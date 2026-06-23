@@ -1,0 +1,73 @@
+import { Switch, Route, Router as WouterRouter, Redirect } from "wouter";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Toaster } from "@/components/ui/toaster";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { AuthProvider, useAuth } from "@/lib/auth";
+import LoginPage from "@/pages/LoginPage";
+import AttendantDashboard from "@/pages/AttendantDashboard";
+import AdminDashboard from "@/pages/AdminDashboard";
+import NotFound from "@/pages/not-found";
+
+const queryClient = new QueryClient();
+
+function AppRoutes() {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-10 h-10 rounded-full border-4 border-primary border-t-transparent animate-spin" />
+          <p className="text-muted-foreground text-sm">Carregando...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <Switch>
+      <Route path="/login">
+        {user ? <Redirect to="/" /> : <LoginPage />}
+      </Route>
+      <Route path="/admin/{*rest}">
+        {!user ? (
+          <Redirect to="/login" />
+        ) : user.role === "admin" ? (
+          <AdminDashboard />
+        ) : (
+          <Redirect to="/" />
+        )}
+      </Route>
+      <Route path="/admin">
+        {!user ? (
+          <Redirect to="/login" />
+        ) : user.role === "admin" ? (
+          <AdminDashboard />
+        ) : (
+          <Redirect to="/" />
+        )}
+      </Route>
+      <Route path="/">
+        {!user ? <Redirect to="/login" /> : user.role === "admin" ? <AdminDashboard /> : <AttendantDashboard />}
+      </Route>
+      <Route component={NotFound} />
+    </Switch>
+  );
+}
+
+function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <AuthProvider>
+          <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+            <AppRoutes />
+          </WouterRouter>
+          <Toaster />
+        </AuthProvider>
+      </TooltipProvider>
+    </QueryClientProvider>
+  );
+}
+
+export default App;
