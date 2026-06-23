@@ -4,10 +4,13 @@ import { api, type QueueEntry, type Sector } from "@/lib/api";
 import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
+import CrmBoard from "./CrmBoard";
 import {
   Smartphone, LogOut, Clock, PhoneCall, CheckCircle,
-  ArrowRightLeft, UserPlus, X, RefreshCw, Users
+  ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban
 } from "lucide-react";
+
+type MainTab = "queue" | "crm";
 
 function formatWait(createdAt: string): string {
   const diff = Math.floor((Date.now() - new Date(createdAt).getTime()) / 1000);
@@ -20,6 +23,7 @@ export default function AttendantDashboard() {
   const { user, logout } = useAuth();
   const { toast } = useToast();
 
+  const [mainTab, setMainTab] = useState<MainTab>("queue");
   const [queue, setQueue] = useState<QueueEntry[]>([]);
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [loading, setLoading] = useState(true);
@@ -155,7 +159,30 @@ export default function AttendantDashboard() {
         </div>
       </nav>
 
-      <div className="max-w-3xl mx-auto px-4 py-6 space-y-5">
+      {/* Sub-tabs */}
+      <div className="bg-white border-b border-border">
+        <div className="max-w-3xl mx-auto px-4 flex gap-1">
+          {([
+            { id: "queue" as MainTab, label: "Fila de Atendimento", icon: PhoneCall },
+            { id: "crm"   as MainTab, label: "CRM",                 icon: Kanban   },
+          ] as const).map(({ id, label, icon: Icon }) => (
+            <button key={id} onClick={() => setMainTab(id)}
+              className={`flex items-center gap-1.5 px-4 py-3.5 text-xs font-semibold border-b-2 transition-colors ${
+                mainTab === id ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}>
+              <Icon className="w-3.5 h-3.5" />{label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {mainTab === "crm" && (
+        <div className="max-w-3xl mx-auto px-4 py-6">
+          <CrmBoard />
+        </div>
+      )}
+
+      {mainTab === "queue" && <><div className="max-w-3xl mx-auto px-4 py-6 space-y-5">
         {/* Stats */}
         <div className="grid grid-cols-3 gap-3">
           {[
@@ -314,6 +341,7 @@ export default function AttendantDashboard() {
           </div>
         </div>
       )}
+      </>}
     </div>
   );
 }

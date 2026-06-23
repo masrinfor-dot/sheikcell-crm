@@ -75,6 +75,22 @@ export type SectorSummary = {
   busyAttendants: number;
 };
 
+export type CrmContact = {
+  id: number;
+  name: string;
+  contact: string | null;
+  sectorId: number | null;
+  attendantId: number | null;
+  status: "potential" | "pending" | "active";
+  notes: string | null;
+  tags: string | null;
+  isArchived: boolean;
+  createdAt: string;
+  updatedAt: string;
+  sector: Sector | null;
+  attendant: { id: number; name: string } | null;
+};
+
 export const api = {
   auth: {
     login: (email: string, password: string) =>
@@ -102,6 +118,14 @@ export const api = {
     transfer: (id: number, targetSectorId: number) =>
       req<QueueEntry>(`/queue/${id}/transfer`, { method: "PATCH", body: JSON.stringify({ targetSectorId }) }),
     remove: (id: number) => req<{ ok: boolean }>(`/queue/${id}`, { method: "DELETE" }),
+  },
+  crm: {
+    list: () => req<CrmContact[]>("/crm"),
+    create: (data: { name: string; contact?: string; sectorId?: number; attendantId?: number; status?: string; notes?: string; tags?: string }) =>
+      req<CrmContact>("/crm", { method: "POST", body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<{ name: string; contact: string; sectorId: number; attendantId: number; status: string; notes: string; tags: string; isArchived: boolean }>) =>
+      req<CrmContact>(`/crm/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/crm/${id}`, { method: "DELETE" }),
   },
   admin: {
     summary: () => req<SectorSummary[]>("/admin/summary"),

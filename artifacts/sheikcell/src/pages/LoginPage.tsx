@@ -95,11 +95,13 @@ export default function LoginPage() {
           </form>
         </div>
 
-        {/* Hint */}
-        <div className="mt-4 text-center text-xs text-muted-foreground">
-          <p>Admin: admin@sheikcell.com / admin123</p>
-          <p className="mt-1">Atendente: joao@sheikcell.com / atend123</p>
-        </div>
+        {/* Dev-only credential hints */}
+        {import.meta.env.DEV && (
+          <div className="mt-4 text-center text-xs text-muted-foreground bg-amber-50 border border-amber-200 rounded-xl p-2">
+            <p className="font-semibold text-amber-700 mb-0.5">Ambiente de desenvolvimento</p>
+            <p>Admin: admin@sheikcell.com / admin123</p>
+          </div>
+        )}
       </div>
     </div>
   );

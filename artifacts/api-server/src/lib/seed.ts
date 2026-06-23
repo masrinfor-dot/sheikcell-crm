@@ -11,8 +11,22 @@ const DEFAULT_SECTORS = [
   { name: "RH / Administrativo / Compras", description: "Recursos humanos e administrativo", icon: "users", color: "#8b5cf6" },
 ] as const;
 
-const ADMIN_EMAIL = "admin@sheikcell.com";
-const ADMIN_PASSWORD = "admin123";
+const ADMIN_EMAIL = process.env["ADMIN_EMAIL"] ?? "admin@sheikcell.com";
+
+function resolveAdminPassword(): string {
+  if (process.env["ADMIN_PASSWORD"]) return process.env["ADMIN_PASSWORD"];
+  if (process.env["NODE_ENV"] === "production") {
+    // Generate a random password in production when env var not set
+    const chars = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#";
+    let pwd = "";
+    for (let i = 0; i < 16; i++) {
+      pwd += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return pwd;
+  }
+  // Development only — never used in production without ADMIN_PASSWORD env var
+  return "admin123";
+}
 
 export async function ensureSeed(): Promise<void> {
   try {
@@ -31,13 +45,14 @@ export async function ensureSeed(): Promise<void> {
     // Get the first sector id (for admin assignment)
     const [firstSector] = await db.select({ id: sectorsTable.id }).from(sectorsTable).limit(1);
 
-    // Seed default admin user if none exist
+    // Seed default admin user only if no users exist at all
     const [{ userCount }] = await db
       .select({ userCount: count() })
       .from(usersTable);
 
     if (Number(userCount) === 0) {
-      const passwordHash = await bcrypt.hash(ADMIN_PASSWORD, 10);
+      const adminPassword = resolveAdminPassword();
+      const passwordHash = await bcrypt.hash(adminPassword, 10);
       await db.insert(usersTable).values({
         name: "Admin Sheikcell",
         email: ADMIN_EMAIL,
@@ -46,7 +61,15 @@ export async function ensureSeed(): Promise<void> {
         sectorId: firstSector?.id ?? 1,
         isActive: true,
       });
-      logger.info({ email: ADMIN_EMAIL }, "Seeded default admin user");
+      if (process.env["NODE_ENV"] === "production") {
+        // Print credentials once to server logs on first run
+        logger.warn(
+          { email: ADMIN_EMAIL },
+          "⚠️  First-run admin created. Set ADMIN_EMAIL / ADMIN_PASSWORD env vars before next deploy to control these credentials. Change the password immediately after first login."
+        );
+      } else {
+        logger.info({ email: ADMIN_EMAIL }, "Seeded default admin user (dev)");
+      }
     }
   } catch (err) {
     logger.error({ err }, "Seed failed — continuing startup");

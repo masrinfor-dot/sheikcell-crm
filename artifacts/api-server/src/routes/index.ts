@@ -5,6 +5,7 @@ import sectorsRouter from "./sectors";
 import queueRouter from "./queue";
 import adminRouter from "./admin";
 import webhookRouter from "./webhook";
+import crmRouter from "./crm";
 
 const router: IRouter = Router();
 
@@ -14,5 +15,6 @@ router.use(sectorsRouter);
 router.use(queueRouter);
 router.use(adminRouter);
 router.use(webhookRouter);
+router.use(crmRouter);
 
 export default router;

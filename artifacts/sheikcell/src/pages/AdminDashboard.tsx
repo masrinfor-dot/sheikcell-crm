@@ -4,13 +4,19 @@ import { api, type SectorSummary, type AttendanceLog, type Sector } from "@/lib/
 import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
+import CrmBoard from "./CrmBoard";
 import {
   Smartphone, LogOut, LayoutDashboard, ClipboardList,
   Settings, Users, RefreshCw, Plus, X, Clock, CheckCircle,
-  PhoneCall, TrendingUp
+  PhoneCall, TrendingUp, Pencil, Kanban
 } from "lucide-react";
 
-type Tab = "dashboard" | "history" | "users" | "sectors";
+type Tab = "dashboard" | "crm" | "history" | "users" | "sectors";
+
+type UserRow = {
+  id: number; name: string; email: string; role: string;
+  isActive: boolean; sector: Sector | null; sectorId: number | null; createdAt: string;
+};
 
 function formatDuration(sec: number | null): string {
   if (!sec) return "—";
@@ -23,6 +29,8 @@ function formatDate(iso: string): string {
   return d.toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
+const ICONS = ["smartphone", "headphones", "wrench", "dollar-sign", "users", "shopping-bag"];
+
 export default function AdminDashboard() {
   const { user, logout } = useAuth();
   const { toast } = useToast();
@@ -30,37 +38,32 @@ export default function AdminDashboard() {
   const [summary, setSummary] = useState<SectorSummary[]>([]);
   const [logs, setLogs] = useState<AttendanceLog[]>([]);
   const [sectors, setSectors] = useState<Sector[]>([]);
-  const [users, setUsers] = useState<(ReturnType<typeof api.admin.users.list> extends Promise<infer T> ? T : never)>([]);
+  const [userRows, setUserRows] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // Modals
   const [showAddUser, setShowAddUser] = useState(false);
+  const [editUser, setEditUser] = useState<UserRow | null>(null);
   const [showAddSector, setShowAddSector] = useState(false);
+  const [editSector, setEditSector] = useState<Sector | null>(null);
+
   const [userForm, setUserForm] = useState({ name: "", email: "", password: "", role: "attendant", sectorId: 1 });
-  const [sectorForm, setSectorForm] = useState({ name: "", description: "", icon: "smartphone", color: "#1a2e6e" });
+  const [sectorForm, setSectorForm] = useState({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true });
 
   const fetchAll = useCallback(async () => {
     try {
-      const [s, l] = await Promise.all([
-        api.admin.summary(),
-        api.admin.logs({ limit: 30 }),
-      ]);
+      const [s, l] = await Promise.all([api.admin.summary(), api.admin.logs({ limit: 40 })]);
       setSummary(s);
       setLogs(l);
-    } catch {
-      // silent
-    } finally {
-      setLoading(false);
-    }
+    } catch { /* silent */ } finally { setLoading(false); }
   }, []);
 
   const fetchUsersAndSectors = useCallback(async () => {
     try {
       const [u, sec] = await Promise.all([api.admin.users.list(), api.sectors.listAll()]);
-      setUsers(u as typeof users);
+      setUserRows(u as UserRow[]);
       setSectors(sec);
-    } catch {
-      // silent
-    }
+    } catch { /* silent */ }
   }, []);
 
   useEffect(() => {
@@ -74,26 +77,60 @@ export default function AdminDashboard() {
   const totalInProgress = summary.reduce((a, s) => a + s.inProgress, 0);
   const totalDone = summary.reduce((a, s) => a + s.completedToday, 0);
 
-  const handleAddUser = async (e: React.FormEvent) => {
+  // ---- User handlers ----
+  const openAddUser = () => {
+    setEditUser(null);
+    setUserForm({ name: "", email: "", password: "", role: "attendant", sectorId: sectors[0]?.id ?? 1 });
+    setShowAddUser(true);
+  };
+  const openEditUser = (u: UserRow) => {
+    setEditUser(u);
+    setUserForm({ name: u.name, email: u.email, password: "", role: u.role, sectorId: u.sectorId ?? 1 });
+    setShowAddUser(true);
+  };
+  const handleSaveUser = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await api.admin.users.create({ ...userForm });
-      toast({ title: "Usuário criado!" });
+      if (editUser) {
+        const payload: Parameters<typeof api.admin.users.update>[1] = {
+          name: userForm.name, email: userForm.email, role: userForm.role, sectorId: userForm.sectorId,
+        };
+        if (userForm.password) payload.password = userForm.password;
+        await api.admin.users.update(editUser.id, payload);
+        toast({ title: "Atendente atualizado!" });
+      } else {
+        await api.admin.users.create({ ...userForm });
+        toast({ title: "Atendente criado!" });
+      }
       setShowAddUser(false);
-      setUserForm({ name: "", email: "", password: "", role: "attendant", sectorId: 1 });
       fetchUsersAndSectors();
     } catch (err: unknown) {
       toast({ title: "Erro", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     }
   };
 
-  const handleAddSector = async (e: React.FormEvent) => {
+  // ---- Sector handlers ----
+  const openAddSector = () => {
+    setEditSector(null);
+    setSectorForm({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true });
+    setShowAddSector(true);
+  };
+  const openEditSector = (s: Sector) => {
+    setEditSector(s);
+    setSectorForm({ name: s.name, description: s.description ?? "", icon: s.icon, color: s.color, isActive: s.isActive });
+    setShowAddSector(true);
+  };
+  const handleSaveSector = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await api.sectors.create(sectorForm);
-      toast({ title: "Setor criado!" });
+      if (editSector) {
+        await api.sectors.update(editSector.id, sectorForm);
+        toast({ title: "Setor atualizado!" });
+      } else {
+        await api.sectors.create(sectorForm);
+        toast({ title: "Setor criado!" });
+      }
       setShowAddSector(false);
-      setSectorForm({ name: "", description: "", icon: "smartphone", color: "#1a2e6e" });
       fetchUsersAndSectors();
     } catch (err: unknown) {
       toast({ title: "Erro", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
@@ -102,6 +139,7 @@ export default function AdminDashboard() {
 
   const tabs = [
     { id: "dashboard" as Tab, label: "Visão Geral", icon: LayoutDashboard },
+    { id: "crm" as Tab, label: "CRM", icon: Kanban },
     { id: "history" as Tab, label: "Histórico", icon: ClipboardList },
     { id: "users" as Tab, label: "Atendentes", icon: Users },
     { id: "sectors" as Tab, label: "Setores", icon: Settings },
@@ -121,9 +159,9 @@ export default function AdminDashboard() {
           </div>
           <div className="flex items-center gap-3">
             <span className="text-xs text-muted-foreground hidden sm:block">{user?.name}</span>
-            <button onClick={() => logout()} data-testid="button-logout" className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition">
-              <LogOut className="w-3.5 h-3.5" />
-              Sair
+            <button onClick={() => logout()} data-testid="button-logout"
+              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition">
+              <LogOut className="w-3.5 h-3.5" /> Sair
             </button>
           </div>
         </div>
@@ -133,26 +171,21 @@ export default function AdminDashboard() {
       <div className="bg-white border-b border-border">
         <div className="max-w-5xl mx-auto px-4 flex gap-1 overflow-x-auto">
           {tabs.map(({ id, label, icon: Icon }) => (
-            <button
-              key={id}
-              onClick={() => setTab(id)}
-              data-testid={`tab-${id}`}
+            <button key={id} onClick={() => setTab(id)} data-testid={`tab-${id}`}
               className={`flex items-center gap-1.5 px-4 py-3.5 text-xs font-semibold whitespace-nowrap border-b-2 transition-colors ${
                 tab === id ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <Icon className="w-3.5 h-3.5" />
-              {label}
+              }`}>
+              <Icon className="w-3.5 h-3.5" />{label}
             </button>
           ))}
         </div>
       </div>
 
       <div className="max-w-5xl mx-auto px-4 py-6">
-        {/* Dashboard tab */}
+
+        {/* === DASHBOARD TAB === */}
         {tab === "dashboard" && (
           <div className="space-y-6">
-            {/* Top KPIs */}
             <div className="grid grid-cols-3 gap-4">
               {[
                 { label: "Aguardando", value: totalWaiting, icon: Clock, color: "text-amber-600", bg: "bg-amber-50" },
@@ -167,7 +200,6 @@ export default function AdminDashboard() {
               ))}
             </div>
 
-            {/* Per-sector cards */}
             <div>
               <div className="flex items-center justify-between mb-3">
                 <h2 className="font-bold text-foreground">Setores</h2>
@@ -187,7 +219,6 @@ export default function AdminDashboard() {
                         <p className="text-xs text-muted-foreground truncate">{sector.description}</p>
                       </div>
                     </div>
-                    {/* Attendants row */}
                     <div className="flex items-center gap-1.5 mb-3 text-xs text-muted-foreground">
                       <Users className="w-3.5 h-3.5" />
                       <span>
@@ -215,12 +246,16 @@ export default function AdminDashboard() {
           </div>
         )}
 
-        {/* History tab */}
+        {/* === CRM TAB === */}
+        {tab === "crm" && <CrmBoard />}
+
+        {/* === HISTORY TAB === */}
         {tab === "history" && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <h2 className="font-bold">Histórico de Atendimentos</h2>
-              <button onClick={() => api.admin.logs({ limit: 30 }).then(setLogs)} className="p-2 text-muted-foreground hover:text-foreground rounded-xl hover:bg-secondary transition">
+              <button onClick={() => api.admin.logs({ limit: 40 }).then(setLogs)}
+                className="p-2 text-muted-foreground hover:text-foreground rounded-xl hover:bg-secondary transition">
                 <RefreshCw className="w-4 h-4" />
               </button>
             </div>
@@ -265,14 +300,14 @@ export default function AdminDashboard() {
           </div>
         )}
 
-        {/* Users tab */}
+        {/* === USERS TAB === */}
         {tab === "users" && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <h2 className="font-bold">Atendentes</h2>
-              <button onClick={() => setShowAddUser(true)} data-testid="button-add-user" className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition">
-                <Plus className="w-3.5 h-3.5" />
-                Novo Atendente
+              <button onClick={openAddUser} data-testid="button-add-user"
+                className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition">
+                <Plus className="w-3.5 h-3.5" /> Novo Atendente
               </button>
             </div>
             <div className="shk-card overflow-hidden">
@@ -280,13 +315,13 @@ export default function AdminDashboard() {
                 <table className="w-full text-sm">
                   <thead className="bg-secondary/50">
                     <tr>
-                      {["Nome", "Email", "Setor", "Perfil", "Status"].map((h) => (
-                        <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground">{h}</th>
+                      {["Nome", "Email", "Setor", "Perfil", "Status", ""].map((h, i) => (
+                        <th key={i} className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground">{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {(users as Array<{ id: number; name: string; email: string; role: string; isActive: boolean; sector?: Sector | null }>).map((u, i) => (
+                    {userRows.map((u, i) => (
                       <tr key={u.id} className={i % 2 === 0 ? "bg-white" : "bg-secondary/20"} data-testid={`row-user-${u.id}`}>
                         <td className="px-4 py-3 font-medium">{u.name}</td>
                         <td className="px-4 py-3 text-muted-foreground">{u.email}</td>
@@ -301,6 +336,12 @@ export default function AdminDashboard() {
                             {u.isActive ? "Ativo" : "Inativo"}
                           </span>
                         </td>
+                        <td className="px-4 py-3">
+                          <button onClick={() => openEditUser(u)} data-testid={`button-edit-user-${u.id}`}
+                            className="p-1.5 text-muted-foreground hover:text-primary hover:bg-blue-50 rounded-lg transition">
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -310,14 +351,14 @@ export default function AdminDashboard() {
           </div>
         )}
 
-        {/* Sectors tab */}
+        {/* === SECTORS TAB === */}
         {tab === "sectors" && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <h2 className="font-bold">Setores</h2>
-              <button onClick={() => setShowAddSector(true)} data-testid="button-add-sector" className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition">
-                <Plus className="w-3.5 h-3.5" />
-                Novo Setor
+              <button onClick={openAddSector} data-testid="button-add-sector"
+                className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition">
+                <Plus className="w-3.5 h-3.5" /> Novo Setor
               </button>
             </div>
             <div className="grid sm:grid-cols-2 gap-4">
@@ -333,6 +374,10 @@ export default function AdminDashboard() {
                   <span className={sector.isActive ? "shk-badge-done" : "shk-badge-waiting"}>
                     {sector.isActive ? "Ativo" : "Inativo"}
                   </span>
+                  <button onClick={() => openEditSector(sector)} data-testid={`button-edit-sector-${sector.id}`}
+                    className="p-1.5 text-muted-foreground hover:text-primary hover:bg-blue-50 rounded-lg transition">
+                    <Pencil className="w-3.5 h-3.5" />
+                  </button>
                 </div>
               ))}
             </div>
@@ -340,80 +385,113 @@ export default function AdminDashboard() {
         )}
       </div>
 
-      {/* Add User Modal */}
+      {/* ===== USER MODAL ===== */}
       {showAddUser && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
           <div className="shk-card w-full max-w-sm p-6">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-bold">Novo Atendente</h3>
+              <h3 className="font-bold">{editUser ? "Editar Atendente" : "Novo Atendente"}</h3>
               <button onClick={() => setShowAddUser(false)}><X className="w-5 h-5 text-muted-foreground" /></button>
             </div>
-            <form onSubmit={handleAddUser} className="space-y-3">
-              {[
-                { label: "Nome *", key: "name", type: "text", placeholder: "João da Silva" },
-                { label: "Email *", key: "email", type: "email", placeholder: "joao@sheikcell.com" },
-                { label: "Senha *", key: "password", type: "password", placeholder: "••••••••" },
-              ].map(({ label, key, type, placeholder }) => (
-                <div key={key}>
-                  <label className="text-xs font-medium mb-1 block">{label}</label>
-                  <input
-                    type={type}
-                    required
-                    placeholder={placeholder}
-                    value={(userForm as unknown as Record<string, string>)[key]}
-                    onChange={(e) => setUserForm({ ...userForm, [key]: e.target.value })}
-                    className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
-                  />
-                </div>
-              ))}
+            <form onSubmit={handleSaveUser} className="space-y-3">
+              <div>
+                <label className="text-xs font-medium mb-1 block">Nome *</label>
+                <input required placeholder="João da Silva" value={userForm.name}
+                  onChange={(e) => setUserForm({ ...userForm, name: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+              </div>
+              <div>
+                <label className="text-xs font-medium mb-1 block">Email *</label>
+                <input required type="email" placeholder="joao@sheikcell.com" value={userForm.email}
+                  onChange={(e) => setUserForm({ ...userForm, email: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+              </div>
+              <div>
+                <label className="text-xs font-medium mb-1 block">{editUser ? "Nova senha (deixe em branco para manter)" : "Senha *"}</label>
+                <input type="password" placeholder="••••••••" required={!editUser} value={userForm.password}
+                  onChange={(e) => setUserForm({ ...userForm, password: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+              </div>
               <div>
                 <label className="text-xs font-medium mb-1 block">Perfil</label>
-                <select value={userForm.role} onChange={(e) => setUserForm({ ...userForm, role: e.target.value })} className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                <select value={userForm.role} onChange={(e) => setUserForm({ ...userForm, role: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl border border-border text-sm">
                   <option value="attendant">Atendente</option>
                   <option value="admin">Admin</option>
                 </select>
               </div>
               <div>
                 <label className="text-xs font-medium mb-1 block">Setor</label>
-                <select value={userForm.sectorId} onChange={(e) => setUserForm({ ...userForm, sectorId: Number(e.target.value) })} className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                <select value={userForm.sectorId} onChange={(e) => setUserForm({ ...userForm, sectorId: Number(e.target.value) })}
+                  className="w-full px-3 py-2 rounded-xl border border-border text-sm">
                   {sectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
               </div>
               <div className="flex gap-2 pt-1">
-                <button type="button" onClick={() => setShowAddUser(false)} className="flex-1 py-2 rounded-xl border border-border text-sm font-medium text-muted-foreground hover:bg-secondary transition">Cancelar</button>
-                <button type="submit" data-testid="button-confirm-add-user" className="flex-1 py-2 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition">Criar</button>
+                <button type="button" onClick={() => setShowAddUser(false)}
+                  className="flex-1 py-2 rounded-xl border border-border text-sm font-medium text-muted-foreground hover:bg-secondary transition">Cancelar</button>
+                <button type="submit" data-testid="button-confirm-save-user"
+                  className="flex-1 py-2 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition">
+                  {editUser ? "Salvar" : "Criar"}
+                </button>
               </div>
             </form>
           </div>
         </div>
       )}
 
-      {/* Add Sector Modal */}
+      {/* ===== SECTOR MODAL ===== */}
       {showAddSector && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
           <div className="shk-card w-full max-w-sm p-6">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-bold">Novo Setor</h3>
+              <h3 className="font-bold">{editSector ? "Editar Setor" : "Novo Setor"}</h3>
               <button onClick={() => setShowAddSector(false)}><X className="w-5 h-5 text-muted-foreground" /></button>
             </div>
-            <form onSubmit={handleAddSector} className="space-y-3">
+            <form onSubmit={handleSaveSector} className="space-y-3">
               <div>
                 <label className="text-xs font-medium mb-1 block">Nome *</label>
-                <input required placeholder="Ex: Pós-venda" value={sectorForm.name} onChange={(e) => setSectorForm({ ...sectorForm, name: e.target.value })} className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                <input required placeholder="Ex: Pós-venda" value={sectorForm.name}
+                  onChange={(e) => setSectorForm({ ...sectorForm, name: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
               </div>
               <div>
                 <label className="text-xs font-medium mb-1 block">Descrição</label>
-                <input placeholder="Descrição curta" value={sectorForm.description} onChange={(e) => setSectorForm({ ...sectorForm, description: e.target.value })} className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                <input placeholder="Descrição curta" value={sectorForm.description}
+                  onChange={(e) => setSectorForm({ ...sectorForm, description: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
               </div>
               <div>
                 <label className="text-xs font-medium mb-1 block">Ícone</label>
-                <select value={sectorForm.icon} onChange={(e) => setSectorForm({ ...sectorForm, icon: e.target.value })} className="w-full px-3 py-2 rounded-xl border border-border text-sm">
-                  {["smartphone", "headphones", "wrench", "dollar-sign", "users", "shopping-bag"].map((ic) => <option key={ic} value={ic}>{ic}</option>)}
+                <select value={sectorForm.icon} onChange={(e) => setSectorForm({ ...sectorForm, icon: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                  {ICONS.map((ic) => <option key={ic} value={ic}>{ic}</option>)}
                 </select>
               </div>
+              <div>
+                <label className="text-xs font-medium mb-1 block">Cor</label>
+                <div className="flex items-center gap-2">
+                  <input type="color" value={sectorForm.color}
+                    onChange={(e) => setSectorForm({ ...sectorForm, color: e.target.value })}
+                    className="w-10 h-10 rounded-xl border border-border cursor-pointer" />
+                  <span className="text-sm text-muted-foreground">{sectorForm.color}</span>
+                </div>
+              </div>
+              {editSector && (
+                <div className="flex items-center gap-2">
+                  <input type="checkbox" id="sectorActive" checked={sectorForm.isActive}
+                    onChange={(e) => setSectorForm({ ...sectorForm, isActive: e.target.checked })}
+                    className="w-4 h-4 rounded" />
+                  <label htmlFor="sectorActive" className="text-sm font-medium">Setor ativo</label>
+                </div>
+              )}
               <div className="flex gap-2 pt-1">
-                <button type="button" onClick={() => setShowAddSector(false)} className="flex-1 py-2 rounded-xl border border-border text-sm font-medium text-muted-foreground hover:bg-secondary transition">Cancelar</button>
-                <button type="submit" data-testid="button-confirm-add-sector" className="flex-1 py-2 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition">Criar</button>
+                <button type="button" onClick={() => setShowAddSector(false)}
+                  className="flex-1 py-2 rounded-xl border border-border text-sm font-medium text-muted-foreground hover:bg-secondary transition">Cancelar</button>
+                <button type="submit" data-testid="button-confirm-save-sector"
+                  className="flex-1 py-2 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition">
+                  {editSector ? "Salvar" : "Criar"}
+                </button>
               </div>
             </form>
           </div>
