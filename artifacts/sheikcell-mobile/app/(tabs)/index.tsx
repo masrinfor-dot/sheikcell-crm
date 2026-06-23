@@ -297,7 +297,11 @@ export default function QueueScreen() {
                   size={13}
                   color={colors.mutedForeground}
                 />
-                <Text style={styles.metaText}>{item.channel}</Text>
+                <Text style={styles.metaText}>
+                  {item.channel === "whatsapp" ? "WhatsApp" :
+                   item.channel === "instagram" ? "Instagram" :
+                   "Balcão"}
+                </Text>
               </View>
             )}
           </View>

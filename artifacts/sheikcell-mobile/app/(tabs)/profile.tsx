@@ -42,7 +42,9 @@ export default function ProfileScreen() {
   };
 
   const roleLabel =
-    user?.role === "admin" ? "Administrador" : "Atendente";
+    user?.role === "admin" ? "Administrador" :
+    user?.role === "supervisor" ? "Supervisor" :
+    "Vendedor";
 
   const initial = user?.name ? user.name.charAt(0).toUpperCase() : "?";
 
