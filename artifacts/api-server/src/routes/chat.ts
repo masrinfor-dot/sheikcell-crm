@@ -143,14 +143,18 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
 
   // Forward to WhatsApp bridge if this is a WhatsApp conversation
   if (conv?.channel === "whatsapp" && conv.phone) {
-    const bridgeUrl =
-      process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
+    const bridgeUrl = process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
+    const bridgeSecret = process.env["WHATSAPP_BRIDGE_SECRET"] ?? "";
     try {
-      await fetch(`${bridgeUrl}/whatsapp/send`, {
+      const r = await fetch(`${bridgeUrl}/whatsapp/send`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Bridge-Secret": bridgeSecret,
+        },
         body: JSON.stringify({ to: conv.phone, text: content.trim() }),
       });
+      if (!r.ok) req.log.warn({ status: r.status }, "Bridge send failed");
     } catch { /* bridge not reachable — silently skip */ }
   }
 

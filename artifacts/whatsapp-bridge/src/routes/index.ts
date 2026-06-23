@@ -1,17 +1,33 @@
-import { Router, type IRouter } from "express";
+import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
 import QRCode from "qrcode";
 import { getWAState, sendWAMessage, disconnectWA, getRawQR } from "../lib/whatsapp";
 
 const router: IRouter = Router();
 
-// Auth note: all endpoints here are called only via api-server proxy (requireAdmin).
-// This service is internal-only (no proxy paths registered in artifact.toml).
+// Shared secret between api-server and bridge.
+// Must be the same value in both services (WHATSAPP_BRIDGE_SECRET env var).
+const BRIDGE_SECRET = process.env["WHATSAPP_BRIDGE_SECRET"] ?? "";
 
+function requireBridgeSecret(req: Request, res: Response, next: NextFunction): void {
+  if (!BRIDGE_SECRET) {
+    // Secret not configured — reject all requests for safety
+    res.status(503).json({ error: "Bridge secret not configured" });
+    return;
+  }
+  const provided = req.headers["x-bridge-secret"];
+  if (!provided || provided !== BRIDGE_SECRET) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  next();
+}
+
+// Health check is public (used by production startup probe)
 router.get("/whatsapp/healthz", (_req, res): void => {
   res.json({ ok: true });
 });
 
-router.get("/whatsapp/", (_req, res): void => {
+router.get("/whatsapp/", requireBridgeSecret, (_req, res): void => {
   const st = getWAState();
   const qrImg = st.qr
     ? `<img src="${st.qr}" alt="QR Code" style="width:220px;height:220px;border-radius:12px;border:1px solid #e5e7eb;" />`
@@ -36,11 +52,11 @@ ${qrImg ? `<p>Abra WhatsApp → Dispositivos Conectados → Conectar dispositivo
 </div></body></html>`);
 });
 
-router.get("/whatsapp/status", (_req, res): void => {
+router.get("/whatsapp/status", requireBridgeSecret, (_req, res): void => {
   res.json(getWAState());
 });
 
-router.get("/whatsapp/qr", async (_req, res): Promise<void> => {
+router.get("/whatsapp/qr", requireBridgeSecret, async (_req, res): Promise<void> => {
   const { status } = getWAState();
   if (status !== "qr") {
     res.status(404).json({ error: "QR code não disponível" });
@@ -58,7 +74,7 @@ router.get("/whatsapp/qr", async (_req, res): Promise<void> => {
   }
 });
 
-router.post("/whatsapp/send", async (req, res): Promise<void> => {
+router.post("/whatsapp/send", requireBridgeSecret, async (req, res): Promise<void> => {
   const { to, text } = req.body as { to?: string; text?: string };
   if (!to || !text) {
     res.status(400).json({ error: "to e text são obrigatórios" });
@@ -72,7 +88,7 @@ router.post("/whatsapp/send", async (req, res): Promise<void> => {
   }
 });
 
-router.post("/whatsapp/disconnect", async (_req, res): Promise<void> => {
+router.post("/whatsapp/disconnect", requireBridgeSecret, async (_req, res): Promise<void> => {
   await disconnectWA(true);
   res.json({ ok: true });
 });

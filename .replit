@@ -45,3 +45,8 @@ externalPort = 3000
 
 [nix]
 channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+WHATSAPP_BRIDGE_SECRET = "89dfbf7160cfc65e6e3d26d18abcc141950e83293d81566d23463b65fbb3c9b1"

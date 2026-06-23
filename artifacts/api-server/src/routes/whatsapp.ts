@@ -10,6 +10,8 @@ const router: IRouter = Router();
 
 const BRIDGE_URL =
   process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
+const BRIDGE_SECRET =
+  process.env["WHATSAPP_BRIDGE_SECRET"] ?? "";
 
 async function proxyToBridge(
   req: Request,
@@ -19,10 +21,13 @@ async function proxyToBridge(
 ): Promise<void> {
   try {
     const url = `${BRIDGE_URL}${bridgePath}`;
-    const init: RequestInit = { method };
+    const headers: Record<string, string> = {
+      "X-Bridge-Secret": BRIDGE_SECRET,
+    };
+    const init: RequestInit = { method, headers };
     if (method === "POST" && req.body && Object.keys(req.body as object).length > 0) {
       init.body = JSON.stringify(req.body);
-      init.headers = { "Content-Type": "application/json" };
+      headers["Content-Type"] = "application/json";
     }
     const upstream = await fetch(url, init);
     const contentType = upstream.headers.get("content-type") ?? "";
