@@ -79,16 +79,40 @@ export type CrmContact = {
   id: number;
   name: string;
   contact: string | null;
+  phone: string | null;
+  email: string | null;
   sectorId: number | null;
   attendantId: number | null;
   status: "potential" | "pending" | "active";
+  profile: "Novo" | "Regular" | "VIP" | "Inativo";
   notes: string | null;
   tags: string | null;
+  totalPurchases: string;
   isArchived: boolean;
   createdAt: string;
   updatedAt: string;
   sector: Sector | null;
   attendant: { id: number; name: string } | null;
+};
+
+export type CrmPurchase = {
+  id: number;
+  contactId: number;
+  description: string;
+  amount: string;
+  purchaseDate: string;
+  category: string | null;
+  notes: string | null;
+  createdAt: string;
+};
+
+export type CrmInternalNote = {
+  id: number;
+  contactId: number;
+  content: string;
+  authorId: number | null;
+  authorName: string | null;
+  createdAt: string;
 };
 
 export type Conversation = {
@@ -195,12 +219,34 @@ export const api = {
     classify: (text: string) => req<ClassifyResult>("/routing/classify", { method: "POST", body: JSON.stringify({ text }) }),
   },
   crm: {
-    list: () => req<CrmContact[]>("/crm"),
-    create: (data: { name: string; contact?: string; sectorId?: number; attendantId?: number; status?: string; notes?: string; tags?: string }) =>
+    list: (params?: { profile?: string; status?: string; search?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.profile) qs.set("profile", params.profile);
+      if (params?.status) qs.set("status", params.status);
+      if (params?.search) qs.set("search", params.search);
+      return req<CrmContact[]>(`/crm?${qs.toString()}`);
+    },
+    get: (id: number) => req<CrmContact>(`/crm/${id}`),
+    create: (data: Partial<Omit<CrmContact, "id" | "createdAt" | "updatedAt" | "sector" | "attendant">>) =>
       req<CrmContact>("/crm", { method: "POST", body: JSON.stringify(data) }),
-    update: (id: number, data: Partial<{ name: string; contact: string; sectorId: number; attendantId: number; status: string; notes: string; tags: string; isArchived: boolean }>) =>
+    update: (id: number, data: Partial<Omit<CrmContact, "id" | "createdAt" | "updatedAt" | "sector" | "attendant">>) =>
       req<CrmContact>(`/crm/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/crm/${id}`, { method: "DELETE" }),
+    autoRegister: (data: { name: string; phone?: string; contact?: string; sectorId?: number }) =>
+      req<CrmContact & { created: boolean }>("/crm/auto-register", { method: "POST", body: JSON.stringify(data) }),
+    purchases: {
+      list: (contactId: number) => req<CrmPurchase[]>(`/crm/${contactId}/purchases`),
+      create: (contactId: number, data: { description: string; amount?: string | number; purchaseDate?: string; category?: string; notes?: string }) =>
+        req<CrmPurchase>(`/crm/${contactId}/purchases`, { method: "POST", body: JSON.stringify(data) }),
+      remove: (purchaseId: number) => req<{ ok: boolean }>(`/crm/purchases/${purchaseId}`, { method: "DELETE" }),
+    },
+    notes: {
+      list: (contactId: number) => req<CrmInternalNote[]>(`/crm/${contactId}/notes`),
+      create: (contactId: number, content: string) =>
+        req<CrmInternalNote>(`/crm/${contactId}/notes`, { method: "POST", body: JSON.stringify({ content }) }),
+      remove: (noteId: number) => req<{ ok: boolean }>(`/crm/notes/${noteId}`, { method: "DELETE" }),
+    },
+    serviceHistory: (contactId: number) => req<AttendanceLog[]>(`/crm/${contactId}/service-history`),
   },
   admin: {
     summary: () => req<SectorSummary[]>("/admin/summary"),

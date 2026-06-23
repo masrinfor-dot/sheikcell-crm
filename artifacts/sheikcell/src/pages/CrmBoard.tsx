@@ -2,10 +2,11 @@ import { useState, useEffect, useCallback } from "react";
 import { api, type CrmContact, type Sector } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
-import { ChannelBadge } from "@/components/ChannelBadge";
+import CrmContactDetail from "@/components/CrmContactDetail";
 import {
-  Plus, X, Pencil, User, Phone, Tag, StickyNote,
-  RefreshCw, Archive, ChevronRight, ChevronLeft
+  Plus, X, Phone, Tag, StickyNote, RefreshCw, Archive,
+  ChevronRight, ChevronLeft, Crown, Star, UserPlus, UserMinus,
+  Search, Filter, ExternalLink, ShoppingBag,
 } from "lucide-react";
 
 const COLUMNS = [
@@ -18,76 +19,120 @@ type Status = typeof COLUMNS[number]["key"];
 
 type ContactFormData = {
   name: string; contact: string; sectorId: string;
-  notes: string; tags: string; status: Status;
+  notes: string; tags: string; status: Status; profile: CrmContact["profile"];
 };
 
 const emptyForm: ContactFormData = {
-  name: "", contact: "", sectorId: "", notes: "", tags: "", status: "potential"
+  name: "", contact: "", sectorId: "", notes: "", tags: "", status: "potential", profile: "Novo",
 };
 
+const PROFILE_META: Record<CrmContact["profile"], { label: string; color: string; Icon: React.ElementType }> = {
+  VIP:    { label: "VIP",     color: "bg-yellow-100 text-yellow-800 border-yellow-200", Icon: Crown     },
+  Regular:{ label: "Regular", color: "bg-blue-100 text-blue-800 border-blue-200",       Icon: Star      },
+  Novo:   { label: "Novo",    color: "bg-green-100 text-green-800 border-green-200",    Icon: UserPlus  },
+  Inativo:{ label: "Inativo", color: "bg-gray-100 text-gray-600 border-gray-200",       Icon: UserMinus },
+};
+
+function ProfileBadge({ profile }: { profile: CrmContact["profile"] }) {
+  const m = PROFILE_META[profile] ?? PROFILE_META.Novo;
+  const { Icon } = m;
+  return (
+    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold border ${m.color}`}>
+      <Icon className="w-2.5 h-2.5" />{m.label}
+    </span>
+  );
+}
+
+function fmtCurrency(val: string | number) {
+  const n = parseFloat(String(val));
+  if (isNaN(n) || n === 0) return null;
+  return n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+}
+
 function ContactCard({
-  contact,
-  onMove,
-  onEdit,
-  onArchive,
-  colIdx,
+  contact, onMove, onEdit, onArchive, onOpen, colIdx,
 }: {
   contact: CrmContact;
   onMove: (id: number, status: Status) => void;
   onEdit: (c: CrmContact) => void;
   onArchive: (id: number) => void;
+  onOpen: (c: CrmContact) => void;
   colIdx: number;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const prev = COLUMNS[colIdx - 1];
   const next = COLUMNS[colIdx + 1];
+  const total = fmtCurrency(contact.totalPurchases ?? "0");
 
   return (
     <div
-      className="bg-white rounded-2xl border border-border shadow-sm p-4 space-y-2 hover:shadow-md transition"
+      className="bg-white rounded-2xl border border-border shadow-sm p-4 space-y-2 hover:shadow-md transition group"
       data-testid={`crm-card-${contact.id}`}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
-          <p className="font-semibold text-sm text-foreground truncate">{contact.name}</p>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <p className="font-semibold text-sm text-foreground truncate">{contact.name}</p>
+            <ProfileBadge profile={contact.profile} />
+          </div>
           {contact.contact && (
             <p className="text-xs text-muted-foreground flex items-center gap-1 mt-0.5">
               <Phone className="w-3 h-3" />{contact.contact}
             </p>
           )}
-        </div>
-        <div className="relative">
-          <button
-            onClick={() => setMenuOpen((v) => !v)}
-            className="p-1 rounded-lg text-muted-foreground hover:bg-secondary transition"
-          >
-            <Pencil className="w-3.5 h-3.5" />
-          </button>
-          {menuOpen && (
-            <div className="absolute right-0 top-7 z-20 bg-white border border-border rounded-xl shadow-lg p-1 min-w-[140px]">
-              <button onClick={() => { onEdit(contact); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
-                <Pencil className="w-3 h-3" /> Editar
-              </button>
-              {prev && (
-                <button onClick={() => { onMove(contact.id, prev.key); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
-                  <ChevronLeft className="w-3 h-3" /> Mover para {prev.label}
-                </button>
-              )}
-              {next && (
-                <button onClick={() => { onMove(contact.id, next.key); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
-                  <ChevronRight className="w-3 h-3" /> Mover para {next.label}
-                </button>
-              )}
-              <button onClick={() => { onArchive(contact.id); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg text-destructive hover:bg-destructive/10 transition">
-                <Archive className="w-3 h-3" /> Arquivar
-              </button>
-            </div>
+          {total && (
+            <p className="text-xs text-primary font-semibold flex items-center gap-1 mt-0.5">
+              <ShoppingBag className="w-3 h-3" />{total}
+            </p>
           )}
+        </div>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => onOpen(contact)}
+            data-testid={`crm-card-open-${contact.id}`}
+            className="p-1.5 rounded-lg text-primary hover:bg-primary hover:text-white transition"
+            title="Ver perfil completo"
+          >
+            <ExternalLink className="w-3.5 h-3.5" />
+          </button>
+          <div className="relative">
+            <button
+              onClick={() => setMenuOpen((v) => !v)}
+              className="p-1 rounded-lg text-muted-foreground hover:bg-secondary transition"
+            >
+              <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+                <circle cx="10" cy="4" r="1.5"/><circle cx="10" cy="10" r="1.5"/><circle cx="10" cy="16" r="1.5"/>
+              </svg>
+            </button>
+            {menuOpen && (
+              <div className="absolute right-0 top-7 z-20 bg-white border border-border rounded-xl shadow-lg p-1 min-w-[160px]">
+                <button onClick={() => { onOpen(contact); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
+                  <ExternalLink className="w-3 h-3" /> Ver perfil completo
+                </button>
+                <button onClick={() => { onEdit(contact); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
+                  <Plus className="w-3 h-3" /> Editar
+                </button>
+                {prev && (
+                  <button onClick={() => { onMove(contact.id, prev.key); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
+                    <ChevronLeft className="w-3 h-3" /> Mover para {prev.label}
+                  </button>
+                )}
+                {next && (
+                  <button onClick={() => { onMove(contact.id, next.key); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
+                    <ChevronRight className="w-3 h-3" /> Mover para {next.label}
+                  </button>
+                )}
+                <button onClick={() => { onArchive(contact.id); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg text-destructive hover:bg-destructive/10 transition">
+                  <Archive className="w-3 h-3" /> Arquivar
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
       {contact.sector && (
-        <div className="flex items-center gap-1">
+        <div>
           <span
             className="text-xs px-2 py-0.5 rounded-full font-medium text-white"
             style={{ backgroundColor: contact.sector.color }}
@@ -116,7 +161,7 @@ function ContactCard({
 
       {contact.attendant && (
         <div className="flex items-center gap-1 text-xs text-muted-foreground pt-1 border-t border-border">
-          <User className="w-3 h-3" />
+          <UserPlus className="w-3 h-3" />
           <span>{contact.attendant.name}</span>
         </div>
       )}
@@ -133,41 +178,36 @@ export default function CrmBoard() {
   const [showForm, setShowForm] = useState(false);
   const [editTarget, setEditTarget] = useState<CrmContact | null>(null);
   const [form, setForm] = useState<ContactFormData>(emptyForm);
+  const [searchQ, setSearchQ] = useState("");
+  const [filterProfile, setFilterProfile] = useState<string>("");
+  const [detailId, setDetailId] = useState<number | null>(null);
+  const [autoImporting, setAutoImporting] = useState(false);
 
   const fetchContacts = useCallback(async () => {
     try {
-      const data = await api.crm.list();
+      const data = await api.crm.list({ profile: filterProfile || undefined, search: searchQ || undefined });
       setContacts(data);
-    } catch {
-      // silent
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    } catch { /* silent */ }
+    finally { setLoading(false); }
+  }, [filterProfile, searchQ]);
 
   useEffect(() => {
+    setLoading(true);
     fetchContacts();
     api.sectors.list().then(setSectors).catch(() => {});
   }, [fetchContacts]);
 
   const openAdd = () => {
     setEditTarget(null);
-    setForm({
-      ...emptyForm,
-      sectorId: user?.sectorId ? String(user.sectorId) : "",
-    });
+    setForm({ ...emptyForm, sectorId: user?.sectorId ? String(user.sectorId) : "" });
     setShowForm(true);
   };
 
   const openEdit = (c: CrmContact) => {
     setEditTarget(c);
     setForm({
-      name: c.name,
-      contact: c.contact ?? "",
-      sectorId: c.sectorId ? String(c.sectorId) : "",
-      notes: c.notes ?? "",
-      tags: c.tags ?? "",
-      status: c.status as Status,
+      name: c.name, contact: c.contact ?? "", sectorId: c.sectorId ? String(c.sectorId) : "",
+      notes: c.notes ?? "", tags: c.tags ?? "", status: c.status as Status, profile: c.profile,
     });
     setShowForm(true);
   };
@@ -176,9 +216,7 @@ export default function CrmBoard() {
     try {
       await api.crm.update(id, { status });
       setContacts((prev) => prev.map((c) => c.id === id ? { ...c, status } : c));
-    } catch {
-      toast({ title: "Erro ao mover contato", variant: "destructive" });
-    }
+    } catch { toast({ title: "Erro ao mover contato", variant: "destructive" }); }
   };
 
   const handleArchive = async (id: number) => {
@@ -186,22 +224,17 @@ export default function CrmBoard() {
       await api.crm.remove(id);
       setContacts((prev) => prev.filter((c) => c.id !== id));
       toast({ title: "Contato arquivado" });
-    } catch {
-      toast({ title: "Erro ao arquivar", variant: "destructive" });
-    }
+    } catch { toast({ title: "Erro ao arquivar", variant: "destructive" }); }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const payload = {
-      name: form.name,
-      contact: form.contact || undefined,
+      name: form.name, contact: form.contact || undefined,
       sectorId: form.sectorId ? Number(form.sectorId) : undefined,
-      notes: form.notes || undefined,
-      tags: form.tags || undefined,
-      status: form.status,
+      notes: form.notes || undefined, tags: form.tags || undefined,
+      status: form.status, profile: form.profile,
     };
-
     try {
       if (editTarget) {
         const updated = await api.crm.update(editTarget.id, payload);
@@ -213,43 +246,112 @@ export default function CrmBoard() {
         toast({ title: "Contato adicionado!" });
       }
       setShowForm(false);
-      fetchContacts(); // refresh with enriched data
+      fetchContacts();
     } catch (err: unknown) {
       toast({ title: "Erro", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     }
   };
 
+  const handleAutoImport = async () => {
+    setAutoImporting(true);
+    try {
+      const logs = await api.admin.logs({ limit: 50 });
+      let imported = 0;
+      for (const log of logs) {
+        if (!log.clientName) continue;
+        const result = await api.crm.autoRegister({
+          name: log.clientName,
+          phone: log.clientContact ?? undefined,
+          contact: log.clientContact ?? undefined,
+          sectorId: log.sectorId,
+        });
+        if ((result as CrmContact & { created: boolean }).created) imported++;
+      }
+      toast({ title: `Auto-importação concluída`, description: `${imported} novo(s) cliente(s) cadastrado(s)` });
+      fetchContacts();
+    } catch { toast({ title: "Erro na importação", variant: "destructive" }); }
+    setAutoImporting(false);
+  };
+
+  const handleContactUpdated = (updated: CrmContact) => {
+    setContacts((prev) => prev.map((c) => c.id === updated.id ? updated : c));
+  };
+
+  // Stats
+  const vipCount = contacts.filter((c) => c.profile === "VIP").length;
+  const totalRevenue = contacts.reduce((sum, c) => sum + parseFloat(c.totalPurchases ?? "0"), 0);
+
   const byStatus = (status: Status) => contacts.filter((c) => c.status === status);
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      {/* Header */}
+      <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h2 className="font-bold text-foreground">CRM — Pipeline de Clientes</h2>
-          <p className="text-xs text-muted-foreground mt-0.5">Gerencie contatos por etapa do relacionamento</p>
+          <p className="text-xs text-muted-foreground mt-0.5">Gerencie relacionamentos e histórico de clientes</p>
         </div>
-        <div className="flex items-center gap-2">
-          <button onClick={fetchContacts} className="p-2 text-muted-foreground hover:text-foreground rounded-xl hover:bg-secondary transition">
+        <div className="flex items-center gap-2 flex-wrap">
+          <button onClick={handleAutoImport} disabled={autoImporting}
+            className="flex items-center gap-1.5 px-3 py-2 border border-border rounded-xl text-xs font-medium text-muted-foreground hover:bg-secondary transition disabled:opacity-50">
+            <RefreshCw className={`w-3.5 h-3.5 ${autoImporting ? "animate-spin" : ""}`} />
+            {autoImporting ? "Importando…" : "Auto-importar"}
+          </button>
+          <button onClick={fetchContacts}
+            className="p-2 text-muted-foreground hover:text-foreground rounded-xl hover:bg-secondary transition">
             <RefreshCw className="w-4 h-4" />
           </button>
-          <button
-            onClick={openAdd}
-            data-testid="button-crm-add"
-            className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            Novo Contato
+          <button onClick={openAdd} data-testid="button-crm-add"
+            className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition">
+            <Plus className="w-3.5 h-3.5" /> Novo Contato
           </button>
         </div>
       </div>
 
-      {/* Kanban board */}
+      {/* Stats bar */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {[
+          { label: "Total", value: contacts.length, color: "text-foreground" },
+          { label: "VIP",   value: vipCount,         color: "text-yellow-600" },
+          { label: "Ativos",value: byStatus("active").length, color: "text-green-600" },
+          { label: "Receita",value: totalRevenue.toLocaleString("pt-BR", { style: "currency", currency: "BRL" }), color: "text-primary" },
+        ].map(({ label, value, color }) => (
+          <div key={label} className="bg-white rounded-xl border border-border p-3 text-center">
+            <p className={`text-lg font-bold ${color}`}>{value}</p>
+            <p className="text-xs text-muted-foreground">{label}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Filters */}
+      <div className="flex gap-2 flex-wrap items-center">
+        <div className="relative flex-1 min-w-[160px] max-w-xs">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+          <input
+            value={searchQ}
+            onChange={(e) => setSearchQ(e.target.value)}
+            placeholder="Buscar cliente…"
+            className="w-full pl-8 pr-3 py-2 rounded-xl border border-border text-xs focus:outline-none focus:ring-2 focus:ring-primary/30"
+          />
+        </div>
+        <div className="flex items-center gap-1.5">
+          <Filter className="w-3.5 h-3.5 text-muted-foreground" />
+          <select value={filterProfile} onChange={(e) => setFilterProfile(e.target.value)}
+            className="px-2 py-2 rounded-xl border border-border text-xs">
+            <option value="">Todos os perfis</option>
+            {(["VIP", "Regular", "Novo", "Inativo"] as const).map((p) => (
+              <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {/* Kanban */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-start">
         {COLUMNS.map((col, colIdx) => {
           const cards = byStatus(col.key);
           return (
             <div key={col.key} className={`rounded-2xl ${col.light} border ${col.border} p-4`} data-testid={`crm-col-${col.key}`}>
-              {/* Column header */}
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2">
                   <div className={`w-2.5 h-2.5 rounded-full ${col.color}`} />
@@ -259,8 +361,6 @@ export default function CrmBoard() {
                   {loading ? "…" : cards.length}
                 </span>
               </div>
-
-              {/* Cards */}
               <div className="space-y-3">
                 {loading ? (
                   <div className="h-20 rounded-xl bg-white/60 animate-pulse" />
@@ -274,11 +374,9 @@ export default function CrmBoard() {
                 ) : (
                   cards.map((c) => (
                     <ContactCard
-                      key={c.id}
-                      contact={c}
-                      onMove={handleMove}
-                      onEdit={openEdit}
-                      onArchive={handleArchive}
+                      key={c.id} contact={c} onMove={handleMove}
+                      onEdit={openEdit} onArchive={handleArchive}
+                      onOpen={(contact) => setDetailId(contact.id)}
                       colIdx={colIdx}
                     />
                   ))
@@ -289,7 +387,7 @@ export default function CrmBoard() {
         })}
       </div>
 
-      {/* Form modal */}
+      {/* Add/Edit form modal */}
       {showForm && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
           <div className="shk-card w-full max-w-sm p-6 max-h-[90vh] overflow-y-auto">
@@ -310,12 +408,23 @@ export default function CrmBoard() {
                   placeholder="33 99999-0000"
                   className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
               </div>
-              <div>
-                <label className="text-xs font-medium mb-1 block">Etapa</label>
-                <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value as Status })}
-                  className="w-full px-3 py-2 rounded-xl border border-border text-sm">
-                  {COLUMNS.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
-                </select>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs font-medium mb-1 block">Etapa</label>
+                  <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value as Status })}
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                    {COLUMNS.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-medium mb-1 block">Perfil</label>
+                  <select value={form.profile} onChange={(e) => setForm({ ...form, profile: e.target.value as CrmContact["profile"] })}
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                    {(["Novo", "Regular", "VIP", "Inativo"] as const).map((p) => (
+                      <option key={p} value={p}>{p}</option>
+                    ))}
+                  </select>
+                </div>
               </div>
               <div>
                 <label className="text-xs font-medium mb-1 block">Setor de interesse</label>
@@ -351,6 +460,16 @@ export default function CrmBoard() {
             </form>
           </div>
         </div>
+      )}
+
+      {/* Contact Detail Panel */}
+      {detailId !== null && (
+        <CrmContactDetail
+          contactId={detailId}
+          onClose={() => setDetailId(null)}
+          onContactUpdated={handleContactUpdated}
+          sectors={sectors}
+        />
       )}
     </div>
   );
