@@ -91,6 +91,39 @@ export type CrmContact = {
   attendant: { id: number; name: string } | null;
 };
 
+export type Conversation = {
+  id: number;
+  phone: string;
+  name: string;
+  avatarUrl: string | null;
+  channel: string;
+  sectorId: number | null;
+  assigneeId: number | null;
+  status: string;
+  labels: string | null;
+  unreadCount: number;
+  lastMessage: string | null;
+  lastMessageAt: string | null;
+  isArchived: boolean;
+  createdAt: string;
+  updatedAt: string;
+  sector: Sector | null;
+  assignee: { id: number; name: string } | null;
+};
+
+export type ChatMessage = {
+  id: number;
+  conversationId: number;
+  content: string;
+  direction: "inbound" | "outbound";
+  type: string;
+  status: string;
+  senderName: string | null;
+  mediaUrl: string | null;
+  externalId: string | null;
+  createdAt: string;
+};
+
 export const api = {
   auth: {
     login: (email: string, password: string) =>
@@ -118,6 +151,23 @@ export const api = {
     transfer: (id: number, targetSectorId: number) =>
       req<QueueEntry>(`/queue/${id}/transfer`, { method: "PATCH", body: JSON.stringify({ targetSectorId }) }),
     remove: (id: number) => req<{ ok: boolean }>(`/queue/${id}`, { method: "DELETE" }),
+  },
+  chat: {
+    conversations: (params?: { search?: string; status?: string; label?: string; sectorId?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.search) qs.set("search", params.search);
+      if (params?.status) qs.set("status", params.status);
+      if (params?.label) qs.set("label", params.label);
+      if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      return req<Conversation[]>(`/chat/conversations?${qs.toString()}`);
+    },
+    messages: (id: number) => req<ChatMessage[]>(`/chat/conversations/${id}/messages`),
+    sendMessage: (id: number, content: string) =>
+      req<ChatMessage>(`/chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
+    updateConversation: (id: number, data: Partial<{ status: string; labels: string; sectorId: number; assigneeId: number; name: string; isArchived: boolean }>) =>
+      req<Conversation>(`/chat/conversations/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    createConversation: (data: { phone: string; name: string; channel?: string; sectorId?: number }) =>
+      req<Conversation>("/chat/conversations", { method: "POST", body: JSON.stringify(data) }),
   },
   crm: {
     list: () => req<CrmContact[]>("/crm"),

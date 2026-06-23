@@ -6,6 +6,7 @@ import queueRouter from "./queue";
 import adminRouter from "./admin";
 import webhookRouter from "./webhook";
 import crmRouter from "./crm";
+import chatRouter from "./chat";
 
 const router: IRouter = Router();
 
@@ -16,5 +17,6 @@ router.use(queueRouter);
 router.use(adminRouter);
 router.use(webhookRouter);
 router.use(crmRouter);
+router.use(chatRouter);
 
 export default router;

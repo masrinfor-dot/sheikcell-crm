@@ -5,13 +5,14 @@ import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
 import CrmBoard from "./CrmBoard";
+import ChatCenter from "./ChatCenter";
 import {
   Smartphone, LogOut, LayoutDashboard, ClipboardList,
   Settings, Users, RefreshCw, Plus, X, Clock, CheckCircle,
-  PhoneCall, TrendingUp, Pencil, Kanban
+  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle
 } from "lucide-react";
 
-type Tab = "dashboard" | "crm" | "history" | "users" | "sectors";
+type Tab = "dashboard" | "chat" | "crm" | "history" | "users" | "sectors";
 
 type UserRow = {
   id: number; name: string; email: string; role: string;
@@ -139,6 +140,7 @@ export default function AdminDashboard() {
 
   const tabs = [
     { id: "dashboard" as Tab, label: "Visão Geral", icon: LayoutDashboard },
+    { id: "chat" as Tab, label: "Central de Atendimento", icon: MessageCircle },
     { id: "crm" as Tab, label: "CRM", icon: Kanban },
     { id: "history" as Tab, label: "Histórico", icon: ClipboardList },
     { id: "users" as Tab, label: "Atendentes", icon: Users },
@@ -247,6 +249,8 @@ export default function AdminDashboard() {
         )}
 
         {/* === CRM TAB === */}
+        {tab === "chat" && <ChatCenter />}
+
         {tab === "crm" && <CrmBoard />}
 
         {/* === HISTORY TAB === */}

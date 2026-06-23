@@ -5,12 +5,13 @@ import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
 import CrmBoard from "./CrmBoard";
+import ChatCenter from "./ChatCenter";
 import {
   Smartphone, LogOut, Clock, PhoneCall, CheckCircle,
-  ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban
+  ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle
 } from "lucide-react";
 
-type MainTab = "queue" | "crm";
+type MainTab = "queue" | "chat" | "crm";
 
 function formatWait(createdAt: string): string {
   const diff = Math.floor((Date.now() - new Date(createdAt).getTime()) / 1000);
@@ -163,8 +164,9 @@ export default function AttendantDashboard() {
       <div className="bg-white border-b border-border">
         <div className="max-w-3xl mx-auto px-4 flex gap-1">
           {([
-            { id: "queue" as MainTab, label: "Fila de Atendimento", icon: PhoneCall },
-            { id: "crm"   as MainTab, label: "CRM",                 icon: Kanban   },
+            { id: "queue" as MainTab, label: "Fila",           icon: PhoneCall      },
+            { id: "chat"  as MainTab, label: "Atendimento",    icon: MessageCircle  },
+            { id: "crm"   as MainTab, label: "CRM",            icon: Kanban         },
           ] as const).map(({ id, label, icon: Icon }) => (
             <button key={id} onClick={() => setMainTab(id)}
               className={`flex items-center gap-1.5 px-4 py-3.5 text-xs font-semibold border-b-2 transition-colors ${
@@ -175,6 +177,12 @@ export default function AttendantDashboard() {
           ))}
         </div>
       </div>
+
+      {mainTab === "chat" && (
+        <div className="max-w-full px-4 py-4">
+          <ChatCenter />
+        </div>
+      )}
 
       {mainTab === "crm" && (
         <div className="max-w-3xl mx-auto px-4 py-6">
