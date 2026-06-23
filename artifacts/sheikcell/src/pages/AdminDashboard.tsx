@@ -176,18 +176,25 @@ export default function AdminDashboard() {
                 </button>
               </div>
               <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                {summary.map(({ sector, waiting, inProgress, completedToday }) => (
+                {summary.map(({ sector, waiting, inProgress, completedToday, totalAttendants, busyAttendants }) => (
                   <div key={sector.id} className="shk-card p-5" data-testid={`card-sector-${sector.id}`}>
-                    <div className="flex items-center gap-3 mb-4">
-                      <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ backgroundColor: sector.color + "20" }}>
+                    <div className="flex items-center gap-3 mb-3">
+                      <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{ backgroundColor: sector.color + "20" }}>
                         <SectorIcon icon={sector.icon} className="w-5 h-5" style={{ color: sector.color }} />
                       </div>
-                      <div>
-                        <p className="font-bold text-sm text-foreground">{sector.name}</p>
-                        <p className="text-xs text-muted-foreground">{sector.description}</p>
+                      <div className="min-w-0">
+                        <p className="font-bold text-sm text-foreground truncate">{sector.name}</p>
+                        <p className="text-xs text-muted-foreground truncate">{sector.description}</p>
                       </div>
                     </div>
-                    <div className="grid grid-cols-3 gap-2 text-center">
+                    {/* Attendants row */}
+                    <div className="flex items-center gap-1.5 mb-3 text-xs text-muted-foreground">
+                      <Users className="w-3.5 h-3.5" />
+                      <span>
+                        <span className="font-semibold text-foreground">{busyAttendants}</span>/{totalAttendants} atendente{totalAttendants !== 1 ? "s" : ""} ativo{busyAttendants !== 1 ? "s" : ""}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 text-center border-t border-border pt-3">
                       <div>
                         <div className="text-lg font-extrabold text-amber-600">{waiting}</div>
                         <div className="text-xs text-muted-foreground">Aguard.</div>

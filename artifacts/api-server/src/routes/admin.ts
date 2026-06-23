@@ -10,6 +10,9 @@ const router: IRouter = Router();
 router.get("/admin/summary", requireAdmin, async (_req, res): Promise<void> => {
   const sectors = await db.select().from(sectorsTable).where(eq(sectorsTable.isActive, true));
 
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+
   const summary = await Promise.all(
     sectors.map(async (sector) => {
       const [waiting] = await db
@@ -22,19 +25,30 @@ router.get("/admin/summary", requireAdmin, async (_req, res): Promise<void> => {
         .from(queueEntriesTable)
         .where(and(eq(queueEntriesTable.sectorId, sector.id), eq(queueEntriesTable.status, "in_progress")));
 
-      const startOfDay = new Date();
-      startOfDay.setHours(0, 0, 0, 0);
-
       const [completedToday] = await db
         .select({ count: sql<number>`count(*)` })
         .from(attendanceLogsTable)
         .where(and(eq(attendanceLogsTable.sectorId, sector.id), gte(attendanceLogsTable.createdAt, startOfDay)));
+
+      // Attendants assigned to this sector (active users)
+      const [activeAttendants] = await db
+        .select({ count: sql<number>`count(*)` })
+        .from(usersTable)
+        .where(and(eq(usersTable.sectorId, sector.id), eq(usersTable.isActive, true)));
+
+      // Attendants currently serving a client (have an in_progress entry assigned to them)
+      const busyAttendants = await db
+        .selectDistinct({ attendantId: queueEntriesTable.attendantId })
+        .from(queueEntriesTable)
+        .where(and(eq(queueEntriesTable.sectorId, sector.id), eq(queueEntriesTable.status, "in_progress")));
 
       return {
         sector,
         waiting: Number(waiting?.count ?? 0),
         inProgress: Number(inProgress?.count ?? 0),
         completedToday: Number(completedToday?.count ?? 0),
+        totalAttendants: Number(activeAttendants?.count ?? 0),
+        busyAttendants: busyAttendants.filter((a) => a.attendantId !== null).length,
       };
     })
   );

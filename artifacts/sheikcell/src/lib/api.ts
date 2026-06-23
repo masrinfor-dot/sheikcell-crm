@@ -71,6 +71,8 @@ export type SectorSummary = {
   waiting: number;
   inProgress: number;
   completedToday: number;
+  totalAttendants: number;
+  busyAttendants: number;
 };
 
 export const api = {
