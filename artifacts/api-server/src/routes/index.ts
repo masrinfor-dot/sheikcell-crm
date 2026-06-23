@@ -8,6 +8,7 @@ import webhookRouter from "./webhook";
 import crmRouter from "./crm";
 import chatRouter from "./chat";
 import routingRouter from "./routing";
+import whatsappRouter from "./whatsapp";
 
 const router: IRouter = Router();
 
@@ -20,5 +21,6 @@ router.use(webhookRouter);
 router.use(crmRouter);
 router.use(chatRouter);
 router.use(routingRouter);
+router.use(whatsappRouter);
 
 export default router;

@@ -122,6 +122,8 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
 
   const senderName = req.session.userName ?? "Atendente";
 
+  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
+
   const [msg] = await db.insert(messagesTable).values({
     conversationId: id,
     content: content.trim(),
@@ -138,6 +140,17 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
   }).where(eq(conversationsTable.id, id));
 
   broadcast("message", { conversationId: id, message: msg });
+
+  // Forward to WhatsApp if this is a WhatsApp conversation
+  if (conv?.channel === "whatsapp" && conv.phone) {
+    try {
+      const { sendWAMessage, getWAState } = await import("../lib/whatsapp");
+      if (getWAState().status === "connected") {
+        await sendWAMessage(conv.phone, content.trim());
+      }
+    } catch { /* WhatsApp not available or not connected — silently skip */ }
+  }
+
   res.status(201).json(msg);
 });
 

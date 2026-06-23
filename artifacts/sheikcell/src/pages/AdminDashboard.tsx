@@ -13,7 +13,13 @@ import {
   PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork
 } from "lucide-react";
 
-type Tab = "dashboard" | "chat" | "distribuicao" | "crm" | "history" | "users" | "sectors";
+type Tab = "dashboard" | "chat" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp";
+
+type WAStatus = {
+  status: "disconnected" | "qr" | "connecting" | "connected";
+  qr: string | null;
+  phoneNumber: string | null;
+};
 
 type UserRow = {
   id: number; name: string; email: string; role: string;
@@ -42,6 +48,8 @@ export default function AdminDashboard() {
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [userRows, setUserRows] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [waStatus, setWaStatus] = useState<WAStatus>({ status: "disconnected", qr: null, phoneNumber: null });
+  const [waLoading, setWaLoading] = useState(false);
 
   // Modals
   const [showAddUser, setShowAddUser] = useState(false);
@@ -68,12 +76,49 @@ export default function AdminDashboard() {
     } catch { /* silent */ }
   }, []);
 
+  const fetchWAStatus = useCallback(async () => {
+    try {
+      const r = await fetch("/api/whatsapp/status", { credentials: "include" });
+      if (r.ok) setWaStatus(await r.json() as WAStatus);
+    } catch { /* silent */ }
+  }, []);
+
   useEffect(() => {
     fetchAll();
     fetchUsersAndSectors();
+    fetchWAStatus();
     const iv = setInterval(fetchAll, 8000);
     return () => clearInterval(iv);
-  }, [fetchAll, fetchUsersAndSectors]);
+  }, [fetchAll, fetchUsersAndSectors, fetchWAStatus]);
+
+  useEffect(() => {
+    if (tab !== "whatsapp") return;
+    fetchWAStatus();
+    const iv = setInterval(fetchWAStatus, 2500);
+    return () => clearInterval(iv);
+  }, [tab, fetchWAStatus]);
+
+  const handleWADisconnect = async () => {
+    setWaLoading(true);
+    try {
+      await fetch("/api/whatsapp/disconnect", { method: "POST", credentials: "include" });
+      toast({ title: "WhatsApp desconectado" });
+      await fetchWAStatus();
+    } catch {
+      toast({ title: "Erro", variant: "destructive" });
+    } finally { setWaLoading(false); }
+  };
+
+  const handleWAReconnect = async () => {
+    setWaLoading(true);
+    try {
+      await fetch("/api/whatsapp/reconnect", { method: "POST", credentials: "include" });
+      toast({ title: "Reconectando..." });
+      await fetchWAStatus();
+    } catch {
+      toast({ title: "Erro", variant: "destructive" });
+    } finally { setWaLoading(false); }
+  };
 
   const totalWaiting = summary.reduce((a, s) => a + s.waiting, 0);
   const totalInProgress = summary.reduce((a, s) => a + s.inProgress, 0);
@@ -147,6 +192,7 @@ export default function AdminDashboard() {
     { id: "history" as Tab, label: "Histórico", icon: ClipboardList },
     { id: "users" as Tab, label: "Atendentes", icon: Users },
     { id: "sectors" as Tab, label: "Setores", icon: Settings },
+    { id: "whatsapp" as Tab, label: "WhatsApp", icon: PhoneCall },
   ];
 
   return (
@@ -256,6 +302,104 @@ export default function AdminDashboard() {
         {tab === "distribuicao" && <DistribuicaoPanel />}
 
         {tab === "crm" && <CrmBoard />}
+
+        {/* === WHATSAPP TAB === */}
+        {tab === "whatsapp" && (
+          <div className="max-w-lg mx-auto space-y-6">
+            {/* Status bar */}
+            <div className="shk-card p-5">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="font-bold text-foreground">Conexão WhatsApp</h2>
+                <div className="flex items-center gap-2">
+                  <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${
+                    waStatus.status === "connected" ? "bg-green-100 text-green-700" :
+                    waStatus.status === "qr" ? "bg-amber-100 text-amber-700" :
+                    waStatus.status === "connecting" ? "bg-blue-100 text-blue-700" :
+                    "bg-gray-100 text-gray-600"
+                  }`}>
+                    <span className={`w-2 h-2 rounded-full ${
+                      waStatus.status === "connected" ? "bg-green-500" :
+                      waStatus.status === "qr" ? "bg-amber-500 animate-pulse" :
+                      waStatus.status === "connecting" ? "bg-blue-500 animate-pulse" :
+                      "bg-gray-400"
+                    }`} />
+                    {waStatus.status === "connected" ? "Conectado" :
+                     waStatus.status === "qr" ? "Aguardando QR" :
+                     waStatus.status === "connecting" ? "Conectando..." :
+                     "Desconectado"}
+                  </span>
+                </div>
+              </div>
+
+              {waStatus.status === "connected" && waStatus.phoneNumber && (
+                <p className="text-sm text-muted-foreground mb-4">
+                  Número: <span className="font-semibold text-foreground">+{waStatus.phoneNumber}</span>
+                </p>
+              )}
+
+              <div className="flex gap-2">
+                {waStatus.status === "connected" ? (
+                  <button onClick={handleWADisconnect} disabled={waLoading}
+                    className="flex-1 py-2.5 rounded-xl bg-red-50 text-red-600 border border-red-200 text-sm font-semibold hover:bg-red-100 transition disabled:opacity-50">
+                    {waLoading ? "Aguarde..." : "Desconectar / Trocar Número"}
+                  </button>
+                ) : (
+                  <button onClick={handleWAReconnect} disabled={waLoading || waStatus.status === "connecting"}
+                    className="flex-1 py-2.5 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition disabled:opacity-50">
+                    {waLoading ? "Aguarde..." : waStatus.status === "connecting" ? "Conectando..." : "Reconectar"}
+                  </button>
+                )}
+                <button onClick={fetchWAStatus} disabled={waLoading}
+                  className="px-3 py-2.5 rounded-xl border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition">
+                  <RefreshCw className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* QR Code */}
+            {waStatus.status === "qr" && waStatus.qr && (
+              <div className="shk-card p-6 text-center">
+                <h3 className="font-bold text-sm mb-1">Escaneie com seu WhatsApp</h3>
+                <p className="text-xs text-muted-foreground mb-4">
+                  Abra o WhatsApp → <strong>Dispositivos Conectados</strong> → <strong>Conectar dispositivo</strong>
+                </p>
+                <div className="flex justify-center">
+                  <img src={waStatus.qr} alt="QR Code WhatsApp" className="w-56 h-56 rounded-xl border border-border" />
+                </div>
+                <p className="text-xs text-muted-foreground mt-3 animate-pulse">Aguardando scan...</p>
+              </div>
+            )}
+
+            {/* Disconnected idle */}
+            {waStatus.status === "disconnected" && (
+              <div className="shk-card p-6 text-center">
+                <Smartphone className="w-10 h-10 mx-auto text-muted-foreground mb-3" />
+                <p className="text-sm text-muted-foreground">
+                  O servidor está inicializando a conexão.<br />
+                  O QR code vai aparecer aqui em instantes.
+                </p>
+              </div>
+            )}
+
+            {/* Connected idle */}
+            {waStatus.status === "connected" && (
+              <div className="shk-card p-6 text-center">
+                <CheckCircle className="w-10 h-10 mx-auto text-green-500 mb-3" />
+                <p className="text-sm font-semibold text-foreground mb-1">WhatsApp conectado!</p>
+                <p className="text-xs text-muted-foreground">
+                  Mensagens recebidas aparecem automaticamente no <strong>Atendimento</strong>.<br />
+                  Respostas enviadas pelo sistema chegam no celular do cliente.
+                </p>
+              </div>
+            )}
+
+            {/* Warning */}
+            <div className="rounded-xl bg-amber-50 border border-amber-200 p-4 text-xs text-amber-800">
+              <strong>⚠️ Aviso:</strong> Esta integração usa um método não-oficial (Baileys). Utilize apenas para testes.
+              Risco de bloqueio temporário do número pela Meta. Não use com número principal da loja.
+            </div>
+          </div>
+        )}
 
         {/* === HISTORY TAB === */}
         {tab === "history" && (
