@@ -3,6 +3,7 @@ import { db, conversationsTable, messagesTable, sectorsTable, usersTable } from 
 import { eq, desc, and, or, ilike, sql } from "drizzle-orm";
 import { requireAuth } from "../middlewares/auth";
 import { broadcast, sseEmitter } from "../lib/sseEmitter";
+import { classifyText } from "../lib/autoRouter";
 
 const router: IRouter = Router();
 
@@ -223,10 +224,12 @@ router.post("/chat/webhook/whatsapp", async (req, res): Promise<void> => {
     .limit(1);
 
   if (!conv) {
+    const classified = text ? await classifyText(text) : null;
     const [first] = await db.select().from(sectorsTable).where(eq(sectorsTable.isActive, true)).limit(1);
+    const targetSectorId = classified?.sectorId ?? first?.id ?? 1;
     [conv] = await db.insert(conversationsTable).values({
       phone, name: pushName, channel: "whatsapp",
-      sectorId: first?.id ?? 1,
+      sectorId: targetSectorId,
       status: "open",
       lastMessage: text,
       lastMessageAt: new Date(),

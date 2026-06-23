@@ -111,6 +111,22 @@ export type Conversation = {
   assignee: { id: number; name: string } | null;
 };
 
+export type RoutingRule = {
+  id: number;
+  sectorId: number;
+  name: string;
+  keywords: string;
+  priority: number;
+  isActive: boolean;
+  createdAt: string;
+};
+
+export type ClassifyResult = {
+  sectorId: number | null;
+  ruleName: string | null;
+  matchedKeyword: string | null;
+};
+
 export type ChatMessage = {
   id: number;
   conversationId: number;
@@ -168,6 +184,15 @@ export const api = {
       req<Conversation>(`/chat/conversations/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     createConversation: (data: { phone: string; name: string; channel?: string; sectorId?: number }) =>
       req<Conversation>("/chat/conversations", { method: "POST", body: JSON.stringify(data) }),
+  },
+  routing: {
+    rules: () => req<RoutingRule[]>("/routing/rules"),
+    create: (data: { sectorId: number; name: string; keywords: string; priority?: number }) =>
+      req<RoutingRule>("/routing/rules", { method: "POST", body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<{ name: string; keywords: string; priority: number; isActive: boolean; sectorId: number }>) =>
+      req<RoutingRule>(`/routing/rules/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/routing/rules/${id}`, { method: "DELETE" }),
+    classify: (text: string) => req<ClassifyResult>("/routing/classify", { method: "POST", body: JSON.stringify({ text }) }),
   },
   crm: {
     list: () => req<CrmContact[]>("/crm"),

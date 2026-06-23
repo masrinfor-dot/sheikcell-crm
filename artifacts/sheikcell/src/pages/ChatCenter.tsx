@@ -6,7 +6,7 @@ import {
   Search, Plus, Send, RefreshCw, X, ChevronDown,
   MessageCircle, Clock, CheckCheck, Tag, Filter,
   Smartphone, Instagram, UserCircle2, Archive, Circle,
-  Phone
+  Phone, ArrowRightLeft
 } from "lucide-react";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -129,6 +129,7 @@ export default function ChatCenter() {
   const [sending, setSending] = useState(false);
   const [showNewConv, setShowNewConv] = useState(false);
   const [showLabelPicker, setShowLabelPicker] = useState(false);
+  const [showTransferPicker, setShowTransferPicker] = useState(false);
   const [showFilter, setShowFilter] = useState(false);
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [newForm, setNewForm] = useState({ name: "", phone: "", channel: "whatsapp", sectorId: "" });
@@ -230,6 +231,27 @@ export default function ChatCenter() {
       await api.chat.updateConversation(activeId, { status });
       setConvs((prev) => prev.map((c) => c.id === activeId ? { ...c, status } : c));
     } catch { toast({ title: "Erro ao atualizar", variant: "destructive" }); }
+  };
+
+  // ── Transfer conversation to sector ──
+  const handleTransfer = async (targetSectorId: number) => {
+    if (!activeConv) return;
+    const targetSector = sectors.find((s) => s.id === targetSectorId);
+    try {
+      const updated = await api.chat.updateConversation(activeConv.id, { sectorId: targetSectorId });
+      setConvs((prev) => prev.map((c) => c.id === activeConv.id ? { ...c, ...updated } : c));
+      // Insert system message locally to show the transfer in chat history
+      await api.chat.sendMessage(activeConv.id, `🔀 Conversa transferida para ${targetSector?.name ?? "outro setor"}`);
+      setMessages((prev: ChatMessage[]) => [...prev, {
+        id: Date.now(), conversationId: activeConv.id,
+        content: `🔀 Conversa transferida para ${targetSector?.name ?? "outro setor"}`,
+        direction: "outbound" as const, type: "system", status: "sent",
+        senderName: "Sistema", mediaUrl: null, externalId: null,
+        createdAt: new Date().toISOString(),
+      }]);
+      toast({ title: `Transferido para ${targetSector?.name ?? "setor"}` });
+    } catch { toast({ title: "Erro ao transferir", variant: "destructive" }); }
+    setShowTransferPicker(false);
   };
 
   // ── Toggle label ──
@@ -401,7 +423,7 @@ export default function ChatCenter() {
               </div>
               {/* Labels */}
               <div className="relative">
-                <button onClick={() => setShowLabelPicker((v) => !v)}
+                <button onClick={() => { setShowLabelPicker((v) => !v); setShowTransferPicker(false); }}
                   className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-white border border-border hover:bg-secondary transition font-medium">
                   <Tag className="w-3 h-3" /> Etiquetas
                 </button>
@@ -414,6 +436,32 @@ export default function ChatCenter() {
                         {label}
                       </button>
                     ))}
+                  </div>
+                )}
+              </div>
+              {/* Transfer to sector */}
+              <div className="relative">
+                <button
+                  onClick={() => { setShowTransferPicker((v) => !v); setShowLabelPicker(false); }}
+                  className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-white border border-border hover:bg-secondary transition font-medium"
+                  title="Transferir para outro setor"
+                >
+                  <ArrowRightLeft className="w-3 h-3" /> Transferir
+                </button>
+                {showTransferPicker && (
+                  <div className="absolute right-0 top-9 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden min-w-[200px]">
+                    <div className="px-3 py-2 border-b border-border text-xs font-semibold text-muted-foreground">
+                      Transferir para:
+                    </div>
+                    {sectors
+                      .filter((s) => s.id !== activeConv?.sectorId)
+                      .map((s) => (
+                        <button key={s.id} onClick={() => handleTransfer(s.id)}
+                          className="w-full text-left flex items-center gap-2 text-xs px-3 py-2.5 hover:bg-secondary transition">
+                          <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: s.color }} />
+                          {s.name}
+                        </button>
+                      ))}
                   </div>
                 )}
               </div>
