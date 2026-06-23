@@ -1,12 +1,16 @@
 import { Router, type IRouter } from "express";
-import { requireAuth } from "../middlewares/auth";
+import { requireAdmin } from "../middlewares/auth";
 import { getWAState, sendWAMessage, disconnectWA } from "../lib/whatsapp";
 import QRCode from "qrcode";
 
 const router: IRouter = Router();
 
+// All WhatsApp management endpoints are admin-only:
+// - status/QR expose sensitive connection info
+// - disconnect/send can disrupt the shared channel or send arbitrary messages
+
 // ─── Simple HTML status page (admin-only) ─────────────────────────────────
-router.get("/whatsapp/", requireAuth, (_req, res): void => {
+router.get("/whatsapp/", requireAdmin, (_req, res): void => {
   const st = getWAState();
   const qrImg = st.qr
     ? `<img src="${st.qr}" alt="QR Code" style="width:220px;height:220px;border-radius:12px;border:1px solid #e5e7eb;" />`
@@ -32,33 +36,31 @@ ${qrImg ? `<p>Abra WhatsApp → Dispositivos Conectados → Conectar dispositivo
 });
 
 // ─── Status JSON ─────────────────────────────────────────────────────────
-router.get("/whatsapp/status", requireAuth, (_req, res): void => {
+router.get("/whatsapp/status", requireAdmin, (_req, res): void => {
   res.json(getWAState());
 });
 
 // ─── QR code as PNG ──────────────────────────────────────────────────────
-router.get("/whatsapp/qr", requireAuth, async (_req, res): Promise<void> => {
-  const { qr, status } = getWAState();
-  if (status !== "qr" || !qr) {
+router.get("/whatsapp/qr", requireAdmin, async (_req, res): Promise<void> => {
+  const { status } = getWAState();
+  if (status !== "qr") {
     res.status(404).json({ error: "QR code não disponível — verifique /whatsapp/status" });
     return;
   }
   try {
-    // qr is already a data URI; extract the raw string from state to regenerate as PNG buffer
-    // We store the raw QR string via a separate getter
     const raw = getRawQR();
     if (!raw) { res.status(404).json({ error: "QR não disponível" }); return; }
     const buffer = await QRCode.toBuffer(raw, { type: "png", width: 300, margin: 2 });
     res.setHeader("Content-Type", "image/png");
     res.setHeader("Cache-Control", "no-store");
     res.send(buffer);
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: "Erro ao gerar QR" });
   }
 });
 
-// ─── Send message ─────────────────────────────────────────────────────────
-router.post("/whatsapp/send", requireAuth, async (req, res): Promise<void> => {
+// ─── Send message (admin direct-send, not used by ChatCenter agents) ──────
+router.post("/whatsapp/send", requireAdmin, async (req, res): Promise<void> => {
   const { to, text } = req.body as { to?: string; text?: string };
   if (!to || !text) {
     res.status(400).json({ error: "to e text são obrigatórios" });
@@ -73,7 +75,7 @@ router.post("/whatsapp/send", requireAuth, async (req, res): Promise<void> => {
 });
 
 // ─── Disconnect + start new QR session ───────────────────────────────────
-router.post("/whatsapp/disconnect", requireAuth, async (_req, res): Promise<void> => {
+router.post("/whatsapp/disconnect", requireAdmin, async (_req, res): Promise<void> => {
   await disconnectWA(true);
   res.json({ ok: true });
 });
