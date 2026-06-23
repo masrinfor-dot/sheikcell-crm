@@ -9,7 +9,6 @@ import QRCode from "qrcode";
 import path from "path";
 import { rm } from "fs/promises";
 import { logger } from "./logger";
-import { processInboundWA } from "./whatsappInbound";
 
 export interface WAState {
   status: "disconnected" | "qr" | "connecting" | "connected";
@@ -28,12 +27,15 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let isStarting = false;
 let rawQRString: string | null = null;
 
-// Sessions live OUTSIDE dist/ so builds never wipe credentials.
-// process.cwd() is the artifact root (artifacts/api-server) when started from the workflow.
-// Falls back to SESSION_DIR env var for production overrides.
+// Sessions at artifacts/whatsapp-bridge/sessions/default — outside dist/
 const SESSION_DIR =
   process.env["SESSION_DIR"] ??
   path.resolve(process.cwd(), "sessions", "default");
+
+// Webhook on api-server that ingests inbound messages into the DB
+const INBOUND_WEBHOOK =
+  process.env["INBOUND_WEBHOOK_URL"] ??
+  "http://localhost:80/api/chat/webhook/whatsapp";
 
 export async function startSession(): Promise<void> {
   if (isStarting) return;
@@ -94,6 +96,7 @@ export async function startSession(): Promise<void> {
       } else if (connection === "open") {
         state.status = "connected";
         state.qr = null;
+        rawQRString = null;
         state.phoneNumber = sock?.user?.id?.split(":")[0]?.split("@")[0] ?? null;
         logger.info({ phone: state.phoneNumber }, "WhatsApp connected");
         isStarting = false;
@@ -109,7 +112,7 @@ export async function startSession(): Promise<void> {
         if (!msg.message) continue;
 
         try {
-          await processInboundWA({
+          const payload = {
             event: "messages.upsert",
             data: {
               key: {
@@ -117,19 +120,26 @@ export async function startSession(): Promise<void> {
                 fromMe: msg.key.fromMe ?? undefined,
                 id: msg.key.id ?? undefined,
               },
-              message: msg.message as {
-                conversation?: string;
-                extendedTextMessage?: { text?: string };
-                imageMessage?: { caption?: string };
-              },
+              message: msg.message,
               pushName: msg.pushName ?? "",
-              messageTimestamp: typeof msg.messageTimestamp === "number"
-                ? msg.messageTimestamp
-                : Number(msg.messageTimestamp ?? 0),
+              messageTimestamp:
+                typeof msg.messageTimestamp === "number"
+                  ? msg.messageTimestamp
+                  : Number(msg.messageTimestamp ?? 0),
             },
+          };
+
+          const res = await fetch(INBOUND_WEBHOOK, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
           });
+
+          if (!res.ok) {
+            logger.error({ status: res.status }, "Inbound webhook call failed");
+          }
         } catch (err) {
-          logger.error({ err }, "Failed to process inbound WhatsApp message");
+          logger.error({ err }, "Failed to forward inbound WhatsApp message");
         }
       }
     });
@@ -171,6 +181,7 @@ export async function disconnectWA(andRestart = false): Promise<void> {
   state.status = "disconnected";
   state.qr = null;
   state.phoneNumber = null;
+  rawQRString = null;
   isStarting = false;
 
   try {

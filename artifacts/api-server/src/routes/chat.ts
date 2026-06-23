@@ -141,14 +141,17 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
 
   broadcast("message", { conversationId: id, message: msg });
 
-  // Forward to WhatsApp if this is a WhatsApp conversation
+  // Forward to WhatsApp bridge if this is a WhatsApp conversation
   if (conv?.channel === "whatsapp" && conv.phone) {
+    const bridgeUrl =
+      process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
     try {
-      const { sendWAMessage, getWAState } = await import("../lib/whatsapp");
-      if (getWAState().status === "connected") {
-        await sendWAMessage(conv.phone, content.trim());
-      }
-    } catch { /* WhatsApp not available or not connected — silently skip */ }
+      await fetch(`${bridgeUrl}/whatsapp/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to: conv.phone, text: content.trim() }),
+      });
+    } catch { /* bridge not reachable — silently skip */ }
   }
 
   res.status(201).json(msg);

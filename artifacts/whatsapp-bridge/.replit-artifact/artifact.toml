@@ -1,0 +1,32 @@
+kind = "api"
+  previewPath = "/api/whatsapp"
+  title = "WhatsApp Bridge"
+  version = "1.0.0"
+  id = "whatsapp-bridge"
+
+  [[services]]
+  localPort = 3002
+  name = "WhatsApp Bridge"
+  paths = []
+
+  [services.development]
+  run = "pnpm --filter @workspace/whatsapp-bridge run dev"
+
+  [services.production]
+
+  [services.production.build]
+  args = ["pnpm", "--filter", "@workspace/whatsapp-bridge", "run", "build"]
+
+  [services.production.build.env]
+  NODE_ENV = "production"
+
+  [services.production.run]
+  args = ["node", "--enable-source-maps", "artifacts/whatsapp-bridge/dist/index.mjs"]
+
+  [services.production.run.env]
+  PORT = "3002"
+  NODE_ENV = "production"
+
+  [services.production.health.startup]
+  path = "/whatsapp/healthz"
+  
