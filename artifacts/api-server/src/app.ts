@@ -45,11 +45,16 @@ app.use(
       tableName: "session",
       createTableIfMissing: true,
     }),
-    secret: process.env["SESSION_SECRET"] ?? "sheikcell-secret-key",
+    secret: process.env["SESSION_SECRET"] ?? (() => {
+      if (process.env["NODE_ENV"] === "production") {
+        throw new Error("SESSION_SECRET env var is required in production");
+      }
+      return "sheikcell-dev-only-secret";
+    })(),
     resave: false,
     saveUninitialized: false,
     cookie: {
-      secure: false,
+      secure: process.env["NODE_ENV"] === "production",
       httpOnly: true,
       maxAge: 24 * 60 * 60 * 1000, // 24h
       sameSite: "lax",

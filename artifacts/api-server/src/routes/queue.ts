@@ -5,19 +5,39 @@ import { requireAuth } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
+/** Returns true if the user is admin OR the entry belongs to their sector */
+function canActOnEntry(userRole: string, userSectorId: number | null, entrySectorId: number): boolean {
+  if (userRole === "admin") return true;
+  return userSectorId === entrySectorId;
+}
+
 router.get("/queue", requireAuth, async (req, res): Promise<void> => {
   const sectorIdParam = req.query.sectorId;
   const statusParam = req.query.status as string | undefined;
 
-  let query = db.select().from(queueEntriesTable).orderBy(asc(queueEntriesTable.position), asc(queueEntriesTable.createdAt));
+  const userRole = req.session.userRole!;
+  const userSectorId = req.session.userSectorId ?? null;
+
+  // Attendants can only query their own sector; admins can query any sector
+  let effectiveSectorId: number | null = null;
+  if (sectorIdParam) {
+    const parsed = parseInt(String(sectorIdParam), 10);
+    if (!isNaN(parsed)) {
+      if (userRole !== "admin" && parsed !== userSectorId) {
+        res.status(403).json({ error: "Acesso negado a este setor" });
+        return;
+      }
+      effectiveSectorId = parsed;
+    }
+  } else if (userRole !== "admin" && userSectorId) {
+    // Non-admins without explicit sectorId always see only their sector
+    effectiveSectorId = userSectorId;
+  }
 
   const conditions = [];
 
-  if (sectorIdParam) {
-    const sectorId = parseInt(String(sectorIdParam), 10);
-    if (!isNaN(sectorId)) {
-      conditions.push(eq(queueEntriesTable.sectorId, sectorId));
-    }
+  if (effectiveSectorId !== null) {
+    conditions.push(eq(queueEntriesTable.sectorId, effectiveSectorId));
   }
 
   if (statusParam) {
@@ -26,9 +46,7 @@ router.get("/queue", requireAuth, async (req, res): Promise<void> => {
       conditions.push(eq(queueEntriesTable.status, statuses[0]!));
     }
   } else {
-    conditions.push(
-      sql`${queueEntriesTable.status} IN ('waiting', 'in_progress')`
-    );
+    conditions.push(sql`${queueEntriesTable.status} IN ('waiting', 'in_progress')`);
   }
 
   const entries = conditions.length
@@ -57,6 +75,12 @@ router.post("/queue", requireAuth, async (req, res): Promise<void> => {
 
   if (!clientName || !sectorId) {
     res.status(400).json({ error: "Nome do cliente e setor são obrigatórios" });
+    return;
+  }
+
+  // Attendants can only add to their own sector
+  if (!canActOnEntry(req.session.userRole!, req.session.userSectorId ?? null, sectorId)) {
+    res.status(403).json({ error: "Acesso negado a este setor" });
     return;
   }
 
@@ -90,13 +114,20 @@ router.patch("/queue/:id/call", requireAuth, async (req, res): Promise<void> => 
   const id = parseInt(rawId, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
 
+  const [existing] = await db.select().from(queueEntriesTable).where(eq(queueEntriesTable.id, id));
+  if (!existing) { res.status(404).json({ error: "Entrada não encontrada" }); return; }
+
+  if (!canActOnEntry(req.session.userRole!, req.session.userSectorId ?? null, existing.sectorId)) {
+    res.status(403).json({ error: "Acesso negado a este setor" }); return;
+  }
+
   const [entry] = await db
     .update(queueEntriesTable)
     .set({ status: "in_progress", attendantId: req.session.userId, calledAt: new Date() })
     .where(and(eq(queueEntriesTable.id, id), eq(queueEntriesTable.status, "waiting")))
     .returning();
 
-  if (!entry) { res.status(404).json({ error: "Entrada não encontrada ou já em atendimento" }); return; }
+  if (!entry) { res.status(409).json({ error: "Entrada já em atendimento ou não encontrada" }); return; }
   res.json(entry);
 });
 
@@ -104,6 +135,13 @@ router.patch("/queue/:id/start", requireAuth, async (req, res): Promise<void> =>
   const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const id = parseInt(rawId, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+
+  const [existing] = await db.select().from(queueEntriesTable).where(eq(queueEntriesTable.id, id));
+  if (!existing) { res.status(404).json({ error: "Entrada não encontrada" }); return; }
+
+  if (!canActOnEntry(req.session.userRole!, req.session.userSectorId ?? null, existing.sectorId)) {
+    res.status(403).json({ error: "Acesso negado a este setor" }); return;
+  }
 
   const [entry] = await db
     .update(queueEntriesTable)
@@ -119,6 +157,13 @@ router.patch("/queue/:id/complete", requireAuth, async (req, res): Promise<void>
   const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const id = parseInt(rawId, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+
+  const [existing] = await db.select().from(queueEntriesTable).where(eq(queueEntriesTable.id, id));
+  if (!existing) { res.status(404).json({ error: "Entrada não encontrada" }); return; }
+
+  if (!canActOnEntry(req.session.userRole!, req.session.userSectorId ?? null, existing.sectorId)) {
+    res.status(403).json({ error: "Acesso negado a este setor" }); return;
+  }
 
   const [entry] = await db
     .update(queueEntriesTable)
@@ -169,6 +214,10 @@ router.patch("/queue/:id/transfer", requireAuth, async (req, res): Promise<void>
   const [existingEntry] = await db.select().from(queueEntriesTable).where(eq(queueEntriesTable.id, id));
   if (!existingEntry) { res.status(404).json({ error: "Entrada não encontrada" }); return; }
 
+  if (!canActOnEntry(req.session.userRole!, req.session.userSectorId ?? null, existingEntry.sectorId)) {
+    res.status(403).json({ error: "Acesso negado a este setor" }); return;
+  }
+
   const [lastInTarget] = await db
     .select({ position: queueEntriesTable.position })
     .from(queueEntriesTable)
@@ -207,6 +256,13 @@ router.delete("/queue/:id", requireAuth, async (req, res): Promise<void> => {
   const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const id = parseInt(rawId, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+
+  const [existing] = await db.select().from(queueEntriesTable).where(eq(queueEntriesTable.id, id));
+  if (!existing) { res.status(404).json({ error: "Entrada não encontrada" }); return; }
+
+  if (!canActOnEntry(req.session.userRole!, req.session.userSectorId ?? null, existing.sectorId)) {
+    res.status(403).json({ error: "Acesso negado a este setor" }); return;
+  }
 
   await db.update(queueEntriesTable).set({ status: "completed", completedAt: new Date() }).where(eq(queueEntriesTable.id, id));
   res.json({ ok: true });

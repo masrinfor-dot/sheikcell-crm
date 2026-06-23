@@ -7,7 +7,7 @@ import { requireAdmin, requireAuth } from "../middlewares/auth";
 const router: IRouter = Router();
 
 // Dashboard summary
-router.get("/admin/summary", requireAuth, async (_req, res): Promise<void> => {
+router.get("/admin/summary", requireAdmin, async (_req, res): Promise<void> => {
   const sectors = await db.select().from(sectorsTable).where(eq(sectorsTable.isActive, true));
 
   const summary = await Promise.all(
@@ -43,7 +43,7 @@ router.get("/admin/summary", requireAuth, async (_req, res): Promise<void> => {
 });
 
 // Recent attendance logs
-router.get("/admin/logs", requireAuth, async (req, res): Promise<void> => {
+router.get("/admin/logs", requireAdmin, async (req, res): Promise<void> => {
   const limit = parseInt(String(req.query.limit ?? "50"), 10);
   const sectorId = req.query.sectorId ? parseInt(String(req.query.sectorId), 10) : null;
 
