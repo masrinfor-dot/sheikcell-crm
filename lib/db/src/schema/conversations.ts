@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, timestamp, boolean } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, timestamp, boolean, primaryKey } from "drizzle-orm/pg-core";
 import { sectorsTable } from "./sectors";
 import { usersTable } from "./users";
 
@@ -19,6 +19,16 @@ export const conversationsTable = pgTable("conversations", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const conversationParticipantsTable = pgTable(
+  "conversation_participants",
+  {
+    conversationId: integer("conversation_id").notNull().references(() => conversationsTable.id, { onDelete: "cascade" }),
+    userId: integer("user_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }),
+    addedAt: timestamp("added_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.conversationId, t.userId] })],
+);
 
 export const messagesTable = pgTable("messages", {
   id: serial("id").primaryKey(),

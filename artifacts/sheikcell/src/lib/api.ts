@@ -133,6 +133,7 @@ export type Conversation = {
   updatedAt: string;
   sector: Sector | null;
   assignee: { id: number; name: string } | null;
+  participants: { id: number; name: string }[];
 };
 
 export type RoutingRule = {
@@ -208,7 +209,14 @@ export const api = {
       req<Conversation>(`/chat/conversations/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     createConversation: (data: { phone: string; name: string; channel?: string; sectorId?: number }) =>
       req<Conversation>("/chat/conversations", { method: "POST", body: JSON.stringify(data) }),
+    participants: {
+      add: (convId: number, userId: number) =>
+        req<{ ok: boolean }>(`/chat/conversations/${convId}/participants`, { method: "POST", body: JSON.stringify({ userId }) }),
+      remove: (convId: number, userId: number) =>
+        req<{ ok: boolean }>(`/chat/conversations/${convId}/participants/${userId}`, { method: "DELETE" }),
+    },
   },
+  chatUsers: () => req<{ id: number; name: string; role: string }[]>("/chat/users"),
   routing: {
     rules: () => req<RoutingRule[]>("/routing/rules"),
     create: (data: { sectorId: number; name: string; keywords: string; priority?: number }) =>

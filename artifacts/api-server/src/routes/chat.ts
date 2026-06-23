@@ -2,8 +2,8 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync } from "fs";
 import path from "path";
-import { db, conversationsTable, messagesTable, sectorsTable, usersTable } from "@workspace/db";
-import { eq, desc, and, or, ilike, sql } from "drizzle-orm";
+import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable } from "@workspace/db";
+import { eq, desc, and, or, ilike, sql, inArray } from "drizzle-orm";
 import { requireAuth } from "../middlewares/auth";
 import { broadcast, sseEmitter } from "../lib/sseEmitter";
 import {
@@ -41,7 +41,12 @@ async function enrichConversation(conv: typeof conversationsTable.$inferSelect) 
   const [assignee] = conv.assigneeId
     ? await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable).where(eq(usersTable.id, conv.assigneeId))
     : [];
-  return { ...conv, sector: sector ?? null, assignee: assignee ?? null };
+  const participants = await db
+    .select({ id: usersTable.id, name: usersTable.name })
+    .from(conversationParticipantsTable)
+    .innerJoin(usersTable, eq(conversationParticipantsTable.userId, usersTable.id))
+    .where(eq(conversationParticipantsTable.conversationId, conv.id));
+  return { ...conv, sector: sector ?? null, assignee: assignee ?? null, participants };
 }
 
 // ─── List conversations ────────────────────────────────────────────────────
@@ -82,10 +87,25 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
   const sectorMap = Object.fromEntries(sectors.map((s) => [s.id, s]));
   const userMap = Object.fromEntries(users.map((u) => [u.id, u]));
 
+  const convIds = rows.map((c) => c.id);
+  const allParticipants = convIds.length > 0
+    ? await db
+        .select({ conversationId: conversationParticipantsTable.conversationId, id: usersTable.id, name: usersTable.name })
+        .from(conversationParticipantsTable)
+        .innerJoin(usersTable, eq(conversationParticipantsTable.userId, usersTable.id))
+        .where(inArray(conversationParticipantsTable.conversationId, convIds))
+    : [];
+  const participantsMap: Record<number, { id: number; name: string }[]> = {};
+  for (const p of allParticipants) {
+    if (!participantsMap[p.conversationId]) participantsMap[p.conversationId] = [];
+    participantsMap[p.conversationId].push({ id: p.id, name: p.name });
+  }
+
   const enriched = rows.map((c) => ({
     ...c,
     sector: c.sectorId ? (sectorMap[c.sectorId] ?? null) : null,
     assignee: c.assigneeId ? (userMap[c.assigneeId] ?? null) : null,
+    participants: participantsMap[c.id] ?? [],
   }));
 
   res.json(enriched);
@@ -215,6 +235,42 @@ router.post("/chat/conversations", requireAuth, async (req, res): Promise<void> 
 
   broadcast("conversation_new", conv);
   res.status(201).json(conv);
+});
+
+// ─── List users available for participant assignment ──────────────────────
+router.get("/chat/users", requireAuth, async (_req, res): Promise<void> => {
+  const users = await db
+    .select({ id: usersTable.id, name: usersTable.name, role: usersTable.role })
+    .from(usersTable)
+    .where(eq(usersTable.isActive, true));
+  res.json(users);
+});
+
+// ─── Conversation participants ─────────────────────────────────────────────
+router.post("/chat/conversations/:id/participants", requireAuth, async (req, res): Promise<void> => {
+  const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const { userId } = req.body as { userId?: number };
+  if (!userId) { res.status(400).json({ error: "userId obrigatório" }); return; }
+
+  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, convId));
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+
+  await db.insert(conversationParticipantsTable).values({ conversationId: convId, userId }).onConflictDoNothing();
+  broadcast("participants_updated", { conversationId: convId });
+  res.status(201).json({ ok: true });
+});
+
+router.delete("/chat/conversations/:id/participants/:userId", requireAuth, async (req, res): Promise<void> => {
+  const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const userId = parseInt(Array.isArray(req.params.userId) ? req.params.userId[0] : req.params.userId, 10);
+
+  await db.delete(conversationParticipantsTable)
+    .where(and(
+      eq(conversationParticipantsTable.conversationId, convId),
+      eq(conversationParticipantsTable.userId, userId),
+    ));
+  broadcast("participants_updated", { conversationId: convId });
+  res.json({ ok: true });
 });
 
 // ─── Serve saved media files ───────────────────────────────────────────────

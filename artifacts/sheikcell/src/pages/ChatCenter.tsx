@@ -6,7 +6,7 @@ import {
   Search, Plus, Send, RefreshCw, X, ChevronDown,
   MessageCircle, CheckCheck, Tag, Filter,
   Smartphone, Instagram, UserCircle2, Circle,
-  ArrowRightLeft, FileText, Volume2, Image
+  ArrowRightLeft, FileText, Volume2, Image, Users
 } from "lucide-react";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -197,8 +197,10 @@ export default function ChatCenter() {
   const [showNewConv, setShowNewConv] = useState(false);
   const [showLabelPicker, setShowLabelPicker] = useState(false);
   const [showTransferPicker, setShowTransferPicker] = useState(false);
+  const [showParticipantPicker, setShowParticipantPicker] = useState(false);
   const [showFilter, setShowFilter] = useState(false);
   const [sectors, setSectors] = useState<Sector[]>([]);
+  const [chatUsers, setChatUsers] = useState<{ id: number; name: string; role: string }[]>([]);
   const [newForm, setNewForm] = useState({ name: "", phone: "", channel: "whatsapp", sectorId: "" });
 
   const msgsEndRef = useRef<HTMLDivElement>(null);
@@ -265,7 +267,10 @@ export default function ChatCenter() {
 
   useEffect(() => {
     api.sectors.list().then(setSectors).catch(() => {});
+    api.chatUsers().then(setChatUsers).catch(() => {});
   }, []);
+
+  useEffect(() => { setShowParticipantPicker(false); }, [activeId]);
 
   // ── Send message ──
   const handleSend = async (e: React.FormEvent) => {
@@ -319,6 +324,24 @@ export default function ChatCenter() {
       toast({ title: `Transferido para ${targetSector?.name ?? "setor"}` });
     } catch { toast({ title: "Erro ao transferir", variant: "destructive" }); }
     setShowTransferPicker(false);
+  };
+
+  // ── Add/remove participant ──
+  const handleAddParticipant = async (userId: number) => {
+    if (!activeConv) return;
+    try {
+      await api.chat.participants.add(activeConv.id, userId);
+      const u = chatUsers.find((x) => x.id === userId);
+      if (u) setConvs((prev) => prev.map((c) => c.id === activeConv.id ? { ...c, participants: [...(c.participants ?? []), { id: u.id, name: u.name }] } : c));
+    } catch { toast({ title: "Erro ao adicionar vendedor", variant: "destructive" }); }
+  };
+
+  const handleRemoveParticipant = async (userId: number) => {
+    if (!activeConv) return;
+    try {
+      await api.chat.participants.remove(activeConv.id, userId);
+      setConvs((prev) => prev.map((c) => c.id === activeConv.id ? { ...c, participants: (c.participants ?? []).filter((p) => p.id !== userId) } : c));
+    } catch { toast({ title: "Erro ao remover vendedor", variant: "destructive" }); }
   };
 
   // ── Toggle label ──
@@ -509,7 +532,7 @@ export default function ChatCenter() {
               {/* Transfer to sector */}
               <div className="relative">
                 <button
-                  onClick={() => { setShowTransferPicker((v) => !v); setShowLabelPicker(false); }}
+                  onClick={() => { setShowTransferPicker((v) => !v); setShowLabelPicker(false); setShowParticipantPicker(false); }}
                   className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-white border border-border hover:bg-secondary transition font-medium"
                   title="Transferir para outro setor"
                 >
@@ -529,6 +552,58 @@ export default function ChatCenter() {
                           {s.name}
                         </button>
                       ))}
+                  </div>
+                )}
+              </div>
+              {/* Participants / Vendedores */}
+              <div className="relative">
+                <button
+                  onClick={() => { setShowParticipantPicker((v) => !v); setShowLabelPicker(false); setShowTransferPicker(false); }}
+                  className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-white border border-border hover:bg-secondary transition font-medium"
+                  title="Vendedores nesta conversa"
+                >
+                  <Users className="w-3 h-3" /> Vendedores
+                  {(activeConv.participants?.length ?? 0) > 0 && (
+                    <span className="ml-0.5 bg-primary text-white rounded-full w-4 h-4 flex items-center justify-center text-[10px] font-bold">
+                      {activeConv.participants!.length}
+                    </span>
+                  )}
+                </button>
+                {showParticipantPicker && (
+                  <div className="absolute right-0 top-9 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden min-w-[220px]">
+                    <div className="px-3 py-2 border-b border-border text-xs font-semibold text-muted-foreground">
+                      Nesta conversa
+                    </div>
+                    {(activeConv.participants ?? []).length === 0 ? (
+                      <p className="px-3 py-2 text-xs text-muted-foreground">Nenhum vendedor atribuído</p>
+                    ) : (
+                      (activeConv.participants ?? []).map((p) => (
+                        <div key={p.id} className="flex items-center gap-2 px-3 py-2 text-xs hover:bg-secondary/50">
+                          <UserCircle2 className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                          <span className="flex-1 font-medium">{p.name}</span>
+                          <button onClick={() => handleRemoveParticipant(p.id)} className="opacity-40 hover:opacity-100 transition">
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ))
+                    )}
+                    {chatUsers.filter((u) => !(activeConv.participants ?? []).some((p) => p.id === u.id)).length > 0 && (
+                      <>
+                        <div className="px-3 py-2 border-t border-border text-xs font-semibold text-muted-foreground">
+                          Adicionar vendedor
+                        </div>
+                        {chatUsers
+                          .filter((u) => !(activeConv.participants ?? []).some((p) => p.id === u.id))
+                          .map((u) => (
+                            <button key={u.id} onClick={() => handleAddParticipant(u.id)}
+                              className="w-full flex items-center gap-2 text-xs px-3 py-2 hover:bg-secondary transition">
+                              <UserCircle2 className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                              <span className="flex-1 text-left">{u.name}</span>
+                              <Plus className="w-3 h-3 text-primary" />
+                            </button>
+                          ))}
+                      </>
+                    )}
                   </div>
                 )}
               </div>
