@@ -33,7 +33,15 @@ app.use(cors({
   origin: true,
   credentials: true,
 }));
-app.use(express.json({ limit: "25mb" }));
+
+app.use(
+  express.json({
+    limit: "25mb",
+    verify: (req, _res, buf) => {
+      (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
+    },
+  }),
+);
 app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 
 const PgSession = connectPgSimple(session);
@@ -56,7 +64,7 @@ app.use(
     cookie: {
       secure: process.env["NODE_ENV"] === "production",
       httpOnly: true,
-      maxAge: 24 * 60 * 60 * 1000, // 24h
+      maxAge: 24 * 60 * 60 * 1000,
       sameSite: "lax",
     },
   })

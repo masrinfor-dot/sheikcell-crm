@@ -1,4 +1,5 @@
 import "express-session";
+import "express";
 
 declare module "express-session" {
   interface SessionData {
@@ -6,5 +7,11 @@ declare module "express-session" {
     userRole: string;
     userSectorId: number | undefined;
     userName: string | undefined;
+  }
+}
+
+declare module "express" {
+  interface Request {
+    rawBody?: Buffer;
   }
 }

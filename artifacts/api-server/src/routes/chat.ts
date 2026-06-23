@@ -6,7 +6,13 @@ import { db, conversationsTable, messagesTable, sectorsTable, usersTable } from 
 import { eq, desc, and, or, ilike, sql } from "drizzle-orm";
 import { requireAuth } from "../middlewares/auth";
 import { broadcast, sseEmitter } from "../lib/sseEmitter";
-import { processInboundWA, type InboundWAPayload, MEDIA_DIR } from "../lib/whatsappInbound";
+import {
+  processInboundWA,
+  processMetaInboundWA,
+  type InboundWAPayload,
+  type MetaInboundWAPayload,
+  MEDIA_DIR,
+} from "../lib/whatsappInbound";
 
 const router: IRouter = Router();
 
@@ -44,13 +50,6 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
 
   const userRole = req.session.userRole!;
   const userSectorId = req.session.userSectorId;
-
-  let query = db
-    .select()
-    .from(conversationsTable)
-    .where(eq(conversationsTable.isArchived, false))
-    .orderBy(desc(conversationsTable.lastMessageAt))
-    .$dynamic();
 
   const conditions = [eq(conversationsTable.isArchived, false)];
 
@@ -104,7 +103,6 @@ router.get("/chat/conversations/:id", requireAuth, async (req, res): Promise<voi
 router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
 
-  // Mark as read
   await db.update(conversationsTable).set({ unreadCount: 0 }).where(eq(conversationsTable.id, id));
 
   const msgs = await db
@@ -144,7 +142,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
 
   broadcast("message", { conversationId: id, message: msg });
 
-  // Forward to WhatsApp bridge if this is a WhatsApp conversation
+  // Forward to WhatsApp bridge (now uses Meta Cloud API) if this is a WhatsApp conversation
   if (conv?.channel === "whatsapp" && conv.phone) {
     const bridgeUrl = process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
     const bridgeSecret = createHmac(
@@ -240,18 +238,45 @@ router.get("/chat/media/:filename", requireAuth, (req: Request, res: Response): 
   createReadStream(filepath).pipe(res);
 });
 
-// ─── WhatsApp webhook (Evolution API / Z-API / Baileys compatible) ────────
-function expectedBridgeSecret(): string {
-  return createHmac(
+// ─── WhatsApp Webhook — Meta Cloud API ────────────────────────────────────
+
+// GET — Meta hub challenge verification
+router.get("/chat/webhook/whatsapp", (req: Request, res: Response): void => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  const verifyToken =
+    process.env["META_WHATSAPP_WEBHOOK_VERIFY_TOKEN"] ?? "sheikcell-verify";
+
+  if (mode === "subscribe" && token === verifyToken) {
+    req.log.info("Meta webhook verification challenge accepted");
+    res.status(200).send(challenge);
+    return;
+  }
+
+  req.log.warn({ mode, token }, "Meta webhook verification failed");
+  res.status(403).json({ error: "Forbidden" });
+});
+
+function verifyMetaSignature(rawBody: Buffer | undefined, sigHeader: string | undefined, secret: string): boolean {
+  if (!rawBody || typeof sigHeader !== "string") return false;
+  if (!sigHeader.startsWith("sha256=")) return false;
+  const expected = "sha256=" + createHmac("sha256", secret).update(rawBody).digest("hex");
+  try {
+    return timingSafeEqual(Buffer.from(sigHeader), Buffer.from(expected));
+  } catch {
+    return false;
+  }
+}
+
+function verifyLegacyBridgeSecret(req: Request): boolean {
+  const provided = req.headers["x-bridge-secret"];
+  if (typeof provided !== "string") return false;
+  const expected = createHmac(
     "sha256",
     process.env["SESSION_SECRET"] ?? "sheikcell-dev-only-secret",
   ).update("whatsapp-bridge-v1").digest("hex");
-}
-
-function verifyBridgeSecret(req: Request): boolean {
-  const provided = req.headers["x-bridge-secret"];
-  if (typeof provided !== "string") return false;
-  const expected = expectedBridgeSecret();
   try {
     return timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
   } catch {
@@ -259,13 +284,37 @@ function verifyBridgeSecret(req: Request): boolean {
   }
 }
 
-router.post("/chat/webhook/whatsapp", async (req, res): Promise<void> => {
-  if (!verifyBridgeSecret(req)) {
-    res.status(401).json({ error: "Unauthorized" });
+// POST — receive inbound messages
+router.post("/chat/webhook/whatsapp", async (req: Request, res: Response): Promise<void> => {
+  const metaSecret = process.env["META_WHATSAPP_WEBHOOK_SECRET"];
+  const isProduction = process.env["NODE_ENV"] === "production";
+
+  if (metaSecret) {
+    // Meta Cloud API: verify X-Hub-Signature-256
+    const sig = req.headers["x-hub-signature-256"] as string | undefined;
+    if (!verifyMetaSignature(req.rawBody, sig, metaSecret)) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+  } else if (isProduction) {
+    // In production, META_WHATSAPP_WEBHOOK_SECRET is mandatory — fail closed
+    req.log.error("META_WHATSAPP_WEBHOOK_SECRET not set in production — rejecting inbound webhook");
+    res.status(503).json({ error: "Webhook not configured" });
     return;
+  } else {
+    // Development only: accept legacy bridge secret (HMAC-verified)
+    if (!verifyLegacyBridgeSecret(req)) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
   }
+
   try {
-    await processInboundWA(req.body as InboundWAPayload);
+    if ((req.body as { object?: string }).object === "whatsapp_business_account") {
+      await processMetaInboundWA(req.body as MetaInboundWAPayload);
+    } else {
+      await processInboundWA(req.body as InboundWAPayload);
+    }
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Erro ao processar mensagem" });

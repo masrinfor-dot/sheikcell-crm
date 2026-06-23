@@ -23,11 +23,9 @@ async function buildAll() {
     logLevel: "info",
     external: [
       "*.node",
-      "@whiskeysockets/baileys",
       "sharp",
       "bufferutil",
       "utf-8-validate",
-      "protobufjs",
       "fsevents",
     ],
     sourcemap: "linked",

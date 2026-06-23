@@ -1,7 +1,7 @@
 /**
  * WhatsApp proxy routes — all management endpoints are admin-only.
  * Requests are forwarded to the whatsapp-bridge internal service at BRIDGE_URL.
- * The bridge handles Baileys session, QR generation, and inbound forwarding.
+ * The bridge uses the Meta Cloud API for sending messages.
  */
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createHmac } from "node:crypto";
@@ -12,7 +12,6 @@ const router: IRouter = Router();
 const BRIDGE_URL =
   process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
 
-// Derive bridge secret — same derivation + same dev fallback as whatsapp-bridge service.
 const _sessionSeed =
   process.env["SESSION_SECRET"] ?? "sheikcell-dev-only-secret";
 const BRIDGE_SECRET = createHmac("sha256", _sessionSeed)
@@ -36,20 +35,9 @@ async function proxyToBridge(
       headers["Content-Type"] = "application/json";
     }
     const upstream = await fetch(url, init);
-    const contentType = upstream.headers.get("content-type") ?? "";
-
     res.status(upstream.status);
-    if (contentType.includes("image/")) {
-      res.setHeader("Content-Type", contentType);
-      res.setHeader("Cache-Control", "no-store");
-      res.send(Buffer.from(await upstream.arrayBuffer()));
-    } else if (contentType.includes("text/html")) {
-      res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.send(await upstream.text());
-    } else {
-      res.setHeader("Content-Type", "application/json");
-      res.send(await upstream.text());
-    }
+    res.setHeader("Content-Type", "application/json");
+    res.send(await upstream.text());
   } catch (err) {
     res.status(503).json({
       error: "WhatsApp Bridge indisponível",
@@ -58,25 +46,12 @@ async function proxyToBridge(
   }
 }
 
-// ─── All endpoints require admin role ─────────────────────────────────────
-router.get("/whatsapp/", requireAdmin, (req, res) =>
-  void proxyToBridge(req, res, "/whatsapp/"),
-);
-
 router.get("/whatsapp/status", requireAdmin, (req, res) =>
   void proxyToBridge(req, res, "/whatsapp/status"),
 );
 
-router.get("/whatsapp/qr", requireAdmin, (req, res) =>
-  void proxyToBridge(req, res, "/whatsapp/qr"),
-);
-
 router.post("/whatsapp/send", requireAdmin, (req, res) =>
   void proxyToBridge(req, res, "/whatsapp/send", "POST"),
-);
-
-router.post("/whatsapp/disconnect", requireAdmin, (req, res) =>
-  void proxyToBridge(req, res, "/whatsapp/disconnect", "POST"),
 );
 
 export default router;

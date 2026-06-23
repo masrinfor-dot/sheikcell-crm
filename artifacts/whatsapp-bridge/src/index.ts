@@ -1,6 +1,5 @@
 import express from "express";
 import { logger } from "./lib/logger";
-import { startSession } from "./lib/whatsapp";
 import bridgeRouter from "./routes/index";
 
 const app = express();
@@ -10,6 +9,5 @@ app.use(express.json({ limit: "1mb" }));
 app.use(bridgeRouter);
 
 app.listen(PORT, () => {
-  logger.info({ port: PORT }, "WhatsApp Bridge listening");
-  void startSession();
+  logger.info({ port: PORT }, "WhatsApp Bridge (Meta Cloud API) listening");
 });
