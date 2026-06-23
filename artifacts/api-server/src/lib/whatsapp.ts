@@ -7,7 +7,6 @@ import makeWASocket, {
 import { Boom } from "@hapi/boom";
 import QRCode from "qrcode";
 import path from "path";
-import { fileURLToPath } from "url";
 import { rm } from "fs/promises";
 import { logger } from "./logger";
 import { processInboundWA } from "./whatsappInbound";
@@ -29,8 +28,12 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let isStarting = false;
 let rawQRString: string | null = null;
 
-const artifactDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const SESSION_DIR = path.resolve(artifactDir, "sessions", "default");
+// Sessions live OUTSIDE dist/ so builds never wipe credentials.
+// process.cwd() is the artifact root (artifacts/api-server) when started from the workflow.
+// Falls back to SESSION_DIR env var for production overrides.
+const SESSION_DIR =
+  process.env["SESSION_DIR"] ??
+  path.resolve(process.cwd(), "sessions", "default");
 
 export async function startSession(): Promise<void> {
   if (isStarting) return;

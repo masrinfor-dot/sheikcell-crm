@@ -5,8 +5,8 @@ import QRCode from "qrcode";
 
 const router: IRouter = Router();
 
-// ─── Simple HTML status page ──────────────────────────────────────────────
-router.get("/whatsapp/", (_req, res): void => {
+// ─── Simple HTML status page (admin-only) ─────────────────────────────────
+router.get("/whatsapp/", requireAuth, (_req, res): void => {
   const st = getWAState();
   const qrImg = st.qr
     ? `<img src="${st.qr}" alt="QR Code" style="width:220px;height:220px;border-radius:12px;border:1px solid #e5e7eb;" />`
