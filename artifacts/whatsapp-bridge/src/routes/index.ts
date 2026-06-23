@@ -5,20 +5,18 @@ import { getWAState, sendWAMessage, disconnectWA, getRawQR } from "../lib/whatsa
 
 const router: IRouter = Router();
 
-// Derive bridge secret from SESSION_SECRET — no extra env var needed.
-// Both api-server and bridge compute the same value at startup.
-function deriveBridgeSecret(): string {
-  const seed = process.env["SESSION_SECRET"];
-  if (!seed) return "";
-  return createHmac("sha256", seed).update("whatsapp-bridge-v1").digest("hex");
-}
-const BRIDGE_SECRET = deriveBridgeSecret();
+// Derive bridge secret from SESSION_SECRET — same derivation as api-server/whatsapp.ts.
+// Falls back to the same dev-only constant used by api-server in development.
+const SESSION_SECRET_SEED =
+  process.env["SESSION_SECRET"] ??
+  (process.env["NODE_ENV"] === "production"
+    ? (() => { throw new Error("SESSION_SECRET env var is required in production"); })()
+    : "sheikcell-dev-only-secret");
+const BRIDGE_SECRET = createHmac("sha256", SESSION_SECRET_SEED)
+  .update("whatsapp-bridge-v1")
+  .digest("hex");
 
 function requireBridgeSecret(req: Request, res: Response, next: NextFunction): void {
-  if (!BRIDGE_SECRET) {
-    res.status(503).json({ error: "SESSION_SECRET not configured" });
-    return;
-  }
   const provided = req.headers["x-bridge-secret"];
   if (!provided || provided !== BRIDGE_SECRET) {
     res.status(401).json({ error: "Unauthorized" });

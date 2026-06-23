@@ -145,8 +145,10 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
   // Forward to WhatsApp bridge if this is a WhatsApp conversation
   if (conv?.channel === "whatsapp" && conv.phone) {
     const bridgeUrl = process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
-    const bridgeSecret = createHmac("sha256", process.env["SESSION_SECRET"] ?? "")
-      .update("whatsapp-bridge-v1").digest("hex");
+    const bridgeSecret = createHmac(
+      "sha256",
+      process.env["SESSION_SECRET"] ?? "sheikcell-dev-only-secret",
+    ).update("whatsapp-bridge-v1").digest("hex");
     try {
       const r = await fetch(`${bridgeUrl}/whatsapp/send`, {
         method: "POST",
@@ -156,8 +158,16 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
         },
         body: JSON.stringify({ to: conv.phone, text: content.trim() }),
       });
-      if (!r.ok) req.log.warn({ status: r.status }, "Bridge send failed");
-    } catch { /* bridge not reachable — silently skip */ }
+      if (!r.ok) {
+        const body = await r.text().catch(() => "");
+        req.log.warn(
+          { status: r.status, body },
+          "WhatsApp bridge delivery failed — message saved but not delivered",
+        );
+      }
+    } catch (err) {
+      req.log.warn({ err }, "WhatsApp bridge unreachable — message saved but not delivered");
+    }
   }
 
   res.status(201).json(msg);

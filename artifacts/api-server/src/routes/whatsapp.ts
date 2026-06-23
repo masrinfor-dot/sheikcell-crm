@@ -12,13 +12,12 @@ const router: IRouter = Router();
 const BRIDGE_URL =
   process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
 
-// Derive bridge secret the same way as the bridge service — SESSION_SECRET is the root.
-function deriveBridgeSecret(): string {
-  const seed = process.env["SESSION_SECRET"];
-  if (!seed) return "";
-  return createHmac("sha256", seed).update("whatsapp-bridge-v1").digest("hex");
-}
-const BRIDGE_SECRET = deriveBridgeSecret();
+// Derive bridge secret — same derivation + same dev fallback as whatsapp-bridge service.
+const _sessionSeed =
+  process.env["SESSION_SECRET"] ?? "sheikcell-dev-only-secret";
+const BRIDGE_SECRET = createHmac("sha256", _sessionSeed)
+  .update("whatsapp-bridge-v1")
+  .digest("hex");
 
 async function proxyToBridge(
   req: Request,
