@@ -4,9 +4,9 @@ import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
   Search, Plus, Send, RefreshCw, X, ChevronDown,
-  MessageCircle, Clock, CheckCheck, Tag, Filter,
-  Smartphone, Instagram, UserCircle2, Archive, Circle,
-  Phone, ArrowRightLeft
+  MessageCircle, CheckCheck, Tag, Filter,
+  Smartphone, Instagram, UserCircle2, Circle,
+  ArrowRightLeft, FileText, Volume2, Image
 } from "lucide-react";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -91,16 +91,83 @@ function ConvItem({ conv, active, onClick }: { conv: Conversation; active: boole
   );
 }
 
+// ─── Media content ────────────────────────────────────────────────────────
+function MediaContent({ msg }: { msg: ChatMessage }) {
+  if (!msg.mediaUrl) return null;
+
+  if (msg.type === "image") {
+    return (
+      <a href={msg.mediaUrl} target="_blank" rel="noopener noreferrer" className="block mb-1">
+        <img
+          src={msg.mediaUrl}
+          alt="Foto"
+          className="max-w-full rounded-xl object-cover max-h-64 cursor-pointer hover:opacity-90 transition"
+          onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+        />
+      </a>
+    );
+  }
+
+  if (msg.type === "audio") {
+    return (
+      <div className="flex items-center gap-2 mb-1 bg-black/5 rounded-xl px-3 py-2 min-w-[200px]">
+        <Volume2 className="w-4 h-4 text-primary shrink-0" />
+        <audio controls className="flex-1 h-8 max-w-[200px]" style={{ minWidth: 0 }}>
+          <source src={msg.mediaUrl} />
+        </audio>
+      </div>
+    );
+  }
+
+  if (msg.type === "doc") {
+    const filename = msg.mediaUrl.split("/").pop() ?? "documento";
+    return (
+      <a
+        href={msg.mediaUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        download
+        className="flex items-center gap-2 mb-1 bg-black/5 rounded-xl px-3 py-2 hover:bg-black/10 transition"
+      >
+        <FileText className="w-5 h-5 text-primary shrink-0" />
+        <span className="text-xs text-gray-700 break-all">{filename}</span>
+      </a>
+    );
+  }
+
+  return null;
+}
+
 // ─── Message bubble ─────────────────────────────────────────────────────────
 function MsgBubble({ msg }: { msg: ChatMessage }) {
   const out = msg.direction === "outbound";
+  const isMedia = msg.type === "image" || msg.type === "audio" || msg.type === "doc";
+  const hasTextContent = msg.content && msg.content !== "📷 Foto" && msg.content !== "🎵 Áudio" && !msg.content.startsWith("📄 ");
+  const showCaption = isMedia && msg.mediaUrl && hasTextContent;
+
   return (
     <div className={`flex ${out ? "justify-end" : "justify-start"} mb-1`}>
       <div className={`max-w-[75%] rounded-2xl px-3 py-2 shadow-sm ${out ? "bg-[#dcf8c6] rounded-br-sm" : "bg-white rounded-bl-sm border border-border"}`}>
         {!out && msg.senderName && (
           <p className="text-xs font-semibold text-primary mb-1">{msg.senderName}</p>
         )}
-        <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">{msg.content}</p>
+        {isMedia && msg.mediaUrl ? (
+          <>
+            <MediaContent msg={msg} />
+            {showCaption && (
+              <p className="text-sm text-gray-800 whitespace-pre-wrap break-words mt-1">{msg.content}</p>
+            )}
+          </>
+        ) : isMedia && !msg.mediaUrl ? (
+          <div className="flex items-center gap-2 text-sm text-gray-500 italic">
+            {msg.type === "image" && <Image className="w-4 h-4 shrink-0" />}
+            {msg.type === "audio" && <Volume2 className="w-4 h-4 shrink-0" />}
+            {msg.type === "doc" && <FileText className="w-4 h-4 shrink-0" />}
+            <span>{msg.content}</span>
+          </div>
+        ) : (
+          <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">{msg.content}</p>
+        )}
         <div className={`flex items-center gap-1 mt-1 ${out ? "justify-end" : "justify-start"}`}>
           <span className="text-xs text-gray-500">{msgTime(msg.createdAt)}</span>
           {out && (

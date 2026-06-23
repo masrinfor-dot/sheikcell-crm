@@ -2,13 +2,23 @@ import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
+  downloadMediaMessage,
   type WASocket,
+  type WAMessage,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
+import { createHmac } from "node:crypto";
 import QRCode from "qrcode";
 import path from "path";
 import { rm } from "fs/promises";
 import { logger } from "./logger";
+
+function bridgeSecret(): string {
+  return createHmac(
+    "sha256",
+    process.env["SESSION_SECRET"] ?? "sheikcell-dev-only-secret",
+  ).update("whatsapp-bridge-v1").digest("hex");
+}
 
 export interface WAState {
   status: "disconnected" | "qr" | "connecting" | "connected";
@@ -36,6 +46,45 @@ const SESSION_DIR =
 const INBOUND_WEBHOOK =
   process.env["INBOUND_WEBHOOK_URL"] ??
   "http://localhost:80/api/chat/webhook/whatsapp";
+
+type MediaResult = {
+  mediaBase64: string | null;
+  mediaMimeType: string | null;
+  mediaType: "image" | "audio" | "doc" | null;
+};
+
+async function extractMedia(msg: WAMessage): Promise<MediaResult> {
+  const m = msg.message;
+  if (!m) return { mediaBase64: null, mediaMimeType: null, mediaType: null };
+
+  let mediaType: MediaResult["mediaType"] = null;
+  let mimeFallback = "application/octet-stream";
+
+  if (m.imageMessage) {
+    mediaType = "image";
+    mimeFallback = m.imageMessage.mimetype ?? "image/jpeg";
+  } else if (m.audioMessage) {
+    mediaType = "audio";
+    mimeFallback = m.audioMessage.mimetype ?? "audio/ogg";
+  } else if (m.documentMessage) {
+    mediaType = "doc";
+    mimeFallback = m.documentMessage.mimetype ?? "application/octet-stream";
+  } else {
+    return { mediaBase64: null, mediaMimeType: null, mediaType: null };
+  }
+
+  try {
+    const buffer = await downloadMediaMessage(msg, "buffer", {}) as Buffer;
+    return {
+      mediaBase64: buffer.toString("base64"),
+      mediaMimeType: mimeFallback,
+      mediaType,
+    };
+  } catch (err) {
+    logger.warn({ err }, "Failed to download media — forwarding without attachment");
+    return { mediaBase64: null, mediaMimeType: null, mediaType };
+  }
+}
 
 export async function startSession(): Promise<void> {
   if (isStarting) return;
@@ -112,6 +161,8 @@ export async function startSession(): Promise<void> {
         if (!msg.message) continue;
 
         try {
+          const { mediaBase64, mediaMimeType, mediaType } = await extractMedia(msg);
+
           const payload = {
             event: "messages.upsert",
             data: {
@@ -126,12 +177,18 @@ export async function startSession(): Promise<void> {
                 typeof msg.messageTimestamp === "number"
                   ? msg.messageTimestamp
                   : Number(msg.messageTimestamp ?? 0),
+              mediaBase64: mediaBase64 ?? undefined,
+              mediaMimeType: mediaMimeType ?? undefined,
+              mediaType: mediaType ?? undefined,
             },
           };
 
           const res = await fetch(INBOUND_WEBHOOK, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              "X-Bridge-Secret": bridgeSecret(),
+            },
             body: JSON.stringify(payload),
           });
 

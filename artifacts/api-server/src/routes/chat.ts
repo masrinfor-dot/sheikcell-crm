@@ -1,10 +1,12 @@
-import { createHmac } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
+import { createReadStream, existsSync } from "fs";
+import path from "path";
 import { db, conversationsTable, messagesTable, sectorsTable, usersTable } from "@workspace/db";
 import { eq, desc, and, or, ilike, sql } from "drizzle-orm";
 import { requireAuth } from "../middlewares/auth";
 import { broadcast, sseEmitter } from "../lib/sseEmitter";
-import { processInboundWA, type InboundWAPayload } from "../lib/whatsappInbound";
+import { processInboundWA, type InboundWAPayload, MEDIA_DIR } from "../lib/whatsappInbound";
 
 const router: IRouter = Router();
 
@@ -217,8 +219,51 @@ router.post("/chat/conversations", requireAuth, async (req, res): Promise<void> 
   res.status(201).json(conv);
 });
 
+// ─── Serve saved media files ───────────────────────────────────────────────
+router.get("/chat/media/:filename", requireAuth, (req: Request, res: Response): void => {
+  const filename = path.basename(req.params.filename as string);
+  const filepath = path.join(MEDIA_DIR, filename);
+  if (!existsSync(filepath)) {
+    res.status(404).json({ error: "Mídia não encontrada" });
+    return;
+  }
+  const ext = path.extname(filename).slice(1).toLowerCase();
+  const mimeMap: Record<string, string> = {
+    jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+    gif: "image/gif", webp: "image/webp",
+    ogg: "audio/ogg", mp3: "audio/mpeg", m4a: "audio/mp4", webm: "audio/webm",
+    pdf: "application/pdf",
+  };
+  const contentType = mimeMap[ext] ?? "application/octet-stream";
+  res.setHeader("Content-Type", contentType);
+  res.setHeader("Cache-Control", "private, max-age=86400");
+  createReadStream(filepath).pipe(res);
+});
+
 // ─── WhatsApp webhook (Evolution API / Z-API / Baileys compatible) ────────
+function expectedBridgeSecret(): string {
+  return createHmac(
+    "sha256",
+    process.env["SESSION_SECRET"] ?? "sheikcell-dev-only-secret",
+  ).update("whatsapp-bridge-v1").digest("hex");
+}
+
+function verifyBridgeSecret(req: Request): boolean {
+  const provided = req.headers["x-bridge-secret"];
+  if (typeof provided !== "string") return false;
+  const expected = expectedBridgeSecret();
+  try {
+    return timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+  } catch {
+    return false;
+  }
+}
+
 router.post("/chat/webhook/whatsapp", async (req, res): Promise<void> => {
+  if (!verifyBridgeSecret(req)) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
   try {
     await processInboundWA(req.body as InboundWAPayload);
     res.json({ ok: true });
