@@ -1,17 +1,22 @@
 import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
+import { createHmac } from "node:crypto";
 import QRCode from "qrcode";
 import { getWAState, sendWAMessage, disconnectWA, getRawQR } from "../lib/whatsapp";
 
 const router: IRouter = Router();
 
-// Shared secret between api-server and bridge.
-// Must be the same value in both services (WHATSAPP_BRIDGE_SECRET env var).
-const BRIDGE_SECRET = process.env["WHATSAPP_BRIDGE_SECRET"] ?? "";
+// Derive bridge secret from SESSION_SECRET — no extra env var needed.
+// Both api-server and bridge compute the same value at startup.
+function deriveBridgeSecret(): string {
+  const seed = process.env["SESSION_SECRET"];
+  if (!seed) return "";
+  return createHmac("sha256", seed).update("whatsapp-bridge-v1").digest("hex");
+}
+const BRIDGE_SECRET = deriveBridgeSecret();
 
 function requireBridgeSecret(req: Request, res: Response, next: NextFunction): void {
   if (!BRIDGE_SECRET) {
-    // Secret not configured — reject all requests for safety
-    res.status(503).json({ error: "Bridge secret not configured" });
+    res.status(503).json({ error: "SESSION_SECRET not configured" });
     return;
   }
   const provided = req.headers["x-bridge-secret"];

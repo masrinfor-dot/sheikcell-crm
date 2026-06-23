@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { db, conversationsTable, messagesTable, sectorsTable, usersTable } from "@workspace/db";
 import { eq, desc, and, or, ilike, sql } from "drizzle-orm";
@@ -144,7 +145,8 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
   // Forward to WhatsApp bridge if this is a WhatsApp conversation
   if (conv?.channel === "whatsapp" && conv.phone) {
     const bridgeUrl = process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
-    const bridgeSecret = process.env["WHATSAPP_BRIDGE_SECRET"] ?? "";
+    const bridgeSecret = createHmac("sha256", process.env["SESSION_SECRET"] ?? "")
+      .update("whatsapp-bridge-v1").digest("hex");
     try {
       const r = await fetch(`${bridgeUrl}/whatsapp/send`, {
         method: "POST",

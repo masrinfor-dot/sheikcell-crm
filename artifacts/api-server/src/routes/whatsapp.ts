@@ -4,14 +4,21 @@
  * The bridge handles Baileys session, QR generation, and inbound forwarding.
  */
 import { Router, type IRouter, type Request, type Response } from "express";
+import { createHmac } from "node:crypto";
 import { requireAdmin } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
 const BRIDGE_URL =
   process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
-const BRIDGE_SECRET =
-  process.env["WHATSAPP_BRIDGE_SECRET"] ?? "";
+
+// Derive bridge secret the same way as the bridge service — SESSION_SECRET is the root.
+function deriveBridgeSecret(): string {
+  const seed = process.env["SESSION_SECRET"];
+  if (!seed) return "";
+  return createHmac("sha256", seed).update("whatsapp-bridge-v1").digest("hex");
+}
+const BRIDGE_SECRET = deriveBridgeSecret();
 
 async function proxyToBridge(
   req: Request,
