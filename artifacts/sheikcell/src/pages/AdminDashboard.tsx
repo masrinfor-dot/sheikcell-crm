@@ -16,9 +16,14 @@ import {
 type Tab = "dashboard" | "chat" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp";
 
 type WAStatus = {
-  status: "configured" | "unconfigured";
+  mode: "baileys" | "meta" | null;
+  status: "connected" | "qr" | "connecting" | "reconnecting" | "disconnected" | "unconfigured" | "error" | "unknown";
   phoneNumber: string | null;
   phoneId: string | null;
+  qrDataUrl: string | null;
+  lastHeartbeatAt: string | null;
+  errorMessage: string | null;
+  bridgeAvailable: boolean;
 };
 
 type UserRow = {
@@ -48,7 +53,7 @@ export default function AdminDashboard() {
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [userRows, setUserRows] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [waStatus, setWaStatus] = useState<WAStatus>({ status: "unconfigured", phoneNumber: null, phoneId: null });
+  const [waStatus, setWaStatus] = useState<WAStatus>({ mode: null, status: "unknown", phoneNumber: null, phoneId: null, qrDataUrl: null, lastHeartbeatAt: null, errorMessage: null, bridgeAvailable: false });
   const [waLoading, setWaLoading] = useState(false);
 
   // Modals
@@ -303,82 +308,164 @@ export default function AdminDashboard() {
             {/* Status card */}
             <div className="shk-card p-5">
               <div className="flex items-center justify-between mb-4">
-                <h2 className="font-bold text-foreground">WhatsApp — Meta Cloud API</h2>
+                <h2 className="font-bold text-foreground">WhatsApp</h2>
                 <div className="flex items-center gap-2">
-                  <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${
-                    waStatus.status === "configured"
-                      ? "bg-green-100 text-green-700"
-                      : "bg-gray-100 text-gray-600"
-                  }`}>
-                    <span className={`w-2 h-2 rounded-full ${
-                      waStatus.status === "configured" ? "bg-green-500" : "bg-gray-400"
-                    }`} />
-                    {waStatus.status === "configured" ? "Configurado" : "Não configurado"}
-                  </span>
+                  {waStatus.status === "connected" && (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-700">
+                      <span className="w-2 h-2 rounded-full bg-green-500" />
+                      Conectado
+                    </span>
+                  )}
+                  {waStatus.status === "qr" && (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-700">
+                      <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+                      Aguardando QR
+                    </span>
+                  )}
+                  {(waStatus.status === "connecting" || waStatus.status === "reconnecting") && (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-700">
+                      <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                      {waStatus.status === "reconnecting" ? "Reconectando…" : "Conectando…"}
+                    </span>
+                  )}
+                  {(waStatus.status === "disconnected" || waStatus.status === "error") && (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-700">
+                      <span className="w-2 h-2 rounded-full bg-red-500" />
+                      Desconectado
+                    </span>
+                  )}
+                  {(waStatus.status === "unconfigured" || waStatus.status === "unknown") && (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-gray-100 text-gray-600">
+                      <span className="w-2 h-2 rounded-full bg-gray-400" />
+                      {waStatus.status === "unknown" ? "Verificando…" : "Não configurado"}
+                    </span>
+                  )}
                 </div>
               </div>
 
-              {waStatus.status === "configured" && (
-                <div className="text-sm text-muted-foreground mb-4 space-y-1">
-                  {waStatus.phoneNumber && (
-                    <p>Número: <span className="font-semibold text-foreground">+{waStatus.phoneNumber.replace(/^\+/, "")}</span></p>
-                  )}
-                  {waStatus.phoneId && (
-                    <p className="text-xs">Phone ID: <span className="font-mono text-foreground">{waStatus.phoneId}</span></p>
-                  )}
-                </div>
-              )}
+              <div className="text-sm text-muted-foreground mb-4 space-y-1">
+                {waStatus.phoneNumber && (
+                  <p>Número: <span className="font-semibold text-foreground">+{waStatus.phoneNumber.replace(/^\+/, "")}</span></p>
+                )}
+                {waStatus.mode && (
+                  <p className="text-xs">Modo: <span className="font-mono text-foreground">{waStatus.mode === "baileys" ? "Baileys (WebSocket)" : "Meta Cloud API"}</span></p>
+                )}
+                {waStatus.lastHeartbeatAt && (
+                  <p className="text-xs text-muted-foreground">
+                    Última conexão confirmada:{" "}
+                    <span className="font-medium text-foreground">
+                      {new Date(waStatus.lastHeartbeatAt).toLocaleString("pt-BR", {
+                        day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit"
+                      })}
+                    </span>
+                  </p>
+                )}
+                {waStatus.errorMessage && (
+                  <p className="text-xs text-red-600 mt-1">{waStatus.errorMessage}</p>
+                )}
+              </div>
 
-              <button onClick={handleWARefresh} disabled={waLoading}
-                className="flex items-center gap-2 px-3 py-2 rounded-xl border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition text-sm disabled:opacity-50">
-                <RefreshCw className={`w-4 h-4 ${waLoading ? "animate-spin" : ""}`} />
-                Verificar status
-              </button>
+              <div className="flex items-center gap-2">
+                <button onClick={handleWARefresh} disabled={waLoading}
+                  className="flex items-center gap-2 px-3 py-2 rounded-xl border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition text-sm disabled:opacity-50">
+                  <RefreshCw className={`w-4 h-4 ${waLoading ? "animate-spin" : ""}`} />
+                  Verificar status
+                </button>
+                {(waStatus.status === "disconnected" || waStatus.status === "error") && (
+                  <button
+                    onClick={async () => {
+                      setWaLoading(true);
+                      try {
+                        await fetch("/api/whatsapp/reset", { method: "POST", credentials: "include" });
+                        await fetchWAStatus();
+                      } finally { setWaLoading(false); }
+                    }}
+                    disabled={waLoading}
+                    className="flex items-center gap-2 px-3 py-2 rounded-xl border border-red-200 text-red-600 hover:bg-red-50 transition text-sm disabled:opacity-50">
+                    <RefreshCw className="w-4 h-4" />
+                    Reconectar / Novo QR
+                  </button>
+                )}
+              </div>
             </div>
 
-            {/* Configured */}
-            {waStatus.status === "configured" && (
+            {/* QR code panel */}
+            {waStatus.status === "qr" && waStatus.qrDataUrl && (
               <div className="shk-card p-6 text-center">
-                <CheckCircle className="w-10 h-10 mx-auto text-green-500 mb-3" />
-                <p className="text-sm font-semibold text-foreground mb-1">Meta Cloud API configurada!</p>
-                <p className="text-xs text-muted-foreground">
-                  Mensagens recebidas aparecem automaticamente no <strong>Atendimento</strong>.<br />
-                  Respostas enviadas pelo sistema são entregues via Meta Cloud API.
+                <p className="text-sm font-semibold text-foreground mb-4">
+                  Escaneie o QR code com o WhatsApp
+                </p>
+                <img src={waStatus.qrDataUrl} alt="QR WhatsApp" className="mx-auto w-56 h-56 rounded-xl border border-border" />
+                <p className="text-xs text-muted-foreground mt-3">
+                  Abra o WhatsApp → Menu → <strong>Aparelhos conectados</strong> → <strong>Conectar um aparelho</strong>
                 </p>
               </div>
             )}
 
-            {/* Not configured */}
-            {waStatus.status === "unconfigured" && (
-              <div className="shk-card p-6">
-                <Smartphone className="w-10 h-10 mx-auto text-muted-foreground mb-3" />
-                <p className="text-sm font-semibold text-foreground text-center mb-4">
-                  Credenciais não configuradas
+            {/* QR waiting (no QR yet) */}
+            {waStatus.status === "qr" && !waStatus.qrDataUrl && (
+              <div className="shk-card p-6 text-center">
+                <RefreshCw className="w-10 h-10 mx-auto text-blue-500 mb-3 animate-spin" />
+                <p className="text-sm font-semibold text-foreground mb-1">Gerando QR code…</p>
+                <p className="text-xs text-muted-foreground">Aguarde alguns segundos</p>
+              </div>
+            )}
+
+            {/* Connected */}
+            {waStatus.status === "connected" && (
+              <div className="shk-card p-6 text-center">
+                <CheckCircle className="w-10 h-10 mx-auto text-green-500 mb-3" />
+                <p className="text-sm font-semibold text-foreground mb-1">WhatsApp conectado!</p>
+                <p className="text-xs text-muted-foreground">
+                  Sessão salva no banco de dados — reconexão automática após restart.<br />
+                  Mensagens recebidas aparecem automaticamente no <strong>Atendimento</strong>.
                 </p>
-                <div className="space-y-2 text-xs text-muted-foreground">
-                  <p className="font-semibold text-foreground">Como configurar:</p>
-                  <ol className="list-decimal list-inside space-y-1.5">
-                    <li>Acesse <strong>developers.facebook.com</strong> e crie um App do tipo <em>Business</em></li>
-                    <li>Adicione o produto <strong>WhatsApp</strong> ao app</li>
-                    <li>Em <em>WhatsApp → Configuração</em>, copie o <strong>Phone Number ID</strong></li>
-                    <li>Gere um <strong>token de acesso permanente</strong> (System User com função admin)</li>
-                    <li>Registre a URL de webhook: <code className="bg-secondary px-1 rounded">https://seu-dominio/api/chat/webhook/whatsapp</code></li>
-                    <li>Configure as variáveis de ambiente no servidor:<br />
-                      <code className="bg-secondary px-1 rounded">META_WHATSAPP_PHONE_ID</code>,{" "}
-                      <code className="bg-secondary px-1 rounded">META_WHATSAPP_ACCESS_TOKEN</code>,{" "}
-                      <code className="bg-secondary px-1 rounded">META_WHATSAPP_WEBHOOK_SECRET</code>,{" "}
-                      <code className="bg-secondary px-1 rounded">META_WHATSAPP_WEBHOOK_VERIFY_TOKEN</code>
-                    </li>
-                  </ol>
-                </div>
+              </div>
+            )}
+
+            {/* Reconnecting / Connecting */}
+            {(waStatus.status === "connecting" || waStatus.status === "reconnecting") && (
+              <div className="shk-card p-6 text-center border-amber-200 bg-amber-50">
+                <RefreshCw className="w-10 h-10 mx-auto text-amber-500 mb-3 animate-spin" />
+                <p className="text-sm font-semibold text-foreground mb-1">
+                  {waStatus.status === "reconnecting" ? "Reconectando…" : "Conectando ao WhatsApp…"}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {waStatus.phoneNumber
+                    ? <>Último número: <strong>+{waStatus.phoneNumber.replace(/^\+/, "")}</strong><br /></>
+                    : null}
+                  A reconexão é automática — aguarde ou clique em "Verificar status".
+                </p>
+              </div>
+            )}
+
+            {/* Disconnected / Error */}
+            {(waStatus.status === "disconnected" || waStatus.status === "error") && (
+              <div className="shk-card p-6 text-center border-red-200 bg-red-50">
+                <PhoneCall className="w-10 h-10 mx-auto text-red-400 mb-3" />
+                <p className="text-sm font-semibold text-foreground mb-1">Sessão encerrada</p>
+                <p className="text-xs text-muted-foreground mb-3">
+                  {waStatus.errorMessage ?? "A sessão foi encerrada ou expirou."}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Clique em <strong>Reconectar / Novo QR</strong> para escanear o QR code novamente.
+                </p>
+              </div>
+            )}
+
+            {/* Not yet known */}
+            {waStatus.status === "unknown" && (
+              <div className="shk-card p-6 text-center">
+                <RefreshCw className="w-10 h-10 mx-auto text-muted-foreground mb-3 animate-spin" />
+                <p className="text-sm text-muted-foreground">Verificando status da conexão…</p>
               </div>
             )}
 
             {/* Info */}
             <div className="rounded-xl bg-blue-50 border border-blue-200 p-4 text-xs text-blue-800">
-              <strong>Meta Cloud API oficial</strong> — gratuita até 1.000 conversas/mês. Requer conta no
-              Meta for Developers e número registrado como WhatsApp Business. Sem risco de bloqueio por
-              termos de uso.
+              <strong>Sessão persistida no banco de dados</strong> — após escanear o QR uma vez, a sessão
+              é salva automaticamente e o servidor reconecta sozinho após reinicializações. Nenhuma
+              credencial de terceiros necessária.
             </div>
           </div>
         )}

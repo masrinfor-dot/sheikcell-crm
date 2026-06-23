@@ -2,3 +2,4 @@
 - [AttendantDashboard Fragment quirk](attendant-fragment.md) — queue tab uses `<>...</>` Fragment wrapper; inserting new tabs before "queue" is safe, but the Fragment must stay intact
 - [Routing keyword matching gotcha](routing-keywords.md) — autoRouter uses substring match + accent normalization; "nao liga" ≠ "nao esta ligando"; use "ligando" not "nao liga" for that pattern
 - [Three-role system](roles.md) — admin/supervisor/vendedor; legacy "attendant" migrated to vendedor; supervisor is scope-global but no user/sector/WhatsApp management
+- [Baileys DB auth state](baileys-db-auth.md) — whatsapp-bridge uses Baileys with PostgreSQL-backed auth state; auth keys in whatsapp_auth_state table; session status cached in whatsapp_sessions

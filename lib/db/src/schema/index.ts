@@ -6,3 +6,5 @@ export * from "./sessions";
 export * from "./crm_contacts";
 export * from "./conversations";
 export * from "./routing_rules";
+export * from "./whatsapp_sessions";
+export * from "./whatsapp_auth_state";

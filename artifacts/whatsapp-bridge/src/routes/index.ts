@@ -1,6 +1,7 @@
 import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
 import { createHmac } from "node:crypto";
 import { getWAState, sendWAMessage } from "../lib/whatsapp";
+import { disconnectAndReset } from "../lib/waConnection";
 
 const router: IRouter = Router();
 
@@ -28,6 +29,11 @@ router.get("/whatsapp/healthz", (_req, res): void => {
 
 router.get("/whatsapp/status", requireBridgeSecret, async (_req, res): Promise<void> => {
   res.json(await getWAState());
+});
+
+router.post("/whatsapp/reset", requireBridgeSecret, async (_req, res): Promise<void> => {
+  await disconnectAndReset();
+  res.json({ ok: true, message: "Sessão reiniciada — aguarde o QR code" });
 });
 
 router.post("/whatsapp/send", requireBridgeSecret, async (req, res): Promise<void> => {
