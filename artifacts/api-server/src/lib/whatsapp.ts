@@ -10,6 +10,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { rm } from "fs/promises";
 import { logger } from "./logger";
+import { processInboundWA } from "./whatsappInbound";
 
 export interface WAState {
   status: "disconnected" | "qr" | "connecting" | "connected";
@@ -26,11 +27,10 @@ const state: WAState = {
 let sock: WASocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let isStarting = false;
+let rawQRString: string | null = null;
 
 const artifactDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const SESSION_DIR = path.resolve(artifactDir, "sessions", "default");
-
-const WEBHOOK_URL = "http://localhost:80/api/chat/webhook/whatsapp";
 
 export async function startSession(): Promise<void> {
   if (isStarting) return;
@@ -59,6 +59,7 @@ export async function startSession(): Promise<void> {
 
       if (qr) {
         try {
+          rawQRString = qr;
           state.qr = await QRCode.toDataURL(qr);
           state.status = "qr";
           logger.info("WhatsApp QR code generated");
@@ -73,6 +74,7 @@ export async function startSession(): Promise<void> {
         state.status = "disconnected";
         state.qr = null;
         state.phoneNumber = null;
+        rawQRString = null;
         logger.info({ errorCode, shouldReconnect }, "WhatsApp connection closed");
 
         if (shouldReconnect) {
@@ -104,21 +106,27 @@ export async function startSession(): Promise<void> {
         if (!msg.message) continue;
 
         try {
-          await fetch(WEBHOOK_URL, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              event: "messages.upsert",
-              data: {
-                key: msg.key,
-                message: msg.message,
-                pushName: msg.pushName ?? "",
-                messageTimestamp: msg.messageTimestamp,
+          await processInboundWA({
+            event: "messages.upsert",
+            data: {
+              key: {
+                remoteJid: msg.key.remoteJid ?? undefined,
+                fromMe: msg.key.fromMe ?? undefined,
+                id: msg.key.id ?? undefined,
               },
-            }),
+              message: msg.message as {
+                conversation?: string;
+                extendedTextMessage?: { text?: string };
+                imageMessage?: { caption?: string };
+              },
+              pushName: msg.pushName ?? "",
+              messageTimestamp: typeof msg.messageTimestamp === "number"
+                ? msg.messageTimestamp
+                : Number(msg.messageTimestamp ?? 0),
+            },
           });
         } catch (err) {
-          logger.error({ err }, "Failed to forward WhatsApp message to webhook");
+          logger.error({ err }, "Failed to process inbound WhatsApp message");
         }
       }
     });
@@ -132,6 +140,10 @@ export function getWAState(): WAState {
   return { ...state };
 }
 
+export function getRawQR(): string | null {
+  return rawQRString;
+}
+
 export async function sendWAMessage(to: string, text: string): Promise<void> {
   if (!sock || state.status !== "connected") {
     throw new Error("WhatsApp não conectado");
@@ -140,7 +152,7 @@ export async function sendWAMessage(to: string, text: string): Promise<void> {
   await sock.sendMessage(jid, { text });
 }
 
-export async function disconnectWA(): Promise<void> {
+export async function disconnectWA(andRestart = false): Promise<void> {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -149,7 +161,7 @@ export async function disconnectWA(): Promise<void> {
     try {
       await sock.logout();
     } catch {
-      sock.end(undefined);
+      try { sock.end(undefined); } catch { /* ignore */ }
     }
     sock = null;
   }
@@ -163,4 +175,8 @@ export async function disconnectWA(): Promise<void> {
   } catch { /* ignore */ }
 
   logger.info("WhatsApp disconnected and session cleared");
+
+  if (andRestart) {
+    setTimeout(() => void startSession(), 500);
+  }
 }

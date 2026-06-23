@@ -102,18 +102,7 @@ export default function AdminDashboard() {
     setWaLoading(true);
     try {
       await fetch("/api/whatsapp/disconnect", { method: "POST", credentials: "include" });
-      toast({ title: "WhatsApp desconectado" });
-      await fetchWAStatus();
-    } catch {
-      toast({ title: "Erro", variant: "destructive" });
-    } finally { setWaLoading(false); }
-  };
-
-  const handleWAReconnect = async () => {
-    setWaLoading(true);
-    try {
-      await fetch("/api/whatsapp/reconnect", { method: "POST", credentials: "include" });
-      toast({ title: "Reconectando..." });
+      toast({ title: "Sessão encerrada — novo QR em instantes..." });
       await fetchWAStatus();
     } catch {
       toast({ title: "Erro", variant: "destructive" });
@@ -338,17 +327,17 @@ export default function AdminDashboard() {
               )}
 
               <div className="flex gap-2">
-                {waStatus.status === "connected" ? (
-                  <button onClick={handleWADisconnect} disabled={waLoading}
-                    className="flex-1 py-2.5 rounded-xl bg-red-50 text-red-600 border border-red-200 text-sm font-semibold hover:bg-red-100 transition disabled:opacity-50">
-                    {waLoading ? "Aguarde..." : "Desconectar / Trocar Número"}
-                  </button>
-                ) : (
-                  <button onClick={handleWAReconnect} disabled={waLoading || waStatus.status === "connecting"}
-                    className="flex-1 py-2.5 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition disabled:opacity-50">
-                    {waLoading ? "Aguarde..." : waStatus.status === "connecting" ? "Conectando..." : "Reconectar"}
-                  </button>
-                )}
+                <button onClick={handleWADisconnect} disabled={waLoading || waStatus.status === "connecting"}
+                  className={`flex-1 py-2.5 rounded-xl text-sm font-semibold transition disabled:opacity-50 ${
+                    waStatus.status === "connected"
+                      ? "bg-red-50 text-red-600 border border-red-200 hover:bg-red-100"
+                      : "bg-primary text-white hover:bg-primary/90"
+                  }`}>
+                  {waLoading ? "Aguarde..." :
+                   waStatus.status === "connecting" ? "Conectando..." :
+                   waStatus.status === "connected" ? "Desconectar / Trocar Número" :
+                   "Reiniciar Conexão"}
+                </button>
                 <button onClick={fetchWAStatus} disabled={waLoading}
                   className="px-3 py-2.5 rounded-xl border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition">
                   <RefreshCw className="w-4 h-4" />

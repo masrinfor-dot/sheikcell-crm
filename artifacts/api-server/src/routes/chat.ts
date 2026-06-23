@@ -3,7 +3,7 @@ import { db, conversationsTable, messagesTable, sectorsTable, usersTable } from 
 import { eq, desc, and, or, ilike, sql } from "drizzle-orm";
 import { requireAuth } from "../middlewares/auth";
 import { broadcast, sseEmitter } from "../lib/sseEmitter";
-import { classifyText } from "../lib/autoRouter";
+import { processInboundWA, type InboundWAPayload } from "../lib/whatsappInbound";
 
 const router: IRouter = Router();
 
@@ -198,78 +198,14 @@ router.post("/chat/conversations", requireAuth, async (req, res): Promise<void> 
   res.status(201).json(conv);
 });
 
-// ─── WhatsApp webhook (Evolution API / Z-API compatible) ──────────────────
+// ─── WhatsApp webhook (Evolution API / Z-API / Baileys compatible) ────────
 router.post("/chat/webhook/whatsapp", async (req, res): Promise<void> => {
-  const body = req.body as {
-    event?: string;
-    data?: {
-      key?: { remoteJid?: string; fromMe?: boolean; id?: string };
-      message?: { conversation?: string; extendedTextMessage?: { text?: string }; imageMessage?: { caption?: string } };
-      pushName?: string;
-      messageTimestamp?: number;
-    };
-    // Z-API format
-    phone?: string; text?: { message?: string }; senderName?: string; messageId?: string;
-    isGroupMsg?: boolean; fromMe?: boolean;
-  };
-
-  // Skip outbound and group
-  const fromMe = body.data?.key?.fromMe ?? body.fromMe ?? false;
-  const isGroup = body.isGroupMsg ?? (body.data?.key?.remoteJid?.includes("@g.us") ?? false);
-  if (fromMe || isGroup) { res.json({ ok: true }); return; }
-
-  // Extract content (Evolution API)
-  const remoteJid = body.data?.key?.remoteJid ?? (body.phone ? `${body.phone}@s.whatsapp.net` : null);
-  const phone = remoteJid?.replace("@s.whatsapp.net", "").replace("@c.us", "") ?? "unknown";
-  const pushName = body.data?.pushName ?? body.senderName ?? phone;
-  const text =
-    body.data?.message?.conversation ??
-    body.data?.message?.extendedTextMessage?.text ??
-    body.data?.message?.imageMessage?.caption ??
-    body.text?.message ??
-    "";
-  const externalId = body.data?.key?.id ?? body.messageId ?? null;
-
-  // Find or create conversation
-  let [conv] = await db.select().from(conversationsTable)
-    .where(and(eq(conversationsTable.phone, phone), eq(conversationsTable.isArchived, false)))
-    .orderBy(desc(conversationsTable.lastMessageAt))
-    .limit(1);
-
-  if (!conv) {
-    const classified = text ? await classifyText(text) : null;
-    const [first] = await db.select().from(sectorsTable).where(eq(sectorsTable.isActive, true)).limit(1);
-    const targetSectorId = classified?.sectorId ?? first?.id ?? 1;
-    [conv] = await db.insert(conversationsTable).values({
-      phone, name: pushName, channel: "whatsapp",
-      sectorId: targetSectorId,
-      status: "open",
-      lastMessage: text,
-      lastMessageAt: new Date(),
-      unreadCount: 1,
-    }).returning();
-    broadcast("conversation_new", conv);
-  } else {
-    await db.update(conversationsTable).set({
-      lastMessage: text,
-      lastMessageAt: new Date(),
-      unreadCount: sql`${conversationsTable.unreadCount} + 1`,
-      updatedAt: new Date(),
-    }).where(eq(conversationsTable.id, conv.id));
+  try {
+    await processInboundWA(req.body as InboundWAPayload);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Erro ao processar mensagem" });
   }
-
-  const [msg] = await db.insert(messagesTable).values({
-    conversationId: conv.id,
-    content: text || "(mídia)",
-    direction: "inbound",
-    type: "text",
-    status: "delivered",
-    senderName: pushName,
-    externalId,
-  }).returning();
-
-  broadcast("message", { conversationId: conv.id, message: msg });
-  res.json({ ok: true });
 });
 
 export default router;
