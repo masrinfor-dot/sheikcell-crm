@@ -2,12 +2,12 @@ import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
 import { db, usersTable, queueEntriesTable, sectorsTable, attendanceLogsTable } from "@workspace/db";
 import { eq, sql, desc, and, gte } from "drizzle-orm";
-import { requireAdmin, requireAuth } from "../middlewares/auth";
+import { requireAdmin, requireAdminOrSupervisor } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
 // Dashboard summary
-router.get("/admin/summary", requireAdmin, async (_req, res): Promise<void> => {
+router.get("/admin/summary", requireAdminOrSupervisor, async (_req, res): Promise<void> => {
   const sectors = await db.select().from(sectorsTable).where(eq(sectorsTable.isActive, true));
 
   const startOfDay = new Date();
@@ -57,7 +57,7 @@ router.get("/admin/summary", requireAdmin, async (_req, res): Promise<void> => {
 });
 
 // Recent attendance logs
-router.get("/admin/logs", requireAdmin, async (req, res): Promise<void> => {
+router.get("/admin/logs", requireAdminOrSupervisor, async (req, res): Promise<void> => {
   const limit = parseInt(String(req.query.limit ?? "50"), 10);
   const sectorId = req.query.sectorId ? parseInt(String(req.query.sectorId), 10) : null;
 
@@ -122,7 +122,7 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
 
   const [user] = await db
     .insert(usersTable)
-    .values({ name, email: email.toLowerCase(), passwordHash, role: role ?? "attendant", sectorId: sectorId ?? 0 })
+    .values({ name, email: email.toLowerCase(), passwordHash, role: role ?? "vendedor", sectorId: sectorId ?? 0 })
     .returning();
 
   const { passwordHash: _ph, ...safeUser } = user;

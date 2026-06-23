@@ -5,9 +5,9 @@ import { requireAuth } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
-/** Returns true if the user is admin OR the entry belongs to their sector */
+/** Returns true if the user has global role (admin/supervisor) OR the entry belongs to their sector */
 function canActOnEntry(userRole: string, userSectorId: number | null, entrySectorId: number): boolean {
-  if (userRole === "admin") return true;
+  if (userRole === "admin" || userRole === "supervisor") return true;
   return userSectorId === entrySectorId;
 }
 

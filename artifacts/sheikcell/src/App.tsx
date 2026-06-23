@@ -32,7 +32,7 @@ function AppRoutes() {
       <Route path="/admin/{*rest}">
         {!user ? (
           <Redirect to="/login" />
-        ) : user.role === "admin" ? (
+        ) : (user.role === "admin" || user.role === "supervisor") ? (
           <AdminDashboard />
         ) : (
           <Redirect to="/" />
@@ -41,14 +41,14 @@ function AppRoutes() {
       <Route path="/admin">
         {!user ? (
           <Redirect to="/login" />
-        ) : user.role === "admin" ? (
+        ) : (user.role === "admin" || user.role === "supervisor") ? (
           <AdminDashboard />
         ) : (
           <Redirect to="/" />
         )}
       </Route>
       <Route path="/">
-        {!user ? <Redirect to="/login" /> : user.role === "admin" ? <AdminDashboard /> : <AttendantDashboard />}
+        {!user ? <Redirect to="/login" /> : (user.role === "admin" || user.role === "supervisor") ? <AdminDashboard /> : <AttendantDashboard />}
       </Route>
       <Route component={NotFound} />
     </Switch>

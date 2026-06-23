@@ -58,7 +58,7 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
 
   const conditions = [eq(conversationsTable.isArchived, false)];
 
-  if (userRole !== "admin" && userSectorId) {
+  if (userRole !== "admin" && userRole !== "supervisor" && userSectorId) {
     conditions.push(eq(conversationsTable.sectorId, userSectorId));
   } else if (sectorId) {
     conditions.push(eq(conversationsTable.sectorId, Number(sectorId)));

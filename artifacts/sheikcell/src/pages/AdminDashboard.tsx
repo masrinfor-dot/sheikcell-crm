@@ -57,7 +57,7 @@ export default function AdminDashboard() {
   const [showAddSector, setShowAddSector] = useState(false);
   const [editSector, setEditSector] = useState<Sector | null>(null);
 
-  const [userForm, setUserForm] = useState({ name: "", email: "", password: "", role: "attendant", sectorId: 1 });
+  const [userForm, setUserForm] = useState({ name: "", email: "", password: "", role: "vendedor", sectorId: 1 });
   const [sectorForm, setSectorForm] = useState({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true });
 
   const fetchAll = useCallback(async () => {
@@ -85,11 +85,11 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     fetchAll();
-    fetchUsersAndSectors();
+    if (user?.role === "admin") fetchUsersAndSectors();
     fetchWAStatus();
     const iv = setInterval(fetchAll, 8000);
     return () => clearInterval(iv);
-  }, [fetchAll, fetchUsersAndSectors, fetchWAStatus]);
+  }, [fetchAll, fetchUsersAndSectors, fetchWAStatus, user?.role]);
 
   useEffect(() => {
     if (tab !== "whatsapp") return;
@@ -115,7 +115,7 @@ export default function AdminDashboard() {
   // ---- User handlers ----
   const openAddUser = () => {
     setEditUser(null);
-    setUserForm({ name: "", email: "", password: "", role: "attendant", sectorId: sectors[0]?.id ?? 1 });
+    setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorId: sectors[0]?.id ?? 1 });
     setShowAddUser(true);
   };
   const openEditUser = (u: UserRow) => {
@@ -172,16 +172,20 @@ export default function AdminDashboard() {
     }
   };
 
-  const tabs = [
-    { id: "dashboard" as Tab, label: "Visão Geral", icon: LayoutDashboard },
-    { id: "chat" as Tab, label: "Atendimento", icon: MessageCircle },
-    { id: "distribuicao" as Tab, label: "Distribuição", icon: GitFork },
-    { id: "crm" as Tab, label: "CRM", icon: Kanban },
-    { id: "history" as Tab, label: "Histórico", icon: ClipboardList },
-    { id: "users" as Tab, label: "Atendentes", icon: Users },
-    { id: "sectors" as Tab, label: "Setores", icon: Settings },
-    { id: "whatsapp" as Tab, label: "WhatsApp", icon: PhoneCall },
+  const isAdmin = user?.role === "admin";
+  const isSupervisor = user?.role === "supervisor";
+
+  const allTabs = [
+    { id: "dashboard" as Tab, label: "Visão Geral", icon: LayoutDashboard, adminOnly: false },
+    { id: "chat" as Tab, label: "Atendimento", icon: MessageCircle, adminOnly: false },
+    { id: "distribuicao" as Tab, label: "Distribuição", icon: GitFork, adminOnly: false },
+    { id: "crm" as Tab, label: "CRM", icon: Kanban, adminOnly: false },
+    { id: "history" as Tab, label: "Histórico", icon: ClipboardList, adminOnly: false },
+    { id: "users" as Tab, label: "Usuários", icon: Users, adminOnly: true },
+    { id: "sectors" as Tab, label: "Setores", icon: Settings, adminOnly: true },
+    { id: "whatsapp" as Tab, label: "WhatsApp", icon: PhoneCall, adminOnly: true },
   ];
+  const tabs = allTabs.filter((t) => !t.adminOnly || isAdmin);
 
   return (
     <div className="min-h-screen bg-background">
@@ -193,7 +197,9 @@ export default function AdminDashboard() {
               <Smartphone className="w-4 h-4 text-white" />
             </div>
             <span className="font-extrabold text-foreground text-sm">Sheikcell</span>
-            <span className="text-xs text-muted-foreground ml-1 hidden sm:block">— Painel Admin</span>
+            <span className="text-xs text-muted-foreground ml-1 hidden sm:block">
+              {isAdmin ? "— Administrador" : isSupervisor ? "— Supervisor" : ""}
+            </span>
           </div>
           <div className="flex items-center gap-3">
             <span className="text-xs text-muted-foreground hidden sm:block">{user?.name}</span>
@@ -432,10 +438,10 @@ export default function AdminDashboard() {
         {tab === "users" && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
-              <h2 className="font-bold">Atendentes</h2>
+              <h2 className="font-bold">Usuários</h2>
               <button onClick={openAddUser} data-testid="button-add-user"
                 className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition">
-                <Plus className="w-3.5 h-3.5" /> Novo Atendente
+                <Plus className="w-3.5 h-3.5" /> Novo Usuário
               </button>
             </div>
             <div className="shk-card overflow-hidden">
@@ -455,8 +461,14 @@ export default function AdminDashboard() {
                         <td className="px-4 py-3 text-muted-foreground">{u.email}</td>
                         <td className="px-4 py-3 text-muted-foreground">{u.sector?.name ?? "—"}</td>
                         <td className="px-4 py-3">
-                          <span className={u.role === "admin" ? "shk-badge-progress" : "shk-badge-waiting"}>
-                            {u.role === "admin" ? "Admin" : "Atendente"}
+                          <span className={
+                            u.role === "admin" ? "shk-badge-progress" :
+                            u.role === "supervisor" ? "shk-badge-done" :
+                            "shk-badge-waiting"
+                          }>
+                            {u.role === "admin" ? "Admin" :
+                             u.role === "supervisor" ? "Supervisor" :
+                             "Vendedor"}
                           </span>
                         </td>
                         <td className="px-4 py-3">
@@ -518,7 +530,7 @@ export default function AdminDashboard() {
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
           <div className="shk-card w-full max-w-sm p-6">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-bold">{editUser ? "Editar Atendente" : "Novo Atendente"}</h3>
+              <h3 className="font-bold">{editUser ? "Editar Usuário" : "Novo Usuário"}</h3>
               <button onClick={() => setShowAddUser(false)}><X className="w-5 h-5 text-muted-foreground" /></button>
             </div>
             <form onSubmit={handleSaveUser} className="space-y-3">
@@ -544,8 +556,9 @@ export default function AdminDashboard() {
                 <label className="text-xs font-medium mb-1 block">Perfil</label>
                 <select value={userForm.role} onChange={(e) => setUserForm({ ...userForm, role: e.target.value })}
                   className="w-full px-3 py-2 rounded-xl border border-border text-sm">
-                  <option value="attendant">Atendente</option>
-                  <option value="admin">Admin</option>
+                  <option value="vendedor">Vendedor</option>
+                  <option value="supervisor">Supervisor</option>
+                  <option value="admin">Administrador</option>
                 </select>
               </div>
               <div>
