@@ -42,8 +42,15 @@ function sanitizeCustomFields(input: unknown): Record<string, string> {
  * the given sectorId. Admins have global access; all other roles are pinned
  * to their own sector.
  */
+function isGlobalRole(role: string | undefined): boolean {
+  // Admins and supervisors have global visibility; vendedores are sector-scoped.
+  // Kept consistent with the chat module so a supervisor can open the CRM record
+  // of any conversation they can see.
+  return role === "admin" || role === "supervisor";
+}
+
 function callerCanAccessSector(session: Request["session"], contactSectorId: number | null): boolean {
-  if (session.userRole === "admin") return true;
+  if (isGlobalRole(session.userRole)) return true;
   return contactSectorId === (session.userSectorId ?? null);
 }
 
@@ -80,15 +87,15 @@ router.post("/crm/auto-register", requireAuth, async (req, res): Promise<void> =
 
   const userRole = req.session.userRole!;
   const userSectorId = req.session.userSectorId ?? null;
-  // Non-admins are pinned to their own sector; they cannot specify a different one.
-  const effectiveSectorId = userRole === "admin" ? (sectorId ?? null) : userSectorId;
+  // Sector-scoped roles are pinned to their own sector; they cannot specify a different one.
+  const effectiveSectorId = isGlobalRole(userRole) ? (sectorId ?? null) : userSectorId;
 
   const normalizedPhone = (phone ?? contact ?? "").replace(/\D/g, "");
   let existing: typeof crmContactsTable.$inferSelect | undefined;
   if (normalizedPhone) {
-    // Scope the lookup to the caller's sector for non-admins so they cannot
-    // probe for contacts in other sectors via phone number.
-    const phoneConditions = userRole === "admin"
+    // Scope the lookup to the caller's sector for sector-scoped roles so they
+    // cannot probe for contacts in other sectors via phone number.
+    const phoneConditions = isGlobalRole(userRole)
       ? and(eq(crmContactsTable.isArchived, false), eq(crmContactsTable.phone, normalizedPhone))
       : and(eq(crmContactsTable.isArchived, false), eq(crmContactsTable.phone, normalizedPhone), eq(crmContactsTable.sectorId, effectiveSectorId!));
     const rows = await db.select().from(crmContactsTable).where(phoneConditions);
@@ -206,7 +213,7 @@ router.get("/crm", requireAuth, async (req, res): Promise<void> => {
     .where(eq(crmContactsTable.isArchived, false))
     .orderBy(desc(crmContactsTable.updatedAt));
 
-  let contacts = userRole === "admin"
+  let contacts = isGlobalRole(userRole)
     ? allContacts
     : allContacts.filter((c) => c.sectorId === userSectorId);
 
@@ -244,8 +251,8 @@ router.post("/crm", requireAuth, async (req, res): Promise<void> => {
   if (!name) { res.status(400).json({ error: "Nome é obrigatório" }); return; }
   const userRole = req.session.userRole!;
   const userSectorId = req.session.userSectorId ?? null;
-  // Non-admins are pinned to their own sector; the caller-supplied sectorId is ignored.
-  const effectiveSectorId = userRole === "admin" ? (sectorId ?? null) : userSectorId;
+  // Sector-scoped roles are pinned to their own sector; the caller-supplied sectorId is ignored.
+  const effectiveSectorId = isGlobalRole(userRole) ? (sectorId ?? null) : userSectorId;
   const [created] = await db.insert(crmContactsTable).values({
     name, contact, phone, email,
     sectorId: effectiveSectorId,

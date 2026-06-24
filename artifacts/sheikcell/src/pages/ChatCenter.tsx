@@ -6,8 +6,9 @@ import {
   Search, Plus, Send, RefreshCw, X, ChevronDown,
   MessageCircle, CheckCheck, Tag, Filter,
   Smartphone, Instagram, UserCircle2, Circle,
-  ArrowRightLeft, FileText, Volume2, Image, Users, Paperclip
+  ArrowRightLeft, FileText, Volume2, Image, Users, Paperclip, IdCard
 } from "lucide-react";
+import CrmContactDetail from "@/components/CrmContactDetail";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 const LABELS_OPTIONS = ["VIP", "Urgente", "Promoção", "Suporte", "Pós-venda", "Aguardando"];
@@ -242,6 +243,10 @@ export default function ChatCenter() {
   const [filePreview, setFilePreview] = useState<{ file: File; previewUrl: string | null } | null>(null);
   const [caption, setCaption] = useState("");
 
+  // CRM connection: contact opened from the active conversation
+  const [crmContactId, setCrmContactId] = useState<number | null>(null);
+  const [crmLoading, setCrmLoading] = useState(false);
+
   const msgsEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -309,7 +314,7 @@ export default function ChatCenter() {
     api.chatUsers().then(setChatUsers).catch(() => {});
   }, []);
 
-  useEffect(() => { setShowParticipantPicker(false); }, [activeId]);
+  useEffect(() => { setShowParticipantPicker(false); setCrmContactId(null); }, [activeId]);
 
   // ── Send message ──
   const handleSend = async (e: React.FormEvent) => {
@@ -446,6 +451,21 @@ export default function ChatCenter() {
       await api.chat.participants.remove(activeConv.id, userId);
       setConvs((prev) => prev.map((c) => c.id === activeConv.id ? { ...c, participants: (c.participants ?? []).filter((p) => p.id !== userId) } : c));
     } catch { toast({ title: "Erro ao remover vendedor", variant: "destructive" }); }
+  };
+
+  // ── Open / link the CRM contact for the active conversation ──
+  // Uses auto-register so the contact is found by phone or created on the fly,
+  // bridging the Atendimento (chat) and CRM modules.
+  const handleOpenCrm = async () => {
+    if (!activeConv || crmLoading) return;
+    setCrmLoading(true);
+    try {
+      const c = await api.crm.autoRegister({ name: activeConv.name, phone: activeConv.phone });
+      setCrmContactId(c.id);
+      if (c.created) toast({ title: "Cliente cadastrado no CRM" });
+    } catch {
+      toast({ title: "Erro ao abrir CRM", variant: "destructive" });
+    } finally { setCrmLoading(false); }
   };
 
   // ── Toggle label ──
@@ -760,6 +780,19 @@ export default function ChatCenter() {
                   </div>
                 )}
               </div>
+              {/* CRM — open / link customer record */}
+              <button
+                onClick={handleOpenCrm}
+                disabled={crmLoading}
+                data-testid="button-open-crm"
+                className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-white border border-border hover:bg-secondary transition font-medium disabled:opacity-50"
+                title="Abrir ficha do cliente no CRM"
+              >
+                {crmLoading
+                  ? <RefreshCw className="w-3 h-3 animate-spin" />
+                  : <IdCard className="w-3 h-3" />}
+                CRM
+              </button>
               {/* Status buttons */}
               {["open", "pending", "resolved"].map((s) => (
                 <button key={s} onClick={() => handleStatus(s)}
@@ -917,6 +950,17 @@ export default function ChatCenter() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── CRM contact panel (opened from a conversation) ─────────────── */}
+      {crmContactId !== null && (
+        <CrmContactDetail
+          key={crmContactId}
+          contactId={crmContactId}
+          onClose={() => setCrmContactId(null)}
+          onContactUpdated={() => {}}
+          sectors={sectors}
+        />
       )}
 
       {/* ── New conversation modal ─────────────────────────────────────── */}
