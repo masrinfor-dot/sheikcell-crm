@@ -127,12 +127,13 @@ export async function sendWAMedia(
   buffer: Buffer,
   mimetype: string,
   filename?: string,
+  caption?: string,
 ): Promise<void> {
   const bail = getConnectionState();
   if (bail.status !== "open") {
     throw new Error("WhatsApp não está conectado (Baileys). Envio de mídia requer conexão Baileys ativa.");
   }
-  await baileysSendMedia(to, type, buffer, mimetype, filename);
+  await baileysSendMedia(to, type, buffer, mimetype, filename, caption);
 }
 
 export async function sendWAMessage(to: string, text: string): Promise<void> {

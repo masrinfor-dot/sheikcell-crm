@@ -194,6 +194,7 @@ export async function sendMedia(
   buffer: Buffer,
   mimetype: string,
   filename?: string,
+  caption?: string,
 ): Promise<void> {
   if (!sock || connectionStatus !== "open") {
     throw new Error("WhatsApp não está conectado");
@@ -201,12 +202,13 @@ export async function sendMedia(
   const phone = to.replace(/\D/g, "");
   const jid = `${phone}@s.whatsapp.net`;
   if (type === "image") {
-    await sock.sendMessage(jid, { image: buffer, mimetype });
+    await sock.sendMessage(jid, { image: buffer, mimetype, caption });
   } else {
     await sock.sendMessage(jid, {
       document: buffer,
       mimetype,
       fileName: filename ?? "documento",
+      caption,
     });
   }
   logger.info({ phone, type }, "WhatsApp media sent via Baileys");

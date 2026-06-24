@@ -138,12 +138,30 @@ function MediaContent({ msg }: { msg: ChatMessage }) {
   return null;
 }
 
+// Known placeholder labels that are not captions
+const MEDIA_PLACEHOLDERS = new Set(["📷 Foto", "🎵 Áudio"]);
+function isMediaPlaceholder(s: string) {
+  return MEDIA_PLACEHOLDERS.has(s) || s.startsWith("📄 ");
+}
+
+// Extract caption from media message content.
+// Supports two formats:
+//   1. Outbound (new): "📷 Foto\ncaption" or "📄 file.pdf\ncaption" — extract after newline
+//   2. Inbound (WhatsApp): content IS the caption (not a known placeholder)
+function extractMediaCaption(content: string): string {
+  const nl = content.indexOf("\n");
+  if (nl !== -1) {
+    return content.slice(nl + 1).trim();
+  }
+  return isMediaPlaceholder(content) ? "" : content.trim();
+}
+
 // ─── Message bubble ─────────────────────────────────────────────────────────
 function MsgBubble({ msg }: { msg: ChatMessage }) {
   const out = msg.direction === "outbound";
   const isMedia = msg.type === "image" || msg.type === "audio" || msg.type === "doc";
-  const hasTextContent = msg.content && msg.content !== "📷 Foto" && msg.content !== "🎵 Áudio" && !msg.content.startsWith("📄 ");
-  const showCaption = isMedia && msg.mediaUrl && hasTextContent;
+  const mediaCaption = isMedia ? extractMediaCaption(msg.content) : "";
+  const showCaption = isMedia && msg.mediaUrl && mediaCaption.length > 0;
 
   return (
     <div className={`flex ${out ? "justify-end" : "justify-start"} mb-1`}>
@@ -155,7 +173,7 @@ function MsgBubble({ msg }: { msg: ChatMessage }) {
           <>
             <MediaContent msg={msg} />
             {showCaption && (
-              <p className="text-sm text-gray-800 whitespace-pre-wrap break-words mt-1">{msg.content}</p>
+              <p className="text-sm text-gray-800 whitespace-pre-wrap break-words mt-1">{mediaCaption}</p>
             )}
           </>
         ) : isMedia && !msg.mediaUrl ? (
@@ -202,6 +220,9 @@ export default function ChatCenter() {
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [chatUsers, setChatUsers] = useState<{ id: number; name: string; role: string }[]>([]);
   const [newForm, setNewForm] = useState({ name: "", phone: "", channel: "whatsapp", sectorId: "" });
+
+  const [filePreview, setFilePreview] = useState<{ file: File; previewUrl: string | null } | null>(null);
+  const [caption, setCaption] = useState("");
 
   const msgsEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -298,25 +319,48 @@ export default function ChatCenter() {
   };
 
   // ── Send file (image or document) ──
-  const handleSendFile = async (file: File) => {
+  const handleSendFile = async (file: File, fileCaption?: string) => {
     if (!activeId || sending) return;
+    const previewUrl = filePreview?.previewUrl ?? null;
+    setFilePreview(null);
+    setCaption("");
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
     setSending(true);
     const isImage = file.type.startsWith("image/");
+    const baseContent = isImage ? "📷 Foto" : `📄 ${file.name}`;
     const optimistic: ChatMessage = {
       id: -Date.now(), conversationId: activeId,
-      content: isImage ? "📷 Foto" : `📄 ${file.name}`,
+      content: fileCaption ? `${baseContent}\n${fileCaption}` : baseContent,
       direction: "outbound", type: isImage ? "image" : "doc", status: "sent",
       senderName: user?.name ?? null, mediaUrl: null, externalId: null,
       createdAt: new Date().toISOString(),
     };
     setMessages((prev) => [...prev, optimistic]);
     try {
-      const msg = await api.chat.sendMedia(activeId, file);
+      const msg = await api.chat.sendMedia(activeId, file, fileCaption);
       setMessages((prev) => prev.map((m) => m.id === optimistic.id ? msg : m));
     } catch {
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
       toast({ title: "Erro ao enviar arquivo", variant: "destructive" });
     } finally { setSending(false); }
+  };
+
+  // ── Open file preview modal ──
+  const handleFileSelected = (file: File) => {
+    const isImage = file.type.startsWith("image/");
+    if (isImage) {
+      const url = URL.createObjectURL(file);
+      setFilePreview({ file, previewUrl: url });
+    } else {
+      setFilePreview({ file, previewUrl: null });
+    }
+    setCaption("");
+  };
+
+  const handleCancelPreview = () => {
+    if (filePreview?.previewUrl) URL.revokeObjectURL(filePreview.previewUrl);
+    setFilePreview(null);
+    setCaption("");
   };
 
   // ── Update status ──
@@ -682,7 +726,7 @@ export default function ChatCenter() {
               className="hidden"
               onChange={(e) => {
                 const file = e.target.files?.[0];
-                if (file) { void handleSendFile(file); }
+                if (file) { handleFileSelected(file); }
                 e.target.value = "";
               }}
             />
@@ -711,6 +755,81 @@ export default function ChatCenter() {
               <Send className="w-4 h-4" />
             </button>
           </form>
+        </div>
+      )}
+
+      {/* ── File preview modal ─────────────────────────────────────────── */}
+      {filePreview && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl w-full max-w-sm shadow-xl flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-5 pt-5 pb-3">
+              <h3 className="font-bold text-base">
+                {filePreview.previewUrl ? "Prévia da foto" : "Enviar documento"}
+              </h3>
+              <button onClick={handleCancelPreview} className="text-muted-foreground hover:text-foreground transition">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="px-5 pb-3">
+              {filePreview.previewUrl ? (
+                <img
+                  src={filePreview.previewUrl}
+                  alt="Prévia"
+                  className="w-full max-h-64 object-contain rounded-xl bg-secondary/30"
+                />
+              ) : (
+                <div className="flex items-center gap-3 p-4 bg-secondary/30 rounded-xl">
+                  <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center shrink-0">
+                    <FileText className="w-6 h-6 text-primary" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate">{filePreview.file.name}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {(filePreview.file.size / 1024).toFixed(0)} KB
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="px-5 pb-4">
+              <input
+                autoFocus
+                value={caption}
+                onChange={(e) => setCaption(e.target.value)}
+                placeholder="Adicionar legenda (opcional)"
+                data-testid="input-file-caption"
+                className="w-full px-3 py-2 rounded-xl border border-border text-sm outline-none focus:ring-2 focus:ring-primary/20"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    void handleSendFile(filePreview.file, caption.trim() || undefined);
+                  }
+                }}
+              />
+            </div>
+
+            <div className="flex gap-2 px-5 pb-5">
+              <button
+                type="button"
+                onClick={handleCancelPreview}
+                data-testid="button-cancel-file-preview"
+                className="flex-1 py-2 rounded-xl border border-border text-sm font-medium text-muted-foreground hover:bg-secondary transition"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                data-testid="button-confirm-file-send"
+                onClick={() => void handleSendFile(filePreview.file, caption.trim() || undefined)}
+                className="flex-1 py-2 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition flex items-center justify-center gap-1.5"
+              >
+                <Send className="w-3.5 h-3.5" />
+                Enviar
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

@@ -138,10 +138,11 @@ router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Pr
 // ─── Send media ────────────────────────────────────────────────────────────
 router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
-  const { base64, mimetype, filename } = req.body as {
+  const { base64, mimetype, filename, caption } = req.body as {
     base64?: string;
     mimetype?: string;
     filename?: string;
+    caption?: string;
   };
 
   if (!base64 || !mimetype) {
@@ -198,7 +199,8 @@ router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Prom
   const mediaUrl = `/api/chat/media/${savedFilename}`;
 
   const displayName = filename ?? (isImage ? "📷 Foto" : "📄 Documento");
-  const content = isImage ? "📷 Foto" : `📄 ${displayName}`;
+  const baseContent = isImage ? "📷 Foto" : `📄 ${displayName}`;
+  const content = caption ? `${baseContent}\n${caption}` : baseContent;
 
   const [msg] = await db.insert(messagesTable).values({
     conversationId: id,
@@ -238,6 +240,7 @@ router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Prom
           base64,
           mimetype,
           filename: filename ?? savedFilename,
+          caption,
         }),
       });
       if (!r.ok) {
