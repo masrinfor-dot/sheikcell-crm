@@ -1,6 +1,6 @@
 import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
 import { createHmac } from "node:crypto";
-import { getWAState, sendWAMessage } from "../lib/whatsapp";
+import { getWAState, sendWAMessage, sendWAMedia } from "../lib/whatsapp";
 import { disconnectAndReset } from "../lib/waConnection";
 
 const router: IRouter = Router();
@@ -47,6 +47,31 @@ router.post("/whatsapp/send", requireBridgeSecret, async (req, res): Promise<voi
     res.json({ ok: true });
   } catch (err) {
     res.status(503).json({ error: err instanceof Error ? err.message : "Erro ao enviar" });
+  }
+});
+
+router.post("/whatsapp/send-media", requireBridgeSecret, async (req, res): Promise<void> => {
+  const { to, type, base64, mimetype, filename } = req.body as {
+    to?: string;
+    type?: string;
+    base64?: string;
+    mimetype?: string;
+    filename?: string;
+  };
+  if (!to || !type || !base64 || !mimetype) {
+    res.status(400).json({ error: "to, type, base64 e mimetype são obrigatórios" });
+    return;
+  }
+  if (type !== "image" && type !== "document") {
+    res.status(400).json({ error: "type deve ser 'image' ou 'document'" });
+    return;
+  }
+  try {
+    const buffer = Buffer.from(base64, "base64");
+    await sendWAMedia(to, type, buffer, mimetype, filename);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(503).json({ error: err instanceof Error ? err.message : "Erro ao enviar mídia" });
   }
 });
 

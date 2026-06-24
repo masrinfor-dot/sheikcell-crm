@@ -205,6 +205,21 @@ export const api = {
     messages: (id: number) => req<ChatMessage[]>(`/chat/conversations/${id}/messages`),
     sendMessage: (id: number, content: string) =>
       req<ChatMessage>(`/chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
+    sendMedia: (id: number, file: File): Promise<ChatMessage> => {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = reader.result as string;
+          const base64 = dataUrl.split(",")[1];
+          req<ChatMessage>(`/chat/conversations/${id}/media`, {
+            method: "POST",
+            body: JSON.stringify({ base64, mimetype: file.type, filename: file.name }),
+          }).then(resolve).catch(reject);
+        };
+        reader.onerror = () => reject(new Error("Falha ao ler arquivo"));
+        reader.readAsDataURL(file);
+      });
+    },
     updateConversation: (id: number, data: Partial<{ status: string; labels: string; sectorId: number; assigneeId: number; name: string; isArchived: boolean }>) =>
       req<Conversation>(`/chat/conversations/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     createConversation: (data: { phone: string; name: string; channel?: string; sectorId?: number }) =>

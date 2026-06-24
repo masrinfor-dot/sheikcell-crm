@@ -6,7 +6,7 @@ import {
   Search, Plus, Send, RefreshCw, X, ChevronDown,
   MessageCircle, CheckCheck, Tag, Filter,
   Smartphone, Instagram, UserCircle2, Circle,
-  ArrowRightLeft, FileText, Volume2, Image, Users
+  ArrowRightLeft, FileText, Volume2, Image, Users, Paperclip
 } from "lucide-react";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -205,6 +205,7 @@ export default function ChatCenter() {
 
   const msgsEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const activeConv = convs.find((c) => c.id === activeId) ?? null;
 
@@ -293,6 +294,28 @@ export default function ChatCenter() {
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
       setMsgText(text);
       toast({ title: "Erro ao enviar mensagem", variant: "destructive" });
+    } finally { setSending(false); }
+  };
+
+  // ── Send file (image or document) ──
+  const handleSendFile = async (file: File) => {
+    if (!activeId || sending) return;
+    setSending(true);
+    const isImage = file.type.startsWith("image/");
+    const optimistic: ChatMessage = {
+      id: -Date.now(), conversationId: activeId,
+      content: isImage ? "📷 Foto" : `📄 ${file.name}`,
+      direction: "outbound", type: isImage ? "image" : "doc", status: "sent",
+      senderName: user?.name ?? null, mediaUrl: null, externalId: null,
+      createdAt: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, optimistic]);
+    try {
+      const msg = await api.chat.sendMedia(activeId, file);
+      setMessages((prev) => prev.map((m) => m.id === optimistic.id ? msg : m));
+    } catch {
+      setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
+      toast({ title: "Erro ao enviar arquivo", variant: "destructive" });
     } finally { setSending(false); }
   };
 
@@ -652,6 +675,27 @@ export default function ChatCenter() {
 
           {/* Input */}
           <form onSubmit={handleSend} className="bg-[#f0f2f5] border-t border-border px-3 py-2.5 flex items-center gap-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/gif,image/webp,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) { void handleSendFile(file); }
+                e.target.value = "";
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={sending}
+              title="Enviar foto ou documento"
+              data-testid="button-attach-file"
+              className="w-9 h-9 rounded-full flex items-center justify-center text-muted-foreground hover:bg-secondary transition shrink-0 disabled:opacity-40"
+            >
+              <Paperclip className="w-4 h-4" />
+            </button>
             <input
               ref={inputRef}
               value={msgText}

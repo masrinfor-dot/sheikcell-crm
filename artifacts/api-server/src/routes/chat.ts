@@ -135,6 +135,126 @@ router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Pr
   res.json(msgs);
 });
 
+// ─── Send media ────────────────────────────────────────────────────────────
+router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Promise<void> => {
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const { base64, mimetype, filename } = req.body as {
+    base64?: string;
+    mimetype?: string;
+    filename?: string;
+  };
+
+  if (!base64 || !mimetype) {
+    res.status(400).json({ error: "base64 e mimetype são obrigatórios" });
+    return;
+  }
+
+  const ALLOWED_MIMES_OUT = new Set([
+    "image/jpeg", "image/png", "image/gif", "image/webp",
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ]);
+  if (!ALLOWED_MIMES_OUT.has(mimetype)) {
+    res.status(400).json({ error: "Tipo de arquivo não suportado" });
+    return;
+  }
+
+  const isImage = mimetype.startsWith("image/");
+  const msgType: "image" | "doc" = isImage ? "image" : "doc";
+  const waType: "image" | "document" = isImage ? "image" : "document";
+
+  const senderName = req.session.userName ?? "Atendente";
+
+  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+
+  // Save file to media directory
+  const { writeFile, mkdir } = await import("fs/promises");
+  const { randomUUID } = await import("crypto");
+  await mkdir(MEDIA_DIR, { recursive: true });
+
+  const mimeToExt: Record<string, string> = {
+    "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp",
+    "application/pdf": "pdf",
+    "application/msword": "doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.ms-excel": "xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+  };
+  const ext = mimeToExt[mimetype] ?? "bin";
+  const savedFilename = `${randomUUID()}.${ext}`;
+  const buf = Buffer.from(base64, "base64");
+
+  const MAX_BYTES = 20 * 1024 * 1024;
+  if (buf.byteLength > MAX_BYTES) {
+    res.status(400).json({ error: "Arquivo muito grande (máximo 20 MB)" });
+    return;
+  }
+
+  await writeFile(path.join(MEDIA_DIR, savedFilename), buf);
+  const mediaUrl = `/api/chat/media/${savedFilename}`;
+
+  const displayName = filename ?? (isImage ? "📷 Foto" : "📄 Documento");
+  const content = isImage ? "📷 Foto" : `📄 ${displayName}`;
+
+  const [msg] = await db.insert(messagesTable).values({
+    conversationId: id,
+    content,
+    direction: "outbound",
+    type: msgType,
+    status: "sent",
+    senderName,
+    mediaUrl,
+  }).returning();
+
+  await db.update(conversationsTable).set({
+    lastMessage: content,
+    lastMessageAt: new Date(),
+    updatedAt: new Date(),
+  }).where(eq(conversationsTable.id, id));
+
+  broadcast("message", { conversationId: id, message: msg });
+
+  // Forward to WhatsApp bridge
+  if (conv.channel === "whatsapp" && conv.phone) {
+    const bridgeUrl = process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
+    const bridgeSecret = createHmac(
+      "sha256",
+      process.env["SESSION_SECRET"] ?? "sheikcell-dev-only-secret",
+    ).update("whatsapp-bridge-v1").digest("hex");
+    try {
+      const r = await fetch(`${bridgeUrl}/whatsapp/send-media`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Bridge-Secret": bridgeSecret,
+        },
+        body: JSON.stringify({
+          to: conv.phone,
+          type: waType,
+          base64,
+          mimetype,
+          filename: filename ?? savedFilename,
+        }),
+      });
+      if (!r.ok) {
+        const body = await r.text().catch(() => "");
+        req.log.warn(
+          { status: r.status, body },
+          "WhatsApp bridge media delivery failed — media saved but not delivered",
+        );
+      }
+    } catch (err) {
+      req.log.warn({ err }, "WhatsApp bridge unreachable — media saved but not delivered");
+    }
+  }
+
+  res.status(201).json(msg);
+});
+
 // ─── Send message ──────────────────────────────────────────────────────────
 router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);

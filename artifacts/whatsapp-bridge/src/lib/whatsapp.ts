@@ -5,7 +5,7 @@
  * and Baileys is not connected, so the system degrades gracefully.
  */
 import { logger } from "./logger";
-import { getConnectionState, sendMessage as baileysSend } from "./waConnection";
+import { getConnectionState, sendMessage as baileysSend, sendMedia as baileysSendMedia } from "./waConnection";
 
 const GRAPH_API_BASE = "https://graph.facebook.com/v19.0";
 
@@ -119,6 +119,20 @@ export async function getWAState(): Promise<WAState> {
     qrDataUrl: null,
     errorMessage: bail.error,
   };
+}
+
+export async function sendWAMedia(
+  to: string,
+  type: "image" | "document",
+  buffer: Buffer,
+  mimetype: string,
+  filename?: string,
+): Promise<void> {
+  const bail = getConnectionState();
+  if (bail.status !== "open") {
+    throw new Error("WhatsApp não está conectado (Baileys). Envio de mídia requer conexão Baileys ativa.");
+  }
+  await baileysSendMedia(to, type, buffer, mimetype, filename);
 }
 
 export async function sendWAMessage(to: string, text: string): Promise<void> {

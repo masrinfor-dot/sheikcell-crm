@@ -187,3 +187,27 @@ export async function sendMessage(to: string, text: string): Promise<void> {
   await sock.sendMessage(jid, { text });
   logger.info({ phone }, "WhatsApp message sent via Baileys");
 }
+
+export async function sendMedia(
+  to: string,
+  type: "image" | "document",
+  buffer: Buffer,
+  mimetype: string,
+  filename?: string,
+): Promise<void> {
+  if (!sock || connectionStatus !== "open") {
+    throw new Error("WhatsApp não está conectado");
+  }
+  const phone = to.replace(/\D/g, "");
+  const jid = `${phone}@s.whatsapp.net`;
+  if (type === "image") {
+    await sock.sendMessage(jid, { image: buffer, mimetype });
+  } else {
+    await sock.sendMessage(jid, {
+      document: buffer,
+      mimetype,
+      fileName: filename ?? "documento",
+    });
+  }
+  logger.info({ phone, type }, "WhatsApp media sent via Baileys");
+}

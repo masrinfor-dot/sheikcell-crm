@@ -6,7 +6,7 @@ import { connect } from "./lib/waConnection";
 const app = express();
 const PORT = Number(process.env["PORT"] ?? 3002);
 
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "30mb" }));
 app.use(bridgeRouter);
 
 app.listen(PORT, () => {
