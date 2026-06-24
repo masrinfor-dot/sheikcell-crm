@@ -24,7 +24,14 @@ router.get("/chat/events", requireAuth, (req: Request, res: Response): void => {
   res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders();
 
-  const send = (payload: { event: string; data: unknown }) => {
+  const userRole = req.session.userRole!;
+  const userSectorId = req.session.userSectorId;
+  const isGlobal = userRole === "admin" || userRole === "supervisor";
+
+  const send = (payload: { event: string; data: unknown; sectorId: number | null }) => {
+    if (!isGlobal && payload.sectorId != null && payload.sectorId !== userSectorId) {
+      return;
+    }
     res.write(`event: ${payload.event}\n`);
     res.write(`data: ${JSON.stringify(payload.data)}\n\n`);
   };
@@ -47,6 +54,19 @@ async function enrichConversation(conv: typeof conversationsTable.$inferSelect) 
     .innerJoin(usersTable, eq(conversationParticipantsTable.userId, usersTable.id))
     .where(eq(conversationParticipantsTable.conversationId, conv.id));
   return { ...conv, sector: sector ?? null, assignee: assignee ?? null, participants };
+}
+
+/**
+ * Returns true if the requesting user is allowed to access the given conversation.
+ * Admins and supervisors have global access; vendedores are restricted to their sector.
+ */
+function canAccessConversation(
+  conv: Pick<typeof conversationsTable.$inferSelect, "sectorId">,
+  req: Request,
+): boolean {
+  const userRole = req.session.userRole!;
+  if (userRole === "admin" || userRole === "supervisor") return true;
+  return conv.sectorId === req.session.userSectorId;
 }
 
 // ─── List conversations ────────────────────────────────────────────────────
@@ -116,12 +136,17 @@ router.get("/chat/conversations/:id", requireAuth, async (req, res): Promise<voi
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id));
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
   res.json(await enrichConversation(conv));
 });
 
 // ─── Get messages ──────────────────────────────────────────────────────────
 router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+
+  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
 
   await db.update(conversationsTable).set({ unreadCount: 0 }).where(eq(conversationsTable.id, id));
 
@@ -171,6 +196,7 @@ router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Prom
 
   const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
 
   // Save file to media directory
   const { writeFile, mkdir } = await import("fs/promises");
@@ -218,7 +244,7 @@ router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Prom
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, id));
 
-  broadcast("message", { conversationId: id, message: msg });
+  broadcast("message", { conversationId: id, message: msg }, conv.sectorId);
 
   // Forward to WhatsApp bridge
   if (conv.channel === "whatsapp" && conv.phone) {
@@ -267,6 +293,8 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
   const senderName = req.session.userName ?? "Atendente";
 
   const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
 
   const [msg] = await db.insert(messagesTable).values({
     conversationId: id,
@@ -283,10 +311,10 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, id));
 
-  broadcast("message", { conversationId: id, message: msg });
+  broadcast("message", { conversationId: id, message: msg }, conv.sectorId);
 
   // Forward to WhatsApp bridge (now uses Meta Cloud API) if this is a WhatsApp conversation
-  if (conv?.channel === "whatsapp" && conv.phone) {
+  if (conv.channel === "whatsapp" && conv.phone) {
     const bridgeUrl = process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
     const bridgeSecret = createHmac(
       "sha256",
@@ -324,18 +352,26 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
     assigneeId?: number; name?: string; isArchived?: boolean;
   };
 
+  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
+
+  const userRole = req.session.userRole!;
   const update: Record<string, unknown> = { updatedAt: new Date() };
   if (status !== undefined) update.status = status;
   if (labels !== undefined) update.labels = labels;
-  if (sectorId !== undefined) update.sectorId = sectorId;
-  if (assigneeId !== undefined) update.assigneeId = assigneeId;
   if (name !== undefined) update.name = name;
   if (isArchived !== undefined) update.isArchived = isArchived;
+  // Only admins and supervisors may reassign to a different sector or assignee
+  if (userRole === "admin" || userRole === "supervisor") {
+    if (sectorId !== undefined) update.sectorId = sectorId;
+    if (assigneeId !== undefined) update.assigneeId = assigneeId;
+  }
 
   const [updated] = await db.update(conversationsTable).set(update)
     .where(eq(conversationsTable.id, id)).returning();
 
-  broadcast("conversation_updated", updated);
+  broadcast("conversation_updated", updated, updated.sectorId);
   res.json(updated);
 });
 
@@ -346,17 +382,23 @@ router.post("/chat/conversations", requireAuth, async (req, res): Promise<void> 
   };
   if (!phone || !name) { res.status(400).json({ error: "Telefone e nome obrigatórios" }); return; }
 
-  const userSectorId = req.session.userSectorId ?? sectorId ?? 1;
+  const userRole = req.session.userRole!;
+  const userSectorId = req.session.userSectorId;
+
+  // Vendedores must create conversations in their own sector only
+  const effectiveSectorId = (userRole === "admin" || userRole === "supervisor")
+    ? (sectorId ?? userSectorId ?? 1)
+    : (userSectorId ?? 1);
 
   const [conv] = await db.insert(conversationsTable).values({
     phone, name,
     channel: channel ?? "manual",
-    sectorId: sectorId ?? userSectorId,
+    sectorId: effectiveSectorId,
     status: "open",
     lastMessageAt: new Date(),
   }).returning();
 
-  broadcast("conversation_new", conv);
+  broadcast("conversation_new", conv, conv.sectorId);
   res.status(201).json(conv);
 });
 
@@ -377,9 +419,10 @@ router.post("/chat/conversations/:id/participants", requireAuth, async (req, res
 
   const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, convId));
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
 
   await db.insert(conversationParticipantsTable).values({ conversationId: convId, userId }).onConflictDoNothing();
-  broadcast("participants_updated", { conversationId: convId });
+  broadcast("participants_updated", { conversationId: convId }, conv.sectorId);
   res.status(201).json({ ok: true });
 });
 
@@ -387,23 +430,53 @@ router.delete("/chat/conversations/:id/participants/:userId", requireAuth, async
   const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const userId = parseInt(Array.isArray(req.params.userId) ? req.params.userId[0] : req.params.userId, 10);
 
+  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, convId));
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
+
   await db.delete(conversationParticipantsTable)
     .where(and(
       eq(conversationParticipantsTable.conversationId, convId),
       eq(conversationParticipantsTable.userId, userId),
     ));
-  broadcast("participants_updated", { conversationId: convId });
+  broadcast("participants_updated", { conversationId: convId }, conv.sectorId);
   res.json({ ok: true });
 });
 
 // ─── Serve saved media files ───────────────────────────────────────────────
-router.get("/chat/media/:filename", requireAuth, (req: Request, res: Response): void => {
+router.get("/chat/media/:filename", requireAuth, async (req: Request, res: Response): Promise<void> => {
   const filename = path.basename(req.params.filename as string);
   const filepath = path.join(MEDIA_DIR, filename);
   if (!existsSync(filepath)) {
     res.status(404).json({ error: "Mídia não encontrada" });
     return;
   }
+
+  // Resolve the media file to its owning conversation and enforce sector access.
+  const mediaUrl = `/api/chat/media/${filename}`;
+  const [owningMsg] = await db
+    .select({ conversationId: messagesTable.conversationId })
+    .from(messagesTable)
+    .where(eq(messagesTable.mediaUrl, mediaUrl))
+    .limit(1);
+
+  if (!owningMsg) {
+    // File exists on disk but has no owning message — deny access to be safe.
+    res.status(403).json({ error: "Acesso negado" });
+    return;
+  }
+
+  const [conv] = await db
+    .select()
+    .from(conversationsTable)
+    .where(eq(conversationsTable.id, owningMsg.conversationId))
+    .limit(1);
+
+  if (!conv || !canAccessConversation(conv, req)) {
+    res.status(403).json({ error: "Acesso negado" });
+    return;
+  }
+
   const ext = path.extname(filename).slice(1).toLowerCase();
   const mimeMap: Record<string, string> = {
     jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",

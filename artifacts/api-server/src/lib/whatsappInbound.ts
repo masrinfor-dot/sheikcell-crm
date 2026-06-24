@@ -161,7 +161,7 @@ async function upsertConversation(phone: string, pushName: string, displayConten
         unreadCount: 1,
       })
       .returning();
-    broadcast("conversation_new", conv);
+    broadcast("conversation_new", conv, conv.sectorId);
   } else {
     await db
       .update(conversationsTable)
@@ -232,7 +232,7 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     })
     .returning();
 
-  broadcast("message", { conversationId: conv.id, message: msg });
+  broadcast("message", { conversationId: conv.id, message: msg }, conv.sectorId);
 }
 
 export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<void> {
@@ -310,7 +310,7 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
           })
           .returning();
 
-        broadcast("message", { conversationId: conv.id, message: saved });
+        broadcast("message", { conversationId: conv.id, message: saved }, conv.sectorId);
       }
     }
   }
