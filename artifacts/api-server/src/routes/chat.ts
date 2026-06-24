@@ -2,9 +2,9 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync } from "fs";
 import path from "path";
-import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, attendanceLogsTable, crmContactsTable } from "@workspace/db";
-import { eq, desc, and, or, ilike, sql, inArray, isNull } from "drizzle-orm";
-import { requireAuth } from "../middlewares/auth";
+import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, attendanceLogsTable, crmContactsTable, chatLabelsTable } from "@workspace/db";
+import { eq, desc, and, or, ilike, sql, inArray, isNull, asc } from "drizzle-orm";
+import { requireAuth, requireAdminOrSupervisor } from "../middlewares/auth";
 import { broadcast, sseEmitter } from "../lib/sseEmitter";
 import { ensureCrmContactForConversation } from "../lib/crmSync";
 import {
@@ -512,6 +512,53 @@ router.post("/chat/conversations", requireAuth, async (req, res): Promise<void> 
   // Keep the CRM in sync with atendimentos: register the customer immediately.
   await ensureCrmContactForConversation(conv);
   res.status(201).json(conv);
+});
+
+// ─── Etiquetas (chat labels) management ───────────────────────────────────
+router.get("/chat/labels", requireAuth, async (_req, res): Promise<void> => {
+  const labels = await db
+    .select()
+    .from(chatLabelsTable)
+    .where(eq(chatLabelsTable.isActive, true))
+    .orderBy(asc(chatLabelsTable.sortOrder), asc(chatLabelsTable.id));
+  res.json(labels);
+});
+
+router.post("/chat/labels", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const { name, color, sortOrder } = req.body as { name?: string; color?: string; sortOrder?: number };
+  if (!name || !name.trim()) { res.status(400).json({ error: "Nome da etiqueta é obrigatório" }); return; }
+  const hex = /^#[0-9a-fA-F]{6}$/.test(color ?? "") ? color! : "#1a2e6e";
+  const [created] = await db.insert(chatLabelsTable).values({
+    name: name.trim(),
+    color: hex,
+    sortOrder: sortOrder ?? 0,
+  }).returning();
+  res.status(201).json(created);
+});
+
+router.patch("/chat/labels/:labelId", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const labelId = parseInt(String(req.params.labelId), 10);
+  if (isNaN(labelId)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const [existing] = await db.select().from(chatLabelsTable).where(eq(chatLabelsTable.id, labelId)).limit(1);
+  if (!existing) { res.status(404).json({ error: "Etiqueta não encontrada" }); return; }
+  const { name, color, sortOrder, isActive } = req.body as {
+    name?: string; color?: string; sortOrder?: number; isActive?: boolean;
+  };
+  const update: Record<string, unknown> = {};
+  if (name !== undefined && name.trim()) update.name = name.trim();
+  if (color !== undefined && /^#[0-9a-fA-F]{6}$/.test(color)) update.color = color;
+  if (sortOrder !== undefined) update.sortOrder = sortOrder;
+  if (isActive !== undefined) update.isActive = isActive;
+  if (Object.keys(update).length === 0) { res.status(400).json({ error: "Nenhum campo válido para atualizar" }); return; }
+  const [updated] = await db.update(chatLabelsTable).set(update).where(eq(chatLabelsTable.id, labelId)).returning();
+  res.json(updated);
+});
+
+router.delete("/chat/labels/:labelId", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const labelId = parseInt(String(req.params.labelId), 10);
+  if (isNaN(labelId)) { res.status(400).json({ error: "ID inválido" }); return; }
+  await db.delete(chatLabelsTable).where(eq(chatLabelsTable.id, labelId));
+  res.json({ ok: true });
 });
 
 // ─── List users available for participant assignment ──────────────────────

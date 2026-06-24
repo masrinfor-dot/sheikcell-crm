@@ -1,17 +1,19 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { api, type Conversation, type ChatMessage, type Sector } from "@/lib/api";
+import { api, type Conversation, type ChatMessage, type Sector, type ChatLabel } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
   Search, Plus, Send, RefreshCw, X, ChevronDown,
   MessageCircle, CheckCheck, Tag, Filter,
   Smartphone, Instagram, UserCircle2, Circle,
-  ArrowRightLeft, FileText, Volume2, Image, Users, Paperclip, IdCard
+  ArrowRightLeft, FileText, Volume2, Image, Users, Paperclip, IdCard,
+  Settings2, Trash2
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
-const LABELS_OPTIONS = ["VIP", "Urgente", "Promoção", "Suporte", "Pós-venda", "Aguardando"];
+// Cores sugeridas para novas etiquetas
+const LABEL_COLOR_PRESETS = ["#1a2e6e", "#f59e0b", "#16a34a", "#dc2626", "#8b5cf6", "#0891b2", "#db2777", "#6b7280"];
 const STATUS_COLORS: Record<string, string> = {
   open: "bg-green-500", pending: "bg-amber-400", resolved: "bg-gray-400",
 };
@@ -233,6 +235,10 @@ export default function ChatCenter() {
   const [sending, setSending] = useState(false);
   const [showNewConv, setShowNewConv] = useState(false);
   const [showLabelPicker, setShowLabelPicker] = useState(false);
+  const [labels, setLabels] = useState<ChatLabel[]>([]);
+  const [showLabelManager, setShowLabelManager] = useState(false);
+  const [labelForm, setLabelForm] = useState<{ name: string; color: string }>({ name: "", color: LABEL_COLOR_PRESETS[0] });
+  const [savingLabel, setSavingLabel] = useState(false);
   const [showTransferPicker, setShowTransferPicker] = useState(false);
   const [showParticipantPicker, setShowParticipantPicker] = useState(false);
   const [showFilter, setShowFilter] = useState(false);
@@ -312,7 +318,33 @@ export default function ChatCenter() {
   useEffect(() => {
     api.sectors.list().then(setSectors).catch(() => {});
     api.chatUsers().then(setChatUsers).catch(() => {});
+    api.chat.labels.list().then(setLabels).catch(() => {});
   }, []);
+
+  // ── Etiquetas (labels) management ──
+  const fetchLabels = useCallback(async () => {
+    try { setLabels(await api.chat.labels.list()); } catch { /* silent */ }
+  }, []);
+
+  const handleCreateLabel = async () => {
+    const name = labelForm.name.trim();
+    if (!name) { toast({ title: "Informe o nome da etiqueta", variant: "destructive" }); return; }
+    setSavingLabel(true);
+    try {
+      await api.chat.labels.create({ name, color: labelForm.color });
+      setLabelForm({ name: "", color: LABEL_COLOR_PRESETS[0] });
+      await fetchLabels();
+      toast({ title: "Etiqueta criada" });
+    } catch { toast({ title: "Erro ao criar etiqueta", variant: "destructive" }); }
+    finally { setSavingLabel(false); }
+  };
+
+  const handleDeleteLabel = async (id: number) => {
+    try {
+      await api.chat.labels.remove(id);
+      await fetchLabels();
+    } catch { toast({ title: "Erro ao excluir etiqueta", variant: "destructive" }); }
+  };
 
   useEffect(() => { setShowParticipantPicker(false); setCrmContactId(null); }, [activeId]);
 
@@ -579,14 +611,21 @@ export default function ChatCenter() {
         {/* Filters */}
         {showFilter && (
           <div className="px-3 py-2 bg-[#ededed] border-b border-border space-y-2">
-            <div className="flex gap-1 flex-wrap">
-              {LABELS_OPTIONS.slice(0, 4).map((l) => (
-                <button key={l} onClick={() => setLabelFilter(labelFilter === l ? "" : l)}
-                  className={`text-xs px-2 py-0.5 rounded-full transition border ${labelFilter === l ? "bg-primary/20 text-primary border-primary/30" : "bg-white border-border text-muted-foreground hover:bg-secondary"}`}>
-                  {l}
-                </button>
-              ))}
-            </div>
+            {labels.length === 0 ? (
+              <p className="text-xs text-muted-foreground">Nenhuma etiqueta criada.</p>
+            ) : (
+              <div className="flex gap-1 flex-wrap">
+                {labels.map((l) => (
+                  <button key={l.id} onClick={() => setLabelFilter(labelFilter === l.name ? "" : l.name)}
+                    className="text-xs px-2 py-0.5 rounded-full transition border"
+                    style={labelFilter === l.name
+                      ? { backgroundColor: `${l.color}22`, color: l.color, borderColor: `${l.color}55` }
+                      : { backgroundColor: "#fff", color: "#6b7280", borderColor: "#e5e7eb" }}>
+                    {l.name}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -691,14 +730,24 @@ export default function ChatCenter() {
                   <Tag className="w-3 h-3" /> Etiquetas
                 </button>
                 {showLabelPicker && (
-                  <div className="absolute right-0 top-9 bg-white border border-border rounded-xl shadow-lg z-20 p-2 min-w-[160px]">
-                    {LABELS_OPTIONS.map((label) => (
-                      <button key={label} onClick={() => handleLabel(label)}
-                        className={`w-full text-left text-xs px-3 py-1.5 rounded-lg flex items-center gap-2 transition ${currentLabels.includes(label) ? "bg-primary/10 text-primary font-semibold" : "hover:bg-secondary text-foreground"}`}>
-                        <span className={`w-2 h-2 rounded-full ${currentLabels.includes(label) ? "bg-primary" : "bg-gray-300"}`} />
-                        {label}
+                  <div className="absolute right-0 top-9 bg-white border border-border rounded-xl shadow-lg z-20 p-2 min-w-[180px]">
+                    {labels.length === 0 ? (
+                      <p className="text-xs text-muted-foreground px-3 py-2">Nenhuma etiqueta criada.</p>
+                    ) : (
+                      labels.map((label) => (
+                        <button key={label.id} onClick={() => handleLabel(label.name)}
+                          className={`w-full text-left text-xs px-3 py-1.5 rounded-lg flex items-center gap-2 transition ${currentLabels.includes(label.name) ? "bg-primary/10 text-primary font-semibold" : "hover:bg-secondary text-foreground"}`}>
+                          <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: label.color }} />
+                          {label.name}
+                        </button>
+                      ))
+                    )}
+                    {(user?.role === "admin" || user?.role === "supervisor") && (
+                      <button onClick={() => { setShowLabelPicker(false); setShowLabelManager(true); }}
+                        className="w-full text-left text-xs px-3 py-1.5 mt-1 rounded-lg flex items-center gap-2 transition border-t border-border pt-2 text-primary hover:bg-secondary">
+                        <Settings2 className="w-3 h-3" /> Gerenciar etiquetas
                       </button>
-                    ))}
+                    )}
                   </div>
                 )}
               </div>
@@ -961,6 +1010,59 @@ export default function ChatCenter() {
           onContactUpdated={() => {}}
           sectors={sectors}
         />
+      )}
+
+      {/* ── Etiquetas manager modal ────────────────────────────────────── */}
+      {showLabelManager && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl w-full max-w-md p-6 shadow-xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-bold flex items-center gap-2"><Tag className="w-4 h-4 text-primary" /> Gerenciar Etiquetas</h3>
+              <button onClick={() => setShowLabelManager(false)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+
+            {/* Create form */}
+            <div className="bg-secondary/50 rounded-xl p-3 mb-4 space-y-2">
+              <label className="text-xs font-medium block">Nova etiqueta</label>
+              <input value={labelForm.name}
+                onChange={(e) => setLabelForm({ ...labelForm, name: e.target.value })}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void handleCreateLabel(); } }}
+                placeholder="Ex.: VIP, Urgente, Promoção…"
+                className="w-full px-3 py-2 rounded-xl border border-border text-sm outline-none focus:ring-2 focus:ring-primary/30" />
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {LABEL_COLOR_PRESETS.map((c) => (
+                  <button key={c} type="button" onClick={() => setLabelForm({ ...labelForm, color: c })}
+                    className={`w-6 h-6 rounded-full border-2 transition ${labelForm.color === c ? "border-foreground scale-110" : "border-transparent"}`}
+                    style={{ backgroundColor: c }} aria-label={`Cor ${c}`} />
+                ))}
+              </div>
+              <button onClick={handleCreateLabel} disabled={savingLabel}
+                className="w-full flex items-center justify-center gap-1.5 text-sm font-medium px-3 py-2 rounded-xl bg-primary text-white hover:opacity-90 transition disabled:opacity-50">
+                <Plus className="w-4 h-4" /> {savingLabel ? "Salvando…" : "Adicionar etiqueta"}
+              </button>
+            </div>
+
+            {/* Existing labels */}
+            <div className="space-y-1.5 max-h-64 overflow-y-auto">
+              {labels.length === 0 ? (
+                <p className="text-xs text-muted-foreground text-center py-4">Nenhuma etiqueta criada ainda.</p>
+              ) : (
+                labels.map((l) => (
+                  <div key={l.id} className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl border border-border">
+                    <span className="flex items-center gap-2 text-sm">
+                      <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: l.color }} />
+                      {l.name}
+                    </span>
+                    <button onClick={() => handleDeleteLabel(l.id)}
+                      className="text-muted-foreground hover:text-red-600 transition" title="Excluir etiqueta">
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ── New conversation modal ─────────────────────────────────────── */}

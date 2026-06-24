@@ -153,6 +153,15 @@ export type Conversation = {
   participants: { id: number; name: string }[];
 };
 
+export type ChatLabel = {
+  id: number;
+  name: string;
+  color: string;
+  sortOrder: number;
+  isActive: boolean;
+  createdAt: string;
+};
+
 export type RoutingRule = {
   id: number;
   sectorId: number;
@@ -248,6 +257,14 @@ export const api = {
         req<{ ok: boolean }>(`/chat/conversations/${convId}/participants`, { method: "POST", body: JSON.stringify({ userId }) }),
       remove: (convId: number, userId: number) =>
         req<{ ok: boolean }>(`/chat/conversations/${convId}/participants/${userId}`, { method: "DELETE" }),
+    },
+    labels: {
+      list: () => req<ChatLabel[]>("/chat/labels"),
+      create: (data: { name: string; color?: string; sortOrder?: number }) =>
+        req<ChatLabel>("/chat/labels", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<{ name: string; color: string; sortOrder: number; isActive: boolean }>) =>
+        req<ChatLabel>(`/chat/labels/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/chat/labels/${id}`, { method: "DELETE" }),
     },
   },
   chatUsers: () => req<{ id: number; name: string; role: string }[]>("/chat/users"),
