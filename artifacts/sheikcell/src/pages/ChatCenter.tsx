@@ -24,10 +24,10 @@ const STATUS_LABELS: Record<string, string> = {
 // ATIVOS: já em atendimento por um vendedor (possuem responsável)
 type Category = "potenciais" | "pendentes" | "ativos" | "resolvidas";
 const CATEGORIES: { id: Category; label: string; help: string; color: string }[] = [
-  { id: "potenciais", label: "Potenciais", help: "Números novos — serão triados pela IA", color: "#8b5cf6" },
-  { id: "pendentes", label: "Pendentes", help: "Já filtrados, na fila de atendimento", color: "#f59e0b" },
-  { id: "ativos", label: "Ativos", help: "Em atendimento pelos vendedores", color: "#16a34a" },
   { id: "resolvidas", label: "Resolvidas", help: "Atendimentos finalizados", color: "#6b7280" },
+  { id: "ativos", label: "Ativos", help: "Em atendimento pelos vendedores", color: "#16a34a" },
+  { id: "pendentes", label: "Pendentes", help: "Já filtrados, na fila de atendimento", color: "#f59e0b" },
+  { id: "potenciais", label: "Potenciais", help: "Números novos — serão triados pela IA", color: "#8b5cf6" },
 ];
 
 function conversationCategory(c: Conversation): Category {
