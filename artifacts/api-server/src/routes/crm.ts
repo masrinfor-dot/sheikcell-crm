@@ -2,6 +2,7 @@ import { Router, type IRouter } from "express";
 import { db, crmContactsTable, crmPurchasesTable, crmInternalNotesTable, sectorsTable, usersTable, attendanceLogsTable } from "@workspace/db";
 import { eq, and, desc, ilike, or } from "drizzle-orm";
 import { requireAuth } from "../middlewares/auth";
+import type { Request } from "express";
 
 const router: IRouter = Router();
 
@@ -18,6 +19,38 @@ async function enrichContact(c: typeof crmContactsTable.$inferSelect) {
   };
 }
 
+/**
+ * Returns true if the caller is allowed to access a contact that belongs to
+ * the given sectorId. Admins have global access; all other roles are pinned
+ * to their own sector.
+ */
+function callerCanAccessSector(session: Request["session"], contactSectorId: number | null): boolean {
+  if (session.userRole === "admin") return true;
+  return contactSectorId === (session.userSectorId ?? null);
+}
+
+/**
+ * Fetches a contact by id, checks that it is not archived, and verifies that
+ * the caller is allowed to access its sector. Returns the contact on success
+ * or sends the appropriate error response and returns null.
+ */
+async function loadContactWithAccess(
+  id: number,
+  session: Request["session"],
+  res: Parameters<Parameters<typeof router.get>[1]>[1],
+): Promise<typeof crmContactsTable.$inferSelect | null> {
+  const [c] = await db.select().from(crmContactsTable).where(eq(crmContactsTable.id, id));
+  if (!c || c.isArchived) {
+    res.status(404).json({ error: "Contato não encontrado" });
+    return null;
+  }
+  if (!callerCanAccessSector(session, c.sectorId)) {
+    res.status(403).json({ error: "Acesso negado" });
+    return null;
+  }
+  return c;
+}
+
 // ─── SPECIFIC routes FIRST (before /:id) ──────────────────────────────────
 
 // Auto-register from queue / chat (POST /crm/auto-register before POST /crm/:id)
@@ -26,17 +59,33 @@ router.post("/crm/auto-register", requireAuth, async (req, res): Promise<void> =
     name?: string; phone?: string; contact?: string; sectorId?: number;
   };
   if (!name) { res.status(400).json({ error: "Nome é obrigatório" }); return; }
+
+  const userRole = req.session.userRole!;
+  const userSectorId = req.session.userSectorId ?? null;
+  // Non-admins are pinned to their own sector; they cannot specify a different one.
+  const effectiveSectorId = userRole === "admin" ? (sectorId ?? null) : userSectorId;
+
   const normalizedPhone = (phone ?? contact ?? "").replace(/\D/g, "");
   let existing: typeof crmContactsTable.$inferSelect | undefined;
   if (normalizedPhone) {
-    const rows = await db.select().from(crmContactsTable)
-      .where(and(eq(crmContactsTable.isArchived, false), eq(crmContactsTable.phone, normalizedPhone)));
+    // Scope the lookup to the caller's sector for non-admins so they cannot
+    // probe for contacts in other sectors via phone number.
+    const phoneConditions = userRole === "admin"
+      ? and(eq(crmContactsTable.isArchived, false), eq(crmContactsTable.phone, normalizedPhone))
+      : and(eq(crmContactsTable.isArchived, false), eq(crmContactsTable.phone, normalizedPhone), eq(crmContactsTable.sectorId, effectiveSectorId!));
+    const rows = await db.select().from(crmContactsTable).where(phoneConditions);
     existing = rows[0];
   }
-  if (existing) { res.json({ ...await enrichContact(existing), created: false }); return; }
+  if (existing) {
+    // Sector gate: deny if caller cannot access the matched contact's sector.
+    if (!callerCanAccessSector(req.session, existing.sectorId)) {
+      res.status(403).json({ error: "Acesso negado" }); return;
+    }
+    res.json({ ...await enrichContact(existing), created: false }); return;
+  }
   const [created] = await db.insert(crmContactsTable).values({
     name, contact: contact ?? phone, phone: normalizedPhone || null,
-    sectorId: sectorId ?? null, status: "potential", profile: "Novo",
+    sectorId: effectiveSectorId, status: "potential", profile: "Novo",
   }).returning();
   res.status(201).json({ ...await enrichContact(created), created: true });
 });
@@ -47,6 +96,11 @@ router.delete("/crm/purchases/:purchaseId", requireAuth, async (req, res): Promi
   if (isNaN(purchaseId)) { res.status(400).json({ error: "ID inválido" }); return; }
   const [p] = await db.select().from(crmPurchasesTable).where(eq(crmPurchasesTable.id, purchaseId));
   if (!p) { res.status(404).json({ error: "Compra não encontrada" }); return; }
+  // Verify caller can access the owning contact's sector before deleting.
+  const [contact] = await db.select().from(crmContactsTable).where(eq(crmContactsTable.id, p.contactId));
+  if (!contact || !callerCanAccessSector(req.session, contact.sectorId)) {
+    res.status(403).json({ error: "Acesso negado" }); return;
+  }
   await db.delete(crmPurchasesTable).where(eq(crmPurchasesTable.id, purchaseId));
   const all = await db.select().from(crmPurchasesTable).where(eq(crmPurchasesTable.contactId, p.contactId));
   const total = all.reduce((s, p2) => s + parseFloat(String(p2.amount ?? "0")), 0);
@@ -58,6 +112,13 @@ router.delete("/crm/purchases/:purchaseId", requireAuth, async (req, res): Promi
 router.delete("/crm/notes/:noteId", requireAuth, async (req, res): Promise<void> => {
   const noteId = parseInt(String(req.params.noteId), 10);
   if (isNaN(noteId)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const [note] = await db.select().from(crmInternalNotesTable).where(eq(crmInternalNotesTable.id, noteId));
+  if (!note) { res.status(404).json({ error: "Nota não encontrada" }); return; }
+  // Verify caller can access the owning contact's sector before deleting.
+  const [contact] = await db.select().from(crmContactsTable).where(eq(crmContactsTable.id, note.contactId));
+  if (!contact || !callerCanAccessSector(req.session, contact.sectorId)) {
+    res.status(403).json({ error: "Acesso negado" }); return;
+  }
   await db.delete(crmInternalNotesTable).where(eq(crmInternalNotesTable.id, noteId));
   res.json({ ok: true });
 });
@@ -111,10 +172,11 @@ router.post("/crm", requireAuth, async (req, res): Promise<void> => {
   if (!name) { res.status(400).json({ error: "Nome é obrigatório" }); return; }
   const userRole = req.session.userRole!;
   const userSectorId = req.session.userSectorId ?? null;
-  const effectiveSectorId = sectorId ?? (userRole !== "admin" ? userSectorId ?? undefined : undefined);
+  // Non-admins are pinned to their own sector; the caller-supplied sectorId is ignored.
+  const effectiveSectorId = userRole === "admin" ? (sectorId ?? null) : userSectorId;
   const [created] = await db.insert(crmContactsTable).values({
     name, contact, phone, email,
-    sectorId: effectiveSectorId ?? null,
+    sectorId: effectiveSectorId,
     attendantId: attendantId ?? null,
     status: status ?? "potential",
     profile: profile ?? "Novo",
@@ -127,8 +189,8 @@ router.post("/crm", requireAuth, async (req, res): Promise<void> => {
 router.get("/crm/:id", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const [c] = await db.select().from(crmContactsTable).where(eq(crmContactsTable.id, id));
-  if (!c || c.isArchived) { res.status(404).json({ error: "Contato não encontrado" }); return; }
+  const c = await loadContactWithAccess(id, req.session, res);
+  if (!c) return;
   res.json(await enrichContact(c));
 });
 
@@ -136,13 +198,9 @@ router.get("/crm/:id", requireAuth, async (req, res): Promise<void> => {
 router.patch("/crm/:id", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const [existing] = await db.select().from(crmContactsTable).where(eq(crmContactsTable.id, id));
-  if (!existing) { res.status(404).json({ error: "Contato não encontrado" }); return; }
+  const existing = await loadContactWithAccess(id, req.session, res);
+  if (!existing) return;
   const userRole = req.session.userRole!;
-  const userSectorId = req.session.userSectorId ?? null;
-  if (userRole !== "admin" && existing.sectorId !== userSectorId) {
-    res.status(403).json({ error: "Acesso negado" }); return;
-  }
   const { name, contact, phone, email, sectorId, attendantId, status, profile, notes, tags, isArchived } = req.body as {
     name?: string; contact?: string; phone?: string; email?: string; sectorId?: number;
     attendantId?: number; status?: string; profile?: string; notes?: string; tags?: string; isArchived?: boolean;
@@ -152,7 +210,8 @@ router.patch("/crm/:id", requireAuth, async (req, res): Promise<void> => {
   if (contact !== undefined) update.contact = contact;
   if (phone !== undefined) update.phone = phone;
   if (email !== undefined) update.email = email;
-  if (sectorId !== undefined) update.sectorId = sectorId;
+  // Only admins may reassign a contact to a different sector.
+  if (sectorId !== undefined && userRole === "admin") update.sectorId = sectorId;
   if (attendantId !== undefined) update.attendantId = attendantId;
   if (status !== undefined) update.status = status;
   if (profile !== undefined) update.profile = profile;
@@ -167,6 +226,8 @@ router.patch("/crm/:id", requireAuth, async (req, res): Promise<void> => {
 router.delete("/crm/:id", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const existing = await loadContactWithAccess(id, req.session, res);
+  if (!existing) return;
   await db.update(crmContactsTable).set({ isArchived: true }).where(eq(crmContactsTable.id, id));
   res.json({ ok: true });
 });
@@ -175,6 +236,8 @@ router.delete("/crm/:id", requireAuth, async (req, res): Promise<void> => {
 router.get("/crm/:id/purchases", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const c = await loadContactWithAccess(id, req.session, res);
+  if (!c) return;
   const purchases = await db.select().from(crmPurchasesTable)
     .where(eq(crmPurchasesTable.contactId, id))
     .orderBy(desc(crmPurchasesTable.purchaseDate));
@@ -184,6 +247,8 @@ router.get("/crm/:id/purchases", requireAuth, async (req, res): Promise<void> =>
 router.post("/crm/:id/purchases", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const c = await loadContactWithAccess(id, req.session, res);
+  if (!c) return;
   const { description, amount, purchaseDate, category, notes } = req.body as {
     description?: string; amount?: string | number; purchaseDate?: string; category?: string; notes?: string;
   };
@@ -208,6 +273,8 @@ router.post("/crm/:id/purchases", requireAuth, async (req, res): Promise<void> =
 router.get("/crm/:id/notes", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const c = await loadContactWithAccess(id, req.session, res);
+  if (!c) return;
   const notes = await db.select().from(crmInternalNotesTable)
     .where(eq(crmInternalNotesTable.contactId, id))
     .orderBy(desc(crmInternalNotesTable.createdAt));
@@ -217,6 +284,8 @@ router.get("/crm/:id/notes", requireAuth, async (req, res): Promise<void> => {
 router.post("/crm/:id/notes", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const c = await loadContactWithAccess(id, req.session, res);
+  if (!c) return;
   const { content } = req.body as { content?: string };
   if (!content) { res.status(400).json({ error: "Conteúdo é obrigatório" }); return; }
   const [note] = await db.insert(crmInternalNotesTable).values({
@@ -232,15 +301,24 @@ router.post("/crm/:id/notes", requireAuth, async (req, res): Promise<void> => {
 router.get("/crm/:id/service-history", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const [contact] = await db.select().from(crmContactsTable).where(eq(crmContactsTable.id, id));
-  if (!contact) { res.status(404).json({ error: "Contato não encontrado" }); return; }
+  const contact = await loadContactWithAccess(id, req.session, res);
+  if (!contact) return;
   const phone = contact.phone ?? contact.contact ?? "";
+  const userRole = req.session.userRole!;
+  const userSectorId = req.session.userSectorId ?? null;
+
+  // Build identity match: logs that belong to this customer by phone or name.
+  const identityMatch = phone
+    ? or(ilike(attendanceLogsTable.clientContact, `%${phone.slice(-8)}%`), ilike(attendanceLogsTable.clientName, `%${contact.name}%`))
+    : ilike(attendanceLogsTable.clientName, `%${contact.name}%`);
+
+  // Non-admins must only see logs from their own sector.
+  const whereClause = (userRole !== "admin" && userSectorId !== null)
+    ? and(identityMatch, eq(attendanceLogsTable.sectorId, userSectorId))
+    : identityMatch;
+
   const logs = await db.select().from(attendanceLogsTable)
-    .where(
-      phone
-        ? or(ilike(attendanceLogsTable.clientContact, `%${phone.slice(-8)}%`), ilike(attendanceLogsTable.clientName, `%${contact.name}%`))
-        : ilike(attendanceLogsTable.clientName, `%${contact.name}%`)
-    )
+    .where(whereClause)
     .orderBy(desc(attendanceLogsTable.createdAt))
     .limit(50);
   res.json(logs);
