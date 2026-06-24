@@ -5,3 +5,4 @@
 - [Baileys DB auth state](baileys-db-auth.md) — whatsapp-bridge uses Baileys with PostgreSQL-backed auth state; auth keys in whatsapp_auth_state table; session status cached in whatsapp_sessions
 - [Atendimento categories](atendimento-categories.md) — ChatCenter buckets convs into Potenciais/Pendentes/Ativos/Resolvidas from status+assignee (no new column); claim endpoint self-assigns (must reject takeover)
 - [WhatsApp inbound flow](whatsapp-inbound.md) — bridge messages.upsert → /chat/webhook/whatsapp is the make-or-break path; bridge-secret webhook allowed in prod (Baileys-only); never fail-closed it
+- [CRM custom fields](crm-custom-fields.md) — user-defined fields: defs in crm_custom_fields table, values in crm_contacts.customFields jsonb keyed by field id (string); sanitize on write, cfValue() on read

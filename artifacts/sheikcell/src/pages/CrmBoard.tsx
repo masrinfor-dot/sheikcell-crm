@@ -1,13 +1,21 @@
 import { useState, useEffect, useCallback } from "react";
-import { api, type CrmContact, type Sector } from "@/lib/api";
+import { api, type CrmContact, type Sector, type CrmCustomField, type CrmCustomFieldType } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import CrmContactDetail from "@/components/CrmContactDetail";
 import {
   Plus, X, Phone, Tag, StickyNote, RefreshCw, Archive,
   ChevronRight, ChevronLeft, Crown, Star, UserPlus, UserMinus,
-  Search, Filter, ExternalLink, ShoppingBag,
+  Search, Filter, ExternalLink, ShoppingBag, SlidersHorizontal, Trash2, GripVertical,
 } from "lucide-react";
+
+const FIELD_TYPES: { value: CrmCustomFieldType; label: string }[] = [
+  { value: "text", label: "Texto" },
+  { value: "number", label: "Número" },
+  { value: "date", label: "Data" },
+  { value: "select", label: "Lista de opções" },
+  { value: "textarea", label: "Texto longo" },
+];
 
 const COLUMNS = [
   { key: "potential" as const, label: "Potenciais", color: "bg-purple-500", light: "bg-purple-50", border: "border-purple-200", text: "text-purple-700" },
@@ -182,6 +190,8 @@ export default function CrmBoard() {
   const [filterProfile, setFilterProfile] = useState<string>("");
   const [detailId, setDetailId] = useState<number | null>(null);
   const [autoImporting, setAutoImporting] = useState(false);
+  const [showFieldsManager, setShowFieldsManager] = useState(false);
+  const canManageFields = user?.role === "admin" || user?.role === "supervisor";
 
   const fetchContacts = useCallback(async () => {
     try {
@@ -301,6 +311,12 @@ export default function CrmBoard() {
             className="p-2 text-muted-foreground hover:text-foreground rounded-xl hover:bg-secondary transition">
             <RefreshCw className="w-4 h-4" />
           </button>
+          {canManageFields && (
+            <button onClick={() => setShowFieldsManager(true)} data-testid="button-crm-custom-fields"
+              className="flex items-center gap-1.5 px-3 py-2 border border-border rounded-xl text-xs font-medium text-muted-foreground hover:bg-secondary transition">
+              <SlidersHorizontal className="w-3.5 h-3.5" /> Campos
+            </button>
+          )}
           <button onClick={openAdd} data-testid="button-crm-add"
             className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition">
             <Plus className="w-3.5 h-3.5" /> Novo Contato
@@ -471,6 +487,136 @@ export default function CrmBoard() {
           sectors={sectors}
         />
       )}
+
+      {/* Custom Fields Manager */}
+      {showFieldsManager && (
+        <CustomFieldsManager onClose={() => setShowFieldsManager(false)} />
+      )}
+    </div>
+  );
+}
+
+function CustomFieldsManager({ onClose }: { onClose: () => void }) {
+  const { toast } = useToast();
+  const [fields, setFields] = useState<CrmCustomField[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [draft, setDraft] = useState<{ name: string; type: CrmCustomFieldType; options: string }>({
+    name: "", type: "text", options: "",
+  });
+
+  const load = useCallback(async () => {
+    try { setFields(await api.crm.customFields.list()); }
+    catch { toast({ title: "Erro ao carregar campos", variant: "destructive" }); }
+    finally { setLoading(false); }
+  }, [toast]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!draft.name.trim()) return;
+    setSaving(true);
+    try {
+      const created = await api.crm.customFields.create({
+        name: draft.name.trim(),
+        type: draft.type,
+        options: draft.type === "select" ? draft.options : undefined,
+        sortOrder: fields.length,
+      });
+      setFields((prev) => [...prev, created]);
+      setDraft({ name: "", type: "text", options: "" });
+      toast({ title: "Campo criado!" });
+    } catch (err: unknown) {
+      toast({ title: "Erro", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
+    setSaving(false);
+  };
+
+  const handleToggle = async (f: CrmCustomField) => {
+    try {
+      const updated = await api.crm.customFields.update(f.id, { isActive: !f.isActive });
+      setFields((prev) => prev.map((x) => x.id === f.id ? updated : x));
+    } catch { toast({ title: "Erro ao atualizar campo", variant: "destructive" }); }
+  };
+
+  const handleDelete = async (id: number) => {
+    if (!confirm("Excluir este campo? Os valores já preenchidos nos clientes deixarão de aparecer.")) return;
+    try {
+      await api.crm.customFields.remove(id);
+      setFields((prev) => prev.filter((x) => x.id !== id));
+      toast({ title: "Campo excluído" });
+    } catch { toast({ title: "Erro ao excluir campo", variant: "destructive" }); }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div className="shk-card w-full max-w-md p-6 max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="font-bold flex items-center gap-2"><SlidersHorizontal className="w-4 h-4" /> Campos personalizados</h3>
+          <button onClick={onClose}><X className="w-5 h-5 text-muted-foreground" /></button>
+        </div>
+        <p className="text-xs text-muted-foreground mb-4">Crie campos para personalizar os dados dos clientes. Eles aparecem na ficha de cada cliente.</p>
+
+        {/* Existing fields */}
+        <div className="space-y-2 mb-5">
+          {loading ? (
+            <div className="h-12 rounded-xl bg-secondary/60 animate-pulse" />
+          ) : fields.length === 0 ? (
+            <p className="text-sm text-muted-foreground text-center py-4">Nenhum campo criado ainda</p>
+          ) : (
+            fields.map((f) => (
+              <div key={f.id} className="flex items-center gap-2 bg-secondary/50 rounded-xl px-3 py-2.5 border border-border">
+                <GripVertical className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className={`text-sm font-medium truncate ${f.isActive ? "" : "line-through text-muted-foreground"}`}>{f.name}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {FIELD_TYPES.find((t) => t.value === f.type)?.label ?? f.type}
+                    {f.type === "select" && f.options ? ` · ${f.options}` : ""}
+                  </p>
+                </div>
+                <button onClick={() => handleToggle(f)}
+                  className={`text-xs px-2 py-1 rounded-lg border transition ${f.isActive ? "border-green-300 text-green-700 bg-green-50" : "border-border text-muted-foreground"}`}>
+                  {f.isActive ? "Ativo" : "Inativo"}
+                </button>
+                <button onClick={() => handleDelete(f.id)} className="p-1.5 rounded-lg text-muted-foreground hover:text-red-600 hover:bg-red-50 transition">
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* New field form */}
+        <form onSubmit={handleCreate} className="space-y-3 border-t border-border pt-4">
+          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Novo campo</p>
+          <div>
+            <label className="text-xs font-medium mb-1 block">Nome do campo *</label>
+            <input required value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+              placeholder="Ex: CPF, Data de nascimento, Modelo do aparelho" data-testid="input-field-name"
+              className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+          </div>
+          <div>
+            <label className="text-xs font-medium mb-1 block">Tipo</label>
+            <select value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value as CrmCustomFieldType })}
+              className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+              {FIELD_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+            </select>
+          </div>
+          {draft.type === "select" && (
+            <div>
+              <label className="text-xs font-medium mb-1 block">Opções (separadas por vírgula)</label>
+              <input value={draft.options} onChange={(e) => setDraft({ ...draft, options: e.target.value })}
+                placeholder="Ex: Pequeno, Médio, Grande"
+                className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+            </div>
+          )}
+          <button type="submit" disabled={saving} data-testid="button-field-create"
+            className="w-full py-2.5 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition disabled:opacity-60 flex items-center justify-center gap-2">
+            <Plus className="w-4 h-4" /> {saving ? "Criando…" : "Adicionar campo"}
+          </button>
+        </form>
+      </div>
     </div>
   );
 }

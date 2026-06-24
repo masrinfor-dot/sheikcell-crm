@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   api, type CrmContact, type CrmPurchase, type CrmInternalNote,
-  type AttendanceLog, type Sector,
+  type AttendanceLog, type Sector, type CrmCustomField,
 } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -43,6 +43,12 @@ function fmtDateTime(iso: string) {
   return new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+// Safely reads a custom-field value as a trimmed string, tolerating legacy/non-string jsonb values.
+function cfValue(fields: Record<string, string> | null | undefined, id: number): string {
+  const raw = fields?.[String(id)];
+  return typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+}
+
 type Tab = "overview" | "purchases" | "history" | "notes";
 
 interface Props {
@@ -65,6 +71,10 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState({ name: "", contact: "", phone: "", email: "", notes: "", tags: "", sectorId: "", profile: "Novo" as CrmContact["profile"] });
 
+  // Custom fields
+  const [customDefs, setCustomDefs] = useState<CrmCustomField[]>([]);
+  const [customValues, setCustomValues] = useState<Record<string, string>>({});
+
   // Purchase form
   const [showPurchaseForm, setShowPurchaseForm] = useState(false);
   const [purchaseForm, setPurchaseForm] = useState({ description: "", amount: "", category: "Celular", notes: "", purchaseDate: new Date().toISOString().slice(0, 10) });
@@ -83,11 +93,16 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
         email: c.email ?? "", notes: c.notes ?? "", tags: c.tags ?? "",
         sectorId: c.sectorId ? String(c.sectorId) : "", profile: c.profile,
       });
+      setCustomValues(c.customFields ?? {});
     } catch { toast({ title: "Erro ao carregar contato", variant: "destructive" }); }
     finally { setLoading(false); }
   }, [contactId, toast]);
 
   useEffect(() => { loadContact(); }, [loadContact]);
+
+  useEffect(() => {
+    api.crm.customFields.list().then((f) => setCustomDefs(f.filter((d) => d.isActive))).catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (tab === "purchases") api.crm.purchases.list(contactId).then(setPurchases).catch(() => {});
@@ -104,8 +119,10 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
         notes: editForm.notes || undefined, tags: editForm.tags || undefined,
         sectorId: editForm.sectorId ? Number(editForm.sectorId) : undefined,
         profile: editForm.profile,
+        customFields: customValues,
       });
       setContact(updated);
+      setCustomValues(updated.customFields ?? {});
       onContactUpdated(updated);
       setEditing(false);
       toast({ title: "Contato atualizado!" });
@@ -345,6 +362,35 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
                       <textarea value={editForm.notes} onChange={(e) => setEditForm({ ...editForm, notes: e.target.value })}
                         rows={3} className="w-full px-3 py-2 rounded-xl border border-border text-sm resize-none focus:outline-none focus:ring-2 focus:ring-primary/30" />
                     </div>
+                    {customDefs.length > 0 && (
+                      <div className="space-y-2.5 pt-2 border-t border-border">
+                        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Campos personalizados</p>
+                        {customDefs.map((def) => {
+                          const raw = customValues[String(def.id)];
+                          const val = typeof raw === "string" ? raw : raw == null ? "" : String(raw);
+                          const set = (v: string) => setCustomValues((prev) => ({ ...prev, [String(def.id)]: v }));
+                          const cls = "w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30";
+                          return (
+                            <div key={def.id}>
+                              <label className="text-xs text-muted-foreground mb-1 block">{def.name}</label>
+                              {def.type === "textarea" ? (
+                                <textarea value={val} onChange={(e) => set(e.target.value)} rows={2} className={`${cls} resize-none`} />
+                              ) : def.type === "select" ? (
+                                <select value={val} onChange={(e) => set(e.target.value)} className={cls}>
+                                  <option value="">— Selecione —</option>
+                                  {(def.options ?? "").split(",").map((o) => o.trim()).filter(Boolean).map((o) => (
+                                    <option key={o} value={o}>{o}</option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <input type={def.type === "number" ? "number" : def.type === "date" ? "date" : "text"}
+                                  value={val} onChange={(e) => set(e.target.value)} className={cls} />
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                     <button onClick={handleSaveEdit}
                       className="w-full py-2.5 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition flex items-center justify-center gap-2">
                       <Check className="w-4 h-4" /> Salvar alterações
@@ -374,7 +420,22 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
                     {contact.notes && (
                       <p className="text-sm text-muted-foreground italic pt-1">{contact.notes}</p>
                     )}
-                    {!contact.contact && !contact.email && !contact.tags && !contact.notes && (
+                    {customDefs.filter((d) => cfValue(contact.customFields, d.id)).length > 0 && (
+                      <div className="pt-2 mt-1 border-t border-border space-y-1.5">
+                        {customDefs.map((d) => {
+                          const v = cfValue(contact.customFields, d.id);
+                          if (!v) return null;
+                          return (
+                            <div key={d.id} className="flex items-start gap-2 text-sm">
+                              <span className="text-xs text-muted-foreground shrink-0 min-w-[90px]">{d.name}:</span>
+                              <span className="font-medium break-words">{v}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {!contact.contact && !contact.email && !contact.tags && !contact.notes &&
+                      customDefs.filter((d) => cfValue(contact.customFields, d.id)).length === 0 && (
                       <p className="text-sm text-muted-foreground">Nenhuma informação adicional</p>
                     )}
                   </div>

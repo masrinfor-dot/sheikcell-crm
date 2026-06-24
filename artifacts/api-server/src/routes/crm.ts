@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
-import { db, crmContactsTable, crmPurchasesTable, crmInternalNotesTable, sectorsTable, usersTable, attendanceLogsTable } from "@workspace/db";
-import { eq, and, desc, ilike, or } from "drizzle-orm";
-import { requireAuth } from "../middlewares/auth";
+import { db, crmContactsTable, crmPurchasesTable, crmInternalNotesTable, crmCustomFieldsTable, sectorsTable, usersTable, attendanceLogsTable } from "@workspace/db";
+import { eq, and, desc, asc, ilike, or } from "drizzle-orm";
+import { requireAuth, requireAdminOrSupervisor } from "../middlewares/auth";
 import type { Request } from "express";
 
 const router: IRouter = Router();
@@ -17,6 +17,24 @@ async function enrichContact(c: typeof crmContactsTable.$inferSelect) {
     sector: c.sectorId ? (sectorMap[c.sectorId] ?? null) : null,
     attendant: c.attendantId ? (userMap[c.attendantId] ?? null) : null,
   };
+}
+
+/**
+ * Normalizes a client-supplied customFields payload into a flat
+ * Record<string, string>. Non-object input becomes {}, and each value is
+ * coerced to a string (objects/arrays are dropped) so the stored jsonb always
+ * matches the typed shape and never crashes string-based rendering downstream.
+ */
+function sanitizeCustomFields(input: unknown): Record<string, string> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    if (value == null) continue;
+    if (typeof value === "string") out[key] = value;
+    else if (typeof value === "number" || typeof value === "boolean") out[key] = String(value);
+    // objects/arrays/functions are intentionally skipped
+  }
+  return out;
 }
 
 /**
@@ -123,6 +141,59 @@ router.delete("/crm/notes/:noteId", requireAuth, async (req, res): Promise<void>
   res.json({ ok: true });
 });
 
+// ─── Custom field definitions (before /crm/:id) ───────────────────────────
+// List all field definitions. Authenticated users can read; only admins and
+// supervisors can create/update/delete the definitions.
+router.get("/crm/custom-fields", requireAuth, async (_req, res): Promise<void> => {
+  const fields = await db
+    .select()
+    .from(crmCustomFieldsTable)
+    .orderBy(asc(crmCustomFieldsTable.sortOrder), asc(crmCustomFieldsTable.id));
+  res.json(fields);
+});
+
+router.post("/crm/custom-fields", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const { name, type, options, sortOrder } = req.body as {
+    name?: string; type?: string; options?: string; sortOrder?: number;
+  };
+  if (!name || !name.trim()) { res.status(400).json({ error: "Nome do campo é obrigatório" }); return; }
+  const allowed = ["text", "number", "date", "select", "textarea"];
+  const fieldType = allowed.includes(type ?? "") ? type! : "text";
+  const [created] = await db.insert(crmCustomFieldsTable).values({
+    name: name.trim(),
+    type: fieldType,
+    options: fieldType === "select" ? (options ?? null) : null,
+    sortOrder: sortOrder ?? 0,
+  }).returning();
+  res.status(201).json(created);
+});
+
+router.patch("/crm/custom-fields/:fieldId", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const fieldId = parseInt(String(req.params.fieldId), 10);
+  if (isNaN(fieldId)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const [existing] = await db.select().from(crmCustomFieldsTable).where(eq(crmCustomFieldsTable.id, fieldId));
+  if (!existing) { res.status(404).json({ error: "Campo não encontrado" }); return; }
+  const { name, type, options, sortOrder, isActive } = req.body as {
+    name?: string; type?: string; options?: string; sortOrder?: number; isActive?: boolean;
+  };
+  const allowed = ["text", "number", "date", "select", "textarea"];
+  const update: Record<string, unknown> = {};
+  if (name !== undefined) update.name = name.trim();
+  if (type !== undefined && allowed.includes(type)) update.type = type;
+  if (options !== undefined) update.options = options || null;
+  if (sortOrder !== undefined) update.sortOrder = sortOrder;
+  if (isActive !== undefined) update.isActive = isActive;
+  const [updated] = await db.update(crmCustomFieldsTable).set(update).where(eq(crmCustomFieldsTable.id, fieldId)).returning();
+  res.json(updated);
+});
+
+router.delete("/crm/custom-fields/:fieldId", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const fieldId = parseInt(String(req.params.fieldId), 10);
+  if (isNaN(fieldId)) { res.status(400).json({ error: "ID inválido" }); return; }
+  await db.delete(crmCustomFieldsTable).where(eq(crmCustomFieldsTable.id, fieldId));
+  res.json({ ok: true });
+});
+
 // ─── List contacts ─────────────────────────────────────────────────────────
 router.get("/crm", requireAuth, async (req, res): Promise<void> => {
   const userRole = req.session.userRole!;
@@ -165,9 +236,10 @@ router.get("/crm", requireAuth, async (req, res): Promise<void> => {
 
 // ─── Create contact ────────────────────────────────────────────────────────
 router.post("/crm", requireAuth, async (req, res): Promise<void> => {
-  const { name, contact, phone, email, sectorId, attendantId, status, profile, notes, tags } = req.body as {
+  const { name, contact, phone, email, sectorId, attendantId, status, profile, notes, tags, customFields } = req.body as {
     name?: string; contact?: string; phone?: string; email?: string;
     sectorId?: number; attendantId?: number; status?: string; profile?: string; notes?: string; tags?: string;
+    customFields?: Record<string, string>;
   };
   if (!name) { res.status(400).json({ error: "Nome é obrigatório" }); return; }
   const userRole = req.session.userRole!;
@@ -181,6 +253,7 @@ router.post("/crm", requireAuth, async (req, res): Promise<void> => {
     status: status ?? "potential",
     profile: profile ?? "Novo",
     notes, tags,
+    customFields: sanitizeCustomFields(customFields),
   }).returning();
   res.status(201).json(await enrichContact(created));
 });
@@ -201,9 +274,10 @@ router.patch("/crm/:id", requireAuth, async (req, res): Promise<void> => {
   const existing = await loadContactWithAccess(id, req.session, res);
   if (!existing) return;
   const userRole = req.session.userRole!;
-  const { name, contact, phone, email, sectorId, attendantId, status, profile, notes, tags, isArchived } = req.body as {
+  const { name, contact, phone, email, sectorId, attendantId, status, profile, notes, tags, customFields, isArchived } = req.body as {
     name?: string; contact?: string; phone?: string; email?: string; sectorId?: number;
-    attendantId?: number; status?: string; profile?: string; notes?: string; tags?: string; isArchived?: boolean;
+    attendantId?: number; status?: string; profile?: string; notes?: string; tags?: string;
+    customFields?: Record<string, string>; isArchived?: boolean;
   };
   const update: Record<string, unknown> = { updatedAt: new Date() };
   if (name !== undefined) update.name = name;
@@ -217,6 +291,7 @@ router.patch("/crm/:id", requireAuth, async (req, res): Promise<void> => {
   if (profile !== undefined) update.profile = profile;
   if (notes !== undefined) update.notes = notes;
   if (tags !== undefined) update.tags = tags;
+  if (customFields !== undefined) update.customFields = sanitizeCustomFields(customFields);
   if (isArchived !== undefined) update.isArchived = isArchived;
   const [updated] = await db.update(crmContactsTable).set(update).where(eq(crmContactsTable.id, id)).returning();
   res.json(await enrichContact(updated));

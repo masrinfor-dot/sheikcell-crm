@@ -88,11 +88,24 @@ export type CrmContact = {
   notes: string | null;
   tags: string | null;
   totalPurchases: string;
+  customFields: Record<string, string>;
   isArchived: boolean;
   createdAt: string;
   updatedAt: string;
   sector: Sector | null;
   attendant: { id: number; name: string } | null;
+};
+
+export type CrmCustomFieldType = "text" | "number" | "date" | "select" | "textarea";
+
+export type CrmCustomField = {
+  id: number;
+  name: string;
+  type: CrmCustomFieldType;
+  options: string | null;
+  sortOrder: number;
+  isActive: boolean;
+  createdAt: string;
 };
 
 export type CrmPurchase = {
@@ -272,6 +285,14 @@ export const api = {
       remove: (noteId: number) => req<{ ok: boolean }>(`/crm/notes/${noteId}`, { method: "DELETE" }),
     },
     serviceHistory: (contactId: number) => req<AttendanceLog[]>(`/crm/${contactId}/service-history`),
+    customFields: {
+      list: () => req<CrmCustomField[]>("/crm/custom-fields"),
+      create: (data: { name: string; type?: CrmCustomFieldType; options?: string; sortOrder?: number }) =>
+        req<CrmCustomField>("/crm/custom-fields", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<{ name: string; type: CrmCustomFieldType; options: string; sortOrder: number; isActive: boolean }>) =>
+        req<CrmCustomField>(`/crm/custom-fields/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/crm/custom-fields/${id}`, { method: "DELETE" }),
+    },
   },
   admin: {
     summary: () => req<SectorSummary[]>("/admin/summary"),
