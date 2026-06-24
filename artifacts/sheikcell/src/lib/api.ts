@@ -224,6 +224,8 @@ export const api = {
       req<Conversation>(`/chat/conversations/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     createConversation: (data: { phone: string; name: string; channel?: string; sectorId?: number }) =>
       req<Conversation>("/chat/conversations", { method: "POST", body: JSON.stringify(data) }),
+    claimConversation: (id: number) =>
+      req<Conversation>(`/chat/conversations/${id}/claim`, { method: "POST" }),
     participants: {
       add: (convId: number, userId: number) =>
         req<{ ok: boolean }>(`/chat/conversations/${convId}/participants`, { method: "POST", body: JSON.stringify({ userId }) }),

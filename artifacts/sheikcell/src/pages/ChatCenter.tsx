@@ -10,7 +10,6 @@ import {
 } from "lucide-react";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
-type StatusFilter = "all" | "open" | "pending" | "resolved";
 const LABELS_OPTIONS = ["VIP", "Urgente", "Promoção", "Suporte", "Pós-venda", "Aguardando"];
 const STATUS_COLORS: Record<string, string> = {
   open: "bg-green-500", pending: "bg-amber-400", resolved: "bg-gray-400",
@@ -18,6 +17,25 @@ const STATUS_COLORS: Record<string, string> = {
 const STATUS_LABELS: Record<string, string> = {
   open: "Aberto", pending: "Pendente", resolved: "Resolvido",
 };
+
+// ─── Atendimento categories ──────────────────────────────────────────────────
+// POTENCIAIS: números novos aguardando triagem (futura inteligência artificial)
+// PENDENTES: já filtrados, aguardando na fila de atendimento
+// ATIVOS: já em atendimento por um vendedor (possuem responsável)
+type Category = "potenciais" | "pendentes" | "ativos" | "resolvidas";
+const CATEGORIES: { id: Category; label: string; help: string; color: string }[] = [
+  { id: "potenciais", label: "Potenciais", help: "Números novos — serão triados pela IA", color: "#8b5cf6" },
+  { id: "pendentes", label: "Pendentes", help: "Já filtrados, na fila de atendimento", color: "#f59e0b" },
+  { id: "ativos", label: "Ativos", help: "Em atendimento pelos vendedores", color: "#16a34a" },
+  { id: "resolvidas", label: "Resolvidas", help: "Atendimentos finalizados", color: "#6b7280" },
+];
+
+function conversationCategory(c: Conversation): Category {
+  if (c.isArchived || c.status === "resolved" || c.status === "archived") return "resolvidas";
+  if (c.assigneeId != null) return "ativos";
+  if (c.status === "pending") return "pendentes";
+  return "potenciais"; // novos / abertos sem responsável
+}
 
 function channelIcon(ch: string) {
   if (ch === "whatsapp") return <Smartphone className="w-3 h-3 text-green-500" />;
@@ -206,7 +224,7 @@ export default function ChatCenter() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [category, setCategory] = useState<Category>("pendentes");
   const [labelFilter, setLabelFilter] = useState("");
   const [msgText, setMsgText] = useState("");
   const [loadingConvs, setLoadingConvs] = useState(true);
@@ -235,12 +253,11 @@ export default function ChatCenter() {
     try {
       const params: Parameters<typeof api.chat.conversations>[0] = {};
       if (search) params.search = search;
-      if (statusFilter !== "all") params.status = statusFilter;
       if (labelFilter) params.label = labelFilter;
       const data = await api.chat.conversations(params);
       setConvs(data);
     } catch { /* silent */ } finally { setLoadingConvs(false); }
-  }, [search, statusFilter, labelFilter]);
+  }, [search, labelFilter]);
 
   // ── Fetch messages ──
   const fetchMsgs = useCallback(async (id: number) => {
@@ -372,6 +389,26 @@ export default function ChatCenter() {
     } catch { toast({ title: "Erro ao atualizar", variant: "destructive" }); }
   };
 
+  // ── Potencial → Pendente (enviar para a fila de atendimento) ──
+  const handleMoveToQueue = async (id: number) => {
+    try {
+      await api.chat.updateConversation(id, { status: "pending" });
+      setConvs((prev) => prev.map((c) => c.id === id ? { ...c, status: "pending" } : c));
+      toast({ title: "Enviado para a fila de atendimento" });
+    } catch { toast({ title: "Erro ao enviar para a fila", variant: "destructive" }); }
+  };
+
+  // ── Pendente → Ativo (iniciar atendimento: assume a conversa) ──
+  const handleClaim = async (id: number) => {
+    try {
+      const updated = await api.chat.claimConversation(id);
+      setConvs((prev) => prev.map((c) => c.id === id
+        ? { ...c, ...updated, assignee: user ? { id: user.id, name: user.name } : c.assignee }
+        : c));
+      toast({ title: "Atendimento iniciado" });
+    } catch { toast({ title: "Erro ao iniciar atendimento", variant: "destructive" }); }
+  };
+
   // ── Transfer conversation to sector ──
   const handleTransfer = async (targetSectorId: number) => {
     if (!activeConv) return;
@@ -440,9 +477,17 @@ export default function ChatCenter() {
     }
   };
 
-  const filteredConvs = convs.filter((c) =>
+  const visibleConvs = convs.filter((c) =>
     !search || c.name.toLowerCase().includes(search.toLowerCase()) || c.phone.includes(search)
   );
+
+  const counts: Record<Category, number> = { potenciais: 0, pendentes: 0, ativos: 0, resolvidas: 0 };
+  for (const c of visibleConvs) {
+    counts[conversationCategory(c)]++;
+  }
+
+  const filteredConvs = visibleConvs.filter((c) => conversationCategory(c) === category);
+  const activeCategory = activeConv ? conversationCategory(activeConv) : null;
 
   const currentLabels = activeConv?.labels ? activeConv.labels.split(",").map((l) => l.trim()).filter(Boolean) : [];
 
@@ -483,17 +528,37 @@ export default function ChatCenter() {
           </div>
         </div>
 
+        {/* Category tabs: Potenciais / Pendentes / Ativos */}
+        <div className="flex border-b border-border bg-white">
+          {CATEGORIES.map((cat) => {
+            const isActive = category === cat.id;
+            return (
+              <button
+                key={cat.id}
+                onClick={() => setCategory(cat.id)}
+                title={cat.help}
+                data-testid={`tab-category-${cat.id}`}
+                className={`flex-1 flex flex-col items-center justify-center gap-0.5 py-2 px-1 text-xs font-semibold transition border-b-2 ${isActive ? "text-foreground" : "text-muted-foreground hover:bg-secondary/40 border-transparent"}`}
+                style={isActive ? { borderBottomColor: cat.color } : undefined}
+              >
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: cat.color }} />
+                  {cat.label}
+                </span>
+                <span
+                  className="text-[11px] font-bold px-1.5 rounded-full min-w-[20px] text-center"
+                  style={{ backgroundColor: `${cat.color}1a`, color: cat.color }}
+                >
+                  {counts[cat.id]}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
         {/* Filters */}
         {showFilter && (
           <div className="px-3 py-2 bg-[#ededed] border-b border-border space-y-2">
-            <div className="flex gap-1 flex-wrap">
-              {(["all", "open", "pending", "resolved"] as StatusFilter[]).map((s) => (
-                <button key={s} onClick={() => setStatusFilter(s)}
-                  className={`text-xs px-2.5 py-1 rounded-full font-medium transition border ${statusFilter === s ? "bg-primary text-white border-primary" : "bg-white border-border text-muted-foreground hover:bg-secondary"}`}>
-                  {s === "all" ? "Todos" : STATUS_LABELS[s]}
-                </button>
-              ))}
-            </div>
             <div className="flex gap-1 flex-wrap">
               {LABELS_OPTIONS.slice(0, 4).map((l) => (
                 <button key={l} onClick={() => setLabelFilter(labelFilter === l ? "" : l)}
@@ -557,6 +622,27 @@ export default function ChatCenter() {
               </div>
             </div>
             <div className="flex items-center gap-1 shrink-0">
+              {/* Category transition action */}
+              {activeCategory === "potenciais" && (
+                <button
+                  onClick={() => handleMoveToQueue(activeConv.id)}
+                  data-testid="button-move-to-queue"
+                  className="flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg text-white font-semibold transition hover:opacity-90"
+                  style={{ backgroundColor: "#f59e0b" }}
+                >
+                  <ArrowRightLeft className="w-3 h-3" /> Enviar para fila
+                </button>
+              )}
+              {activeCategory === "pendentes" && (
+                <button
+                  onClick={() => handleClaim(activeConv.id)}
+                  data-testid="button-claim-conv"
+                  className="flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg text-white font-semibold transition hover:opacity-90"
+                  style={{ backgroundColor: "#16a34a" }}
+                >
+                  <UserCircle2 className="w-3 h-3" /> Iniciar atendimento
+                </button>
+              )}
               {/* Status quick-set */}
               <div className="relative">
                 <button

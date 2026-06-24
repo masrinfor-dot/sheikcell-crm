@@ -375,6 +375,32 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
   res.json(updated);
 });
 
+// ─── Claim conversation (self-assign / take from queue) ────────────────────
+// Any authenticated user may take a conversation they can access and assign it
+// to themselves, moving it from "Pendentes" (queue) to "Ativos". This is a
+// sector-scoped self-assignment, so it is safe for vendedores who cannot
+// otherwise change assigneeId via the PATCH route.
+router.post("/chat/conversations/:id/claim", requireAuth, async (req, res): Promise<void> => {
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+
+  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
+  // Only conversations that are not already taken by someone else may be claimed.
+  // Re-claiming a conversation already assigned to the current user is idempotent.
+  if (conv.assigneeId != null && conv.assigneeId !== req.session.userId) {
+    res.status(409).json({ error: "Conversa já está em atendimento por outro vendedor" });
+    return;
+  }
+
+  const [updated] = await db.update(conversationsTable)
+    .set({ assigneeId: req.session.userId, status: "pending", updatedAt: new Date() })
+    .where(eq(conversationsTable.id, id)).returning();
+
+  broadcast("conversation_updated", updated, updated.sectorId);
+  res.json(updated);
+});
+
 // ─── Create conversation manually ─────────────────────────────────────────
 router.post("/chat/conversations", requireAuth, async (req, res): Promise<void> => {
   const { phone, name, channel, sectorId } = req.body as {
