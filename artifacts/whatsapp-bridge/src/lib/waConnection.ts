@@ -5,8 +5,14 @@
  * - Persists credential updates back to DB after every auth update
  * - Reconnects automatically on disconnection using exponential backoff
  */
-import makeWASocket, { DisconnectReason, type WASocket } from "@whiskeysockets/baileys";
+import makeWASocket, {
+  DisconnectReason,
+  downloadMediaMessage,
+  type WASocket,
+  type WAMessage,
+} from "@whiskeysockets/baileys";
 import { toDataURL } from "qrcode";
+import { createHmac } from "node:crypto";
 import { logger } from "./logger";
 import { useDatabaseAuthState, clearAuthState } from "./dbAuthState";
 import { db, whatsappSessionsTable } from "@workspace/db";
@@ -15,6 +21,101 @@ import { eq } from "drizzle-orm";
 type ConnectionStatus = "connecting" | "open" | "close" | "qr";
 
 const SESSION_KEY = "default";
+
+const API_SERVER_URL = process.env["API_SERVER_URL"] ?? "http://localhost:80";
+
+const SESSION_SECRET_SEED =
+  process.env["SESSION_SECRET"] ??
+  (process.env["NODE_ENV"] === "production"
+    ? (() => { throw new Error("SESSION_SECRET env var is required in production"); })()
+    : "sheikcell-dev-only-secret");
+const BRIDGE_SECRET = createHmac("sha256", SESSION_SECRET_SEED)
+  .update("whatsapp-bridge-v1")
+  .digest("hex");
+
+/**
+ * Forwards an inbound Baileys message to the API server's webhook so it gets
+ * persisted and broadcast to the attendance UI. Skips own/group/broadcast
+ * messages. Downloads image/audio/document media as base64.
+ */
+async function forwardInboundMessage(m: WAMessage): Promise<void> {
+  if (m.key?.fromMe) return;
+  const remoteJid = m.key?.remoteJid ?? "";
+  if (!remoteJid || remoteJid.endsWith("@g.us") || remoteJid === "status@broadcast") return;
+  const msg = m.message;
+  if (!msg) return;
+
+  let mediaBase64: string | undefined;
+  let mediaMimeType: string | undefined;
+  let mediaType: "image" | "audio" | "doc" | undefined;
+
+  if (msg.imageMessage) {
+    mediaType = "image";
+    mediaMimeType = msg.imageMessage.mimetype ?? "image/jpeg";
+  } else if (msg.audioMessage) {
+    mediaType = "audio";
+    mediaMimeType = msg.audioMessage.mimetype ?? "audio/ogg";
+  } else if (msg.documentMessage) {
+    mediaType = "doc";
+    mediaMimeType = msg.documentMessage.mimetype ?? "application/octet-stream";
+  }
+
+  if (mediaType) {
+    try {
+      const buffer = await downloadMediaMessage(
+        m,
+        "buffer",
+        {},
+        {
+          logger: logger.child({ module: "baileys-media" }) as never,
+          reuploadRequest: sock!.updateMediaMessage,
+        },
+      );
+      mediaBase64 = (buffer as Buffer).toString("base64");
+    } catch (err) {
+      logger.warn({ err }, "Failed to download inbound media — forwarding without it");
+      mediaType = undefined;
+      mediaMimeType = undefined;
+    }
+  }
+
+  const payload = {
+    data: {
+      key: { remoteJid, fromMe: false, id: m.key?.id ?? undefined },
+      message: msg,
+      pushName: m.pushName ?? undefined,
+      messageTimestamp:
+        typeof m.messageTimestamp === "number" ? m.messageTimestamp : undefined,
+      mediaBase64,
+      mediaMimeType,
+      mediaType,
+    },
+  };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const res = await fetch(`${API_SERVER_URL}/api/chat/webhook/whatsapp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Bridge-Secret": BRIDGE_SECRET,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      logger.warn(
+        { status: res.status, body: body.slice(0, 200) },
+        "API rejected forwarded inbound message",
+      );
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 let sock: WASocket | null = null;
 let currentQR: string | null = null;
@@ -109,6 +210,15 @@ export async function connect(): Promise<void> {
 
     sock.ev.on("creds.update", () => {
       void saveCreds();
+    });
+
+    sock.ev.on("messages.upsert", ({ messages, type }) => {
+      if (type !== "notify") return;
+      for (const m of messages) {
+        forwardInboundMessage(m).catch((err) => {
+          logger.warn({ err }, "Failed to forward inbound WhatsApp message");
+        });
+      }
     });
 
     sock.ev.on("connection.update", async (update) => {

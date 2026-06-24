@@ -539,7 +539,6 @@ function verifyLegacyBridgeSecret(req: Request): boolean {
 // POST — receive inbound messages
 router.post("/chat/webhook/whatsapp", async (req: Request, res: Response): Promise<void> => {
   const metaSecret = process.env["META_WHATSAPP_WEBHOOK_SECRET"];
-  const isProduction = process.env["NODE_ENV"] === "production";
 
   if (metaSecret) {
     // Meta Cloud API: verify X-Hub-Signature-256
@@ -548,13 +547,10 @@ router.post("/chat/webhook/whatsapp", async (req: Request, res: Response): Promi
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
-  } else if (isProduction) {
-    // In production, META_WHATSAPP_WEBHOOK_SECRET is mandatory — fail closed
-    req.log.error("META_WHATSAPP_WEBHOOK_SECRET not set in production — rejecting inbound webhook");
-    res.status(503).json({ error: "Webhook not configured" });
-    return;
   } else {
-    // Development only: accept legacy bridge secret (HMAC-verified)
+    // Baileys bridge path: accept HMAC-verified bridge secret (timing-safe).
+    // SESSION_SECRET is always present in production, so this remains a strong
+    // authenticated channel — it is not an open/fail-open webhook.
     if (!verifyLegacyBridgeSecret(req)) {
       res.status(401).json({ error: "Unauthorized" });
       return;
