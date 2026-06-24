@@ -7,3 +7,4 @@
 - [WhatsApp inbound flow](whatsapp-inbound.md) — bridge messages.upsert → /chat/webhook/whatsapp is the make-or-break path; bridge-secret webhook allowed in prod (Baileys-only); never fail-closed it
 - [CRM custom fields](crm-custom-fields.md) — user-defined fields: defs in crm_custom_fields table, values in crm_contacts.customFields jsonb keyed by field id (string); sanitize on write, cfValue() on read
 - [Role scope consistency](role-scope-consistency.md) — global-role set (admin+supervisor) must match across chat & CRM; use a shared predicate, not hardcoded role==='admin', or cross-module handoffs 403
+- [Atendimento↔dashboard↔CRM sync](atendimento-dashboard-crm-sync.md) — dashboard & CRM history read attendance_logs; resolving a chat must emit one log (txn + locked read, sector-scoped CRM)

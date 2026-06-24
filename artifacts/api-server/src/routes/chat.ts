@@ -2,8 +2,8 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync } from "fs";
 import path from "path";
-import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable } from "@workspace/db";
-import { eq, desc, and, or, ilike, sql, inArray } from "drizzle-orm";
+import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, attendanceLogsTable, crmContactsTable } from "@workspace/db";
+import { eq, desc, and, or, ilike, sql, inArray, isNull } from "drizzle-orm";
 import { requireAuth } from "../middlewares/auth";
 import { broadcast, sseEmitter } from "../lib/sseEmitter";
 import {
@@ -344,6 +344,74 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
   res.status(201).json(msg);
 });
 
+// ─── Sync a finalized conversation into Visão Geral + CRM ───────────────────
+// When a chat attendance is resolved we record it as an attendance log (so the
+// dashboard "Finalizados"/recent feed counts it the same way as queue
+// attendances) and ensure the customer exists in the CRM (find-or-create by
+// normalized phone), keeping the three modules in sync.
+async function syncResolvedConversation(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  conv: typeof conversationsTable.$inferSelect,
+): Promise<void> {
+  const [attendant] = conv.assigneeId
+    ? await tx.select().from(usersTable).where(eq(usersTable.id, conv.assigneeId)).limit(1)
+    : [];
+  // Attribute the attendance to the conversation's sector, falling back to the
+  // assignee's sector so a conversation without an explicit sector still counts
+  // on the dashboard when it was handled by a sectorized attendant.
+  const effectiveSectorId = conv.sectorId ?? attendant?.sectorId ?? null;
+  const [sector] = effectiveSectorId != null
+    ? await tx.select().from(sectorsTable).where(eq(sectorsTable.id, effectiveSectorId)).limit(1)
+    : [];
+
+  // 1) Attendance log — feeds the Visão Geral dashboard and CRM service history.
+  //    sectorId is required (NOT NULL); skip the log only when the attendance
+  //    cannot be attributed to any sector.
+  if (effectiveSectorId != null) {
+    const serviceSeconds = Math.round((Date.now() - conv.createdAt.getTime()) / 1000);
+    await tx.insert(attendanceLogsTable).values({
+      queueEntryId: 0, // chat attendances have no queue entry
+      clientName: conv.name,
+      clientContact: conv.phone,
+      sectorId: effectiveSectorId,
+      sectorName: sector?.name ?? "Desconhecido",
+      attendantId: conv.assigneeId,
+      attendantName: attendant?.name ?? null,
+      channel: conv.channel,
+      outcome: "completed",
+      serviceTimeSeconds: serviceSeconds >= 0 ? serviceSeconds : null,
+    });
+  }
+
+  // 2) CRM contact — link the conversation to a CRM record (find-or-create by
+  //    phone). The lookup is scoped to the conversation's effective sector so we
+  //    never read or mutate a same-phone contact that belongs to another sector.
+  const normalizedPhone = (conv.phone ?? "").replace(/\D/g, "");
+  if (normalizedPhone) {
+    const sectorCondition = effectiveSectorId != null
+      ? eq(crmContactsTable.sectorId, effectiveSectorId)
+      : isNull(crmContactsTable.sectorId);
+    const [existing] = await tx.select().from(crmContactsTable)
+      .where(and(eq(crmContactsTable.isArchived, false), eq(crmContactsTable.phone, normalizedPhone), sectorCondition))
+      .limit(1);
+    if (existing) {
+      await tx.update(crmContactsTable)
+        .set({ updatedAt: new Date() })
+        .where(eq(crmContactsTable.id, existing.id));
+    } else {
+      await tx.insert(crmContactsTable).values({
+        name: conv.name,
+        contact: conv.phone,
+        phone: normalizedPhone,
+        sectorId: effectiveSectorId,
+        attendantId: conv.assigneeId ?? null,
+        status: "active",
+        profile: "Novo",
+      });
+    }
+  }
+}
+
 // ─── Update conversation ───────────────────────────────────────────────────
 router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
@@ -368,8 +436,23 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
     if (assigneeId !== undefined) update.assigneeId = assigneeId;
   }
 
-  const [updated] = await db.update(conversationsTable).set(update)
-    .where(eq(conversationsTable.id, id)).returning();
+  // Run the update and the dashboard/CRM sync atomically. A locked read of the
+  // pre-update status guarantees the sync fires exactly once per transition into
+  // "resolved" even under concurrent PATCH requests, and rolls back the status
+  // change if the sync fails.
+  const updated = await db.transaction(async (tx) => {
+    const [locked] = await tx.select().from(conversationsTable)
+      .where(eq(conversationsTable.id, id)).for("update").limit(1);
+    const wasResolved = locked?.status === "resolved";
+
+    const [row] = await tx.update(conversationsTable).set(update)
+      .where(eq(conversationsTable.id, id)).returning();
+
+    if (status === "resolved" && !wasResolved) {
+      await syncResolvedConversation(tx, row);
+    }
+    return row;
+  });
 
   broadcast("conversation_updated", updated, updated.sectorId);
   res.json(updated);
