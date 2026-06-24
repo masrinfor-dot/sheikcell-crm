@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Blocks accidental commit of WhatsApp Baileys session material.
+# Install: git config core.hooksPath .githooks
+set -euo pipefail
+
+FORBIDDEN_PATTERNS=(
+  "sessions/default/creds.json"
+  "sessions/default/"
+  "creds\.json"
+  "pre-key-[0-9]"
+  "app-state-sync-key-"
+  "app-state-sync-version-"
+  "identity-key-"
+  "device-list-"
+  "sender-key-"
+  "sender-key-memory-"
+)
+
+staged=$(git diff --cached --name-only 2>/dev/null || true)
+
+if [ -z "$staged" ]; then
+  exit 0
+fi
+
+found=0
+for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
+  matches=$(echo "$staged" | grep -E "$pattern" || true)
+  if [ -n "$matches" ]; then
+    echo "ERROR: Attempted to commit WhatsApp Baileys session material:" >&2
+    echo "$matches" | sed 's/^/  /' >&2
+    found=1
+  fi
+done
+
+if [ "$found" -eq 1 ]; then
+  echo "" >&2
+  echo "These files contain live WhatsApp authentication keys and must never" >&2
+  echo "be committed. Add them to .gitignore and remove from staging:" >&2
+  echo "  git reset HEAD <file>" >&2
+  echo "" >&2
+  echo "To rotate compromised credentials run:" >&2
+  echo "  pnpm --filter @workspace/scripts run rotate-wa-credentials" >&2
+  exit 1
+fi
+
+exit 0
