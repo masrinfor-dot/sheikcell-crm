@@ -243,9 +243,11 @@ router.get("/crm", requireAuth, async (req, res): Promise<void> => {
 
 // ─── Create contact ────────────────────────────────────────────────────────
 router.post("/crm", requireAuth, async (req, res): Promise<void> => {
-  const { name, contact, phone, email, sectorId, attendantId, status, profile, notes, tags, customFields } = req.body as {
+  const { name, contact, phone, email, sectorId, attendantId, status, profile, isNew, city, serviceStore, attendanceSource, notes, tags, customFields } = req.body as {
     name?: string; contact?: string; phone?: string; email?: string;
-    sectorId?: number; attendantId?: number; status?: string; profile?: string; notes?: string; tags?: string;
+    sectorId?: number; attendantId?: number; status?: string; profile?: string;
+    isNew?: boolean; city?: string; serviceStore?: string; attendanceSource?: string;
+    notes?: string; tags?: string;
     customFields?: Record<string, string>;
   };
   if (!name) { res.status(400).json({ error: "Nome é obrigatório" }); return; }
@@ -259,6 +261,10 @@ router.post("/crm", requireAuth, async (req, res): Promise<void> => {
     attendantId: attendantId ?? null,
     status: status ?? "potential",
     profile: profile ?? "Novo",
+    isNew: isNew ?? true,
+    city: city || null,
+    serviceStore: serviceStore || null,
+    attendanceSource: attendanceSource || null,
     notes, tags,
     customFields: sanitizeCustomFields(customFields),
   }).returning();
@@ -281,9 +287,11 @@ router.patch("/crm/:id", requireAuth, async (req, res): Promise<void> => {
   const existing = await loadContactWithAccess(id, req.session, res);
   if (!existing) return;
   const userRole = req.session.userRole!;
-  const { name, contact, phone, email, sectorId, attendantId, status, profile, notes, tags, customFields, isArchived } = req.body as {
+  const { name, contact, phone, email, sectorId, attendantId, status, profile, isNew, city, serviceStore, attendanceSource, notes, tags, customFields, isArchived } = req.body as {
     name?: string; contact?: string; phone?: string; email?: string; sectorId?: number;
-    attendantId?: number; status?: string; profile?: string; notes?: string; tags?: string;
+    attendantId?: number; status?: string; profile?: string;
+    isNew?: boolean; city?: string; serviceStore?: string; attendanceSource?: string;
+    notes?: string; tags?: string;
     customFields?: Record<string, string>; isArchived?: boolean;
   };
   const update: Record<string, unknown> = { updatedAt: new Date() };
@@ -296,6 +304,10 @@ router.patch("/crm/:id", requireAuth, async (req, res): Promise<void> => {
   if (attendantId !== undefined) update.attendantId = attendantId;
   if (status !== undefined) update.status = status;
   if (profile !== undefined) update.profile = profile;
+  if (isNew !== undefined) update.isNew = isNew;
+  if (city !== undefined) update.city = city || null;
+  if (serviceStore !== undefined) update.serviceStore = serviceStore || null;
+  if (attendanceSource !== undefined) update.attendanceSource = attendanceSource || null;
   if (notes !== undefined) update.notes = notes;
   if (tags !== undefined) update.tags = tags;
   if (customFields !== undefined) update.customFields = sanitizeCustomFields(customFields);

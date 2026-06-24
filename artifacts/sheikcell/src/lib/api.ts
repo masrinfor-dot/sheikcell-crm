@@ -85,6 +85,10 @@ export type CrmContact = {
   attendantId: number | null;
   status: "potential" | "pending" | "active";
   profile: "Novo" | "Regular" | "VIP" | "Inativo";
+  isNew: boolean;
+  city: string | null;
+  serviceStore: string | null;
+  attendanceSource: string | null;
   notes: string | null;
   tags: string | null;
   totalPurchases: string;

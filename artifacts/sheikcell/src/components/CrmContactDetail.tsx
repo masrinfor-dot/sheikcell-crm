@@ -7,7 +7,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   X, Crown, Star, UserPlus, UserMinus, ShoppingBag, MessageSquare,
   StickyNote, Phone, Mail, Pencil, Trash2, Plus, Check, Clock,
-  ChevronDown, Package,
+  ChevronDown, Package, Sparkles, MapPin, Store, Compass,
 } from "lucide-react";
 
 const PROFILES: { key: CrmContact["profile"]; label: string; color: string; Icon: React.ElementType }[] = [
@@ -18,6 +18,8 @@ const PROFILES: { key: CrmContact["profile"]; label: string; color: string; Icon
 ];
 
 const CATEGORIES = ["Celular", "Acessório", "Serviço", "Garantia", "Outro"];
+
+const ATTENDANCE_SOURCES = ["WhatsApp", "Instagram", "Facebook", "Indicação", "Google", "Loja física", "Telefone", "Outro"];
 
 function ProfileBadge({ profile }: { profile: CrmContact["profile"] }) {
   const p = PROFILES.find((x) => x.key === profile) ?? PROFILES[2];
@@ -69,7 +71,7 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
 
   // Edit state
   const [editing, setEditing] = useState(false);
-  const [editForm, setEditForm] = useState({ name: "", contact: "", phone: "", email: "", notes: "", tags: "", sectorId: "", profile: "Novo" as CrmContact["profile"] });
+  const [editForm, setEditForm] = useState({ name: "", contact: "", phone: "", email: "", notes: "", tags: "", sectorId: "", profile: "Novo" as CrmContact["profile"], isNew: true, city: "", serviceStore: "", attendanceSource: "" });
 
   // Custom fields
   const [customDefs, setCustomDefs] = useState<CrmCustomField[]>([]);
@@ -92,6 +94,8 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
         name: c.name, contact: c.contact ?? "", phone: c.phone ?? "",
         email: c.email ?? "", notes: c.notes ?? "", tags: c.tags ?? "",
         sectorId: c.sectorId ? String(c.sectorId) : "", profile: c.profile,
+        isNew: c.isNew ?? true, city: c.city ?? "",
+        serviceStore: c.serviceStore ?? "", attendanceSource: c.attendanceSource ?? "",
       });
       setCustomValues(c.customFields ?? {});
     } catch { toast({ title: "Erro ao carregar contato", variant: "destructive" }); }
@@ -119,6 +123,10 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
         notes: editForm.notes || undefined, tags: editForm.tags || undefined,
         sectorId: editForm.sectorId ? Number(editForm.sectorId) : undefined,
         profile: editForm.profile,
+        isNew: editForm.isNew,
+        city: editForm.city,
+        serviceStore: editForm.serviceStore,
+        attendanceSource: editForm.attendanceSource,
         customFields: customValues,
       });
       setContact(updated);
@@ -352,6 +360,36 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
                       </select>
                     </div>
                     <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Cliente novo?</label>
+                      <select value={editForm.isNew ? "sim" : "nao"} onChange={(e) => setEditForm({ ...editForm, isNew: e.target.value === "sim" })}
+                        className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                        <option value="sim">Sim — primeiro atendimento</option>
+                        <option value="nao">Não — cliente recorrente</option>
+                      </select>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">Cidade</label>
+                        <input value={editForm.city} onChange={(e) => setEditForm({ ...editForm, city: e.target.value })}
+                          placeholder="Governador Valadares"
+                          className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                      </div>
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">Loja para atendimento</label>
+                        <input value={editForm.serviceStore} onChange={(e) => setEditForm({ ...editForm, serviceStore: e.target.value })}
+                          placeholder="Loja Centro"
+                          className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">De onde veio o atendimento</label>
+                      <select value={editForm.attendanceSource} onChange={(e) => setEditForm({ ...editForm, attendanceSource: e.target.value })}
+                        className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                        <option value="">— Selecione —</option>
+                        {ATTENDANCE_SOURCES.map((s) => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </div>
+                    <div>
                       <label className="text-xs text-muted-foreground mb-1 block">Tags (vírgula)</label>
                       <input value={editForm.tags} onChange={(e) => setEditForm({ ...editForm, tags: e.target.value })}
                         placeholder="iPhone, Urgente, Financiado"
@@ -408,6 +446,28 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
                       <div className="flex items-center gap-2 text-sm">
                         <Mail className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                         <span>{contact.email}</span>
+                      </div>
+                    )}
+                    <div className="flex items-center gap-2 text-sm">
+                      <Sparkles className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                      <span>{contact.isNew ? "Cliente novo" : "Cliente recorrente"}</span>
+                    </div>
+                    {contact.city && (
+                      <div className="flex items-center gap-2 text-sm">
+                        <MapPin className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                        <span>{contact.city}</span>
+                      </div>
+                    )}
+                    {contact.serviceStore && (
+                      <div className="flex items-center gap-2 text-sm">
+                        <Store className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                        <span>{contact.serviceStore}</span>
+                      </div>
+                    )}
+                    {contact.attendanceSource && (
+                      <div className="flex items-center gap-2 text-sm">
+                        <Compass className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                        <span>Veio de: {contact.attendanceSource}</span>
                       </div>
                     )}
                     {contact.tags && (

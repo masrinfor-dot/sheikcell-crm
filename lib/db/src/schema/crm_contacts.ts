@@ -12,6 +12,10 @@ export const crmContactsTable = pgTable("crm_contacts", {
   attendantId: integer("attendant_id").references(() => usersTable.id),
   status: text("status").notNull().default("potential"), // potential | pending | active
   profile: text("profile").notNull().default("Novo"),    // Novo | Regular | VIP | Inativo
+  isNew: boolean("is_new").notNull().default(true),       // cliente novo (true) ou recorrente (false)
+  city: text("city"),                                     // cidade do cliente
+  serviceStore: text("service_store"),                   // loja para atendimento
+  attendanceSource: text("attendance_source"),           // de onde veio o atendimento (origem)
   notes: text("notes"),
   tags: text("tags"),
   totalPurchases: numeric("total_purchases").notNull().default("0"),
