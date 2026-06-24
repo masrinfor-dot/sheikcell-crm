@@ -22,15 +22,24 @@ router.get("/queue", requireAuth, async (req, res): Promise<void> => {
   let effectiveSectorId: number | null = null;
   if (sectorIdParam) {
     const parsed = parseInt(String(sectorIdParam), 10);
-    if (!isNaN(parsed)) {
-      if (userRole !== "admin" && parsed !== userSectorId) {
-        res.status(403).json({ error: "Acesso negado a este setor" });
-        return;
-      }
-      effectiveSectorId = parsed;
+    if (isNaN(parsed)) {
+      res.status(400).json({ error: "sectorId inválido" });
+      return;
     }
-  } else if (userRole !== "admin" && userSectorId) {
-    // Non-admins without explicit sectorId always see only their sector
+    if (userRole !== "admin" && userRole !== "supervisor" && parsed !== userSectorId) {
+      res.status(403).json({ error: "Acesso negado a este setor" });
+      return;
+    }
+    effectiveSectorId = parsed;
+  } else if (userRole === "admin" || userRole === "supervisor") {
+    // Admins and supervisors can see all sectors when no sectorId param given
+    effectiveSectorId = null;
+  } else {
+    // Non-admin/supervisor users must have a valid sector assignment
+    if (!userSectorId) {
+      res.status(403).json({ error: "Conta sem setor atribuído válido" });
+      return;
+    }
     effectiveSectorId = userSectorId;
   }
 

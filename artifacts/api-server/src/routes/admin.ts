@@ -118,11 +118,19 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
     return;
   }
 
+  const resolvedRole = role ?? "vendedor";
+
+  // Vendedores must be assigned to a real sector
+  if (resolvedRole === "vendedor" && !sectorId) {
+    res.status(400).json({ error: "Vendedor precisa de um setor atribuído" });
+    return;
+  }
+
   const passwordHash = await bcrypt.hash(password, 10);
 
   const [user] = await db
     .insert(usersTable)
-    .values({ name, email: email.toLowerCase(), passwordHash, role: role ?? "vendedor", sectorId: sectorId ?? 0 })
+    .values({ name, email: email.toLowerCase(), passwordHash, role: resolvedRole, sectorId: sectorId ?? undefined })
     .returning();
 
   const { passwordHash: _ph, ...safeUser } = user;

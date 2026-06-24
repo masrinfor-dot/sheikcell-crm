@@ -23,7 +23,30 @@ function detectSectorFromMessage(message: string): string {
   return "Vendas de Celulares"; // default
 }
 
-router.post("/webhook/inbound", async (req, res): Promise<void> => {
+router.post("/webhook/inbound", (req, res, next): void => {
+  const secret = process.env["WEBHOOK_SECRET"];
+
+  if (process.env["NODE_ENV"] === "production" && !secret) {
+    res.status(403).json({ error: "Webhook not configured" });
+    return;
+  }
+
+  if (secret) {
+    const provided =
+      req.headers["x-webhook-secret"] ??
+      (typeof req.headers["authorization"] === "string" &&
+      req.headers["authorization"].startsWith("Bearer ")
+        ? req.headers["authorization"].slice(7)
+        : undefined);
+
+    if (provided !== secret) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+  }
+
+  next();
+}, async (req, res): Promise<void> => {
   const body = req.body as {
     clientName?: string;
     clientContact?: string;

@@ -36,13 +36,13 @@ app.use(cors({
 
 app.use(
   express.json({
-    limit: "25mb",
+    limit: "1mb",
     verify: (req, _res, buf) => {
       (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
     },
   }),
 );
-app.use(express.urlencoded({ extended: true, limit: "25mb" }));
+app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
 const PgSession = connectPgSimple(session);
 
