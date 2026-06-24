@@ -416,10 +416,24 @@ export default function AdminDashboard() {
               <div className="shk-card p-6 text-center">
                 <CheckCircle className="w-10 h-10 mx-auto text-green-500 mb-3" />
                 <p className="text-sm font-semibold text-foreground mb-1">WhatsApp conectado!</p>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-xs text-muted-foreground mb-4">
                   Sessão salva no banco de dados — reconexão automática após restart.<br />
                   Mensagens recebidas aparecem automaticamente no <strong>Atendimento</strong>.
                 </p>
+                <button
+                  onClick={async () => {
+                    if (!window.confirm("Desconectar este número? A sessão atual será encerrada e um novo QR code será gerado para conectar outro número.")) return;
+                    setWaLoading(true);
+                    try {
+                      await fetch("/api/whatsapp/reset", { method: "POST", credentials: "include" });
+                      await fetchWAStatus();
+                    } finally { setWaLoading(false); }
+                  }}
+                  disabled={waLoading}
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-red-200 text-red-600 hover:bg-red-50 transition text-sm disabled:opacity-50">
+                  <PhoneCall className="w-4 h-4" />
+                  Desconectar / Trocar número
+                </button>
               </div>
             )}
 
