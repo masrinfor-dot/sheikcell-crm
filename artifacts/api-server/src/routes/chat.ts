@@ -6,6 +6,7 @@ import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conver
 import { eq, desc, and, or, ilike, sql, inArray, isNull } from "drizzle-orm";
 import { requireAuth } from "../middlewares/auth";
 import { broadcast, sseEmitter } from "../lib/sseEmitter";
+import { ensureCrmContactForConversation } from "../lib/crmSync";
 import {
   processInboundWA,
   processMetaInboundWA,
@@ -508,6 +509,8 @@ router.post("/chat/conversations", requireAuth, async (req, res): Promise<void> 
   }).returning();
 
   broadcast("conversation_new", conv, conv.sectorId);
+  // Keep the CRM in sync with atendimentos: register the customer immediately.
+  await ensureCrmContactForConversation(conv);
   res.status(201).json(conv);
 });
 

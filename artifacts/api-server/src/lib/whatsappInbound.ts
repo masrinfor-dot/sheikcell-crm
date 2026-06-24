@@ -2,6 +2,7 @@ import { db, conversationsTable, messagesTable, sectorsTable } from "@workspace/
 import { eq, and, desc, sql } from "drizzle-orm";
 import { broadcast } from "./sseEmitter";
 import { classifyText } from "./autoRouter";
+import { ensureCrmContactForConversation } from "./crmSync";
 import { writeFile, mkdir } from "fs/promises";
 import { randomUUID } from "crypto";
 import path from "path";
@@ -162,6 +163,9 @@ async function upsertConversation(phone: string, pushName: string, displayConten
       })
       .returning();
     broadcast("conversation_new", conv, conv.sectorId);
+    // Keep the CRM in sync with atendimentos: register the customer as soon as
+    // the conversation starts, not only when it is resolved.
+    await ensureCrmContactForConversation(conv);
   } else {
     await db
       .update(conversationsTable)
