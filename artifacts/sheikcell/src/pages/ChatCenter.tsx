@@ -7,7 +7,7 @@ import {
   MessageCircle, CheckCheck, Tag, Filter,
   Smartphone, Instagram, UserCircle2, Circle,
   ArrowRightLeft, FileText, Volume2, Image, Users, Paperclip, IdCard,
-  Settings2, Trash2, Info, Sparkles, Check, Bell
+  Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 
@@ -289,6 +289,72 @@ export default function ChatCenter() {
   const [showNotifications, setShowNotifications] = useState(false);
   const [notifications, setNotifications] = useState<MsgNotification[]>([]);
 
+  // Alert preferences: play a sound and/or show a native browser notification for
+  // inbound messages even when the attendant is on another tab. Persisted locally.
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
+    try { return localStorage.getItem("chat.alertSound") !== "off"; } catch { return true; }
+  });
+  const [desktopEnabled, setDesktopEnabled] = useState<boolean>(() => {
+    try { return localStorage.getItem("chat.alertDesktop") === "on"; } catch { return false; }
+  });
+  const soundEnabledRef = useRef(soundEnabled);
+  const desktopEnabledRef = useRef(desktopEnabled);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+
+  useEffect(() => {
+    soundEnabledRef.current = soundEnabled;
+    try { localStorage.setItem("chat.alertSound", soundEnabled ? "on" : "off"); } catch { /* ignore */ }
+  }, [soundEnabled]);
+  useEffect(() => {
+    desktopEnabledRef.current = desktopEnabled;
+    try { localStorage.setItem("chat.alertDesktop", desktopEnabled ? "on" : "off"); } catch { /* ignore */ }
+  }, [desktopEnabled]);
+
+  // Short two-tone beep synthesized via Web Audio (no asset needed).
+  const playAlertSound = useCallback(() => {
+    try {
+      const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!Ctx) return;
+      let ctx = audioCtxRef.current;
+      if (!ctx) { ctx = new Ctx(); audioCtxRef.current = ctx; }
+      if (ctx.state === "suspended") ctx.resume().catch(() => {});
+      const now = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(880, now);
+      osc.frequency.setValueAtTime(660, now + 0.12);
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(0.15, now + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.35);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.36);
+    } catch { /* ignore */ }
+  }, []);
+
+  const showDesktopNotification = useCallback((title: string, body: string, conversationId: number) => {
+    try {
+      if (!("Notification" in window) || Notification.permission !== "granted") return;
+      const n = new Notification(title, { body: body || "Nova mensagem", tag: `conv-${conversationId}`, icon: "/favicon.ico" });
+      n.onclick = () => { window.focus(); setActiveId(conversationId); setShowNotifications(false); n.close(); };
+    } catch { /* ignore */ }
+  }, []);
+
+  // Toggle desktop notifications, requesting browser permission on enable.
+  const toggleDesktop = useCallback(async () => {
+    if (desktopEnabled) { setDesktopEnabled(false); return; }
+    if (!("Notification" in window)) {
+      toast({ title: "Notificações não suportadas neste navegador", variant: "destructive" });
+      return;
+    }
+    let perm = Notification.permission;
+    if (perm === "default") { try { perm = await Notification.requestPermission(); } catch { /* ignore */ } }
+    if (perm === "granted") setDesktopEnabled(true);
+    else toast({ title: "Permissão de notificação negada pelo navegador", variant: "destructive" });
+  }, [desktopEnabled, toast]);
+
   const msgsEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -388,6 +454,15 @@ export default function ChatCenter() {
               },
               ...prev,
             ].slice(0, 100));
+            // Alert the attendant even when this conversation isn't focused or the
+            // browser tab is in the background: short sound and/or native notification.
+            const notLooking = document.hidden || conversationId !== activeId;
+            if (notLooking) {
+              if (soundEnabledRef.current) playAlertSound();
+              if (desktopEnabledRef.current && document.hidden) {
+                showDesktopNotification(conv.name, message.content, conversationId);
+              }
+            }
           }
         }
       } catch { /* silent */ }
@@ -754,12 +829,38 @@ export default function ChatCenter() {
                   data-testid="panel-notifications"
                   className="absolute right-0 top-9 z-30 w-80 max-w-[calc(100vw-2rem)] bg-white border border-border rounded-xl shadow-lg overflow-hidden"
                 >
-                  <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-[#ededed]">
-                    <span className="text-sm font-bold text-foreground">Mensagens recebidas</span>
+                  <div className="border-b border-border bg-[#ededed]">
+                    <div className="flex items-center justify-between px-3 py-2">
+                      <span className="text-sm font-bold text-foreground">Mensagens recebidas</span>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => setSoundEnabled((v) => !v)}
+                          data-testid="button-toggle-sound"
+                          title={soundEnabled ? "Som ligado — clique para desligar" : "Som desligado — clique para ligar"}
+                          className="p-1 rounded hover:bg-white/70 transition"
+                        >
+                          {soundEnabled
+                            ? <Volume2 className="w-4 h-4 text-primary" />
+                            : <VolumeX className="w-4 h-4 text-muted-foreground" />}
+                        </button>
+                        <button
+                          onClick={toggleDesktop}
+                          data-testid="button-toggle-desktop"
+                          title={desktopEnabled ? "Notificações do navegador ligadas — clique para desligar" : "Notificações do navegador desligadas — clique para ligar"}
+                          className="p-1 rounded hover:bg-white/70 transition"
+                        >
+                          {desktopEnabled
+                            ? <Bell className="w-4 h-4 text-primary" />
+                            : <BellOff className="w-4 h-4 text-muted-foreground" />}
+                        </button>
+                      </div>
+                    </div>
                     {unreadNotifications > 0 && (
-                      <button onClick={markAllNotificationsRead} className="text-xs text-primary hover:underline">
-                        Marcar todas como lidas
-                      </button>
+                      <div className="px-3 pb-2 -mt-0.5">
+                        <button onClick={markAllNotificationsRead} className="text-xs text-primary hover:underline">
+                          Marcar todas como lidas
+                        </button>
+                      </div>
                     )}
                   </div>
                   <div className="max-h-96 overflow-y-auto">

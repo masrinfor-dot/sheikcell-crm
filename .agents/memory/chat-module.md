@@ -16,6 +16,11 @@ The Central de Atendimento uses Server-Sent Events (SSE) for real-time updates, 
 - Demo data: 10 conversations, 27 messages seeded June 23 2026
 - WhatsApp webhook endpoint: `POST /api/chat/webhook/whatsapp` (Evolution API / Z-API format)
 
+## Inbound alerts (sound + browser notification) live only in ChatCenter
+Background-tab alerts for new inbound messages are gated on `document.hidden || conversationId !== activeId`; sound is a synthesized Web Audio beep (no asset), browser Notification requires user-granted permission. Prefs persist in localStorage (`chat.alertSound`, `chat.alertDesktop`) and are read via refs so toggling doesn't re-subscribe the SSE.
+
+**Gotcha:** The chat EventSource is mounted inside `ChatCenter.tsx` and closes when the attendant navigates to another route — so alerts only fire while the Central de Atendimento screen is mounted (a background browser tab counts; a different in-app route does not). True app-wide notifications would need an app-level SSE subscription.
+
 ## Etiquetas (chat labels) are DB-backed
 Chat etiquetas live in the `chat_labels` table (name + color), managed via `api.chat.labels.*`. Read is for any authed user; create/update/delete require admin/supervisor.
 
