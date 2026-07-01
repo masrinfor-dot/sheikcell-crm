@@ -537,7 +537,7 @@ export default function ChatCenter() {
     if (!activeConv || crmLoading) return;
     setCrmLoading(true);
     try {
-      const c = await api.crm.autoRegister({ name: activeConv.name, phone: activeConv.phone });
+      const c = await api.crm.autoRegister({ name: activeConv.name, phone: activeConv.phone, sectorId: activeConv.sectorId ?? undefined });
       setCrmContactId(c.id);
       if (c.created) toast({ title: "Cliente cadastrado no CRM" });
     } catch {
@@ -550,7 +550,7 @@ export default function ChatCenter() {
     if (!activeConv) return;
     setInfoLoading(true);
     try {
-      const c = await api.crm.autoRegister({ name: activeConv.name, phone: activeConv.phone });
+      const c = await api.crm.autoRegister({ name: activeConv.name, phone: activeConv.phone, sectorId: activeConv.sectorId ?? undefined });
       const full = await api.crm.get(c.id);
       setInfoContact(full);
       setInfoForm({
