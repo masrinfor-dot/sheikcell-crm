@@ -1,0 +1,22 @@
+name: Deploy para a VPS
+
+# Toda vez que houver um push na branch main, o GitHub conecta na sua VPS
+# por SSH e roda o script de deploy (git pull + build + reinício dos serviços).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {} # permite rodar manualmente pela aba Actions
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT }}
+          script: |
+            bash /var/www/sheikcell/deploy/deploy.sh
