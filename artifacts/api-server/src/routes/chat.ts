@@ -840,15 +840,16 @@ router.post("/chat/conversations/:id/suggest-reply", requireAuth, async (req, re
   const userPrompt = `Informações do cliente:\n${infoLines.join("\n")}\n\nHistórico recente da conversa:\n${history}\n\nSugira a próxima resposta do atendente ao cliente.`;
 
   try {
-    const { anthropic } = await import("@workspace/integrations-anthropic-ai");
-    const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
+    const { openai } = await import("@workspace/integrations-openai-ai");
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o",
       max_tokens: 8192,
-      system: systemPrompt,
-      messages: [{ role: "user", content: userPrompt }],
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
     });
-    const block = message.content.find((b) => b.type === "text");
-    const suggestion = block && block.type === "text" ? block.text.trim() : "";
+    const suggestion = completion.choices[0]?.message?.content?.trim() ?? "";
     if (!suggestion) {
       res.status(502).json({ error: "A IA não retornou uma sugestão. Tente novamente." });
       return;

@@ -13,7 +13,7 @@
       "path": "./lib/api-zod"
     },
     {
-      "path": "./lib/integrations-anthropic-ai"
+      "path": "./lib/integrations-openai-ai"
     }
   ]
 }
