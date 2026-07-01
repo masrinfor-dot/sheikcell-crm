@@ -167,15 +167,25 @@ async function upsertConversation(phone: string, pushName: string, displayConten
     // the conversation starts, not only when it is resolved.
     await ensureCrmContactForConversation(conv);
   } else {
-    await db
+    // Se o atendimento já foi finalizado (resolvido/arquivado) e o cliente volta
+    // a mandar mensagem, reabrimos a conversa para "Potenciais": status "open" e
+    // sem responsável, para que volte à triagem.
+    const reopen = conv.status === "resolved" || conv.status === "archived";
+    const [updated] = await db
       .update(conversationsTable)
       .set({
         lastMessage: displayContent,
         lastMessageAt: new Date(),
         unreadCount: sql`${conversationsTable.unreadCount} + 1`,
         updatedAt: new Date(),
+        ...(reopen ? { status: "open", assigneeId: null } : {}),
       })
-      .where(eq(conversationsTable.id, conv.id));
+      .where(eq(conversationsTable.id, conv.id))
+      .returning();
+    if (updated) conv = updated;
+    if (reopen && updated) {
+      broadcast("conversation_updated", updated, updated.sectorId);
+    }
   }
 
   return conv;
