@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { api, type Conversation, type ChatMessage, type Sector, type ChatLabel } from "@/lib/api";
+import { api, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -38,6 +38,15 @@ function conversationCategory(c: Conversation): Category {
   if (c.assigneeId != null) return "ativos";
   if (c.status === "pending") return "pendentes";
   return "potenciais"; // novos / abertos sem responsável
+}
+
+// Mirrors the server-side scoping: admins/supervisors see everything, vendedores
+// see their own sector plus any "potencial" (new, unclaimed lead) from any sector.
+function isVisibleToMe(c: Conversation, user: User | null): boolean {
+  if (!user) return false;
+  if (user.role === "admin" || user.role === "supervisor") return true;
+  if (c.sectorId === user.sectorId) return true;
+  return conversationCategory(c) === "potenciais";
 }
 
 function channelIcon(ch: string) {
@@ -308,13 +317,27 @@ export default function ChatCenter() {
       } catch { /* silent */ }
     });
     es.addEventListener("conversation_new", (e) => {
-      try { const conv = JSON.parse(e.data) as Conversation; setConvs((prev) => [conv, ...prev]); } catch { /* silent */ }
+      try {
+        const conv = JSON.parse(e.data) as Conversation;
+        if (!isVisibleToMe(conv, user)) return;
+        setConvs((prev) => prev.some((c) => c.id === conv.id) ? prev : [conv, ...prev]);
+      } catch { /* silent */ }
     });
     es.addEventListener("conversation_updated", (e) => {
-      try { const conv = JSON.parse(e.data) as Conversation; setConvs((prev) => prev.map((c) => c.id === conv.id ? { ...c, ...conv } : c)); } catch { /* silent */ }
+      try {
+        const conv = JSON.parse(e.data) as Conversation;
+        setConvs((prev) => {
+          // A potencial claimed by someone else (or moved to another sector)
+          // is no longer visible — drop it from the list.
+          if (!isVisibleToMe(conv, user)) return prev.filter((c) => c.id !== conv.id);
+          const exists = prev.some((c) => c.id === conv.id);
+          if (!exists) return [conv, ...prev];
+          return prev.map((c) => c.id === conv.id ? { ...c, ...conv } : c);
+        });
+      } catch { /* silent */ }
     });
     return () => es.close();
-  }, [activeId]);
+  }, [activeId, user]);
 
   useEffect(() => {
     api.sectors.list().then(setSectors).catch(() => {});

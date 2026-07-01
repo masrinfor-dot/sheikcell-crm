@@ -1,6 +1,7 @@
 import { db, conversationsTable, messagesTable, sectorsTable } from "@workspace/db";
 import { eq, and, desc, sql } from "drizzle-orm";
 import { broadcast } from "./sseEmitter";
+import { isPotentialConversation } from "./conversationScope";
 import { classifyText } from "./autoRouter";
 import { ensureCrmContactForConversation } from "./crmSync";
 import { writeFile, mkdir } from "fs/promises";
@@ -162,7 +163,7 @@ async function upsertConversation(phone: string, pushName: string, displayConten
         unreadCount: 1,
       })
       .returning();
-    broadcast("conversation_new", conv, conv.sectorId);
+    broadcast("conversation_new", conv, conv.sectorId, isPotentialConversation(conv));
     // Keep the CRM in sync with atendimentos: register the customer as soon as
     // the conversation starts, not only when it is resolved.
     await ensureCrmContactForConversation(conv);
@@ -184,7 +185,7 @@ async function upsertConversation(phone: string, pushName: string, displayConten
       .returning();
     if (updated) conv = updated;
     if (reopen && updated) {
-      broadcast("conversation_updated", updated, updated.sectorId);
+      broadcast("conversation_updated", updated, updated.sectorId, isPotentialConversation(updated));
     }
   }
 
@@ -246,7 +247,7 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     })
     .returning();
 
-  broadcast("message", { conversationId: conv.id, message: msg }, conv.sectorId);
+  broadcast("message", { conversationId: conv.id, message: msg }, conv.sectorId, isPotentialConversation(conv));
 }
 
 export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<void> {
@@ -324,7 +325,7 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
           })
           .returning();
 
-        broadcast("message", { conversationId: conv.id, message: saved }, conv.sectorId);
+        broadcast("message", { conversationId: conv.id, message: saved }, conv.sectorId, isPotentialConversation(conv));
       }
     }
   }

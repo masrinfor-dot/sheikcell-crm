@@ -3,9 +3,10 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync } from "fs";
 import path from "path";
 import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, attendanceLogsTable, crmContactsTable, chatLabelsTable } from "@workspace/db";
-import { eq, desc, and, or, ilike, sql, inArray, isNull, asc } from "drizzle-orm";
+import { eq, desc, and, or, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { requireAuth, requireAdminOrSupervisor } from "../middlewares/auth";
 import { broadcast, sseEmitter } from "../lib/sseEmitter";
+import { isPotentialConversation, POTENTIAL_EXCLUDED_STATUSES } from "../lib/conversationScope";
 import { ensureCrmContactForConversation } from "../lib/crmSync";
 import {
   processInboundWA,
@@ -29,8 +30,10 @@ router.get("/chat/events", requireAuth, (req: Request, res: Response): void => {
   const userSectorId = req.session.userSectorId;
   const isGlobal = userRole === "admin" || userRole === "supervisor";
 
-  const send = (payload: { event: string; data: unknown; sectorId: number | null }) => {
-    if (!isGlobal && payload.sectorId != null && payload.sectorId !== userSectorId) {
+  const send = (payload: { event: string; data: unknown; sectorId: number | null; isPotential?: boolean }) => {
+    // Potenciais (new, unclaimed leads) are broadcast to every vendedor
+    // regardless of sector; everything else stays sector-scoped.
+    if (!isGlobal && !payload.isPotential && payload.sectorId != null && payload.sectorId !== userSectorId) {
       return;
     }
     res.write(`event: ${payload.event}\n`);
@@ -59,15 +62,18 @@ async function enrichConversation(conv: typeof conversationsTable.$inferSelect) 
 
 /**
  * Returns true if the requesting user is allowed to access the given conversation.
- * Admins and supervisors have global access; vendedores are restricted to their sector.
+ * Admins and supervisors have global access; vendedores are restricted to their
+ * sector, EXCEPT for potenciais (new, unclaimed leads) which any vendedor may
+ * see and claim regardless of sector.
  */
 function canAccessConversation(
-  conv: Pick<typeof conversationsTable.$inferSelect, "sectorId">,
+  conv: Pick<typeof conversationsTable.$inferSelect, "sectorId" | "assigneeId" | "status" | "isArchived">,
   req: Request,
 ): boolean {
   const userRole = req.session.userRole!;
   if (userRole === "admin" || userRole === "supervisor") return true;
-  return conv.sectorId === req.session.userSectorId;
+  if (conv.sectorId === req.session.userSectorId) return true;
+  return isPotentialConversation(conv);
 }
 
 // ─── List conversations ────────────────────────────────────────────────────
@@ -80,7 +86,15 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
   const conditions = [eq(conversationsTable.isArchived, false)];
 
   if (userRole !== "admin" && userRole !== "supervisor" && userSectorId) {
-    conditions.push(eq(conversationsTable.sectorId, userSectorId));
+    // Vendedores see their own sector's conversations plus every potencial
+    // (new, unclaimed lead) regardless of sector so anyone can pick them up.
+    conditions.push(or(
+      eq(conversationsTable.sectorId, userSectorId),
+      and(
+        isNull(conversationsTable.assigneeId),
+        notInArray(conversationsTable.status, [...POTENTIAL_EXCLUDED_STATUSES]),
+      ),
+    )!);
   } else if (sectorId) {
     conditions.push(eq(conversationsTable.sectorId, Number(sectorId)));
   }
@@ -245,7 +259,7 @@ router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Prom
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, id));
 
-  broadcast("message", { conversationId: id, message: msg }, conv.sectorId);
+  broadcast("message", { conversationId: id, message: msg }, conv.sectorId, isPotentialConversation(conv));
 
   // Forward to WhatsApp bridge
   if (conv.channel === "whatsapp" && conv.phone) {
@@ -312,7 +326,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, id));
 
-  broadcast("message", { conversationId: id, message: msg }, conv.sectorId);
+  broadcast("message", { conversationId: id, message: msg }, conv.sectorId, isPotentialConversation(conv));
 
   // Forward to WhatsApp bridge (now uses Meta Cloud API) if this is a WhatsApp conversation
   if (conv.channel === "whatsapp" && conv.phone) {
@@ -455,7 +469,7 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
     return row;
   });
 
-  broadcast("conversation_updated", updated, updated.sectorId);
+  broadcast("conversation_updated", updated, updated.sectorId, isPotentialConversation(updated));
   res.json(updated);
 });
 
@@ -477,11 +491,30 @@ router.post("/chat/conversations/:id/claim", requireAuth, async (req, res): Prom
     return;
   }
 
+  // When a vendedor claims a potencial from another sector, move it into their
+  // own sector so it stays properly scoped to them afterwards.
+  const userRole = req.session.userRole!;
+  const userSectorId = req.session.userSectorId;
+  const claimSet: Partial<typeof conversationsTable.$inferInsert> = {
+    assigneeId: req.session.userId,
+    status: "pending",
+    updatedAt: new Date(),
+  };
+  if (userRole !== "admin" && userRole !== "supervisor" && userSectorId && conv.sectorId !== userSectorId) {
+    claimSet.sectorId = userSectorId;
+  }
+
+  // If the conversation was a potencial BEFORE the claim, every vendedor could
+  // see it, so the transition must reach them all (they'll drop it from their
+  // "Potenciais" list). A normal same-sector claim stays sector-scoped and must
+  // NOT be broadcast cross-sector.
+  const wasPotential = isPotentialConversation(conv);
+
   const [updated] = await db.update(conversationsTable)
-    .set({ assigneeId: req.session.userId, status: "pending", updatedAt: new Date() })
+    .set(claimSet)
     .where(eq(conversationsTable.id, id)).returning();
 
-  broadcast("conversation_updated", updated, updated.sectorId);
+  broadcast("conversation_updated", updated, updated.sectorId, wasPotential);
   res.json(updated);
 });
 
@@ -508,7 +541,7 @@ router.post("/chat/conversations", requireAuth, async (req, res): Promise<void> 
     lastMessageAt: new Date(),
   }).returning();
 
-  broadcast("conversation_new", conv, conv.sectorId);
+  broadcast("conversation_new", conv, conv.sectorId, isPotentialConversation(conv));
   // Keep the CRM in sync with atendimentos: register the customer immediately.
   await ensureCrmContactForConversation(conv);
   res.status(201).json(conv);
@@ -581,7 +614,7 @@ router.post("/chat/conversations/:id/participants", requireAuth, async (req, res
   if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
 
   await db.insert(conversationParticipantsTable).values({ conversationId: convId, userId }).onConflictDoNothing();
-  broadcast("participants_updated", { conversationId: convId }, conv.sectorId);
+  broadcast("participants_updated", { conversationId: convId }, conv.sectorId, isPotentialConversation(conv));
   res.status(201).json({ ok: true });
 });
 
@@ -598,7 +631,7 @@ router.delete("/chat/conversations/:id/participants/:userId", requireAuth, async
       eq(conversationParticipantsTable.conversationId, convId),
       eq(conversationParticipantsTable.userId, userId),
     ));
-  broadcast("participants_updated", { conversationId: convId }, conv.sectorId);
+  broadcast("participants_updated", { conversationId: convId }, conv.sectorId, isPotentialConversation(conv));
   res.json({ ok: true });
 });
 
