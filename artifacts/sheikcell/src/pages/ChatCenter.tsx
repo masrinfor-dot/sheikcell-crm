@@ -7,7 +7,7 @@ import {
   MessageCircle, CheckCheck, Tag, Filter,
   Smartphone, Instagram, UserCircle2, Circle,
   ArrowRightLeft, FileText, Volume2, Image, Users, Paperclip, IdCard,
-  Settings2, Trash2, Info, Sparkles, Check
+  Settings2, Trash2, Info, Sparkles, Check, Bell
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 
@@ -48,6 +48,16 @@ function isVisibleToMe(c: Conversation, user: User | null): boolean {
   if (c.sectorId === user.sectorId) return true;
   return conversationCategory(c) === "potenciais";
 }
+
+// A received (inbound) message surfaced in the notification bell, in arrival order.
+type MsgNotification = {
+  id: string;
+  conversationId: number;
+  convName: string;
+  preview: string;
+  createdAt: string;
+  read: boolean;
+};
 
 function channelIcon(ch: string) {
   if (ch === "whatsapp") return <Smartphone className="w-3 h-3 text-green-500" />;
@@ -275,11 +285,34 @@ export default function ChatCenter() {
   // AI reply suggestion in the composer
   const [suggesting, setSuggesting] = useState(false);
 
+  // Notification bell: inbound messages accumulated in arrival order
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [notifications, setNotifications] = useState<MsgNotification[]>([]);
+
   const msgsEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Latest conversations, read from inside the SSE handler without re-subscribing.
+  const convsRef = useRef<Conversation[]>([]);
 
   const activeConv = convs.find((c) => c.id === activeId) ?? null;
+  const unreadNotifications = notifications.reduce((n, x) => n + (x.read ? 0 : 1), 0);
+
+  // Open the conversation behind a notification and mark its notices read.
+  const openNotification = (n: MsgNotification) => {
+    // If the conversation is no longer visible/loaded (e.g. reassigned out of
+    // scope), just clear its stale notices instead of trying to open it.
+    const stillVisible = convs.some((c) => c.id === n.conversationId);
+    setNotifications((prev) =>
+      stillVisible
+        ? prev.map((x) => x.conversationId === n.conversationId ? { ...x, read: true } : x)
+        : prev.filter((x) => x.conversationId !== n.conversationId)
+    );
+    if (stillVisible) setActiveId(n.conversationId);
+    setShowNotifications(false);
+  };
+  const markAllNotificationsRead = () =>
+    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
 
   // ── Fetch conversations ──
   const fetchConvs = useCallback(async () => {
@@ -304,9 +337,21 @@ export default function ChatCenter() {
 
   useEffect(() => { fetchConvs(); }, [fetchConvs]);
 
+  useEffect(() => { convsRef.current = convs; }, [convs]);
+
   useEffect(() => {
     if (activeId) { fetchMsgs(activeId); inputRef.current?.focus(); }
   }, [activeId, fetchMsgs]);
+
+  // Opening a conversation clears its notification notices.
+  useEffect(() => {
+    if (activeId == null) return;
+    setNotifications((prev) =>
+      prev.some((n) => n.conversationId === activeId && !n.read)
+        ? prev.map((n) => n.conversationId === activeId ? { ...n, read: true } : n)
+        : prev
+    );
+  }, [activeId]);
 
   useEffect(() => {
     msgsEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -326,6 +371,25 @@ export default function ChatCenter() {
             ? { ...c, lastMessage: message.content, lastMessageAt: message.createdAt, unreadCount: conversationId === activeId ? 0 : c.unreadCount + 1 }
             : c
         ));
+        // Surface received (inbound) messages in the notification bell, in arrival
+        // order, respecting the attendant's visible-conversation scope. Messages for
+        // the conversation already open are counted as already read.
+        if (message.direction === "inbound") {
+          const conv = convsRef.current.find((c) => c.id === conversationId);
+          if (conv && isVisibleToMe(conv, user)) {
+            setNotifications((prev) => [
+              {
+                id: `${conversationId}-${message.id}-${message.createdAt}`,
+                conversationId,
+                convName: conv.name,
+                preview: message.content,
+                createdAt: message.createdAt,
+                read: conversationId === activeId,
+              },
+              ...prev,
+            ].slice(0, 100));
+          }
+        }
       } catch { /* silent */ }
     });
     es.addEventListener("conversation_new", (e) => {
@@ -338,6 +402,11 @@ export default function ChatCenter() {
     es.addEventListener("conversation_updated", (e) => {
       try {
         const conv = JSON.parse(e.data) as Conversation;
+        // Once a conversation leaves the attendant's scope, drop any of its
+        // notifications so no out-of-scope message previews linger in the bell.
+        if (!isVisibleToMe(conv, user)) {
+          setNotifications((prev) => prev.filter((n) => n.conversationId !== conv.id));
+        }
         setConvs((prev) => {
           // A potencial claimed by someone else (or moved to another sector)
           // is no longer visible — drop it from the list.
@@ -663,6 +732,62 @@ export default function ChatCenter() {
         <div className="px-4 py-3 border-b border-border bg-[#ededed] flex items-center justify-between">
           <span className="font-bold text-foreground">Conversas</span>
           <div className="flex items-center gap-1">
+            <div className="relative">
+              <button
+                onClick={() => setShowNotifications((v) => !v)}
+                data-testid="button-notifications"
+                title="Mensagens recebidas"
+                className={`relative p-1.5 rounded-lg hover:bg-secondary transition ${showNotifications ? "bg-secondary" : ""}`}
+              >
+                <Bell className="w-4 h-4 text-muted-foreground" />
+                {unreadNotifications > 0 && (
+                  <span
+                    data-testid="badge-notifications"
+                    className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] leading-none rounded-full px-1 py-0.5 min-w-[16px] text-center font-bold"
+                  >
+                    {unreadNotifications > 99 ? "99+" : unreadNotifications}
+                  </span>
+                )}
+              </button>
+              {showNotifications && (
+                <div
+                  data-testid="panel-notifications"
+                  className="absolute right-0 top-9 z-30 w-80 max-w-[calc(100vw-2rem)] bg-white border border-border rounded-xl shadow-lg overflow-hidden"
+                >
+                  <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-[#ededed]">
+                    <span className="text-sm font-bold text-foreground">Mensagens recebidas</span>
+                    {unreadNotifications > 0 && (
+                      <button onClick={markAllNotificationsRead} className="text-xs text-primary hover:underline">
+                        Marcar todas como lidas
+                      </button>
+                    )}
+                  </div>
+                  <div className="max-h-96 overflow-y-auto">
+                    {notifications.length === 0 ? (
+                      <p className="text-xs text-muted-foreground text-center py-8">Nenhuma mensagem recebida</p>
+                    ) : (
+                      notifications.map((n) => (
+                        <button
+                          key={n.id}
+                          onClick={() => openNotification(n)}
+                          data-testid={`notification-item-${n.conversationId}`}
+                          className={`w-full flex gap-2 items-start px-3 py-2 text-left border-b border-border/50 hover:bg-secondary/60 transition ${n.read ? "opacity-60" : ""}`}
+                        >
+                          <span className={`mt-1.5 w-2 h-2 rounded-full shrink-0 ${n.read ? "bg-transparent" : "bg-red-500"}`} />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-sm font-semibold text-foreground truncate">{n.convName}</span>
+                              <span className="text-[11px] text-muted-foreground shrink-0">{msgTime(n.createdAt)}</span>
+                            </div>
+                            <p className="text-xs text-muted-foreground truncate">{n.preview || "Mensagem"}</p>
+                          </div>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
             <button onClick={() => setShowFilter(!showFilter)} className={`p-1.5 rounded-lg hover:bg-secondary transition ${showFilter ? "bg-secondary" : ""}`}>
               <Filter className="w-4 h-4 text-muted-foreground" />
             </button>
