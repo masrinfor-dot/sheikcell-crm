@@ -218,21 +218,25 @@ export default function AdminDashboard() {
         </div>
       </nav>
 
-      {/* Sub-tabs */}
-      <div className="bg-white border-b border-border">
-        <div className="max-w-5xl mx-auto px-4 flex gap-1 overflow-x-auto">
-          {tabs.map(({ id, label, icon: Icon }) => (
-            <button key={id} onClick={() => setTab(id)} data-testid={`tab-${id}`}
-              className={`flex items-center gap-1.5 px-4 py-3.5 text-xs font-semibold whitespace-nowrap border-b-2 transition-colors ${
-                tab === id ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
-              }`}>
-              <Icon className="w-3.5 h-3.5" />{label}
-            </button>
-          ))}
-        </div>
-      </div>
+      {/* Left sidebar + content */}
+      <div className="flex">
+        {/* Sidebar tabs */}
+        <aside className="w-52 shrink-0 border-r border-border bg-white sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3">
+          <div className="flex flex-col gap-1">
+            {tabs.map(({ id, label, icon: Icon }) => (
+              <button key={id} onClick={() => setTab(id)} data-testid={`tab-${id}`}
+                className={`flex items-center gap-2 w-full px-3 py-2.5 rounded-lg text-xs font-semibold text-left transition-colors ${
+                  tab === id ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                }`}>
+                <Icon className="w-4 h-4 shrink-0" />{label}
+              </button>
+            ))}
+          </div>
+        </aside>
 
-      <div className="max-w-5xl mx-auto px-4 py-6">
+        {/* Content */}
+        <div className="flex-1 min-w-0">
+          <div className="max-w-5xl mx-auto px-4 py-6">
 
         {/* === DASHBOARD TAB === */}
         {tab === "dashboard" && (
@@ -628,6 +632,8 @@ export default function AdminDashboard() {
             </div>
           </div>
         )}
+          </div>
+        </div>
       </div>
 
       {/* ===== USER MODAL ===== */}
