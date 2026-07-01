@@ -278,6 +278,7 @@ router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Prom
       "sha256",
       process.env["SESSION_SECRET"] ?? "sheikcell-dev-only-secret",
     ).update("whatsapp-bridge-v1").digest("hex");
+    let delivered = true;
     try {
       const r = await fetch(`${bridgeUrl}/whatsapp/send-media`, {
         method: "POST",
@@ -300,9 +301,23 @@ router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Prom
           { status: r.status, body },
           "WhatsApp bridge media delivery failed — media saved but not delivered",
         );
+        delivered = false;
       }
     } catch (err) {
       req.log.warn({ err }, "WhatsApp bridge unreachable — media saved but not delivered");
+      delivered = false;
+    }
+
+    if (!delivered) {
+      const [failedMsg] = await db.update(messagesTable)
+        .set({ status: "failed" })
+        .where(eq(messagesTable.id, msg.id))
+        .returning();
+      if (failedMsg) {
+        broadcast("message_updated", { conversationId: id, message: failedMsg }, conv.sectorId, isPotentialConversation(conv));
+        res.status(201).json(failedMsg);
+        return;
+      }
     }
   }
 
@@ -345,6 +360,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
       "sha256",
       process.env["SESSION_SECRET"] ?? "sheikcell-dev-only-secret",
     ).update("whatsapp-bridge-v1").digest("hex");
+    let delivered = true;
     try {
       const r = await fetch(`${bridgeUrl}/whatsapp/send`, {
         method: "POST",
@@ -360,9 +376,23 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
           { status: r.status, body },
           "WhatsApp bridge delivery failed — message saved but not delivered",
         );
+        delivered = false;
       }
     } catch (err) {
       req.log.warn({ err }, "WhatsApp bridge unreachable — message saved but not delivered");
+      delivered = false;
+    }
+
+    if (!delivered) {
+      const [failedMsg] = await db.update(messagesTable)
+        .set({ status: "failed" })
+        .where(eq(messagesTable.id, msg.id))
+        .returning();
+      if (failedMsg) {
+        broadcast("message_updated", { conversationId: id, message: failedMsg }, conv.sectorId, isPotentialConversation(conv));
+        res.status(201).json(failedMsg);
+        return;
+      }
     }
   }
 

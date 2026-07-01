@@ -4,7 +4,7 @@ import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
   Search, Plus, Send, RefreshCw, X, ChevronDown,
-  MessageCircle, CheckCheck, Tag, Filter,
+  MessageCircle, CheckCheck, AlertCircle, Tag, Filter,
   Smartphone, Instagram, UserCircle2, Circle,
   ArrowRightLeft, FileText, Volume2, Image, Users, Paperclip, IdCard,
   Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX
@@ -229,7 +229,14 @@ function MsgBubble({ msg }: { msg: ChatMessage }) {
         <div className={`flex items-center gap-1 mt-1 ${out ? "justify-end" : "justify-start"}`}>
           <span className="text-xs text-gray-500">{msgTime(msg.createdAt)}</span>
           {out && (
-            <CheckCheck className={`w-3 h-3 ${msg.status === "read" ? "text-blue-500" : "text-gray-400"}`} />
+            msg.status === "failed" ? (
+              <span className="flex items-center gap-0.5 text-[11px] text-red-500" title="Falha no envio — WhatsApp não conectado ou número inválido">
+                <AlertCircle className="w-3 h-3" />
+                Não entregue
+              </span>
+            ) : (
+              <CheckCheck className={`w-3 h-3 ${msg.status === "read" ? "text-blue-500" : "text-gray-400"}`} />
+            )
           )}
         </div>
       </div>
@@ -431,6 +438,20 @@ export default function ChatCenter() {
   // ── SSE real-time ──
   useEffect(() => {
     const es = new EventSource("/api/chat/events", { withCredentials: true });
+    es.addEventListener("message_updated", (e) => {
+      try {
+        const { conversationId, message } = JSON.parse(e.data) as { conversationId: number; message: ChatMessage };
+        if (conversationId === activeId) {
+          setMessages((prev) => prev.map((m) => m.id === message.id ? message : m));
+        }
+        setConvs((prev) => prev.map((c) =>
+          c.id === conversationId && c.lastMessageAt === message.createdAt
+            ? { ...c, lastMessage: message.content }
+            : c
+        ));
+      } catch { /* ignore malformed event */ }
+    });
+
     es.addEventListener("message", (e) => {
       try {
         const { conversationId, message } = JSON.parse(e.data) as { conversationId: number; message: ChatMessage };

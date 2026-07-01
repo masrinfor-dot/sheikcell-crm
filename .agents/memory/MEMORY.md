@@ -12,3 +12,5 @@
 - [CRM custom fields](crm-custom-fields.md) — user-defined fields: defs in crm_custom_fields table, values in crm_contacts.customFields jsonb keyed by field id (string); sanitize on write, cfValue() on read
 - [Role scope consistency](role-scope-consistency.md) — global-role set (admin+supervisor) must match across chat & CRM; use a shared predicate, not hardcoded role==='admin', or cross-module handoffs 403
 - [Atendimento↔dashboard↔CRM sync](atendimento-dashboard-crm-sync.md) — dashboard & CRM history read attendance_logs; resolving a chat must emit one log (txn + locked read, sector-scoped CRM)
+- [WhatsApp outbound status](whatsapp-outbound-status.md) — "conversas não funcionam" = bridge unpaired (status qr, scan QR); failed sends must set status 'failed' + broadcast message_updated, never stay silent 'sent'
+- [Task board](task-board.md) — Trello-style Tarefas board (tasks table); vendedor sees own-sector OR assignee OR creator; sector-scope predicate must guard null (see vendedor-scoping)
