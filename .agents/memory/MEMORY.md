@@ -14,3 +14,4 @@
 - [Atendimento↔dashboard↔CRM sync](atendimento-dashboard-crm-sync.md) — dashboard & CRM history read attendance_logs; resolving a chat must emit one log (txn + locked read, sector-scoped CRM)
 - [WhatsApp outbound status](whatsapp-outbound-status.md) — "conversas não funcionam" = bridge unpaired (status qr, scan QR); failed sends must set status 'failed' + broadcast message_updated, never stay silent 'sent'
 - [Task board](task-board.md) — Trello-style Tarefas board (tasks table); vendedor sees own-sector OR assignee OR creator; sector-scope predicate must guard null (see vendedor-scoping)
+- [CRM real-time sync](crm-realtime-sync.md) — CRM board + Visão Geral reuse the chat SSE channel (/api/chat/events) with crm_contact_* events; broadcast with contact sectorId, isPotential=false

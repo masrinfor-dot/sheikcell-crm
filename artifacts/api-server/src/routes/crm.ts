@@ -2,6 +2,7 @@ import { Router, type IRouter } from "express";
 import { db, crmContactsTable, crmPurchasesTable, crmInternalNotesTable, crmCustomFieldsTable, sectorsTable, usersTable, attendanceLogsTable } from "@workspace/db";
 import { eq, and, desc, asc, ilike, or } from "drizzle-orm";
 import { requireAuth, requireAdminOrSupervisor } from "../middlewares/auth";
+import { broadcast } from "../lib/sseEmitter";
 import type { Request } from "express";
 
 const router: IRouter = Router();
@@ -51,7 +52,34 @@ function isGlobalRole(role: string | undefined): boolean {
 
 function callerCanAccessSector(session: Request["session"], contactSectorId: number | null): boolean {
   if (isGlobalRole(session.userRole)) return true;
-  return contactSectorId === (session.userSectorId ?? null);
+  // Fail closed: a sector-scoped user without a sector matches nothing, and
+  // null-sector contacts are never accessible to non-global users. This keeps
+  // CRM isolation consistent with the hardened chat/queue scoping.
+  const sid = session.userSectorId ?? null;
+  if (sid === null) return false;
+  return contactSectorId === sid;
+}
+
+/**
+ * Emits a real-time CRM event over the shared SSE channel so open CRM boards
+ * and the Visão Geral update instantly. Scoped by the contact's sector:
+ * globals (admin/supervisor) receive every event, vendedores only their own
+ * sector (isPotential is always false — CRM has no cross-sector fan-out).
+ */
+function broadcastContact(
+  event: "crm_contact_created" | "crm_contact_updated" | "crm_contact_deleted",
+  payload: Record<string, unknown>,
+  sectorId: number | null,
+): void {
+  broadcast(event, payload, sectorId, false);
+}
+
+/** Reloads a contact by id, enriches it, and broadcasts an update event. */
+async function broadcastContactUpdate(id: number): Promise<void> {
+  const [fresh] = await db.select().from(crmContactsTable).where(eq(crmContactsTable.id, id));
+  if (!fresh) return;
+  const enriched = await enrichContact(fresh);
+  broadcastContact("crm_contact_updated", enriched, fresh.sectorId);
 }
 
 /**
@@ -112,7 +140,9 @@ router.post("/crm/auto-register", requireAuth, async (req, res): Promise<void> =
     name, contact: contact ?? phone, phone: normalizedPhone || null,
     sectorId: effectiveSectorId, status: "potential", profile: "Novo",
   }).returning();
-  res.status(201).json({ ...await enrichContact(created), created: true });
+  const enriched = await enrichContact(created);
+  res.status(201).json({ ...enriched, created: true });
+  broadcastContact("crm_contact_created", enriched, created.sectorId);
 });
 
 // Delete purchase (before /crm/:id)
@@ -131,6 +161,7 @@ router.delete("/crm/purchases/:purchaseId", requireAuth, async (req, res): Promi
   const total = all.reduce((s, p2) => s + parseFloat(String(p2.amount ?? "0")), 0);
   await db.update(crmContactsTable).set({ totalPurchases: String(total), updatedAt: new Date() }).where(eq(crmContactsTable.id, p.contactId));
   res.json({ ok: true });
+  await broadcastContactUpdate(p.contactId);
 });
 
 // Delete note (before /crm/:id)
@@ -215,7 +246,9 @@ router.get("/crm", requireAuth, async (req, res): Promise<void> => {
 
   let contacts = isGlobalRole(userRole)
     ? allContacts
-    : allContacts.filter((c) => c.sectorId === userSectorId);
+    : userSectorId === null
+      ? [] // fail closed: sector-scoped user without a sector sees nothing
+      : allContacts.filter((c) => c.sectorId === userSectorId);
 
   if (profile) contacts = contacts.filter((c) => c.profile === profile);
   if (status) contacts = contacts.filter((c) => c.status === status);
@@ -268,7 +301,9 @@ router.post("/crm", requireAuth, async (req, res): Promise<void> => {
     notes, tags,
     customFields: sanitizeCustomFields(customFields),
   }).returning();
-  res.status(201).json(await enrichContact(created));
+  const enriched = await enrichContact(created);
+  res.status(201).json(enriched);
+  broadcastContact("crm_contact_created", enriched, created.sectorId);
 });
 
 // ─── Get single contact (full detail) ─────────────────────────────────────
@@ -313,7 +348,21 @@ router.patch("/crm/:id", requireAuth, async (req, res): Promise<void> => {
   if (customFields !== undefined) update.customFields = sanitizeCustomFields(customFields);
   if (isArchived !== undefined) update.isArchived = isArchived;
   const [updated] = await db.update(crmContactsTable).set(update).where(eq(crmContactsTable.id, id)).returning();
-  res.json(await enrichContact(updated));
+  const enriched = await enrichContact(updated);
+  res.json(enriched);
+  // Archiving via PATCH is a removal for open boards.
+  if (updated.isArchived) {
+    broadcastContact("crm_contact_deleted", { id, sectorId: updated.sectorId }, updated.sectorId);
+    if (existing.sectorId !== updated.sectorId) {
+      broadcastContact("crm_contact_deleted", { id, sectorId: existing.sectorId }, existing.sectorId);
+    }
+    return;
+  }
+  broadcastContact("crm_contact_updated", enriched, updated.sectorId);
+  // On admin sector reassignment, tell the origin sector to drop the contact.
+  if (existing.sectorId !== updated.sectorId) {
+    broadcastContact("crm_contact_deleted", { id, sectorId: existing.sectorId }, existing.sectorId);
+  }
 });
 
 // ─── Delete (archive) ──────────────────────────────────────────────────────
@@ -324,6 +373,7 @@ router.delete("/crm/:id", requireAuth, async (req, res): Promise<void> => {
   if (!existing) return;
   await db.update(crmContactsTable).set({ isArchived: true }).where(eq(crmContactsTable.id, id));
   res.json({ ok: true });
+  broadcastContact("crm_contact_deleted", { id, sectorId: existing.sectorId }, existing.sectorId);
 });
 
 // ─── Purchases ─────────────────────────────────────────────────────────────
@@ -361,6 +411,7 @@ router.post("/crm/:id/purchases", requireAuth, async (req, res): Promise<void> =
   else if (total >= 1000) profileUpdate.profile = "Regular";
   await db.update(crmContactsTable).set(profileUpdate).where(eq(crmContactsTable.id, id));
   res.status(201).json(purchase);
+  await broadcastContactUpdate(id);
 });
 
 // ─── Internal Notes ────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { api, type CrmContact, type Sector, type CrmCustomField, type CrmCustomFieldType } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
@@ -206,6 +206,60 @@ export default function CrmBoard() {
     fetchContacts();
     api.sectors.list().then(setSectors).catch(() => {});
   }, [fetchContacts]);
+
+  // ── Real-time sync: reflect CRM changes from any user instantly ──
+  const filterProfileRef = useRef(filterProfile);
+  const searchQRef = useRef(searchQ);
+  const fetchContactsRef = useRef(fetchContacts);
+  const searchRefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => { filterProfileRef.current = filterProfile; }, [filterProfile]);
+  useEffect(() => { searchQRef.current = searchQ; }, [searchQ]);
+  useEffect(() => { fetchContactsRef.current = fetchContacts; }, [fetchContacts]);
+
+  useEffect(() => {
+    const es = new EventSource("/api/chat/events", { withCredentials: true });
+
+    // While a search is active the server-side match spans many fields, so we
+    // can't reliably decide client-side whether a changed row still matches.
+    // Debounce a scoped refetch instead of a surgical upsert.
+    const scheduleSearchRefetch = () => {
+      if (searchRefetchTimer.current) return;
+      searchRefetchTimer.current = setTimeout(() => {
+        searchRefetchTimer.current = null;
+        fetchContactsRef.current();
+      }, 500);
+    };
+
+    const upsert = (c: CrmContact) => {
+      if (searchQRef.current) { scheduleSearchRefetch(); return; }
+      setContacts((prev) => {
+        const exists = prev.some((x) => x.id === c.id);
+        // Respect the active profile filter so events don't inject off-filter rows.
+        const profileOk = !filterProfileRef.current || c.profile === filterProfileRef.current;
+        if (!profileOk) return exists ? prev.filter((x) => x.id !== c.id) : prev;
+        if (exists) return prev.map((x) => (x.id === c.id ? { ...x, ...c } : x));
+        return [c, ...prev];
+      });
+    };
+
+    es.addEventListener("crm_contact_created", (e) => {
+      try { upsert(JSON.parse((e as MessageEvent).data) as CrmContact); } catch { /* ignore */ }
+    });
+    es.addEventListener("crm_contact_updated", (e) => {
+      try { upsert(JSON.parse((e as MessageEvent).data) as CrmContact); } catch { /* ignore */ }
+    });
+    es.addEventListener("crm_contact_deleted", (e) => {
+      try {
+        const { id } = JSON.parse((e as MessageEvent).data) as { id: number };
+        setContacts((prev) => prev.filter((x) => x.id !== id));
+      } catch { /* ignore */ }
+    });
+
+    return () => {
+      es.close();
+      if (searchRefetchTimer.current) { clearTimeout(searchRefetchTimer.current); searchRefetchTimer.current = null; }
+    };
+  }, []);
 
   const openAdd = () => {
     setEditTarget(null);

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/lib/auth";
 import { api, type SectorSummary, type AttendanceLog, type Sector } from "@/lib/api";
 import { SectorIcon } from "@/components/SectorIcon";
@@ -97,6 +97,30 @@ export default function AdminDashboard() {
     const iv = setInterval(fetchAll, 8000);
     return () => clearInterval(iv);
   }, [fetchAll, fetchUsersAndSectors, fetchWAStatus, user?.role]);
+
+  // ── Real-time Visão Geral: refresh the summary the moment CRM, chat or queue
+  // state changes, instead of waiting for the 8s poll. Debounced so a burst of
+  // events triggers a single refetch.
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const es = new EventSource("/api/chat/events", { withCredentials: true });
+    const scheduleRefresh = () => {
+      if (refreshTimer.current) return;
+      refreshTimer.current = setTimeout(() => {
+        refreshTimer.current = null;
+        fetchAll();
+      }, 500);
+    };
+    const events = [
+      "crm_contact_created", "crm_contact_updated", "crm_contact_deleted",
+      "conversation_new", "conversation_updated",
+    ];
+    for (const ev of events) es.addEventListener(ev, scheduleRefresh);
+    return () => {
+      es.close();
+      if (refreshTimer.current) { clearTimeout(refreshTimer.current); refreshTimer.current = null; }
+    };
+  }, [fetchAll]);
 
   useEffect(() => {
     if (tab !== "whatsapp") return;
