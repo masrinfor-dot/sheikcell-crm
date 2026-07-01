@@ -12,7 +12,7 @@ import {
   ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare
 } from "lucide-react";
 
-type MainTab = "queue" | "chat" | "equipe" | "crm";
+type MainTab = "queue" | "chat" | "crm";
 
 function formatWait(createdAt: string): string {
   const diff = Math.floor((Date.now() - new Date(createdAt).getTime()) / 1000);
@@ -169,7 +169,6 @@ export default function AttendantDashboard() {
             {([
               { id: "queue" as MainTab, label: "Fila",           icon: PhoneCall      },
               { id: "chat"  as MainTab, label: "Atendimento",    icon: MessageCircle  },
-              { id: "equipe" as MainTab, label: "Chat Interno",  icon: MessagesSquare },
               { id: "crm"   as MainTab, label: "CRM",            icon: Kanban         },
             ] as const).map(({ id, label, icon: Icon }) => (
               <button key={id} onClick={() => setMainTab(id)}
@@ -190,8 +189,6 @@ export default function AttendantDashboard() {
           <ChatCenter />
         </div>
       )}
-
-      {mainTab === "equipe" && <InternalChat />}
 
       {mainTab === "crm" && (
         <div className="max-w-3xl mx-auto px-4 py-6">
@@ -360,6 +357,11 @@ export default function AttendantDashboard() {
       )}
       </>}
         </div>
+
+        {/* Chat Interno — coluna lateral sempre aberta */}
+        <aside className="flex w-[300px] xl:w-[360px] shrink-0 flex-col border-l border-border bg-card sticky top-14 self-start h-[calc(100vh-3.5rem)]">
+          <InternalChat docked />
+        </aside>
       </div>
     </div>
   );

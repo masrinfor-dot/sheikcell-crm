@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
 import { api, type InternalConversation, type InternalMessage } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
-import { Users, Send, Plus, X, Search, MessagesSquare } from "lucide-react";
+import { Users, Send, Plus, X, Search, MessagesSquare, ChevronLeft } from "lucide-react";
 
 const roleLabel: Record<string, string> = {
   admin: "Administrador",
@@ -24,7 +24,7 @@ function timeLabel(iso: string | null): string {
   return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
 }
 
-export default function InternalChat() {
+export default function InternalChat({ docked = false }: { docked?: boolean } = {}) {
   const { user } = useAuth();
   const { toast } = useToast();
   const [conversations, setConversations] = useState<InternalConversation[]>([]);
@@ -150,12 +150,9 @@ export default function InternalChat() {
 
   const filteredColleagues = colleagues.filter((c) => c.name.toLowerCase().includes(colleagueSearch.toLowerCase()));
 
-  return (
-    <div className="max-w-6xl mx-auto px-4 py-4">
-      <div className="relative flex h-[calc(100vh-180px)] min-h-[480px] rounded-xl border bg-card overflow-hidden shadow-sm">
-        {/* Conversation list */}
-        <aside className="w-72 shrink-0 border-r flex flex-col bg-muted/20">
-          <div className="p-3 border-b flex items-center justify-between gap-2">
+  const listPanel = (
+    <>
+          <div className="p-3 border-b flex items-center justify-between gap-2 shrink-0">
             <div className="flex items-center gap-2 font-semibold text-sm">
               <MessagesSquare className="w-4 h-4 text-primary" /> Chat Interno
             </div>
@@ -202,13 +199,21 @@ export default function InternalChat() {
               </button>
             ))}
           </div>
-        </aside>
+    </>
+  );
 
-        {/* Message thread */}
-        <section className="flex-1 flex flex-col min-w-0">
-          {active ? (
+  const threadPanel = active ? (
             <>
-              <header className="px-4 py-3 border-b flex items-center gap-3">
+              <header className="px-4 py-3 border-b flex items-center gap-3 shrink-0">
+                {docked && (
+                  <button
+                    onClick={() => setActiveId(null)}
+                    data-testid="button-back-internal"
+                    className="p-1 -ml-1 rounded-md hover:bg-muted/50 shrink-0"
+                  >
+                    <ChevronLeft className="w-5 h-5" />
+                  </button>
+                )}
                 <div className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-semibold ${
                   active.kind === "general" ? "bg-amber-500 text-white" : "bg-primary text-white"
                 }`}>
@@ -247,7 +252,7 @@ export default function InternalChat() {
                 <div ref={bottomRef} />
               </div>
 
-              <div className="p-3 border-t flex items-end gap-2">
+              <div className="p-3 border-t flex items-end gap-2 shrink-0">
                 <textarea
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
@@ -274,11 +279,9 @@ export default function InternalChat() {
               <MessagesSquare className="w-12 h-12 mb-3 opacity-30" />
               <p className="text-sm">Selecione uma conversa ou inicie uma nova para conversar com a equipe.</p>
             </div>
-          )}
-        </section>
+  );
 
-        {/* New conversation modal */}
-        {showNew && (
+  const newModal = showNew && (
           <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowNew(false)}>
             <div className="bg-card rounded-xl w-full max-w-sm shadow-xl border overflow-hidden" onClick={(e) => e.stopPropagation()}>
               <div className="flex items-center justify-between px-4 py-3 border-b">
@@ -321,7 +324,27 @@ export default function InternalChat() {
               </div>
             </div>
           </div>
+  );
+
+  if (docked) {
+    return (
+      <div className="relative flex flex-col h-full min-h-0 bg-card overflow-hidden">
+        {active ? (
+          <section className="flex-1 flex flex-col min-h-0">{threadPanel}</section>
+        ) : (
+          <div className="flex flex-col h-full min-h-0">{listPanel}</div>
         )}
+        {newModal}
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-6xl mx-auto px-4 py-4">
+      <div className="relative flex h-[calc(100vh-180px)] min-h-[480px] rounded-xl border bg-card overflow-hidden shadow-sm">
+        <aside className="w-72 shrink-0 border-r flex flex-col bg-muted/20">{listPanel}</aside>
+        <section className="flex-1 flex flex-col min-w-0">{threadPanel}</section>
+        {newModal}
       </div>
     </div>
   );
