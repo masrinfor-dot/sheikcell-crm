@@ -573,8 +573,18 @@ export default function ChatCenter() {
         });
       } catch { /* silent */ }
     });
+    // When the reconnection gap is larger than the server's replay buffer (or
+    // the server restarted), the server asks the client to resync. Refetch the
+    // conversation list and the open conversation's messages so nothing that
+    // arrived during the outage is lost. Missed events within buffer range are
+    // replayed automatically and flow through the handlers above, so the bell
+    // and lists stay correct without any extra work here.
+    es.addEventListener("resync", () => {
+      fetchConvs();
+      if (activeId != null) fetchMsgs(activeId);
+    });
     return () => es.close();
-  }, [activeId, user]);
+  }, [activeId, user, fetchConvs, fetchMsgs]);
 
   useEffect(() => {
     api.sectors.list().then(setSectors).catch(() => {});

@@ -5,7 +5,13 @@ import path from "path";
 import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable } from "@workspace/db";
 import { eq, desc, and, or, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { requireAuth, requireAdminOrSupervisor } from "../middlewares/auth";
-import { broadcast, sseEmitter } from "../lib/sseEmitter";
+import {
+  broadcast,
+  sseEmitter,
+  bufferedEventsSince,
+  reconnectStrategy,
+  type BufferedEvent,
+} from "../lib/sseEmitter";
 import { isPotentialConversation, POTENTIAL_EXCLUDED_STATUSES } from "../lib/conversationScope";
 import { ensureCrmContactForConversation } from "../lib/crmSync";
 import {
@@ -30,19 +36,45 @@ router.get("/chat/events", requireAuth, (req: Request, res: Response): void => {
   const userSectorId = req.session.userSectorId;
   const isGlobal = userRole === "admin" || userRole === "supervisor";
 
-  const send = (payload: { event: string; data: unknown; sectorId: number | null; isPotential?: boolean }) => {
-    // Potenciais (new, unclaimed leads) are broadcast to every vendedor
-    // regardless of sector; everything else stays sector-scoped. Mirror
-    // canAccessConversation exactly: a non-global user only receives an event
-    // when it is a potencial OR its sector matches their own. A null sector
-    // never matches a vendedor, so such events are withheld (fail closed).
-    if (!isGlobal && !payload.isPotential) {
-      const sameSector = payload.sectorId != null && payload.sectorId === userSectorId;
-      if (!sameSector) return;
-    }
-    res.write(`event: ${payload.event}\n`);
-    res.write(`data: ${JSON.stringify(payload.data)}\n\n`);
+  // Mirror canAccessConversation exactly: Potenciais (new, unclaimed leads) are
+  // broadcast to every vendedor regardless of sector; everything else stays
+  // sector-scoped. A non-global user only receives an event when it is a
+  // potencial OR its sector matches their own. A null sector never matches a
+  // vendedor, so such events are withheld (fail closed).
+  const allowed = (ev: { sectorId: number | null; isPotential?: boolean }): boolean => {
+    if (isGlobal || ev.isPotential) return true;
+    return ev.sectorId != null && ev.sectorId === userSectorId;
   };
+
+  const writeEvent = (ev: { id?: number; event: string; data: unknown }) => {
+    if (ev.id != null) res.write(`id: ${ev.id}\n`);
+    res.write(`event: ${ev.event}\n`);
+    res.write(`data: ${JSON.stringify(ev.data)}\n\n`);
+  };
+
+  const send = (payload: BufferedEvent) => {
+    if (!allowed(payload)) return;
+    writeEvent(payload);
+  };
+
+  // ── Reconnect recovery ──
+  // EventSource resends the id of the last event it received in the
+  // `Last-Event-ID` header. Replay everything missed during the disconnection
+  // so no inbound message is lost. If too much was missed (evicted from the
+  // buffer) or the server restarted, tell the client to refetch from REST.
+  const rawLastId = req.headers["last-event-id"];
+  const sinceRaw = Array.isArray(rawLastId) ? rawLastId[0] : rawLastId;
+  const sinceId = sinceRaw != null ? Number.parseInt(sinceRaw, 10) : NaN;
+  if (Number.isFinite(sinceId)) {
+    const strategy = reconnectStrategy(sinceId);
+    if (strategy === "resync") {
+      writeEvent({ event: "resync", data: { reason: "gap" } });
+    } else if (strategy === "replay") {
+      for (const ev of bufferedEventsSince(sinceId)) {
+        if (allowed(ev)) writeEvent(ev);
+      }
+    }
+  }
 
   sseEmitter.on("broadcast", send);
   req.on("close", () => sseEmitter.off("broadcast", send));
