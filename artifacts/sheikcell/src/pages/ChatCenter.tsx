@@ -360,6 +360,11 @@ export default function ChatCenter() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Latest conversations, read from inside the SSE handler without re-subscribing.
   const convsRef = useRef<Conversation[]>([]);
+  // Inbound messages that arrived before their conversation was loaded (real-time
+  // event ordering). Buffered by conversationId and resolved into notifications
+  // once the matching conversation_new event arrives (respecting visible scope),
+  // so the first message of a brand-new contact is never silently dropped.
+  const pendingNotifsRef = useRef<Map<number, MsgNotification[]>>(new Map());
 
   const activeConv = convs.find((c) => c.id === activeId) ?? null;
   const unreadNotifications = notifications.reduce((n, x) => n + (x.read ? 0 : 1), 0);
@@ -442,18 +447,29 @@ export default function ChatCenter() {
         // the conversation already open are counted as already read.
         if (message.direction === "inbound") {
           const conv = convsRef.current.find((c) => c.id === conversationId);
-          if (conv && isVisibleToMe(conv, user)) {
-            setNotifications((prev) => [
-              {
-                id: `${conversationId}-${message.id}-${message.createdAt}`,
-                conversationId,
-                convName: conv.name,
-                preview: message.content,
-                createdAt: message.createdAt,
-                read: conversationId === activeId,
-              },
-              ...prev,
-            ].slice(0, 100));
+          const notif: MsgNotification = {
+            id: `${conversationId}-${message.id}-${message.createdAt}`,
+            conversationId,
+            convName: conv?.name ?? "",
+            preview: message.content,
+            createdAt: message.createdAt,
+            read: conversationId === activeId,
+          };
+          if (!conv) {
+            // The conversation hasn't loaded yet (e.g. first message of a brand-new
+            // contact arriving before conversation_new). Buffer the notice so it can
+            // be resolved once the conversation appears, instead of dropping it.
+            const map = pendingNotifsRef.current;
+            const list = map.get(conversationId) ?? [];
+            map.set(conversationId, [...list, notif].slice(-20));
+            // Bound the buffer so out-of-scope conversations that never arrive can't
+            // grow it without limit; drop the oldest pending conversation.
+            if (map.size > 50) {
+              const oldest = map.keys().next().value;
+              if (oldest !== undefined) map.delete(oldest);
+            }
+          } else if (isVisibleToMe(conv, user)) {
+            setNotifications((prev) => [notif, ...prev].slice(0, 100));
             // Alert the attendant even when this conversation isn't focused or the
             // browser tab is in the background: short sound and/or native notification.
             const notLooking = document.hidden || conversationId !== activeId;
@@ -470,8 +486,34 @@ export default function ChatCenter() {
     es.addEventListener("conversation_new", (e) => {
       try {
         const conv = JSON.parse(e.data) as Conversation;
+        // Regardless of visibility, discard any buffered notices for this conv;
+        // if it's out of scope they must not surface, if visible we resolve them now.
+        const pending = pendingNotifsRef.current.get(conv.id);
+        pendingNotifsRef.current.delete(conv.id);
         if (!isVisibleToMe(conv, user)) return;
         setConvs((prev) => prev.some((c) => c.id === conv.id) ? prev : [conv, ...prev]);
+        // Resolve any inbound messages that arrived before this conversation loaded,
+        // so the first notice of a brand-new contact isn't lost to event ordering.
+        if (pending && pending.length) {
+          const resolved = pending.map((n) => ({
+            ...n,
+            convName: conv.name,
+            read: n.conversationId === activeId,
+          }));
+          setNotifications((prev) => {
+            const seen = new Set(prev.map((n) => n.id));
+            const fresh = resolved.filter((n) => !seen.has(n.id));
+            return [...fresh.reverse(), ...prev].slice(0, 100);
+          });
+          const notLooking = document.hidden || conv.id !== activeId;
+          if (notLooking) {
+            if (soundEnabledRef.current) playAlertSound();
+            if (desktopEnabledRef.current && document.hidden) {
+              const last = pending[pending.length - 1];
+              showDesktopNotification(conv.name, last.preview, conv.id);
+            }
+          }
+        }
       } catch { /* silent */ }
     });
     es.addEventListener("conversation_updated", (e) => {
