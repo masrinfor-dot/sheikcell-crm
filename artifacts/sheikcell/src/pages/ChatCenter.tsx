@@ -691,35 +691,38 @@ export default function ChatCenter() {
               </div>
             </div>
             <div className="flex items-center gap-1 shrink-0">
-              {/* Category transition action */}
+              {/* Category transition action (compact icon) */}
               {activeCategory === "potenciais" && (
                 <button
                   onClick={() => handleMoveToQueue(activeConv.id)}
                   data-testid="button-move-to-queue"
-                  className="flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg text-white font-semibold transition hover:opacity-90"
+                  className="p-2 rounded-lg text-white transition hover:opacity-90"
                   style={{ backgroundColor: "#f59e0b" }}
+                  title="Enviar para a fila de atendimento"
                 >
-                  <ArrowRightLeft className="w-3 h-3" /> Enviar para fila
+                  <ArrowRightLeft className="w-3.5 h-3.5" />
                 </button>
               )}
               {activeCategory === "pendentes" && (
                 <button
                   onClick={() => handleClaim(activeConv.id)}
                   data-testid="button-claim-conv"
-                  className="flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg text-white font-semibold transition hover:opacity-90"
+                  className="p-2 rounded-lg text-white transition hover:opacity-90"
                   style={{ backgroundColor: "#16a34a" }}
+                  title="Iniciar atendimento"
                 >
-                  <UserCircle2 className="w-3 h-3" /> Iniciar atendimento
+                  <UserCircle2 className="w-3.5 h-3.5" />
                 </button>
               )}
               {activeCategory === "ativos" && (
                 <button
                   onClick={() => handleFinalize(activeConv.id)}
                   data-testid="button-finalize-conv"
-                  className="flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg text-white font-semibold transition hover:opacity-90"
+                  className="p-2 rounded-lg text-white transition hover:opacity-90"
                   style={{ backgroundColor: "#16a34a" }}
+                  title="Finalizar atendimento"
                 >
-                  <CheckCircle2 className="w-3 h-3" /> Finalizar atendimento
+                  <CheckCircle2 className="w-3.5 h-3.5" />
                 </button>
               )}
               {/* Status quick-set */}
@@ -734,7 +737,7 @@ export default function ChatCenter() {
                 </button>
                 {showStatusPicker && (
                   <div className="absolute right-0 top-11 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden w-36">
-                    {["open", "pending", "resolved"].map((s) => (
+                    {["open", "pending"].map((s) => (
                       <button key={s} onClick={() => { handleStatus(s); setShowStatusPicker(false); }}
                         className="w-full text-left flex items-center gap-2 text-xs px-3 py-2.5 hover:bg-secondary transition">
                         <Circle className={`w-2 h-2 fill-current ${s === "open" ? "text-green-500" : s === "pending" ? "text-amber-500" : "text-gray-400"}`} />
