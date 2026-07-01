@@ -390,6 +390,10 @@ export default function ChatCenter() {
   // once the matching conversation_new event arrives (respecting visible scope),
   // so the first message of a brand-new contact is never silently dropped.
   const pendingNotifsRef = useRef<Map<number, MsgNotification[]>>(new Map());
+  // Guards the one-time refetch that closes the initial-load race between the
+  // REST fetch and the SSE subscriber being registered server-side. Only the
+  // very first stream `open` triggers it; reconnects are covered by replay/resync.
+  const initialSyncedRef = useRef(false);
 
   const activeConv = convs.find((c) => c.id === activeId) ?? null;
   const unreadNotifications = notifications.reduce((n, x) => n + (x.read ? 0 : 1), 0);
@@ -456,6 +460,19 @@ export default function ChatCenter() {
   // ── SSE real-time ──
   useEffect(() => {
     const es = new EventSource("/api/chat/events", { withCredentials: true });
+    // Close the initial-load race: a message can arrive after the REST fetch
+    // snapshot but before the SSE subscriber is registered server-side, landing
+    // in neither the fetch nor the stream. Once the stream is actually open
+    // (subscriber registered), do a one-time refetch to pull anything that
+    // slipped through the gap. A brand-new connection gets no replay, so this
+    // never duplicates messages or bell notifications; subsequent reconnects are
+    // handled by replay/resync, so the guard keeps this to the very first open.
+    es.addEventListener("open", () => {
+      if (initialSyncedRef.current) return;
+      initialSyncedRef.current = true;
+      fetchConvs();
+      if (activeId != null) fetchMsgs(activeId);
+    });
     es.addEventListener("message_updated", (e) => {
       try {
         const { conversationId, message } = JSON.parse(e.data) as { conversationId: number; message: ChatMessage };
