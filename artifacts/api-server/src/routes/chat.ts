@@ -486,9 +486,28 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
   if (name !== undefined) update.name = name;
   if (isArchived !== undefined) update.isArchived = isArchived;
   // Only admins and supervisors may reassign to a different sector or assignee
+  let isSectorTransfer = false;
   if (userRole === "admin" || userRole === "supervisor") {
     if (sectorId !== undefined) update.sectorId = sectorId;
     if (assigneeId !== undefined) update.assigneeId = assigneeId;
+    // Transferring a conversation to a DIFFERENT sector hands it off to another
+    // team of vendedores. Route it into that sector's "Pendentes" queue by
+    // clearing the assignee and setting status "pending", so a vendedor there
+    // reviews and assumes it ("Iniciar atendimento") instead of it silently
+    // staying under the previous vendedor. Skipped when the caller explicitly
+    // sets a status/assignee in the same request or the conversation is
+    // already finished.
+    isSectorTransfer =
+      sectorId !== undefined &&
+      sectorId !== conv.sectorId &&
+      assigneeId === undefined &&
+      status === undefined &&
+      conv.status !== "resolved" &&
+      conv.status !== "archived";
+    if (isSectorTransfer) {
+      update.assigneeId = null;
+      update.status = "pending";
+    }
   }
 
   // Run the update and the dashboard/CRM sync atomically. A locked read of the
@@ -509,7 +528,17 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
     return row;
   });
 
-  broadcast("conversation_updated", updated, updated.sectorId, isPotentialConversation(updated));
+  // Deliver to everyone who could see it BEFORE the change (potenciais are
+  // cross-sector visible, so read wasPotential from the pre-update row) as well
+  // as everyone who can see it now.
+  const wasPotential = isPotentialConversation(conv);
+  broadcast("conversation_updated", updated, updated.sectorId, wasPotential || isPotentialConversation(updated));
+  // On a sector transfer the broadcast above targets the NEW sector, so the
+  // ORIGIN sector's vendedores would otherwise never learn the conversation
+  // left. Notify them explicitly so they drop it from their list.
+  if (isSectorTransfer && conv.sectorId != null && conv.sectorId !== updated.sectorId) {
+    broadcast("conversation_updated", updated, conv.sectorId, false);
+  }
   res.json(updated);
 });
 

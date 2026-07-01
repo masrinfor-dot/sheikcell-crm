@@ -714,7 +714,7 @@ export default function ChatCenter() {
         senderName: "Sistema", mediaUrl: null, externalId: null,
         createdAt: new Date().toISOString(),
       }]);
-      toast({ title: `Transferido para ${targetSector?.name ?? "setor"}` });
+      toast({ title: `Transferido para ${targetSector?.name ?? "setor"}`, description: "Conversa enviada para Pendentes para aprovar o atendimento." });
     } catch { toast({ title: "Erro ao transferir", variant: "destructive" }); }
     setShowTransferPicker(false);
   };

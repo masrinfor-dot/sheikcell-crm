@@ -40,4 +40,24 @@ apply the new status locally without waiting for the SSE round-trip.
 - **Potencial → Pendente:** `updateConversation(status: "pending")` ("Enviar para fila"). Stand-in for the future AI filter.
 - **Pendente → Ativo:** `POST /chat/conversations/:id/claim` (self-assign). Needed because the PATCH route blocks vendedores from setting `assigneeId`; claim is a sector-scoped self-assignment.
 
+## Sector transfer routes to Pendentes
+
+The ChatCenter "Transferir" feature is a SECTOR change, not a per-vendedor pick — it
+hands the conversation to another team of vendedores. A sector transfer (admin/
+supervisor PATCH that changes `sectorId` with no explicit `assigneeId`/`status`, and
+the conv isn't resolved/archived) resets `assigneeId = null` + `status = "pending"`
+so it lands in the DESTINATION sector's Pendentes queue for someone to claim.
+
+**Why:** "conversas transferidas entre vendedores devem aparecer em Pendentes" — a
+handoff must be re-approved by the receiving team, not silently stay under the old
+vendedor.
+
+**How to apply (SSE, or the old sector leaks a ghost row):** the normal
+`conversation_updated` broadcast targets the NEW sector only, so the ORIGIN sector's
+vendedores never learn it left. On a sector transfer, broadcast a SECOND
+`conversation_updated` scoped to the origin sector so they drop it (frontend
+`isVisibleToMe` is false once sector changed). Also OR the pre-update `wasPotential`
+into the main broadcast's isPotential flag so cross-sector potencial viewers still
+get the removal (see potenciais-scoping).
+
 **Claim guard:** claim must reject (409) when `assigneeId` is already set to *another* user — otherwise any same-sector user could steal an in-progress conversation. Re-claiming by the same user is idempotent.
