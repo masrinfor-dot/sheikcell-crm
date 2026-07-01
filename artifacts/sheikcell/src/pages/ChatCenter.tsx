@@ -723,9 +723,17 @@ export default function ChatCenter() {
   const handleAddParticipant = async (userId: number) => {
     if (!activeConv) return;
     try {
-      await api.chat.participants.add(activeConv.id, userId);
+      const res = await api.chat.participants.add(activeConv.id, userId);
       const u = chatUsers.find((x) => x.id === userId);
-      if (u) setConvs((prev) => prev.map((c) => c.id === activeConv.id ? { ...c, participants: [...(c.participants ?? []), { id: u.id, name: u.name }] } : c));
+      const newStatus = res.conversation?.status;
+      setConvs((prev) => prev.map((c) => {
+        if (c.id !== activeConv.id) return c;
+        const participants = u ? [...(c.participants ?? []), { id: u.id, name: u.name }] : c.participants;
+        return newStatus ? { ...c, participants, status: newStatus } : { ...c, participants };
+      }));
+      if (newStatus === "pending") {
+        toast({ title: "Vendedor adicionado", description: "Conversa enviada para Pendentes para aprovar o atendimento." });
+      }
     } catch { toast({ title: "Erro ao adicionar vendedor", variant: "destructive" }); }
   };
 

@@ -654,6 +654,39 @@ router.post("/chat/conversations/:id/participants", requireAuth, async (req, res
   if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
 
   await db.insert(conversationParticipantsTable).values({ conversationId: convId, userId }).onConflictDoNothing();
+
+  // When a vendedor is added to a conversation, route it into the "Pendentes"
+  // queue so they can review and approve/assume the attendance ("Iniciar
+  // atendimento"). Only do this when nobody is actively handling it yet and it
+  // isn't already queued or finished, so an active or resolved conversation is
+  // never knocked back into the queue.
+  const [addedUser] = await db
+    .select({ role: usersTable.role })
+    .from(usersTable)
+    .where(eq(usersTable.id, userId))
+    .limit(1);
+  const shouldQueue =
+    addedUser?.role === "vendedor" &&
+    conv.assigneeId == null &&
+    conv.status !== "pending" &&
+    conv.status !== "resolved" &&
+    conv.status !== "archived";
+
+  if (shouldQueue) {
+    // wasPotential must be read from the PRE-update state so the SSE fan-out
+    // scoping stays correct (potenciais are cross-sector visible).
+    const wasPotential = isPotentialConversation(conv);
+    const [updated] = await db
+      .update(conversationsTable)
+      .set({ status: "pending", updatedAt: new Date() })
+      .where(eq(conversationsTable.id, convId))
+      .returning();
+    broadcast("conversation_updated", updated, updated.sectorId, wasPotential);
+    broadcast("participants_updated", { conversationId: convId }, updated.sectorId, false);
+    res.status(201).json({ ok: true, conversation: updated });
+    return;
+  }
+
   broadcast("participants_updated", { conversationId: convId }, conv.sectorId, isPotentialConversation(conv));
   res.status(201).json({ ok: true });
 });

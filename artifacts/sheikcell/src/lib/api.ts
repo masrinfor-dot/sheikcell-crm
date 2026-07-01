@@ -297,7 +297,7 @@ export const api = {
       req<Conversation>(`/chat/conversations/${id}/claim`, { method: "POST" }),
     participants: {
       add: (convId: number, userId: number) =>
-        req<{ ok: boolean }>(`/chat/conversations/${convId}/participants`, { method: "POST", body: JSON.stringify({ userId }) }),
+        req<{ ok: boolean; conversation?: Conversation }>(`/chat/conversations/${convId}/participants`, { method: "POST", body: JSON.stringify({ userId }) }),
       remove: (convId: number, userId: number) =>
         req<{ ok: boolean }>(`/chat/conversations/${convId}/participants/${userId}`, { method: "DELETE" }),
     },
