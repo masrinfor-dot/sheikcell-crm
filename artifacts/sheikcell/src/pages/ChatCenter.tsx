@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { api, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User } from "@/lib/api";
+import { api, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -7,7 +7,7 @@ import {
   MessageCircle, CheckCheck, Tag, Filter,
   Smartphone, Instagram, UserCircle2, Circle,
   ArrowRightLeft, FileText, Volume2, Image, Users, Paperclip, IdCard,
-  Settings2, Trash2
+  Settings2, Trash2, Info, Sparkles, Check
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 
@@ -262,6 +262,18 @@ export default function ChatCenter() {
   // CRM connection: contact opened from the active conversation
   const [crmContactId, setCrmContactId] = useState<number | null>(null);
   const [crmLoading, setCrmLoading] = useState(false);
+
+  // Informações side panel: view/edit the linked CRM contact next to the chat
+  const [showInfo, setShowInfo] = useState(false);
+  const [infoContact, setInfoContact] = useState<CrmContact | null>(null);
+  const [infoLoading, setInfoLoading] = useState(false);
+  const [infoSaving, setInfoSaving] = useState(false);
+  const [infoForm, setInfoForm] = useState({ name: "", city: "", serviceStore: "", attendanceSource: "", notes: "" });
+  const [infoCustomValues, setInfoCustomValues] = useState<Record<string, string>>({});
+  const [customDefs, setCustomDefs] = useState<CrmCustomField[]>([]);
+
+  // AI reply suggestion in the composer
+  const [suggesting, setSuggesting] = useState(false);
 
   const msgsEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -533,6 +545,72 @@ export default function ChatCenter() {
     } finally { setCrmLoading(false); }
   };
 
+  // ── Informações side panel: load the linked CRM contact ──
+  const loadInfoContact = useCallback(async () => {
+    if (!activeConv) return;
+    setInfoLoading(true);
+    try {
+      const c = await api.crm.autoRegister({ name: activeConv.name, phone: activeConv.phone });
+      const full = await api.crm.get(c.id);
+      setInfoContact(full);
+      setInfoForm({
+        name: full.name,
+        city: full.city ?? "",
+        serviceStore: full.serviceStore ?? "",
+        attendanceSource: full.attendanceSource ?? "",
+        notes: full.notes ?? "",
+      });
+      setInfoCustomValues(full.customFields ?? {});
+    } catch {
+      toast({ title: "Erro ao carregar informações do cliente", variant: "destructive" });
+    } finally { setInfoLoading(false); }
+  }, [activeConv, toast]);
+
+  // Load custom-field definitions once for the info panel
+  useEffect(() => {
+    api.crm.customFields.list().then((f) => setCustomDefs(f.filter((d) => d.isActive))).catch(() => {});
+  }, []);
+
+  // (Re)load contact whenever the panel opens or the active conversation changes
+  useEffect(() => {
+    if (showInfo && activeConv) void loadInfoContact();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showInfo, activeId]);
+
+  const handleSaveInfo = async () => {
+    if (!infoContact) return;
+    setInfoSaving(true);
+    try {
+      const updated = await api.crm.update(infoContact.id, {
+        name: infoForm.name,
+        city: infoForm.city,
+        serviceStore: infoForm.serviceStore,
+        attendanceSource: infoForm.attendanceSource,
+        notes: infoForm.notes,
+        customFields: infoCustomValues,
+      });
+      setInfoContact(updated);
+      setInfoCustomValues(updated.customFields ?? {});
+      toast({ title: "Informações atualizadas!" });
+    } catch (err: unknown) {
+      toast({ title: "Erro", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setInfoSaving(false); }
+  };
+
+  // ── AI: suggest a reply for the attendant to review before sending ──
+  const handleSuggestReply = async () => {
+    if (!activeConv || suggesting) return;
+    setSuggesting(true);
+    try {
+      const { suggestion } = await api.chat.suggestReply(activeConv.id);
+      setMsgText(suggestion);
+      inputRef.current?.focus();
+      toast({ title: "Sugestão gerada — revise antes de enviar" });
+    } catch (err: unknown) {
+      toast({ title: "IA indisponível", description: err instanceof Error ? err.message : "Erro ao gerar sugestão", variant: "destructive" });
+    } finally { setSuggesting(false); }
+  };
+
   // ── Toggle label ──
   const handleLabel = async (label: string) => {
     if (!activeConv) return;
@@ -697,6 +775,7 @@ export default function ChatCenter() {
           <p className="text-sm mt-1">Selecione uma conversa para começar</p>
         </div>
       ) : (
+        <div className="flex-1 flex min-w-0">
         <div className="flex-1 flex flex-col min-w-0">
           {/* Chat header */}
           <div className="bg-[#ededed] border-b border-border px-4 py-2.5 flex items-center gap-3">
@@ -872,6 +951,15 @@ export default function ChatCenter() {
                   ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                   : <IdCard className="w-3.5 h-3.5" />}
               </button>
+              {/* Informações — toggle the customer info side panel */}
+              <button
+                onClick={() => setShowInfo((v) => !v)}
+                data-testid="button-toggle-info"
+                className={`p-2 rounded-lg border transition ${showInfo ? "bg-primary text-white border-primary" : "bg-white border-border hover:bg-secondary"}`}
+                title="Informações do cliente"
+              >
+                <Info className="w-3.5 h-3.5" />
+              </button>
             </div>
           </div>
 
@@ -931,6 +1019,19 @@ export default function ChatCenter() {
             >
               <Paperclip className="w-4 h-4" />
             </button>
+            <button
+              type="button"
+              onClick={handleSuggestReply}
+              disabled={sending || suggesting}
+              title="Sugerir resposta com IA (revise antes de enviar)"
+              data-testid="button-suggest-reply"
+              className="h-9 px-3 rounded-full flex items-center gap-1.5 text-xs font-semibold text-primary bg-primary/10 hover:bg-primary/20 transition shrink-0 disabled:opacity-40"
+            >
+              {suggesting
+                ? <RefreshCw className="w-4 h-4 animate-spin" />
+                : <Sparkles className="w-4 h-4" />}
+              <span className="hidden sm:inline">Sugerir (IA)</span>
+            </button>
             <input
               ref={inputRef}
               value={msgText}
@@ -946,6 +1047,96 @@ export default function ChatCenter() {
               <Send className="w-4 h-4" />
             </button>
           </form>
+        </div>
+
+        {/* ── Informações side panel ─────────────────────────────────────── */}
+        {showInfo && (
+          <aside className="w-80 shrink-0 border-l border-border bg-white flex flex-col overflow-hidden" data-testid="panel-info">
+            <div className="bg-primary px-4 py-3 text-white flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2">
+                <Info className="w-4 h-4" />
+                <span className="font-semibold text-sm">Informações do cliente</span>
+              </div>
+              <button onClick={() => setShowInfo(false)} className="p-1 rounded-lg hover:bg-white/20 transition" title="Fechar">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            {infoLoading || !infoContact ? (
+              <div className="flex-1 flex items-center justify-center">
+                <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+              </div>
+            ) : (
+              <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Nome</label>
+                  <input value={infoForm.name} onChange={(e) => setInfoForm({ ...infoForm, name: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Cidade</label>
+                  <input value={infoForm.city} onChange={(e) => setInfoForm({ ...infoForm, city: e.target.value })}
+                    placeholder="Governador Valadares"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Loja para atendimento</label>
+                  <input value={infoForm.serviceStore} onChange={(e) => setInfoForm({ ...infoForm, serviceStore: e.target.value })}
+                    placeholder="Loja Centro"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">De onde veio o atendimento</label>
+                  <select value={infoForm.attendanceSource} onChange={(e) => setInfoForm({ ...infoForm, attendanceSource: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                    <option value="">— Selecione —</option>
+                    {["WhatsApp", "Instagram", "Facebook", "Indicação", "Google", "Loja física", "Telefone", "Outro"].map((s) => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Observações</label>
+                  <textarea value={infoForm.notes} onChange={(e) => setInfoForm({ ...infoForm, notes: e.target.value })}
+                    rows={3} className="w-full px-3 py-2 rounded-xl border border-border text-sm resize-none focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                </div>
+                {customDefs.length > 0 && (
+                  <div className="space-y-3 pt-2 border-t border-border">
+                    <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Campos personalizados</p>
+                    {customDefs.map((def) => {
+                      const raw = infoCustomValues[String(def.id)];
+                      const val = typeof raw === "string" ? raw : raw == null ? "" : String(raw);
+                      const set = (v: string) => setInfoCustomValues((prev) => ({ ...prev, [String(def.id)]: v }));
+                      const cls = "w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30";
+                      return (
+                        <div key={def.id}>
+                          <label className="text-xs text-muted-foreground mb-1 block">{def.name}</label>
+                          {def.type === "textarea" ? (
+                            <textarea value={val} onChange={(e) => set(e.target.value)} rows={2} className={`${cls} resize-none`} />
+                          ) : def.type === "select" ? (
+                            <select value={val} onChange={(e) => set(e.target.value)} className={cls}>
+                              <option value="">— Selecione —</option>
+                              {(def.options ?? "").split(",").map((o) => o.trim()).filter(Boolean).map((o) => (
+                                <option key={o} value={o}>{o}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input type={def.type === "number" ? "number" : def.type === "date" ? "date" : "text"}
+                              value={val} onChange={(e) => set(e.target.value)} className={cls} />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                <button onClick={handleSaveInfo} disabled={infoSaving} data-testid="button-save-info"
+                  className="w-full py-2.5 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition flex items-center justify-center gap-2 disabled:opacity-50">
+                  {infoSaving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+                  Salvar informações
+                </button>
+              </div>
+            )}
+          </aside>
+        )}
         </div>
       )}
 

@@ -1,18 +1,20 @@
 import Anthropic from "@anthropic-ai/sdk";
 
-if (!process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL) {
+// Supports either a user-provided key (ANTHROPIC_API_KEY, using the default
+// Anthropic API) or the Replit AI Integrations proxy (AI_INTEGRATIONS_*).
+const apiKey = (
+  process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY
+)?.trim();
+
+if (!apiKey) {
   throw new Error(
-    "AI_INTEGRATIONS_ANTHROPIC_BASE_URL must be set. Did you forget to provision the Anthropic AI integration?",
+    "ANTHROPIC_API_KEY must be set. Add your Anthropic API key to enable AI features.",
   );
 }
 
-if (!process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY) {
-  throw new Error(
-    "AI_INTEGRATIONS_ANTHROPIC_API_KEY must be set. Did you forget to provision the Anthropic AI integration?",
-  );
-}
+const baseURL = process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL;
 
 export const anthropic = new Anthropic({
-  apiKey: process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY,
-  baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL,
+  apiKey,
+  ...(baseURL ? { baseURL } : {}),
 });

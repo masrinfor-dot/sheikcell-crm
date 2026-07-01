@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync } from "fs";
 import path from "path";
-import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, attendanceLogsTable, crmContactsTable, chatLabelsTable } from "@workspace/db";
+import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable } from "@workspace/db";
 import { eq, desc, and, or, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { requireAuth, requireAdminOrSupervisor } from "../middlewares/auth";
 import { broadcast, sseEmitter } from "../lib/sseEmitter";
@@ -758,6 +758,105 @@ router.post("/chat/webhook/whatsapp", async (req: Request, res: Response): Promi
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Erro ao processar mensagem" });
+  }
+});
+
+// ─── AI reply suggestion ──────────────────────────────────────────────────
+// Generates a Portuguese reply suggestion for the attendant to review before
+// sending. Context = linked CRM contact info + the last messages of the
+// conversation. Human always reviews/edits; nothing is sent automatically.
+// Fails clearly (503) when the AI provider is unavailable so the rest of the
+// attendance keeps working.
+router.post("/chat/conversations/:id/suggest-reply", requireAuth, async (req, res): Promise<void> => {
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+
+  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
+
+  // Resolve the linked CRM contact (find by normalized phone, scoped to the
+  // conversation's sector — same rule used by the CRM sync helpers).
+  const normalizedPhone = (conv.phone ?? "").replace(/\D/g, "");
+  let contact: typeof crmContactsTable.$inferSelect | undefined;
+  if (normalizedPhone) {
+    const sectorCondition = conv.sectorId != null
+      ? eq(crmContactsTable.sectorId, conv.sectorId)
+      : isNull(crmContactsTable.sectorId);
+    [contact] = await db.select().from(crmContactsTable)
+      .where(and(eq(crmContactsTable.isArchived, false), eq(crmContactsTable.phone, normalizedPhone), sectorCondition))
+      .limit(1);
+  }
+
+  // Build the customer info block from the contact + custom-field labels.
+  const infoLines: string[] = [`Nome: ${conv.name}`];
+  if (contact) {
+    if (contact.city) infoLines.push(`Cidade: ${contact.city}`);
+    if (contact.serviceStore) infoLines.push(`Loja de atendimento: ${contact.serviceStore}`);
+    if (contact.attendanceSource) infoLines.push(`Origem: ${contact.attendanceSource}`);
+    if (contact.profile) infoLines.push(`Perfil: ${contact.profile}`);
+    if (contact.notes) infoLines.push(`Observações: ${contact.notes}`);
+    const cf = contact.customFields ?? {};
+    if (Object.keys(cf).length > 0) {
+      const defs = await db.select().from(crmCustomFieldsTable);
+      const defMap = Object.fromEntries(defs.map((d) => [String(d.id), d.name]));
+      for (const [key, value] of Object.entries(cf)) {
+        if (value == null || value === "") continue;
+        infoLines.push(`${defMap[key] ?? key}: ${value}`);
+      }
+    }
+  }
+  if (conv.sectorId != null) {
+    const [sector] = await db.select({ name: sectorsTable.name }).from(sectorsTable)
+      .where(eq(sectorsTable.id, conv.sectorId)).limit(1);
+    if (sector?.name) infoLines.push(`Setor: ${sector.name}`);
+  }
+
+  // Last messages of the conversation (chronological).
+  const recent = await db
+    .select()
+    .from(messagesTable)
+    .where(eq(messagesTable.conversationId, id))
+    .orderBy(desc(messagesTable.createdAt))
+    .limit(15);
+  const history = recent
+    .reverse()
+    .map((m) => `${m.direction === "inbound" ? "Cliente" : "Atendente"}: ${m.content}`)
+    .join("\n");
+
+  if (!history.trim()) {
+    res.status(422).json({ error: "Não há mensagens suficientes para gerar uma sugestão" });
+    return;
+  }
+
+  const systemPrompt = [
+    "Você é um assistente de atendimento ao cliente da Sheikcell, uma loja de celulares e assistência técnica.",
+    "Escreva SEMPRE em português do Brasil, em tom cordial, profissional e objetivo.",
+    "Gere apenas UMA sugestão de resposta que o atendente possa enviar ao cliente pelo WhatsApp.",
+    "Use as informações do cliente e o histórico da conversa para personalizar a resposta.",
+    "Não invente dados que você não tem (preços, prazos, disponibilidade). Se faltar informação, peça educadamente ao cliente ou ofereça verificar.",
+    "Responda apenas com o texto da mensagem sugerida, sem aspas, sem rótulos e sem explicações.",
+  ].join(" ");
+
+  const userPrompt = `Informações do cliente:\n${infoLines.join("\n")}\n\nHistórico recente da conversa:\n${history}\n\nSugira a próxima resposta do atendente ao cliente.`;
+
+  try {
+    const { anthropic } = await import("@workspace/integrations-anthropic-ai");
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 8192,
+      system: systemPrompt,
+      messages: [{ role: "user", content: userPrompt }],
+    });
+    const block = message.content.find((b) => b.type === "text");
+    const suggestion = block && block.type === "text" ? block.text.trim() : "";
+    if (!suggestion) {
+      res.status(502).json({ error: "A IA não retornou uma sugestão. Tente novamente." });
+      return;
+    }
+    res.json({ suggestion });
+  } catch (err) {
+    req.log.error({ err }, "AI reply suggestion failed");
+    res.status(503).json({ error: "A IA está indisponível no momento. Tente novamente em instantes." });
   }
 });
 
