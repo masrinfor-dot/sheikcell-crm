@@ -241,6 +241,7 @@ export default function ChatCenter() {
   const [savingLabel, setSavingLabel] = useState(false);
   const [showTransferPicker, setShowTransferPicker] = useState(false);
   const [showParticipantPicker, setShowParticipantPicker] = useState(false);
+  const [showStatusPicker, setShowStatusPicker] = useState(false);
   const [showFilter, setShowFilter] = useState(false);
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [chatUsers, setChatUsers] = useState<{ id: number; name: string; role: string }[]>([]);
@@ -724,29 +725,31 @@ export default function ChatCenter() {
               {/* Status quick-set */}
               <div className="relative">
                 <button
-                  onClick={() => setShowLabelPicker(false)}
-                  className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-white border border-border hover:bg-secondary transition font-medium"
-                  id="status-menu"
+                  onClick={() => { setShowStatusPicker((v) => !v); setShowLabelPicker(false); setShowTransferPicker(false); setShowParticipantPicker(false); }}
+                  className="flex items-center gap-1 p-2 rounded-lg bg-white border border-border hover:bg-secondary transition"
+                  title={`Status: ${STATUS_LABELS[activeConv.status] ?? activeConv.status}`}
                 >
-                  <Circle className={`w-2 h-2 fill-current ${activeConv.status === "open" ? "text-green-500" : activeConv.status === "pending" ? "text-amber-500" : "text-gray-400"}`} />
-                  {STATUS_LABELS[activeConv.status] ?? activeConv.status}
-                  <ChevronDown className="w-3 h-3 ml-0.5" />
+                  <Circle className={`w-3 h-3 fill-current ${activeConv.status === "open" ? "text-green-500" : activeConv.status === "pending" ? "text-amber-500" : "text-gray-400"}`} />
+                  <ChevronDown className="w-3 h-3" />
                 </button>
-                <div className="absolute right-0 top-9 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden w-36" id="status-dropdown" style={{ display: "none" }}>
-                  {["open", "pending", "resolved"].map((s) => (
-                    <button key={s} onClick={() => handleStatus(s)}
-                      className="w-full text-left flex items-center gap-2 text-xs px-3 py-2.5 hover:bg-secondary transition">
-                      <Circle className={`w-2 h-2 fill-current ${s === "open" ? "text-green-500" : s === "pending" ? "text-amber-500" : "text-gray-400"}`} />
-                      {STATUS_LABELS[s]}
-                    </button>
-                  ))}
-                </div>
+                {showStatusPicker && (
+                  <div className="absolute right-0 top-11 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden w-36">
+                    {["open", "pending", "resolved"].map((s) => (
+                      <button key={s} onClick={() => { handleStatus(s); setShowStatusPicker(false); }}
+                        className="w-full text-left flex items-center gap-2 text-xs px-3 py-2.5 hover:bg-secondary transition">
+                        <Circle className={`w-2 h-2 fill-current ${s === "open" ? "text-green-500" : s === "pending" ? "text-amber-500" : "text-gray-400"}`} />
+                        {STATUS_LABELS[s]}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
               {/* Labels */}
               <div className="relative">
-                <button onClick={() => { setShowLabelPicker((v) => !v); setShowTransferPicker(false); }}
-                  className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-white border border-border hover:bg-secondary transition font-medium">
-                  <Tag className="w-3 h-3" /> Etiquetas
+                <button onClick={() => { setShowLabelPicker((v) => !v); setShowTransferPicker(false); setShowParticipantPicker(false); setShowStatusPicker(false); }}
+                  className="p-2 rounded-lg bg-white border border-border hover:bg-secondary transition"
+                  title="Etiquetas">
+                  <Tag className="w-3.5 h-3.5" />
                 </button>
                 {showLabelPicker && (
                   <div className="absolute right-0 top-9 bg-white border border-border rounded-xl shadow-lg z-20 p-2 min-w-[180px]">
@@ -773,11 +776,11 @@ export default function ChatCenter() {
               {/* Transfer to sector */}
               <div className="relative">
                 <button
-                  onClick={() => { setShowTransferPicker((v) => !v); setShowLabelPicker(false); setShowParticipantPicker(false); }}
-                  className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-white border border-border hover:bg-secondary transition font-medium"
+                  onClick={() => { setShowTransferPicker((v) => !v); setShowLabelPicker(false); setShowParticipantPicker(false); setShowStatusPicker(false); }}
+                  className="p-2 rounded-lg bg-white border border-border hover:bg-secondary transition"
                   title="Transferir para outro setor"
                 >
-                  <ArrowRightLeft className="w-3 h-3" /> Transferir
+                  <ArrowRightLeft className="w-3.5 h-3.5" />
                 </button>
                 {showTransferPicker && (
                   <div className="absolute right-0 top-9 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden min-w-[200px]">
@@ -799,13 +802,13 @@ export default function ChatCenter() {
               {/* Participants / Vendedores */}
               <div className="relative">
                 <button
-                  onClick={() => { setShowParticipantPicker((v) => !v); setShowLabelPicker(false); setShowTransferPicker(false); }}
-                  className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-white border border-border hover:bg-secondary transition font-medium"
+                  onClick={() => { setShowParticipantPicker((v) => !v); setShowLabelPicker(false); setShowTransferPicker(false); setShowStatusPicker(false); }}
+                  className="relative p-2 rounded-lg bg-white border border-border hover:bg-secondary transition"
                   title="Vendedores nesta conversa"
                 >
-                  <Users className="w-3 h-3" /> Vendedores
+                  <Users className="w-3.5 h-3.5" />
                   {(activeConv.participants?.length ?? 0) > 0 && (
-                    <span className="ml-0.5 bg-primary text-white rounded-full w-4 h-4 flex items-center justify-center text-[10px] font-bold">
+                    <span className="absolute -top-1 -right-1 bg-primary text-white rounded-full w-4 h-4 flex items-center justify-center text-[10px] font-bold">
                       {activeConv.participants!.length}
                     </span>
                   )}
@@ -853,21 +856,13 @@ export default function ChatCenter() {
                 onClick={handleOpenCrm}
                 disabled={crmLoading}
                 data-testid="button-open-crm"
-                className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-white border border-border hover:bg-secondary transition font-medium disabled:opacity-50"
+                className="p-2 rounded-lg bg-white border border-border hover:bg-secondary transition disabled:opacity-50"
                 title="Abrir ficha do cliente no CRM"
               >
                 {crmLoading
-                  ? <RefreshCw className="w-3 h-3 animate-spin" />
-                  : <IdCard className="w-3 h-3" />}
-                CRM
+                  ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  : <IdCard className="w-3.5 h-3.5" />}
               </button>
-              {/* Status buttons */}
-              {["open", "pending", "resolved"].map((s) => (
-                <button key={s} onClick={() => handleStatus(s)}
-                  className={`hidden sm:flex items-center gap-1 text-xs px-2 py-1.5 rounded-lg border transition font-medium ${activeConv.status === s ? "bg-primary text-white border-primary" : "bg-white border-border text-muted-foreground hover:bg-secondary"}`}>
-                  {STATUS_LABELS[s]}
-                </button>
-              ))}
             </div>
           </div>
 
