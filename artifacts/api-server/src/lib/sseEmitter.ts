@@ -16,3 +16,14 @@ export function broadcast(
     isPotential: isPotential ?? false,
   });
 }
+
+// Internal team chat targeting. `recipientIds` is the set of user ids that
+// should receive the event; pass `null` to reach every connected user (used by
+// the general/team room).
+export function broadcastInternal(
+  event: string,
+  data: unknown,
+  recipientIds: number[] | null,
+): void {
+  sseEmitter.emit("internal", { event, data, recipientIds });
+}

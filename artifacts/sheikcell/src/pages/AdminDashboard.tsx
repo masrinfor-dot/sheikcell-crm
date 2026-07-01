@@ -6,14 +6,15 @@ import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
 import CrmBoard from "./CrmBoard";
 import ChatCenter from "./ChatCenter";
+import InternalChat from "./InternalChat";
 import DistribuicaoPanel from "./DistribuicaoPanel";
 import {
   Smartphone, LogOut, LayoutDashboard, ClipboardList,
   Settings, Users, RefreshCw, Plus, X, Clock, CheckCircle,
-  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork
+  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare
 } from "lucide-react";
 
-type Tab = "dashboard" | "chat" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp";
+type Tab = "dashboard" | "chat" | "equipe" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp";
 
 type WAStatus = {
   mode: "baileys" | "meta" | null;
@@ -183,6 +184,7 @@ export default function AdminDashboard() {
   const allTabs = [
     { id: "dashboard" as Tab, label: "Visão Geral", icon: LayoutDashboard, adminOnly: false },
     { id: "chat" as Tab, label: "Atendimento", icon: MessageCircle, adminOnly: false },
+    { id: "equipe" as Tab, label: "Chat Interno", icon: MessagesSquare, adminOnly: false },
     { id: "distribuicao" as Tab, label: "Distribuição", icon: GitFork, adminOnly: false },
     { id: "crm" as Tab, label: "CRM", icon: Kanban, adminOnly: false },
     { id: "history" as Tab, label: "Histórico", icon: ClipboardList, adminOnly: false },
@@ -297,6 +299,8 @@ export default function AdminDashboard() {
 
         {/* === CRM TAB === */}
         {tab === "chat" && <ChatCenter />}
+
+        {tab === "equipe" && <InternalChat />}
 
         {tab === "distribuicao" && <DistribuicaoPanel />}
 

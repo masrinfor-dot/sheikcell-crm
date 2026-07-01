@@ -23,6 +23,25 @@ export type User = {
   sector: Sector | null;
 };
 
+export type InternalConversation = {
+  id: number;
+  kind: "direct" | "general";
+  name: string;
+  otherUser: { id: number; name: string; role: string } | null;
+  lastMessage: string | null;
+  lastMessageAt: string | null;
+  unreadCount: number;
+};
+
+export type InternalMessage = {
+  id: number;
+  conversationId: number;
+  senderId: number;
+  senderName: string;
+  content: string;
+  createdAt: string;
+};
+
 export type Sector = {
   id: number;
   name: string;
@@ -268,6 +287,15 @@ export const api = {
     },
   },
   chatUsers: () => req<{ id: number; name: string; role: string }[]>("/chat/users"),
+  internalChat: {
+    conversations: () => req<InternalConversation[]>("/internal-chat/conversations"),
+    startDirect: (userId: number) =>
+      req<InternalConversation>("/internal-chat/conversations/direct", { method: "POST", body: JSON.stringify({ userId }) }),
+    messages: (id: number) => req<InternalMessage[]>(`/internal-chat/conversations/${id}/messages`),
+    send: (id: number, content: string) =>
+      req<InternalMessage>(`/internal-chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
+    markRead: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}/read`, { method: "POST" }),
+  },
   routing: {
     rules: () => req<RoutingRule[]>("/routing/rules"),
     create: (data: { sectorId: number; name: string; keywords: string; priority?: number }) =>

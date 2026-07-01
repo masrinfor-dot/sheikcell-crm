@@ -6,12 +6,13 @@ import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
 import CrmBoard from "./CrmBoard";
 import ChatCenter from "./ChatCenter";
+import InternalChat from "./InternalChat";
 import {
   Smartphone, LogOut, Clock, PhoneCall, CheckCircle,
-  ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle
+  ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare
 } from "lucide-react";
 
-type MainTab = "queue" | "chat" | "crm";
+type MainTab = "queue" | "chat" | "equipe" | "crm";
 
 function formatWait(createdAt: string): string {
   const diff = Math.floor((Date.now() - new Date(createdAt).getTime()) / 1000);
@@ -166,6 +167,7 @@ export default function AttendantDashboard() {
           {([
             { id: "queue" as MainTab, label: "Fila",           icon: PhoneCall      },
             { id: "chat"  as MainTab, label: "Atendimento",    icon: MessageCircle  },
+            { id: "equipe" as MainTab, label: "Chat Interno",  icon: MessagesSquare },
             { id: "crm"   as MainTab, label: "CRM",            icon: Kanban         },
           ] as const).map(({ id, label, icon: Icon }) => (
             <button key={id} onClick={() => setMainTab(id)}
@@ -183,6 +185,8 @@ export default function AttendantDashboard() {
           <ChatCenter />
         </div>
       )}
+
+      {mainTab === "equipe" && <InternalChat />}
 
       {mainTab === "crm" && (
         <div className="max-w-3xl mx-auto px-4 py-6">

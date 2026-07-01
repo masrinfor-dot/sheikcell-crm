@@ -9,6 +9,7 @@ import crmRouter from "./crm";
 import chatRouter from "./chat";
 import routingRouter from "./routing";
 import whatsappProxyRouter from "./whatsapp";
+import internalChatRouter from "./internalChat";
 
 const router: IRouter = Router();
 
@@ -22,5 +23,6 @@ router.use(crmRouter);
 router.use(chatRouter);
 router.use(routingRouter);
 router.use(whatsappProxyRouter);
+router.use(internalChatRouter);
 
 export default router;
