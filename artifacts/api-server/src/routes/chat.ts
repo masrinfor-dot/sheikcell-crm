@@ -32,9 +32,13 @@ router.get("/chat/events", requireAuth, (req: Request, res: Response): void => {
 
   const send = (payload: { event: string; data: unknown; sectorId: number | null; isPotential?: boolean }) => {
     // Potenciais (new, unclaimed leads) are broadcast to every vendedor
-    // regardless of sector; everything else stays sector-scoped.
-    if (!isGlobal && !payload.isPotential && payload.sectorId != null && payload.sectorId !== userSectorId) {
-      return;
+    // regardless of sector; everything else stays sector-scoped. Mirror
+    // canAccessConversation exactly: a non-global user only receives an event
+    // when it is a potencial OR its sector matches their own. A null sector
+    // never matches a vendedor, so such events are withheld (fail closed).
+    if (!isGlobal && !payload.isPotential) {
+      const sameSector = payload.sectorId != null && payload.sectorId === userSectorId;
+      if (!sameSector) return;
     }
     res.write(`event: ${payload.event}\n`);
     res.write(`data: ${JSON.stringify(payload.data)}\n\n`);
@@ -85,16 +89,22 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
 
   const conditions = [eq(conversationsTable.isArchived, false)];
 
-  if (userRole !== "admin" && userRole !== "supervisor" && userSectorId) {
-    // Vendedores see their own sector's conversations plus every potencial
-    // (new, unclaimed lead) regardless of sector so anyone can pick them up.
-    conditions.push(or(
-      eq(conversationsTable.sectorId, userSectorId),
-      and(
-        isNull(conversationsTable.assigneeId),
-        notInArray(conversationsTable.status, [...POTENTIAL_EXCLUDED_STATUSES]),
-      ),
-    )!);
+  const isPrivileged = userRole === "admin" || userRole === "supervisor";
+  if (!isPrivileged) {
+    // Vendedores are ALWAYS sector-scoped and must never see every conversation.
+    // They see their own sector's conversations (when they have a valid sector)
+    // plus every potencial (new, unclaimed lead) regardless of sector so anyone
+    // can pick them up. A vendedor without a valid sector still only ever sees
+    // potenciais — never the full conversation history (fail closed).
+    const potencial = and(
+      isNull(conversationsTable.assigneeId),
+      notInArray(conversationsTable.status, [...POTENTIAL_EXCLUDED_STATUSES]),
+    )!;
+    conditions.push(
+      userSectorId
+        ? or(eq(conversationsTable.sectorId, userSectorId), potencial)!
+        : potencial,
+    );
   } else if (sectorId) {
     conditions.push(eq(conversationsTable.sectorId, Number(sectorId)));
   }

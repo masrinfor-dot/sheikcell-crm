@@ -6,11 +6,11 @@ description: How the Central de Atendimento (chat) module is built — SSE, API 
 ## Rule
 The Central de Atendimento uses Server-Sent Events (SSE) for real-time updates, not WebSockets.
 
-**Why:** Simpler to implement with Express; SSE endpoint at `GET /api/chat/conversations/:id/stream`.
+**Why:** Simpler to implement with Express; app-wide SSE endpoint at `GET /api/chat/events`.
 
 **How to apply:**
 - Frontend connects via `new EventSource(...)` inside `ChatCenter.tsx`
-- SSE emitter singleton at `artifacts/api-server/src/lib/sseEmitter.ts` — call `broadcast(conversationId, data)` from any route
+- SSE emitter singleton at `artifacts/api-server/src/lib/sseEmitter.ts` — call `broadcast(event, data, sectorId, isPotential)` from any route; the `/chat/events` handler filters per-subscriber by role/sector
 - DB tables: `conversations` + `messages` (lib/db/src/schema/conversations.ts)
 - All chat API methods live in `api.ts` under `api.chat.*` (no Orval codegen)
 - Demo data: 10 conversations, 27 messages seeded June 23 2026

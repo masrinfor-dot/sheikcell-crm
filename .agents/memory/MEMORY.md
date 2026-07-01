@@ -3,6 +3,7 @@
 - [Routing keyword matching gotcha](routing-keywords.md) — autoRouter uses substring match + accent normalization; "nao liga" ≠ "nao esta ligando"; use "ligando" not "nao liga" for that pattern
 - [Three-role system](roles.md) — admin/supervisor/vendedor; legacy "attendant" migrated to vendedor; supervisor is scope-global but no user/sector/WhatsApp management
 - [Baileys DB auth state](baileys-db-auth.md) — whatsapp-bridge uses Baileys with PostgreSQL-backed auth state; auth keys in whatsapp_auth_state table; session status cached in whatsapp_sessions
+- [Vendedor sector scoping](vendedor-scoping.md) — vendedores must fail closed to their sector + potenciais across list/canAccess/SSE; users.sector_id is an integer FK to sectors, never serial
 - [AI provider](ai-provider.md) — chat AI uses OpenAI direct with user's own key (OPENAI_API_KEY, gpt-4o); proxy model aliases don't exist on real vendor APIs; trim env keys
 - [Internal team chat](internal-chat.md) — staff-only chat (direct + one singleton "Equipe (Geral)" room); separate SSE channel (broadcastInternal), partial unique index enforces single general room
 - [Potenciais cross-sector scoping](potenciais-scoping.md) — potenciais (new unclaimed leads) are visible/claimable to all vendedores across sectors; SSE isPotential flag must come from PRE-update state or it leaks cross-sector
