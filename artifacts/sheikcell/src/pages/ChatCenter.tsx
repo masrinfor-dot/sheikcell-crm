@@ -7,7 +7,7 @@ import {
   MessageCircle, CheckCheck, Tag, Filter,
   Smartphone, Instagram, UserCircle2, Circle,
   ArrowRightLeft, FileText, Volume2, Image, Users, Paperclip, IdCard,
-  Settings2, Trash2
+  Settings2, Trash2, CheckCircle2
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 
@@ -446,6 +446,15 @@ export default function ChatCenter() {
     } catch { toast({ title: "Erro ao iniciar atendimento", variant: "destructive" }); }
   };
 
+  // ── Ativo → Resolvida (finalizar atendimento) ──
+  const handleFinalize = async (id: number) => {
+    try {
+      const updated = await api.chat.updateConversation(id, { status: "resolved" });
+      setConvs((prev) => prev.map((c) => c.id === id ? { ...c, ...updated, status: "resolved" } : c));
+      toast({ title: "Atendimento finalizado" });
+    } catch { toast({ title: "Erro ao finalizar atendimento", variant: "destructive" }); }
+  };
+
   // ── Transfer conversation to sector ──
   const handleTransfer = async (targetSectorId: number) => {
     if (!activeConv) return;
@@ -700,6 +709,16 @@ export default function ChatCenter() {
                   style={{ backgroundColor: "#16a34a" }}
                 >
                   <UserCircle2 className="w-3 h-3" /> Iniciar atendimento
+                </button>
+              )}
+              {activeCategory === "ativos" && (
+                <button
+                  onClick={() => handleFinalize(activeConv.id)}
+                  data-testid="button-finalize-conv"
+                  className="flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg text-white font-semibold transition hover:opacity-90"
+                  style={{ backgroundColor: "#16a34a" }}
+                >
+                  <CheckCircle2 className="w-3 h-3" /> Finalizar atendimento
                 </button>
               )}
               {/* Status quick-set */}
