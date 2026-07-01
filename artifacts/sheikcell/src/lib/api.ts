@@ -151,6 +151,28 @@ export type CrmInternalNote = {
   createdAt: string;
 };
 
+export type TaskStatus = "todo" | "doing" | "done";
+export type TaskPriority = "baixa" | "media" | "alta";
+
+export type Task = {
+  id: number;
+  title: string;
+  description: string | null;
+  status: TaskStatus;
+  priority: TaskPriority;
+  assigneeId: number | null;
+  createdById: number | null;
+  sectorId: number | null;
+  dueDate: string | null;
+  position: number;
+  isArchived: boolean;
+  createdAt: string;
+  updatedAt: string;
+  sector: Sector | null;
+  assignee: { id: number; name: string } | null;
+  createdBy: { id: number; name: string } | null;
+};
+
 export type Conversation = {
   id: number;
   phone: string;
@@ -344,6 +366,19 @@ export const api = {
         req<CrmCustomField>(`/crm/custom-fields/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number) => req<{ ok: boolean }>(`/crm/custom-fields/${id}`, { method: "DELETE" }),
     },
+  },
+  tasks: {
+    list: () => req<Task[]>("/tasks"),
+    create: (data: {
+      title: string; description?: string; status?: TaskStatus; priority?: TaskPriority;
+      assigneeId?: number | null; sectorId?: number | null; dueDate?: string | null;
+    }) => req<Task>("/tasks", { method: "POST", body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<{
+      title: string; description: string; status: TaskStatus; priority: TaskPriority;
+      assigneeId: number | null; sectorId: number | null; dueDate: string | null;
+      position: number; isArchived: boolean;
+    }>) => req<Task>(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/tasks/${id}`, { method: "DELETE" }),
   },
   admin: {
     summary: () => req<SectorSummary[]>("/admin/summary"),
