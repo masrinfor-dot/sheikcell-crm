@@ -77,7 +77,22 @@ router.get("/chat/events", requireAuth, (req: Request, res: Response): void => {
   }
 
   sseEmitter.on("broadcast", send);
-  req.on("close", () => sseEmitter.off("broadcast", send));
+
+  // ── Heartbeat ──
+  // Proxies and mobile networks can keep a TCP connection open long after it has
+  // effectively died, leaving an attendant "connected" but receiving no events.
+  // A periodic SSE comment (ignored by EventSource) keeps intermediaries from
+  // idle-closing a healthy stream, and — crucially — the write attempt surfaces a
+  // dead connection quickly: it fails/RSTs, the client's EventSource sees the drop
+  // and reconnects, replaying anything missed (Last-Event-ID → replay/resync).
+  const heartbeat = setInterval(() => {
+    res.write(": keepalive\n\n");
+  }, 25_000);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    sseEmitter.off("broadcast", send);
+  });
 });
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
