@@ -2,7 +2,13 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import { db, internalConversationsTable, internalConversationMembersTable, internalMessagesTable, usersTable } from "@workspace/db";
 import { eq, and, asc, inArray, sql, ne } from "drizzle-orm";
 import { requireAuth } from "../middlewares/auth";
-import { sseEmitter, broadcastInternal } from "../lib/sseEmitter";
+import {
+  sseEmitter,
+  broadcastInternal,
+  bufferedInternalEventsSince,
+  reconnectInternalStrategy,
+  type BufferedInternalEvent,
+} from "../lib/sseEmitter";
 
 const router: IRouter = Router();
 
@@ -58,11 +64,41 @@ router.get("/internal-chat/events", requireAuth, (req: Request, res: Response): 
 
   const userId = req.session.userId!;
 
-  const send = (payload: { event: string; data: unknown; recipientIds: number[] | null }) => {
-    if (payload.recipientIds != null && !payload.recipientIds.includes(userId)) return;
-    res.write(`event: ${payload.event}\n`);
-    res.write(`data: ${JSON.stringify(payload.data)}\n\n`);
+  // An event reaches this user when it targets everyone (recipientIds == null)
+  // or explicitly includes their id.
+  const allowed = (ev: { recipientIds: number[] | null }): boolean =>
+    ev.recipientIds == null || ev.recipientIds.includes(userId);
+
+  const writeEvent = (ev: { id?: number; event: string; data: unknown }) => {
+    if (ev.id != null) res.write(`id: ${ev.id}\n`);
+    res.write(`event: ${ev.event}\n`);
+    res.write(`data: ${JSON.stringify(ev.data)}\n\n`);
   };
+
+  const send = (payload: BufferedInternalEvent) => {
+    if (!allowed(payload)) return;
+    writeEvent(payload);
+  };
+
+  // ── Reconnect recovery ──
+  // EventSource resends the id of the last event it received in the
+  // `Last-Event-ID` header. Replay everything missed during the disconnection
+  // (still applying the recipient filter, so no one receives events for
+  // conversations they don't participate in). If too much was missed (evicted
+  // from the buffer) or the server restarted, ask the client to refetch.
+  const rawLastId = req.headers["last-event-id"];
+  const sinceRaw = Array.isArray(rawLastId) ? rawLastId[0] : rawLastId;
+  const sinceId = sinceRaw != null ? Number.parseInt(sinceRaw, 10) : NaN;
+  if (Number.isFinite(sinceId)) {
+    const strategy = reconnectInternalStrategy(sinceId);
+    if (strategy === "resync") {
+      writeEvent({ event: "resync", data: { reason: "gap" } });
+    } else if (strategy === "replay") {
+      for (const ev of bufferedInternalEventsSince(sinceId)) {
+        if (allowed(ev)) writeEvent(ev);
+      }
+    }
+  }
 
   sseEmitter.on("internal", send);
   req.on("close", () => sseEmitter.off("internal", send));

@@ -106,6 +106,20 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
         });
       });
     });
+    // When the reconnection gap is larger than the server's replay buffer (or
+    // the server restarted), the server asks the client to resync. Refetch the
+    // conversation list and the open conversation's messages so nothing sent
+    // during the outage is lost. Missed events within buffer range are replayed
+    // automatically and flow through the handler above.
+    es.addEventListener("resync", () => {
+      loadConversations();
+      const openId = activeIdRef.current;
+      if (openId != null) {
+        api.internalChat.messages(openId).then((msgs) => {
+          if (activeIdRef.current === openId) setMessages(msgs);
+        }).catch(() => {});
+      }
+    });
     return () => es.close();
   }, [user?.id, loadConversations]);
 

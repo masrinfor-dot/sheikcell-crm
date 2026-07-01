@@ -72,13 +72,64 @@ export function broadcast(
   sseEmitter.emit("broadcast", payload);
 }
 
+// ─── Replay buffer for internal team chat ──────────────────────────────────
+// Mirrors the customer-chat replay buffer above, but keyed by `recipientIds`
+// (the set of user ids allowed to receive the event) instead of sector scope.
+// Internal events get their own monotonic id space and ring buffer so a
+// reconnecting internal-chat client can recover messages sent during the
+// disconnection without touching the customer-chat counter.
+export interface BufferedInternalEvent {
+  id: number;
+  event: string;
+  data: unknown;
+  recipientIds: number[] | null;
+}
+
+const MAX_BUFFERED_INTERNAL_EVENTS = 1000;
+let lastInternalEventId = 0;
+const internalEventBuffer: BufferedInternalEvent[] = [];
+
+export function currentInternalEventId(): number {
+  return lastInternalEventId;
+}
+
+export function oldestBufferedInternalId(): number | null {
+  return internalEventBuffer.length ? internalEventBuffer[0]!.id : null;
+}
+
+// Returns buffered internal events with an id strictly greater than `sinceId`,
+// in arrival order. Does not apply the recipient filter — callers must filter.
+export function bufferedInternalEventsSince(sinceId: number): BufferedInternalEvent[] {
+  return internalEventBuffer.filter((e) => e.id > sinceId);
+}
+
+export function reconnectInternalStrategy(sinceId: number): "replay" | "resync" | "current" {
+  if (sinceId > lastInternalEventId) return "resync"; // server restarted / counter reset
+  if (sinceId === lastInternalEventId) return "current";
+  const oldest = oldestBufferedInternalId();
+  if (oldest == null) return "current";
+  if (sinceId < oldest - 1) return "resync";
+  return "replay";
+}
+
 // Internal team chat targeting. `recipientIds` is the set of user ids that
 // should receive the event; pass `null` to reach every connected user (used by
-// the general/team room).
+// the general/team room). Buffered for reconnect replay.
 export function broadcastInternal(
   event: string,
   data: unknown,
   recipientIds: number[] | null,
 ): void {
-  sseEmitter.emit("internal", { event, data, recipientIds });
+  lastInternalEventId += 1;
+  const payload: BufferedInternalEvent = {
+    id: lastInternalEventId,
+    event,
+    data,
+    recipientIds,
+  };
+  internalEventBuffer.push(payload);
+  if (internalEventBuffer.length > MAX_BUFFERED_INTERNAL_EVENTS) {
+    internalEventBuffer.splice(0, internalEventBuffer.length - MAX_BUFFERED_INTERNAL_EVENTS);
+  }
+  sseEmitter.emit("internal", payload);
 }
