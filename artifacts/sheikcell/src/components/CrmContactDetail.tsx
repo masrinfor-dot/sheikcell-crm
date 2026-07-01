@@ -627,6 +627,7 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
                         {h.serviceTimeSeconds && <span>Duração: {Math.round(h.serviceTimeSeconds / 60)}min</span>}
                         <span>{fmtDateTime(h.createdAt)}</span>
                       </div>
+                      {h.resolutionReason && <p className="text-xs text-foreground"><span className="font-medium">Motivo:</span> {h.resolutionReason}</p>}
                       {h.notes && <p className="text-xs text-muted-foreground italic">{h.notes}</p>}
                     </div>
                   ))}

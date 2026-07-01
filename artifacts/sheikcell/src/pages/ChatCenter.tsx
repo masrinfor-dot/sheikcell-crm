@@ -21,6 +21,19 @@ const STATUS_LABELS: Record<string, string> = {
   open: "Aberto", pending: "Pendente", resolved: "Resolvido",
 };
 
+// Motivos pré-definidos para finalizar (resolver) um atendimento. "Outro"
+// libera um campo de texto para o vendedor detalhar.
+const FINALIZE_REASONS = [
+  "Venda realizada",
+  "Orçamento enviado",
+  "Cliente vai pensar",
+  "Sem interesse",
+  "Sem resposta do cliente",
+  "Dúvida esclarecida",
+  "Problema resolvido",
+  "Outro",
+] as const;
+
 // ─── Atendimento categories ──────────────────────────────────────────────────
 // POTENCIAIS: números novos aguardando triagem (futura inteligência artificial)
 // PENDENTES: já filtrados, aguardando na fila de atendimento
@@ -269,6 +282,11 @@ export default function ChatCenter() {
   const [showParticipantPicker, setShowParticipantPicker] = useState(false);
   const [showStatusPicker, setShowStatusPicker] = useState(false);
   const [showFilter, setShowFilter] = useState(false);
+  // Finalizar atendimento: modal para capturar o motivo da finalização.
+  const [finalizeTarget, setFinalizeTarget] = useState<number | null>(null);
+  const [finalizeReason, setFinalizeReason] = useState<string>(FINALIZE_REASONS[0]);
+  const [finalizeDetail, setFinalizeDetail] = useState("");
+  const [finalizing, setFinalizing] = useState(false);
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [chatUsers, setChatUsers] = useState<{ id: number; name: string; role: string }[]>([]);
   const [newForm, setNewForm] = useState({ name: "", phone: "", channel: "whatsapp", sectorId: "" });
@@ -690,12 +708,31 @@ export default function ChatCenter() {
   };
 
   // ── Ativo → Resolvida (finalizar atendimento) ──
-  const handleFinalize = async (id: number) => {
+  // Abre o modal para o vendedor escolher o motivo antes de finalizar.
+  const handleFinalize = (id: number) => {
+    setFinalizeTarget(id);
+    setFinalizeReason(FINALIZE_REASONS[0]);
+    setFinalizeDetail("");
+  };
+
+  const submitFinalize = async () => {
+    if (finalizeTarget == null) return;
+    const id = finalizeTarget;
+    // Motivo enviado ao servidor: para "Outro" usa o texto livre, senão o rótulo.
+    const isOutro = finalizeReason === "Outro";
+    const resolutionReason = (isOutro ? finalizeDetail.trim() : finalizeReason) || null;
+    if (isOutro && !resolutionReason) {
+      toast({ title: "Descreva o motivo da finalização", variant: "destructive" });
+      return;
+    }
+    setFinalizing(true);
     try {
-      const updated = await api.chat.updateConversation(id, { status: "resolved" });
+      const updated = await api.chat.updateConversation(id, { status: "resolved", resolutionReason });
       setConvs((prev) => prev.map((c) => c.id === id ? { ...c, ...updated, status: "resolved" } : c));
       toast({ title: "Atendimento finalizado" });
+      setFinalizeTarget(null);
     } catch { toast({ title: "Erro ao finalizar atendimento", variant: "destructive" }); }
+    finally { setFinalizing(false); }
   };
 
   // ── Transfer conversation to sector ──
@@ -1621,6 +1658,46 @@ export default function ChatCenter() {
                   className="flex-1 py-2 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition">Criar</button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ── Finalizar atendimento: motivo ──────────────────────────────── */}
+      {finalizeTarget != null && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => { if (!finalizing) setFinalizeTarget(null); }}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-5 space-y-4"
+            onClick={(e) => e.stopPropagation()}>
+            <div>
+              <h3 className="text-base font-semibold">Finalizar atendimento</h3>
+              <p className="text-xs text-muted-foreground mt-0.5">Selecione o motivo da finalização.</p>
+            </div>
+            <div>
+              <label className="text-xs font-medium mb-1 block">Motivo</label>
+              <select value={finalizeReason} onChange={(e) => setFinalizeReason(e.target.value)}
+                data-testid="select-finalize-reason"
+                className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                {FINALIZE_REASONS.map((r) => <option key={r} value={r}>{r}</option>)}
+              </select>
+            </div>
+            {finalizeReason === "Outro" && (
+              <div>
+                <label className="text-xs font-medium mb-1 block">Descreva o motivo</label>
+                <textarea value={finalizeDetail} onChange={(e) => setFinalizeDetail(e.target.value)}
+                  rows={3} autoFocus data-testid="input-finalize-detail"
+                  placeholder="Ex.: cliente pediu para retornar amanhã"
+                  className="w-full px-3 py-2 rounded-xl border border-border text-sm resize-none" />
+              </div>
+            )}
+            <div className="flex gap-2 pt-1">
+              <button type="button" onClick={() => setFinalizeTarget(null)} disabled={finalizing}
+                className="flex-1 py-2 rounded-xl border border-border text-sm font-medium text-muted-foreground hover:bg-secondary transition disabled:opacity-50">Cancelar</button>
+              <button type="button" onClick={submitFinalize} disabled={finalizing}
+                data-testid="button-confirm-finalize"
+                className="flex-1 py-2 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition disabled:opacity-50">
+                {finalizing ? "Finalizando…" : "Finalizar"}
+              </button>
+            </div>
           </div>
         </div>
       )}

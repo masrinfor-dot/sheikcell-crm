@@ -541,7 +541,7 @@ export default function AdminDashboard() {
                   <table className="w-full text-sm">
                     <thead className="bg-secondary/50">
                       <tr>
-                        {["Cliente", "Setor", "Atendente", "Canal", "Resultado", "Espera", "Atend.", "Hora"].map((h) => (
+                        {["Cliente", "Setor", "Atendente", "Canal", "Resultado", "Motivo", "Espera", "Atend.", "Hora"].map((h) => (
                           <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground whitespace-nowrap">{h}</th>
                         ))}
                       </tr>
@@ -558,6 +558,7 @@ export default function AdminDashboard() {
                               {log.outcome === "completed" ? "Finalizado" : log.outcome === "transferred" ? "Transferido" : log.outcome ?? "—"}
                             </span>
                           </td>
+                          <td className="px-4 py-3 text-muted-foreground">{log.resolutionReason ?? "—"}</td>
                           <td className="px-4 py-3 text-muted-foreground">{formatDuration(log.waitTimeSeconds)}</td>
                           <td className="px-4 py-3 text-muted-foreground">{formatDuration(log.serviceTimeSeconds)}</td>
                           <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{formatDate(log.createdAt)}</td>

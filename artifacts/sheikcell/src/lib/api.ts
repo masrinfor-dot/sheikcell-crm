@@ -79,6 +79,7 @@ export type AttendanceLog = {
   attendantName: string | null;
   channel: string;
   outcome: string | null;
+  resolutionReason: string | null;
   notes: string | null;
   waitTimeSeconds: number | null;
   serviceTimeSeconds: number | null;
@@ -289,7 +290,7 @@ export const api = {
         reader.readAsDataURL(file);
       });
     },
-    updateConversation: (id: number, data: Partial<{ status: string; labels: string; sectorId: number; assigneeId: number; name: string; isArchived: boolean }>) =>
+    updateConversation: (id: number, data: Partial<{ status: string; labels: string; sectorId: number; assigneeId: number; name: string; isArchived: boolean; resolutionReason: string | null }>) =>
       req<Conversation>(`/chat/conversations/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     createConversation: (data: { phone: string; name: string; channel?: string; sectorId?: number }) =>
       req<Conversation>("/chat/conversations", { method: "POST", body: JSON.stringify(data) }),

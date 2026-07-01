@@ -13,6 +13,7 @@ export const attendanceLogsTable = pgTable("attendance_logs", {
   attendantName: text("attendant_name"),
   channel: text("channel").notNull().default("manual"),
   outcome: text("outcome"), // "completed" | "transferred" | "abandoned"
+  resolutionReason: text("resolution_reason"), // motivo escolhido ao finalizar o atendimento
   notes: text("notes"),
   waitTimeSeconds: integer("wait_time_seconds"),
   serviceTimeSeconds: integer("service_time_seconds"),

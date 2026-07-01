@@ -407,6 +407,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
 async function syncResolvedConversation(
   tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
   conv: typeof conversationsTable.$inferSelect,
+  resolutionReason?: string | null,
 ): Promise<void> {
   const [attendant] = conv.assigneeId
     ? await tx.select().from(usersTable).where(eq(usersTable.id, conv.assigneeId)).limit(1)
@@ -434,6 +435,7 @@ async function syncResolvedConversation(
       attendantName: attendant?.name ?? null,
       channel: conv.channel,
       outcome: "completed",
+      resolutionReason: resolutionReason?.trim() || null,
       serviceTimeSeconds: serviceSeconds >= 0 ? serviceSeconds : null,
     });
   }
@@ -470,9 +472,10 @@ async function syncResolvedConversation(
 // ─── Update conversation ───────────────────────────────────────────────────
 router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
-  const { status, labels, sectorId, assigneeId, name, isArchived } = req.body as {
+  const { status, labels, sectorId, assigneeId, name, isArchived, resolutionReason } = req.body as {
     status?: string; labels?: string; sectorId?: number;
     assigneeId?: number; name?: string; isArchived?: boolean;
+    resolutionReason?: string;
   };
 
   const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
@@ -523,7 +526,9 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
       .where(eq(conversationsTable.id, id)).returning();
 
     if (status === "resolved" && !wasResolved) {
-      await syncResolvedConversation(tx, row);
+      // Sanitize untrusted client input: only accept a string motive, capped.
+      const cleanReason = typeof resolutionReason === "string" ? resolutionReason.slice(0, 500) : null;
+      await syncResolvedConversation(tx, row, cleanReason);
     }
     return row;
   });
