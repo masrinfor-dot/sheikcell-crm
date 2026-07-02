@@ -55,6 +55,27 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
     loadConversations();
   }, [loadConversations]);
 
+  // After a reconnection, the client's per-conversation unread counters may
+  // have drifted (replay bumps them +1 per message, which is only approximate).
+  // Refetch the authoritative counts from the server so every badge matches the
+  // backend exactly. The conversation currently open is being read now, so force
+  // its badge to 0 to avoid a transient ghost while the server mark-read (via
+  // the messages refetch below) catches up.
+  const reconcileAfterReconnect = useCallback(async () => {
+    const openId = activeIdRef.current;
+    try {
+      const list = await api.internalChat.conversations();
+      setConversations(openId != null ? list.map((c) => (c.id === openId ? { ...c, unreadCount: 0 } : c)) : list);
+    } catch {
+      /* ignore */
+    }
+    if (openId != null) {
+      api.internalChat.messages(openId).then((msgs) => {
+        if (activeIdRef.current === openId) setMessages(msgs);
+      }).catch(() => {});
+    }
+  }, []);
+
   // Load messages when active conversation changes.
   useEffect(() => {
     if (activeId == null) { setMessages([]); return; }
@@ -107,21 +128,20 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
       });
     });
     // When the reconnection gap is larger than the server's replay buffer (or
-    // the server restarted), the server asks the client to resync. Refetch the
-    // conversation list and the open conversation's messages so nothing sent
-    // during the outage is lost. Missed events within buffer range are replayed
-    // automatically and flow through the handler above.
+    // the server restarted), the server asks the client to resync. Reconcile the
+    // conversation list (authoritative unread counts) and the open conversation's
+    // messages so nothing sent during the outage is lost.
     es.addEventListener("resync", () => {
-      loadConversations();
-      const openId = activeIdRef.current;
-      if (openId != null) {
-        api.internalChat.messages(openId).then((msgs) => {
-          if (activeIdRef.current === openId) setMessages(msgs);
-        }).catch(() => {});
-      }
+      reconcileAfterReconnect();
+    });
+    // After a within-buffer reconnect, the server replays missed messages (which
+    // flow through the handler above and bump unread counters approximately) and
+    // then emits this sentinel. Reconcile so the badges match the backend exactly.
+    es.addEventListener("internal_reconnect", () => {
+      reconcileAfterReconnect();
     });
     return () => es.close();
-  }, [user?.id, loadConversations]);
+  }, [user?.id, loadConversations, reconcileAfterReconnect]);
 
   const openNew = async () => {
     setShowNew(true);

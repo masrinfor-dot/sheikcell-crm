@@ -97,6 +97,13 @@ router.get("/internal-chat/events", requireAuth, (req: Request, res: Response): 
       for (const ev of bufferedInternalEventsSince(sinceId)) {
         if (allowed(ev)) writeEvent(ev);
       }
+      // The client bumps per-conversation unread counters by +1 for each
+      // replayed message, which is only approximate. Emit an ordered sentinel
+      // AFTER all replayed events so the client reconciles its counters against
+      // the authoritative server counts. No `id` field, so this does not disturb
+      // the client's Last-Event-ID (a subsequent reconnect still resumes from
+      // the last real event).
+      writeEvent({ event: "internal_reconnect", data: { reason: "replay" } });
     }
   }
 
