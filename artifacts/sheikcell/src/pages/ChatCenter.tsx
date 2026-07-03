@@ -1166,6 +1166,19 @@ export default function ChatCenter() {
                   <UserCircle2 className="w-3.5 h-3.5" />
                 </button>
               )}
+              {/* Finalizar atendimento — atalho visível (abre o modal de motivo) */}
+              {activeCategory !== "resolvidas" && (
+                <button
+                  onClick={() => handleFinalize(activeConv.id)}
+                  data-testid="button-finalize-conv"
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-white text-xs font-semibold transition hover:opacity-90"
+                  style={{ backgroundColor: "#6b7280" }}
+                  title="Finalizar atendimento"
+                >
+                  <CheckCheck className="w-3.5 h-3.5" />
+                  <span className="hidden lg:inline">Finalizar</span>
+                </button>
+              )}
               {/* Status quick-set */}
               <div className="relative">
                 <button
