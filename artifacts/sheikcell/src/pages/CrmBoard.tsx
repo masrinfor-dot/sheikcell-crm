@@ -191,7 +191,21 @@ export default function CrmBoard() {
   const [detailId, setDetailId] = useState<number | null>(null);
   const [autoImporting, setAutoImporting] = useState(false);
   const [showFieldsManager, setShowFieldsManager] = useState(false);
+  // Conversas finalizadas (atendimentos resolvidos no chat) — o servidor já
+  // aplica o escopo por papel/setor, então basta contar o retorno.
+  const [finalizadasCount, setFinalizadasCount] = useState(0);
   const canManageFields = user?.role === "admin" || user?.role === "supervisor";
+
+  const fetchFinalizadas = useCallback(async () => {
+    try {
+      // Mesma regra do ChatCenter ("Resolvidas"): status resolved OU archived.
+      const [resolved, archived] = await Promise.all([
+        api.chat.conversations({ status: "resolved" }),
+        api.chat.conversations({ status: "archived" }),
+      ]);
+      setFinalizadasCount(resolved.length + archived.length);
+    } catch { /* silent */ }
+  }, []);
 
   const fetchContacts = useCallback(async () => {
     try {
@@ -207,6 +221,8 @@ export default function CrmBoard() {
     api.sectors.list().then(setSectors).catch(() => {});
   }, [fetchContacts]);
 
+  useEffect(() => { fetchFinalizadas(); }, [fetchFinalizadas]);
+
   // ── Real-time sync: reflect CRM changes from any user instantly ──
   const filterProfileRef = useRef(filterProfile);
   const searchQRef = useRef(searchQ);
@@ -215,6 +231,8 @@ export default function CrmBoard() {
   useEffect(() => { filterProfileRef.current = filterProfile; }, [filterProfile]);
   useEffect(() => { searchQRef.current = searchQ; }, [searchQ]);
   useEffect(() => { fetchContactsRef.current = fetchContacts; }, [fetchContacts]);
+  const fetchFinalizadasRef = useRef(fetchFinalizadas);
+  useEffect(() => { fetchFinalizadasRef.current = fetchFinalizadas; }, [fetchFinalizadas]);
 
   useEffect(() => {
     const es = new EventSource("/api/chat/events", { withCredentials: true });
@@ -255,9 +273,22 @@ export default function CrmBoard() {
       } catch { /* ignore */ }
     });
 
+    // Keep the "Conversas finalizadas" counter live: conversation status
+    // changes (resolve/reopen) arrive as conversation_updated. Debounce the
+    // recount to avoid bursts.
+    let finalizadasTimer: ReturnType<typeof setTimeout> | null = null;
+    es.addEventListener("conversation_updated", () => {
+      if (finalizadasTimer) return;
+      finalizadasTimer = setTimeout(() => {
+        finalizadasTimer = null;
+        fetchFinalizadasRef.current();
+      }, 500);
+    });
+
     return () => {
       es.close();
       if (searchRefetchTimer.current) { clearTimeout(searchRefetchTimer.current); searchRefetchTimer.current = null; }
+      if (finalizadasTimer) { clearTimeout(finalizadasTimer); finalizadasTimer = null; }
     };
   }, []);
 
@@ -379,11 +410,12 @@ export default function CrmBoard() {
       </div>
 
       {/* Stats bar */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
         {[
           { label: "Total", value: contacts.length, color: "text-foreground" },
           { label: "VIP",   value: vipCount,         color: "text-yellow-600" },
           { label: "Ativos",value: byStatus("active").length, color: "text-green-600" },
+          { label: "Conversas finalizadas", value: finalizadasCount, color: "text-gray-600" },
           { label: "Receita",value: totalRevenue.toLocaleString("pt-BR", { style: "currency", currency: "BRL" }), color: "text-primary" },
         ].map(({ label, value, color }) => (
           <div key={label} className="bg-white rounded-xl border border-border p-3 text-center">
