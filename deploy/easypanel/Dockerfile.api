@@ -1,0 +1,12 @@
+# API do Sheikcell — usado pelo EasyPanel (Build: Dockerfile)
+FROM node:24-alpine
+RUN npm install -g pnpm
+WORKDIR /app
+COPY . .
+RUN pnpm install --frozen-lockfile
+RUN pnpm --filter @workspace/api-server run build
+ENV NODE_ENV=production
+ENV PORT=8080
+EXPOSE 8080
+# Aplica o schema no banco e inicia a API
+CMD ["sh", "-c", "pnpm --filter @workspace/db run push && node --enable-source-maps artifacts/api-server/dist/index.mjs"]

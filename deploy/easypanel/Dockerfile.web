@@ -1,0 +1,13 @@
+# Site (frontend) do Sheikcell — usado pelo EasyPanel (Build: Dockerfile)
+FROM node:24-alpine AS build
+RUN npm install -g pnpm
+WORKDIR /app
+COPY . .
+RUN pnpm install --frozen-lockfile
+ENV BASE_PATH=/
+RUN pnpm --filter @workspace/sheikcell run build
+
+FROM nginx:alpine
+COPY deploy/easypanel/web-nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/artifacts/sheikcell/dist/public /usr/share/nginx/html
+EXPOSE 80
