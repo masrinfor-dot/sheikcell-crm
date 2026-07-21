@@ -341,6 +341,7 @@ router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Prom
           filename: filename ?? savedFilename,
           caption,
         }),
+        signal: AbortSignal.timeout(60_000),
       });
       if (!r.ok) {
         const body = await r.text().catch(() => "");
@@ -416,6 +417,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
           "X-Bridge-Secret": bridgeSecret,
         },
         body: JSON.stringify({ to: conv.phone, text: content.trim() }),
+        signal: AbortSignal.timeout(60_000),
       });
       if (!r.ok) {
         const body = await r.text().catch(() => "");

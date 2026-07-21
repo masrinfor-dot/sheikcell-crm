@@ -288,13 +288,87 @@ export async function connect(): Promise<void> {
   }
 }
 
+// ─── Anti-ban: fila de envio com ritmo humano ────────────────────────────────
+// Números que disparam mensagens em rajada (sem intervalo e sem "digitando")
+// são sinalizados como automação e podem ser banidos. Todo envio passa por uma
+// fila única que:
+//   1. garante um intervalo mínimo aleatório entre envios consecutivos;
+//   2. simula presença ("digitando…") proporcional ao tamanho do texto.
+const MIN_GAP_BASE_MS = 1500;   // intervalo mínimo entre envios
+const MIN_GAP_JITTER_MS = 1500; // + variação aleatória (1.5s a 3s no total)
+const TYPING_MS_PER_CHAR = 45;  // velocidade de "digitação" simulada
+const TYPING_MAX_MS = 4000;     // teto para não travar a fila
+
+let sendChain: Promise<void> = Promise.resolve();
+let lastSendAt = 0;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function humanPacing(jid: string, textLength: number): Promise<void> {
+  const sinceLast = Date.now() - lastSendAt;
+  const minGap = MIN_GAP_BASE_MS + Math.random() * MIN_GAP_JITTER_MS;
+  if (sinceLast < minGap) await sleep(minGap - sinceLast);
+
+  // Simula "digitando…" — ignora falhas de presença (não são críticas).
+  try {
+    if (sock && connectionStatus === "open") {
+      await sock.presenceSubscribe(jid);
+      await sock.sendPresenceUpdate("composing", jid);
+      const typing = Math.min(textLength * TYPING_MS_PER_CHAR, TYPING_MAX_MS);
+      await sleep(400 + typing * (0.6 + Math.random() * 0.4));
+      await sock.sendPresenceUpdate("paused", jid);
+    }
+  } catch {
+    /* presença é opcional */
+  }
+}
+
+const SEND_JOB_TIMEOUT_MS = 45_000; // watchdog: um envio travado não pode parar a fila
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label}: tempo esgotado (${ms}ms)`)), ms);
+    p.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); },
+    );
+  });
+}
+
+function enqueueSend(jid: string, textLength: number, fn: () => Promise<void>): Promise<void> {
+  const run = sendChain.then(async () => {
+    try {
+      await withTimeout(
+        (async () => {
+          await humanPacing(jid, textLength);
+          await fn();
+        })(),
+        SEND_JOB_TIMEOUT_MS,
+        "Envio WhatsApp",
+      );
+    } finally {
+      lastSendAt = Date.now();
+    }
+  });
+  // A fila nunca deve travar por causa de um envio que falhou ou expirou.
+  sendChain = run.catch(() => {});
+  return run;
+}
+
 export async function sendMessage(to: string, text: string): Promise<void> {
   if (!sock || connectionStatus !== "open") {
     throw new Error("WhatsApp não está conectado");
   }
   const phone = to.replace(/\D/g, "");
   const jid = `${phone}@s.whatsapp.net`;
-  await sock.sendMessage(jid, { text });
+  await enqueueSend(jid, text.length, async () => {
+    if (!sock || connectionStatus !== "open") {
+      throw new Error("WhatsApp não está conectado");
+    }
+    await sock.sendMessage(jid, { text });
+  });
   logger.info({ phone }, "WhatsApp message sent via Baileys");
 }
 
@@ -311,15 +385,20 @@ export async function sendMedia(
   }
   const phone = to.replace(/\D/g, "");
   const jid = `${phone}@s.whatsapp.net`;
-  if (type === "image") {
-    await sock.sendMessage(jid, { image: buffer, mimetype, caption });
-  } else {
-    await sock.sendMessage(jid, {
-      document: buffer,
-      mimetype,
-      fileName: filename ?? "documento",
-      caption,
-    });
-  }
+  await enqueueSend(jid, caption?.length ?? 30, async () => {
+    if (!sock || connectionStatus !== "open") {
+      throw new Error("WhatsApp não está conectado");
+    }
+    if (type === "image") {
+      await sock.sendMessage(jid, { image: buffer, mimetype, caption });
+    } else {
+      await sock.sendMessage(jid, {
+        document: buffer,
+        mimetype,
+        fileName: filename ?? "documento",
+        caption,
+      });
+    }
+  });
   logger.info({ phone, type }, "WhatsApp media sent via Baileys");
 }

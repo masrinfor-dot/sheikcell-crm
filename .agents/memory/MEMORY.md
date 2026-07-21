@@ -13,6 +13,7 @@
 - [Role scope consistency](role-scope-consistency.md) — global-role set (admin+supervisor) must match across chat & CRM; use a shared predicate, not hardcoded role==='admin', or cross-module handoffs 403
 - [Atendimento↔dashboard↔CRM sync](atendimento-dashboard-crm-sync.md) — dashboard & CRM history read attendance_logs; resolving a chat must emit one log (txn + locked read, sector-scoped CRM)
 - [WhatsApp outbound status](whatsapp-outbound-status.md) — "conversas não funcionam" = bridge unpaired (status qr, scan QR); failed sends must set status 'failed' + broadcast message_updated, never stay silent 'sent'
+- [WhatsApp anti-ban queue](whatsapp-antiban.md) — all Baileys sends go through the paced queue (gap + typing sim + 45s watchdog); never call sock.sendMessage directly
 - [Task board](task-board.md) — Trello-style Tarefas board (tasks table); vendedor sees own-sector OR assignee OR creator; sector-scope predicate must guard null (see vendedor-scoping)
 - [Resolve reason (motivo)](resolve-reason.md) — finalize modal captures motivo → attendance_logs.resolution_reason, written once on resolve transition; motives are a hardcoded FE constant
 - [CRM real-time sync](crm-realtime-sync.md) — CRM board + Visão Geral reuse the chat SSE channel (/api/chat/events) with crm_contact_* events; broadcast with contact sectorId, isPotential=false
