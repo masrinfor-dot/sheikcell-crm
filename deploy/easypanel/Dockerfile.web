@@ -6,6 +6,7 @@ WORKDIR /app
 COPY . .
 RUN pnpm install --frozen-lockfile || pnpm install --no-frozen-lockfile
 ENV BASE_PATH=/
+ENV PORT=3000
 RUN pnpm --filter @workspace/sheikcell run build
 
 FROM nginx:alpine

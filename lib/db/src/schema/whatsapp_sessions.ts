@@ -3,6 +3,7 @@ import { pgTable, serial, text, timestamp } from "drizzle-orm/pg-core";
 export const whatsappSessionsTable = pgTable("whatsapp_sessions", {
   id: serial("id").primaryKey(),
   sessionKey: text("session_key").notNull().unique(),
+  displayName: text("display_name"),
   status: text("status").notNull().default("unknown"),
   phoneNumber: text("phone_number"),
   phoneId: text("phone_id"),

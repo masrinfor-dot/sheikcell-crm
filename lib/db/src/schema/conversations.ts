@@ -8,6 +8,7 @@ export const conversationsTable = pgTable("conversations", {
   name: text("name").notNull(),
   avatarUrl: text("avatar_url"),
   channel: text("channel").notNull().default("whatsapp"), // whatsapp | instagram | manual
+  sessionKey: text("session_key").notNull().default("default"), // qual conexão de WhatsApp recebeu a conversa
   sectorId: integer("sector_id").references(() => sectorsTable.id),
   assigneeId: integer("assignee_id").references(() => usersTable.id),
   status: text("status").notNull().default("open"), // open | pending | resolved | archived
