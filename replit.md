@@ -34,7 +34,8 @@ _Describe the high-level user-facing capabilities of this app once they exist._
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Após cada alteração concluída (checkpoint), enviar o código para o GitHub automaticamente: push de `main` local para a branch `producao` de `masrinfor-dot/sheikcell-crm` usando `GIT_ASKPASS=/tmp/askpass.sh` (token no secret `GITHUB_TOKEN`). O EasyPanel do usuário faz deploy a partir dessa branch.
+- Usuário fala PT-BR, nível iniciante — explicar sem jargão.
 
 ## Gotchas
 
