@@ -40,7 +40,7 @@ function AuthRedirect() {
     if (!isAuthenticated && !inAuthGroup) {
       router.replace("/login");
     } else if (isAuthenticated && inAuthGroup) {
-      router.replace("/(tabs)/");
+      router.replace("/(tabs)");
     }
   }, [isAuthenticated, isLoading, segments]);
 

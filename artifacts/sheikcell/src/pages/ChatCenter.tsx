@@ -124,6 +124,11 @@ function ConvItem({ conv, active, onClick }: { conv: Conversation; active: boole
         <div className="flex items-center justify-between gap-1">
           <p className="text-xs text-muted-foreground truncate flex-1">{conv.lastMessage ?? "Sem mensagens"}</p>
           <div className="flex items-center gap-1 shrink-0">
+            {conv.sessionKey && conv.sessionKey !== "default" && (
+              <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full font-semibold truncate max-w-[80px]" title={`Recebida pela conexão ${conv.sessionKey}`}>
+                {conv.sessionKey}
+              </span>
+            )}
             {channelIcon(conv.channel)}
             {conv.unreadCount > 0 && (
               <span className="bg-green-500 text-white text-xs rounded-full px-1.5 py-0.5 min-w-[18px] text-center font-bold">

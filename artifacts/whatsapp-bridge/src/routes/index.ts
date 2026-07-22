@@ -1,7 +1,13 @@
 import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
 import { createHmac } from "node:crypto";
 import { getWAState, sendWAMessage, sendWAMedia } from "../lib/whatsapp";
-import { disconnectAndReset } from "../lib/waConnection";
+import {
+  disconnectAndReset,
+  startSession,
+  removeSession,
+  getAllSessionStates,
+  DEFAULT_SESSION_KEY,
+} from "../lib/waConnection";
 
 const router: IRouter = Router();
 
@@ -23,27 +29,69 @@ function requireBridgeSecret(req: Request, res: Response, next: NextFunction): v
   next();
 }
 
+const VALID_KEY = /^[a-z0-9][a-z0-9_-]{0,39}$/;
+
+function sessionKeyFrom(raw: unknown): string | null {
+  if (raw == null || raw === "") return DEFAULT_SESSION_KEY;
+  if (typeof raw !== "string" || !VALID_KEY.test(raw)) return null;
+  return raw;
+}
+
 router.get("/whatsapp/healthz", (_req, res): void => {
   res.json({ ok: true });
 });
 
-router.get("/whatsapp/status", requireBridgeSecret, async (_req, res): Promise<void> => {
-  res.json(await getWAState());
+// Status of one session (?session=key; default "default")
+router.get("/whatsapp/status", requireBridgeSecret, async (req, res): Promise<void> => {
+  const key = sessionKeyFrom(req.query["session"]);
+  if (!key) { res.status(400).json({ error: "session inválida" }); return; }
+  res.json(await getWAState(key));
 });
 
-router.post("/whatsapp/reset", requireBridgeSecret, async (_req, res): Promise<void> => {
-  await disconnectAndReset();
+// All sessions with live state
+router.get("/whatsapp/sessions", requireBridgeSecret, async (_req, res): Promise<void> => {
+  const states = getAllSessionStates();
+  const detailed = await Promise.all(states.map((s) => getWAState(s.sessionKey)));
+  res.json(detailed);
+});
+
+// Start (create) a session
+router.post("/whatsapp/sessions", requireBridgeSecret, async (req, res): Promise<void> => {
+  const key = sessionKeyFrom((req.body as { session?: string })?.session);
+  if (!key) { res.status(400).json({ error: "session inválida (use letras minúsculas, números, - e _)" }); return; }
+  await startSession(key);
+  res.json({ ok: true, sessionKey: key });
+});
+
+// Remove a session permanently
+router.delete("/whatsapp/sessions/:key", requireBridgeSecret, async (req, res): Promise<void> => {
+  const key = sessionKeyFrom(req.params.key);
+  if (!key) { res.status(400).json({ error: "session inválida" }); return; }
+  if (key === DEFAULT_SESSION_KEY) {
+    res.status(400).json({ error: "A conexão principal não pode ser removida" });
+    return;
+  }
+  await removeSession(key);
+  res.json({ ok: true });
+});
+
+router.post("/whatsapp/reset", requireBridgeSecret, async (req, res): Promise<void> => {
+  const key = sessionKeyFrom((req.body as { session?: string })?.session);
+  if (!key) { res.status(400).json({ error: "session inválida" }); return; }
+  await disconnectAndReset(key);
   res.json({ ok: true, message: "Sessão reiniciada — aguarde o QR code" });
 });
 
 router.post("/whatsapp/send", requireBridgeSecret, async (req, res): Promise<void> => {
-  const { to, text } = req.body as { to?: string; text?: string };
+  const { to, text, session } = req.body as { to?: string; text?: string; session?: string };
+  const key = sessionKeyFrom(session);
+  if (!key) { res.status(400).json({ error: "session inválida" }); return; }
   if (!to || !text) {
     res.status(400).json({ error: "to e text são obrigatórios" });
     return;
   }
   try {
-    await sendWAMessage(to, text);
+    await sendWAMessage(key, to, text);
     res.json({ ok: true });
   } catch (err) {
     res.status(503).json({ error: err instanceof Error ? err.message : "Erro ao enviar" });
@@ -51,14 +99,17 @@ router.post("/whatsapp/send", requireBridgeSecret, async (req, res): Promise<voi
 });
 
 router.post("/whatsapp/send-media", requireBridgeSecret, async (req, res): Promise<void> => {
-  const { to, type, base64, mimetype, filename, caption } = req.body as {
+  const { to, type, base64, mimetype, filename, caption, session } = req.body as {
     to?: string;
     type?: string;
     base64?: string;
     mimetype?: string;
     filename?: string;
     caption?: string;
+    session?: string;
   };
+  const key = sessionKeyFrom(session);
+  if (!key) { res.status(400).json({ error: "session inválida" }); return; }
   if (!to || !type || !base64 || !mimetype) {
     res.status(400).json({ error: "to, type, base64 e mimetype são obrigatórios" });
     return;
@@ -69,7 +120,7 @@ router.post("/whatsapp/send-media", requireBridgeSecret, async (req, res): Promi
   }
   try {
     const buffer = Buffer.from(base64, "base64");
-    await sendWAMedia(to, type, buffer, mimetype, filename, caption);
+    await sendWAMedia(key, to, type, buffer, mimetype, filename, caption);
     res.json({ ok: true });
   } catch (err) {
     res.status(503).json({ error: err instanceof Error ? err.message : "Erro ao enviar mídia" });

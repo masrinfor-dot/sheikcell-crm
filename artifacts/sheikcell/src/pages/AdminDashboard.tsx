@@ -17,7 +17,9 @@ import {
 
 type Tab = "dashboard" | "chat" | "equipe" | "tarefas" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp";
 
-type WAStatus = {
+type WASession = {
+  sessionKey: string;
+  displayName: string | null;
   mode: "baileys" | "meta" | null;
   status: "connected" | "qr" | "connecting" | "reconnecting" | "disconnected" | "unconfigured" | "error" | "unknown";
   phoneNumber: string | null;
@@ -55,8 +57,9 @@ export default function AdminDashboard() {
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [userRows, setUserRows] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [waStatus, setWaStatus] = useState<WAStatus>({ mode: null, status: "unknown", phoneNumber: null, phoneId: null, qrDataUrl: null, lastHeartbeatAt: null, errorMessage: null, bridgeAvailable: false });
+  const [waSessions, setWaSessions] = useState<WASession[] | null>(null);
   const [waLoading, setWaLoading] = useState(false);
+  const [newConnName, setNewConnName] = useState("");
 
   // Modals
   const [showAddUser, setShowAddUser] = useState(false);
@@ -85,8 +88,8 @@ export default function AdminDashboard() {
 
   const fetchWAStatus = useCallback(async () => {
     try {
-      const r = await fetch("/api/whatsapp/status", { credentials: "include" });
-      if (r.ok) setWaStatus(await r.json() as WAStatus);
+      const r = await fetch("/api/whatsapp/sessions", { credentials: "include" });
+      if (r.ok) setWaSessions(await r.json() as WASession[]);
     } catch { /* silent */ }
   }, []);
 
@@ -341,181 +344,197 @@ export default function AdminDashboard() {
         {/* === WHATSAPP TAB === */}
         {tab === "whatsapp" && (
           <div className="max-w-lg mx-auto space-y-6">
-            {/* Status card */}
-            <div className="shk-card p-5">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="font-bold text-foreground">WhatsApp</h2>
-                <div className="flex items-center gap-2">
-                  {waStatus.status === "connected" && (
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-700">
-                      <span className="w-2 h-2 rounded-full bg-green-500" />
-                      Conectado
+            <div className="flex items-center justify-between">
+              <h2 className="font-bold text-foreground">Conexões WhatsApp</h2>
+              <button onClick={handleWARefresh} disabled={waLoading}
+                className="flex items-center gap-2 px-3 py-2 rounded-xl border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition text-sm disabled:opacity-50">
+                <RefreshCw className={`w-4 h-4 ${waLoading ? "animate-spin" : ""}`} />
+                Atualizar
+              </button>
+            </div>
+
+            {waSessions === null && (
+              <div className="shk-card p-6 text-center">
+                <RefreshCw className="w-10 h-10 mx-auto text-muted-foreground mb-3 animate-spin" />
+                <p className="text-sm text-muted-foreground">Verificando conexões…</p>
+              </div>
+            )}
+
+            {waSessions?.map((s) => (
+              <div key={s.sessionKey} className="shk-card p-5">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Smartphone className="w-4 h-4 text-muted-foreground shrink-0" />
+                    <span className="font-bold text-foreground truncate">
+                      {s.displayName ?? (s.sessionKey === "default" ? "Principal" : s.sessionKey)}
                     </span>
-                  )}
-                  {waStatus.status === "qr" && (
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-700">
-                      <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
-                      Aguardando QR
-                    </span>
-                  )}
-                  {(waStatus.status === "connecting" || waStatus.status === "reconnecting") && (
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-700">
-                      <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-                      {waStatus.status === "reconnecting" ? "Reconectando…" : "Conectando…"}
-                    </span>
-                  )}
-                  {(waStatus.status === "disconnected" || waStatus.status === "error") && (
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-700">
-                      <span className="w-2 h-2 rounded-full bg-red-500" />
-                      Desconectado
-                    </span>
-                  )}
-                  {(waStatus.status === "unconfigured" || waStatus.status === "unknown") && (
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-gray-100 text-gray-600">
-                      <span className="w-2 h-2 rounded-full bg-gray-400" />
-                      {waStatus.status === "unknown" ? "Verificando…" : "Não configurado"}
-                    </span>
-                  )}
+                    <button
+                      title="Renomear"
+                      onClick={async () => {
+                        const name = window.prompt("Novo nome da conexão:", s.displayName ?? "");
+                        if (!name?.trim()) return;
+                        await fetch(`/api/whatsapp/sessions/${s.sessionKey}/rename`, {
+                          method: "POST", credentials: "include",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ displayName: name.trim() }),
+                        });
+                        fetchWAStatus();
+                      }}
+                      className="p-1 text-muted-foreground hover:text-foreground rounded transition shrink-0">
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {s.status === "connected" && (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-700">
+                        <span className="w-2 h-2 rounded-full bg-green-500" />Conectado
+                      </span>
+                    )}
+                    {s.status === "qr" && (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-700">
+                        <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />Aguardando QR
+                      </span>
+                    )}
+                    {(s.status === "connecting" || s.status === "reconnecting") && (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-700">
+                        <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                        {s.status === "reconnecting" ? "Reconectando…" : "Conectando…"}
+                      </span>
+                    )}
+                    {(s.status === "disconnected" || s.status === "error" || s.status === "unconfigured") && (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-700">
+                        <span className="w-2 h-2 rounded-full bg-red-500" />Desconectado
+                      </span>
+                    )}
+                  </div>
                 </div>
-              </div>
 
-              <div className="text-sm text-muted-foreground mb-4 space-y-1">
-                {waStatus.phoneNumber && (
-                  <p>Número: <span className="font-semibold text-foreground">+{waStatus.phoneNumber.replace(/^\+/, "")}</span></p>
-                )}
-                {waStatus.mode && (
-                  <p className="text-xs">Modo: <span className="font-mono text-foreground">{waStatus.mode === "baileys" ? "Baileys (WebSocket)" : "Meta Cloud API"}</span></p>
-                )}
-                {waStatus.lastHeartbeatAt && (
-                  <p className="text-xs text-muted-foreground">
-                    Última conexão confirmada:{" "}
-                    <span className="font-medium text-foreground">
-                      {new Date(waStatus.lastHeartbeatAt).toLocaleString("pt-BR", {
-                        day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit"
-                      })}
-                    </span>
-                  </p>
-                )}
-                {waStatus.errorMessage && (
-                  <p className="text-xs text-red-600 mt-1">{waStatus.errorMessage}</p>
-                )}
-              </div>
+                <div className="text-sm text-muted-foreground mb-3 space-y-1">
+                  {s.phoneNumber && (
+                    <p>Número: <span className="font-semibold text-foreground">+{s.phoneNumber.replace(/^\+/, "")}</span></p>
+                  )}
+                  {s.lastHeartbeatAt && (
+                    <p className="text-xs">
+                      Última conexão:{" "}
+                      <span className="font-medium text-foreground">
+                        {new Date(s.lastHeartbeatAt).toLocaleString("pt-BR", {
+                          day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"
+                        })}
+                      </span>
+                    </p>
+                  )}
+                  {s.errorMessage && <p className="text-xs text-red-600">{s.errorMessage}</p>}
+                </div>
 
-              <div className="flex items-center gap-2">
-                <button onClick={handleWARefresh} disabled={waLoading}
-                  className="flex items-center gap-2 px-3 py-2 rounded-xl border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition text-sm disabled:opacity-50">
-                  <RefreshCw className={`w-4 h-4 ${waLoading ? "animate-spin" : ""}`} />
-                  Verificar status
-                </button>
-                {(waStatus.status === "disconnected" || waStatus.status === "error") && (
+                {/* QR code */}
+                {s.status === "qr" && s.qrDataUrl && (
+                  <div className="text-center mb-3">
+                    <img src={s.qrDataUrl} alt={`QR WhatsApp ${s.sessionKey}`} className="mx-auto w-52 h-52 rounded-xl border border-border" />
+                    <p className="text-xs text-muted-foreground mt-2">
+                      WhatsApp → Menu → <strong>Aparelhos conectados</strong> → <strong>Conectar um aparelho</strong>
+                    </p>
+                  </div>
+                )}
+                {s.status === "qr" && !s.qrDataUrl && (
+                  <div className="text-center mb-3">
+                    <RefreshCw className="w-8 h-8 mx-auto text-blue-500 mb-2 animate-spin" />
+                    <p className="text-xs text-muted-foreground">Gerando QR code…</p>
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2 flex-wrap">
                   <button
                     onClick={async () => {
+                      if (s.status === "connected" && !window.confirm("Desconectar este número? Um novo QR code será gerado.")) return;
                       setWaLoading(true);
                       try {
-                        await fetch("/api/whatsapp/reset", { method: "POST", credentials: "include" });
+                        await fetch("/api/whatsapp/reset", {
+                          method: "POST", credentials: "include",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ session: s.sessionKey }),
+                        });
                         await fetchWAStatus();
                       } finally { setWaLoading(false); }
                     }}
                     disabled={waLoading}
-                    className="flex items-center gap-2 px-3 py-2 rounded-xl border border-red-200 text-red-600 hover:bg-red-50 transition text-sm disabled:opacity-50">
+                    className="flex items-center gap-2 px-3 py-2 rounded-xl border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition text-sm disabled:opacity-50">
                     <RefreshCw className="w-4 h-4" />
-                    Reconectar / Novo QR
+                    {s.status === "connected" ? "Desconectar / Trocar número" : "Reconectar / Novo QR"}
                   </button>
-                )}
+                  {s.sessionKey !== "default" && (
+                    <button
+                      onClick={async () => {
+                        if (!window.confirm(`Remover a conexão "${s.displayName ?? s.sessionKey}"? As conversas dela passam a responder pela conexão principal.`)) return;
+                        setWaLoading(true);
+                        try {
+                          const r = await fetch(`/api/whatsapp/sessions/${s.sessionKey}`, { method: "DELETE", credentials: "include" });
+                          if (!r.ok) {
+                            const d = await r.json().catch(() => null) as { error?: string } | null;
+                            toast({ title: "Erro", description: d?.error ?? "Erro ao remover", variant: "destructive" });
+                          } else {
+                            toast({ title: "Conexão removida" });
+                          }
+                          await fetchWAStatus();
+                        } finally { setWaLoading(false); }
+                      }}
+                      disabled={waLoading}
+                      className="flex items-center gap-2 px-3 py-2 rounded-xl border border-red-200 text-red-600 hover:bg-red-50 transition text-sm disabled:opacity-50">
+                      <X className="w-4 h-4" />
+                      Remover
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
+            ))}
 
-            {/* QR code panel */}
-            {waStatus.status === "qr" && waStatus.qrDataUrl && (
-              <div className="shk-card p-6 text-center">
-                <p className="text-sm font-semibold text-foreground mb-4">
-                  Escaneie o QR code com o WhatsApp
-                </p>
-                <img src={waStatus.qrDataUrl} alt="QR WhatsApp" className="mx-auto w-56 h-56 rounded-xl border border-border" />
-                <p className="text-xs text-muted-foreground mt-3">
-                  Abra o WhatsApp → Menu → <strong>Aparelhos conectados</strong> → <strong>Conectar um aparelho</strong>
-                </p>
-              </div>
-            )}
-
-            {/* QR waiting (no QR yet) */}
-            {waStatus.status === "qr" && !waStatus.qrDataUrl && (
-              <div className="shk-card p-6 text-center">
-                <RefreshCw className="w-10 h-10 mx-auto text-blue-500 mb-3 animate-spin" />
-                <p className="text-sm font-semibold text-foreground mb-1">Gerando QR code…</p>
-                <p className="text-xs text-muted-foreground">Aguarde alguns segundos</p>
-              </div>
-            )}
-
-            {/* Connected */}
-            {waStatus.status === "connected" && (
-              <div className="shk-card p-6 text-center">
-                <CheckCircle className="w-10 h-10 mx-auto text-green-500 mb-3" />
-                <p className="text-sm font-semibold text-foreground mb-1">WhatsApp conectado!</p>
-                <p className="text-xs text-muted-foreground mb-4">
-                  Sessão salva no banco de dados — reconexão automática após restart.<br />
-                  Mensagens recebidas aparecem automaticamente no <strong>Atendimento</strong>.
-                </p>
-                <button
-                  onClick={async () => {
-                    if (!window.confirm("Desconectar este número? A sessão atual será encerrada e um novo QR code será gerado para conectar outro número.")) return;
-                    setWaLoading(true);
-                    try {
-                      await fetch("/api/whatsapp/reset", { method: "POST", credentials: "include" });
-                      await fetchWAStatus();
-                    } finally { setWaLoading(false); }
-                  }}
-                  disabled={waLoading}
-                  className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-red-200 text-red-600 hover:bg-red-50 transition text-sm disabled:opacity-50">
-                  <PhoneCall className="w-4 h-4" />
-                  Desconectar / Trocar número
+            {/* Add connection */}
+            <div className="shk-card p-5">
+              <p className="text-sm font-semibold text-foreground mb-2">Adicionar novo número</p>
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  const name = newConnName.trim();
+                  if (!name) return;
+                  setWaLoading(true);
+                  try {
+                    const r = await fetch("/api/whatsapp/sessions", {
+                      method: "POST", credentials: "include",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ displayName: name }),
+                    });
+                    const d = await r.json().catch(() => null) as { error?: string } | null;
+                    if (!r.ok) {
+                      toast({ title: "Erro", description: d?.error ?? "Erro ao criar conexão", variant: "destructive" });
+                    } else {
+                      toast({ title: "Conexão criada!", description: "Aguarde o QR code aparecer para escanear." });
+                      setNewConnName("");
+                    }
+                    await fetchWAStatus();
+                  } finally { setWaLoading(false); }
+                }}
+                className="flex items-center gap-2">
+                <input
+                  value={newConnName}
+                  onChange={(e) => setNewConnName(e.target.value)}
+                  placeholder="Nome da conexão (ex.: Vendas, Suporte)"
+                  className="flex-1 px-3 py-2 rounded-xl border border-border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                />
+                <button type="submit" disabled={waLoading || !newConnName.trim()}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-50">
+                  <Plus className="w-4 h-4" />
+                  Adicionar
                 </button>
-              </div>
-            )}
-
-            {/* Reconnecting / Connecting */}
-            {(waStatus.status === "connecting" || waStatus.status === "reconnecting") && (
-              <div className="shk-card p-6 text-center border-amber-200 bg-amber-50">
-                <RefreshCw className="w-10 h-10 mx-auto text-amber-500 mb-3 animate-spin" />
-                <p className="text-sm font-semibold text-foreground mb-1">
-                  {waStatus.status === "reconnecting" ? "Reconectando…" : "Conectando ao WhatsApp…"}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {waStatus.phoneNumber
-                    ? <>Último número: <strong>+{waStatus.phoneNumber.replace(/^\+/, "")}</strong><br /></>
-                    : null}
-                  A reconexão é automática — aguarde ou clique em "Verificar status".
-                </p>
-              </div>
-            )}
-
-            {/* Disconnected / Error */}
-            {(waStatus.status === "disconnected" || waStatus.status === "error") && (
-              <div className="shk-card p-6 text-center border-red-200 bg-red-50">
-                <PhoneCall className="w-10 h-10 mx-auto text-red-400 mb-3" />
-                <p className="text-sm font-semibold text-foreground mb-1">Sessão encerrada</p>
-                <p className="text-xs text-muted-foreground mb-3">
-                  {waStatus.errorMessage ?? "A sessão foi encerrada ou expirou."}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  Clique em <strong>Reconectar / Novo QR</strong> para escanear o QR code novamente.
-                </p>
-              </div>
-            )}
-
-            {/* Not yet known */}
-            {waStatus.status === "unknown" && (
-              <div className="shk-card p-6 text-center">
-                <RefreshCw className="w-10 h-10 mx-auto text-muted-foreground mb-3 animate-spin" />
-                <p className="text-sm text-muted-foreground">Verificando status da conexão…</p>
-              </div>
-            )}
+              </form>
+              <p className="text-xs text-muted-foreground mt-2">
+                Cada conexão é um número de WhatsApp diferente. Depois de criar, escaneie o QR code com o celular do número desejado.
+              </p>
+            </div>
 
             {/* Info */}
             <div className="rounded-xl bg-blue-50 border border-blue-200 p-4 text-xs text-blue-800">
-              <strong>Sessão persistida no banco de dados</strong> — após escanear o QR uma vez, a sessão
-              é salva automaticamente e o servidor reconecta sozinho após reinicializações. Nenhuma
-              credencial de terceiros necessária.
+              <strong>Sessões salvas no banco de dados</strong> — após escanear o QR uma vez, cada conexão
+              reconecta sozinha após reinicializações. As respostas de cada conversa saem sempre pelo
+              número que o cliente chamou.
             </div>
           </div>
         )}

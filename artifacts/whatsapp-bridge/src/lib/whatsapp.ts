@@ -1,17 +1,23 @@
 /**
- * Public interface for WhatsApp status and sending.
+ * Public interface for WhatsApp status and sending — multi-session.
  * Delegates to the Baileys connection manager (waConnection.ts).
- * The Meta Cloud API is kept as a secondary send path when env vars are set
- * and Baileys is not connected, so the system degrades gracefully.
+ * The Meta Cloud API is kept as a secondary send path for the DEFAULT session
+ * only, when env vars are set and Baileys is not connected.
  */
 import { logger } from "./logger";
-import { getConnectionState, sendMessage as baileysSend, sendMedia as baileysSendMedia } from "./waConnection";
+import {
+  getSessionState,
+  sendMessage as baileysSend,
+  sendMedia as baileysSendMedia,
+  DEFAULT_SESSION_KEY,
+} from "./waConnection";
 
 const GRAPH_API_BASE = "https://graph.facebook.com/v19.0";
 
 export type WAMode = "baileys" | "meta";
 
 export interface WAState {
+  sessionKey: string;
   mode: WAMode;
   status: "connected" | "qr" | "connecting" | "reconnecting" | "disconnected" | "unconfigured";
   phoneNumber: string | null;
@@ -48,11 +54,24 @@ async function fetchMetaPhoneNumber(phoneId: string, accessToken: string): Promi
   }
 }
 
-export async function getWAState(): Promise<WAState> {
-  const bail = getConnectionState();
+export async function getWAState(sessionKey: string = DEFAULT_SESSION_KEY): Promise<WAState> {
+  const bail = getSessionState(sessionKey);
+
+  if (!bail) {
+    return {
+      sessionKey,
+      mode: "baileys",
+      status: "unconfigured",
+      phoneNumber: null,
+      phoneId: null,
+      qrDataUrl: null,
+      errorMessage: "Conexão não encontrada",
+    };
+  }
 
   if (bail.status === "open") {
     return {
+      sessionKey,
       mode: "baileys",
       status: "connected",
       phoneNumber: bail.phone,
@@ -64,6 +83,7 @@ export async function getWAState(): Promise<WAState> {
 
   if (bail.status === "qr") {
     return {
+      sessionKey,
       mode: "baileys",
       status: "qr",
       phoneNumber: null,
@@ -73,34 +93,27 @@ export async function getWAState(): Promise<WAState> {
     };
   }
 
-  if (bail.status === "connecting") {
-    return {
-      mode: "baileys",
-      status: "connecting",
-      phoneNumber: null,
-      phoneId: null,
-      qrDataUrl: null,
-      errorMessage: bail.error,
-    };
-  }
-
   if (bail.status === "close") {
-    // Check if Meta Cloud API can cover
-    const { phoneId, accessToken } = getMetaConfig();
-    if (phoneId && accessToken) {
-      const phoneNumber = await fetchMetaPhoneNumber(phoneId, accessToken);
-      if (phoneNumber) {
-        return {
-          mode: "meta",
-          status: "connected",
-          phoneNumber,
-          phoneId,
-          qrDataUrl: null,
-          errorMessage: null,
-        };
+    // Meta Cloud API fallback applies only to the default session.
+    if (sessionKey === DEFAULT_SESSION_KEY) {
+      const { phoneId, accessToken } = getMetaConfig();
+      if (phoneId && accessToken) {
+        const phoneNumber = await fetchMetaPhoneNumber(phoneId, accessToken);
+        if (phoneNumber) {
+          return {
+            sessionKey,
+            mode: "meta",
+            status: "connected",
+            phoneNumber,
+            phoneId,
+            qrDataUrl: null,
+            errorMessage: null,
+          };
+        }
       }
     }
     return {
+      sessionKey,
       mode: "baileys",
       status: "disconnected",
       phoneNumber: null,
@@ -112,6 +125,7 @@ export async function getWAState(): Promise<WAState> {
 
   // "connecting" / reconnecting state
   return {
+    sessionKey,
     mode: "baileys",
     status: "connecting",
     phoneNumber: null,
@@ -122,6 +136,7 @@ export async function getWAState(): Promise<WAState> {
 }
 
 export async function sendWAMedia(
+  sessionKey: string,
   to: string,
   type: "image" | "document",
   buffer: Buffer,
@@ -129,22 +144,21 @@ export async function sendWAMedia(
   filename?: string,
   caption?: string,
 ): Promise<void> {
-  const bail = getConnectionState();
-  if (bail.status !== "open") {
-    throw new Error("WhatsApp não está conectado (Baileys). Envio de mídia requer conexão Baileys ativa.");
-  }
-  await baileysSendMedia(to, type, buffer, mimetype, filename, caption);
+  await baileysSendMedia(sessionKey, to, type, buffer, mimetype, filename, caption);
 }
 
-export async function sendWAMessage(to: string, text: string): Promise<void> {
-  const bail = getConnectionState();
+export async function sendWAMessage(sessionKey: string, to: string, text: string): Promise<void> {
+  const bail = getSessionState(sessionKey);
 
-  if (bail.status === "open") {
-    await baileysSend(to, text);
+  if (bail?.status === "open") {
+    await baileysSend(sessionKey, to, text);
     return;
   }
 
-  // Fallback to Meta Cloud API
+  // Fallback to Meta Cloud API — default session only.
+  if (sessionKey !== DEFAULT_SESSION_KEY) {
+    throw new Error(`WhatsApp não está conectado (conexão "${sessionKey}")`);
+  }
   const { phoneId, accessToken } = getMetaConfig();
   if (!phoneId || !accessToken) {
     throw new Error("WhatsApp não está conectado (Baileys desconectado e Meta API não configurada)");

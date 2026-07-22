@@ -24,6 +24,7 @@ const ALLOWED_MIMES = new Set([
 
 export interface InboundWAPayload {
   event?: string;
+  sessionKey?: string;
   data?: {
     key?: { remoteJid?: string; fromMe?: boolean; id?: string };
     message?: {
@@ -134,11 +135,23 @@ async function downloadMetaMedia(
   }
 }
 
-async function upsertConversation(phone: string, pushName: string, displayContent: string) {
+async function upsertConversation(
+  phone: string,
+  pushName: string,
+  displayContent: string,
+  sessionKey: string = "default",
+) {
+  // Same customer talking to two different WhatsApp numbers = two separate
+  // conversations, so replies always go out through the number the customer
+  // contacted.
   let [conv] = await db
     .select()
     .from(conversationsTable)
-    .where(and(eq(conversationsTable.phone, phone), eq(conversationsTable.isArchived, false)))
+    .where(and(
+      eq(conversationsTable.phone, phone),
+      eq(conversationsTable.sessionKey, sessionKey),
+      eq(conversationsTable.isArchived, false),
+    ))
     .orderBy(desc(conversationsTable.lastMessageAt))
     .limit(1);
 
@@ -156,6 +169,7 @@ async function upsertConversation(phone: string, pushName: string, displayConten
         phone,
         name: pushName,
         channel: "whatsapp",
+        sessionKey,
         sectorId: targetSectorId,
         status: "open",
         lastMessage: displayContent,
@@ -231,7 +245,11 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
 
   const displayContent = text || (mediaType === "image" ? "📷 Foto" : mediaType === "audio" ? "🎵 Áudio" : mediaType === "doc" ? `📄 ${docFileName ?? "Documento"}` : "(mídia)");
 
-  const conv = await upsertConversation(phone, pushName, displayContent);
+  const sessionKey =
+    typeof body.sessionKey === "string" && /^[a-z0-9][a-z0-9_-]{0,39}$/.test(body.sessionKey)
+      ? body.sessionKey
+      : "default";
+  const conv = await upsertConversation(phone, pushName, displayContent, sessionKey);
 
   const [msg] = await db
     .insert(messagesTable)

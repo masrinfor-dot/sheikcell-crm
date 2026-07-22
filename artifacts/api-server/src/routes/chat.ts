@@ -340,6 +340,7 @@ router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Prom
           mimetype,
           filename: filename ?? savedFilename,
           caption,
+          session: conv.sessionKey,
         }),
         signal: AbortSignal.timeout(60_000),
       });
@@ -416,7 +417,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
           "Content-Type": "application/json",
           "X-Bridge-Secret": bridgeSecret,
         },
-        body: JSON.stringify({ to: conv.phone, text: content.trim() }),
+        body: JSON.stringify({ to: conv.phone, text: content.trim(), session: conv.sessionKey }),
         signal: AbortSignal.timeout(60_000),
       });
       if (!r.ok) {

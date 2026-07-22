@@ -180,6 +180,7 @@ export type Conversation = {
   name: string;
   avatarUrl: string | null;
   channel: string;
+  sessionKey: string;
   sectorId: number | null;
   assigneeId: number | null;
   status: string;
