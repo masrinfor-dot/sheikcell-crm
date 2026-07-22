@@ -1,6 +1,8 @@
 # Site (frontend) do Sheikcell — usado pelo EasyPanel (Build: Dockerfile)
-FROM node:24-alpine AS build
-RUN apk add --no-cache python3 make g++ git
+# node:24-slim (Debian/glibc) — o binário nativo do Rollup para Alpine (musl)
+# não está no lockfile, então o build quebra em imagens alpine.
+FROM node:24-slim AS build
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ git && rm -rf /var/lib/apt/lists/*
 RUN npm install -g pnpm@10
 WORKDIR /app
 COPY . .
