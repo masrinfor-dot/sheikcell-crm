@@ -9,6 +9,10 @@ import { logger } from "./lib/logger";
 
 const app: Express = express();
 
+// Atrás do proxy reverso (EasyPanel/Traefik) — necessário para o cookie
+// de sessão "secure" funcionar em produção (HTTPS termina no proxy).
+app.set("trust proxy", 1);
+
 app.use(
   pinoHttp({
     logger,
