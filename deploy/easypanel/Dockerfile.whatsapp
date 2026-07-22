@@ -1,9 +1,10 @@
 # WhatsApp Bridge do Sheikcell — usado pelo EasyPanel (Build: Dockerfile)
 FROM node:24-alpine
-RUN npm install -g pnpm
+RUN apk add --no-cache python3 make g++ git
+RUN npm install -g pnpm@10
 WORKDIR /app
 COPY . .
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --frozen-lockfile || pnpm install --no-frozen-lockfile
 RUN pnpm --filter @workspace/whatsapp-bridge run build
 ENV NODE_ENV=production
 ENV PORT=3002

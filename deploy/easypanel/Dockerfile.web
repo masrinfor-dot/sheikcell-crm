@@ -1,9 +1,10 @@
 # Site (frontend) do Sheikcell — usado pelo EasyPanel (Build: Dockerfile)
 FROM node:24-alpine AS build
-RUN npm install -g pnpm
+RUN apk add --no-cache python3 make g++ git
+RUN npm install -g pnpm@10
 WORKDIR /app
 COPY . .
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --frozen-lockfile || pnpm install --no-frozen-lockfile
 ENV BASE_PATH=/
 RUN pnpm --filter @workspace/sheikcell run build
 
