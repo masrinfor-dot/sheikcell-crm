@@ -1399,7 +1399,23 @@ export default function ChatCenter() {
             )}
           </div>
 
-          {/* Input */}
+          {/* Input — bloqueado até alguém iniciar o atendimento (assumir a conversa) */}
+          {!activeConv.assignee && activeCategory !== "resolvidas" ? (
+            <div className="bg-[#f0f2f5] border-t border-border px-3 py-3 flex flex-col items-center gap-1.5">
+              <button
+                onClick={() => handleClaim(activeConv.id)}
+                data-testid="button-start-attendance"
+                className="flex items-center gap-2 px-6 py-2.5 rounded-full text-white text-sm font-semibold transition hover:opacity-90"
+                style={{ backgroundColor: "#16a34a" }}
+              >
+                <UserCircle2 className="w-4 h-4" />
+                Iniciar atendimento
+              </button>
+              <span className="text-[11px] text-muted-foreground">
+                Para enviar mensagens, primeiro inicie o atendimento
+              </span>
+            </div>
+          ) : (
           <form onSubmit={handleSend} className="bg-[#f0f2f5] border-t border-border px-3 py-2.5 flex items-center gap-2">
             <input
               ref={fileInputRef}
@@ -1465,6 +1481,7 @@ export default function ChatCenter() {
               <Send className="w-4 h-4" />
             </button>
           </form>
+          )}
         </div>
 
         {/* ── Informações side panel ─────────────────────────────────────── */}

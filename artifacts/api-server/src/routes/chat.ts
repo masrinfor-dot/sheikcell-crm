@@ -269,6 +269,10 @@ router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Prom
   const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
+  if (conv.assigneeId == null) {
+    res.status(409).json({ error: "Inicie o atendimento antes de enviar mensagens" });
+    return;
+  }
 
   // Save file to media directory
   const { writeFile, mkdir } = await import("fs/promises");
@@ -384,6 +388,10 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
   const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
+  if (conv.assigneeId == null) {
+    res.status(409).json({ error: "Inicie o atendimento antes de enviar mensagens" });
+    return;
+  }
 
   const [msg] = await db.insert(messagesTable).values({
     conversationId: id,
