@@ -3,7 +3,7 @@ import { api, type Conversation, type ChatMessage, type Sector, type ChatLabel, 
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
-  Search, Plus, Send, RefreshCw, X, ChevronDown,
+  Search, Plus, Send, RefreshCw, X, ChevronDown, SpellCheck,
   MessageCircle, CheckCheck, AlertCircle, Tag, Filter,
   Smartphone, Instagram, UserCircle2, Circle,
   ArrowRightLeft, FileText, Volume2, Image, Users, Paperclip, IdCard,
@@ -314,6 +314,7 @@ export default function ChatCenter() {
 
   // AI reply suggestion in the composer
   const [suggesting, setSuggesting] = useState(false);
+  const [correcting, setCorrecting] = useState(false);
 
   // Notification bell: inbound messages accumulated in arrival order
   const [showNotifications, setShowNotifications] = useState(false);
@@ -901,6 +902,23 @@ export default function ChatCenter() {
     } finally { setSuggesting(false); }
   };
 
+  // ── AI: fix spelling/grammar of the drafted message ──
+  const handleCorrectText = async () => {
+    const text = msgText.trim();
+    if (!text || correcting || sending) return;
+    setCorrecting(true);
+    try {
+      const { corrected } = await api.chat.correctText(text);
+      // Só aplica se o atendente não editou o texto enquanto a IA respondia.
+      setMsgText((prev) => (prev.trim() === text ? corrected : prev));
+      inputRef.current?.focus();
+      if (corrected === text) toast({ title: "Nenhum erro encontrado" });
+      else toast({ title: "Texto corrigido — revise antes de enviar" });
+    } catch (err: unknown) {
+      toast({ title: "Correção indisponível", description: err instanceof Error ? err.message : "Erro ao corrigir texto", variant: "destructive" });
+    } finally { setCorrecting(false); }
+  };
+
   // ── Toggle label ──
   const handleLabel = async (label: string) => {
     if (!activeConv) return;
@@ -1417,11 +1435,26 @@ export default function ChatCenter() {
                 : <Sparkles className="w-4 h-4" />}
               <span className="hidden sm:inline">Sugerir (IA)</span>
             </button>
+            <button
+              type="button"
+              onClick={handleCorrectText}
+              disabled={!msgText.trim() || correcting || sending}
+              title="Corrigir ortografia com IA"
+              data-testid="button-correct-text"
+              className="h-9 px-3 rounded-full flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-100 hover:bg-emerald-200 transition shrink-0 disabled:opacity-40"
+            >
+              {correcting
+                ? <RefreshCw className="w-4 h-4 animate-spin" />
+                : <SpellCheck className="w-4 h-4" />}
+              <span className="hidden sm:inline">Corrigir</span>
+            </button>
             <input
               ref={inputRef}
               value={msgText}
               onChange={(e) => setMsgText(e.target.value)}
               placeholder="Digite uma mensagem..."
+              spellCheck
+              lang="pt-BR"
               data-testid="input-message"
               className="flex-1 bg-white rounded-full px-4 py-2 text-sm border border-border outline-none focus:ring-2 focus:ring-primary/20"
               disabled={sending}

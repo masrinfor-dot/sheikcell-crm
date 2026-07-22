@@ -276,6 +276,8 @@ export const api = {
       req<ChatMessage>(`/chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
     suggestReply: (id: number) =>
       req<{ suggestion: string }>(`/chat/conversations/${id}/suggest-reply`, { method: "POST" }),
+    correctText: (text: string) =>
+      req<{ corrected: string }>(`/chat/correct-text`, { method: "POST", body: JSON.stringify({ text }) }),
     sendMedia: (id: number, file: File, caption?: string): Promise<ChatMessage> => {
       return new Promise((resolve, reject) => {
         const reader = new FileReader();

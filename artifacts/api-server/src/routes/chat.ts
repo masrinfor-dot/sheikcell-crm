@@ -1018,4 +1018,42 @@ router.post("/chat/conversations/:id/suggest-reply", requireAuth, async (req, re
   }
 });
 
+// ── AI text correction ───────────────────────────────────────────────────
+// Corrects spelling/grammar of a drafted message without changing its meaning.
+router.post("/chat/correct-text", requireAuth, async (req, res): Promise<void> => {
+  const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
+  if (!text) { res.status(400).json({ error: "Texto vazio" }); return; }
+  if (text.length > 4000) { res.status(400).json({ error: "Texto muito longo" }); return; }
+
+  const systemPrompt = [
+    "Você é um corretor ortográfico e gramatical de português do Brasil.",
+    "Corrija APENAS erros de ortografia, acentuação, pontuação e gramática do texto enviado.",
+    "NÃO mude o sentido, o tom, as gírias intencionais nem os emojis.",
+    "NÃO adicione nem remova informações.",
+    "Se o texto já estiver correto, devolva-o exatamente igual.",
+    "Responda somente com o texto corrigido, sem aspas, rótulos ou explicações.",
+  ].join(" ");
+
+  try {
+    const { openai } = await import("@workspace/integrations-openai-ai");
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o",
+      max_tokens: 4096,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: text },
+      ],
+    });
+    const corrected = completion.choices[0]?.message?.content?.trim() ?? "";
+    if (!corrected) {
+      res.status(502).json({ error: "A IA não retornou a correção. Tente novamente." });
+      return;
+    }
+    res.json({ corrected });
+  } catch (err) {
+    req.log.error({ err }, "AI text correction failed");
+    res.status(503).json({ error: "A correção está indisponível no momento. Tente novamente em instantes." });
+  }
+});
+
 export default router;
