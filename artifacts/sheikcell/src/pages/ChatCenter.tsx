@@ -496,7 +496,9 @@ export default function ChatCenter() {
       try {
         const { conversationId, message } = JSON.parse(e.data) as { conversationId: number; message: ChatMessage };
         if (conversationId === activeId) {
-          setMessages((prev) => [...prev, message]);
+          // Evita duplicar: quem enviou já recebe a mensagem pela resposta do
+          // POST, e o SSE também entrega para o próprio remetente.
+          setMessages((prev) => prev.some((m) => m.id === message.id) ? prev : [...prev, message]);
         }
         setConvs((prev) => prev.map((c) =>
           c.id === conversationId
@@ -657,7 +659,9 @@ export default function ChatCenter() {
     setMessages((prev) => [...prev, optimistic]);
     try {
       const msg = await api.chat.sendMessage(activeId, text);
-      setMessages((prev) => prev.map((m) => m.id === optimistic.id ? msg : m));
+      setMessages((prev) => prev.some((m) => m.id === msg.id)
+        ? prev.filter((m) => m.id !== optimistic.id)
+        : prev.map((m) => m.id === optimistic.id ? msg : m));
     } catch {
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
       setMsgText(text);
@@ -685,7 +689,9 @@ export default function ChatCenter() {
     setMessages((prev) => [...prev, optimistic]);
     try {
       const msg = await api.chat.sendMedia(activeId, file, fileCaption);
-      setMessages((prev) => prev.map((m) => m.id === optimistic.id ? msg : m));
+      setMessages((prev) => prev.some((m) => m.id === msg.id)
+        ? prev.filter((m) => m.id !== optimistic.id)
+        : prev.map((m) => m.id === optimistic.id ? msg : m));
     } catch {
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
       toast({ title: "Erro ao enviar arquivo", variant: "destructive" });
