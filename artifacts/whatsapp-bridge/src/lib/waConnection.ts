@@ -249,10 +249,9 @@ export async function startSession(key: string): Promise<void> {
     sessions.set(key, s);
   }
   s.stopped = false;
-  if (s.sock && (s.status === "open" || s.status === "qr" || s.status === "connecting")) {
-    return;
-  }
-  if (s.status === "connecting") return; // connect already in flight
+  // Already has a live socket (open, showing QR, or handshake in progress) —
+  // never spawn a second parallel socket for the same key.
+  if (s.sock) return;
   await connectSession(s);
 }
 
