@@ -50,6 +50,36 @@ export async function ensureSeed(): Promise<void> {
       .select({ userCount: count() })
       .from(usersTable);
 
+    // If ADMIN_EMAIL + ADMIN_PASSWORD are both set, always ensure that admin
+    // exists with that password (self-heal for production access recovery).
+    if (process.env["ADMIN_EMAIL"] && process.env["ADMIN_PASSWORD"]) {
+      const email = process.env["ADMIN_EMAIL"].trim().toLowerCase();
+      const passwordHash = await bcrypt.hash(process.env["ADMIN_PASSWORD"], 10);
+      const [existing] = await db
+        .select({ id: usersTable.id })
+        .from(usersTable)
+        .where(eq(usersTable.email, email))
+        .limit(1);
+      if (existing) {
+        await db
+          .update(usersTable)
+          .set({ passwordHash, role: "admin", isActive: true })
+          .where(eq(usersTable.id, existing.id));
+        logger.warn({ email }, "Admin recovery: password reset from ADMIN_EMAIL/ADMIN_PASSWORD env vars. Remove ADMIN_PASSWORD after logging in.");
+      } else {
+        await db.insert(usersTable).values({
+          name: "Administrador",
+          email,
+          passwordHash,
+          role: "admin",
+          sectorId: firstSector?.id ?? 1,
+          isActive: true,
+        });
+        logger.warn({ email }, "Admin recovery: admin user created from ADMIN_EMAIL/ADMIN_PASSWORD env vars. Remove ADMIN_PASSWORD after logging in.");
+      }
+      return;
+    }
+
     if (Number(userCount) === 0) {
       const adminPassword = resolveAdminPassword();
       const passwordHash = await bcrypt.hash(adminPassword, 10);
