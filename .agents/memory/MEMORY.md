@@ -18,3 +18,4 @@
 - [Task board](task-board.md) — Trello-style Tarefas board (tasks table); vendedor sees own-sector OR assignee OR creator; sector-scope predicate must guard null (see vendedor-scoping)
 - [Resolve reason (motivo)](resolve-reason.md) — finalize modal captures motivo → attendance_logs.resolution_reason, written once on resolve transition; motives are a hardcoded FE constant
 - [CRM real-time sync](crm-realtime-sync.md) — CRM board + Visão Geral reuse the chat SSE channel (/api/chat/events) with crm_contact_* events; broadcast with contact sectorId, isPotential=false
+- [EasyPanel deploy gotchas](easypanel-deploy.md) — web Docker build precisa de glibc (node:24-slim), rollup musl fora do lockfile; conferir GIT_SHA do log antes de debugar
