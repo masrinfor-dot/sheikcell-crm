@@ -22,18 +22,28 @@ const ALLOWED_MIMES = new Set([
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 ]);
 
+export interface InboundWAMessageContent {
+  conversation?: string;
+  extendedTextMessage?: { text?: string };
+  imageMessage?: { caption?: string };
+  audioMessage?: { caption?: string };
+  documentMessage?: { caption?: string; fileName?: string };
+  contactMessage?: { displayName?: string; vcard?: string };
+  contactsArrayMessage?: { displayName?: string; contacts?: Array<{ displayName?: string; vcard?: string }> };
+  locationMessage?: { degreesLatitude?: number; degreesLongitude?: number; name?: string; address?: string };
+  stickerMessage?: object;
+  // Wrappers used by disappearing/view-once chats — the real content is nested.
+  ephemeralMessage?: { message?: InboundWAMessageContent };
+  viewOnceMessage?: { message?: InboundWAMessageContent };
+  viewOnceMessageV2?: { message?: InboundWAMessageContent };
+}
+
 export interface InboundWAPayload {
   event?: string;
   sessionKey?: string;
   data?: {
     key?: { remoteJid?: string; fromMe?: boolean; id?: string };
-    message?: {
-      conversation?: string;
-      extendedTextMessage?: { text?: string };
-      imageMessage?: { caption?: string };
-      audioMessage?: { caption?: string };
-      documentMessage?: { caption?: string; fileName?: string };
-    };
+    message?: InboundWAMessageContent;
     pushName?: string;
     messageTimestamp?: number;
     mediaBase64?: string;
@@ -220,14 +230,52 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   const mediaBase64 = body.data?.mediaBase64 ?? null;
   const mediaMimeType = body.data?.mediaMimeType ?? null;
 
+  // Unwrap disappearing/view-once wrappers so nested content is not lost.
+  const rawMsg = body.data?.message;
+  const msgContent: InboundWAMessageContent | undefined =
+    rawMsg?.ephemeralMessage?.message ??
+    rawMsg?.viewOnceMessage?.message ??
+    rawMsg?.viewOnceMessageV2?.message ??
+    rawMsg;
+
   const text =
-    body.data?.message?.conversation ??
-    body.data?.message?.extendedTextMessage?.text ??
-    body.data?.message?.imageMessage?.caption ??
-    body.data?.message?.audioMessage?.caption ??
-    body.data?.message?.documentMessage?.caption ??
+    msgContent?.conversation ??
+    msgContent?.extendedTextMessage?.text ??
+    msgContent?.imageMessage?.caption ??
+    msgContent?.audioMessage?.caption ??
+    msgContent?.documentMessage?.caption ??
     body.text?.message ??
     "";
+
+  // Shared contact(s): render name + phone extracted from the vCard so the
+  // attendant sees the contact instead of a message that never shows up.
+  let contactText = "";
+  const vcardPhone = (vcard?: string): string | null => {
+    if (!vcard) return null;
+    const m = vcard.match(/waid=(\d+)/) ?? vcard.match(/TEL[^:]*:([+\d][\d\s()+-]+)/i);
+    return m?.[1]?.trim() ?? null;
+  };
+  if (msgContent?.contactMessage) {
+    const c = msgContent.contactMessage;
+    const phoneStr = vcardPhone(c.vcard);
+    contactText = `👤 Contato compartilhado: ${c.displayName ?? "Sem nome"}${phoneStr ? ` — ${phoneStr}` : ""}`;
+  } else if (msgContent?.contactsArrayMessage) {
+    const list = (msgContent.contactsArrayMessage.contacts ?? [])
+      .map((c) => {
+        const phoneStr = vcardPhone(c.vcard);
+        return `${c.displayName ?? "Sem nome"}${phoneStr ? ` — ${phoneStr}` : ""}`;
+      });
+    contactText = `👤 Contatos compartilhados:\n${list.join("\n")}`;
+  }
+
+  // Shared location: render coordinates + a maps link.
+  let locationText = "";
+  if (msgContent?.locationMessage) {
+    const { degreesLatitude: lat, degreesLongitude: lng, name, address } = msgContent.locationMessage;
+    const label = [name, address].filter(Boolean).join(" — ");
+    const link = lat != null && lng != null ? `https://maps.google.com/?q=${lat},${lng}` : "";
+    locationText = `📍 Localização${label ? `: ${label}` : ""}${link ? `\n${link}` : ""}`;
+  }
 
   const externalId = body.data?.key?.id ?? body.messageId ?? null;
 
@@ -241,9 +289,17 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   }
 
   const msgType: string = mediaType ?? "text";
-  const docFileName = body.data?.message?.documentMessage?.fileName ?? null;
+  const docFileName = msgContent?.documentMessage?.fileName ?? null;
 
-  const displayContent = text || (mediaType === "image" ? "📷 Foto" : mediaType === "audio" ? "🎵 Áudio" : mediaType === "doc" ? `📄 ${docFileName ?? "Documento"}` : "(mídia)");
+  const displayContent =
+    text ||
+    contactText ||
+    locationText ||
+    (mediaType === "image" ? "📷 Foto"
+      : mediaType === "audio" ? "🎵 Áudio"
+      : mediaType === "doc" ? `📄 ${docFileName ?? "Documento"}`
+      : msgContent?.stickerMessage ? "🙂 Figurinha"
+      : "(mensagem não suportada)");
 
   const sessionKey =
     typeof body.sessionKey === "string" && /^[a-z0-9][a-z0-9_-]{0,39}$/.test(body.sessionKey)
