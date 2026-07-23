@@ -442,6 +442,32 @@ async function humanPacing(s: Session, jid: string, textLength: number): Promise
 // Enviar mesmo assim geraria mensagem DUPLICADA no cliente. Melhor descartar.
 const QUEUE_WAIT_MAX_MS = 50_000;
 
+/**
+ * Conexão "zumbi": o status fica "open" mas o WebSocket por baixo já morreu
+ * (rede caiu sem o evento de close chegar). Sintoma: painel mostra
+ * "Conectado" mas nenhuma mensagem sai. Aqui detectamos e reconectamos.
+ */
+function bounceSession(s: Session, reason: string): void {
+  logger.warn({ sessionKey: s.key, reason }, "Reiniciando socket do WhatsApp (conexão zumbi?)");
+  clearReconnectTimer(s);
+  if (s.sock) {
+    try { s.sock.end(undefined); } catch { /* ignore */ }
+    s.sock = null;
+  }
+  s.status = "connecting";
+  s.error = "Reconectando após falha de envio…";
+  void persistStatus(s.key, "reconnecting", s.phone, s.error).catch(() => {});
+  s.reconnectTimer = setTimeout(() => void connectSession(s), 1000);
+}
+
+function ensureSocketAlive(s: Session): void {
+  const ws = (s.sock as unknown as { ws?: { isOpen?: boolean } } | null)?.ws;
+  if (!s.sock || (ws && ws.isOpen === false)) {
+    bounceSession(s, "WebSocket fechado detectado antes do envio");
+    throw new Error("WhatsApp caiu e está reconectando — tente novamente em instantes.");
+  }
+}
+
 function enqueueSend(s: Session, jid: string, textLength: number, fn: () => Promise<void>): Promise<void> {
   const enqueuedAt = Date.now();
   const run = s.sendChain.then(async () => {
@@ -451,6 +477,7 @@ function enqueueSend(s: Session, jid: string, textLength: number, fn: () => Prom
     try {
       await withTimeout(
         (async () => {
+          await ensureSocketAlive(s);
           await humanPacing(s, jid, textLength);
           // Checagem final: se entre a fila e a "digitação" o prazo total estourou,
           // o api-server já marcou como falha — não envia para não duplicar.
@@ -462,6 +489,12 @@ function enqueueSend(s: Session, jid: string, textLength: number, fn: () => Prom
         SEND_JOB_TIMEOUT_MS,
         "Envio WhatsApp",
       );
+    } catch (err) {
+      // Envio expirou com status "open"? Provável conexão zumbi — derruba e reconecta.
+      if (err instanceof Error && err.message.includes("tempo esgotado") && s.status === "open") {
+        bounceSession(s, "envio expirou com conexão aparentemente aberta");
+      }
+      throw err;
     } finally {
       s.lastSendAt = Date.now();
     }
