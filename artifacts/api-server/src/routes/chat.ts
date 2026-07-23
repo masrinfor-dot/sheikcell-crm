@@ -839,6 +839,7 @@ router.get("/chat/media/:filename", requireAuth, async (req: Request, res: Respo
     jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
     gif: "image/gif", webp: "image/webp",
     ogg: "audio/ogg", mp3: "audio/mpeg", m4a: "audio/mp4", webm: "audio/webm",
+    aac: "audio/aac", amr: "audio/amr", wav: "audio/wav",
     pdf: "application/pdf",
   };
   const contentType = mimeMap[ext] ?? "application/octet-stream";

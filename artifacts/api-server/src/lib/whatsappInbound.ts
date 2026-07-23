@@ -14,7 +14,7 @@ const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 
 const ALLOWED_MIMES = new Set([
   "image/jpeg", "image/png", "image/gif", "image/webp",
-  "audio/ogg", "audio/mpeg", "audio/mp4", "audio/webm",
+  "audio/ogg", "audio/mpeg", "audio/mp4", "audio/webm", "audio/aac", "audio/amr", "audio/wav",
   "application/pdf",
   "application/msword",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -100,6 +100,9 @@ function mimeToExt(mime: string): string {
     "audio/mpeg": "mp3",
     "audio/mp4": "m4a",
     "audio/webm": "webm",
+    "audio/aac": "aac",
+    "audio/amr": "amr",
+    "audio/wav": "wav",
     "application/pdf": "pdf",
   };
   return map[mime] ?? mime.split("/")[1] ?? "bin";
@@ -107,10 +110,13 @@ function mimeToExt(mime: string): string {
 
 async function saveMedia(
   base64: string,
-  mime: string,
+  rawMime: string,
 ): Promise<string> {
+  // WhatsApp envia tipos com parâmetros, ex. "audio/ogg; codecs=opus" —
+  // normaliza para o tipo base antes de validar.
+  const mime = rawMime.split(";")[0].trim().toLowerCase();
   if (!ALLOWED_MIMES.has(mime)) {
-    throw new Error(`Unsupported media MIME type: ${mime}`);
+    throw new Error(`Unsupported media MIME type: ${rawMime}`);
   }
   const buf = Buffer.from(base64, "base64");
   if (buf.byteLength > MAX_MEDIA_BYTES) {
