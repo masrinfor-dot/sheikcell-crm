@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
-import { createReadStream, existsSync } from "fs";
+import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
 import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable } from "@workspace/db";
 import { eq, desc, and, or, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
@@ -866,6 +866,29 @@ router.get("/chat/media/:filename", requireAuth, async (req: Request, res: Respo
   const contentType = mimeMap[ext] ?? "application/octet-stream";
   res.setHeader("Content-Type", contentType);
   res.setHeader("Cache-Control", "private, max-age=86400");
+
+  // Suporte a Range (leitura por partes): obrigatório para <video>/<audio>
+  // em Safari/iOS e permite pular para o meio do vídeo em qualquer navegador.
+  const { size } = statSync(filepath);
+  res.setHeader("Accept-Ranges", "bytes");
+  const range = req.headers.range;
+  if (range) {
+    const m = /^bytes=(\d*)-(\d*)$/.exec(range);
+    if (m) {
+      const start = m[1] ? parseInt(m[1], 10) : 0;
+      const end = m[2] ? Math.min(parseInt(m[2], 10), size - 1) : size - 1;
+      if (start >= size || start > end) {
+        res.status(416).setHeader("Content-Range", `bytes */${size}`).end();
+        return;
+      }
+      res.status(206);
+      res.setHeader("Content-Range", `bytes ${start}-${end}/${size}`);
+      res.setHeader("Content-Length", String(end - start + 1));
+      createReadStream(filepath, { start, end }).pipe(res);
+      return;
+    }
+  }
+  res.setHeader("Content-Length", String(size));
   createReadStream(filepath).pipe(res);
 });
 
