@@ -92,11 +92,22 @@ function msgTime(iso: string): string {
 }
 
 // ─── Avatar ────────────────────────────────────────────────────────────────
-function Avatar({ name, size = "md" }: { name: string; size?: "sm" | "md" | "lg" }) {
+function Avatar({ name, src, size = "md" }: { name: string; src?: string | null; size?: "sm" | "md" | "lg" }) {
+  const [imgError, setImgError] = useState(false);
   const initials = name.split(" ").slice(0, 2).map((w) => w[0]).join("").toUpperCase();
   const colors = ["bg-blue-500", "bg-purple-500", "bg-green-500", "bg-orange-500", "bg-pink-500", "bg-teal-500"];
   const color = colors[name.charCodeAt(0) % colors.length];
   const sz = size === "sm" ? "w-8 h-8 text-xs" : size === "lg" ? "w-12 h-12 text-base" : "w-10 h-10 text-sm";
+  if (src && !imgError) {
+    return (
+      <img
+        src={src}
+        alt={name}
+        onError={() => setImgError(true)}
+        className={`${sz} rounded-full object-cover shrink-0`}
+      />
+    );
+  }
   return (
     <div className={`${sz} ${color} rounded-full flex items-center justify-center text-white font-bold shrink-0`}>
       {initials || <UserCircle2 className="w-5 h-5" />}
@@ -113,7 +124,7 @@ function ConvItem({ conv, active, onClick }: { conv: Conversation; active: boole
       className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-secondary/60 transition border-b border-border/50 ${active ? "bg-primary/5 border-l-2 border-l-primary" : ""}`}
     >
       <div className="relative shrink-0">
-        <Avatar name={conv.name} size="md" />
+        <Avatar name={conv.name} src={conv.avatarUrl} size="md" />
         <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-white ${STATUS_COLORS[conv.status] ?? "bg-gray-300"}`} />
       </div>
       <div className="flex-1 min-w-0">
@@ -1283,7 +1294,7 @@ export default function ChatCenter() {
         <div className="flex-1 flex flex-col min-w-0">
           {/* Chat header */}
           <div className="bg-[#ededed] border-b border-border px-4 py-2.5 flex items-center gap-3">
-            <Avatar name={activeConv.name} size="md" />
+            <Avatar name={activeConv.name} src={activeConv.avatarUrl} size="md" />
             <div className="flex-1 min-w-0">
               <p className="font-bold text-sm text-foreground truncate">{activeConv.name}</p>
               <div className="flex items-center gap-2 text-xs text-muted-foreground">

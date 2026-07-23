@@ -130,6 +130,24 @@ async function persistStatus(
   }
 }
 
+// Cache da foto de perfil por JID (6h) — evita consultar o WhatsApp a cada
+// mensagem recebida do mesmo contato.
+const AVATAR_TTL_MS = 6 * 60 * 60 * 1000;
+const avatarCache = new Map<string, { url: string | undefined; at: number }>();
+
+async function getProfilePicture(s: Session, jid: string): Promise<string | undefined> {
+  const hit = avatarCache.get(jid);
+  if (hit && Date.now() - hit.at < AVATAR_TTL_MS) return hit.url;
+  let url: string | undefined;
+  try {
+    url = (await s.sock?.profilePictureUrl(jid, "image")) ?? undefined;
+  } catch {
+    // sem foto ou privacidade restrita — segue sem avatar
+  }
+  avatarCache.set(jid, { url, at: Date.now() });
+  return url;
+}
+
 /**
  * Forwards an inbound Baileys message to the API server's webhook so it gets
  * persisted and broadcast to the attendance UI. Includes the sessionKey so the
@@ -202,6 +220,8 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
     }
   }
 
+  const avatarUrl = await getProfilePicture(s, remoteJid);
+
   const payload = {
     sessionKey: s.key,
     data: {
@@ -213,6 +233,7 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
       mediaBase64,
       mediaMimeType,
       mediaType,
+      avatarUrl,
     },
   };
 

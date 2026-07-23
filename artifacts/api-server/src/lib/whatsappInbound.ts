@@ -51,6 +51,7 @@ export interface InboundWAPayload {
     mediaBase64?: string;
     mediaMimeType?: string;
     mediaType?: "image" | "video" | "audio" | "doc";
+    avatarUrl?: string;
   };
   phone?: string;
   text?: { message?: string };
@@ -165,6 +166,7 @@ async function upsertConversation(
   pushName: string,
   displayContent: string,
   sessionKey: string = "default",
+  avatarUrl?: string,
 ) {
   // Same customer talking to two different WhatsApp numbers = two separate
   // conversations, so replies always go out through the number the customer
@@ -193,6 +195,7 @@ async function upsertConversation(
       .values({
         phone,
         name: pushName,
+        avatarUrl: avatarUrl ?? null,
         channel: "whatsapp",
         sessionKey,
         sectorId: targetSectorId,
@@ -219,6 +222,7 @@ async function upsertConversation(
         unreadCount: sql`${conversationsTable.unreadCount} + 1`,
         updatedAt: new Date(),
         ...(reopen ? { status: "open", assigneeId: null } : {}),
+        ...(avatarUrl && avatarUrl !== conv.avatarUrl ? { avatarUrl } : {}),
       })
       .where(eq(conversationsTable.id, conv.id))
       .returning();
@@ -333,7 +337,7 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     typeof body.sessionKey === "string" && /^[a-z0-9][a-z0-9_-]{0,39}$/.test(body.sessionKey)
       ? body.sessionKey
       : "default";
-  const conv = await upsertConversation(phone, pushName, displayContent, sessionKey);
+  const conv = await upsertConversation(phone, pushName, displayContent, sessionKey, body.data?.avatarUrl);
 
   const [msg] = await db
     .insert(messagesTable)
