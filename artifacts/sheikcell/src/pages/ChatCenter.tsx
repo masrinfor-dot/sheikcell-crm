@@ -968,7 +968,7 @@ export default function ChatCenter() {
   const currentLabels = activeConv?.labels ? activeConv.labels.split(",").map((l) => l.trim()).filter(Boolean) : [];
 
   return (
-    <div className="flex h-[calc(100vh-112px)] bg-[#f0f2f5] overflow-hidden rounded-2xl border border-border shadow-sm">
+    <div className="flex h-[calc(100vh-88px)] bg-[#f0f2f5] overflow-hidden rounded-2xl border border-border shadow-sm">
 
       {/* ── LEFT PANEL: conversation list ──────────────────────────────── */}
       <div className="w-80 lg:w-96 bg-white flex flex-col border-r border-border shrink-0">

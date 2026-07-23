@@ -265,7 +265,8 @@ export default function AdminDashboard() {
 
         {/* Content */}
         <div className="flex-1 min-w-0">
-          <div className="max-w-5xl mx-auto px-4 py-6">
+          {/* O chat ocupa a largura toda; as demais abas ficam na coluna central */}
+          <div className={tab === "chat" ? "max-w-full px-4 py-4" : "max-w-5xl mx-auto px-4 py-6"}>
 
         {/* === DASHBOARD TAB === */}
         {tab === "dashboard" && (
