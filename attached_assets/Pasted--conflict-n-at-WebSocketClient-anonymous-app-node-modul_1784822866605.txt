@@ -1,0 +1,73 @@
+ (conflict)\n    at WebSocketClient.<anonymous> (/app/node_modules/.pnpm/@whiskeysockets+baileys@7.0.0-rc13/node_modules/@whiskeysockets/baileys/src/Socket/socket.ts:988:12)\n    at WebSocketClient.emit (node:events:509:28)\n    at <anonymous> (/app/node_modules/.pnpm/@whiskeysockets+baileys@7.0.0-rc13/node_modules/@whiskeysockets/baileys/src/Socket/socket.ts:612:23)\n    at processData (/app/node_modules/.pnpm/@whiskeysockets+baileys@7.0.0-rc13/node_modules/@whiskeysockets/baileys/src/Utils/noise-handler.ts:169:4)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async Object.decodeFrame (/app/node_modules/.pnpm/@whiskeysockets+baileys@7.0.0-rc13/node_modules/@whiskeysockets/baileys/src/Utils/noise-handler.ts:265:4)\n    at async WebSocketClient.onMessageReceived (/app/node_modules/.pnpm/@whiskeysockets+baileys@7.0.0-rc13/node_modules/@whiskeysockets/baileys/src/Socket/socket.ts:583:3)","msg":"connection errored"}
+{"level":40,"time":1784821216712,"pid":1,"hostname":"4bc1e89b8359","statusCode":440,"isLoggedOut":false,"sessionKey":"default","msg":"WhatsApp connection closed"}
+{"level":30,"time":1784821216715,"pid":1,"hostname":"4bc1e89b8359","delay":1000,"attempt":1,"sessionKey":"default","msg":"Scheduling reconnect"}
+{"level":30,"time":1784821217918,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","browser":["Mac OS","Chrome","14.4.1"],"helloMsg":{"clientHello":{"ephemeral":"7WAhZOvLm2V5WIHut5nkJaPldctZASaZrky3jVVIOWY="}},"msg":"connected to WA"}
+{"level":30,"time":1784821218128,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","node":{"username":"553384311666","passive":true,"userAgent":{"platform":"WEB","appVersion":{"primary":2,"secondary":3000,"tertiary":1035194821},"mcc":"000","mnc":"000","osVersion":"0.1","device":"Desktop","osBuildNumber":"0.1","releaseChannel":"RELEASE","localeLanguageIso6391":"en","localeCountryIso31661Alpha2":"US"},"webInfo":{"webSubPlatform":"WEB_BROWSER"},"connectType":"WIFI_UNKNOWN","connectReason":"USER_ACTIVATED","device":50,"pull":true,"lidDbMigrated":false},"msg":"logging in..."}
+{"level":30,"time":1784821218953,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"801 pre-keys found on server"}
+{"level":30,"time":1784821218953,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"Current prekey ID: 812, exists in storage: true"}
+{"level":30,"time":1784821218953,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"PreKey validation passed - Server: 801, Current prekey 812 exists"}
+{"level":30,"time":1784821219282,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"handled 0 offline messages/notifications"}
+{"level":30,"time":1784821219283,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"Connection is now AwaitingInitialSync, buffering events"}
+{"level":30,"time":1784821219283,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"Reconnection with existing sync data, skipping history sync wait. Transitioning to Online."}
+{"level":30,"time":1784821219450,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"opened connection to WA"}
+{"level":30,"time":1784821219453,"pid":1,"hostname":"4bc1e89b8359","phone":"553384311666","sessionKey":"default","msg":"WhatsApp connected via Baileys"}
+{"level":30,"time":1784821219474,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","myPN":"553384311666:50@s.whatsapp.net","myLID":"64433703362635:50@lid","msg":"Own LID session created successfully"}
+{"level":50,"time":1784821220445,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","reasonNode":{"tag":"conflict","attrs":{"type":"replaced"}},"fullErrorNode":{"tag":"stream:error","attrs":{},"content":[{"tag":"conflict","attrs":{"type":"replaced"}}]},"msg":"stream errored out"}
+{"level":30,"time":1784821220445,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","trace":"Error: Stream Errored (conflict)\n    at WebSocketClient.<anonymous> (/app/node_modules/.pnpm/@whiskeysockets+baileys@7.0.0-rc13/node_modules/@whiskeysockets/baileys/src/Socket/socket.ts:988:12)\n    at WebSocketClient.emit (node:events:509:28)\n    at <anonymous> (/app/node_modules/.pnpm/@whiskeysockets+baileys@7.0.0-rc13/node_modules/@whiskeysockets/baileys/src/Socket/socket.ts:612:23)\n    at processData (/app/node_modules/.pnpm/@whiskeysockets+baileys@7.0.0-rc13/node_modules/@whiskeysockets/baileys/src/Utils/noise-handler.ts:169:4)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async Object.decodeFrame (/app/node_modules/.pnpm/@whiskeysockets+baileys@7.0.0-rc13/node_modules/@whiskeysockets/baileys/src/Utils/noise-handler.ts:265:4)\n    at async WebSocketClient.onMessageReceived (/app/node_modules/.pnpm/@whiskeysockets+baileys@7.0.0-rc13/node_modules/@whiskeysockets/baileys/src/Socket/socket.ts:583:3)","msg":"connection errored"}
+{"level":40,"time":1784821220588,"pid":1,"hostname":"4bc1e89b8359","statusCode":440,"isLoggedOut":false,"sessionKey":"default","msg":"WhatsApp connection closed"}
+{"level":30,"time":1784821220590,"pid":1,"hostname":"4bc1e89b8359","delay":1000,"attempt":1,"sessionKey":"default","msg":"Scheduling reconnect"}
+{"level":30,"time":1784821221792,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","browser":["Mac OS","Chrome","14.4.1"],"helloMsg":{"clientHello":{"ephemeral":"TRAbMhswK0STOMqv00lhufd+8KuwehEkQYnTFJMhJUg="}},"msg":"connected to WA"}
+{"level":30,"time":1784821222011,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","node":{"username":"553384311666","passive":true,"userAgent":{"platform":"WEB","appVersion":{"primary":2,"secondary":3000,"tertiary":1035194821},"mcc":"000","mnc":"000","osVersion":"0.1","device":"Desktop","osBuildNumber":"0.1","releaseChannel":"RELEASE","localeLanguageIso6391":"en","localeCountryIso31661Alpha2":"US"},"webInfo":{"webSubPlatform":"WEB_BROWSER"},"connectType":"WIFI_UNKNOWN","connectReason":"USER_ACTIVATED","device":50,"pull":true,"lidDbMigrated":false},"msg":"logging in..."}
+{"level":30,"time":1784821222870,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"801 pre-keys found on server"}
+{"level":30,"time":1784821222870,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"Current prekey ID: 812, exists in storage: true"}
+{"level":30,"time":1784821222870,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"PreKey validation passed - Server: 801, Current prekey 812 exists"}
+{"level":30,"time":1784821223201,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"handled 0 offline messages/notifications"}
+{"level":30,"time":1784821223201,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"Connection is now AwaitingInitialSync, buffering events"}
+{"level":30,"time":1784821223201,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"Reconnection with existing sync data, skipping history sync wait. Transitioning to Online."}
+{"level":30,"time":1784821223386,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"opened connection to WA"}
+{"level":30,"time":1784821223388,"pid":1,"hostname":"4bc1e89b8359","phone":"553384311666","sessionKey":"default","msg":"WhatsApp connected via Baileys"}
+{"level":30,"time":1784821223412,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","myPN":"553384311666:50@s.whatsapp.net","myLID":"64433703362635:50@lid","msg":"Own LID session created successfully"}
+{"level":30,"time":1784821397547,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","jid":"188300124000461@lid","addr":"188300124000461_1.0","msg":"identity key changed or new contact, session will be re-established"}
+{"level":30,"time":1784821630175,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","jid":"113834417192971:69@lid","addr":"113834417192971_1.69","msg":"identity key changed or new contact, session will be re-established"}
+{"level":30,"time":1784821753923,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","jid":"94507114709205:13@lid","addr":"94507114709205_1.13","msg":"identity key changed or new contact, session will be re-established"}
+{"level":30,"time":1784822067569,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","jid":"198157023629567@lid","addr":"198157023629567_1.0","msg":"identity key changed or new contact, session will be re-established"}
+{"level":30,"time":1784822307624,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","jid":"22664576028758@lid","addr":"22664576028758_1.0","msg":"identity key changed or new contact, session will be re-established"}
+{"level":40,"time":1784822629901,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"USync fetch yielded no results for pending PNs"}
+Closing session: SessionEntry {
+  _chains: {
+    BRvU10kdQCapsOZk5RWg7zAwYcQEquIo39scJGwpSx8G: { chainKey: [Object], chainType: 1, messageKeys: {} }
+  },
+  registrationId: 1645462748,
+  currentRatchet: {
+    ephemeralKeyPair: {
+      pubKey: <Buffer 05 1b d4 d7 49 1d 40 26 a9 b0 e6 64 e5 15 a0 ef 30 30 61 c4 04 aa e2 28 df db 1c 24 6c 29 4b 1f 06>,
+      privKey: <Buffer f8 b9 bb 83 96 e8 7f 43 6d b1 88 a7 8d b0 c0 a1 c2 38 70 83 92 8b 57 fd b3 f4 dd 00 24 9b c2 41>
+    },
+    lastRemoteEphemeralKey: <Buffer 05 fd 9a 3d b5 5c f7 e4 fa d5 e8 4c 0f af f5 14 43 ff e5 49 43 d9 bc 50 78 43 1a ee 26 99 42 8c 11>,
+    previousCounter: 0,
+    rootKey: <Buffer 7c 80 21 76 1b 2f 48 a8 a0 54 c4 4c c7 41 44 86 cc 5d 79 5a ba 38 c4 98 04 3d ac 3b 0d 77 b9 fe>
+  },
+  indexInfo: {
+    baseKey: <Buffer 05 24 4c c3 b9 fb 17 42 a0 9d 66 0a d0 98 31 da eb cf e1 c5 92 d5 ca 90 bc 74 10 e9 fb 52 1b 17 1d>,
+    baseKeyType: 1,
+    closed: -1,
+    used: 1784820963604,
+    created: 1784820963604,
+    remoteIdentityKey: <Buffer 05 b9 16 f5 6a b0 a7 cf 10 b4 21 23 de ca d4 b1 42 ee 4b be d7 f9 ee 8e 3d d1 b6 7c 0f 26 21 78 0c>
+  },
+  pendingPreKey: {
+    signedKeyId: 10455007,
+    baseKey: <Buffer 05 24 4c c3 b9 fb 17 42 a0 9d 66 0a d0 98 31 da eb cf e1 c5 92 d5 ca 90 bc 74 10 e9 fb 52 1b 17 1d>,
+    preKeyId: 7529684
+  }
+}
+{"level":40,"time":1784822631623,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"USync fetch yielded no results for pending PNs"}
+{"level":30,"time":1784822631634,"pid":1,"hostname":"4bc1e89b8359","phone":"113834417192971","sessionKey":"default","msg":"WhatsApp message sent via Baileys"}
+{"level":30,"time":1784822675605,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","jid":"74625610424520@lid","addr":"74625610424520_1.0","msg":"identity key changed or new contact, session will be re-established"}
+{"level":40,"time":1784822688182,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"USync fetch yielded no results for pending PNs"}
+{"level":40,"time":1784822689128,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"USync fetch yielded no results for pending PNs"}
+{"level":30,"time":1784822689133,"pid":1,"hostname":"4bc1e89b8359","phone":"74625610424520","sessionKey":"default","msg":"WhatsApp message sent via Baileys"}
+{"level":40,"time":1784822732352,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"USync fetch yielded no results for pending PNs"}
+{"level":40,"time":1784822734424,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","msg":"USync fetch yielded no results for pending PNs"}
+{"level":30,"time":1784822734427,"pid":1,"hostname":"4bc1e89b8359","phone":"74625610424520","sessionKey":"default","msg":"WhatsApp message sent via Baileys"}
+{"level":30,"time":1784822830233,"pid":1,"hostname":"4bc1e89b8359","module":"baileys","sessionKey":"default","jid":"57969660166349@lid","addr":"57969660166349_1.0","msg":"identity key changed or new contact, session will be re-established"}

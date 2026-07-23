@@ -16,6 +16,7 @@
 - [WhatsApp anti-ban queue](whatsapp-antiban.md) — all Baileys sends go through the paced queue (gap + typing sim + 45s watchdog); never call sock.sendMessage directly
 - [WhatsApp multi-session](whatsapp-multi-session.md) — conversations keyed by phone+sessionKey; outbound must pass conv.sessionKey; bridge startSession must stay idempotent (parallel-socket ban risk)
 - [WhatsApp media types](whatsapp-media.md) — weba=áudio/webm=vídeo no GET media; normalizar mime com split(";"); ptt sai como ogg/opus; 4 lugares para novo tipo
+- [WhatsApp LID JIDs](whatsapp-lid.md) — contatos migram p/ @lid (ID interno); enviar digits@s.whatsapp.net falha silenciosamente; resolver PN inbound e enviar @lid outbound
 - [Task board](task-board.md) — Trello-style Tarefas board (tasks table); vendedor sees own-sector OR assignee OR creator; sector-scope predicate must guard null (see vendedor-scoping)
 - [Resolve reason (motivo)](resolve-reason.md) — finalize modal captures motivo → attendance_logs.resolution_reason, written once on resolve transition; motives are a hardcoded FE constant
 - [CRM real-time sync](crm-realtime-sync.md) — CRM board + Visão Geral reuse the chat SSE channel (/api/chat/events) with crm_contact_* events; broadcast with contact sectorId, isPotential=false

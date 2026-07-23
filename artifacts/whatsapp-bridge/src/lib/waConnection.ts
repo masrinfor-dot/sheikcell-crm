@@ -137,8 +137,31 @@ async function persistStatus(
  */
 async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
   if (m.key?.fromMe) return;
-  const remoteJid = m.key?.remoteJid ?? "";
+  let remoteJid = m.key?.remoteJid ?? "";
   if (!remoteJid || remoteJid.endsWith("@g.us") || remoteJid === "status@broadcast") return;
+
+  // WhatsApp está migrando contatos para JIDs "@lid" (ID interno, não é o
+  // telefone). Se o JID vier como @lid, resolve para o número real (PN);
+  // sem isso a resposta seria enviada para um número inexistente.
+  if (remoteJid.endsWith("@lid")) {
+    const alt = (m.key as { remoteJidAlt?: string } | undefined)?.remoteJidAlt;
+    if (alt && alt.endsWith("@s.whatsapp.net")) {
+      remoteJid = alt;
+    } else {
+      try {
+        const mapping = (s.sock as unknown as {
+          signalRepository?: { lidMapping?: { getPNForLID?: (lid: string) => Promise<string | null> } };
+        })?.signalRepository?.lidMapping;
+        const pn = await mapping?.getPNForLID?.(remoteJid);
+        if (pn && pn.endsWith("@s.whatsapp.net")) remoteJid = pn;
+      } catch {
+        // mantém o @lid — o envio de resposta tratará esse formato
+      }
+    }
+    if (remoteJid.endsWith("@lid")) {
+      logger.warn({ remoteJid, sessionKey: s.key }, "Inbound LID sem mapeamento para telefone — usando @lid");
+    }
+  }
   const msg = m.message;
   if (!msg) return;
 
@@ -512,10 +535,21 @@ function requireOpenSession(key: string): Session {
   return s;
 }
 
+/**
+ * Monta o JID de destino. Contatos migrados pelo WhatsApp podem estar salvos
+ * como ID interno ("...@lid"); nesse caso o envio precisa usar o formato @lid —
+ * transformar em número comum enviaria para um telefone inexistente.
+ */
+function toJid(to: string): string {
+  const digits = to.replace(/\D/g, "");
+  if (!digits) throw new Error(`Destino de envio inválido: "${to}"`);
+  return to.includes("@lid") ? `${digits}@lid` : `${digits}@s.whatsapp.net`;
+}
+
 export async function sendMessage(key: string, to: string, text: string): Promise<void> {
   const s = requireOpenSession(key);
   const phone = to.replace(/\D/g, "");
-  const jid = `${phone}@s.whatsapp.net`;
+  const jid = toJid(to);
   await enqueueSend(s, jid, text.length, async () => {
     const cur = requireOpenSession(key);
     await cur.sock!.sendMessage(jid, { text });
@@ -535,7 +569,7 @@ export async function sendMedia(
 ): Promise<void> {
   const s = requireOpenSession(key);
   const phone = to.replace(/\D/g, "");
-  const jid = `${phone}@s.whatsapp.net`;
+  const jid = toJid(to);
   await enqueueSend(s, jid, caption?.length ?? 30, async () => {
     const cur = requireOpenSession(key);
     if (type === "image") {
