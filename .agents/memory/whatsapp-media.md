@@ -8,3 +8,5 @@ description: Convenções de mídia (vídeo/áudio/ptt) no pipeline chat↔bridg
 - Nota de voz (ptt): gravada como webm/opus no navegador; o bridge anuncia ao Baileys como `audio/ogg; codecs=opus` com `ptt:true` (prática padrão, WhatsApp aceita).
 - **Why:** WhatsApp rejeita/mostra errado áudio ptt com mimetype webm; e whitelist estrita quebrava uploads de gravação por causa dos parâmetros do mimetype.
 - **How to apply:** ao adicionar novo tipo de mídia, atualizar em 4 lugares: ALLOWED_MIMES (inbound), ALLOWED_MIMES_OUT + mimeToExt (POST /media), mimeMap (GET /media), accept do file input no ChatCenter.
+
+- Áudio outbound: NÃO basta renomear mimetype para ogg/opus — WhatsApp rejeita ("algo errado com o arquivo"). Converter de verdade com ffmpeg (toOggOpus no bridge); ffmpeg precisa estar na imagem Docker do bridge.

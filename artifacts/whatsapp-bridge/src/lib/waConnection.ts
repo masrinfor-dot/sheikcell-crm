@@ -14,6 +14,7 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import { toDataURL } from "qrcode";
 import { createHmac } from "node:crypto";
+import { spawn } from "node:child_process";
 import { logger } from "./logger";
 import { useDatabaseAuthState, clearAuthState } from "./dbAuthState";
 import { db, whatsappSessionsTable } from "@workspace/db";
@@ -560,7 +561,39 @@ function requireOpenSession(key: string): Session {
  * Monta o JID de destino. Contatos migrados pelo WhatsApp podem estar salvos
  * como ID interno ("...@lid"); nesse caso o envio precisa usar o formato @lid —
  * transformar em número comum enviaria para um telefone inexistente.
+ * (ver toJid abaixo)
+ *
+ * Converte qualquer áudio para ogg/opus mono 48kHz via ffmpeg — o único
+ * formato que o WhatsApp reproduz de forma confiável como nota de voz.
  */
+function toOggOpus(input: Buffer): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const ff = spawn("ffmpeg", [
+      "-i", "pipe:0",
+      "-vn",
+      "-c:a", "libopus",
+      "-b:a", "32k",
+      "-ac", "1",
+      "-ar", "48000",
+      "-f", "ogg",
+      "pipe:1",
+    ]);
+    const out: Buffer[] = [];
+    const errChunks: Buffer[] = [];
+    ff.stdout.on("data", (c: Buffer) => out.push(c));
+    ff.stderr.on("data", (c: Buffer) => errChunks.push(c));
+    ff.on("error", reject);
+    ff.on("close", (code) => {
+      if (code === 0 && out.length > 0) resolve(Buffer.concat(out));
+      else reject(new Error(`ffmpeg saiu com código ${code}: ${Buffer.concat(errChunks).toString().slice(-400)}`));
+    });
+    const t = setTimeout(() => { ff.kill("SIGKILL"); reject(new Error("ffmpeg timeout (20s)")); }, 20_000);
+    ff.on("close", () => clearTimeout(t));
+    ff.stdin.on("error", () => { /* EPIPE se o ffmpeg morrer antes */ });
+    ff.stdin.end(input);
+  });
+}
+
 function toJid(to: string): string {
   const digits = to.replace(/\D/g, "");
   if (!digits) throw new Error(`Destino de envio inválido: "${to}"`);
@@ -598,11 +631,25 @@ export async function sendMedia(
     } else if (type === "video") {
       await cur.sock!.sendMessage(jid, { video: buffer, mimetype, caption });
     } else if (type === "audio") {
-      // Nota de voz (ptt): o WhatsApp espera ogg/opus — gravações do navegador
-      // são webm/opus, e anunciar como ogg/opus é a prática comum com Baileys.
+      // O WhatsApp só toca áudio de forma confiável em ogg/opus. Gravações do
+      // navegador vêm em webm/mp4 — apenas renomear o tipo corrompe o arquivo
+      // ("algo errado com o arquivo de áudio"). Converte de verdade com ffmpeg.
+      let audio = buffer;
+      let audioMime = mimetype;
+      const alreadyOgg = /audio\/ogg/i.test(mimetype);
+      if (!alreadyOgg) {
+        try {
+          audio = await toOggOpus(buffer);
+          audioMime = "audio/ogg; codecs=opus";
+        } catch (err) {
+          logger.warn({ err }, "ffmpeg falhou ao converter áudio — enviando original");
+        }
+      } else {
+        audioMime = "audio/ogg; codecs=opus";
+      }
       await cur.sock!.sendMessage(jid, {
-        audio: buffer,
-        mimetype: ptt ? "audio/ogg; codecs=opus" : mimetype,
+        audio,
+        mimetype: audioMime,
         ptt: ptt ?? false,
       });
     } else {
