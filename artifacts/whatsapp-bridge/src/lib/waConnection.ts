@@ -144,11 +144,14 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
 
   let mediaBase64: string | undefined;
   let mediaMimeType: string | undefined;
-  let mediaType: "image" | "audio" | "doc" | undefined;
+  let mediaType: "image" | "video" | "audio" | "doc" | undefined;
 
   if (msg.imageMessage) {
     mediaType = "image";
     mediaMimeType = msg.imageMessage.mimetype ?? "image/jpeg";
+  } else if (msg.videoMessage) {
+    mediaType = "video";
+    mediaMimeType = msg.videoMessage.mimetype ?? "video/mp4";
   } else if (msg.audioMessage) {
     mediaType = "audio";
     mediaMimeType = msg.audioMessage.mimetype ?? "audio/ogg";
@@ -476,11 +479,12 @@ export async function sendMessage(key: string, to: string, text: string): Promis
 export async function sendMedia(
   key: string,
   to: string,
-  type: "image" | "document",
+  type: "image" | "video" | "audio" | "document",
   buffer: Buffer,
   mimetype: string,
   filename?: string,
   caption?: string,
+  ptt?: boolean,
 ): Promise<void> {
   const s = requireOpenSession(key);
   const phone = to.replace(/\D/g, "");
@@ -489,6 +493,16 @@ export async function sendMedia(
     const cur = requireOpenSession(key);
     if (type === "image") {
       await cur.sock!.sendMessage(jid, { image: buffer, mimetype, caption });
+    } else if (type === "video") {
+      await cur.sock!.sendMessage(jid, { video: buffer, mimetype, caption });
+    } else if (type === "audio") {
+      // Nota de voz (ptt): o WhatsApp espera ogg/opus — gravações do navegador
+      // são webm/opus, e anunciar como ogg/opus é a prática comum com Baileys.
+      await cur.sock!.sendMessage(jid, {
+        audio: buffer,
+        mimetype: ptt ? "audio/ogg; codecs=opus" : mimetype,
+        ptt: ptt ?? false,
+      });
     } else {
       await cur.sock!.sendMessage(jid, {
         document: buffer,

@@ -235,20 +235,26 @@ router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Pr
 // ─── Send media ────────────────────────────────────────────────────────────
 router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
-  const { base64, mimetype, filename, caption } = req.body as {
+  const { base64, mimetype: rawMimetype, filename, caption, ptt } = req.body as {
     base64?: string;
     mimetype?: string;
     filename?: string;
     caption?: string;
+    ptt?: boolean; // nota de voz (gravação do microfone)
   };
 
-  if (!base64 || !mimetype) {
+  if (!base64 || !rawMimetype) {
     res.status(400).json({ error: "base64 e mimetype são obrigatórios" });
     return;
   }
+  // Navegadores mandam tipos com parâmetros, ex. "audio/webm;codecs=opus" —
+  // normaliza para o tipo base antes de validar.
+  const mimetype = rawMimetype.split(";")[0].trim().toLowerCase();
 
   const ALLOWED_MIMES_OUT = new Set([
     "image/jpeg", "image/png", "image/gif", "image/webp",
+    "video/mp4", "video/3gpp", "video/webm", "video/quicktime",
+    "audio/ogg", "audio/mpeg", "audio/mp4", "audio/webm", "audio/aac", "audio/wav",
     "application/pdf",
     "application/msword",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -261,8 +267,12 @@ router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Prom
   }
 
   const isImage = mimetype.startsWith("image/");
-  const msgType: "image" | "doc" = isImage ? "image" : "doc";
-  const waType: "image" | "document" = isImage ? "image" : "document";
+  const isVideo = mimetype.startsWith("video/");
+  const isAudio = mimetype.startsWith("audio/");
+  const msgType: "image" | "video" | "audio" | "doc" =
+    isImage ? "image" : isVideo ? "video" : isAudio ? "audio" : "doc";
+  const waType: "image" | "video" | "audio" | "document" =
+    isImage ? "image" : isVideo ? "video" : isAudio ? "audio" : "document";
 
   const senderName = req.session.userName ?? "Atendente";
 
@@ -281,6 +291,10 @@ router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Prom
 
   const mimeToExt: Record<string, string> = {
     "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp",
+    "video/mp4": "mp4", "video/3gpp": "3gp", "video/webm": "webm", "video/quicktime": "mov",
+    // "weba" para áudio webm — "webm" fica reservado para vídeo no GET /chat/media
+    "audio/ogg": "ogg", "audio/mpeg": "mp3", "audio/mp4": "m4a",
+    "audio/webm": "weba", "audio/aac": "aac", "audio/wav": "wav",
     "application/pdf": "pdf",
     "application/msword": "doc",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
@@ -300,8 +314,8 @@ router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Prom
   await writeFile(path.join(MEDIA_DIR, savedFilename), buf);
   const mediaUrl = `/api/chat/media/${savedFilename}`;
 
-  const displayName = filename ?? (isImage ? "📷 Foto" : "📄 Documento");
-  const baseContent = isImage ? "📷 Foto" : `📄 ${displayName}`;
+  const displayName = filename ?? (isImage ? "📷 Foto" : isVideo ? "🎥 Vídeo" : isAudio ? "🎤 Áudio" : "📄 Documento");
+  const baseContent = isImage ? "📷 Foto" : isVideo ? "🎥 Vídeo" : isAudio ? "🎤 Áudio" : `📄 ${displayName}`;
   const content = caption ? `${baseContent}\n${caption}` : baseContent;
 
   const [msg] = await db.insert(messagesTable).values({
@@ -344,6 +358,7 @@ router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Prom
           mimetype,
           filename: filename ?? savedFilename,
           caption,
+          ptt: isAudio ? (ptt ?? false) : undefined,
           session: conv.sessionKey,
         }),
         signal: AbortSignal.timeout(60_000),
@@ -838,9 +853,15 @@ router.get("/chat/media/:filename", requireAuth, async (req: Request, res: Respo
   const mimeMap: Record<string, string> = {
     jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
     gif: "image/gif", webp: "image/webp",
-    ogg: "audio/ogg", mp3: "audio/mpeg", m4a: "audio/mp4", webm: "audio/webm",
+    ogg: "audio/ogg", mp3: "audio/mpeg", m4a: "audio/mp4", weba: "audio/webm",
     aac: "audio/aac", amr: "audio/amr", wav: "audio/wav",
+    // "webm" sem prefixo é vídeo; áudio webm usa a extensão "weba"
+    mp4: "video/mp4", "3gp": "video/3gpp", webm: "video/webm", mov: "video/quicktime",
     pdf: "application/pdf",
+    doc: "application/msword",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xls: "application/vnd.ms-excel",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   };
   const contentType = mimeMap[ext] ?? "application/octet-stream";
   res.setHeader("Content-Type", contentType);

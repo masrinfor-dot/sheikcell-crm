@@ -15,6 +15,7 @@ const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 const ALLOWED_MIMES = new Set([
   "image/jpeg", "image/png", "image/gif", "image/webp",
   "audio/ogg", "audio/mpeg", "audio/mp4", "audio/webm", "audio/aac", "audio/amr", "audio/wav",
+  "video/mp4", "video/3gpp", "video/webm", "video/quicktime",
   "application/pdf",
   "application/msword",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -26,6 +27,7 @@ export interface InboundWAMessageContent {
   conversation?: string;
   extendedTextMessage?: { text?: string };
   imageMessage?: { caption?: string };
+  videoMessage?: { caption?: string };
   audioMessage?: { caption?: string };
   documentMessage?: { caption?: string; fileName?: string };
   contactMessage?: { displayName?: string; vcard?: string };
@@ -48,7 +50,7 @@ export interface InboundWAPayload {
     messageTimestamp?: number;
     mediaBase64?: string;
     mediaMimeType?: string;
-    mediaType?: "image" | "audio" | "doc";
+    mediaType?: "image" | "video" | "audio" | "doc";
   };
   phone?: string;
   text?: { message?: string };
@@ -99,10 +101,16 @@ function mimeToExt(mime: string): string {
     "audio/ogg": "ogg",
     "audio/mpeg": "mp3",
     "audio/mp4": "m4a",
-    "audio/webm": "webm",
+    // "weba" para áudio webm — a extensão "webm" fica reservada para vídeo,
+    // assim o GET /chat/media devolve o Content-Type certo para cada um.
+    "audio/webm": "weba",
     "audio/aac": "aac",
     "audio/amr": "amr",
     "audio/wav": "wav",
+    "video/mp4": "mp4",
+    "video/3gpp": "3gp",
+    "video/webm": "webm",
+    "video/quicktime": "mov",
     "application/pdf": "pdf",
   };
   return map[mime] ?? mime.split("/")[1] ?? "bin";
@@ -248,6 +256,7 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     msgContent?.conversation ??
     msgContent?.extendedTextMessage?.text ??
     msgContent?.imageMessage?.caption ??
+    msgContent?.videoMessage?.caption ??
     msgContent?.audioMessage?.caption ??
     msgContent?.documentMessage?.caption ??
     body.text?.message ??
@@ -302,6 +311,7 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     contactText ||
     locationText ||
     (mediaType === "image" ? "📷 Foto"
+      : mediaType === "video" ? "🎥 Vídeo"
       : mediaType === "audio" ? "🎵 Áudio"
       : mediaType === "doc" ? `📄 ${docFileName ?? "Documento"}`
       : msgContent?.stickerMessage ? "🙂 Figurinha"

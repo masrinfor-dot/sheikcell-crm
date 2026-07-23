@@ -99,13 +99,14 @@ router.post("/whatsapp/send", requireBridgeSecret, async (req, res): Promise<voi
 });
 
 router.post("/whatsapp/send-media", requireBridgeSecret, async (req, res): Promise<void> => {
-  const { to, type, base64, mimetype, filename, caption, session } = req.body as {
+  const { to, type, base64, mimetype, filename, caption, ptt, session } = req.body as {
     to?: string;
     type?: string;
     base64?: string;
     mimetype?: string;
     filename?: string;
     caption?: string;
+    ptt?: boolean;
     session?: string;
   };
   const key = sessionKeyFrom(session);
@@ -114,13 +115,13 @@ router.post("/whatsapp/send-media", requireBridgeSecret, async (req, res): Promi
     res.status(400).json({ error: "to, type, base64 e mimetype são obrigatórios" });
     return;
   }
-  if (type !== "image" && type !== "document") {
-    res.status(400).json({ error: "type deve ser 'image' ou 'document'" });
+  if (type !== "image" && type !== "video" && type !== "audio" && type !== "document") {
+    res.status(400).json({ error: "type deve ser 'image', 'video', 'audio' ou 'document'" });
     return;
   }
   try {
     const buffer = Buffer.from(base64, "base64");
-    await sendWAMedia(key, to, type, buffer, mimetype, filename, caption);
+    await sendWAMedia(key, to, type, buffer, mimetype, filename, caption, ptt);
     res.json({ ok: true });
   } catch (err) {
     res.status(503).json({ error: err instanceof Error ? err.message : "Erro ao enviar mídia" });
