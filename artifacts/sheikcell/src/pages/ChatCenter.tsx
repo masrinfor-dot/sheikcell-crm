@@ -6,7 +6,7 @@ import {
   Search, Plus, Send, RefreshCw, X, ChevronDown, SpellCheck,
   MessageCircle, CheckCheck, AlertCircle, Tag, Filter,
   Smartphone, Instagram, UserCircle2, Circle,
-  ArrowRightLeft, FileText, Volume2, Image, Users, Paperclip, IdCard,
+  ArrowRightLeft, FileText, Volume2, Image, Video, Mic, Users, Paperclip, IdCard,
   Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
@@ -166,6 +166,19 @@ function MediaContent({ msg }: { msg: ChatMessage }) {
     );
   }
 
+  if (msg.type === "video") {
+    return (
+      <video
+        controls
+        preload="metadata"
+        className="max-w-full rounded-xl max-h-64 mb-1 bg-black"
+        style={{ minWidth: 200 }}
+      >
+        <source src={msg.mediaUrl} />
+      </video>
+    );
+  }
+
   if (msg.type === "audio") {
     return (
       <div className="flex items-center gap-2 mb-1 bg-black/5 rounded-xl px-3 py-2 min-w-[200px]">
@@ -197,7 +210,7 @@ function MediaContent({ msg }: { msg: ChatMessage }) {
 }
 
 // Known placeholder labels that are not captions
-const MEDIA_PLACEHOLDERS = new Set(["📷 Foto", "🎵 Áudio"]);
+const MEDIA_PLACEHOLDERS = new Set(["📷 Foto", "🎵 Áudio", "🎥 Vídeo", "🎤 Áudio"]);
 function isMediaPlaceholder(s: string) {
   return MEDIA_PLACEHOLDERS.has(s) || s.startsWith("📄 ");
 }
@@ -217,7 +230,7 @@ function extractMediaCaption(content: string): string {
 // ─── Message bubble ─────────────────────────────────────────────────────────
 function MsgBubble({ msg }: { msg: ChatMessage }) {
   const out = msg.direction === "outbound";
-  const isMedia = msg.type === "image" || msg.type === "audio" || msg.type === "doc";
+  const isMedia = msg.type === "image" || msg.type === "video" || msg.type === "audio" || msg.type === "doc";
   const mediaCaption = isMedia ? extractMediaCaption(msg.content) : "";
   const showCaption = isMedia && msg.mediaUrl && mediaCaption.length > 0;
 
@@ -237,6 +250,7 @@ function MsgBubble({ msg }: { msg: ChatMessage }) {
         ) : isMedia && !msg.mediaUrl ? (
           <div className="flex items-center gap-2 text-sm text-gray-500 italic">
             {msg.type === "image" && <Image className="w-4 h-4 shrink-0" />}
+            {msg.type === "video" && <Video className="w-4 h-4 shrink-0" />}
             {msg.type === "audio" && <Volume2 className="w-4 h-4 shrink-0" />}
             {msg.type === "doc" && <FileText className="w-4 h-4 shrink-0" />}
             <span>{msg.content}</span>
@@ -400,6 +414,15 @@ export default function ChatCenter() {
   // REST fetch and the SSE subscriber being registered server-side. Only the
   // very first stream `open` triggers it; reconnects are covered by replay/resync.
   const initialSyncedRef = useRef(false);
+
+  // ── Gravação de áudio (nota de voz, igual WhatsApp) ──
+  const [recording, setRecording] = useState(false);
+  const [recordSecs, setRecordSecs] = useState(0);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recordChunksRef = useRef<Blob[]>([]);
+  const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Decide no stop se a gravação vira envio ou é descartada.
+  const recordSendRef = useRef(false);
 
   const activeConv = convs.find((c) => c.id === activeId) ?? null;
   const unreadNotifications = notifications.reduce((n, x) => n + (x.read ? 0 : 1), 0);
@@ -679,11 +702,13 @@ export default function ChatCenter() {
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     setSending(true);
     const isImage = file.type.startsWith("image/");
-    const baseContent = isImage ? "📷 Foto" : `📄 ${file.name}`;
+    const isVideo = file.type.startsWith("video/");
+    const isAudio = file.type.startsWith("audio/");
+    const baseContent = isImage ? "📷 Foto" : isVideo ? "🎥 Vídeo" : isAudio ? "🎤 Áudio" : `📄 ${file.name}`;
     const optimistic: ChatMessage = {
       id: -Date.now(), conversationId: activeId,
       content: fileCaption ? `${baseContent}\n${fileCaption}` : baseContent,
-      direction: "outbound", type: isImage ? "image" : "doc", status: "sent",
+      direction: "outbound", type: isImage ? "image" : isVideo ? "video" : isAudio ? "audio" : "doc", status: "sent",
       senderName: user?.name ?? null, mediaUrl: null, externalId: null,
       createdAt: new Date().toISOString(),
     };
@@ -698,6 +723,84 @@ export default function ChatCenter() {
       toast({ title: "Erro ao enviar arquivo", variant: "destructive" });
     } finally { setSending(false); }
   };
+
+  // ── Gravação de nota de voz (microfone) ──
+  const stopRecordTimer = () => {
+    if (recordTimerRef.current) { clearInterval(recordTimerRef.current); recordTimerRef.current = null; }
+  };
+
+  const handleStartRecording = async () => {
+    if (!activeId || recording || sending) return;
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      toast({ title: "Gravação de áudio não suportada neste navegador", variant: "destructive" });
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm"
+        : MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "";
+      const rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      recordChunksRef.current = [];
+      recordSendRef.current = false;
+      const convId = activeId;
+      rec.ondataavailable = (e) => { if (e.data.size > 0) recordChunksRef.current.push(e.data); };
+      rec.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        stopRecordTimer();
+        setRecording(false);
+        setRecordSecs(0);
+        const chunks = recordChunksRef.current;
+        recordChunksRef.current = [];
+        if (!recordSendRef.current || chunks.length === 0) return;
+        const type = (rec.mimeType || "audio/webm").split(";")[0];
+        const ext = type === "audio/mp4" ? "m4a" : "weba";
+        const file = new File([new Blob(chunks, { type })], `nota-de-voz.${ext}`, { type: rec.mimeType || "audio/webm" });
+        setSending(true);
+        const optimistic: ChatMessage = {
+          id: -Date.now(), conversationId: convId,
+          content: "🎤 Áudio",
+          direction: "outbound", type: "audio", status: "sent",
+          senderName: user?.name ?? null, mediaUrl: null, externalId: null,
+          createdAt: new Date().toISOString(),
+        };
+        setMessages((prev) => [...prev, optimistic]);
+        try {
+          const msg = await api.chat.sendMedia(convId, file, undefined, { ptt: true });
+          setMessages((prev) => prev.some((m) => m.id === msg.id)
+            ? prev.filter((m) => m.id !== optimistic.id)
+            : prev.map((m) => m.id === optimistic.id ? msg : m));
+        } catch (err) {
+          setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
+          toast({ title: "Erro ao enviar áudio", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+        } finally { setSending(false); }
+      };
+      recorderRef.current = rec;
+      rec.start();
+      setRecording(true);
+      setRecordSecs(0);
+      recordTimerRef.current = setInterval(() => setRecordSecs((s) => s + 1), 1000);
+    } catch {
+      toast({ title: "Permissão do microfone negada", variant: "destructive" });
+    }
+  };
+
+  const handleFinishRecording = (send: boolean) => {
+    recordSendRef.current = send;
+    recorderRef.current?.stop();
+    recorderRef.current = null;
+  };
+
+  // Cancela gravação ao trocar de conversa ou sair da tela.
+  useEffect(() => {
+    return () => {
+      recordSendRef.current = false;
+      recorderRef.current?.stop();
+      recorderRef.current = null;
+      stopRecordTimer();
+    };
+  }, [activeId]);
 
   // ── Open file preview modal ──
   const handleFileSelected = (file: File) => {
@@ -1421,11 +1524,37 @@ export default function ChatCenter() {
               </span>
             </div>
           ) : (
+          recording ? (
+            <div className="bg-[#f0f2f5] border-t border-border px-3 py-2.5 flex items-center gap-3" data-testid="bar-recording">
+              <button
+                type="button"
+                onClick={() => handleFinishRecording(false)}
+                title="Cancelar gravação"
+                data-testid="button-cancel-recording"
+                className="w-9 h-9 rounded-full flex items-center justify-center text-red-500 hover:bg-red-50 transition shrink-0"
+              >
+                <Trash2 className="w-5 h-5" />
+              </button>
+              <div className="flex-1 flex items-center gap-2 text-sm text-muted-foreground">
+                <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse" />
+                <span>Gravando... {Math.floor(recordSecs / 60)}:{String(recordSecs % 60).padStart(2, "0")}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleFinishRecording(true)}
+                title="Enviar áudio"
+                data-testid="button-send-recording"
+                className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white hover:bg-primary/90 transition shrink-0"
+              >
+                <Send className="w-4 h-4" />
+              </button>
+            </div>
+          ) : (
           <form onSubmit={handleSend} className="bg-[#f0f2f5] border-t border-border px-3 py-2.5 flex items-center gap-2">
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/jpeg,image/png,image/gif,image/webp,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/3gpp,video/webm,video/quicktime,audio/ogg,audio/mpeg,audio/mp4,audio/webm,audio/aac,audio/wav,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
               className="hidden"
               onChange={(e) => {
                 const file = e.target.files?.[0];
@@ -1481,12 +1610,20 @@ export default function ChatCenter() {
               disabled={sending}
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(e); } }}
             />
-            <button type="submit" disabled={!msgText.trim() || sending} data-testid="button-send-message"
-              className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white hover:bg-primary/90 disabled:opacity-40 transition shrink-0">
-              <Send className="w-4 h-4" />
-            </button>
+            {msgText.trim() ? (
+              <button type="submit" disabled={sending} data-testid="button-send-message"
+                className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white hover:bg-primary/90 disabled:opacity-40 transition shrink-0">
+                <Send className="w-4 h-4" />
+              </button>
+            ) : (
+              <button type="button" onClick={handleStartRecording} disabled={sending}
+                title="Gravar nota de voz" data-testid="button-record-audio"
+                className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white hover:bg-primary/90 disabled:opacity-40 transition shrink-0">
+                <Mic className="w-4 h-4" />
+              </button>
+            )}
           </form>
-          )}
+          ))}
         </div>
 
         {/* ── Informações side panel ─────────────────────────────────────── */}

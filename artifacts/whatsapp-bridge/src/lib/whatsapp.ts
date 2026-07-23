@@ -138,13 +138,14 @@ export async function getWAState(sessionKey: string = DEFAULT_SESSION_KEY): Prom
 export async function sendWAMedia(
   sessionKey: string,
   to: string,
-  type: "image" | "document",
+  type: "image" | "video" | "audio" | "document",
   buffer: Buffer,
   mimetype: string,
   filename?: string,
   caption?: string,
+  ptt?: boolean,
 ): Promise<void> {
-  await baileysSendMedia(sessionKey, to, type, buffer, mimetype, filename, caption);
+  await baileysSendMedia(sessionKey, to, type, buffer, mimetype, filename, caption, ptt);
 }
 
 export async function sendWAMessage(sessionKey: string, to: string, text: string): Promise<void> {

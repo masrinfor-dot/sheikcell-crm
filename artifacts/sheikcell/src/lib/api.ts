@@ -278,7 +278,7 @@ export const api = {
       req<{ suggestion: string }>(`/chat/conversations/${id}/suggest-reply`, { method: "POST" }),
     correctText: (text: string) =>
       req<{ corrected: string }>(`/chat/correct-text`, { method: "POST", body: JSON.stringify({ text }) }),
-    sendMedia: (id: number, file: File, caption?: string): Promise<ChatMessage> => {
+    sendMedia: (id: number, file: File, caption?: string, opts?: { ptt?: boolean }): Promise<ChatMessage> => {
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => {
@@ -286,7 +286,7 @@ export const api = {
           const base64 = dataUrl.split(",")[1];
           req<ChatMessage>(`/chat/conversations/${id}/media`, {
             method: "POST",
-            body: JSON.stringify({ base64, mimetype: file.type, filename: file.name, caption }),
+            body: JSON.stringify({ base64, mimetype: file.type, filename: file.name, caption, ptt: opts?.ptt }),
           }).then(resolve).catch(reject);
         };
         reader.onerror = () => reject(new Error("Falha ao ler arquivo"));

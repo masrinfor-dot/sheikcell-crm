@@ -76,6 +76,7 @@ export interface MetaInboundWAPayload {
           type: string;
           text?: { body: string };
           image?: { id: string; mime_type: string; caption?: string; sha256?: string };
+          video?: { id: string; mime_type: string; caption?: string };
           audio?: { id: string; mime_type: string };
           document?: { id: string; mime_type: string; filename?: string; caption?: string };
           sticker?: { id: string; mime_type: string };
@@ -372,6 +373,15 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
               try { mediaUrl = await saveMedia(dl.base64, dl.mime); } catch { mediaUrl = null; }
             }
           }
+        } else if (msg.type === "video") {
+          msgType = "video";
+          text = msg.video?.caption ?? "";
+          if (accessToken && msg.video?.id) {
+            const dl = await downloadMetaMedia(msg.video.id, accessToken);
+            if (dl) {
+              try { mediaUrl = await saveMedia(dl.base64, dl.mime); } catch { mediaUrl = null; }
+            }
+          }
         } else if (msg.type === "audio") {
           msgType = "audio";
           if (accessToken && msg.audio?.id) {
@@ -396,6 +406,7 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
         const displayContent =
           text ||
           (msgType === "image" ? "📷 Foto" :
+           msgType === "video" ? "🎥 Vídeo" :
            msgType === "audio" ? "🎵 Áudio" :
            msgType === "doc" ? "📄 Documento" : "(mídia)");
 
