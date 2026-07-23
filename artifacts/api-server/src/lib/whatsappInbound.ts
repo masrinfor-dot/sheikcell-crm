@@ -295,6 +295,17 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
 
   const externalId = body.data?.key?.id ?? body.messageId ?? null;
 
+  // Dedup: em reconexões o Baileys pode reentregar a mesma mensagem
+  // (messages.upsert repetido). Se já gravamos esse ID, ignora.
+  if (externalId) {
+    const [dup] = await db
+      .select({ id: messagesTable.id })
+      .from(messagesTable)
+      .where(and(eq(messagesTable.externalId, externalId), eq(messagesTable.direction, "inbound")))
+      .limit(1);
+    if (dup) return;
+  }
+
   let mediaUrl: string | null = null;
   if (mediaBase64 && mediaMimeType) {
     try {
@@ -336,8 +347,11 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
       externalId,
       mediaUrl,
     })
+    .onConflictDoNothing()
     .returning();
 
+  // Conflito = mensagem duplicada chegando em paralelo; não notifica de novo.
+  if (!msg) return;
   broadcast("message", { conversationId: conv.id, message: msg }, conv.sectorId, isPotentialConversation(conv));
 }
 
@@ -356,6 +370,16 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
         const contact = contacts.find((c) => c.wa_id === phone);
         const pushName = contact?.profile?.name ?? phone;
         const externalId = msg.id;
+
+        // Dedup: Meta pode reentregar o mesmo webhook (retry). Ignora IDs já gravados.
+        if (externalId) {
+          const [dup] = await db
+            .select({ id: messagesTable.id })
+            .from(messagesTable)
+            .where(and(eq(messagesTable.externalId, externalId), eq(messagesTable.direction, "inbound")))
+            .limit(1);
+          if (dup) continue;
+        }
 
         let text = "";
         let msgType = "text";
@@ -424,8 +448,11 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
             externalId,
             mediaUrl,
           })
+          .onConflictDoNothing()
           .returning();
 
+        // Conflito = mensagem duplicada chegando em paralelo; não notifica de novo.
+        if (!saved) continue;
         broadcast("message", { conversationId: conv.id, message: saved }, conv.sectorId, isPotentialConversation(conv));
       }
     }

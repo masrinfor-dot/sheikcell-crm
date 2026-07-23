@@ -437,12 +437,26 @@ async function humanPacing(s: Session, jid: string, textLength: number): Promise
   }
 }
 
+// Se o job ficar tempo demais esperando na fila, o api-server já desistiu
+// (timeout de 60s) e marcou a mensagem como falha — o atendente vai reenviar.
+// Enviar mesmo assim geraria mensagem DUPLICADA no cliente. Melhor descartar.
+const QUEUE_WAIT_MAX_MS = 50_000;
+
 function enqueueSend(s: Session, jid: string, textLength: number, fn: () => Promise<void>): Promise<void> {
+  const enqueuedAt = Date.now();
   const run = s.sendChain.then(async () => {
+    if (Date.now() - enqueuedAt > QUEUE_WAIT_MAX_MS) {
+      throw new Error("Envio descartado: esperou tempo demais na fila (evita duplicar mensagem)");
+    }
     try {
       await withTimeout(
         (async () => {
           await humanPacing(s, jid, textLength);
+          // Checagem final: se entre a fila e a "digitação" o prazo total estourou,
+          // o api-server já marcou como falha — não envia para não duplicar.
+          if (Date.now() - enqueuedAt > QUEUE_WAIT_MAX_MS) {
+            throw new Error("Envio descartado: prazo total excedido (evita duplicar mensagem)");
+          }
           await fn();
         })(),
         SEND_JOB_TIMEOUT_MS,
