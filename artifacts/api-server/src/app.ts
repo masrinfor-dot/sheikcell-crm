@@ -40,7 +40,9 @@ app.use(cors({
 
 app.use(
   express.json({
-    limit: "1mb",
+    // Fotos/áudios chegam em base64 no JSON (webhook do bridge e envio de mídia
+    // pelo painel) — 1mb bloqueava qualquer foto real com 413.
+    limit: "30mb",
     verify: (req, _res, buf) => {
       (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
     },
