@@ -141,7 +141,12 @@ async function getProfilePicture(s: Session, jid: string): Promise<string | unde
   if (hit && Date.now() - hit.at < AVATAR_TTL_MS) return hit.url;
   let url: string | undefined;
   try {
-    url = (await s.sock?.profilePictureUrl(jid, "image")) ?? undefined;
+    // Timeout curto: buscar a foto nunca pode atrasar/travar a entrega da
+    // mensagem recebida.
+    url = (await Promise.race([
+      s.sock?.profilePictureUrl(jid, "image"),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 5_000)),
+    ])) ?? undefined;
   } catch {
     // sem foto ou privacidade restrita — segue sem avatar
   }
