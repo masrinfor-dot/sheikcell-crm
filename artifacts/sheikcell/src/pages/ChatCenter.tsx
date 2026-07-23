@@ -743,7 +743,12 @@ export default function ChatCenter() {
         ? { ...c, ...updated, assignee: user ? { id: user.id, name: user.name } : c.assignee }
         : c));
       toast({ title: "Atendimento iniciado" });
-    } catch { toast({ title: "Erro ao iniciar atendimento", variant: "destructive" }); }
+    } catch (e) {
+      // Mostra o motivo real (ex.: 404 se a API em produção estiver desatualizada,
+      // 409 se outro vendedor já assumiu) em vez de um erro genérico.
+      const msg = e instanceof Error ? e.message : "";
+      toast({ title: "Erro ao iniciar atendimento", description: msg || undefined, variant: "destructive" });
+    }
   };
 
   // ── Ativo → Resolvida (finalizar atendimento) ──
