@@ -521,8 +521,14 @@ export default function ChatCenter() {
         const { conversationId, message } = JSON.parse(e.data) as { conversationId: number; message: ChatMessage };
         if (conversationId === activeId) {
           // Evita duplicar: quem enviou já recebe a mensagem pela resposta do
-          // POST, e o SSE também entrega para o próprio remetente.
-          setMessages((prev) => prev.some((m) => m.id === message.id) ? prev : [...prev, message]);
+          // POST, e o SSE também entrega para o próprio remetente. Se a
+          // mensagem real chegar via SSE antes do POST responder, remove a
+          // bolha provisória (id negativo) para não aparecer em dobro.
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === message.id)) return prev;
+            const base = message.direction === "outbound" ? prev.filter((m) => m.id >= 0) : prev;
+            return [...base, message];
+          });
         }
         setConvs((prev) => prev.map((c) =>
           c.id === conversationId
