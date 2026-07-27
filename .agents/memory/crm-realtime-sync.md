@@ -1,35 +1,15 @@
 ---
 name: CRM real-time sync
-description: How CRM board + Visão Geral stay live and which SSE channel they reuse
+description: How the CRM board stays in sync with the chat (SSE events + attendant mirroring)
 ---
 
-# CRM real-time sync
+- CRM board + Visão Geral reuse the chat SSE channel (`/api/chat/events`) listening to `crm_contact_created/updated/deleted`; broadcast with the contact's sectorId, isPotential=false.
+- The CRM card's "atendente" mirrors the conversation assignee: `syncCrmAttendant` (crmSync) is called on claim and on any PATCH that changes assigneeId. It matches contact by normalized phone + sector, updates attendantId, and broadcasts `crm_contact_updated` itself (best-effort, never throws).
+- `ensureCrmContactForConversation` also sets attendantId on the existing-contact branch when the conversation already has an assignee (e.g. vendedor-created convs are born assigned).
+- **Why:** without mirroring, the CRM card showed a stale/empty attendant while the chat moved on ("CRM não acompanha o fluxo").
+- **How to apply:** any new code path that changes `conversations.assigneeId` must call `syncCrmAttendant` afterwards, or the CRM card drifts.
 
-CRM does NOT have its own SSE stream. It piggybacks on the chat channel
-`/api/chat/events`. CRM mutations broadcast `crm_contact_created` /
-`crm_contact_updated` / `crm_contact_deleted` via the shared `broadcast(event,
-payload, sectorId, isPotential=false)`.
-
-**Rule:** always broadcast CRM events with the contact's own `sectorId` and
-`isPotential=false` so the shared SSE `send` filter scopes them exactly like chat
-(globals get all; a vendedor only gets same-sector, never null-sector). On admin
-sector reassignment (PATCH changes `sectorId`), emit an `updated` to the new
-sector AND a `crm_contact_deleted` to the OLD sector so the origin board drops the
-row (same pattern as chat transfer). Archiving via PATCH `isArchived:true` or
-DELETE both emit `crm_contact_deleted`.
-
-**Why:** one channel avoids a second EventSource per client and keeps sector
-isolation logic in one place. Broadcasting after `res.json(...)` keeps response
-latency low.
-
-**How to apply:**
-- Consumers: `CrmBoard.tsx` upserts/removes by id; while a `search` is active it
-  debounces a scoped refetch instead of surgical upsert (server-side search spans
-  many fields, can't be judged client-side). `AdminDashboard.tsx` (Visão Geral)
-  debounces `fetchAll()` on `crm_*` + `conversation_*` events.
-- Any new CRM mutation path that changes a contact must also broadcast, or boards
-  go stale. Purchase add/delete use `broadcastContactUpdate(id)` (profile/total
-  can change).
-- CRM scoping is fail-closed on null sector (see vendedor-scoping.md): a
-  sector-scoped user with no sector sees nothing; null-sector contacts are never
-  visible to non-global users.
+Related rules added in the same change:
+- Vendedor transfer: PATCH assigneeId requires perm `transferir`; target must be an active user; when caller is vendedor, target must be role vendedor and same sector as the conversation; vendedor cannot set assigneeId=null; status forced "open" on vendedor transfer.
+- Claim is atomic: `UPDATE ... WHERE assignee_id IS NULL OR assignee_id = me`, 409 if no row.
+- unreadCount only cleared when the viewer is the assignee (or a vendedor if unassigned) — admin/supervisor peeking must not clear the vendedor's notification.
