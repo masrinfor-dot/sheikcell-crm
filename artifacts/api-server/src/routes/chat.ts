@@ -286,7 +286,16 @@ router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Pr
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
 
-  await db.update(conversationsTable).set({ unreadCount: 0 }).where(eq(conversationsTable.id, id));
+  // Zera o contador de não lidas só quando quem abre é o responsável (ou um
+  // vendedor, se a conversa ainda não tem dono). Admin/supervisor espiando a
+  // conversa NÃO pode apagar a notificação do vendedor que vai atender.
+  const viewerRole = req.session.userRole!;
+  const clearsUnread = conv.assigneeId != null
+    ? conv.assigneeId === req.session.userId
+    : viewerRole === "vendedor";
+  if (clearsUnread && conv.unreadCount > 0) {
+    await db.update(conversationsTable).set({ unreadCount: 0 }).where(eq(conversationsTable.id, id));
+  }
 
   const msgs = await db
     .select()
