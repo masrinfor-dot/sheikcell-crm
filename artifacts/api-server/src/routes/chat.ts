@@ -634,6 +634,27 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
       res.status(403).json({ error: "Você não tem permissão para transferir conversas de setor. Fale com o administrador." });
       return;
     }
+    if (assigneeId !== undefined && assigneeId !== conv.assigneeId && !(await checkPerm(req, "transferir"))) {
+      res.status(403).json({ error: "Você não tem permissão para transferir conversas. Fale com o administrador." });
+      return;
+    }
+  }
+
+  // Transferência para outro vendedor: valida o destino (ativo; vendedor só
+  // recebe conversa do próprio setor). Vendedor não pode "des-atribuir".
+  if (assigneeId != null && assigneeId !== conv.assigneeId) {
+    const [target] = await db.select().from(usersTable).where(eq(usersTable.id, assigneeId)).limit(1);
+    if (!target || !target.isActive) { res.status(400).json({ error: "Vendedor de destino inválido" }); return; }
+    if (target.role === "vendedor" && target.sectorId != null) {
+      const destSector = sectorId ?? conv.sectorId;
+      if (destSector != null && target.sectorId !== destSector) {
+        res.status(400).json({ error: "Esse vendedor é de outro setor. Transfira o setor junto ou escolha um vendedor do setor da conversa." });
+        return;
+      }
+    }
+  } else if (userRole === "vendedor" && assigneeId === null && conv.assigneeId != null) {
+    res.status(403).json({ error: "Apenas admin ou supervisor podem remover o responsável" });
+    return;
   }
 
   const update: Record<string, unknown> = { updatedAt: new Date() };
@@ -646,7 +667,12 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
   let isSectorTransfer = false;
   if (userRole === "admin" || userRole === "supervisor" || userRole === "vendedor") {
     if (sectorId !== undefined && (userRole !== "vendedor" || sectorId !== conv.sectorId)) update.sectorId = sectorId;
-    if (assigneeId !== undefined && userRole !== "vendedor") update.assigneeId = assigneeId;
+    // Vendedor autorizado transfere para outro vendedor (nunca "des-atribui" —
+    // já bloqueado acima); a conversa vai direto para os Ativos do destino.
+    if (assigneeId !== undefined && (userRole !== "vendedor" || assigneeId != null)) {
+      update.assigneeId = assigneeId;
+      if (userRole === "vendedor" && status === undefined) update.status = "open";
+    }
     // Transferring a conversation to a DIFFERENT sector hands it off to another
     // team of vendedores. Route it into that sector's "Pendentes" queue by
     // clearing the assignee and setting status "pending", so a vendedor there
@@ -894,7 +920,7 @@ router.delete("/chat/labels/:labelId", requireAdminOrSupervisor, async (req, res
 // ─── List users available for participant assignment ──────────────────────
 router.get("/chat/users", requireAuth, async (_req, res): Promise<void> => {
   const users = await db
-    .select({ id: usersTable.id, name: usersTable.name, role: usersTable.role })
+    .select({ id: usersTable.id, name: usersTable.name, role: usersTable.role, sectorId: usersTable.sectorId })
     .from(usersTable)
     .where(eq(usersTable.isActive, true));
   res.json(users);

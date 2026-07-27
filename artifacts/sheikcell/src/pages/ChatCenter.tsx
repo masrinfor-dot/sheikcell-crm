@@ -354,7 +354,7 @@ export default function ChatCenter() {
   const [finalizeDetail, setFinalizeDetail] = useState("");
   const [finalizing, setFinalizing] = useState(false);
   const [sectors, setSectors] = useState<Sector[]>([]);
-  const [chatUsers, setChatUsers] = useState<{ id: number; name: string; role: string }[]>([]);
+  const [chatUsers, setChatUsers] = useState<{ id: number; name: string; role: string; sectorId?: number | null }[]>([]);
   const [waSessions, setWaSessions] = useState<WaSessionInfo[]>([]);
   const [newForm, setNewForm] = useState({ name: "", phone: "", channel: "whatsapp", sectorId: "" });
 
@@ -983,6 +983,19 @@ export default function ChatCenter() {
   };
 
   // ── Transfer conversation to sector ──
+  const handleTransferToUser = async (targetUserId: number, targetName: string) => {
+    if (!activeConv) return;
+    try {
+      await api.chat.sendMessage(activeConv.id, `🔀 Conversa transferida para ${targetName}`);
+      const updated = await api.chat.updateConversation(activeConv.id, { assigneeId: targetUserId });
+      setConvs((prev) => prev.map((c) => c.id === activeConv.id ? { ...c, ...updated } : c));
+      setShowTransferPicker(false);
+      toast({ title: `Transferido para ${targetName}`, description: "A conversa agora está nos Ativos desse vendedor." });
+    } catch (err) {
+      toast({ title: "Erro ao transferir", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
+  };
+
   const handleTransfer = async (targetSectorId: number) => {
     if (!activeConv) return;
     const targetSector = sectors.find((s) => s.id === targetSectorId);
@@ -1533,9 +1546,9 @@ export default function ChatCenter() {
                   <ArrowRightLeft className="w-3.5 h-3.5" />
                 </button>
                 {showTransferPicker && (
-                  <div className="absolute right-0 top-9 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden min-w-[200px]">
+                  <div className="absolute right-0 top-9 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden min-w-[220px] max-h-[60vh] overflow-y-auto">
                     <div className="px-3 py-2 border-b border-border text-xs font-semibold text-muted-foreground">
-                      Transferir para:
+                      Transferir para outro setor:
                     </div>
                     {sectors
                       .filter((s) => s.id !== activeConv?.sectorId)
@@ -1546,6 +1559,28 @@ export default function ChatCenter() {
                           {s.name}
                         </button>
                       ))}
+                    {(() => {
+                      // Vendedores do setor da conversa (menos eu e o responsável atual)
+                      const targets = chatUsers.filter((u) =>
+                        u.role === "vendedor" &&
+                        u.id !== user?.id &&
+                        u.id !== activeConv?.assigneeId &&
+                        (u.sectorId == null || u.sectorId === activeConv?.sectorId));
+                      if (targets.length === 0) return null;
+                      return (<>
+                        <div className="px-3 py-2 border-y border-border text-xs font-semibold text-muted-foreground">
+                          Transferir para vendedor:
+                        </div>
+                        {targets.map((u) => (
+                          <button key={`u-${u.id}`} onClick={() => handleTransferToUser(u.id, u.name)}
+                            data-testid={`button-transfer-user-${u.id}`}
+                            className="w-full text-left flex items-center gap-2 text-xs px-3 py-2.5 hover:bg-secondary transition">
+                            <UserCircle2 className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+                            {u.name}
+                          </button>
+                        ))}
+                      </>);
+                    })()}
                   </div>
                 )}
               </div>

@@ -351,7 +351,7 @@ export const api = {
       remove: (id: number) => req<{ ok: boolean }>(`/chat/labels/${id}`, { method: "DELETE" }),
     },
   },
-  chatUsers: () => req<{ id: number; name: string; role: string }[]>("/chat/users"),
+  chatUsers: () => req<{ id: number; name: string; role: string; sectorId: number | null }[]>("/chat/users"),
   internalChat: {
     conversations: () => req<InternalConversation[]>("/internal-chat/conversations"),
     startDirect: (userId: number) =>
