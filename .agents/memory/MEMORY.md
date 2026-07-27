@@ -22,4 +22,5 @@
 - [CRM real-time sync](crm-realtime-sync.md) — CRM board + Visão Geral reuse the chat SSE channel (/api/chat/events) with crm_contact_* events; broadcast with contact sectorId, isPotential=false
 - [EasyPanel deploy gotchas](easypanel-deploy.md) — web Docker build precisa de glibc (node:24-slim), rollup musl fora do lockfile; conferir GIT_SHA do log antes de debugar
 - [Mobile responsive layout](mobile-layout.md) — <md = celular: bottom nav fixa, ChatCenter vira single-column (lista some c/ conversa ativa), InternalChat vira aba "Equipe"; alturas usam 100dvh + safe-area
+- [Permissões por vendedor](vendedor-permissions.md) — users.permissions jsonb (null=liberado), só role vendedor; checar no servidor E esconder na UI; archived=finalizar; SSE refaz perm a cada 30s
 - [Restricted conversation visibility](restricted-conv-visibility.md) — conversas com responsável ou finalizadas só p/ assignee+participantes, admin e supervisor do MESMO setor; SSE usa restrictedTo + conversation_hidden
