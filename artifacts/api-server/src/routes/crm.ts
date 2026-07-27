@@ -2,10 +2,14 @@ import { Router, type IRouter } from "express";
 import { db, crmContactsTable, crmPurchasesTable, crmInternalNotesTable, crmCustomFieldsTable, sectorsTable, usersTable, attendanceLogsTable } from "@workspace/db";
 import { eq, and, desc, asc, ilike, or } from "drizzle-orm";
 import { requireAuth, requireAdminOrSupervisor } from "../middlewares/auth";
+import { requirePerm } from "../lib/permissions";
 import { broadcast } from "../lib/sseEmitter";
 import type { Request } from "express";
 
 const router: IRouter = Router();
+
+// Permissão individual "crm": vendedor sem ela não acessa nenhuma rota do CRM.
+router.use("/crm", requirePerm("crm"));
 
 // ─── helpers ──────────────────────────────────────────────────────────────
 async function enrichContact(c: typeof crmContactsTable.$inferSelect) {

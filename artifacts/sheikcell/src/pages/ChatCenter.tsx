@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { api, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField } from "@/lib/api";
+import { api, can, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -1274,10 +1274,12 @@ export default function ChatCenter() {
             <button onClick={() => setShowFilter(!showFilter)} className={`p-1.5 rounded-lg hover:bg-secondary transition ${showFilter ? "bg-secondary" : ""}`}>
               <Filter className="w-4 h-4 text-muted-foreground" />
             </button>
-            <button onClick={() => setShowNewConv(true)} data-testid="button-new-conv"
-              className="p-1.5 rounded-lg hover:bg-secondary transition">
-              <Plus className="w-4 h-4 text-muted-foreground" />
-            </button>
+            {can(user, "criar_atendimento") && (
+              <button onClick={() => setShowNewConv(true)} data-testid="button-new-conv"
+                className="p-1.5 rounded-lg hover:bg-secondary transition">
+                <Plus className="w-4 h-4 text-muted-foreground" />
+              </button>
+            )}
             <button onClick={fetchConvs} className="p-1.5 rounded-lg hover:bg-secondary transition">
               <RefreshCw className="w-4 h-4 text-muted-foreground" />
             </button>
@@ -1301,7 +1303,7 @@ export default function ChatCenter() {
 
         {/* Category tabs: Potenciais / Pendentes / Ativos */}
         <div className="flex border-b border-border bg-white">
-          {CATEGORIES.map((cat) => {
+          {CATEGORIES.filter((cat) => cat.id !== "potenciais" || can(user, "ver_potenciais")).map((cat) => {
             const isActive = category === cat.id;
             return (
               <button
@@ -1450,7 +1452,7 @@ export default function ChatCenter() {
                 </button>
               )}
               {/* Finalizar atendimento — atalho visível (abre o modal de motivo) */}
-              {activeCategory !== "resolvidas" && (
+              {activeCategory !== "resolvidas" && can(user, "finalizar") && (
                 <button
                   onClick={() => handleFinalize(activeConv.id)}
                   data-testid="button-finalize-conv"
@@ -1474,7 +1476,7 @@ export default function ChatCenter() {
                 </button>
                 {showStatusPicker && (
                   <div className="absolute right-0 top-11 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden w-40">
-                    {["open", "pending", "resolved"].map((s) => (
+                    {["open", "pending", "resolved"].filter((s) => s !== "resolved" || can(user, "finalizar")).map((s) => (
                       <button key={s} onClick={() => {
                         if (s === "resolved") handleFinalize(activeConv.id);
                         else if (s === "pending") handleMoveToQueue(activeConv.id);
@@ -1519,6 +1521,7 @@ export default function ChatCenter() {
                 )}
               </div>
               {/* Transfer to sector */}
+              {can(user, "transferir") && (
               <div className="relative">
                 <button
                   onClick={() => { setShowTransferPicker((v) => !v); setShowLabelPicker(false); setShowParticipantPicker(false); setShowStatusPicker(false); }}
@@ -1544,6 +1547,7 @@ export default function ChatCenter() {
                   </div>
                 )}
               </div>
+              )}
               {/* Participants / Vendedores */}
               <div className="relative">
                 <button
@@ -1708,6 +1712,7 @@ export default function ChatCenter() {
                 e.target.value = "";
               }}
             />
+            {can(user, "enviar_midia") && (
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
@@ -1718,6 +1723,8 @@ export default function ChatCenter() {
             >
               <Paperclip className="w-4 h-4" />
             </button>
+            )}
+            {can(user, "usar_ia") && (<>
             <button
               type="button"
               onClick={handleSuggestReply}
@@ -1744,6 +1751,7 @@ export default function ChatCenter() {
                 : <SpellCheck className="w-4 h-4" />}
               <span className="hidden sm:inline">Corrigir</span>
             </button>
+            </>)}
             <input
               ref={inputRef}
               value={msgText}
@@ -1761,11 +1769,16 @@ export default function ChatCenter() {
                 className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white hover:bg-primary/90 disabled:opacity-40 transition shrink-0">
                 <Send className="w-4 h-4" />
               </button>
-            ) : (
+            ) : can(user, "enviar_midia") ? (
               <button type="button" onClick={handleStartRecording} disabled={sending}
                 title="Gravar nota de voz" data-testid="button-record-audio"
                 className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white hover:bg-primary/90 disabled:opacity-40 transition shrink-0">
                 <Mic className="w-4 h-4" />
+              </button>
+            ) : (
+              <button type="submit" disabled data-testid="button-send-message-disabled"
+                className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white opacity-40 transition shrink-0">
+                <Send className="w-4 h-4" />
               </button>
             )}
           </form>

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, type SectorSummary, type AttendanceLog, type Sector } from "@/lib/api";
+import { api, PERMISSION_KEYS, PERMISSION_LABELS, type SectorSummary, type AttendanceLog, type Sector } from "@/lib/api";
 import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
@@ -12,7 +12,7 @@ import TaskBoard from "./TaskBoard";
 import {
   Smartphone, LogOut, LayoutDashboard, ClipboardList,
   Settings, Users, RefreshCw, Plus, X, Clock, CheckCircle,
-  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal
+  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck
 } from "lucide-react";
 
 type Tab = "dashboard" | "chat" | "equipe" | "tarefas" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp";
@@ -33,6 +33,7 @@ type WASession = {
 type UserRow = {
   id: number; name: string; email: string; role: string;
   isActive: boolean; sector: Sector | null; sectorId: number | null; createdAt: string;
+  permissions?: Record<string, boolean> | null;
 };
 
 function formatDuration(sec: number | null): string {
@@ -64,6 +65,10 @@ export default function AdminDashboard() {
   // Modals
   const [showAddUser, setShowAddUser] = useState(false);
   const [editUser, setEditUser] = useState<UserRow | null>(null);
+  // Modal de permissões individuais do vendedor
+  const [permUser, setPermUser] = useState<UserRow | null>(null);
+  const [permDraft, setPermDraft] = useState<Record<string, boolean>>({});
+  const [savingPerms, setSavingPerms] = useState(false);
   const [showAddSector, setShowAddSector] = useState(false);
   const [editSector, setEditSector] = useState<Sector | null>(null);
 
@@ -639,10 +644,26 @@ export default function AdminDashboard() {
                           </span>
                         </td>
                         <td className="px-4 py-3">
-                          <button onClick={() => openEditUser(u)} data-testid={`button-edit-user-${u.id}`}
-                            className="p-1.5 text-muted-foreground hover:text-primary hover:bg-blue-50 rounded-lg transition">
-                            <Pencil className="w-3.5 h-3.5" />
-                          </button>
+                          <div className="flex items-center gap-1">
+                            <button onClick={() => openEditUser(u)} data-testid={`button-edit-user-${u.id}`}
+                              className="p-1.5 text-muted-foreground hover:text-primary hover:bg-blue-50 rounded-lg transition">
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            {u.role === "vendedor" && (
+                              <button
+                                onClick={() => {
+                                  const draft: Record<string, boolean> = {};
+                                  for (const k of PERMISSION_KEYS) draft[k] = u.permissions?.[k] !== false;
+                                  setPermDraft(draft);
+                                  setPermUser(u);
+                                }}
+                                data-testid={`button-perms-user-${u.id}`}
+                                title="Permissões do vendedor"
+                                className="p-1.5 text-muted-foreground hover:text-primary hover:bg-blue-50 rounded-lg transition">
+                                <ShieldCheck className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -688,6 +709,59 @@ export default function AdminDashboard() {
           </div>
         </div>
       </div>
+
+      {/* ===== PERMISSIONS MODAL ===== */}
+      {permUser && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="shk-card w-full max-w-sm p-6">
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="font-bold">Permissões</h3>
+              <button onClick={() => setPermUser(null)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <p className="text-xs text-muted-foreground mb-4">
+              O que <span className="font-semibold text-foreground">{permUser.name}</span> pode fazer:
+            </p>
+            <div className="space-y-1 max-h-[50vh] overflow-y-auto">
+              {PERMISSION_KEYS.map((k) => (
+                <label key={k} className="flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-secondary/50 cursor-pointer text-sm" data-testid={`perm-${k}`}>
+                  <input
+                    type="checkbox"
+                    checked={permDraft[k] !== false}
+                    onChange={(e) => setPermDraft((d) => ({ ...d, [k]: e.target.checked }))}
+                    className="w-4 h-4 accent-[var(--primary)] shrink-0"
+                  />
+                  <span>{PERMISSION_LABELS[k]}</span>
+                </label>
+              ))}
+            </div>
+            <div className="flex gap-2 mt-4">
+              <button onClick={() => setPermUser(null)}
+                className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold border border-border hover:bg-secondary transition">
+                Cancelar
+              </button>
+              <button
+                disabled={savingPerms}
+                data-testid="button-save-perms"
+                onClick={async () => {
+                  setSavingPerms(true);
+                  try {
+                    await api.admin.users.update(permUser.id, { permissions: permDraft });
+                    toast({ title: "Permissões salvas", description: `Permissões de ${permUser.name} atualizadas.` });
+                    setPermUser(null);
+                    fetchUsersAndSectors();
+                  } catch {
+                    toast({ title: "Erro", description: "Não foi possível salvar as permissões.", variant: "destructive" });
+                  } finally {
+                    setSavingPerms(false);
+                  }
+                }}
+                className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold bg-primary text-white hover:bg-primary/90 transition disabled:opacity-50">
+                {savingPerms ? "Salvando..." : "Salvar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ===== USER MODAL ===== */}
       {showAddUser && (

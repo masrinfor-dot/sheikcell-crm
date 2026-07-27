@@ -5,6 +5,7 @@ import path from "path";
 import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable } from "@workspace/db";
 import { eq, desc, and, or, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireAdminOrSupervisor } from "../middlewares/auth";
+import { checkPerm, requirePerm } from "../lib/permissions";
 import {
   broadcast,
   sseEmitter,
@@ -25,7 +26,7 @@ import {
 const router: IRouter = Router();
 
 // ─── SSE real-time stream ──────────────────────────────────────────────────
-router.get("/chat/events", requireAuth, (req: Request, res: Response): void => {
+router.get("/chat/events", requireAuth, async (req: Request, res: Response): Promise<void> => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
@@ -35,6 +36,12 @@ router.get("/chat/events", requireAuth, (req: Request, res: Response): void => {
   const userRole = req.session.userRole!;
   const userSectorId = req.session.userSectorId;
   const userId = req.session.userId!;
+  // Permissões do vendedor: recarregadas a cada 30s para que uma revogação
+  // feita pelo admin pare de vazar eventos de Potenciais sem exigir reconexão.
+  let canSeePotenciais = await checkPerm(req, "ver_potenciais");
+  const permRefresh = setInterval(() => {
+    checkPerm(req, "ver_potenciais").then((v) => { canSeePotenciais = v; }).catch(() => {});
+  }, 30_000);
 
   // Mirror canAccessConversation exactly.
   // - Eventos de conversas RESTRITAS (com responsável ou finalizadas) trazem
@@ -50,7 +57,7 @@ router.get("/chat/events", requireAuth, (req: Request, res: Response): void => {
       return ev.restrictedTo == null && ev.isPotential === true;
     }
     if (ev.restrictedTo != null) return ev.restrictedTo.includes(userId);
-    if (ev.isPotential) return true;
+    if (ev.isPotential && canSeePotenciais) return true;
     return ev.sectorId != null && ev.sectorId === userSectorId;
   };
 
@@ -99,6 +106,7 @@ router.get("/chat/events", requireAuth, (req: Request, res: Response): void => {
 
   req.on("close", () => {
     clearInterval(heartbeat);
+    clearInterval(permRefresh);
     sseEmitter.off("broadcast", send);
   });
 });
@@ -153,7 +161,7 @@ async function canAccessConversation(
     return !!p;
   }
   if (conv.sectorId != null && conv.sectorId === userSectorId) return true;
-  return isPotentialConversation(conv);
+  return isPotentialConversation(conv) && (await checkPerm(req, "ver_potenciais"));
 }
 
 // ─── List conversations ────────────────────────────────────────────────────
@@ -196,10 +204,14 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
     // - conversas do próprio setor NÃO restritas (ex.: pendentes);
     // - conversas restritas apenas quando é o responsável ou participante.
     const userId = req.session.userId!;
-    const potencial = and(
-      isNull(conversationsTable.assigneeId),
-      notInArray(conversationsTable.status, [...POTENTIAL_EXCLUDED_STATUSES]),
-    )!;
+    // Permissão "ver_potenciais" desligada: o vendedor não vê os leads novos
+    // de outros setores (só o escopo do próprio setor).
+    const potencial = (await checkPerm(req, "ver_potenciais"))
+      ? and(
+          isNull(conversationsTable.assigneeId),
+          notInArray(conversationsTable.status, [...POTENTIAL_EXCLUDED_STATUSES]),
+        )!
+      : sql`FALSE`;
     const mine = or(
       eq(conversationsTable.assigneeId, userId),
       sql`EXISTS (SELECT 1 FROM ${conversationParticipantsTable} WHERE ${conversationParticipantsTable.conversationId} = ${conversationsTable.id} AND ${conversationParticipantsTable.userId} = ${userId})`,
@@ -287,7 +299,7 @@ router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Pr
 });
 
 // ─── Send media ────────────────────────────────────────────────────────────
-router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Promise<void> => {
+router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_midia"), async (req, res): Promise<void> => {
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const { base64, mimetype: rawMimetype, filename, caption, ptt } = req.body as {
     base64?: string;
@@ -611,16 +623,30 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
   if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
 
   const userRole = req.session.userRole!;
+
+  // Permissões individuais do vendedor: finalizar e transferir são configuráveis.
+  if (userRole === "vendedor") {
+    if ((status === "resolved" || status === "archived" || isArchived === true) && !(await checkPerm(req, "finalizar"))) {
+      res.status(403).json({ error: "Você não tem permissão para finalizar atendimentos. Fale com o administrador." });
+      return;
+    }
+    if (sectorId !== undefined && sectorId !== conv.sectorId && !(await checkPerm(req, "transferir"))) {
+      res.status(403).json({ error: "Você não tem permissão para transferir conversas de setor. Fale com o administrador." });
+      return;
+    }
+  }
+
   const update: Record<string, unknown> = { updatedAt: new Date() };
   if (status !== undefined) update.status = status;
   if (labels !== undefined) update.labels = labels;
   if (name !== undefined) update.name = name;
   if (isArchived !== undefined) update.isArchived = isArchived;
-  // Only admins and supervisors may reassign to a different sector or assignee
+  // Reatribuir responsável segue exclusivo de admin/supervisor; transferir de
+  // setor também é permitido ao vendedor autorizado (permissão "transferir").
   let isSectorTransfer = false;
-  if (userRole === "admin" || userRole === "supervisor") {
-    if (sectorId !== undefined) update.sectorId = sectorId;
-    if (assigneeId !== undefined) update.assigneeId = assigneeId;
+  if (userRole === "admin" || userRole === "supervisor" || userRole === "vendedor") {
+    if (sectorId !== undefined && (userRole !== "vendedor" || sectorId !== conv.sectorId)) update.sectorId = sectorId;
+    if (assigneeId !== undefined && userRole !== "vendedor") update.assigneeId = assigneeId;
     // Transferring a conversation to a DIFFERENT sector hands it off to another
     // team of vendedores. Route it into that sector's "Pendentes" queue by
     // clearing the assignee and setting status "pending", so a vendedor there
@@ -628,13 +654,19 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
     // staying under the previous vendedor. Skipped when the caller explicitly
     // sets a status/assignee in the same request or the conversation is
     // already finished.
+    // Vendedor: a transferência SEMPRE segue o fluxo de handoff (limpa o
+    // responsável e vai para Pendentes) — campos extras do cliente são
+    // ignorados para impedir que uma transferência mantenha dono/status.
     isSectorTransfer =
       sectorId !== undefined &&
       sectorId !== conv.sectorId &&
-      assigneeId === undefined &&
-      status === undefined &&
+      (userRole === "vendedor" || (assigneeId === undefined && status === undefined)) &&
       conv.status !== "resolved" &&
       conv.status !== "archived";
+    if (isSectorTransfer && userRole === "vendedor") {
+      delete update.status;
+      delete update.isArchived;
+    }
     if (isSectorTransfer) {
       update.assigneeId = null;
       update.status = "pending";
@@ -693,6 +725,11 @@ router.post("/chat/conversations/:id/claim", requireAuth, async (req, res): Prom
   const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+  // Permissão "ver_potenciais": sem ela o vendedor não pode assumir leads novos.
+  if (isPotentialConversation(conv) && !(await checkPerm(req, "ver_potenciais"))) {
+    res.status(403).json({ error: "Você não tem permissão para assumir Potenciais. Fale com o administrador." });
+    return;
+  }
   // Only conversations that are not already taken by someone else may be claimed.
   // Re-claiming a conversation already assigned to the current user is idempotent.
   if (conv.assigneeId != null && conv.assigneeId !== req.session.userId) {
@@ -775,7 +812,7 @@ router.delete("/chat/conversations/:id", requireAdmin, async (req, res): Promise
 });
 
 // ─── Create conversation manually ─────────────────────────────────────────
-router.post("/chat/conversations", requireAuth, async (req, res): Promise<void> => {
+router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento"), async (req, res): Promise<void> => {
   const { phone, name, channel, sectorId } = req.body as {
     phone?: string; name?: string; channel?: string; sectorId?: number;
   };
@@ -1092,7 +1129,7 @@ router.post("/chat/webhook/whatsapp", async (req: Request, res: Response): Promi
 // conversation. Human always reviews/edits; nothing is sent automatically.
 // Fails clearly (503) when the AI provider is unavailable so the rest of the
 // attendance keeps working.
-router.post("/chat/conversations/:id/suggest-reply", requireAuth, async (req, res): Promise<void> => {
+router.post("/chat/conversations/:id/suggest-reply", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
 
   const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
@@ -1188,7 +1225,7 @@ router.post("/chat/conversations/:id/suggest-reply", requireAuth, async (req, re
 
 // ── AI text correction ───────────────────────────────────────────────────
 // Corrects spelling/grammar of a drafted message without changing its meaning.
-router.post("/chat/correct-text", requireAuth, async (req, res): Promise<void> => {
+router.post("/chat/correct-text", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
   const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
   if (!text) { res.status(400).json({ error: "Texto vazio" }); return; }
   if (text.length > 4000) { res.status(400).json({ error: "Texto muito longo" }); return; }

@@ -51,6 +51,7 @@ router.post("/auth/login", async (req, res): Promise<void> => {
       role: user.role,
       sectorId: user.sectorId,
       sector,
+      permissions: user.permissions ?? null,
     },
   });
 });
@@ -89,6 +90,7 @@ router.get("/auth/me", requireAuth, async (req, res): Promise<void> => {
       role: user.role,
       sectorId: user.sectorId,
       sector,
+      permissions: user.permissions ?? null,
     },
   });
 });

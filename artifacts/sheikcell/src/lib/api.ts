@@ -14,6 +14,31 @@ async function req<T>(path: string, opts?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export type VendedorPermissions = Record<string, boolean> | null;
+
+// Chaves de permissão individuais do vendedor (null/ausente = liberado).
+export const PERMISSION_KEYS = [
+  "ver_potenciais",
+  "transferir",
+  "finalizar",
+  "criar_atendimento",
+  "usar_ia",
+  "crm",
+  "tarefas",
+  "enviar_midia",
+] as const;
+
+export const PERMISSION_LABELS: Record<string, string> = {
+  ver_potenciais: "Ver e assumir Potenciais (leads novos)",
+  transferir: "Transferir conversa para outro setor",
+  finalizar: "Finalizar atendimentos",
+  criar_atendimento: "Criar novo atendimento manualmente",
+  usar_ia: "Usar sugestão de resposta com IA",
+  crm: "Acessar o CRM",
+  tarefas: "Acessar o quadro de Tarefas",
+  enviar_midia: "Enviar fotos, áudios e arquivos",
+};
+
 export type User = {
   id: number;
   name: string;
@@ -21,7 +46,15 @@ export type User = {
   role: string;
   sectorId: number | null;
   sector: Sector | null;
+  permissions?: VendedorPermissions;
 };
+
+// Vendedor tem a permissão? (admin/supervisor sempre têm; ausência = liberado)
+export function can(user: User | null, key: string): boolean {
+  if (!user) return false;
+  if (user.role !== "vendedor") return true;
+  return user.permissions?.[key] !== false;
+}
 
 export type InternalConversation = {
   id: number;
@@ -400,7 +433,7 @@ export const api = {
       list: () => req<(User & { isActive: boolean; createdAt: string })[]>("/admin/users"),
       create: (data: { name: string; email: string; password: string; role: string; sectorId: number }) =>
         req<User>("/admin/users", { method: "POST", body: JSON.stringify(data) }),
-      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorId: number; isActive: boolean }>) =>
+      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorId: number; isActive: boolean; permissions: Record<string, boolean> }>) =>
         req<User>(`/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     },
   },

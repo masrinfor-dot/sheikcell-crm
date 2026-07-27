@@ -2,9 +2,13 @@ import { Router, type IRouter } from "express";
 import { db, tasksTable, sectorsTable, usersTable } from "@workspace/db";
 import { eq, desc, asc } from "drizzle-orm";
 import { requireAuth, isGlobalRole } from "../middlewares/auth";
+import { requirePerm } from "../lib/permissions";
 import type { Request } from "express";
 
 const router: IRouter = Router();
+
+// Permissão individual "tarefas": vendedor sem ela não acessa o quadro.
+router.use("/tasks", requirePerm("tarefas"));
 
 const STATUSES = ["todo", "doing", "done"];
 const PRIORITIES = ["baixa", "media", "alta"];

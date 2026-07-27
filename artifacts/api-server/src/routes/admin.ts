@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable } from "@workspace/db";
 import { eq, sql, desc, and, gte, isNull, isNotNull, notInArray } from "drizzle-orm";
 import { requireAdmin, requireAdminOrSupervisor } from "../middlewares/auth";
+import { sanitizePermissions } from "../lib/permissions";
 
 const router: IRouter = Router();
 
@@ -96,6 +97,7 @@ router.get("/admin/users", requireAdmin, async (_req, res): Promise<void> => {
       role: usersTable.role,
       sectorId: usersTable.sectorId,
       isActive: usersTable.isActive,
+      permissions: usersTable.permissions,
       createdAt: usersTable.createdAt,
     })
     .from(usersTable)
@@ -151,13 +153,14 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   const id = parseInt(rawId, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
 
-  const { name, email, password, role, sectorId, isActive } = req.body as {
+  const { name, email, password, role, sectorId, isActive, permissions } = req.body as {
     name?: string;
     email?: string;
     password?: string;
     role?: string;
     sectorId?: number;
     isActive?: boolean;
+    permissions?: unknown;
   };
 
   const updateData: Record<string, unknown> = {};
@@ -166,6 +169,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   if (role) updateData.role = role;
   if (sectorId !== undefined) updateData.sectorId = sectorId;
   if (isActive !== undefined) updateData.isActive = isActive;
+  if (permissions !== undefined) updateData.permissions = sanitizePermissions(permissions);
   if (password) updateData.passwordHash = await bcrypt.hash(password, 10);
 
   const [user] = await db.update(usersTable).set(updateData).where(eq(usersTable.id, id)).returning();
