@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { db, usersTable, queueEntriesTable, sectorsTable, attendanceLogsTable } from "@workspace/db";
-import { eq, sql, desc, and, gte } from "drizzle-orm";
+import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable } from "@workspace/db";
+import { eq, sql, desc, and, gte, isNull, isNotNull, notInArray } from "drizzle-orm";
 import { requireAdmin, requireAdminOrSupervisor } from "../middlewares/auth";
 
 const router: IRouter = Router();
@@ -13,17 +13,26 @@ router.get("/admin/summary", requireAdminOrSupervisor, async (_req, res): Promis
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
 
+  // A Visão Geral espelha a Central de Atendimento (tabela conversations):
+  // "aguardando"  = conversas sem responsável ainda abertas (potenciais + pendentes);
+  // "em atendimento" = conversas com responsável e não finalizadas;
+  // "finalizados hoje" segue vindo do histórico (attendance_logs).
+  const notFinished = and(
+    eq(conversationsTable.isArchived, false),
+    notInArray(conversationsTable.status, ["resolved", "archived"]),
+  )!;
+
   const summary = await Promise.all(
     sectors.map(async (sector) => {
       const [waiting] = await db
         .select({ count: sql<number>`count(*)` })
-        .from(queueEntriesTable)
-        .where(and(eq(queueEntriesTable.sectorId, sector.id), eq(queueEntriesTable.status, "waiting")));
+        .from(conversationsTable)
+        .where(and(eq(conversationsTable.sectorId, sector.id), isNull(conversationsTable.assigneeId), notFinished));
 
       const [inProgress] = await db
         .select({ count: sql<number>`count(*)` })
-        .from(queueEntriesTable)
-        .where(and(eq(queueEntriesTable.sectorId, sector.id), eq(queueEntriesTable.status, "in_progress")));
+        .from(conversationsTable)
+        .where(and(eq(conversationsTable.sectorId, sector.id), isNotNull(conversationsTable.assigneeId), notFinished));
 
       const [completedToday] = await db
         .select({ count: sql<number>`count(*)` })
@@ -36,11 +45,11 @@ router.get("/admin/summary", requireAdminOrSupervisor, async (_req, res): Promis
         .from(usersTable)
         .where(and(eq(usersTable.sectorId, sector.id), eq(usersTable.isActive, true)));
 
-      // Attendants currently serving a client (have an in_progress entry assigned to them)
+      // Vendedores atualmente atendendo (responsáveis por conversa em andamento)
       const busyAttendants = await db
-        .selectDistinct({ attendantId: queueEntriesTable.attendantId })
-        .from(queueEntriesTable)
-        .where(and(eq(queueEntriesTable.sectorId, sector.id), eq(queueEntriesTable.status, "in_progress")));
+        .selectDistinct({ attendantId: conversationsTable.assigneeId })
+        .from(conversationsTable)
+        .where(and(eq(conversationsTable.sectorId, sector.id), isNotNull(conversationsTable.assigneeId), notFinished));
 
       return {
         sector,
