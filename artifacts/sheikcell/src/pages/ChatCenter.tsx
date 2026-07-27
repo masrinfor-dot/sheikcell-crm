@@ -137,8 +137,19 @@ function Avatar({ name, src, size = "md" }: { name: string; src?: string | null;
   );
 }
 
+// Conexão de WhatsApp (número de atendimento) — usada para etiquetar de qual
+// número a conversa está chegando quando há mais de uma conexão pareada.
+type WaSessionInfo = { sessionKey: string; displayName: string | null; phoneNumber: string | null };
+
+function waSessionLabel(key: string, sessions: WaSessionInfo[]): string {
+  const s = sessions.find((x) => x.sessionKey === key);
+  if (s?.displayName) return s.displayName;
+  if (s?.phoneNumber) return s.phoneNumber.replace(/@.*$/, "");
+  return key === "default" ? "Principal" : key;
+}
+
 // ─── Conversation list item ─────────────────────────────────────────────────
-function ConvItem({ conv, active, onClick }: { conv: Conversation; active: boolean; onClick: () => void }) {
+function ConvItem({ conv, active, onClick, sessionBadge }: { conv: Conversation; active: boolean; onClick: () => void; sessionBadge?: string | null }) {
   return (
     <button
       onClick={onClick}
@@ -157,9 +168,9 @@ function ConvItem({ conv, active, onClick }: { conv: Conversation; active: boole
         <div className="flex items-center justify-between gap-1">
           <p className="text-xs text-muted-foreground truncate flex-1">{conv.lastMessage ?? "Sem mensagens"}</p>
           <div className="flex items-center gap-1 shrink-0">
-            {conv.sessionKey && conv.sessionKey !== "default" && (
-              <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full font-semibold truncate max-w-[80px]" title={`Recebida pela conexão ${conv.sessionKey}`}>
-                {conv.sessionKey}
+            {sessionBadge && (
+              <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full font-semibold truncate max-w-[90px]" title={`Recebida pelo número: ${sessionBadge}`}>
+                {sessionBadge}
               </span>
             )}
             {channelIcon(conv.channel, isGroupConv(conv))}
@@ -341,6 +352,7 @@ export default function ChatCenter() {
   const [finalizing, setFinalizing] = useState(false);
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [chatUsers, setChatUsers] = useState<{ id: number; name: string; role: string }[]>([]);
+  const [waSessions, setWaSessions] = useState<WaSessionInfo[]>([]);
   const [newForm, setNewForm] = useState({ name: "", phone: "", channel: "whatsapp", sectorId: "" });
 
   const [filePreview, setFilePreview] = useState<{ file: File; previewUrl: string | null } | null>(null);
@@ -701,6 +713,7 @@ export default function ChatCenter() {
     api.sectors.list().then(setSectors).catch(() => {});
     api.chatUsers().then(setChatUsers).catch(() => {});
     api.chat.labels.list().then(setLabels).catch(() => {});
+    api.chat.waSessions().then(setWaSessions).catch(() => {});
   }, []);
 
   // ── Etiquetas (labels) management ──
@@ -1330,7 +1343,19 @@ export default function ChatCenter() {
             </div>
           ) : (
             filteredConvs.map((conv) => (
-              <ConvItem key={conv.id} conv={conv} active={conv.id === activeId} onClick={() => setActiveId(conv.id)} />
+              <ConvItem
+                key={conv.id}
+                conv={conv}
+                active={conv.id === activeId}
+                onClick={() => setActiveId(conv.id)}
+                sessionBadge={
+                  // Só etiqueta quando há mais de um número de atendimento
+                  // pareado (ou a conversa vem de uma conexão secundária).
+                  conv.channel === "whatsapp" && (waSessions.length > 1 || conv.sessionKey !== "default")
+                    ? waSessionLabel(conv.sessionKey, waSessions)
+                    : null
+                }
+              />
             ))
           )}
         </div>
@@ -1364,6 +1389,11 @@ export default function ChatCenter() {
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 {channelIcon(activeConv.channel, isGroupConv(activeConv))}
                 <span>{isGroupConv(activeConv) ? "Grupo do WhatsApp" : activeConv.phone}</span>
+                {activeConv.channel === "whatsapp" && (waSessions.length > 1 || activeConv.sessionKey !== "default") && (
+                  <span className="px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-semibold truncate max-w-[140px]" style={{ fontSize: "10px" }} title="Número de atendimento pelo qual esta conversa chega">
+                    via {waSessionLabel(activeConv.sessionKey, waSessions)}
+                  </span>
+                )}
                 {activeConv.sector && (
                   <span className="px-1.5 py-0.5 rounded-full text-white font-medium" style={{ backgroundColor: activeConv.sector.color, fontSize: "10px" }}>
                     {activeConv.sector.name}

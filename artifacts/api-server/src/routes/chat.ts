@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
-import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable } from "@workspace/db";
+import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable } from "@workspace/db";
 import { eq, desc, and, or, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { requireAuth, requireAdminOrSupervisor } from "../middlewares/auth";
 import {
@@ -721,6 +721,23 @@ router.post("/chat/conversations/:id/claim", requireAuth, async (req, res): Prom
     broadcast("conversation_hidden", { id: updated.id, keepFor: claimRecipients, sectorId: updated.sectorId }, conv.sectorId, wasPotential);
   }
   res.json(updated);
+});
+
+// ─── WhatsApp connections (read-only, for labeling) ────────────────────────
+// Lista leve das conexões de WhatsApp (número de atendimento) para que o
+// frontend identifique por qual conexão cada conversa chega. Diferente de
+// /whatsapp/sessions (admin), aqui qualquer usuário logado pode ler — só
+// nome/numero, sem QR nem status detalhado.
+router.get("/chat/wa-sessions", requireAuth, async (_req, res): Promise<void> => {
+  const rows = await db
+    .select({
+      sessionKey: whatsappSessionsTable.sessionKey,
+      displayName: whatsappSessionsTable.displayName,
+      phoneNumber: whatsappSessionsTable.phoneNumber,
+    })
+    .from(whatsappSessionsTable)
+    .orderBy(whatsappSessionsTable.id);
+  res.json(rows);
 });
 
 // ─── Create conversation manually ─────────────────────────────────────────

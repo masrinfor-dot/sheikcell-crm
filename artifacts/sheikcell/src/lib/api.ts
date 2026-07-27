@@ -263,6 +263,8 @@ export const api = {
     remove: (id: number) => req<{ ok: boolean }>(`/queue/${id}`, { method: "DELETE" }),
   },
   chat: {
+    // Conexões de WhatsApp (números de atendimento) — para etiquetar conversas.
+    waSessions: () => req<{ sessionKey: string; displayName: string | null; phoneNumber: string | null }[]>("/chat/wa-sessions"),
     conversations: (params?: { search?: string; status?: string; label?: string; sectorId?: number }) => {
       const qs = new URLSearchParams();
       if (params?.search) qs.set("search", params.search);
