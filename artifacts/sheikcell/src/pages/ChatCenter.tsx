@@ -66,14 +66,17 @@ function isRestrictedConv(c: Conversation): boolean {
 function isVisibleToMe(c: Conversation, user: User | null): boolean {
   if (!user) return false;
   if (user.role === "admin") return true;
+  if (user.role === "supervisor") {
+    // Supervisor com setor: só o próprio setor + potenciais (sem setor = global).
+    if (user.sectorId == null || c.sectorId === user.sectorId) return true;
+    return conversationCategory(c) === "potenciais";
+  }
   if (isRestrictedConv(c)) {
-    if (user.role === "supervisor") return user.sectorId == null || c.sectorId === user.sectorId;
     if (c.assigneeId === user.id) return true;
     // Eventos SSE trazem a linha crua (sem participants); nesse caso não dá
     // para decidir aqui — o chamador deve mesclar com o estado local antes.
     return (c.participants ?? []).some((p) => p.id === user.id);
   }
-  if (user.role === "supervisor") return true;
   if (c.sectorId === user.sectorId) return true;
   return conversationCategory(c) === "potenciais";
 }

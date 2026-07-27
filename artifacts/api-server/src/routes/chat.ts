@@ -44,11 +44,13 @@ router.get("/chat/events", requireAuth, (req: Request, res: Response): void => {
   // - Demais eventos: potenciais chegam a todos; o resto é escopado por setor.
   const allowed = (ev: { sectorId: number | null; isPotential?: boolean; restrictedTo?: number[] | null }): boolean => {
     if (userRole === "admin") return true;
-    if (ev.restrictedTo != null) {
-      if (userRole === "supervisor") return userSectorId == null || ev.sectorId === userSectorId;
-      return ev.restrictedTo.includes(userId);
+    if (userRole === "supervisor") {
+      // Supervisor com setor: só eventos do próprio setor + potenciais.
+      if (userSectorId == null || ev.sectorId === userSectorId) return true;
+      return ev.restrictedTo == null && ev.isPotential === true;
     }
-    if (userRole === "supervisor" || ev.isPotential) return true;
+    if (ev.restrictedTo != null) return ev.restrictedTo.includes(userId);
+    if (ev.isPotential) return true;
     return ev.sectorId != null && ev.sectorId === userSectorId;
   };
 
@@ -134,8 +136,12 @@ async function canAccessConversation(
   if (userRole === "admin") return true;
   const userId = req.session.userId!;
   const userSectorId = req.session.userSectorId;
+  if (userRole === "supervisor") {
+    // Supervisor com setor: acesso apenas ao próprio setor + potenciais.
+    if (userSectorId == null || conv.sectorId === userSectorId) return true;
+    return isPotentialConversation(conv);
+  }
   if (isRestrictedConversation(conv)) {
-    if (userRole === "supervisor") return userSectorId == null || conv.sectorId === userSectorId;
     if (conv.assigneeId === userId) return true;
     const [p] = await db.select({ userId: conversationParticipantsTable.userId })
       .from(conversationParticipantsTable)
@@ -146,7 +152,6 @@ async function canAccessConversation(
       .limit(1);
     return !!p;
   }
-  if (userRole === "supervisor") return true;
   if (conv.sectorId != null && conv.sectorId === userSectorId) return true;
   return isPotentialConversation(conv);
 }
@@ -171,12 +176,17 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
   if (userRole === "admin") {
     if (sectorId) conditions.push(eq(conversationsTable.sectorId, Number(sectorId)));
   } else if (userRole === "supervisor") {
-    // Supervisor: tudo do escopo normal, mas restritas só do próprio setor.
+    // Supervisor com setor: só vê o próprio setor (pendentes, ativas e
+    // resolvidas), além dos potenciais (leads novos, cross-sector).
     // Supervisor sem setor definido permanece global (não há como escopar).
     if (userSectorId) {
+      const potencialSup = and(
+        isNull(conversationsTable.assigneeId),
+        notInArray(conversationsTable.status, [...POTENTIAL_EXCLUDED_STATUSES]),
+      )!;
       conditions.push(or(
-        sql`NOT (${restricted})`,
         eq(conversationsTable.sectorId, userSectorId),
+        potencialSup,
       )!);
     }
     if (sectorId) conditions.push(eq(conversationsTable.sectorId, Number(sectorId)));
