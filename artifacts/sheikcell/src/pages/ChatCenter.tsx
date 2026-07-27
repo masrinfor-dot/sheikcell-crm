@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { api, can, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField } from "@/lib/api";
+import { api, can, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -7,7 +7,7 @@ import {
   MessageCircle, CheckCheck, AlertCircle, Tag, Filter,
   Smartphone, Instagram, UserCircle2, Circle,
   ArrowRightLeft, FileText, Volume2, Image, Video, Mic, Users, Paperclip, IdCard,
-  Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX
+  Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX, Zap
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 
@@ -355,6 +355,8 @@ export default function ChatCenter() {
   const [finalizing, setFinalizing] = useState(false);
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [chatUsers, setChatUsers] = useState<{ id: number; name: string; role: string; sectorId?: number | null }[]>([]);
+  const [quickReplies, setQuickReplies] = useState<QuickReply[]>([]);
+  const [showQuickReplies, setShowQuickReplies] = useState(false);
   const [waSessions, setWaSessions] = useState<WaSessionInfo[]>([]);
   const [newForm, setNewForm] = useState({ name: "", phone: "", channel: "whatsapp", sectorId: "" });
 
@@ -724,6 +726,7 @@ export default function ChatCenter() {
   useEffect(() => {
     api.sectors.list().then(setSectors).catch(() => {});
     api.chatUsers().then(setChatUsers).catch(() => {});
+    api.chat.quickReplies.list().then(setQuickReplies).catch(() => {});
     api.chat.labels.list().then(setLabels).catch(() => {});
     api.chat.waSessions().then(setWaSessions).catch(() => {});
   }, []);
@@ -1760,6 +1763,37 @@ export default function ChatCenter() {
             >
               <Paperclip className="w-4 h-4" />
             </button>
+            )}
+            {quickReplies.length > 0 && (
+            <div className="relative shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowQuickReplies((v) => !v)}
+                disabled={sending}
+                title="Mensagens rápidas"
+                data-testid="button-quick-replies"
+                className="w-9 h-9 rounded-full flex items-center justify-center text-amber-600 bg-amber-100 hover:bg-amber-200 transition disabled:opacity-40"
+              >
+                <Zap className="w-4 h-4" />
+              </button>
+              {showQuickReplies && (
+                <div className="absolute bottom-11 left-0 bg-white border border-border rounded-xl shadow-lg z-30 w-72 max-h-64 overflow-y-auto">
+                  <div className="px-3 py-2 border-b border-border text-xs font-semibold text-muted-foreground">Mensagens rápidas</div>
+                  {quickReplies.map((q) => (
+                    <button key={q.id} type="button" data-testid={`button-quickreply-${q.id}`}
+                      onClick={() => {
+                        setMsgText((prev) => prev ? `${prev} ${q.content}` : q.content);
+                        setShowQuickReplies(false);
+                        inputRef.current?.focus();
+                      }}
+                      className="w-full text-left px-3 py-2.5 hover:bg-secondary transition">
+                      <p className="text-xs font-semibold">{q.title}</p>
+                      <p className="text-[11px] text-muted-foreground line-clamp-2">{q.content}</p>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             )}
             {can(user, "usar_ia") && (<>
             <button

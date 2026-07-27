@@ -229,6 +229,14 @@ export type Conversation = {
   participants: { id: number; name: string }[];
 };
 
+export type QuickReply = {
+  id: number;
+  title: string;
+  content: string;
+  sectorId: number | null;
+  createdAt: string;
+};
+
 export type ChatLabel = {
   id: number;
   name: string;
@@ -342,6 +350,14 @@ export const api = {
       remove: (convId: number, userId: number) =>
         req<{ ok: boolean }>(`/chat/conversations/${convId}/participants/${userId}`, { method: "DELETE" }),
     },
+    quickReplies: {
+      list: () => req<QuickReply[]>("/chat/quick-replies"),
+      create: (data: { title: string; content: string; sectorId?: number | null }) =>
+        req<QuickReply>("/chat/quick-replies", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<{ title: string; content: string; sectorId: number | null }>) =>
+        req<QuickReply>(`/chat/quick-replies/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/chat/quick-replies/${id}`, { method: "DELETE" }),
+    },
     labels: {
       list: () => req<ChatLabel[]>("/chat/labels"),
       create: (data: { name: string; color?: string; sortOrder?: number }) =>
@@ -352,6 +368,7 @@ export const api = {
     },
   },
   chatUsers: () => req<{ id: number; name: string; role: string; sectorId: number | null }[]>("/chat/users"),
+
   internalChat: {
     conversations: () => req<InternalConversation[]>("/internal-chat/conversations"),
     startDirect: (userId: number) =>

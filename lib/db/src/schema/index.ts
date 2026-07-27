@@ -11,3 +11,4 @@ export * from "./whatsapp_sessions";
 export * from "./whatsapp_auth_state";
 export * from "./internal_chat";
 export * from "./tasks";
+export * from "./quick_replies";

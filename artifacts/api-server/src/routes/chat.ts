@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
-import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable } from "@workspace/db";
+import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable } from "@workspace/db";
 import { eq, desc, and, or, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireAdminOrSupervisor } from "../middlewares/auth";
 import { checkPerm, requirePerm } from "../lib/permissions";
@@ -897,6 +897,48 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
 });
 
 // ─── Etiquetas (chat labels) management ───────────────────────────────────
+// ─── Quick replies (mensagens rápidas) ─────────────────────────────────────
+// Leitura: qualquer usuário logado vê as globais + as do próprio setor.
+// Gestão (criar/editar/excluir): admin e supervisor.
+router.get("/chat/quick-replies", requireAuth, async (req, res): Promise<void> => {
+  const role = req.session.userRole!;
+  const sectorId = req.session.userSectorId ?? null;
+  const rows = await db.select().from(quickRepliesTable).orderBy(asc(quickRepliesTable.title));
+  const visible = (role === "admin" || role === "supervisor")
+    ? rows
+    : rows.filter((r) => r.sectorId == null || r.sectorId === sectorId);
+  res.json(visible);
+});
+
+router.post("/chat/quick-replies", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const { title, content, sectorId } = req.body as { title?: string; content?: string; sectorId?: number | null };
+  if (!title?.trim() || !content?.trim()) { res.status(400).json({ error: "Título e mensagem são obrigatórios" }); return; }
+  const [created] = await db.insert(quickRepliesTable).values({
+    title: title.trim().slice(0, 80),
+    content: content.trim().slice(0, 2000),
+    sectorId: sectorId ?? null,
+  }).returning();
+  res.status(201).json(created);
+});
+
+router.patch("/chat/quick-replies/:qrId", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const qrId = parseInt(Array.isArray(req.params.qrId) ? req.params.qrId[0] : req.params.qrId, 10);
+  const { title, content, sectorId } = req.body as { title?: string; content?: string; sectorId?: number | null };
+  const update: Partial<typeof quickRepliesTable.$inferInsert> = {};
+  if (title !== undefined) update.title = title.trim().slice(0, 80);
+  if (content !== undefined) update.content = content.trim().slice(0, 2000);
+  if (sectorId !== undefined) update.sectorId = sectorId;
+  const [updated] = await db.update(quickRepliesTable).set(update).where(eq(quickRepliesTable.id, qrId)).returning();
+  if (!updated) { res.status(404).json({ error: "Mensagem rápida não encontrada" }); return; }
+  res.json(updated);
+});
+
+router.delete("/chat/quick-replies/:qrId", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const qrId = parseInt(Array.isArray(req.params.qrId) ? req.params.qrId[0] : req.params.qrId, 10);
+  await db.delete(quickRepliesTable).where(eq(quickRepliesTable.id, qrId));
+  res.json({ ok: true });
+});
+
 router.get("/chat/labels", requireAuth, async (_req, res): Promise<void> => {
   const labels = await db
     .select()

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, PERMISSION_KEYS, PERMISSION_LABELS, type SectorSummary, type AttendanceLog, type Sector } from "@/lib/api";
+import { api, PERMISSION_KEYS, PERMISSION_LABELS, type SectorSummary, type AttendanceLog, type Sector, type QuickReply } from "@/lib/api";
 import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
@@ -12,10 +12,10 @@ import TaskBoard from "./TaskBoard";
 import {
   Smartphone, LogOut, LayoutDashboard, ClipboardList,
   Settings, Users, RefreshCw, Plus, X, Clock, CheckCircle,
-  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck
+  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2
 } from "lucide-react";
 
-type Tab = "dashboard" | "chat" | "equipe" | "tarefas" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp";
+type Tab = "dashboard" | "chat" | "equipe" | "tarefas" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies";
 
 type WASession = {
   sessionKey: string;
@@ -215,6 +215,41 @@ export default function AdminDashboard() {
   const isSupervisor = user?.role === "supervisor";
   const [showMoreNav, setShowMoreNav] = useState(false);
 
+  // ── Mensagens rápidas (aba de configuração) ──
+  const [quickReplies, setQuickReplies] = useState<QuickReply[]>([]);
+  const [qrForm, setQrForm] = useState<{ id: number | null; title: string; content: string; sectorId: string } | null>(null);
+  const [savingQr, setSavingQr] = useState(false);
+  useEffect(() => {
+    if (tab === "quickreplies") api.chat.quickReplies.list().then(setQuickReplies).catch(() => {});
+  }, [tab]);
+  const saveQuickReply = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!qrForm || savingQr) return;
+    setSavingQr(true);
+    try {
+      const data = {
+        title: qrForm.title, content: qrForm.content,
+        sectorId: qrForm.sectorId ? Number(qrForm.sectorId) : null,
+      };
+      const saved = qrForm.id
+        ? await api.chat.quickReplies.update(qrForm.id, data)
+        : await api.chat.quickReplies.create(data);
+      setQuickReplies((prev) => qrForm.id
+        ? prev.map((q) => q.id === saved.id ? saved : q)
+        : [...prev, saved].sort((a, b) => a.title.localeCompare(b.title)));
+      setQrForm(null);
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setSavingQr(false); }
+  };
+  const deleteQuickReply = async (id: number) => {
+    if (!confirm("Excluir esta mensagem rápida?")) return;
+    try {
+      await api.chat.quickReplies.remove(id);
+      setQuickReplies((prev) => prev.filter((q) => q.id !== id));
+    } catch { toast({ title: "Erro ao excluir", variant: "destructive" }); }
+  };
+
   const allTabs = [
     { id: "dashboard" as Tab, label: "Visão Geral", icon: LayoutDashboard, adminOnly: false },
     { id: "chat" as Tab, label: "Atendimento", icon: MessageCircle, adminOnly: false },
@@ -225,6 +260,7 @@ export default function AdminDashboard() {
     { id: "history" as Tab, label: "Histórico", icon: ClipboardList, adminOnly: false },
     { id: "users" as Tab, label: "Usuários", icon: Users, adminOnly: true },
     { id: "sectors" as Tab, label: "Setores", icon: Settings, adminOnly: true },
+    { id: "quickreplies" as Tab, label: "Msgs Rápidas", icon: Zap, adminOnly: true },
     { id: "whatsapp" as Tab, label: "WhatsApp", icon: PhoneCall, adminOnly: true },
   ];
   const tabs = allTabs.filter((t) => !t.adminOnly || isAdmin);
@@ -675,6 +711,75 @@ export default function AdminDashboard() {
         )}
 
         {/* === SECTORS TAB === */}
+        {tab === "quickreplies" && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="font-bold">Mensagens Rápidas</h2>
+                <p className="text-xs text-muted-foreground">Respostas prontas que os vendedores inserem no chat com um clique (botão ⚡ na conversa).</p>
+              </div>
+              <button onClick={() => setQrForm({ id: null, title: "", content: "", sectorId: "" })} data-testid="button-add-quickreply"
+                className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition shrink-0">
+                <Plus className="w-3.5 h-3.5" /> Nova Mensagem
+              </button>
+            </div>
+            {quickReplies.length === 0 ? (
+              <div className="shk-card p-8 text-center text-sm text-muted-foreground">
+                Nenhuma mensagem rápida ainda. Crie a primeira — ex.: saudação, horário de funcionamento, formas de pagamento.
+              </div>
+            ) : (
+              <div className="grid sm:grid-cols-2 gap-4">
+                {quickReplies.map((q) => (
+                  <div key={q.id} className="shk-card p-4 flex items-start gap-3" data-testid={`card-quickreply-${q.id}`}>
+                    <div className="w-9 h-9 rounded-xl bg-amber-100 flex items-center justify-center shrink-0">
+                      <Zap className="w-4 h-4 text-amber-600" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-bold text-sm truncate">{q.title}</p>
+                      <p className="text-xs text-muted-foreground whitespace-pre-wrap line-clamp-3">{q.content}</p>
+                      <p className="text-[10px] text-muted-foreground mt-1">
+                        {q.sectorId ? (sectors.find((s) => s.id === q.sectorId)?.name ?? "Setor") : "Todos os setores"}
+                      </p>
+                    </div>
+                    <button onClick={() => setQrForm({ id: q.id, title: q.title, content: q.content, sectorId: q.sectorId ? String(q.sectorId) : "" })}
+                      data-testid={`button-edit-quickreply-${q.id}`}
+                      className="p-2 rounded-lg hover:bg-secondary transition shrink-0"><Pencil className="w-4 h-4 text-muted-foreground" /></button>
+                    <button onClick={() => deleteQuickReply(q.id)} data-testid={`button-delete-quickreply-${q.id}`}
+                      className="p-2 rounded-lg hover:bg-red-50 transition shrink-0"><Trash2 className="w-4 h-4 text-red-500" /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {qrForm && (
+              <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setQrForm(null)}>
+                <form onSubmit={saveQuickReply} onClick={(e) => e.stopPropagation()}
+                  className="bg-white rounded-2xl p-5 w-full max-w-md space-y-3 shadow-xl">
+                  <div className="flex items-center justify-between">
+                    <h3 className="font-bold text-sm">{qrForm.id ? "Editar mensagem rápida" : "Nova mensagem rápida"}</h3>
+                    <button type="button" onClick={() => setQrForm(null)} className="p-1 rounded hover:bg-secondary"><X className="w-4 h-4" /></button>
+                  </div>
+                  <input value={qrForm.title} onChange={(e) => setQrForm({ ...qrForm, title: e.target.value })}
+                    placeholder="Título (ex.: Saudação)" required maxLength={80} data-testid="input-quickreply-title"
+                    className="w-full border border-border rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/20" />
+                  <textarea value={qrForm.content} onChange={(e) => setQrForm({ ...qrForm, content: e.target.value })}
+                    placeholder="Texto da mensagem que será inserido no chat" required rows={4} maxLength={2000} data-testid="input-quickreply-content"
+                    className="w-full border border-border rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/20 resize-none" />
+                  <select value={qrForm.sectorId} onChange={(e) => setQrForm({ ...qrForm, sectorId: e.target.value })}
+                    data-testid="select-quickreply-sector"
+                    className="w-full border border-border rounded-xl px-3 py-2 text-sm outline-none bg-white">
+                    <option value="">Todos os setores</option>
+                    {sectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </select>
+                  <button type="submit" disabled={savingQr} data-testid="button-save-quickreply"
+                    className="w-full py-2.5 bg-primary text-white rounded-xl text-sm font-semibold hover:bg-primary/90 transition disabled:opacity-50">
+                    {savingQr ? "Salvando..." : "Salvar"}
+                  </button>
+                </form>
+              </div>
+            )}
+          </div>
+        )}
+
         {tab === "sectors" && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
