@@ -72,7 +72,13 @@ type MsgNotification = {
   read: boolean;
 };
 
-function channelIcon(ch: string) {
+// Grupos e comunidades do WhatsApp: o campo "phone" guarda o JID do grupo.
+function isGroupConv(c: { phone: string }) {
+  return c.phone.includes("@g.us");
+}
+
+function channelIcon(ch: string, group?: boolean) {
+  if (group) return <Users className="w-3 h-3 text-green-600" />;
   if (ch === "whatsapp") return <Smartphone className="w-3 h-3 text-green-500" />;
   if (ch === "instagram") return <Instagram className="w-3 h-3 text-pink-500" />;
   return <MessageCircle className="w-3 h-3 text-muted-foreground" />;
@@ -140,7 +146,7 @@ function ConvItem({ conv, active, onClick }: { conv: Conversation; active: boole
                 {conv.sessionKey}
               </span>
             )}
-            {channelIcon(conv.channel)}
+            {channelIcon(conv.channel, isGroupConv(conv))}
             {conv.unreadCount > 0 && (
               <span className="bg-green-500 text-white text-xs rounded-full px-1.5 py-0.5 min-w-[18px] text-center font-bold">
                 {conv.unreadCount > 99 ? "99+" : conv.unreadCount}
@@ -951,6 +957,10 @@ export default function ChatCenter() {
   // bridging the Atendimento (chat) and CRM modules.
   const handleOpenCrm = async () => {
     if (!activeConv || crmLoading) return;
+    if (isGroupConv(activeConv)) {
+      toast({ title: "Grupos não são cadastrados no CRM" });
+      return;
+    }
     setCrmLoading(true);
     try {
       const c = await api.crm.autoRegister({ name: activeConv.name, phone: activeConv.phone, sectorId: activeConv.sectorId ?? undefined });
@@ -964,6 +974,12 @@ export default function ChatCenter() {
   // ── Informações side panel: load the linked CRM contact ──
   const loadInfoContact = useCallback(async () => {
     if (!activeConv) return;
+    if (isGroupConv(activeConv)) {
+      // Grupos não têm ficha de cliente no CRM.
+      setInfoContact(null);
+      setInfoLoading(false);
+      return;
+    }
     setInfoLoading(true);
     try {
       const c = await api.crm.autoRegister({ name: activeConv.name, phone: activeConv.phone, sectorId: activeConv.sectorId ?? undefined });
@@ -1298,8 +1314,8 @@ export default function ChatCenter() {
             <div className="flex-1 min-w-0">
               <p className="font-bold text-sm text-foreground truncate">{activeConv.name}</p>
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                {channelIcon(activeConv.channel)}
-                <span>{activeConv.phone}</span>
+                {channelIcon(activeConv.channel, isGroupConv(activeConv))}
+                <span>{isGroupConv(activeConv) ? "Grupo do WhatsApp" : activeConv.phone}</span>
                 {activeConv.sector && (
                   <span className="px-1.5 py-0.5 rounded-full text-white font-medium" style={{ backgroundColor: activeConv.sector.color, fontSize: "10px" }}>
                     {activeConv.sector.name}

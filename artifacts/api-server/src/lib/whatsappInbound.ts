@@ -47,6 +47,7 @@ export interface InboundWAPayload {
     key?: { remoteJid?: string; fromMe?: boolean; id?: string };
     message?: InboundWAMessageContent;
     pushName?: string;
+    groupSubject?: string;
     messageTimestamp?: number;
     mediaBase64?: string;
     mediaMimeType?: string;
@@ -167,6 +168,8 @@ async function upsertConversation(
   displayContent: string,
   sessionKey: string = "default",
   avatarUrl?: string,
+  // Grupos: mantém o nome da conversa sincronizado com o nome do grupo.
+  syncName: boolean = false,
 ) {
   // Same customer talking to two different WhatsApp numbers = two separate
   // conversations, so replies always go out through the number the customer
@@ -223,6 +226,7 @@ async function upsertConversation(
         updatedAt: new Date(),
         ...(reopen ? { status: "open", assigneeId: null } : {}),
         ...(avatarUrl && avatarUrl !== conv.avatarUrl ? { avatarUrl } : {}),
+        ...(syncName && pushName && pushName !== conv.name ? { name: pushName } : {}),
       })
       .where(eq(conversationsTable.id, conv.id))
       .returning();
@@ -237,13 +241,19 @@ async function upsertConversation(
 
 export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   const fromMe = body.data?.key?.fromMe ?? body.fromMe ?? false;
+  if (fromMe) return;
   const isGroup = body.isGroupMsg ?? (body.data?.key?.remoteJid?.includes("@g.us") ?? false);
-  if (fromMe || isGroup) return;
 
   const remoteJid =
     body.data?.key?.remoteJid ?? (body.phone ? `${body.phone}@s.whatsapp.net` : null);
-  const phone = remoteJid?.replace("@s.whatsapp.net", "").replace("@c.us", "") ?? "unknown";
+  // Grupos/comunidades: o identificador da conversa é o JID completo do grupo
+  // (não há telefone). Contatos 1:1 continuam usando só os dígitos.
+  const phone = isGroup
+    ? (remoteJid ?? "unknown")
+    : remoteJid?.replace("@s.whatsapp.net", "").replace("@c.us", "") ?? "unknown";
   const pushName = body.data?.pushName ?? body.senderName ?? phone;
+  // Nome da conversa: nome do grupo (subject) para grupos; nome do contato para 1:1.
+  const convName = isGroup ? (body.data?.groupSubject || "Grupo do WhatsApp") : pushName;
 
   const mediaType = body.data?.mediaType ?? null;
   const mediaBase64 = body.data?.mediaBase64 ?? null;
@@ -337,7 +347,12 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     typeof body.sessionKey === "string" && /^[a-z0-9][a-z0-9_-]{0,39}$/.test(body.sessionKey)
       ? body.sessionKey
       : "default";
-  const conv = await upsertConversation(phone, pushName, displayContent, sessionKey, body.data?.avatarUrl);
+  // Só sincroniza o nome quando o subject real do grupo veio na mensagem —
+  // nunca sobrescreve um nome existente com o rótulo genérico.
+  const conv = await upsertConversation(
+    phone, convName, displayContent, sessionKey, body.data?.avatarUrl,
+    isGroup && !!body.data?.groupSubject,
+  );
 
   const [msg] = await db
     .insert(messagesTable)

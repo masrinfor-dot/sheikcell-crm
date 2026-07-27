@@ -20,6 +20,8 @@ export async function ensureCrmContactForConversation(conv: {
   channel?: string | null;
 }): Promise<void> {
   try {
+    // Grupos/comunidades do WhatsApp não são clientes — não entram no CRM.
+    if ((conv.phone ?? "").includes("@g.us")) return;
     const normalizedPhone = (conv.phone ?? "").replace(/\D/g, "");
     if (!normalizedPhone) return;
 

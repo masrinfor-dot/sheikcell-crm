@@ -517,7 +517,8 @@ async function syncResolvedConversation(
   //    phone). The lookup is scoped to the conversation's effective sector so we
   //    never read or mutate a same-phone contact that belongs to another sector.
   const normalizedPhone = (conv.phone ?? "").replace(/\D/g, "");
-  if (normalizedPhone) {
+  // Grupos/comunidades não entram no CRM (não são um cliente com telefone).
+  if (normalizedPhone && !(conv.phone ?? "").includes("@g.us")) {
     const sectorCondition = effectiveSectorId != null
       ? eq(crmContactsTable.sectorId, effectiveSectorId)
       : isNull(crmContactsTable.sectorId);
@@ -988,7 +989,7 @@ router.post("/chat/conversations/:id/suggest-reply", requireAuth, async (req, re
   // conversation's sector — same rule used by the CRM sync helpers).
   const normalizedPhone = (conv.phone ?? "").replace(/\D/g, "");
   let contact: typeof crmContactsTable.$inferSelect | undefined;
-  if (normalizedPhone) {
+  if (normalizedPhone && !(conv.phone ?? "").includes("@g.us")) {
     const sectorCondition = conv.sectorId != null
       ? eq(crmContactsTable.sectorId, conv.sectorId)
       : isNull(crmContactsTable.sectorId);

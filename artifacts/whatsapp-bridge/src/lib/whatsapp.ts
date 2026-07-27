@@ -156,6 +156,11 @@ export async function sendWAMessage(sessionKey: string, to: string, text: string
     return;
   }
 
+  // Grupos/comunidades (@g.us) só existem no Baileys — a Meta Cloud API envia
+  // apenas para números; cair no fallback poderia entregar ao destino errado.
+  if (to.includes("@g.us")) {
+    throw new Error("WhatsApp não está conectado — envio para grupos requer a conexão Baileys ativa");
+  }
   // Fallback to Meta Cloud API — default session only.
   if (sessionKey !== DEFAULT_SESSION_KEY) {
     throw new Error(`WhatsApp não está conectado (conexão "${sessionKey}")`);
