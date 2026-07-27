@@ -14,7 +14,7 @@ import {
   type BufferedEvent,
 } from "../lib/sseEmitter";
 import { isPotentialConversation, isRestrictedConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES } from "../lib/conversationScope";
-import { ensureCrmContactForConversation } from "../lib/crmSync";
+import { ensureCrmContactForConversation, syncCrmAttendant } from "../lib/crmSync";
 import {
   processInboundWA,
   processMetaInboundWA,
@@ -654,6 +654,11 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
   if (assigneeId != null && assigneeId !== conv.assigneeId) {
     const [target] = await db.select().from(usersTable).where(eq(usersTable.id, assigneeId)).limit(1);
     if (!target || !target.isActive) { res.status(400).json({ error: "Vendedor de destino inválido" }); return; }
+    // Vendedor só transfere para outro vendedor — nunca para admin/supervisor.
+    if (userRole === "vendedor" && target.role !== "vendedor") {
+      res.status(400).json({ error: "Só é possível transferir para um vendedor" });
+      return;
+    }
     if (target.role === "vendedor" && target.sectorId != null) {
       const destSector = sectorId ?? conv.sectorId;
       if (destSector != null && target.sectorId !== destSector) {
@@ -733,6 +738,8 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
   // as everyone who can see it now.
   const wasPotential = isPotentialConversation(conv);
   const recipients = await restrictedRecipients(updated);
+  // Espelha o responsável no cartão do CRM (transferência p/ vendedor, etc.).
+  if (updated.assigneeId !== conv.assigneeId) await syncCrmAttendant(updated);
   broadcast("conversation_updated", updated, updated.sectorId, wasPotential || isPotentialConversation(updated), recipients);
   // Transição para RESTRITA (ganhou responsável ou foi finalizada): quem via a
   // conversa antes (setor/potencial) e não está na lista de autorizados precisa
@@ -791,11 +798,21 @@ router.post("/chat/conversations/:id/claim", requireAuth, async (req, res): Prom
   // NOT be broadcast cross-sector.
   const wasPotential = isPotentialConversation(conv);
 
+  // Atomic: only claims if still unassigned (or already mine) at write time —
+  // two vendedores clicking at the same time can't both take the conversation.
   const [updated] = await db.update(conversationsTable)
     .set(claimSet)
-    .where(eq(conversationsTable.id, id)).returning();
+    .where(and(
+      eq(conversationsTable.id, id),
+      or(isNull(conversationsTable.assigneeId), eq(conversationsTable.assigneeId, req.session.userId!)),
+    )).returning();
+  if (!updated) {
+    res.status(409).json({ error: "Conversa já está em atendimento por outro vendedor" });
+    return;
+  }
 
   const claimRecipients = await restrictedRecipients(updated);
+  await syncCrmAttendant(updated);
   broadcast("conversation_updated", updated, updated.sectorId, wasPotential, claimRecipients);
   // A conversa ficou restrita ao vendedor que assumiu: avisa quem a via antes
   // (potencial cross-sector ou fila do setor) para removê-la da lista.

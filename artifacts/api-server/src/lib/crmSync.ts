@@ -1,6 +1,55 @@
-import { db, crmContactsTable } from "@workspace/db";
+import { db, crmContactsTable, usersTable, sectorsTable } from "@workspace/db";
 import { eq, and, isNull } from "drizzle-orm";
 import { logger } from "./logger";
+import { broadcast } from "./sseEmitter";
+
+/**
+ * Keeps the CRM card's "vendedor que está atendendo" in sync with the chat:
+ * whenever a conversation gains/changes its assignee, mirror it into the
+ * matching CRM contact (same normalized phone + sector) and broadcast a
+ * crm_contact_updated event so the board updates live. Best-effort: never
+ * throws (a CRM desync must not break claim/transfer flows).
+ */
+export async function syncCrmAttendant(conv: {
+  phone: string | null;
+  sectorId: number | null;
+  assigneeId: number | null;
+}): Promise<void> {
+  try {
+    if ((conv.phone ?? "").includes("@g.us")) return;
+    const normalizedPhone = (conv.phone ?? "").replace(/\D/g, "");
+    if (!normalizedPhone) return;
+
+    const sectorCondition = conv.sectorId != null
+      ? eq(crmContactsTable.sectorId, conv.sectorId)
+      : isNull(crmContactsTable.sectorId);
+    const [existing] = await db.select().from(crmContactsTable)
+      .where(and(
+        eq(crmContactsTable.isArchived, false),
+        eq(crmContactsTable.phone, normalizedPhone),
+        sectorCondition,
+      ))
+      .limit(1);
+    if (!existing || existing.attendantId === conv.assigneeId) return;
+
+    const [updated] = await db.update(crmContactsTable)
+      .set({ attendantId: conv.assigneeId, updatedAt: new Date() })
+      .where(eq(crmContactsTable.id, existing.id))
+      .returning();
+
+    // Enriquecimento mínimo igual ao do CRM (attendant/sector) p/ o board.
+    const attendant = updated.attendantId
+      ? (await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable)
+          .where(eq(usersTable.id, updated.attendantId)).limit(1))[0] ?? null
+      : null;
+    const sector = updated.sectorId
+      ? (await db.select().from(sectorsTable).where(eq(sectorsTable.id, updated.sectorId)).limit(1))[0] ?? null
+      : null;
+    broadcast("crm_contact_updated", { ...updated, attendant, sector }, updated.sectorId, false);
+  } catch (err) {
+    logger.warn({ err, phone: conv.phone, sectorId: conv.sectorId }, "CRM attendant sync failed");
+  }
+}
 
 /**
  * Links a conversation to a CRM contact at attendance START (find-or-create by
@@ -39,7 +88,12 @@ export async function ensureCrmContactForConversation(conv: {
 
     if (existing) {
       await db.update(crmContactsTable)
-        .set({ updatedAt: new Date() })
+        .set({
+          updatedAt: new Date(),
+          // Conversa já nasce com responsável (ex.: criada por vendedor):
+          // reflete no cartão do CRM sem apagar um atendente já definido.
+          ...(conv.assigneeId != null ? { attendantId: conv.assigneeId } : {}),
+        })
         .where(eq(crmContactsTable.id, existing.id));
     } else {
       await db.insert(crmContactsTable).values({
