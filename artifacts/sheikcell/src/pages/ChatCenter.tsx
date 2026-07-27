@@ -1159,6 +1159,8 @@ export default function ChatCenter() {
       });
       setConvs((prev) => [conv, ...prev]);
       setActiveId(conv.id);
+      // Abre a aba onde a conversa realmente caiu (vendedor: já sai em Ativos).
+      setCategory(conversationCategory(conv));
       setShowNewConv(false);
       setNewForm({ name: "", phone: "", channel: "whatsapp", sectorId: "" });
     } catch (err: unknown) {

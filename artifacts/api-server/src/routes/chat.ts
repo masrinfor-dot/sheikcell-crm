@@ -826,11 +826,15 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
     ? (sectorId ?? userSectorId ?? 1)
     : (userSectorId ?? 1);
 
+  // Vendedor que cria um atendimento já fica como responsável — sem isso a
+  // conversa nasce como "Potencial" sem dono e ele precisaria assumi-la (o que
+  // falha se não tiver a permissão ver_potenciais).
   const [conv] = await db.insert(conversationsTable).values({
     phone, name,
     channel: channel ?? "manual",
     sectorId: effectiveSectorId,
     status: "open",
+    assigneeId: userRole === "vendedor" ? req.session.userId! : null,
     lastMessageAt: new Date(),
   }).returning();
 
