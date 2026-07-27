@@ -12,7 +12,7 @@ import {
   reconnectStrategy,
   type BufferedEvent,
 } from "../lib/sseEmitter";
-import { isPotentialConversation, POTENTIAL_EXCLUDED_STATUSES } from "../lib/conversationScope";
+import { isPotentialConversation, isRestrictedConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES } from "../lib/conversationScope";
 import { ensureCrmContactForConversation } from "../lib/crmSync";
 import {
   processInboundWA,
@@ -34,15 +34,21 @@ router.get("/chat/events", requireAuth, (req: Request, res: Response): void => {
 
   const userRole = req.session.userRole!;
   const userSectorId = req.session.userSectorId;
-  const isGlobal = userRole === "admin" || userRole === "supervisor";
+  const userId = req.session.userId!;
 
-  // Mirror canAccessConversation exactly: Potenciais (new, unclaimed leads) are
-  // broadcast to every vendedor regardless of sector; everything else stays
-  // sector-scoped. A non-global user only receives an event when it is a
-  // potencial OR its sector matches their own. A null sector never matches a
-  // vendedor, so such events are withheld (fail closed).
-  const allowed = (ev: { sectorId: number | null; isPotential?: boolean }): boolean => {
-    if (isGlobal || ev.isPotential) return true;
+  // Mirror canAccessConversation exactly.
+  // - Eventos de conversas RESTRITAS (com responsável ou finalizadas) trazem
+  //   `restrictedTo` (responsável + participantes): admin recebe sempre;
+  //   supervisor só se o setor bater (supervisor sem setor = global);
+  //   vendedor só se estiver na lista.
+  // - Demais eventos: potenciais chegam a todos; o resto é escopado por setor.
+  const allowed = (ev: { sectorId: number | null; isPotential?: boolean; restrictedTo?: number[] | null }): boolean => {
+    if (userRole === "admin") return true;
+    if (ev.restrictedTo != null) {
+      if (userRole === "supervisor") return userSectorId == null || ev.sectorId === userSectorId;
+      return ev.restrictedTo.includes(userId);
+    }
+    if (userRole === "supervisor" || ev.isPotential) return true;
     return ev.sectorId != null && ev.sectorId === userSectorId;
   };
 
@@ -113,17 +119,35 @@ async function enrichConversation(conv: typeof conversationsTable.$inferSelect) 
 
 /**
  * Returns true if the requesting user is allowed to access the given conversation.
- * Admins and supervisors have global access; vendedores are restricted to their
- * sector, EXCEPT for potenciais (new, unclaimed leads) which any vendedor may
- * see and claim regardless of sector.
+ * - Admin: acesso global.
+ * - Conversa RESTRITA (com responsável ou finalizada): supervisor só do mesmo
+ *   setor (supervisor sem setor = global); vendedor só se for o responsável ou
+ *   participante.
+ * - Demais conversas: supervisor global; vendedor no próprio setor; potenciais
+ *   (leads novos sem dono) visíveis a qualquer vendedor.
  */
-function canAccessConversation(
-  conv: Pick<typeof conversationsTable.$inferSelect, "sectorId" | "assigneeId" | "status" | "isArchived">,
+async function canAccessConversation(
+  conv: Pick<typeof conversationsTable.$inferSelect, "id" | "sectorId" | "assigneeId" | "status" | "isArchived">,
   req: Request,
-): boolean {
+): Promise<boolean> {
   const userRole = req.session.userRole!;
-  if (userRole === "admin" || userRole === "supervisor") return true;
-  if (conv.sectorId === req.session.userSectorId) return true;
+  if (userRole === "admin") return true;
+  const userId = req.session.userId!;
+  const userSectorId = req.session.userSectorId;
+  if (isRestrictedConversation(conv)) {
+    if (userRole === "supervisor") return userSectorId == null || conv.sectorId === userSectorId;
+    if (conv.assigneeId === userId) return true;
+    const [p] = await db.select({ userId: conversationParticipantsTable.userId })
+      .from(conversationParticipantsTable)
+      .where(and(
+        eq(conversationParticipantsTable.conversationId, conv.id),
+        eq(conversationParticipantsTable.userId, userId),
+      ))
+      .limit(1);
+    return !!p;
+  }
+  if (userRole === "supervisor") return true;
+  if (conv.sectorId != null && conv.sectorId === userSectorId) return true;
   return isPotentialConversation(conv);
 }
 
@@ -136,24 +160,44 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
 
   const conditions = [eq(conversationsTable.isArchived, false)];
 
-  const isPrivileged = userRole === "admin" || userRole === "supervisor";
-  if (!isPrivileged) {
+  // Conversas RESTRITAS (com responsável ou finalizadas) têm visibilidade
+  // reduzida: só o responsável/participantes (vendedor), o admin e o
+  // supervisor do MESMO setor as veem.
+  const restricted = or(
+    sql`${conversationsTable.assigneeId} IS NOT NULL`,
+    inArray(conversationsTable.status, ["resolved", "archived"]),
+  )!;
+
+  if (userRole === "admin") {
+    if (sectorId) conditions.push(eq(conversationsTable.sectorId, Number(sectorId)));
+  } else if (userRole === "supervisor") {
+    // Supervisor: tudo do escopo normal, mas restritas só do próprio setor.
+    // Supervisor sem setor definido permanece global (não há como escopar).
+    if (userSectorId) {
+      conditions.push(or(
+        sql`NOT (${restricted})`,
+        eq(conversationsTable.sectorId, userSectorId),
+      )!);
+    }
+    if (sectorId) conditions.push(eq(conversationsTable.sectorId, Number(sectorId)));
+  } else {
     // Vendedores are ALWAYS sector-scoped and must never see every conversation.
-    // They see their own sector's conversations (when they have a valid sector)
-    // plus every potencial (new, unclaimed lead) regardless of sector so anyone
-    // can pick them up. A vendedor without a valid sector still only ever sees
-    // potenciais — never the full conversation history (fail closed).
+    // - potenciais (leads novos sem dono): visíveis a todos;
+    // - conversas do próprio setor NÃO restritas (ex.: pendentes);
+    // - conversas restritas apenas quando é o responsável ou participante.
+    const userId = req.session.userId!;
     const potencial = and(
       isNull(conversationsTable.assigneeId),
       notInArray(conversationsTable.status, [...POTENTIAL_EXCLUDED_STATUSES]),
     )!;
-    conditions.push(
-      userSectorId
-        ? or(eq(conversationsTable.sectorId, userSectorId), potencial)!
-        : potencial,
-    );
-  } else if (sectorId) {
-    conditions.push(eq(conversationsTable.sectorId, Number(sectorId)));
+    const mine = or(
+      eq(conversationsTable.assigneeId, userId),
+      sql`EXISTS (SELECT 1 FROM ${conversationParticipantsTable} WHERE ${conversationParticipantsTable.conversationId} = ${conversationsTable.id} AND ${conversationParticipantsTable.userId} = ${userId})`,
+    )!;
+    const sectorUnrestricted = userSectorId
+      ? and(eq(conversationsTable.sectorId, userSectorId), sql`NOT (${restricted})`)!
+      : sql`FALSE`;
+    conditions.push(or(potencial, mine, sectorUnrestricted)!);
   }
 
   if (status) conditions.push(eq(conversationsTable.status, status));
@@ -208,7 +252,7 @@ router.get("/chat/conversations/:id", requireAuth, async (req, res): Promise<voi
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id));
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
-  if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
   res.json(await enrichConversation(conv));
 });
 
@@ -218,7 +262,7 @@ router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Pr
 
   const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
-  if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
 
   await db.update(conversationsTable).set({ unreadCount: 0 }).where(eq(conversationsTable.id, id));
 
@@ -278,7 +322,7 @@ router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Prom
 
   const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
-  if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
   if (conv.assigneeId == null) {
     res.status(409).json({ error: "Inicie o atendimento antes de enviar mensagens" });
     return;
@@ -334,7 +378,7 @@ router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Prom
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, id));
 
-  broadcast("message", { conversationId: id, message: msg }, conv.sectorId, isPotentialConversation(conv));
+  broadcast("message", { conversationId: id, message: msg }, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
 
   // Forward to WhatsApp bridge
   if (conv.channel === "whatsapp" && conv.phone) {
@@ -382,7 +426,7 @@ router.post("/chat/conversations/:id/media", requireAuth, async (req, res): Prom
         .where(eq(messagesTable.id, msg.id))
         .returning();
       if (failedMsg) {
-        broadcast("message_updated", { conversationId: id, message: failedMsg }, conv.sectorId, isPotentialConversation(conv));
+        broadcast("message_updated", { conversationId: id, message: failedMsg }, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
         res.status(201).json(failedMsg);
         return;
       }
@@ -402,7 +446,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
 
   const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
-  if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
   if (conv.assigneeId == null) {
     res.status(409).json({ error: "Inicie o atendimento antes de enviar mensagens" });
     return;
@@ -423,7 +467,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, id));
 
-  broadcast("message", { conversationId: id, message: msg }, conv.sectorId, isPotentialConversation(conv));
+  broadcast("message", { conversationId: id, message: msg }, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
 
   // Forward to WhatsApp bridge (now uses Meta Cloud API) if this is a WhatsApp conversation
   if (conv.channel === "whatsapp" && conv.phone) {
@@ -462,7 +506,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
         .where(eq(messagesTable.id, msg.id))
         .returning();
       if (failedMsg) {
-        broadcast("message_updated", { conversationId: id, message: failedMsg }, conv.sectorId, isPotentialConversation(conv));
+        broadcast("message_updated", { conversationId: id, message: failedMsg }, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
         res.status(201).json(failedMsg);
         return;
       }
@@ -554,7 +598,7 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
 
   const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
-  if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
 
   const userRole = req.session.userRole!;
   const update: Record<string, unknown> = { updatedAt: new Date() };
@@ -611,7 +655,14 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
   // cross-sector visible, so read wasPotential from the pre-update row) as well
   // as everyone who can see it now.
   const wasPotential = isPotentialConversation(conv);
-  broadcast("conversation_updated", updated, updated.sectorId, wasPotential || isPotentialConversation(updated));
+  const recipients = await restrictedRecipients(updated);
+  broadcast("conversation_updated", updated, updated.sectorId, wasPotential || isPotentialConversation(updated), recipients);
+  // Transição para RESTRITA (ganhou responsável ou foi finalizada): quem via a
+  // conversa antes (setor/potencial) e não está na lista de autorizados precisa
+  // removê-la da tela. O evento leva só o id + quem pode mantê-la (sem conteúdo).
+  if (recipients != null && !isRestrictedConversation(conv)) {
+    broadcast("conversation_hidden", { id: updated.id, keepFor: recipients, sectorId: updated.sectorId }, conv.sectorId, wasPotential);
+  }
   // On a sector transfer the broadcast above targets the NEW sector, so the
   // ORIGIN sector's vendedores would otherwise never learn the conversation
   // left. Notify them explicitly so they drop it from their list.
@@ -631,7 +682,7 @@ router.post("/chat/conversations/:id/claim", requireAuth, async (req, res): Prom
 
   const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
-  if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
   // Only conversations that are not already taken by someone else may be claimed.
   // Re-claiming a conversation already assigned to the current user is idempotent.
   if (conv.assigneeId != null && conv.assigneeId !== req.session.userId) {
@@ -662,7 +713,13 @@ router.post("/chat/conversations/:id/claim", requireAuth, async (req, res): Prom
     .set(claimSet)
     .where(eq(conversationsTable.id, id)).returning();
 
-  broadcast("conversation_updated", updated, updated.sectorId, wasPotential);
+  const claimRecipients = await restrictedRecipients(updated);
+  broadcast("conversation_updated", updated, updated.sectorId, wasPotential, claimRecipients);
+  // A conversa ficou restrita ao vendedor que assumiu: avisa quem a via antes
+  // (potencial cross-sector ou fila do setor) para removê-la da lista.
+  if (claimRecipients != null) {
+    broadcast("conversation_hidden", { id: updated.id, keepFor: claimRecipients, sectorId: updated.sectorId }, conv.sectorId, wasPotential);
+  }
   res.json(updated);
 });
 
@@ -689,7 +746,7 @@ router.post("/chat/conversations", requireAuth, async (req, res): Promise<void> 
     lastMessageAt: new Date(),
   }).returning();
 
-  broadcast("conversation_new", conv, conv.sectorId, isPotentialConversation(conv));
+  broadcast("conversation_new", conv, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
   // Keep the CRM in sync with atendimentos: register the customer immediately.
   await ensureCrmContactForConversation(conv);
   res.status(201).json(conv);
@@ -759,7 +816,7 @@ router.post("/chat/conversations/:id/participants", requireAuth, async (req, res
 
   const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, convId));
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
-  if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
 
   await db.insert(conversationParticipantsTable).values({ conversationId: convId, userId }).onConflictDoNothing();
 
@@ -795,7 +852,7 @@ router.post("/chat/conversations/:id/participants", requireAuth, async (req, res
     return;
   }
 
-  broadcast("participants_updated", { conversationId: convId }, conv.sectorId, isPotentialConversation(conv));
+  broadcast("participants_updated", { conversationId: convId }, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
   res.status(201).json({ ok: true });
 });
 
@@ -805,14 +862,20 @@ router.delete("/chat/conversations/:id/participants/:userId", requireAuth, async
 
   const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, convId));
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
-  if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
 
   await db.delete(conversationParticipantsTable)
     .where(and(
       eq(conversationParticipantsTable.conversationId, convId),
       eq(conversationParticipantsTable.userId, userId),
     ));
-  broadcast("participants_updated", { conversationId: convId }, conv.sectorId, isPotentialConversation(conv));
+  // O participante removido também precisa receber o evento (para tirar a
+  // conversa da tela dele), então entra na lista junto dos que permanecem.
+  const removeRecipients = await restrictedRecipients(conv);
+  broadcast("participants_updated", { conversationId: convId }, conv.sectorId, isPotentialConversation(conv), removeRecipients ? [...new Set([...removeRecipients, userId])] : null);
+  if (removeRecipients != null) {
+    broadcast("conversation_hidden", { id: convId, keepFor: removeRecipients, sectorId: conv.sectorId }, conv.sectorId, false, [...new Set([...removeRecipients, userId])]);
+  }
   res.json({ ok: true });
 });
 
@@ -845,7 +908,7 @@ router.get("/chat/media/:filename", requireAuth, async (req: Request, res: Respo
     .where(eq(conversationsTable.id, owningMsg.conversationId))
     .limit(1);
 
-  if (!conv || !canAccessConversation(conv, req)) {
+  if (!conv || !(await canAccessConversation(conv, req))) {
     res.status(403).json({ error: "Acesso negado" });
     return;
   }
@@ -983,7 +1046,7 @@ router.post("/chat/conversations/:id/suggest-reply", requireAuth, async (req, re
 
   const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
-  if (!canAccessConversation(conv, req)) { res.status(403).json({ error: "Acesso negado" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
 
   // Resolve the linked CRM contact (find by normalized phone, scoped to the
   // conversation's sector — same rule used by the CRM sync helpers).

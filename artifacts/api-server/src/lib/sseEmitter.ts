@@ -15,6 +15,10 @@ export interface BufferedEvent {
   data: unknown;
   sectorId: number | null;
   isPotential: boolean;
+  // Conversas restritas (com responsável ou finalizadas): lista de userIds que
+  // podem receber o evento (responsável + participantes). null = escopo normal
+  // por setor/potencial. Admin sempre recebe; supervisor recebe se o setor bate.
+  restrictedTo: number[] | null;
 }
 
 const MAX_BUFFERED_EVENTS = 1000;
@@ -56,6 +60,7 @@ export function broadcast(
   data: unknown,
   sectorId?: number | null,
   isPotential?: boolean,
+  restrictedTo?: number[] | null,
 ): void {
   lastEventId += 1;
   const payload: BufferedEvent = {
@@ -64,6 +69,7 @@ export function broadcast(
     data,
     sectorId: sectorId ?? null,
     isPotential: isPotential ?? false,
+    restrictedTo: restrictedTo ?? null,
   };
   eventBuffer.push(payload);
   if (eventBuffer.length > MAX_BUFFERED_EVENTS) {

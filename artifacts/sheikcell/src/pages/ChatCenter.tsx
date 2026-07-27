@@ -55,9 +55,25 @@ function conversationCategory(c: Conversation): Category {
 
 // Mirrors the server-side scoping: admins/supervisors see everything, vendedores
 // see their own sector plus any "potencial" (new, unclaimed lead) from any sector.
+// Conversa "restrita" = já tem responsável (ativa) ou foi finalizada.
+// Essas só ficam visíveis para o vendedor responsável/participantes, o admin
+// e o supervisor do mesmo setor (espelha a regra do servidor).
+function isRestrictedConv(c: Conversation): boolean {
+  return c.assigneeId != null || c.isArchived === true
+    || c.status === "resolved" || c.status === "archived";
+}
+
 function isVisibleToMe(c: Conversation, user: User | null): boolean {
   if (!user) return false;
-  if (user.role === "admin" || user.role === "supervisor") return true;
+  if (user.role === "admin") return true;
+  if (isRestrictedConv(c)) {
+    if (user.role === "supervisor") return user.sectorId == null || c.sectorId === user.sectorId;
+    if (c.assigneeId === user.id) return true;
+    // Eventos SSE trazem a linha crua (sem participants); nesse caso não dá
+    // para decidir aqui — o chamador deve mesclar com o estado local antes.
+    return (c.participants ?? []).some((p) => p.id === user.id);
+  }
+  if (user.role === "supervisor") return true;
   if (c.sectorId === user.sectorId) return true;
   return conversationCategory(c) === "potenciais";
 }
@@ -629,20 +645,44 @@ export default function ChatCenter() {
     es.addEventListener("conversation_updated", (e) => {
       try {
         const conv = JSON.parse(e.data) as Conversation;
-        // Once a conversation leaves the attendant's scope, drop any of its
-        // notifications so no out-of-scope message previews linger in the bell.
-        if (!isVisibleToMe(conv, user)) {
-          setNotifications((prev) => prev.filter((n) => n.conversationId !== conv.id));
-        }
         setConvs((prev) => {
+          // O evento traz a linha crua (sem participants); mescla com o estado
+          // local para não descartar uma conversa em que sou participante.
+          const existing = prev.find((c) => c.id === conv.id);
+          const merged = existing ? { ...existing, ...conv } : conv;
           // A potencial claimed by someone else (or moved to another sector)
           // is no longer visible — drop it from the list.
-          if (!isVisibleToMe(conv, user)) return prev.filter((c) => c.id !== conv.id);
-          const exists = prev.some((c) => c.id === conv.id);
-          if (!exists) return [conv, ...prev];
-          return prev.map((c) => c.id === conv.id ? { ...c, ...conv } : c);
+          if (!isVisibleToMe(merged, user)) {
+            // Also drop its notifications so no out-of-scope previews linger.
+            setNotifications((p) => p.filter((n) => n.conversationId !== conv.id));
+            return prev.filter((c) => c.id !== conv.id);
+          }
+          if (!existing) return [merged, ...prev];
+          return prev.map((c) => c.id === conv.id ? merged : c);
         });
       } catch { /* silent */ }
+    });
+    // Conversa ficou restrita (assumida/finalizada por outro): remove da tela
+    // de quem não está na lista de autorizados. Evento leve: só id + keepFor.
+    es.addEventListener("conversation_hidden", (e) => {
+      try {
+        const { id, keepFor, sectorId } = JSON.parse(e.data) as { id: number; keepFor: number[]; sectorId: number | null };
+        if (!user) return;
+        if (user.role === "admin") return;
+        if (user.role === "supervisor") {
+          // Supervisor com setor: só mantém conversas restritas do próprio setor.
+          if (user.sectorId == null || sectorId === user.sectorId) return;
+        } else if (keepFor.includes(user.id)) {
+          return;
+        }
+        setConvs((prev) => prev.filter((c) => c.id !== id));
+        setNotifications((prev) => prev.filter((n) => n.conversationId !== id));
+      } catch { /* silent */ }
+    });
+    // Participantes mudaram (fui adicionado/removido de uma conversa restrita):
+    // a lista do servidor é a fonte da verdade — refetch.
+    es.addEventListener("participants_updated", () => {
+      fetchConvs();
     });
     // When the reconnection gap is larger than the server's replay buffer (or
     // the server restarted), the server asks the client to resync. Refetch the
@@ -1104,10 +1144,10 @@ export default function ChatCenter() {
   const currentLabels = activeConv?.labels ? activeConv.labels.split(",").map((l) => l.trim()).filter(Boolean) : [];
 
   return (
-    <div className="flex h-[calc(100vh-88px)] bg-[#f0f2f5] overflow-hidden rounded-2xl border border-border shadow-sm">
+    <div className="flex h-[calc(100dvh-7rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-88px)] bg-[#f0f2f5] overflow-hidden rounded-none md:rounded-2xl border-0 md:border border-border shadow-none md:shadow-sm">
 
       {/* ── LEFT PANEL: conversation list ──────────────────────────────── */}
-      <div className="w-80 lg:w-96 bg-white flex flex-col border-r border-border shrink-0">
+      <div className={`${activeConv ? "hidden md:flex" : "flex"} w-full md:w-80 lg:w-96 bg-white flex-col md:border-r border-border shrink-0`}>
         {/* Header */}
         <div className="px-4 py-3 border-b border-border bg-[#ededed] flex items-center justify-between">
           <span className="font-bold text-foreground">Conversas</span>
@@ -1298,7 +1338,7 @@ export default function ChatCenter() {
 
       {/* ── RIGHT PANEL: chat window ────────────────────────────────────── */}
       {!activeConv ? (
-        <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground bg-[#f0f2f5]">
+        <div className="hidden md:flex flex-1 flex-col items-center justify-center text-muted-foreground bg-[#f0f2f5]">
           <div className="w-20 h-20 rounded-full bg-secondary flex items-center justify-center mb-4">
             <MessageCircle className="w-10 h-10 opacity-30" />
           </div>
@@ -1309,7 +1349,15 @@ export default function ChatCenter() {
         <div className="flex-1 flex min-w-0">
         <div className="flex-1 flex flex-col min-w-0">
           {/* Chat header */}
-          <div className="bg-[#ededed] border-b border-border px-4 py-2.5 flex items-center gap-3">
+          <div className="bg-[#ededed] border-b border-border px-2 md:px-4 py-2.5 flex items-center gap-2 md:gap-3 flex-wrap md:flex-nowrap">
+            <button
+              onClick={() => setActiveId(null)}
+              data-testid="button-back-conv-list"
+              title="Voltar para conversas"
+              className="md:hidden p-1.5 -ml-0.5 rounded-lg hover:bg-secondary transition text-muted-foreground"
+            >
+              <ChevronDown className="w-5 h-5 rotate-90" />
+            </button>
             <Avatar name={activeConv.name} src={activeConv.avatarUrl} size="md" />
             <div className="flex-1 min-w-0">
               <p className="font-bold text-sm text-foreground truncate">{activeConv.name}</p>
@@ -1661,7 +1709,7 @@ export default function ChatCenter() {
 
         {/* ── Informações side panel ─────────────────────────────────────── */}
         {showInfo && (
-          <aside className="w-80 shrink-0 border-l border-border bg-white flex flex-col overflow-hidden" data-testid="panel-info">
+          <aside className="fixed inset-0 z-40 w-full md:static md:z-auto md:w-80 shrink-0 md:border-l border-border bg-white flex flex-col overflow-hidden" data-testid="panel-info">
             <div className="bg-primary px-4 py-3 text-white flex items-center justify-between shrink-0">
               <div className="flex items-center gap-2">
                 <Info className="w-4 h-4" />

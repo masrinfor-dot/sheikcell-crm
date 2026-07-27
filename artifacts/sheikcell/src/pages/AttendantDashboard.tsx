@@ -13,7 +13,14 @@ import {
   ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo
 } from "lucide-react";
 
-type MainTab = "queue" | "chat" | "crm" | "tarefas";
+type MainTab = "queue" | "chat" | "crm" | "tarefas" | "equipe";
+
+const MAIN_TABS = [
+  { id: "queue" as MainTab, label: "Fila", icon: PhoneCall },
+  { id: "chat" as MainTab, label: "Atendimento", icon: MessageCircle },
+  { id: "tarefas" as MainTab, label: "Tarefas", icon: ListTodo },
+  { id: "crm" as MainTab, label: "CRM", icon: Kanban },
+] as const;
 
 function formatWait(createdAt: string): string {
   const diff = Math.floor((Date.now() - new Date(createdAt).getTime()) / 1000);
@@ -165,14 +172,9 @@ export default function AttendantDashboard() {
       {/* Left sidebar + content */}
       <div className="flex">
         {/* Sidebar tabs */}
-        <aside className="w-52 shrink-0 border-r border-border bg-white sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3">
+        <aside className="hidden md:block w-52 shrink-0 border-r border-border bg-white sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3">
           <div className="flex flex-col gap-1">
-            {([
-              { id: "queue" as MainTab, label: "Fila",           icon: PhoneCall      },
-              { id: "chat"  as MainTab, label: "Atendimento",    icon: MessageCircle  },
-              { id: "tarefas" as MainTab, label: "Tarefas",      icon: ListTodo       },
-              { id: "crm"   as MainTab, label: "CRM",            icon: Kanban         },
-            ] as const).map(({ id, label, icon: Icon }) => (
+            {MAIN_TABS.map(({ id, label, icon: Icon }) => (
               <button key={id} onClick={() => setMainTab(id)}
                 className={`flex items-center gap-2 w-full px-3 py-2.5 rounded-lg text-xs font-semibold text-left transition-colors ${
                   mainTab === id ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
@@ -184,11 +186,17 @@ export default function AttendantDashboard() {
         </aside>
 
         {/* Content */}
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-0 pb-[calc(3.5rem+env(safe-area-inset-bottom))] md:pb-0">
 
       {mainTab === "chat" && (
-        <div className="max-w-full px-4 py-4">
+        <div className="max-w-full px-0 py-0 md:px-4 md:py-4">
           <ChatCenter />
+        </div>
+      )}
+
+      {mainTab === "equipe" && (
+        <div className="md:hidden h-[calc(100dvh-7rem-env(safe-area-inset-bottom))] flex flex-col bg-card">
+          <InternalChat docked />
         </div>
       )}
 
@@ -366,11 +374,28 @@ export default function AttendantDashboard() {
       </>}
         </div>
 
-        {/* Chat Interno — coluna lateral sempre aberta */}
-        <aside className="flex w-[300px] xl:w-[360px] shrink-0 flex-col border-l border-border bg-card sticky top-14 self-start h-[calc(100vh-3.5rem)]">
+        {/* Chat Interno — coluna lateral sempre aberta (somente desktop) */}
+        <aside className="hidden md:flex w-[300px] xl:w-[360px] shrink-0 flex-col border-l border-border bg-card sticky top-14 self-start h-[calc(100vh-3.5rem)]">
           <InternalChat docked />
         </aside>
       </div>
+
+      {/* Barra de navegação inferior — somente celular */}
+      <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-white border-t border-border flex items-stretch h-[calc(3.5rem+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)]">
+        {[...MAIN_TABS, { id: "equipe" as MainTab, label: "Equipe", icon: MessagesSquare }].map(({ id, label, icon: Icon }) => (
+          <button
+            key={id}
+            onClick={() => setMainTab(id)}
+            data-testid={`bottomnav-${id}`}
+            className={`flex-1 flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold transition ${
+              mainTab === id ? "text-primary" : "text-muted-foreground"
+            }`}
+          >
+            <Icon className="w-5 h-5" />
+            {label}
+          </button>
+        ))}
+      </nav>
     </div>
   );
 }

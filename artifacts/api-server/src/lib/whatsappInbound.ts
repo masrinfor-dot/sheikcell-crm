@@ -1,7 +1,7 @@
 import { db, conversationsTable, messagesTable, sectorsTable } from "@workspace/db";
 import { eq, and, desc, sql } from "drizzle-orm";
 import { broadcast } from "./sseEmitter";
-import { isPotentialConversation } from "./conversationScope";
+import { isPotentialConversation, restrictedRecipients } from "./conversationScope";
 import { classifyText } from "./autoRouter";
 import { ensureCrmContactForConversation } from "./crmSync";
 import { writeFile, mkdir } from "fs/promises";
@@ -208,7 +208,7 @@ async function upsertConversation(
         unreadCount: 1,
       })
       .returning();
-    broadcast("conversation_new", conv, conv.sectorId, isPotentialConversation(conv));
+    broadcast("conversation_new", conv, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
     // Keep the CRM in sync with atendimentos: register the customer as soon as
     // the conversation starts, not only when it is resolved.
     await ensureCrmContactForConversation(conv);
@@ -232,7 +232,7 @@ async function upsertConversation(
       .returning();
     if (updated) conv = updated;
     if (reopen && updated) {
-      broadcast("conversation_updated", updated, updated.sectorId, isPotentialConversation(updated));
+      broadcast("conversation_updated", updated, updated.sectorId, isPotentialConversation(updated), await restrictedRecipients(updated));
     }
   }
 
@@ -371,7 +371,7 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
 
   // Conflito = mensagem duplicada chegando em paralelo; não notifica de novo.
   if (!msg) return;
-  broadcast("message", { conversationId: conv.id, message: msg }, conv.sectorId, isPotentialConversation(conv));
+  broadcast("message", { conversationId: conv.id, message: msg }, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
 }
 
 export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<void> {
@@ -472,7 +472,7 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
 
         // Conflito = mensagem duplicada chegando em paralelo; não notifica de novo.
         if (!saved) continue;
-        broadcast("message", { conversationId: conv.id, message: saved }, conv.sectorId, isPotentialConversation(conv));
+        broadcast("message", { conversationId: conv.id, message: saved }, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
       }
     }
   }

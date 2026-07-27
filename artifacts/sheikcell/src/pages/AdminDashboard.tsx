@@ -12,7 +12,7 @@ import TaskBoard from "./TaskBoard";
 import {
   Smartphone, LogOut, LayoutDashboard, ClipboardList,
   Settings, Users, RefreshCw, Plus, X, Clock, CheckCircle,
-  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo
+  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal
 } from "lucide-react";
 
 type Tab = "dashboard" | "chat" | "equipe" | "tarefas" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp";
@@ -208,6 +208,7 @@ export default function AdminDashboard() {
 
   const isAdmin = user?.role === "admin";
   const isSupervisor = user?.role === "supervisor";
+  const [showMoreNav, setShowMoreNav] = useState(false);
 
   const allTabs = [
     { id: "dashboard" as Tab, label: "Visão Geral", icon: LayoutDashboard, adminOnly: false },
@@ -222,6 +223,9 @@ export default function AdminDashboard() {
     { id: "whatsapp" as Tab, label: "WhatsApp", icon: PhoneCall, adminOnly: true },
   ];
   const tabs = allTabs.filter((t) => !t.adminOnly || isAdmin);
+  // Celular: 4 abas principais + "Mais" (painel com o restante)
+  const mobilePrimaryTabs = tabs.slice(0, 4);
+  const mobileMoreTabs = tabs.slice(4);
 
   return (
     <div className="min-h-screen bg-background">
@@ -250,7 +254,7 @@ export default function AdminDashboard() {
       {/* Left sidebar + content */}
       <div className="flex">
         {/* Sidebar tabs */}
-        <aside className="w-52 shrink-0 border-r border-border bg-white sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3">
+        <aside className="hidden md:block w-52 shrink-0 border-r border-border bg-white sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3">
           <div className="flex flex-col gap-1">
             {tabs.map(({ id, label, icon: Icon }) => (
               <button key={id} onClick={() => setTab(id)} data-testid={`tab-${id}`}
@@ -264,9 +268,9 @@ export default function AdminDashboard() {
         </aside>
 
         {/* Content */}
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-0 pb-[calc(3.5rem+env(safe-area-inset-bottom))] md:pb-0">
           {/* O chat ocupa a largura toda; as demais abas ficam na coluna central */}
-          <div className={tab === "chat" ? "max-w-full px-4 py-4" : "max-w-5xl mx-auto px-4 py-6"}>
+          <div className={tab === "chat" ? "max-w-full px-0 py-0 md:px-4 md:py-4" : "max-w-5xl mx-auto px-4 py-6"}>
 
         {/* === DASHBOARD TAB === */}
         {tab === "dashboard" && (
@@ -798,6 +802,61 @@ export default function AdminDashboard() {
           </div>
         </div>
       )}
+
+      {/* Barra de navegação inferior — somente celular */}
+      {showMoreNav && (
+        <div className="md:hidden fixed inset-0 z-40" onClick={() => setShowMoreNav(false)}>
+          <div className="absolute inset-0 bg-black/30" />
+          <div
+            className="absolute bottom-0 inset-x-0 bg-white rounded-t-2xl border-t border-border p-4 pb-[calc(4.5rem+env(safe-area-inset-bottom))]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="text-xs font-semibold text-muted-foreground mb-3">Mais opções</p>
+            <div className="grid grid-cols-3 gap-2">
+              {mobileMoreTabs.map(({ id, label, icon: Icon }) => (
+                <button
+                  key={id}
+                  onClick={() => { setTab(id); setShowMoreNav(false); }}
+                  data-testid={`bottomnav-more-${id}`}
+                  className={`flex flex-col items-center justify-center gap-1 py-3 rounded-xl text-[11px] font-semibold transition ${
+                    tab === id ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-secondary"
+                  }`}
+                >
+                  <Icon className="w-5 h-5" />
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+      <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-white border-t border-border flex items-stretch h-[calc(3.5rem+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)]">
+        {mobilePrimaryTabs.map(({ id, label, icon: Icon }) => (
+          <button
+            key={id}
+            onClick={() => { setTab(id); setShowMoreNav(false); }}
+            data-testid={`bottomnav-${id}`}
+            className={`flex-1 flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold transition ${
+              tab === id && !showMoreNav ? "text-primary" : "text-muted-foreground"
+            }`}
+          >
+            <Icon className="w-5 h-5" />
+            {label}
+          </button>
+        ))}
+        {mobileMoreTabs.length > 0 && (
+          <button
+            onClick={() => setShowMoreNav((v) => !v)}
+            data-testid="bottomnav-more"
+            className={`flex-1 flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold transition ${
+              showMoreNav || mobileMoreTabs.some((t) => t.id === tab) ? "text-primary" : "text-muted-foreground"
+            }`}
+          >
+            <MoreHorizontal className="w-5 h-5" />
+            Mais
+          </button>
+        )}
+      </nav>
     </div>
   );
 }
