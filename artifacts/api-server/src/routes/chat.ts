@@ -4,7 +4,7 @@ import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
 import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable } from "@workspace/db";
 import { eq, desc, and, or, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
-import { requireAuth, requireAdminOrSupervisor } from "../middlewares/auth";
+import { requireAuth, requireAdmin, requireAdminOrSupervisor } from "../middlewares/auth";
 import {
   broadcast,
   sseEmitter,
@@ -748,6 +748,30 @@ router.get("/chat/wa-sessions", requireAuth, async (_req, res): Promise<void> =>
     .from(whatsappSessionsTable)
     .orderBy(whatsappSessionsTable.id);
   res.json(rows);
+});
+
+// ─── Excluir atendimento (somente admin) ───────────────────────────────────
+// Remove definitivamente a conversa (mensagens e participantes juntos).
+// Restrito a POTENCIAIS (lead novo sem dono): conversas já assumidas ou
+// finalizadas fazem parte do histórico e não podem ser apagadas por aqui.
+router.delete("/chat/conversations/:id", requireAdmin, async (req, res): Promise<void> => {
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!isPotentialConversation(conv)) {
+    res.status(409).json({ error: "Só é possível excluir atendimentos em Potenciais (sem responsável e não finalizados)" });
+    return;
+  }
+
+  await db.transaction(async (tx) => {
+    await tx.delete(messagesTable).where(eq(messagesTable.conversationId, id));
+    await tx.delete(conversationParticipantsTable).where(eq(conversationParticipantsTable.conversationId, id));
+    await tx.delete(conversationsTable).where(eq(conversationsTable.id, id));
+  });
+
+  // Potenciais são visíveis a todos — o evento de remoção também precisa ser.
+  broadcast("conversation_deleted", { id }, conv.sectorId, true);
+  res.json({ ok: true });
 });
 
 // ─── Create conversation manually ─────────────────────────────────────────

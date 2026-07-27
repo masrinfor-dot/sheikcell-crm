@@ -694,6 +694,15 @@ export default function ChatCenter() {
         setNotifications((prev) => prev.filter((n) => n.conversationId !== id));
       } catch { /* silent */ }
     });
+    // Atendimento excluído pelo administrador: some para todos.
+    es.addEventListener("conversation_deleted", (e) => {
+      try {
+        const { id } = JSON.parse(e.data) as { id: number };
+        setConvs((prev) => prev.filter((c) => c.id !== id));
+        setNotifications((prev) => prev.filter((n) => n.conversationId !== id));
+        setActiveId((cur) => (cur === id ? null : cur));
+      } catch { /* silent */ }
+    });
     // Participantes mudaram (fui adicionado/removido de uma conversa restrita):
     // a lista do servidor é a fonte da verdade — refetch.
     es.addEventListener("participants_updated", () => {
@@ -935,6 +944,18 @@ export default function ChatCenter() {
 
   // ── Ativo → Resolvida (finalizar atendimento) ──
   // Abre o modal para o vendedor escolher o motivo antes de finalizar.
+  const handleDeleteConv = async (id: number, name: string) => {
+    if (!window.confirm(`Excluir o atendimento de "${name}"? As mensagens serão apagadas de vez.`)) return;
+    try {
+      await api.chat.deleteConversation(id);
+      setConvs((prev) => prev.filter((c) => c.id !== id));
+      setNotifications((prev) => prev.filter((n) => n.conversationId !== id));
+      setActiveId((cur) => (cur === id ? null : cur));
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "Não foi possível excluir o atendimento");
+    }
+  };
+
   const handleFinalize = (id: number) => {
     setFinalizeTarget(id);
     setFinalizeReason(FINALIZE_REASONS[0]);
@@ -1405,6 +1426,17 @@ export default function ChatCenter() {
               </div>
             </div>
             <div className="flex items-center gap-1 shrink-0">
+              {/* Excluir atendimento — só admin e só em Potenciais */}
+              {user?.role === "admin" && activeCategory === "potenciais" && (
+                <button
+                  onClick={() => handleDeleteConv(activeConv.id, activeConv.name)}
+                  data-testid="button-delete-conv"
+                  className="p-2 rounded-lg text-red-600 bg-white border border-border hover:bg-red-50 transition"
+                  title="Excluir atendimento"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
               {/* Iniciar atendimento (assumir a conversa) — atribuição, não é status */}
               {activeCategory === "pendentes" && (
                 <button
