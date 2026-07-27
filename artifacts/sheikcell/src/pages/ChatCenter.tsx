@@ -348,6 +348,7 @@ export default function ChatCenter() {
   const [showParticipantPicker, setShowParticipantPicker] = useState(false);
   const [showStatusPicker, setShowStatusPicker] = useState(false);
   const [showFilter, setShowFilter] = useState(false);
+  const [onlyUnanswered, setOnlyUnanswered] = useState(false);
   // Finalizar atendimento: modal para capturar o motivo da finalização.
   const [finalizeTarget, setFinalizeTarget] = useState<number | null>(null);
   const [finalizeReason, setFinalizeReason] = useState<string>(FINALIZE_REASONS[0]);
@@ -582,7 +583,7 @@ export default function ChatCenter() {
         }
         setConvs((prev) => prev.map((c) =>
           c.id === conversationId
-            ? { ...c, lastMessage: message.content, lastMessageAt: message.createdAt, unreadCount: conversationId === activeId ? 0 : c.unreadCount + 1 }
+            ? { ...c, lastMessage: message.content, lastMessageDirection: message.direction, lastMessageAt: message.createdAt, unreadCount: conversationId === activeId ? 0 : c.unreadCount + 1 }
             : c
         ));
         // Surface received (inbound) messages in the notification bell, in arrival
@@ -1185,7 +1186,9 @@ export default function ChatCenter() {
   };
 
   const visibleConvs = convs.filter((c) =>
-    !search || c.name.toLowerCase().includes(search.toLowerCase()) || c.phone.includes(search)
+    (!search || c.name.toLowerCase().includes(search.toLowerCase()) || c.phone.includes(search)) &&
+    // Filtro "não respondidas": o cliente falou por último (ou há não lidas).
+    (!onlyUnanswered || c.lastMessageDirection === "inbound" || c.unreadCount > 0)
   );
 
   const counts: Record<Category, number> = { potenciais: 0, pendentes: 0, ativos: 0, resolvidas: 0 };
@@ -1350,6 +1353,15 @@ export default function ChatCenter() {
         {/* Filters */}
         {showFilter && (
           <div className="px-3 py-2 bg-[#ededed] border-b border-border space-y-2">
+            <button
+              onClick={() => setOnlyUnanswered((v) => !v)}
+              data-testid="button-filter-unanswered"
+              className={`text-xs px-2.5 py-1 rounded-full transition border font-semibold ${onlyUnanswered
+                ? "bg-red-50 text-red-600 border-red-200"
+                : "bg-white text-muted-foreground border-border"}`}
+            >
+              ● Não respondidas
+            </button>
             {labels.length === 0 ? (
               <p className="text-xs text-muted-foreground">Nenhuma etiqueta criada.</p>
             ) : (

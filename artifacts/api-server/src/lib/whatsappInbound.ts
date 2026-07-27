@@ -204,6 +204,7 @@ async function upsertConversation(
         sectorId: targetSectorId,
         status: "open",
         lastMessage: displayContent,
+        lastMessageDirection: "inbound",
         lastMessageAt: new Date(),
         unreadCount: 1,
       })
@@ -221,6 +222,7 @@ async function upsertConversation(
       .update(conversationsTable)
       .set({
         lastMessage: displayContent,
+        lastMessageDirection: "inbound",
         lastMessageAt: new Date(),
         unreadCount: sql`${conversationsTable.unreadCount} + 1`,
         updatedAt: new Date(),

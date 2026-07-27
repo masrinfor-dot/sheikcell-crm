@@ -16,6 +16,8 @@ export const conversationsTable = pgTable("conversations", {
   labels: text("labels"), // comma-separated
   unreadCount: integer("unread_count").notNull().default(0),
   lastMessage: text("last_message"),
+  // "inbound" = cliente falou por último (não respondida); "outbound" = já respondida.
+  lastMessageDirection: text("last_message_direction"),
   lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
   isArchived: boolean("is_archived").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

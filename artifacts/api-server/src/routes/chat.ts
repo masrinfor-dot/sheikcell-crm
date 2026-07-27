@@ -405,6 +405,7 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
 
   await db.update(conversationsTable).set({
     lastMessage: content,
+    lastMessageDirection: "outbound",
     lastMessageAt: new Date(),
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, id));
@@ -494,6 +495,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
 
   await db.update(conversationsTable).set({
     lastMessage: content.trim(),
+    lastMessageDirection: "outbound",
     lastMessageAt: new Date(),
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, id));

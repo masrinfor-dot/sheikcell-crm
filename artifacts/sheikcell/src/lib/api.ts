@@ -220,6 +220,7 @@ export type Conversation = {
   labels: string | null;
   unreadCount: number;
   lastMessage: string | null;
+  lastMessageDirection: string | null;
   lastMessageAt: string | null;
   isArchived: boolean;
   createdAt: string;
