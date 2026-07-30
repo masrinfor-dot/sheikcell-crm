@@ -49,6 +49,7 @@ export type User = {
   storeName?: string | null;
   mustChangePassword?: boolean;
   adminAccess?: string[] | null;
+  accessHours?: { start: string; end: string; days: number[] } | null;
   sector: Sector | null;
   permissions?: VendedorPermissions;
 };
@@ -707,9 +708,9 @@ export const api = {
     },
     users: {
       list: () => req<(User & { isActive: boolean; createdAt: string })[]>("/admin/users"),
-      create: (data: { name: string; email: string; password: string; role: string; sectorId: number; storeName?: string; adminAccess?: string[] | null }) =>
+      create: (data: { name: string; email: string; password: string; role: string; sectorId: number; storeName?: string; adminAccess?: string[] | null; accessHours?: { start: string; end: string; days: number[] } | null }) =>
         req<User>("/admin/users", { method: "POST", body: JSON.stringify(data) }),
-      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; isActive: boolean; permissions: Record<string, boolean>; adminAccess: string[] | null }>) =>
+      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; isActive: boolean; permissions: Record<string, boolean>; adminAccess: string[] | null; accessHours: { start: string; end: string; days: number[] } | null }>) =>
         req<User>(`/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number, transferToId: number | null) =>
         req<{ ok: boolean; transferredConversations: number }>(`/admin/users/${id}`, { method: "DELETE", body: JSON.stringify({ transferToId }) }),

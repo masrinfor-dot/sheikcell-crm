@@ -7,6 +7,8 @@ declare module "express-session" {
     userRole: string;
     userSectorId: number | undefined;
     userName: string | undefined;
+    // Horário de acesso do vendedor (null/undefined = sem restrição)
+    accessHours: { start: string; end: string; days: number[] } | null | undefined;
   }
 }
 

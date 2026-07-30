@@ -16,6 +16,9 @@ export const usersTable = pgTable("users", {
   mustChangePassword: boolean("must_change_password").notNull().default(false),
   // Funções de admin liberadas para não-admins (ex.: ["financeiro","sorteios"])
   adminAccess: jsonb("admin_access").$type<string[] | null>(),
+  // Horário de acesso (só vendedor): fora dele o login/uso é bloqueado.
+  // null = sem restrição. days: 0=domingo ... 6=sábado
+  accessHours: jsonb("access_hours").$type<{ start: string; end: string; days: number[] } | null>(),
   isActive: boolean("is_active").notNull().default(true),
   // Permissões individuais do vendedor (null = todas liberadas). Chaves:
   // ver_potenciais, transferir, finalizar, criar_atendimento, usar_ia,

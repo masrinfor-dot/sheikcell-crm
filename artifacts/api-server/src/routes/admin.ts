@@ -111,6 +111,7 @@ router.get("/admin/users", requireAdmin, async (_req, res): Promise<void> => {
       sectorId: usersTable.sectorId,
       storeName: usersTable.storeName,
       adminAccess: usersTable.adminAccess,
+      accessHours: usersTable.accessHours,
       isActive: usersTable.isActive,
       permissions: usersTable.permissions,
       createdAt: usersTable.createdAt,
@@ -133,6 +134,20 @@ router.get("/admin/users", requireAdmin, async (_req, res): Promise<void> => {
 // Funções de admin que podem ser liberadas para não-admins
 const GRANTABLE_FEATURES = ["financeiro", "sorteios", "robo", "rh", "questionarios", "whatsapp"];
 
+// Valida o horário de acesso: { start:"08:00", end:"18:00", days:[1..6] } ou null
+function sanitizeAccessHours(v: unknown): { start: string; end: string; days: number[] } | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  const hhmm = /^([01]?\d|2[0-3]):[0-5]\d$/;
+  const start = typeof o.start === "string" && hhmm.test(o.start) ? o.start : null;
+  const end = typeof o.end === "string" && hhmm.test(o.end) ? o.end : null;
+  if (!start || !end) return null;
+  const days = Array.isArray(o.days)
+    ? [...new Set(o.days.map((d) => Number(d)).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))]
+    : [];
+  return { start, end, days };
+}
+
 function sanitizeAdminAccess(v: unknown): string[] | null {
   if (!Array.isArray(v)) return null;
   const out = v.map((x) => String(x)).filter((x) => GRANTABLE_FEATURES.includes(x));
@@ -140,7 +155,7 @@ function sanitizeAdminAccess(v: unknown): string[] | null {
 }
 
 router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
-  const { name, email, password, role, sectorId, storeName, adminAccess } = req.body as {
+  const { name, email, password, role, sectorId, storeName, adminAccess, accessHours } = req.body as {
     name?: string;
     email?: string;
     password?: string;
@@ -148,6 +163,7 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
     sectorId?: number;
     storeName?: string;
     adminAccess?: unknown;
+    accessHours?: unknown;
   };
 
   if (!name || !email || !password) {
@@ -173,6 +189,7 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
       storeName: typeof storeName === "string" && storeName.trim() ? storeName.trim().slice(0, 120) : null,
       mustChangePassword: true, // primeiro acesso: obriga trocar a senha
       adminAccess: sanitizeAdminAccess(adminAccess),
+      accessHours: resolvedRole === "vendedor" ? sanitizeAccessHours(accessHours) : null,
     })
     .returning();
 
@@ -185,8 +202,9 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   const id = parseInt(rawId, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
 
-  const { name, email, password, role, sectorId, isActive, permissions, storeName, adminAccess } = req.body as {
+  const { name, email, password, role, sectorId, isActive, permissions, storeName, adminAccess, accessHours } = req.body as {
     adminAccess?: unknown;
+    accessHours?: unknown;
     name?: string;
     email?: string;
     password?: string;
@@ -203,6 +221,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   if (role) updateData.role = role;
   if (sectorId !== undefined) updateData.sectorId = sectorId;
   if (adminAccess !== undefined) updateData.adminAccess = sanitizeAdminAccess(adminAccess);
+  if (accessHours !== undefined) updateData.accessHours = sanitizeAccessHours(accessHours);
   if (storeName !== undefined) {
     updateData.storeName = typeof storeName === "string" && storeName.trim() ? storeName.trim().slice(0, 120) : null;
   }

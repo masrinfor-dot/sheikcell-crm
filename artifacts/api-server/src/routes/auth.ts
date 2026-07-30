@@ -2,7 +2,7 @@ import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
 import { db, usersTable, sectorsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
-import { requireAuth } from "../middlewares/auth";
+import { requireAuth, isWithinAccessHours } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
@@ -29,6 +29,12 @@ router.post("/auth/login", async (req, res): Promise<void> => {
     return;
   }
 
+  // Vendedor com horário de acesso: bloqueia login fora da janela
+  if (user.role === "vendedor" && !isWithinAccessHours(user.accessHours)) {
+    res.status(403).json({ error: "Fora do horário de acesso. Fale com o administrador." });
+    return;
+  }
+
   let sector = null;
   if (user.sectorId) {
     const [s] = await db
@@ -39,6 +45,7 @@ router.post("/auth/login", async (req, res): Promise<void> => {
   }
 
   req.session.userId = user.id;
+  req.session.accessHours = user.role === "vendedor" ? (user.accessHours ?? null) : null;
   req.session.userRole = user.role;
   req.session.userSectorId = user.sectorId ?? undefined;
   req.session.userName = user.name;

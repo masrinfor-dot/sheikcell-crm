@@ -45,7 +45,7 @@ type WASession = {
 
 type UserRow = {
   id: number; name: string; email: string; role: string;
-  isActive: boolean; sector: Sector | null; sectorId: number | null; storeName?: string | null; adminAccess?: string[] | null; createdAt: string;
+  isActive: boolean; sector: Sector | null; sectorId: number | null; storeName?: string | null; adminAccess?: string[] | null; accessHours?: { start: string; end: string; days: number[] } | null; createdAt: string;
   permissions?: Record<string, boolean> | null;
 };
 
@@ -94,7 +94,7 @@ export default function AdminDashboard() {
   const [deleteTransferTo, setDeleteTransferTo] = useState("");
   const [deletingUser, setDeletingUser] = useState(false);
 
-  const [userForm, setUserForm] = useState<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; adminAccess: string[] }>({ name: "", email: "", password: "", role: "vendedor", sectorId: 1, storeName: "", adminAccess: [] });
+  const [userForm, setUserForm] = useState<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; adminAccess: string[]; ahEnabled: boolean; ahStart: string; ahEnd: string; ahDays: number[] }>({ name: "", email: "", password: "", role: "vendedor", sectorId: 1, storeName: "", adminAccess: [], ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6] });
   const [sectorForm, setSectorForm] = useState({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true });
 
   const fetchAll = useCallback(async () => {
@@ -205,12 +205,12 @@ export default function AdminDashboard() {
   // ---- User handlers ----
   const openAddUser = () => {
     setEditUser(null);
-    setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorId: sectors[0]?.id ?? 1, storeName: "", adminAccess: [] });
+    setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorId: sectors[0]?.id ?? 1, storeName: "", adminAccess: [], ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6] });
     setShowAddUser(true);
   };
   const openEditUser = (u: UserRow) => {
     setEditUser(u);
-    setUserForm({ name: u.name, email: u.email, password: "", role: u.role, sectorId: u.sectorId ?? 1, storeName: u.storeName ?? "", adminAccess: u.adminAccess ?? [] });
+    setUserForm({ name: u.name, email: u.email, password: "", role: u.role, sectorId: u.sectorId ?? 1, storeName: u.storeName ?? "", adminAccess: u.adminAccess ?? [], ahEnabled: !!u.accessHours, ahStart: u.accessHours?.start ?? "08:00", ahEnd: u.accessHours?.end ?? "18:00", ahDays: u.accessHours?.days?.length ? u.accessHours.days : [1, 2, 3, 4, 5, 6] });
     setShowAddUser(true);
   };
   const handleSaveUser = async (e: React.FormEvent) => {
@@ -221,6 +221,9 @@ export default function AdminDashboard() {
           name: userForm.name, email: userForm.email, role: userForm.role, sectorId: userForm.sectorId,
           storeName: userForm.storeName,
           adminAccess: userForm.role === "admin" ? null : userForm.adminAccess,
+          accessHours: userForm.role === "vendedor" && userForm.ahEnabled
+            ? { start: userForm.ahStart, end: userForm.ahEnd, days: userForm.ahDays }
+            : null,
         };
         if (userForm.password) payload.password = userForm.password;
         await api.admin.users.update(editUser.id, payload);
@@ -1113,6 +1116,39 @@ export default function AdminDashboard() {
                   {sectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
               </div>
+              {userForm.role === "vendedor" && (
+                <div>
+                  <label className="flex items-center gap-2 text-xs font-medium mb-1">
+                    <input type="checkbox" checked={userForm.ahEnabled} data-testid="toggle-access-hours"
+                      onChange={(e) => setUserForm({ ...userForm, ahEnabled: e.target.checked })} />
+                    Limitar horário de acesso
+                  </label>
+                  {userForm.ahEnabled && (
+                    <div className="space-y-2 mt-1.5 p-2.5 rounded-xl bg-secondary/50 border border-border">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] text-muted-foreground">Das</span>
+                        <input type="time" value={userForm.ahStart} data-testid="input-access-start"
+                          onChange={(e) => setUserForm({ ...userForm, ahStart: e.target.value })}
+                          className="px-2 py-1 rounded-lg border border-border text-xs bg-white" />
+                        <span className="text-[11px] text-muted-foreground">às</span>
+                        <input type="time" value={userForm.ahEnd} data-testid="input-access-end"
+                          onChange={(e) => setUserForm({ ...userForm, ahEnd: e.target.value })}
+                          className="px-2 py-1 rounded-lg border border-border text-xs bg-white" />
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {(["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"] as const).map((d, i) => (
+                          <button type="button" key={d} data-testid={`toggle-access-day-${i}`}
+                            onClick={() => setUserForm({ ...userForm, ahDays: userForm.ahDays.includes(i) ? userForm.ahDays.filter((x) => x !== i) : [...userForm.ahDays, i] })}
+                            className={`px-2 py-1 rounded-lg border text-[11px] font-medium transition ${userForm.ahDays.includes(i) ? "bg-primary text-white border-primary" : "border-border text-muted-foreground bg-white hover:bg-secondary"}`}>
+                            {d}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-[10px] text-muted-foreground">Fora desse horário o vendedor não consegue entrar nem usar o sistema (horário de Brasília).</p>
+                    </div>
+                  )}
+                </div>
+              )}
               {userForm.role !== "admin" && (
                 <div>
                   <label className="text-xs font-medium mb-1 block">Funções de admin liberadas (opcional)</label>
