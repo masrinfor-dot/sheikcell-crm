@@ -456,7 +456,8 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
           base64,
           mimetype,
           filename: filename ?? savedFilename,
-          caption,
+          // Cliente vê quem está atendendo (áudios não têm legenda no WhatsApp)
+          caption: isAudio ? caption : (caption ? `*${senderName}:*\n${caption}` : `*${senderName}:*`),
           ptt: isAudio ? (ptt ?? false) : undefined,
           session: conv.sessionKey,
         }),
@@ -540,7 +541,8 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
           "Content-Type": "application/json",
           "X-Bridge-Secret": bridgeSecret,
         },
-        body: JSON.stringify({ to: conv.phone, text: content.trim(), session: conv.sessionKey }),
+        // Cliente vê quem está atendendo: "*Nome:*" antes da mensagem
+        body: JSON.stringify({ to: conv.phone, text: `*${senderName}:*\n${content.trim()}`, session: conv.sessionKey }),
         signal: AbortSignal.timeout(60_000),
       });
       if (!r.ok) {
