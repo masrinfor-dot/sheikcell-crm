@@ -14,13 +14,27 @@ type FormState = {
   dayOfWeek: number; dayOfMonth: number; periodDays: string;
   onlyResolved: boolean; excludePreviousWinners: boolean; active: boolean;
   sectorIds: number[]; vendedorIds: number[]; sessionKeys: string[];
+  clientTypes: string[];
 };
+
+// Tipos de cliente que podem participar (combináveis — vale qualquer um marcado)
+const CLIENT_TYPES: { value: string; label: string }[] = [
+  { value: "comprou", label: "🛒 Compraram (venda registrada)" },
+  { value: "prospeccao", label: "🔎 Em prospecção (atendimento em andamento)" },
+  { value: "Venda realizada", label: "Finalizados: venda realizada" },
+  { value: "Orçamento enviado", label: "Finalizados: orçamento enviado" },
+  { value: "Cliente vai pensar", label: "Finalizados: cliente vai pensar" },
+  { value: "Sem interesse", label: "Finalizados: sem interesse" },
+  { value: "Sem resposta do cliente", label: "Finalizados: sem resposta" },
+  { value: "Dúvida esclarecida", label: "Finalizados: dúvida esclarecida" },
+  { value: "Problema resolvido", label: "Finalizados: problema resolvido" },
+];
 
 const emptyForm = (): FormState => ({
   name: "", prize: "", storeName: "", messageTemplate: DEFAULT_TEMPLATE,
   winnersCount: 1, recurrence: "once", dayOfWeek: 5, dayOfMonth: 1, periodDays: "",
   onlyResolved: false, excludePreviousWinners: true, active: true,
-  sectorIds: [], vendedorIds: [], sessionKeys: [],
+  sectorIds: [], vendedorIds: [], sessionKeys: [], clientTypes: [],
 });
 
 // Aba "Sorteios" (admin): sorteios entre clientes com filtros, recorrência
@@ -66,6 +80,7 @@ export default function Sorteios() {
       periodDays: r.periodDays != null ? String(r.periodDays) : "",
       onlyResolved: r.onlyResolved, excludePreviousWinners: r.excludePreviousWinners, active: r.active,
       sectorIds: r.sectorIds ?? [], vendedorIds: r.vendedorIds ?? [], sessionKeys: r.sessionKeys ?? [],
+      clientTypes: r.clientTypes ?? [],
     } : emptyForm());
     setShowForm(true);
   };
@@ -80,6 +95,7 @@ export default function Sorteios() {
         sectorIds: form.sectorIds.length ? form.sectorIds : null,
         vendedorIds: form.vendedorIds.length ? form.vendedorIds : null,
         sessionKeys: form.sessionKeys.length ? form.sessionKeys : null,
+        clientTypes: form.clientTypes.length ? form.clientTypes : null,
       };
       if (editing) {
         const upd = await api.raffles.update(editing.id, payload as Partial<Raffle>);
@@ -292,6 +308,19 @@ export default function Sorteios() {
                     </div>
                   </div>
                 )}
+                <div className="mb-2">
+                  <label className="font-semibold">Tipo de cliente (nenhum marcado = todos)</label>
+                  <div className="flex flex-wrap gap-1.5 mt-1">
+                    {CLIENT_TYPES.map((ct) => (
+                      <button key={ct.value} onClick={() => setForm({ ...form, clientTypes: toggleStr(form.clientTypes, ct.value) })}
+                        data-testid={`toggle-client-type-${ct.value}`}
+                        className={`px-2 py-1 rounded-lg border text-[11px] font-medium transition ${form.clientTypes.includes(ct.value) ? "bg-primary text-white border-primary" : "border-border text-muted-foreground hover:bg-secondary"}`}>
+                        {ct.label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-muted-foreground mt-1">Pode marcar vários: participa quem se encaixa em qualquer um deles.</p>
+                </div>
                 {stores.length > 0 && (
                   <div className="mb-2">
                     <label className="font-semibold">Lojas (marca todos os vendedores da loja)</label>

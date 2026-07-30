@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { Router, type IRouter } from "express";
-import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
-import { db, rafflesTable, raffleDrawsTable, conversationsTable, usersTable } from "@workspace/db";
+import { and, desc, eq, gte, inArray, or, sql } from "drizzle-orm";
+import { db, rafflesTable, raffleDrawsTable, conversationsTable, usersTable, attendanceLogsTable } from "@workspace/db";
 import { requireAdmin } from "../middlewares/auth";
 import { logger } from "../lib/logger";
 
@@ -60,6 +60,7 @@ function sanitizeRaffle(body: Record<string, unknown>): { data?: typeof rafflesT
       sectorIds: numArrayOrNull(body["sectorIds"]),
       vendedorIds: numArrayOrNull(body["vendedorIds"]),
       sessionKeys: strArrayOrNull(body["sessionKeys"]),
+      clientTypes: strArrayOrNull(body["clientTypes"]),
       periodDays,
       onlyResolved: body["onlyResolved"] === true,
       excludePreviousWinners: body["excludePreviousWinners"] !== false,
@@ -89,12 +90,45 @@ async function eligibleClients(raffle: Raffle): Promise<{ phone: string; name: s
     conds.push(gte(conversationsTable.updatedAt, new Date(Date.now() - raffle.periodDays * 86_400_000)));
   }
 
-  const rows = await db.select({
+  let rows = await db.select({
     id: conversationsTable.id,
     phone: conversationsTable.phone,
     name: conversationsTable.name,
+    status: conversationsTable.status,
     updatedAt: conversationsTable.updatedAt,
   }).from(conversationsTable).where(and(...conds));
+
+  // Tipo de cliente: "comprou" (venda registrada), "prospeccao" (atendimento
+  // ainda não finalizado) ou um motivo de finalização exato. Combináveis (OU).
+  const clientTypes = strArrayOrNull(raffle.clientTypes);
+  if (clientTypes) {
+    const wantComprou = clientTypes.includes("comprou");
+    const wantProspec = clientTypes.includes("prospeccao");
+    const reasons = clientTypes.filter((t) => t !== "comprou" && t !== "prospeccao");
+
+    const okPhones = new Set<string>();
+    const logConds = [];
+    if (wantComprou) logConds.push(eq(attendanceLogsTable.hadSale, true));
+    if (reasons.length) logConds.push(inArray(attendanceLogsTable.resolutionReason, reasons));
+    if (logConds.length) {
+      const logWhere = [or(...logConds)!];
+      if (raffle.periodDays) {
+        logWhere.push(gte(attendanceLogsTable.createdAt, new Date(Date.now() - raffle.periodDays * 86_400_000)));
+      }
+      const logs = await db.select({ contact: attendanceLogsTable.clientContact })
+        .from(attendanceLogsTable).where(and(...logWhere));
+      for (const l of logs) {
+        const key = (l.contact ?? "").replace(/\D/g, "");
+        if (key) okPhones.add(key);
+      }
+    }
+    rows = rows.filter((r) => {
+      const key = r.phone.replace(/\D/g, "");
+      if (okPhones.has(key)) return true;
+      if (wantProspec && r.status !== "resolved" && r.status !== "archived") return true;
+      return false;
+    });
+  }
 
   // Cada cliente (telefone) entra UMA vez — fica com a conversa mais recente.
   const byPhone = new Map<string, { phone: string; name: string; conversationId: number; at: number }>();

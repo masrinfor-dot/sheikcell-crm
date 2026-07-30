@@ -10,6 +10,8 @@ export const rafflesTable = pgTable("raffles", {
   vendedorIds: jsonb("vendedor_ids"),   // number[] | null (assigneeId da conversa)
   sessionKeys: jsonb("session_keys"),   // string[] | null (número de WhatsApp conectado)
   periodDays: integer("period_days"),   // só clientes com movimento nos últimos N dias
+  // Tipo de cliente: "comprou" | "prospeccao" | motivo de finalização exato. null = todos
+  clientTypes: jsonb("client_types"),   // string[] | null
   onlyResolved: boolean("only_resolved").notNull().default(false),
   excludePreviousWinners: boolean("exclude_previous_winners").notNull().default(true),
   winnersCount: integer("winners_count").notNull().default(1),

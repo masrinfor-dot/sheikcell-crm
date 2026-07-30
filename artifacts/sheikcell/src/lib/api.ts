@@ -92,6 +92,7 @@ export type BotSettings = {
 export type Raffle = {
   id: number; name: string; prize: string;
   sectorIds: number[] | null; vendedorIds: number[] | null; sessionKeys: string[] | null;
+  clientTypes: string[] | null;
   periodDays: number | null; onlyResolved: boolean; excludePreviousWinners: boolean;
   winnersCount: number; messageTemplate: string; storeName: string | null;
   recurrence: "once" | "weekly" | "monthly"; dayOfWeek: number | null; dayOfMonth: number | null;
