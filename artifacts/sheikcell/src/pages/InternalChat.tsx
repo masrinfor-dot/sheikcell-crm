@@ -274,15 +274,13 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
   const threadPanel = active ? (
             <>
               <header className="px-4 py-3 border-b flex items-center gap-3 shrink-0">
-                {docked && (
-                  <button
-                    onClick={() => setActiveId(null)}
-                    data-testid="button-back-internal"
-                    className="p-1 -ml-1 rounded-md hover:bg-muted/50 shrink-0"
-                  >
-                    <ChevronLeft className="w-5 h-5" />
-                  </button>
-                )}
+                <button
+                  onClick={() => setActiveId(null)}
+                  data-testid="button-back-internal"
+                  className={`p-1 -ml-1 rounded-md hover:bg-muted/50 shrink-0 ${docked ? "" : "md:hidden"}`}
+                >
+                  <ChevronLeft className="w-5 h-5" />
+                </button>
                 <div className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-semibold ${
                   active.kind === "general" ? "bg-amber-500 text-white" : active.kind === "group" ? "bg-violet-500 text-white" : "bg-primary text-white"
                 }`}>
@@ -479,8 +477,10 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
   }
 
   return (
-    <div className="max-w-6xl mx-auto px-4 py-4">
-      <div className="relative flex flex-col h-[calc(100vh-180px)] min-h-[480px] rounded-xl border bg-card overflow-hidden shadow-sm">
+    <div className="max-w-6xl mx-auto px-2 md:px-4 py-2 md:py-4">
+      {/* Celular: uma coluna só (lista OU conversa) e altura descontando a
+          bottom nav — duas colunas espremidas distorciam tudo. */}
+      <div className="relative flex flex-col h-[calc(100dvh-11rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-180px)] min-h-[380px] md:min-h-[480px] rounded-xl border bg-card overflow-hidden shadow-sm">
         {viewTabs}
         {view === "tasks" ? (
           <div className="flex-1 overflow-y-auto p-4">
@@ -488,8 +488,8 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
           </div>
         ) : (
           <div className="relative flex flex-1 min-h-0">
-            <aside className="w-72 shrink-0 border-r flex flex-col bg-muted/20">{listPanel}</aside>
-            <section className="flex-1 flex flex-col min-w-0">{threadPanel}</section>
+            <aside className={`w-full md:w-72 shrink-0 md:border-r flex-col bg-muted/20 ${active ? "hidden md:flex" : "flex"}`}>{listPanel}</aside>
+            <section className={`flex-1 flex-col min-w-0 ${active ? "flex" : "hidden md:flex"}`}>{threadPanel}</section>
           </div>
         )}
         {newModal}
