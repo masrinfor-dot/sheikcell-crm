@@ -24,3 +24,6 @@ description: How WhatsApp session persistence works — Baileys writes all auth 
 - `SignalKeyStore.get` must use explicit generic cast (`val as SignalDataTypeMap[T]`) to satisfy TypeScript — the DB stores JSON, not typed values.
 
 **Why:** Any return type broader than `SignalDataTypeMap[T]` will fail the strict generic constraint in Baileys' SignalKeyStore interface.
+
+## Erro 405 no pareamento (QR nunca aparece)
+Baileys desatualizado faz o WhatsApp recusar novos registros com statusCode 405 ("Connection Failure" em loop, "not logged in, attempting registration"). Sessões já pareadas continuam funcionando — só o pareamento NOVO quebra. Correção: atualizar @whiskeysockets/baileys (rc13→rc14 em jul/2026). Se "gerar novo QR" parar de funcionar, checar versão do Baileys antes de debugar o fluxo de reset.
