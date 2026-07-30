@@ -220,6 +220,13 @@ export type TaskSubtask = {
   id: number; taskId: number; title: string; isDone: boolean; position: number; createdAt: string;
 };
 
+export type TradeInEvaluation = {
+  id: number; userId: number | null; userName?: string | null;
+  device: string; answers: Record<string, string>;
+  marketPrice: string | null; suggestedPrice: string | null;
+  aiSummary: string | null; createdAt: string;
+};
+
 export type FilmCompat = {
   id: number; film: string; models: string; notes: string | null;
   createdAt: string; updatedAt: string;
@@ -477,6 +484,12 @@ export const api = {
         req<CrmCustomField>(`/crm/custom-fields/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number) => req<{ ok: boolean }>(`/crm/custom-fields/${id}`, { method: "DELETE" }),
     },
+  },
+  tradeIn: {
+    list: () => req<TradeInEvaluation[]>("/trade-in"),
+    evaluate: (data: { device: string; answers: Record<string, string> }) =>
+      req<{ id: number; device: string; marketPrice: string; suggestedPrice: string; summary: string; createdAt: string }>(
+        "/trade-in/evaluate", { method: "POST", body: JSON.stringify(data) }),
   },
   filmCompat: {
     list: () => req<FilmCompat[]>("/film-compat"),

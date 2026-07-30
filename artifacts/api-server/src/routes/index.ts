@@ -14,6 +14,7 @@ import tasksRouter from "./tasks";
 import settingsRouter from "./settings";
 import partnerLinksRouter from "./partnerLinks";
 import filmCompatRouter from "./filmCompat";
+import tradeInRouter from "./tradeIn";
 
 const router: IRouter = Router();
 
@@ -32,5 +33,6 @@ router.use(tasksRouter);
 router.use(settingsRouter);
 router.use(partnerLinksRouter);
 router.use(filmCompatRouter);
+router.use(tradeInRouter);
 
 export default router;

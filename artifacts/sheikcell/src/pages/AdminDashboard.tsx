@@ -8,16 +8,17 @@ import CrmBoard from "./CrmBoard";
 import ChatCenter from "./ChatCenter";
 import Financeiras from "./Financeiras";
 import Peliculas from "./Peliculas";
+import Avaliacao from "./Avaliacao";
 import InternalChat from "./InternalChat";
 import DistribuicaoPanel from "./DistribuicaoPanel";
 import TaskBoard from "./TaskBoard";
 import {
   Smartphone, LogOut, LayoutDashboard, ClipboardList,
   Settings, Users, RefreshCw, Plus, X, Clock, CheckCircle,
-  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark
+  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign
 } from "lucide-react";
 
-type Tab = "dashboard" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies";
+type Tab = "dashboard" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies";
 
 type WASession = {
   sessionKey: string;
@@ -266,6 +267,7 @@ export default function AdminDashboard() {
     { id: "crm" as Tab, label: "CRM", icon: Kanban, adminOnly: false },
     { id: "financeiras" as Tab, label: "Financeiras", icon: Landmark, adminOnly: false },
     { id: "peliculas" as Tab, label: "Películas", icon: ShieldCheck, adminOnly: false },
+    { id: "avaliacao" as Tab, label: "Avaliação de Usados", icon: BadgeDollarSign, adminOnly: false },
     { id: "history" as Tab, label: "Histórico", icon: ClipboardList, adminOnly: false },
     { id: "users" as Tab, label: "Usuários", icon: Users, adminOnly: true },
     { id: "sectors" as Tab, label: "Setores", icon: Settings, adminOnly: true },
@@ -399,6 +401,8 @@ export default function AdminDashboard() {
         {tab === "financeiras" && <Financeiras />}
 
         {tab === "peliculas" && <Peliculas />}
+
+        {tab === "avaliacao" && <Avaliacao />}
 
         {/* === WHATSAPP TAB === */}
         {tab === "whatsapp" && (
