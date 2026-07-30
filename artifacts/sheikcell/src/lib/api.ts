@@ -220,6 +220,22 @@ export type TaskSubtask = {
   id: number; taskId: number; title: string; isDone: boolean; position: number; createdAt: string;
 };
 
+export type ChecklistQuestion = { id: string; label: string; type: "text" | "options" | "rating"; options?: string[] };
+export type Checklist = {
+  id: number; title: string; description: string | null;
+  questions: ChecklistQuestion[]; targetRoles: string[];
+  recurrence: "daily" | "weekly" | "once"; dayOfWeek: number | null;
+  startDate: string | null; mandatory: boolean; active: boolean; createdAt: string;
+};
+export type PendingChecklist = {
+  id: number; title: string; description: string | null;
+  questions: ChecklistQuestion[]; mandatory: boolean; periodKey: string;
+};
+export type ChecklistResponse = {
+  id: number; userId: number; userName: string | null;
+  periodKey: string; answers: Record<string, string>; createdAt: string;
+};
+
 export type TradeInEvaluation = {
   id: number; userId: number | null; userName?: string | null;
   device: string; answers: Record<string, string>;
@@ -484,6 +500,16 @@ export const api = {
         req<CrmCustomField>(`/crm/custom-fields/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number) => req<{ ok: boolean }>(`/crm/custom-fields/${id}`, { method: "DELETE" }),
     },
+  },
+  checklists: {
+    pending: () => req<PendingChecklist[]>("/checklists/pending"),
+    respond: (id: number, answers: Record<string, string>) =>
+      req<{ id: number }>(`/checklists/${id}/respond`, { method: "POST", body: JSON.stringify({ answers }) }),
+    list: () => req<Checklist[]>("/checklists"),
+    create: (data: Partial<Checklist>) => req<Checklist>("/checklists", { method: "POST", body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<Checklist>) => req<Checklist>(`/checklists/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/checklists/${id}`, { method: "DELETE" }),
+    responses: (id: number) => req<ChecklistResponse[]>(`/checklists/${id}/responses`),
   },
   tradeIn: {
     list: () => req<TradeInEvaluation[]>("/trade-in"),

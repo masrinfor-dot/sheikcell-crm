@@ -11,6 +11,7 @@ import TaskBoard from "./TaskBoard";
 import Financeiras from "./Financeiras";
 import Peliculas from "./Peliculas";
 import Avaliacao from "./Avaliacao";
+import ChecklistGate from "@/components/ChecklistGate";
 import {
   Smartphone, LogOut, Clock, PhoneCall, CheckCircle,
   ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, Shield, BadgeDollarSign
@@ -140,6 +141,7 @@ export default function AttendantDashboard() {
 
   return (
     <div className="min-h-screen bg-background">
+      <ChecklistGate />
       {/* Navbar */}
       <nav className="bg-white border-b border-border sticky top-0 z-20">
         <div className="max-w-3xl mx-auto px-4 h-14 flex items-center justify-between">

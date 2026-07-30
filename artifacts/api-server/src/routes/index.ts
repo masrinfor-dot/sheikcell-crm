@@ -15,11 +15,14 @@ import settingsRouter from "./settings";
 import partnerLinksRouter from "./partnerLinks";
 import filmCompatRouter from "./filmCompat";
 import tradeInRouter from "./tradeIn";
+import checklistsRouter, { enforceMandatoryChecklists } from "./checklists";
 
 const router: IRouter = Router();
 
 router.use(healthRouter);
 router.use(authRouter);
+// Trava o sistema (423) enquanto houver questionário obrigatório pendente.
+router.use(enforceMandatoryChecklists);
 router.use(sectorsRouter);
 router.use(queueRouter);
 router.use(adminRouter);
@@ -34,5 +37,6 @@ router.use(settingsRouter);
 router.use(partnerLinksRouter);
 router.use(filmCompatRouter);
 router.use(tradeInRouter);
+router.use(checklistsRouter);
 
 export default router;
