@@ -72,6 +72,11 @@ export default function AdminDashboard() {
   const [showAddSector, setShowAddSector] = useState(false);
   const [editSector, setEditSector] = useState<Sector | null>(null);
 
+  // Exclusão de usuário com transferência dos atendimentos dele.
+  const [deleteUser, setDeleteUser] = useState<UserRow | null>(null);
+  const [deleteTransferTo, setDeleteTransferTo] = useState("");
+  const [deletingUser, setDeletingUser] = useState(false);
+
   const [userForm, setUserForm] = useState({ name: "", email: "", password: "", role: "vendedor", sectorId: 1 });
   const [sectorForm, setSectorForm] = useState({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true });
 
@@ -685,6 +690,13 @@ export default function AdminDashboard() {
                               className="p-1.5 text-muted-foreground hover:text-primary hover:bg-blue-50 rounded-lg transition">
                               <Pencil className="w-3.5 h-3.5" />
                             </button>
+                            {u.id !== user?.id && (
+                              <button onClick={() => { setDeleteUser(u); setDeleteTransferTo(""); }}
+                                data-testid={`button-delete-user-${u.id}`} title="Excluir usuário"
+                                className="p-1.5 text-muted-foreground hover:text-red-600 hover:bg-red-50 rounded-lg transition">
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                             {u.role === "vendedor" && (
                               <button
                                 onClick={() => {
@@ -862,6 +874,63 @@ export default function AdminDashboard() {
                 }}
                 className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold bg-primary text-white hover:bg-primary/90 transition disabled:opacity-50">
                 {savingPerms ? "Salvando..." : "Salvar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===== DELETE USER MODAL ===== */}
+      {deleteUser && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="shk-card w-full max-w-sm p-6">
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="font-bold text-red-600">Excluir usuário</h3>
+              <button onClick={() => { if (!deletingUser) setDeleteUser(null); }}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <p className="text-xs text-muted-foreground mb-4">
+              <span className="font-semibold text-foreground">{deleteUser.name}</span> será excluído
+              de forma permanente. Escolha para quem vão os atendimentos, tarefas e clientes dele:
+            </p>
+            <div>
+              <label className="text-xs font-medium mb-1 block">Transferir para</label>
+              <select value={deleteTransferTo} onChange={(e) => setDeleteTransferTo(e.target.value)}
+                data-testid="select-delete-transfer"
+                className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                <option value="">— Ninguém (conversas voltam para a fila) —</option>
+                {userRows.filter((u) => u.id !== deleteUser.id && u.isActive).map((u) => (
+                  <option key={u.id} value={String(u.id)}>{u.name}</option>
+                ))}
+              </select>
+            </div>
+            <div className="flex gap-2 mt-4">
+              <button onClick={() => setDeleteUser(null)} disabled={deletingUser}
+                className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold border border-border hover:bg-secondary transition disabled:opacity-50">
+                Cancelar
+              </button>
+              <button
+                disabled={deletingUser}
+                data-testid="button-confirm-delete-user"
+                onClick={async () => {
+                  setDeletingUser(true);
+                  try {
+                    const r = await api.admin.users.remove(deleteUser.id, deleteTransferTo ? Number(deleteTransferTo) : null);
+                    toast({
+                      title: "Usuário excluído",
+                      description: r.transferredConversations > 0
+                        ? `${r.transferredConversations} atendimento(s) ${deleteTransferTo ? "transferido(s)" : "devolvido(s) para a fila"}.`
+                        : `${deleteUser.name} foi removido.`,
+                    });
+                    setDeleteUser(null);
+                    fetchUsersAndSectors();
+                  } catch (err) {
+                    toast({ title: "Erro ao excluir", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+                  } finally {
+                    setDeletingUser(false);
+                  }
+                }}
+                className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold bg-red-600 text-white hover:bg-red-700 transition disabled:opacity-50">
+                {deletingUser ? "Excluindo..." : "Excluir"}
               </button>
             </div>
           </div>

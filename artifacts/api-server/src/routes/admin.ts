@@ -1,9 +1,10 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable } from "@workspace/db";
+import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, tasksTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable } from "@workspace/db";
 import { eq, sql, desc, and, gte, isNull, isNotNull, notInArray } from "drizzle-orm";
 import { requireAdmin, requireAdminOrSupervisor } from "../middlewares/auth";
 import { sanitizePermissions } from "../lib/permissions";
+import { syncCrmAttendant } from "../lib/crmSync";
 
 const router: IRouter = Router();
 
@@ -177,6 +178,74 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
 
   const { passwordHash: _ph, ...safeUser } = user;
   res.json(safeUser);
+});
+
+// ─── Excluir usuário (transferindo os atendimentos dele) ────────────────────
+// transferToId: para quem vão as conversas/tarefas/clientes do usuário excluído.
+// Sem transferToId, as conversas em andamento voltam para a fila (sem responsável)
+// e as demais referências ficam "sem responsável".
+router.delete("/admin/users/:id", requireAdmin, async (req, res): Promise<void> => {
+  const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const id = parseInt(rawId, 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  if (id === req.session.userId) { res.status(400).json({ error: "Você não pode excluir a si mesmo" }); return; }
+
+  const { transferToId: rawTransfer } = req.body as { transferToId?: number | null };
+  const transferToId = rawTransfer != null ? Number(rawTransfer) : null;
+  if (transferToId != null && (Number.isNaN(transferToId) || transferToId === id)) {
+    res.status(400).json({ error: "Destinatário da transferência inválido" });
+    return;
+  }
+
+  const [target] = await db.select().from(usersTable).where(eq(usersTable.id, id)).limit(1);
+  if (!target) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
+
+  if (transferToId != null) {
+    const [dest] = await db.select({ id: usersTable.id, isActive: usersTable.isActive })
+      .from(usersTable).where(eq(usersTable.id, transferToId)).limit(1);
+    if (!dest || !dest.isActive) { res.status(400).json({ error: "Usuário de destino não encontrado ou inativo" }); return; }
+  }
+
+  // Conversas do usuário (para sincronizar CRM/registro após a transação).
+  const ownedConvs = await db.select().from(conversationsTable).where(eq(conversationsTable.assigneeId, id));
+
+  await db.transaction(async (tx) => {
+    if (transferToId != null) {
+      // Transfere todas as conversas para o novo responsável.
+      await tx.update(conversationsTable)
+        .set({ assigneeId: transferToId, updatedAt: new Date() })
+        .where(eq(conversationsTable.assigneeId, id));
+    } else {
+      // Sem destino: atendimentos em andamento voltam para a fila do setor.
+      await tx.update(conversationsTable)
+        .set({ assigneeId: null, status: "open", attendanceStartedAt: null, updatedAt: new Date() })
+        .where(and(eq(conversationsTable.assigneeId, id), notInArray(conversationsTable.status, ["resolved", "archived"])));
+      await tx.update(conversationsTable)
+        .set({ assigneeId: null, updatedAt: new Date() })
+        .where(eq(conversationsTable.assigneeId, id));
+    }
+    // Tarefas, agendamentos, clientes do CRM e anotações.
+    await tx.update(tasksTable).set({ assigneeId: transferToId }).where(eq(tasksTable.assigneeId, id));
+    await tx.update(tasksTable).set({ createdById: transferToId }).where(eq(tasksTable.createdById, id));
+    await tx.update(scheduledMessagesTable).set({ createdById: transferToId }).where(eq(scheduledMessagesTable.createdById, id));
+    await tx.update(crmContactsTable).set({ attendantId: transferToId, updatedAt: new Date() }).where(eq(crmContactsTable.attendantId, id));
+    await tx.update(crmInternalNotesTable).set({ authorId: transferToId }).where(eq(crmInternalNotesTable.authorId, id));
+    // Chat interno e participações são removidos em cascata pelo banco.
+    await tx.delete(usersTable).where(eq(usersTable.id, id));
+  });
+
+  // Espelha a transferência no quadro CRM (best-effort, fora da transação).
+  for (const conv of ownedConvs) {
+    await syncCrmAttendant({
+      phone: conv.phone,
+      sectorId: conv.sectorId,
+      assigneeId: transferToId,
+      status: transferToId == null && conv.status !== "resolved" && conv.status !== "archived" ? "open" : conv.status,
+      isArchived: conv.isArchived,
+    });
+  }
+
+  res.json({ ok: true, transferredConversations: ownedConvs.length });
 });
 
 export default router;
