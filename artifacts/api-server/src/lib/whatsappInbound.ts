@@ -34,6 +34,10 @@ export interface InboundWAMessageContent {
   contactsArrayMessage?: { displayName?: string; contacts?: Array<{ displayName?: string; vcard?: string }> };
   locationMessage?: { degreesLatitude?: number; degreesLongitude?: number; name?: string; address?: string };
   stickerMessage?: object;
+  pollCreationMessage?: { name?: string; options?: Array<{ optionName?: string }> };
+  pollCreationMessageV2?: { name?: string; options?: Array<{ optionName?: string }> };
+  pollCreationMessageV3?: { name?: string; options?: Array<{ optionName?: string }> };
+  ptvMessage?: { caption?: string };
   // Wrappers used by disappearing/view-once chats — the real content is nested.
   ephemeralMessage?: { message?: InboundWAMessageContent };
   viewOnceMessage?: { message?: InboundWAMessageContent };
@@ -336,10 +340,17 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   const msgType: string = mediaType ?? "text";
   const docFileName = msgContent?.documentMessage?.fileName ?? null;
 
+  // Enquete: mostra a pergunta e as opções.
+  const poll = msgContent?.pollCreationMessage ?? msgContent?.pollCreationMessageV2 ?? msgContent?.pollCreationMessageV3;
+  const pollText = poll
+    ? `📊 Enquete: ${poll.name ?? ""}${(poll.options ?? []).length ? `\n${(poll.options ?? []).map((o) => `• ${o.optionName ?? ""}`).join("\n")}` : ""}`.trim()
+    : "";
+
   const displayContent =
     text ||
     contactText ||
     locationText ||
+    pollText ||
     (mediaType === "image" ? "📷 Foto"
       : mediaType === "video" ? "🎥 Vídeo"
       : mediaType === "audio" ? "🎵 Áudio"

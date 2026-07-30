@@ -213,22 +213,38 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
   const msg = m.message;
   if (!msg) return;
 
+  // Eventos SEM conteúdo visível (reação, edição/apagar, voto em enquete,
+  // recibos, chaves de criptografia) não viram mensagem — antes chegavam na
+  // Central como "(mensagem não suportada)" em cima de qualquer reação. 🙅
+  {
+    const keys = Object.keys(msg).filter((k) => k !== "messageContextInfo" && k !== "senderKeyDistributionMessage");
+    const INVISIBLE = new Set(["reactionMessage", "protocolMessage", "pollUpdateMessage", "keepInChatMessage", "pinInChatMessage"]);
+    if (keys.length === 0 || keys.every((k) => INVISIBLE.has(k))) return;
+  }
+
+  // Mídia pode vir embrulhada (mensagem temporária / visualização única).
+  const inner = msg.ephemeralMessage?.message ?? msg.viewOnceMessage?.message ?? msg.viewOnceMessageV2?.message ?? msg;
+
   let mediaBase64: string | undefined;
   let mediaMimeType: string | undefined;
   let mediaType: "image" | "video" | "audio" | "doc" | undefined;
 
-  if (msg.imageMessage) {
+  if (inner.imageMessage) {
     mediaType = "image";
-    mediaMimeType = msg.imageMessage.mimetype ?? "image/jpeg";
-  } else if (msg.videoMessage) {
+    mediaMimeType = inner.imageMessage.mimetype ?? "image/jpeg";
+  } else if (inner.videoMessage) {
     mediaType = "video";
-    mediaMimeType = msg.videoMessage.mimetype ?? "video/mp4";
-  } else if (msg.audioMessage) {
+    mediaMimeType = inner.videoMessage.mimetype ?? "video/mp4";
+  } else if (inner.ptvMessage) {
+    // Vídeo redondo (nota de vídeo) — é um vídeo comum para o painel.
+    mediaType = "video";
+    mediaMimeType = inner.ptvMessage.mimetype ?? "video/mp4";
+  } else if (inner.audioMessage) {
     mediaType = "audio";
-    mediaMimeType = msg.audioMessage.mimetype ?? "audio/ogg";
-  } else if (msg.documentMessage) {
+    mediaMimeType = inner.audioMessage.mimetype ?? "audio/ogg";
+  } else if (inner.documentMessage) {
     mediaType = "doc";
-    mediaMimeType = msg.documentMessage.mimetype ?? "application/octet-stream";
+    mediaMimeType = inner.documentMessage.mimetype ?? "application/octet-stream";
   }
 
   if (mediaType && s.sock) {
@@ -244,9 +260,10 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
       );
       mediaBase64 = (buffer as Buffer).toString("base64");
     } catch (err) {
-      logger.warn({ err }, "Failed to download inbound media — forwarding without it");
-      mediaType = undefined;
-      mediaMimeType = undefined;
+      // Mantém o TIPO mesmo sem o arquivo: o painel mostra "🎵 Áudio"/"📷 Foto"
+      // em vez de "(mensagem não suportada)".
+      logger.warn({ err, mediaType }, "Failed to download inbound media — forwarding type without file");
+      mediaBase64 = undefined;
     }
   }
 
