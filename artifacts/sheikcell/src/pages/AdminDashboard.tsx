@@ -12,6 +12,7 @@ import Avaliacao from "./Avaliacao";
 import Questionarios from "./Questionarios";
 import Treinamentos from "./Treinamentos";
 import Planilhas from "./Planilhas";
+import RH from "./RH";
 import ChecklistGate from "@/components/ChecklistGate";
 import TrainingGate from "@/components/TrainingGate";
 import InternalChat from "./InternalChat";
@@ -20,10 +21,10 @@ import TaskBoard from "./TaskBoard";
 import {
   Smartphone, LogOut, LayoutDashboard, ClipboardList,
   Settings, Users, RefreshCw, Plus, X, Clock, CheckCircle,
-  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, Table2
+  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, Table2, UserSearch
 } from "lucide-react";
 
-type Tab = "dashboard" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "questionarios" | "treinamentos" | "planilhas" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies";
+type Tab = "dashboard" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "questionarios" | "treinamentos" | "planilhas" | "rh" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies";
 
 type WASession = {
   sessionKey: string;
@@ -276,6 +277,7 @@ export default function AdminDashboard() {
     { id: "questionarios" as Tab, label: "Questionários", icon: ClipboardList, adminOnly: true },
     { id: "treinamentos" as Tab, label: "Treinamentos", icon: GraduationCap, adminOnly: false },
     { id: "planilhas" as Tab, label: "Planilhas", icon: Table2, adminOnly: false },
+    { id: "rh" as Tab, label: "RH", icon: UserSearch, adminOnly: true },
     { id: "history" as Tab, label: "Histórico", icon: ClipboardList, adminOnly: false },
     { id: "users" as Tab, label: "Usuários", icon: Users, adminOnly: true },
     { id: "sectors" as Tab, label: "Setores", icon: Settings, adminOnly: true },
@@ -419,6 +421,8 @@ export default function AdminDashboard() {
         {tab === "treinamentos" && <Treinamentos />}
 
         {tab === "planilhas" && <Planilhas />}
+
+        {tab === "rh" && <RH />}
 
         {/* === WHATSAPP TAB === */}
         {tab === "whatsapp" && (

@@ -1,4 +1,5 @@
 const BASE = "/api";
+export const API_BASE = BASE;
 
 async function req<T>(path: string, opts?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
@@ -259,6 +260,16 @@ export type TradeInEvaluation = {
 export type FilmCompat = {
   id: number; film: string; models: string; notes: string | null;
   createdAt: string; updatedAt: string;
+};
+
+export type RhQuestion = { id: string; label: string; type: "text" | "longtext" | "options"; options?: string[] };
+export type RhStage = { id: string; title: string; description: string; type: "form" | "video"; enabled: boolean; questions: RhQuestion[] };
+export type RhCandidate = {
+  id: number; name: string; phone: string; email: string | null;
+  status: "novo" | "aprovado" | "reprovado";
+  answers: Record<string, Record<string, string>>;
+  stagesSnapshot: RhStage[] | null;
+  notes: string | null; hasVideo: boolean; createdAt: string;
 };
 
 export type SheetLink = {
@@ -551,6 +562,21 @@ export const api = {
     update: (id: number, data: Partial<{ film: string; models: string; notes: string }>) =>
       req<FilmCompat>(`/film-compat/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/film-compat/${id}`, { method: "DELETE" }),
+  },
+  rh: {
+    publicProcess: (token: string) => req<{ stages: RhStage[] }>(`/rh/public/${token}`),
+    publicApply: (token: string, data: {
+      name: string; phone: string; email?: string;
+      answers: Record<string, Record<string, string>>;
+      videoData?: string; videoMime?: string;
+    }) => req<{ ok: boolean; id: number }>(`/rh/public/${token}/apply`, { method: "POST", body: JSON.stringify(data) }),
+    settings: () => req<{ publicToken: string; stages: RhStage[] }>("/rh/settings"),
+    saveSettings: (stages: RhStage[]) => req<{ ok: boolean }>("/rh/settings", { method: "PUT", body: JSON.stringify({ stages }) }),
+    regenerateToken: () => req<{ publicToken: string }>("/rh/settings/regenerate-token", { method: "POST" }),
+    candidates: () => req<RhCandidate[]>("/rh/candidates"),
+    updateCandidate: (id: number, data: { status?: string; notes?: string }) =>
+      req<Pick<RhCandidate, "id" | "status" | "notes">>(`/rh/candidates/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    removeCandidate: (id: number) => req<{ ok: boolean }>(`/rh/candidates/${id}`, { method: "DELETE" }),
   },
   sheetLinks: {
     list: () => req<SheetLink[]>("/sheet-links"),

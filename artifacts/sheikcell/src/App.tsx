@@ -7,6 +7,7 @@ import LoginPage from "@/pages/LoginPage";
 import AttendantDashboard from "@/pages/AttendantDashboard";
 import AdminDashboard from "@/pages/AdminDashboard";
 import NotFound from "@/pages/not-found";
+import Candidatura from "@/pages/Candidatura";
 
 const queryClient = new QueryClient();
 
@@ -26,6 +27,9 @@ function AppRoutes() {
 
   return (
     <Switch>
+      <Route path="/candidatura/:token">
+        <Candidatura />
+      </Route>
       <Route path="/login">
         {user ? <Redirect to="/" /> : <LoginPage />}
       </Route>

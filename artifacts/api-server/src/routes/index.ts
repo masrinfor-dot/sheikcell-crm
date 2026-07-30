@@ -18,6 +18,7 @@ import tradeInRouter from "./tradeIn";
 import checklistsRouter, { enforceMandatoryChecklists } from "./checklists";
 import trainingsRouter, { enforceMandatoryTrainings } from "./trainings";
 import sheetLinksRouter from "./sheetLinks";
+import rhRouter from "./rh";
 
 const router: IRouter = Router();
 
@@ -43,5 +44,6 @@ router.use(tradeInRouter);
 router.use(checklistsRouter);
 router.use(trainingsRouter);
 router.use(sheetLinksRouter);
+router.use(rhRouter);
 
 export default router;
