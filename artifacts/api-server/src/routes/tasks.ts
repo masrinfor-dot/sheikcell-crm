@@ -121,6 +121,13 @@ router.patch("/tasks/:id", requireAuth, async (req, res): Promise<void> => {
     assigneeId?: number | null; sectorId?: number | null; dueDate?: string | null;
     position?: number; isArchived?: boolean;
   };
+  // Somente o responsável pela tarefa pode marcá-la como concluída.
+  // (Tarefas sem responsável podem ser concluídas por qualquer pessoa com acesso.)
+  if (status === "done" && existing.status !== "done"
+      && existing.assigneeId != null && existing.assigneeId !== req.session.userId) {
+    res.status(403).json({ error: "Somente o responsável pela tarefa pode concluí-la" });
+    return;
+  }
   const update: Record<string, unknown> = { updatedAt: new Date() };
   if (title !== undefined) update.title = title.trim();
   if (description !== undefined) update.description = description || null;

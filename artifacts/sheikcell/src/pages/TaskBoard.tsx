@@ -54,17 +54,20 @@ function isOverdue(iso: string, status: TaskStatus): boolean {
 }
 
 function TaskCard({
-  task, onMove, onEdit, onDelete, colIdx,
+  task, onMove, onEdit, onDelete, colIdx, canComplete,
 }: {
   task: Task;
   onMove: (id: number, status: TaskStatus) => void;
   onEdit: (t: Task) => void;
   onDelete: (id: number) => void;
   colIdx: number;
+  canComplete: boolean;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const prev = COLUMNS[colIdx - 1];
-  const next = COLUMNS[colIdx + 1];
+  // Só o responsável pode mover a tarefa para "Concluído".
+  const nextCol = COLUMNS[colIdx + 1];
+  const next = nextCol?.key === "done" && !canComplete ? undefined : nextCol;
   const overdue = task.dueDate ? isOverdue(task.dueDate, task.status) : false;
 
   return (
@@ -150,6 +153,9 @@ export default function TaskBoard() {
   const [showForm, setShowForm] = useState(false);
   const [editTarget, setEditTarget] = useState<Task | null>(null);
   const [form, setForm] = useState<TaskFormData>(emptyForm);
+  // Filtros do quadro: por setor e por responsável (vendedor).
+  const [filterSector, setFilterSector] = useState("");
+  const [filterAssignee, setFilterAssignee] = useState("");
   const isGlobal = user?.role === "admin" || user?.role === "supervisor";
 
   const fetchTasks = useCallback(async () => {
@@ -191,8 +197,8 @@ export default function TaskBoard() {
     setTasks((prev) => prev.map((t) => t.id === id ? { ...t, status } : t));
     try {
       await api.tasks.update(id, { status });
-    } catch {
-      toast({ title: "Erro ao mover tarefa", variant: "destructive" });
+    } catch (err) {
+      toast({ title: "Erro ao mover tarefa", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
       fetchTasks();
     }
   };
@@ -233,7 +239,21 @@ export default function TaskBoard() {
     }
   };
 
-  const byStatus = (status: TaskStatus) => tasks.filter((t) => t.status === status);
+  // Aplica os filtros de setor/responsável e ordena por prioridade
+  // (Alta → Média → Baixa) e, dentro da mesma prioridade, pelo prazo mais próximo.
+  const PRIORITY_ORDER: Record<string, number> = { alta: 0, media: 1, baixa: 2 };
+  const visibleTasks = tasks.filter((t) =>
+    (!filterSector || String(t.sectorId ?? "") === filterSector) &&
+    (!filterAssignee || String(t.assigneeId ?? "") === filterAssignee));
+  const byStatus = (status: TaskStatus) => visibleTasks
+    .filter((t) => t.status === status)
+    .sort((a, b) => {
+      const pd = (PRIORITY_ORDER[a.priority] ?? 1) - (PRIORITY_ORDER[b.priority] ?? 1);
+      if (pd !== 0) return pd;
+      const ad = a.dueDate ? new Date(a.dueDate).getTime() : Infinity;
+      const bd = b.dueDate ? new Date(b.dueDate).getTime() : Infinity;
+      return ad - bd;
+    });
 
   return (
     <div className="space-y-4">
@@ -246,6 +266,18 @@ export default function TaskBoard() {
           <p className="text-xs text-muted-foreground mt-0.5">Organize as tarefas do atendimento entre a equipe</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          <select value={filterSector} onChange={(e) => setFilterSector(e.target.value)}
+            data-testid="filter-task-sector"
+            className="px-2.5 py-2 rounded-xl border border-border text-xs bg-white">
+            <option value="">Todos os setores</option>
+            {sectors.map((s) => <option key={s.id} value={String(s.id)}>{s.name}</option>)}
+          </select>
+          <select value={filterAssignee} onChange={(e) => setFilterAssignee(e.target.value)}
+            data-testid="filter-task-assignee"
+            className="px-2.5 py-2 rounded-xl border border-border text-xs bg-white">
+            <option value="">Todos os responsáveis</option>
+            {team.map((u) => <option key={u.id} value={String(u.id)}>{u.name}</option>)}
+          </select>
           <button onClick={fetchTasks}
             className="p-2 text-muted-foreground hover:text-foreground rounded-xl hover:bg-secondary transition">
             <RefreshCw className="w-4 h-4" />
@@ -260,7 +292,7 @@ export default function TaskBoard() {
       {/* Stats bar */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {[
-          { label: "Total", value: tasks.length, color: "text-foreground" },
+          { label: "Total", value: visibleTasks.length, color: "text-foreground" },
           { label: "A Fazer", value: byStatus("todo").length, color: "text-slate-600" },
           { label: "Em Andamento", value: byStatus("doing").length, color: "text-blue-600" },
           { label: "Concluídas", value: byStatus("done").length, color: "text-green-600" },
@@ -303,6 +335,7 @@ export default function TaskBoard() {
                       key={t.id} task={t} onMove={handleMove}
                       onEdit={openEdit} onDelete={handleDelete}
                       colIdx={colIdx}
+                      canComplete={t.assigneeId == null || t.assigneeId === user?.id}
                     />
                   ))
                 )}
