@@ -14,12 +14,13 @@ import Avaliacao from "./Avaliacao";
 import ChecklistGate from "@/components/ChecklistGate";
 import TrainingGate from "@/components/TrainingGate";
 import Treinamentos from "./Treinamentos";
+import Planilhas from "./Planilhas";
 import {
   Smartphone, LogOut, Clock, PhoneCall, CheckCircle,
-  ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, Shield, BadgeDollarSign, GraduationCap
+  ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, Shield, BadgeDollarSign, GraduationCap, Table2
 } from "lucide-react";
 
-type MainTab = "queue" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "peliculas" | "avaliacao" | "treinamentos";
+type MainTab = "queue" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "peliculas" | "avaliacao" | "treinamentos" | "planilhas";
 
 const MAIN_TABS = [
   { id: "queue" as MainTab, label: "Fila", icon: PhoneCall },
@@ -30,6 +31,7 @@ const MAIN_TABS = [
   { id: "peliculas" as MainTab, label: "Películas", icon: Shield },
   { id: "avaliacao" as MainTab, label: "Avaliação", icon: BadgeDollarSign },
   { id: "treinamentos" as MainTab, label: "Treinamentos", icon: GraduationCap },
+  { id: "planilhas" as MainTab, label: "Planilhas", icon: Table2 },
 ] as const;
 
 function formatWait(createdAt: string): string {
@@ -221,6 +223,12 @@ export default function AttendantDashboard() {
       {mainTab === "treinamentos" && (
         <div className="max-w-3xl mx-auto px-4 py-6">
           <Treinamentos />
+        </div>
+      )}
+
+      {mainTab === "planilhas" && (
+        <div className="max-w-5xl mx-auto px-4 py-6">
+          <Planilhas />
         </div>
       )}
 

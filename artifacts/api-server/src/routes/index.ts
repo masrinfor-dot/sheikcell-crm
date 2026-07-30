@@ -17,6 +17,7 @@ import filmCompatRouter from "./filmCompat";
 import tradeInRouter from "./tradeIn";
 import checklistsRouter, { enforceMandatoryChecklists } from "./checklists";
 import trainingsRouter, { enforceMandatoryTrainings } from "./trainings";
+import sheetLinksRouter from "./sheetLinks";
 
 const router: IRouter = Router();
 
@@ -41,5 +42,6 @@ router.use(filmCompatRouter);
 router.use(tradeInRouter);
 router.use(checklistsRouter);
 router.use(trainingsRouter);
+router.use(sheetLinksRouter);
 
 export default router;

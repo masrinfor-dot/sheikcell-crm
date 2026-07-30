@@ -261,6 +261,10 @@ export type FilmCompat = {
   createdAt: string; updatedAt: string;
 };
 
+export type SheetLink = {
+  id: number; name: string; url: string; position: number; createdAt: string;
+};
+
 export type PartnerLink = {
   id: number; name: string; url: string; position: number; createdAt: string;
 };
@@ -547,6 +551,14 @@ export const api = {
     update: (id: number, data: Partial<{ film: string; models: string; notes: string }>) =>
       req<FilmCompat>(`/film-compat/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/film-compat/${id}`, { method: "DELETE" }),
+  },
+  sheetLinks: {
+    list: () => req<SheetLink[]>("/sheet-links"),
+    create: (data: { name: string; url: string }) =>
+      req<SheetLink>("/sheet-links", { method: "POST", body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<{ name: string; url: string }>) =>
+      req<SheetLink>(`/sheet-links/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/sheet-links/${id}`, { method: "DELETE" }),
   },
   partnerLinks: {
     list: () => req<PartnerLink[]>("/partner-links"),
