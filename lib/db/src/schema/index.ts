@@ -1,5 +1,6 @@
 export * from "./users";
 export * from "./app_settings";
+export * from "./partner_links";
 export * from "./sectors";
 export * from "./queue_entries";
 export * from "./attendance_logs";

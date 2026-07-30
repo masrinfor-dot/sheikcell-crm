@@ -220,6 +220,10 @@ export type TaskSubtask = {
   id: number; taskId: number; title: string; isDone: boolean; position: number; createdAt: string;
 };
 
+export type PartnerLink = {
+  id: number; name: string; url: string; position: number; createdAt: string;
+};
+
 export type AppSettings = {
   alertUnansweredEnabled: boolean;
   alertUnansweredMinutes: number;
@@ -468,6 +472,14 @@ export const api = {
         req<CrmCustomField>(`/crm/custom-fields/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number) => req<{ ok: boolean }>(`/crm/custom-fields/${id}`, { method: "DELETE" }),
     },
+  },
+  partnerLinks: {
+    list: () => req<PartnerLink[]>("/partner-links"),
+    create: (data: { name: string; url: string }) =>
+      req<PartnerLink>("/partner-links", { method: "POST", body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<{ name: string; url: string }>) =>
+      req<PartnerLink>(`/partner-links/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/partner-links/${id}`, { method: "DELETE" }),
   },
   settings: {
     get: () => req<AppSettings>("/settings"),
