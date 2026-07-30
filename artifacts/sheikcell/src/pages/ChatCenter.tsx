@@ -1497,6 +1497,13 @@ export default function ChatCenter() {
                     {activeConv.sector.name}
                   </span>
                 )}
+                {/* Data e hora de início do atendimento (quando foi assumido) */}
+                {activeConv.attendanceStartedAt && (
+                  <span className="hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 font-medium" style={{ fontSize: "10px" }} title="Início do atendimento" data-testid="text-attendance-started">
+                    <CalendarClock className="w-3 h-3" />
+                    Início: {new Date(activeConv.attendanceStartedAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                  </span>
+                )}
               </div>
             </div>
             <div className="flex items-center gap-1 shrink-0">

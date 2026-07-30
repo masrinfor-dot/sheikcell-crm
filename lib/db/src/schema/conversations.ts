@@ -19,6 +19,9 @@ export const conversationsTable = pgTable("conversations", {
   // "inbound" = cliente falou por último (não respondida); "outbound" = já respondida.
   lastMessageDirection: text("last_message_direction"),
   lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
+  // Momento em que um vendedor assumiu o atendimento (assigneeId saiu de null).
+  // Limpo quando a conversa volta para a fila/potenciais (perde o responsável).
+  attendanceStartedAt: timestamp("attendance_started_at", { withTimezone: true }),
   isArchived: boolean("is_archived").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

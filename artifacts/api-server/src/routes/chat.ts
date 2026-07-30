@@ -713,6 +713,13 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
       update.assigneeId = null;
       update.status = "pending";
     }
+    // Data/hora de INÍCIO do atendimento: marcada quando a conversa ganha um
+    // responsável (estava sem dono) e limpa quando volta para a fila sem dono.
+    if ("assigneeId" in update) {
+      const newAssignee = update.assigneeId as number | null;
+      if (newAssignee != null && conv.assigneeId == null) update.attendanceStartedAt = new Date();
+      if (newAssignee == null) update.attendanceStartedAt = null;
+    }
   }
 
   // Run the update and the dashboard/CRM sync atomically. A locked read of the
@@ -792,6 +799,8 @@ router.post("/chat/conversations/:id/claim", requireAuth, async (req, res): Prom
     assigneeId: req.session.userId,
     status: "pending",
     updatedAt: new Date(),
+    // Início do atendimento: só marca na primeira vez (re-claim é idempotente).
+    ...(conv.assigneeId == null ? { attendanceStartedAt: new Date() } : {}),
   };
   if (userRole !== "admin" && userRole !== "supervisor" && userSectorId && conv.sectorId !== userSectorId) {
     claimSet.sectorId = userSectorId;
@@ -892,6 +901,7 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
     sectorId: effectiveSectorId,
     status: "open",
     assigneeId: userRole === "vendedor" ? req.session.userId! : null,
+    attendanceStartedAt: userRole === "vendedor" ? new Date() : null,
     lastMessageAt: new Date(),
   }).returning();
 

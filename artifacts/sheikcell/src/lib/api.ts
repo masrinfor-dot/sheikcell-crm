@@ -221,6 +221,7 @@ export type Conversation = {
   unreadCount: number;
   lastMessage: string | null;
   lastMessageDirection: string | null;
+  attendanceStartedAt: string | null;
   lastMessageAt: string | null;
   isArchived: boolean;
   createdAt: string;

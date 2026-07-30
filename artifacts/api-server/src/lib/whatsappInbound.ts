@@ -226,7 +226,7 @@ async function upsertConversation(
         lastMessageAt: new Date(),
         unreadCount: sql`${conversationsTable.unreadCount} + 1`,
         updatedAt: new Date(),
-        ...(reopen ? { status: "open", assigneeId: null } : {}),
+        ...(reopen ? { status: "open", assigneeId: null, attendanceStartedAt: null } : {}),
         ...(avatarUrl && avatarUrl !== conv.avatarUrl ? { avatarUrl } : {}),
         ...(syncName && pushName && pushName !== conv.name ? { name: pushName } : {}),
       })
