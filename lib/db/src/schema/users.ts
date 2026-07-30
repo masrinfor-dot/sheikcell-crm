@@ -12,6 +12,8 @@ export const usersTable = pgTable("users", {
   sectorId: integer("sector_id").references(() => sectorsTable.id),
   // Loja da rede a que o vendedor pertence (texto livre; ex.: "Loja Centro")
   storeName: text("store_name"),
+  // Obriga trocar a senha no próximo login (primeiro acesso ou senha resetada pelo admin)
+  mustChangePassword: boolean("must_change_password").notNull().default(false),
   isActive: boolean("is_active").notNull().default(true),
   // Permissões individuais do vendedor (null = todas liberadas). Chaves:
   // ver_potenciais, transferir, finalizar, criar_atendimento, usar_ia,

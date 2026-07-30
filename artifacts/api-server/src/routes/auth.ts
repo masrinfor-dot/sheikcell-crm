@@ -52,8 +52,36 @@ router.post("/auth/login", async (req, res): Promise<void> => {
       sectorId: user.sectorId,
       sector,
       permissions: user.permissions ?? null,
+      mustChangePassword: user.mustChangePassword,
     },
   });
+});
+
+// Troca de senha pelo próprio usuário (primeiro acesso ou quando quiser)
+router.post("/auth/change-password", requireAuth, async (req, res): Promise<void> => {
+  const { currentPassword, newPassword } = req.body as { currentPassword?: string; newPassword?: string };
+  if (!currentPassword || !newPassword) {
+    res.status(400).json({ error: "Informe a senha atual e a nova senha" });
+    return;
+  }
+  if (newPassword.length < 6) {
+    res.status(400).json({ error: "A nova senha precisa ter pelo menos 6 caracteres" });
+    return;
+  }
+  if (newPassword === currentPassword) {
+    res.status(400).json({ error: "A nova senha precisa ser diferente da atual" });
+    return;
+  }
+  const [user] = await db.select().from(usersTable).where(eq(usersTable.id, req.session.userId!));
+  if (!user) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
+  const valid = await bcrypt.compare(currentPassword, user.passwordHash);
+  if (!valid) { res.status(401).json({ error: "Senha atual incorreta" }); return; }
+
+  const passwordHash = await bcrypt.hash(newPassword, 10);
+  await db.update(usersTable)
+    .set({ passwordHash, mustChangePassword: false })
+    .where(eq(usersTable.id, user.id));
+  res.json({ ok: true });
 });
 
 router.post("/auth/logout", requireAuth, (req, res): void => {
@@ -91,6 +119,7 @@ router.get("/auth/me", requireAuth, async (req, res): Promise<void> => {
       sectorId: user.sectorId,
       sector,
       permissions: user.permissions ?? null,
+      mustChangePassword: user.mustChangePassword,
     },
   });
 });

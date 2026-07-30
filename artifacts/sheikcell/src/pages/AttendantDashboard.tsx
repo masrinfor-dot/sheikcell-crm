@@ -12,11 +12,12 @@ import Financeiras from "./Financeiras";
 import Peliculas from "./Peliculas";
 import Avaliacao from "./Avaliacao";
 import ChecklistGate from "@/components/ChecklistGate";
+import ChangePasswordModal from "@/components/ChangePasswordModal";
 import TrainingGate from "@/components/TrainingGate";
 import Treinamentos from "./Treinamentos";
 import Planilhas from "./Planilhas";
 import {
-  Smartphone, LogOut, Clock, PhoneCall, CheckCircle,
+  Smartphone, LogOut, KeyRound, Clock, PhoneCall, CheckCircle,
   ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, Shield, BadgeDollarSign, GraduationCap, Table2
 } from "lucide-react";
 
@@ -43,6 +44,7 @@ function formatWait(createdAt: string): string {
 
 export default function AttendantDashboard() {
   const { user, logout } = useAuth();
+  const [showChangePassword, setShowChangePassword] = useState(false);
   const { toast } = useToast();
 
   const [mainTab, setMainTab] = useState<MainTab>("queue");
@@ -171,6 +173,11 @@ export default function AttendantDashboard() {
               )}
               <span className="text-xs text-muted-foreground">{user?.name}</span>
             </div>
+            <button onClick={() => setShowChangePassword(true)} data-testid="button-change-password"
+              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition">
+              <KeyRound className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Trocar senha</span>
+            </button>
             <button
               onClick={() => logout()}
               data-testid="button-logout"
@@ -182,6 +189,11 @@ export default function AttendantDashboard() {
           </div>
         </div>
       </nav>
+
+      {showChangePassword && (
+        <ChangePasswordModal onDone={() => { setShowChangePassword(false); toast({ title: "Senha alterada com sucesso!" }); }}
+          onClose={() => setShowChangePassword(false)} />
+      )}
 
       {/* Left sidebar + content */}
       <div className="flex">

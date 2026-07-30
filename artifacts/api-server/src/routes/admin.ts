@@ -148,6 +148,7 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
       name, email: email.toLowerCase(), passwordHash, role: resolvedRole,
       sectorId: sectorId ?? undefined,
       storeName: typeof storeName === "string" && storeName.trim() ? storeName.trim().slice(0, 120) : null,
+      mustChangePassword: true, // primeiro acesso: obriga trocar a senha
     })
     .returning();
 
@@ -181,7 +182,11 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   }
   if (isActive !== undefined) updateData.isActive = isActive;
   if (permissions !== undefined) updateData.permissions = sanitizePermissions(permissions);
-  if (password) updateData.passwordHash = await bcrypt.hash(password, 10);
+  if (password) {
+    updateData.passwordHash = await bcrypt.hash(password, 10);
+    // Senha resetada pelo admin (recuperação): usuário troca no próximo login
+    updateData.mustChangePassword = true;
+  }
 
   const [user] = await db.update(usersTable).set(updateData).where(eq(usersTable.id, id)).returning();
   if (!user) { res.status(404).json({ error: "Usuário não encontrado" }); return; }

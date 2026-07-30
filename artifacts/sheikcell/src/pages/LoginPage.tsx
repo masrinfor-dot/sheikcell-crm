@@ -93,6 +93,10 @@ export default function LoginPage() {
               {loading ? "Entrando..." : "Entrar"}
             </button>
           </form>
+          <p className="mt-3 text-center text-[11px] text-muted-foreground">
+            Esqueceu a senha? Peça ao administrador para gerar uma senha temporária —
+            você troca por uma nova no primeiro acesso.
+          </p>
         </div>
 
         {/* Dev-only credential hints */}

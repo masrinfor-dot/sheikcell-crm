@@ -16,6 +16,7 @@ import RH from "./RH";
 import Sorteios from "./Sorteios";
 import Robo from "./Robo";
 import Financeiro from "./Financeiro";
+import ChangePasswordModal from "@/components/ChangePasswordModal";
 import ChecklistGate from "@/components/ChecklistGate";
 import TrainingGate from "@/components/TrainingGate";
 import InternalChat from "./InternalChat";
@@ -24,7 +25,7 @@ import TaskBoard from "./TaskBoard";
 import {
   Smartphone, LogOut, LayoutDashboard, ClipboardList,
   Settings, Users, RefreshCw, Plus, X, Clock, CheckCircle,
-  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, Table2, UserSearch, Gift, Bot
+  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, Table2, UserSearch, Gift, Bot, KeyRound
 } from "lucide-react";
 
 type Tab = "dashboard" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "questionarios" | "treinamentos" | "planilhas" | "rh" | "sorteios" | "robo" | "financeiro" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies";
@@ -63,6 +64,7 @@ const ICONS = ["smartphone", "headphones", "wrench", "dollar-sign", "users", "sh
 
 export default function AdminDashboard() {
   const { user, logout } = useAuth();
+  const [showChangePassword, setShowChangePassword] = useState(false);
   const { toast } = useToast();
   const [tab, setTab] = useState<Tab>("dashboard");
   const [summary, setSummary] = useState<SectorSummary[]>([]);
@@ -312,6 +314,10 @@ export default function AdminDashboard() {
           </div>
           <div className="flex items-center gap-3">
             <span className="text-xs text-muted-foreground hidden sm:block">{user?.name}</span>
+            <button onClick={() => setShowChangePassword(true)} data-testid="button-change-password"
+              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition">
+              <KeyRound className="w-3.5 h-3.5" /> <span className="hidden sm:inline">Trocar senha</span>
+            </button>
             <button onClick={() => logout()} data-testid="button-logout"
               className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition">
               <LogOut className="w-3.5 h-3.5" /> Sair
@@ -320,6 +326,10 @@ export default function AdminDashboard() {
         </div>
       </nav>
       <ChecklistGate />
+      {showChangePassword && (
+        <ChangePasswordModal onDone={() => { setShowChangePassword(false); toast({ title: "Senha alterada com sucesso!" }); }}
+          onClose={() => setShowChangePassword(false)} />
+      )}
       <TrainingGate />
 
       {/* Left sidebar + content */}

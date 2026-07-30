@@ -47,6 +47,7 @@ export type User = {
   role: string;
   sectorId: number | null;
   storeName?: string | null;
+  mustChangePassword?: boolean;
   sector: Sector | null;
   permissions?: VendedorPermissions;
 };
@@ -419,6 +420,8 @@ export const api = {
       req<{ user: User }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
     logout: () => req<{ ok: boolean }>("/auth/logout", { method: "POST" }),
     me: () => req<{ user: User }>("/auth/me"),
+    changePassword: (currentPassword: string, newPassword: string) =>
+      req<{ ok: boolean }>("/auth/change-password", { method: "POST", body: JSON.stringify({ currentPassword, newPassword }) }),
   },
   sectors: {
     list: () => req<Sector[]>("/sectors"),
