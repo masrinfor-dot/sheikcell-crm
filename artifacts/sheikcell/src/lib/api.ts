@@ -230,6 +230,17 @@ export type Conversation = {
   participants: { id: number; name: string }[];
 };
 
+export type ScheduledMessage = {
+  id: number;
+  conversationId: number;
+  kind: "mensagem" | "retorno";
+  content: string;
+  sendAt: string;
+  status: string;
+  taskId: number | null;
+  createdAt: string;
+};
+
 export type QuickReply = {
   id: number;
   title: string;
@@ -350,6 +361,12 @@ export const api = {
         req<{ ok: boolean; conversation?: Conversation }>(`/chat/conversations/${convId}/participants`, { method: "POST", body: JSON.stringify({ userId }) }),
       remove: (convId: number, userId: number) =>
         req<{ ok: boolean }>(`/chat/conversations/${convId}/participants/${userId}`, { method: "DELETE" }),
+    },
+    schedules: {
+      list: (convId: number) => req<ScheduledMessage[]>(`/chat/conversations/${convId}/schedules`),
+      create: (convId: number, data: { kind: "mensagem" | "retorno"; content: string; sendAt: string }) =>
+        req<ScheduledMessage>(`/chat/conversations/${convId}/schedules`, { method: "POST", body: JSON.stringify(data) }),
+      cancel: (id: number) => req<{ ok: boolean }>(`/chat/schedules/${id}`, { method: "DELETE" }),
     },
     quickReplies: {
       list: () => req<QuickReply[]>("/chat/quick-replies"),

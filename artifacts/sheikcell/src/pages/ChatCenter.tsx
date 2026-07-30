@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { api, can, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply } from "@/lib/api";
+import { api, can, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -7,7 +7,7 @@ import {
   MessageCircle, CheckCheck, AlertCircle, Tag, Filter,
   Smartphone, Instagram, UserCircle2, Circle,
   ArrowRightLeft, FileText, Volume2, Image, Video, Mic, Users, Paperclip, IdCard,
-  Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX, Zap
+  Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX, Zap, CalendarClock
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 
@@ -358,6 +358,11 @@ export default function ChatCenter() {
   const [chatUsers, setChatUsers] = useState<{ id: number; name: string; role: string; sectorId?: number | null }[]>([]);
   const [quickReplies, setQuickReplies] = useState<QuickReply[]>([]);
   const [showQuickReplies, setShowQuickReplies] = useState(false);
+  // Agendamentos: mensagem programada ou lembrete de retorno (vira tarefa no quadro)
+  const [showSchedule, setShowSchedule] = useState(false);
+  const [schedules, setSchedules] = useState<ScheduledMessage[]>([]);
+  const [schedForm, setSchedForm] = useState<{ kind: "mensagem" | "retorno"; content: string; sendAt: string }>({ kind: "mensagem", content: "", sendAt: "" });
+  const [schedSaving, setSchedSaving] = useState(false);
   const [waSessions, setWaSessions] = useState<WaSessionInfo[]>([]);
   const [newForm, setNewForm] = useState({ name: "", phone: "", channel: "whatsapp", sectorId: "" });
 
@@ -960,6 +965,43 @@ export default function ChatCenter() {
     }
   };
 
+  const openSchedule = async (convId: number) => {
+    setSchedForm({ kind: "mensagem", content: "", sendAt: "" });
+    setShowSchedule(true);
+    try { setSchedules(await api.chat.schedules.list(convId)); } catch { setSchedules([]); }
+  };
+
+  const submitSchedule = async () => {
+    if (!activeConv) return;
+    if (!schedForm.content.trim()) { toast({ title: "Escreva o texto da mensagem ou do retorno", variant: "destructive" }); return; }
+    if (!schedForm.sendAt) { toast({ title: "Escolha a data e a hora", variant: "destructive" }); return; }
+    setSchedSaving(true);
+    try {
+      await api.chat.schedules.create(activeConv.id, {
+        kind: schedForm.kind,
+        content: schedForm.content.trim(),
+        sendAt: new Date(schedForm.sendAt).toISOString(),
+      });
+      setSchedules(await api.chat.schedules.list(activeConv.id));
+      setSchedForm({ kind: schedForm.kind, content: "", sendAt: "" });
+      toast({ title: schedForm.kind === "mensagem" ? "Mensagem agendada! Também criei uma tarefa no quadro." : "Retorno agendado! Criei uma tarefa no quadro como lembrete." });
+    } catch (e) {
+      toast({ title: e instanceof Error ? e.message : "Não foi possível agendar", variant: "destructive" });
+    } finally {
+      setSchedSaving(false);
+    }
+  };
+
+  const cancelSchedule = async (schedId: number) => {
+    if (!activeConv) return;
+    try {
+      await api.chat.schedules.cancel(schedId);
+      setSchedules((prev) => prev.filter((s) => s.id !== schedId));
+    } catch (e) {
+      toast({ title: e instanceof Error ? e.message : "Não foi possível cancelar", variant: "destructive" });
+    }
+  };
+
   const handleFinalize = (id: number) => {
     setFinalizeTarget(id);
     setFinalizeReason(FINALIZE_REASONS[0]);
@@ -1479,6 +1521,17 @@ export default function ChatCenter() {
                   title="Iniciar atendimento"
                 >
                   <UserCircle2 className="w-3.5 h-3.5" />
+                </button>
+              )}
+              {/* Agendar mensagem ou retorno (vira tarefa no quadro) */}
+              {activeCategory !== "resolvidas" && (
+                <button
+                  onClick={() => openSchedule(activeConv.id)}
+                  data-testid="button-schedule"
+                  className="p-2 rounded-lg bg-white border border-border hover:bg-secondary transition text-indigo-600"
+                  title="Agendar mensagem ou retorno"
+                >
+                  <CalendarClock className="w-3.5 h-3.5" />
                 </button>
               )}
               {/* Finalizar atendimento — atalho visível (abre o modal de motivo) */}
@@ -2148,6 +2201,82 @@ export default function ChatCenter() {
       )}
 
       {/* ── Finalizar atendimento: motivo ──────────────────────────────── */}
+      {/* Modal de agendamento: mensagem programada ou lembrete de retorno */}
+      {showSchedule && activeConv && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setShowSchedule(false)}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-5 space-y-4 max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-semibold flex items-center gap-2">
+                <CalendarClock className="w-4 h-4 text-indigo-600" />
+                Agendar — {activeConv.name}
+              </h3>
+              <button onClick={() => setShowSchedule(false)} className="p-1 rounded-lg hover:bg-secondary"><X className="w-4 h-4" /></button>
+            </div>
+
+            <div className="flex gap-2">
+              {([["mensagem", "Enviar mensagem"], ["retorno", "Lembrete de retorno"]] as const).map(([k, label]) => (
+                <button key={k} onClick={() => setSchedForm((f) => ({ ...f, kind: k }))}
+                  className={`flex-1 text-xs font-semibold px-3 py-2 rounded-xl border transition ${schedForm.kind === k ? "bg-indigo-600 text-white border-indigo-600" : "bg-white border-border hover:bg-secondary"}`}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              {schedForm.kind === "mensagem"
+                ? "A mensagem será enviada automaticamente ao cliente no horário escolhido. Também criamos uma tarefa no quadro."
+                : "Nada é enviado ao cliente: criamos uma tarefa no quadro de Tarefas como lembrete para você retornar."}
+            </p>
+
+            <textarea
+              value={schedForm.content}
+              onChange={(e) => setSchedForm((f) => ({ ...f, content: e.target.value }))}
+              placeholder={schedForm.kind === "mensagem" ? "Texto da mensagem para o cliente..." : "Anotação do retorno (ex.: ligar para confirmar orçamento)..."}
+              rows={3}
+              className="w-full text-sm border border-border rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-indigo-200 resize-none"
+              data-testid="input-schedule-content"
+            />
+            <input
+              type="datetime-local"
+              value={schedForm.sendAt}
+              onChange={(e) => setSchedForm((f) => ({ ...f, sendAt: e.target.value }))}
+              className="w-full text-sm border border-border rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-indigo-200"
+              data-testid="input-schedule-datetime"
+            />
+            <button
+              onClick={submitSchedule}
+              disabled={schedSaving}
+              className="w-full py-2.5 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 transition disabled:opacity-50"
+              data-testid="button-schedule-submit"
+            >
+              {schedSaving ? "Agendando..." : schedForm.kind === "mensagem" ? "Agendar mensagem" : "Agendar retorno"}
+            </button>
+
+            {schedules.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-muted-foreground">Agendamentos pendentes</p>
+                {schedules.map((s) => (
+                  <div key={s.id} className="flex items-start gap-2 border border-border rounded-xl p-2.5">
+                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${s.kind === "mensagem" ? "bg-indigo-100 text-indigo-700" : "bg-amber-100 text-amber-700"}`}>
+                      {s.kind === "mensagem" ? "Mensagem" : "Retorno"}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-foreground line-clamp-2">{s.content}</p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">
+                        {new Date(s.sendAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                      </p>
+                    </div>
+                    <button onClick={() => cancelSchedule(s.id)} title="Cancelar agendamento"
+                      className="p-1 rounded-lg text-red-600 hover:bg-red-50 transition shrink-0" data-testid={`button-cancel-schedule-${s.id}`}>
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {finalizeTarget != null && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
           onClick={() => { if (!finalizing) setFinalizeTarget(null); }}>

@@ -3,10 +3,25 @@ import { eq, and, isNull } from "drizzle-orm";
 import { logger } from "./logger";
 import { broadcast } from "./sseEmitter";
 
+// Coluna do quadro CRM correspondente ao estado da conversa no atendimento.
+// Espelha as categorias do ChatCenter: sem responsável e aberta = Potencial;
+// sem responsável em "pending" = Pendente; com responsável = Ativo. Conversa
+// finalizada mantém o cartão em "Ativos" (o cliente continua sendo cliente).
+export function crmStageForConversation(conv: {
+  assigneeId: number | null;
+  status: string;
+  isArchived?: boolean | null;
+}): "potential" | "pending" | "active" {
+  if (conv.assigneeId != null || conv.status === "resolved" || conv.status === "archived" || conv.isArchived) {
+    return "active";
+  }
+  return conv.status === "pending" ? "pending" : "potential";
+}
+
 /**
- * Keeps the CRM card's "vendedor que está atendendo" in sync with the chat:
- * whenever a conversation gains/changes its assignee, mirror it into the
- * matching CRM contact (same normalized phone + sector) and broadcast a
+ * Keeps the CRM card in sync with the chat: whenever a conversation changes
+ * assignee OR status, mirror the attendant and the board column (stage) into
+ * the matching CRM contact (same normalized phone + sector) and broadcast a
  * crm_contact_updated event so the board updates live. Best-effort: never
  * throws (a CRM desync must not break claim/transfer flows).
  */
@@ -14,6 +29,8 @@ export async function syncCrmAttendant(conv: {
   phone: string | null;
   sectorId: number | null;
   assigneeId: number | null;
+  status: string;
+  isArchived?: boolean | null;
 }): Promise<void> {
   try {
     if ((conv.phone ?? "").includes("@g.us")) return;
@@ -30,10 +47,12 @@ export async function syncCrmAttendant(conv: {
         sectorCondition,
       ))
       .limit(1);
-    if (!existing || existing.attendantId === conv.assigneeId) return;
+    if (!existing) return;
+    const stage = crmStageForConversation(conv);
+    if (existing.attendantId === conv.assigneeId && existing.status === stage) return;
 
     const [updated] = await db.update(crmContactsTable)
-      .set({ attendantId: conv.assigneeId, updatedAt: new Date() })
+      .set({ attendantId: conv.assigneeId, status: stage, updatedAt: new Date() })
       .where(eq(crmContactsTable.id, existing.id))
       .returning();
 
@@ -67,6 +86,8 @@ export async function ensureCrmContactForConversation(conv: {
   sectorId: number | null;
   assigneeId?: number | null;
   channel?: string | null;
+  status?: string;
+  isArchived?: boolean | null;
 }): Promise<void> {
   try {
     // Grupos/comunidades do WhatsApp não são clientes — não entram no CRM.
@@ -86,6 +107,11 @@ export async function ensureCrmContactForConversation(conv: {
       ))
       .limit(1);
 
+    // Coluna do quadro espelhando o estado da conversa (Potencial/Pendente/Ativo).
+    const stage = conv.status !== undefined
+      ? crmStageForConversation({ assigneeId: conv.assigneeId ?? null, status: conv.status, isArchived: conv.isArchived })
+      : null;
+
     if (existing) {
       await db.update(crmContactsTable)
         .set({
@@ -93,6 +119,7 @@ export async function ensureCrmContactForConversation(conv: {
           // Conversa já nasce com responsável (ex.: criada por vendedor):
           // reflete no cartão do CRM sem apagar um atendente já definido.
           ...(conv.assigneeId != null ? { attendantId: conv.assigneeId } : {}),
+          ...(stage != null ? { status: stage } : {}),
         })
         .where(eq(crmContactsTable.id, existing.id));
     } else {
@@ -102,7 +129,7 @@ export async function ensureCrmContactForConversation(conv: {
         phone: normalizedPhone,
         sectorId: conv.sectorId,
         attendantId: conv.assigneeId ?? null,
-        status: "active",
+        status: stage ?? "active",
         profile: "Novo",
         attendanceSource: conv.channel === "whatsapp" ? "WhatsApp" : null,
       });

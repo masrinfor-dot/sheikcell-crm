@@ -3,7 +3,7 @@ import { eq, and, desc, sql } from "drizzle-orm";
 import { broadcast } from "./sseEmitter";
 import { isPotentialConversation, restrictedRecipients } from "./conversationScope";
 import { classifyText } from "./autoRouter";
-import { ensureCrmContactForConversation } from "./crmSync";
+import { ensureCrmContactForConversation, syncCrmAttendant } from "./crmSync";
 import { writeFile, mkdir } from "fs/promises";
 import { randomUUID } from "crypto";
 import path from "path";
@@ -235,6 +235,8 @@ async function upsertConversation(
     if (updated) conv = updated;
     if (reopen && updated) {
       broadcast("conversation_updated", updated, updated.sectorId, isPotentialConversation(updated), await restrictedRecipients(updated));
+      // Cliente voltou: cartão do CRM volta para "Potenciais" e perde o atendente.
+      await syncCrmAttendant(updated);
     }
   }
 

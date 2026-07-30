@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
-import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable } from "@workspace/db";
+import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable } from "@workspace/db";
 import { eq, desc, and, or, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireAdminOrSupervisor } from "../middlewares/auth";
 import { checkPerm, requirePerm } from "../lib/permissions";
@@ -740,8 +740,11 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
   // as everyone who can see it now.
   const wasPotential = isPotentialConversation(conv);
   const recipients = await restrictedRecipients(updated);
-  // Espelha o responsável no cartão do CRM (transferência p/ vendedor, etc.).
-  if (updated.assigneeId !== conv.assigneeId) await syncCrmAttendant(updated);
+  // Espelha responsável E coluna no cartão do CRM (transferência, finalização,
+  // reabertura etc.): qualquer mudança de dono ou status move o cartão junto.
+  if (updated.assigneeId !== conv.assigneeId || updated.status !== conv.status || updated.isArchived !== conv.isArchived) {
+    await syncCrmAttendant(updated);
+  }
   broadcast("conversation_updated", updated, updated.sectorId, wasPotential || isPotentialConversation(updated), recipients);
   // Transição para RESTRITA (ganhou responsável ou foi finalizada): quem via a
   // conversa antes (setor/potencial) e não está na lista de autorizados precisa
@@ -899,6 +902,82 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
 });
 
 // ─── Etiquetas (chat labels) management ───────────────────────────────────
+// ─── Agendamentos (mensagem agendada / retorno ao cliente) ─────────────────
+// Cria também uma tarefa espelho no quadro de Tarefas com o mesmo prazo.
+router.post("/chat/conversations/:id/schedules", requireAuth, async (req, res): Promise<void> => {
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const { kind, content, sendAt } = req.body as { kind?: string; content?: string; sendAt?: string };
+
+  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+
+  const cleanKind = kind === "retorno" ? "retorno" : "mensagem";
+  // Mensagem agendada SAI para o cliente: vendedor só agenda em conversa que é
+  // dele (mesma regra de posse do envio — assuma o atendimento antes de agendar).
+  const role = req.session.userRole;
+  if (cleanKind === "mensagem" && role === "vendedor" && conv.assigneeId !== req.session.userId) {
+    res.status(403).json({ error: "Assuma o atendimento antes de agendar uma mensagem para este cliente" });
+    return;
+  }
+  const text = (content ?? "").trim();
+  if (!text) { res.status(400).json({ error: "Escreva o texto da mensagem ou do retorno" }); return; }
+  const when = sendAt ? new Date(sendAt) : null;
+  if (!when || isNaN(when.getTime())) { res.status(400).json({ error: "Data/hora inválida" }); return; }
+  if (when.getTime() < Date.now() - 60_000) { res.status(400).json({ error: "Escolha um horário no futuro" }); return; }
+
+  // Tarefa espelho no quadro (lembrete visível para a equipe)
+  const [task] = await db.insert(tasksTable).values({
+    title: cleanKind === "mensagem"
+      ? `📅 Mensagem agendada — ${conv.name}`
+      : `📞 Retorno ao cliente — ${conv.name}`,
+    description: `${text}\n\nCliente: ${conv.name} (${conv.phone})`,
+    status: "todo",
+    priority: "media",
+    assigneeId: req.session.userId ?? null,
+    createdById: req.session.userId ?? null,
+    sectorId: conv.sectorId,
+    dueDate: when,
+  }).returning();
+
+  const [created] = await db.insert(scheduledMessagesTable).values({
+    conversationId: conv.id,
+    kind: cleanKind,
+    content: text.slice(0, 2000),
+    sendAt: when,
+    createdById: req.session.userId ?? null,
+    taskId: task?.id ?? null,
+  }).returning();
+
+  res.status(201).json(created);
+});
+
+router.get("/chat/conversations/:id/schedules", requireAuth, async (req, res): Promise<void> => {
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+  const rows = await db.select().from(scheduledMessagesTable)
+    .where(and(eq(scheduledMessagesTable.conversationId, id), eq(scheduledMessagesTable.status, "pending")))
+    .orderBy(asc(scheduledMessagesTable.sendAt));
+  res.json(rows);
+});
+
+router.delete("/chat/schedules/:schedId", requireAuth, async (req, res): Promise<void> => {
+  const schedId = parseInt(Array.isArray(req.params.schedId) ? req.params.schedId[0] : req.params.schedId, 10);
+  const [item] = await db.select().from(scheduledMessagesTable).where(eq(scheduledMessagesTable.id, schedId)).limit(1);
+  if (!item) { res.status(404).json({ error: "Agendamento não encontrado" }); return; }
+  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, item.conversationId)).limit(1);
+  if (!conv || !(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+  if (item.status !== "pending") { res.status(409).json({ error: "Esse agendamento já foi processado" }); return; }
+  await db.update(scheduledMessagesTable).set({ status: "cancelled" }).where(eq(scheduledMessagesTable.id, schedId));
+  // Arquiva a tarefa espelho para não ficar lembrete órfão no quadro.
+  if (item.taskId != null) {
+    await db.update(tasksTable).set({ isArchived: true, updatedAt: new Date() }).where(eq(tasksTable.id, item.taskId));
+  }
+  res.json({ ok: true });
+});
+
 // ─── Quick replies (mensagens rápidas) ─────────────────────────────────────
 // Leitura: qualquer usuário logado vê as globais + as do próprio setor.
 // Gestão (criar/editar/excluir): admin e supervisor.
