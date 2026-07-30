@@ -246,6 +246,66 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
 });
 
 // ─── Excluir usuário (transferindo os atendimentos dele) ────────────────────
+// ─── Inativar usuário (transferindo os atendimentos em andamento) ──────────
+// transferToId: para quem vão os atendimentos em andamento. Sem transferToId,
+// eles voltam para a fila do setor. Histórico (resolvidos) continua com ele.
+router.post("/admin/users/:id/deactivate", requireAdmin, async (req, res): Promise<void> => {
+  const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const id = parseInt(rawId, 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  if (id === req.session.userId) { res.status(400).json({ error: "Você não pode inativar a si mesmo" }); return; }
+
+  const { transferToId: rawTransfer } = req.body as { transferToId?: number | null };
+  const transferToId = rawTransfer != null ? Number(rawTransfer) : null;
+  if (transferToId != null && (Number.isNaN(transferToId) || transferToId === id)) {
+    res.status(400).json({ error: "Destinatário da transferência inválido" });
+    return;
+  }
+
+  const [target] = await db.select().from(usersTable).where(eq(usersTable.id, id)).limit(1);
+  if (!target) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
+
+  if (transferToId != null) {
+    const [dest] = await db.select({ id: usersTable.id, isActive: usersTable.isActive })
+      .from(usersTable).where(eq(usersTable.id, transferToId)).limit(1);
+    if (!dest || !dest.isActive) { res.status(400).json({ error: "Usuário de destino não encontrado ou inativo" }); return; }
+  }
+
+  // Só os atendimentos em andamento mudam de mãos — o histórico fica com ele.
+  const openConvs = await db.select().from(conversationsTable)
+    .where(and(eq(conversationsTable.assigneeId, id), notInArray(conversationsTable.status, ["resolved", "archived"])));
+
+  await db.transaction(async (tx) => {
+    if (transferToId != null) {
+      await tx.update(conversationsTable)
+        .set({ assigneeId: transferToId, updatedAt: new Date() })
+        .where(and(eq(conversationsTable.assigneeId, id), notInArray(conversationsTable.status, ["resolved", "archived"])));
+      await tx.update(tasksTable).set({ assigneeId: transferToId }).where(eq(tasksTable.assigneeId, id));
+      await tx.update(crmContactsTable).set({ attendantId: transferToId, updatedAt: new Date() }).where(eq(crmContactsTable.attendantId, id));
+    } else {
+      await tx.update(conversationsTable)
+        .set({ assigneeId: null, status: "open", attendanceStartedAt: null, updatedAt: new Date() })
+        .where(and(eq(conversationsTable.assigneeId, id), notInArray(conversationsTable.status, ["resolved", "archived"])));
+    }
+    await tx.update(usersTable).set({ isActive: false }).where(eq(usersTable.id, id));
+    // Derruba as sessões ativas na hora.
+    await tx.execute(sql`DELETE FROM "session" WHERE (sess::json->>'userId')::int = ${id}`);
+  });
+
+  // Espelha no quadro CRM (best-effort, fora da transação).
+  for (const conv of openConvs) {
+    await syncCrmAttendant({
+      phone: conv.phone,
+      sectorId: conv.sectorId,
+      assigneeId: transferToId,
+      status: transferToId == null ? "open" : conv.status,
+      isArchived: conv.isArchived,
+    });
+  }
+
+  res.json({ ok: true, transferredConversations: openConvs.length });
+});
+
 // transferToId: para quem vão as conversas/tarefas/clientes do usuário excluído.
 // Sem transferToId, as conversas em andamento voltam para a fila (sem responsável)
 // e as demais referências ficam "sem responsável".

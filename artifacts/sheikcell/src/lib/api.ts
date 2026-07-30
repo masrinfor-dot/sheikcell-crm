@@ -731,6 +731,8 @@ export const api = {
         req<User>(`/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number, transferToId: number | null) =>
         req<{ ok: boolean; transferredConversations: number }>(`/admin/users/${id}`, { method: "DELETE", body: JSON.stringify({ transferToId }) }),
+      deactivate: (id: number, transferToId: number | null) =>
+        req<{ ok: boolean; transferredConversations: number }>(`/admin/users/${id}/deactivate`, { method: "POST", body: JSON.stringify({ transferToId }) }),
     },
   },
 };

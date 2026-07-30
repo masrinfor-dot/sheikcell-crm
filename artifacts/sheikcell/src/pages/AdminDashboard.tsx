@@ -25,7 +25,7 @@ import TaskBoard from "./TaskBoard";
 import {
   Smartphone, LogOut, LayoutDashboard, ClipboardList,
   Settings, Users, RefreshCw, Plus, X, Clock, CheckCircle,
-  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, Table2, UserSearch, Gift, Bot, KeyRound
+  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, Table2, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck
 } from "lucide-react";
 
 type Tab = "dashboard" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "questionarios" | "treinamentos" | "planilhas" | "rh" | "sorteios" | "robo" | "financeiro" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies";
@@ -90,6 +90,9 @@ export default function AdminDashboard() {
   const [editSector, setEditSector] = useState<Sector | null>(null);
 
   // Exclusão de usuário com transferência dos atendimentos dele.
+  const [deactivateUser, setDeactivateUser] = useState<UserRow | null>(null);
+  const [deactTransferTo, setDeactTransferTo] = useState("");
+  const [deactivating, setDeactivating] = useState(false);
   const [deleteUser, setDeleteUser] = useState<UserRow | null>(null);
   const [deleteTransferTo, setDeleteTransferTo] = useState("");
   const [deletingUser, setDeletingUser] = useState(false);
@@ -831,6 +834,29 @@ export default function AdminDashboard() {
                               className="p-1.5 text-muted-foreground hover:text-primary hover:bg-blue-50 rounded-lg transition">
                               <Pencil className="w-3.5 h-3.5" />
                             </button>
+                            {u.id !== user?.id && u.isActive && (
+                              <button onClick={() => { setDeactivateUser(u); setDeactTransferTo(""); }}
+                                data-testid={`button-deactivate-user-${u.id}`} title="Inativar usuário"
+                                className="p-1.5 text-muted-foreground hover:text-amber-600 hover:bg-amber-50 rounded-lg transition">
+                                <UserX className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                            {u.id !== user?.id && !u.isActive && (
+                              <button
+                                onClick={async () => {
+                                  try {
+                                    await api.admin.users.update(u.id, { isActive: true });
+                                    toast({ title: "Usuário reativado", description: `${u.name} pode entrar no sistema novamente.` });
+                                    fetchUsersAndSectors();
+                                  } catch (err) {
+                                    toast({ title: "Erro", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+                                  }
+                                }}
+                                data-testid={`button-reactivate-user-${u.id}`} title="Reativar usuário"
+                                className="p-1.5 text-muted-foreground hover:text-green-600 hover:bg-green-50 rounded-lg transition">
+                                <UserCheck className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                             {u.id !== user?.id && (
                               <button onClick={() => { setDeleteUser(u); setDeleteTransferTo(""); }}
                                 data-testid={`button-delete-user-${u.id}`} title="Excluir usuário"
@@ -1015,6 +1041,64 @@ export default function AdminDashboard() {
                 }}
                 className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold bg-primary text-white hover:bg-primary/90 transition disabled:opacity-50">
                 {savingPerms ? "Salvando..." : "Salvar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===== DEACTIVATE USER MODAL ===== */}
+      {deactivateUser && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="shk-card w-full max-w-sm p-6">
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="font-bold text-amber-600">Inativar usuário</h3>
+              <button onClick={() => { if (!deactivating) setDeactivateUser(null); }}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <p className="text-xs text-muted-foreground mb-4">
+              <span className="font-semibold text-foreground">{deactivateUser.name}</span> não vai mais
+              conseguir entrar no sistema, mas o histórico dele fica guardado e você pode reativar quando quiser.
+              Escolha para quem vão os atendimentos em andamento:
+            </p>
+            <div>
+              <label className="text-xs font-medium mb-1 block">Transferir para</label>
+              <select value={deactTransferTo} onChange={(e) => setDeactTransferTo(e.target.value)}
+                data-testid="select-deactivate-transfer"
+                className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                <option value="">— Ninguém (voltam para a fila) —</option>
+                {userRows.filter((u) => u.id !== deactivateUser.id && u.isActive).map((u) => (
+                  <option key={u.id} value={String(u.id)}>{u.name}</option>
+                ))}
+              </select>
+            </div>
+            <div className="flex gap-2 mt-4">
+              <button onClick={() => setDeactivateUser(null)} disabled={deactivating}
+                className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold border border-border hover:bg-secondary transition disabled:opacity-50">
+                Cancelar
+              </button>
+              <button
+                disabled={deactivating}
+                data-testid="button-confirm-deactivate-user"
+                onClick={async () => {
+                  setDeactivating(true);
+                  try {
+                    const r = await api.admin.users.deactivate(deactivateUser.id, deactTransferTo ? Number(deactTransferTo) : null);
+                    toast({
+                      title: "Usuário inativado",
+                      description: r.transferredConversations > 0
+                        ? `${r.transferredConversations} atendimento(s) ${deactTransferTo ? "transferido(s)" : "devolvido(s) para a fila"}.`
+                        : `${deactivateUser.name} foi inativado.`,
+                    });
+                    setDeactivateUser(null);
+                    fetchUsersAndSectors();
+                  } catch (err) {
+                    toast({ title: "Erro ao inativar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+                  } finally {
+                    setDeactivating(false);
+                  }
+                }}
+                className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold bg-amber-600 text-white hover:bg-amber-700 transition disabled:opacity-50">
+                {deactivating ? "Inativando..." : "Inativar"}
               </button>
             </div>
           </div>
