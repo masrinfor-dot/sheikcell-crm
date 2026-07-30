@@ -176,6 +176,11 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   const [user] = await db.update(usersTable).set(updateData).where(eq(usersTable.id, id)).returning();
   if (!user) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
 
+  // Usuário desativado perde as sessões ativas na hora (não só no próximo login).
+  if (isActive === false) {
+    await db.execute(sql`DELETE FROM "session" WHERE (sess::json->>'userId')::int = ${id}`);
+  }
+
   const { passwordHash: _ph, ...safeUser } = user;
   res.json(safeUser);
 });
@@ -232,6 +237,9 @@ router.delete("/admin/users/:id", requireAdmin, async (req, res): Promise<void> 
     await tx.update(crmInternalNotesTable).set({ authorId: transferToId }).where(eq(crmInternalNotesTable.authorId, id));
     // Chat interno e participações são removidos em cascata pelo banco.
     await tx.delete(usersTable).where(eq(usersTable.id, id));
+    // Derruba as sessões ativas do usuário excluído: sem isso, o cookie dele
+    // continuaria autorizando requisições até expirar.
+    await tx.execute(sql`DELETE FROM "session" WHERE (sess::json->>'userId')::int = ${id}`);
   });
 
   // Espelha a transferência no quadro CRM (best-effort, fora da transação).
