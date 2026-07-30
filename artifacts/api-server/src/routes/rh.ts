@@ -2,7 +2,7 @@ import { Router, type IRouter } from "express";
 import { randomBytes } from "crypto";
 import { db, rhSettingsTable, rhCandidatesTable } from "@workspace/db";
 import { eq, desc } from "drizzle-orm";
-import { requireAdmin } from "../middlewares/auth";
+import { requireFeature } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
@@ -171,12 +171,12 @@ router.post("/rh/public/:token/apply", async (req, res): Promise<void> => {
 
 // ── Admin ──────────────────────────────────────────────────────────────────
 
-router.get("/rh/settings", requireAdmin, async (_req, res): Promise<void> => {
+router.get("/rh/settings", requireFeature("rh"), async (_req, res): Promise<void> => {
   const s = await getSettings();
   res.json({ publicToken: s.publicToken, stages: s.stages });
 });
 
-router.put("/rh/settings", requireAdmin, async (req, res): Promise<void> => {
+router.put("/rh/settings", requireFeature("rh"), async (req, res): Promise<void> => {
   const stages = sanitizeStages((req.body ?? {}).stages);
   if (!stages) {
     res.status(400).json({ error: "Etapas inválidas — cada etapa precisa de título e (se for formulário) de 1 a 30 perguntas; opções precisam de 2+ alternativas" });
@@ -187,14 +187,14 @@ router.put("/rh/settings", requireAdmin, async (req, res): Promise<void> => {
   res.json({ ok: true });
 });
 
-router.post("/rh/settings/regenerate-token", requireAdmin, async (_req, res): Promise<void> => {
+router.post("/rh/settings/regenerate-token", requireFeature("rh"), async (_req, res): Promise<void> => {
   const s = await getSettings();
   const publicToken = randomBytes(16).toString("hex");
   await db.update(rhSettingsTable).set({ publicToken, updatedAt: new Date() }).where(eq(rhSettingsTable.id, s.id));
   res.json({ publicToken });
 });
 
-router.get("/rh/candidates", requireAdmin, async (_req, res): Promise<void> => {
+router.get("/rh/candidates", requireFeature("rh"), async (_req, res): Promise<void> => {
   const rows = await db.select({
     id: rhCandidatesTable.id,
     name: rhCandidatesTable.name,
@@ -210,7 +210,7 @@ router.get("/rh/candidates", requireAdmin, async (_req, res): Promise<void> => {
   res.json(rows.map((r) => ({ ...r, hasVideo: !!r.hasVideo })));
 });
 
-router.get("/rh/candidates/:id/video", requireAdmin, async (req, res): Promise<void> => {
+router.get("/rh/candidates/:id/video", requireFeature("rh"), async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   const [row] = await db.select({ videoData: rhCandidatesTable.videoData, videoMime: rhCandidatesTable.videoMime })
@@ -225,7 +225,7 @@ router.get("/rh/candidates/:id/video", requireAdmin, async (req, res): Promise<v
   res.send(buf);
 });
 
-router.patch("/rh/candidates/:id", requireAdmin, async (req, res): Promise<void> => {
+router.patch("/rh/candidates/:id", requireFeature("rh"), async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   const { status, notes } = (req.body ?? {}) as { status?: string; notes?: string };
@@ -242,7 +242,7 @@ router.patch("/rh/candidates/:id", requireAdmin, async (req, res): Promise<void>
   res.json(updated);
 });
 
-router.delete("/rh/candidates/:id", requireAdmin, async (req, res): Promise<void> => {
+router.delete("/rh/candidates/:id", requireFeature("rh"), async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   await db.delete(rhCandidatesTable).where(eq(rhCandidatesTable.id, id));

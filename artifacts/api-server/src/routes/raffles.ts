@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import { Router, type IRouter } from "express";
 import { and, desc, eq, gte, inArray, or, sql } from "drizzle-orm";
 import { db, rafflesTable, raffleDrawsTable, conversationsTable, usersTable, attendanceLogsTable } from "@workspace/db";
-import { requireAdmin } from "../middlewares/auth";
+import { requireFeature } from "../middlewares/auth";
 import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
@@ -353,19 +353,19 @@ export async function runDueRaffles(): Promise<void> {
 
 // ---------- rotas (admin) ----------
 
-router.get("/raffles", requireAdmin, async (_req, res): Promise<void> => {
+router.get("/raffles", requireFeature("sorteios"), async (_req, res): Promise<void> => {
   const rows = await db.select().from(rafflesTable).orderBy(desc(rafflesTable.id));
   res.json(rows);
 });
 
-router.post("/raffles", requireAdmin, async (req, res): Promise<void> => {
+router.post("/raffles", requireFeature("sorteios"), async (req, res): Promise<void> => {
   const { data, error } = sanitizeRaffle((req.body ?? {}) as Record<string, unknown>);
   if (!data) { res.status(400).json({ error }); return; }
   const [created] = await db.insert(rafflesTable).values(data).returning();
   res.status(201).json(created);
 });
 
-router.patch("/raffles/:id", requireAdmin, async (req, res): Promise<void> => {
+router.patch("/raffles/:id", requireFeature("sorteios"), async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   const [existing] = await db.select().from(rafflesTable).where(eq(rafflesTable.id, id)).limit(1);
@@ -378,7 +378,7 @@ router.patch("/raffles/:id", requireAdmin, async (req, res): Promise<void> => {
   res.json(updated);
 });
 
-router.delete("/raffles/:id", requireAdmin, async (req, res): Promise<void> => {
+router.delete("/raffles/:id", requireFeature("sorteios"), async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   await db.delete(rafflesTable).where(eq(rafflesTable.id, id));
@@ -386,7 +386,7 @@ router.delete("/raffles/:id", requireAdmin, async (req, res): Promise<void> => {
 });
 
 // Prévia: quantos clientes participam com os filtros atuais.
-router.get("/raffles/:id/eligible", requireAdmin, async (req, res): Promise<void> => {
+router.get("/raffles/:id/eligible", requireFeature("sorteios"), async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   const [raffle] = await db.select().from(rafflesTable).where(eq(rafflesTable.id, id)).limit(1);
@@ -396,7 +396,7 @@ router.get("/raffles/:id/eligible", requireAdmin, async (req, res): Promise<void
 });
 
 // Sortear agora (manual).
-router.post("/raffles/:id/run", requireAdmin, async (req, res): Promise<void> => {
+router.post("/raffles/:id/run", requireFeature("sorteios"), async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   const [raffle] = await db.select().from(rafflesTable).where(eq(rafflesTable.id, id)).limit(1);
@@ -411,7 +411,7 @@ router.post("/raffles/:id/run", requireAdmin, async (req, res): Promise<void> =>
   }
 });
 
-router.get("/raffles/:id/draws", requireAdmin, async (req, res): Promise<void> => {
+router.get("/raffles/:id/draws", requireFeature("sorteios"), async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   const rows = await db.select().from(raffleDrawsTable)

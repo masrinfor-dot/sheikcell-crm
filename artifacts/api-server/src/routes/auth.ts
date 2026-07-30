@@ -53,6 +53,7 @@ router.post("/auth/login", async (req, res): Promise<void> => {
       sector,
       permissions: user.permissions ?? null,
       mustChangePassword: user.mustChangePassword,
+      adminAccess: user.adminAccess ?? null,
     },
   });
 });
@@ -120,6 +121,7 @@ router.get("/auth/me", requireAuth, async (req, res): Promise<void> => {
       sector,
       permissions: user.permissions ?? null,
       mustChangePassword: user.mustChangePassword,
+      adminAccess: user.adminAccess ?? null,
     },
   });
 });

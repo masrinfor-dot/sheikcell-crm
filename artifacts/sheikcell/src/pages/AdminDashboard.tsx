@@ -45,7 +45,7 @@ type WASession = {
 
 type UserRow = {
   id: number; name: string; email: string; role: string;
-  isActive: boolean; sector: Sector | null; sectorId: number | null; storeName?: string | null; createdAt: string;
+  isActive: boolean; sector: Sector | null; sectorId: number | null; storeName?: string | null; adminAccess?: string[] | null; createdAt: string;
   permissions?: Record<string, boolean> | null;
 };
 
@@ -91,7 +91,7 @@ export default function AdminDashboard() {
   const [deleteTransferTo, setDeleteTransferTo] = useState("");
   const [deletingUser, setDeletingUser] = useState(false);
 
-  const [userForm, setUserForm] = useState({ name: "", email: "", password: "", role: "vendedor", sectorId: 1, storeName: "" });
+  const [userForm, setUserForm] = useState<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; adminAccess: string[] }>({ name: "", email: "", password: "", role: "vendedor", sectorId: 1, storeName: "", adminAccess: [] });
   const [sectorForm, setSectorForm] = useState({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true });
 
   const fetchAll = useCallback(async () => {
@@ -173,12 +173,12 @@ export default function AdminDashboard() {
   // ---- User handlers ----
   const openAddUser = () => {
     setEditUser(null);
-    setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorId: sectors[0]?.id ?? 1, storeName: "" });
+    setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorId: sectors[0]?.id ?? 1, storeName: "", adminAccess: [] });
     setShowAddUser(true);
   };
   const openEditUser = (u: UserRow) => {
     setEditUser(u);
-    setUserForm({ name: u.name, email: u.email, password: "", role: u.role, sectorId: u.sectorId ?? 1, storeName: u.storeName ?? "" });
+    setUserForm({ name: u.name, email: u.email, password: "", role: u.role, sectorId: u.sectorId ?? 1, storeName: u.storeName ?? "", adminAccess: u.adminAccess ?? [] });
     setShowAddUser(true);
   };
   const handleSaveUser = async (e: React.FormEvent) => {
@@ -188,6 +188,7 @@ export default function AdminDashboard() {
         const payload: Parameters<typeof api.admin.users.update>[1] = {
           name: userForm.name, email: userForm.email, role: userForm.role, sectorId: userForm.sectorId,
           storeName: userForm.storeName,
+          adminAccess: userForm.role === "admin" ? null : userForm.adminAccess,
         };
         if (userForm.password) payload.password = userForm.password;
         await api.admin.users.update(editUser.id, payload);
@@ -293,7 +294,9 @@ export default function AdminDashboard() {
     { id: "quickreplies" as Tab, label: "Msgs Rápidas", icon: Zap, adminOnly: true },
     { id: "whatsapp" as Tab, label: "WhatsApp", icon: PhoneCall, adminOnly: true },
   ];
-  const tabs = allTabs.filter((t) => !t.adminOnly || isAdmin);
+  // Aba de admin aparece para admin OU para quem recebeu a função no cadastro
+  const granted = user?.adminAccess ?? [];
+  const tabs = allTabs.filter((t) => !t.adminOnly || isAdmin || granted.includes(t.id));
   // Celular: 4 abas principais + "Mais" (painel com o restante)
   const mobilePrimaryTabs = tabs.slice(0, 4);
   const mobileMoreTabs = tabs.slice(4);
@@ -1035,6 +1038,21 @@ export default function AdminDashboard() {
                   {sectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
               </div>
+              {userForm.role !== "admin" && (
+                <div>
+                  <label className="text-xs font-medium mb-1 block">Funções de admin liberadas (opcional)</label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {([["financeiro","Financeiro"],["sorteios","Sorteios"],["robo","Robô"],["rh","RH"],["questionarios","Questionários"],["whatsapp","WhatsApp"]] as const).map(([key, label]) => (
+                      <button type="button" key={key} data-testid={`toggle-admin-access-${key}`}
+                        onClick={() => setUserForm({ ...userForm, adminAccess: userForm.adminAccess.includes(key) ? userForm.adminAccess.filter((k) => k !== key) : [...userForm.adminAccess, key] })}
+                        className={`px-2 py-1 rounded-lg border text-[11px] font-medium transition ${userForm.adminAccess.includes(key) ? "bg-primary text-white border-primary" : "border-border text-muted-foreground hover:bg-secondary"}`}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-muted-foreground mt-1">A aba escolhida aparece para esse usuário com acesso total à função.</p>
+                </div>
+              )}
               <div>
                 <label className="text-xs font-medium mb-1 block">Loja (para redes de lojas)</label>
                 <input value={userForm.storeName} onChange={(e) => setUserForm({ ...userForm, storeName: e.target.value })}

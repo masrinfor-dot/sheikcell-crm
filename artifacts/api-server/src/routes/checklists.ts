@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db, checklistsTable, checklistResponsesTable, usersTable } from "@workspace/db";
 import { eq, desc, and, inArray } from "drizzle-orm";
-import { requireAuth, requireAdmin } from "../middlewares/auth";
+import { requireAuth, requireFeature } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
@@ -187,12 +187,12 @@ router.post("/checklists/:id/respond", requireAuth, async (req, res): Promise<vo
 });
 
 // ── Administração (admin) ──────────────────────────────────────────────────
-router.get("/checklists", requireAdmin, async (_req, res): Promise<void> => {
+router.get("/checklists", requireFeature("questionarios"), async (_req, res): Promise<void> => {
   const rows = await db.select().from(checklistsTable).orderBy(desc(checklistsTable.createdAt));
   res.json(rows);
 });
 
-router.post("/checklists", requireAdmin, async (req, res): Promise<void> => {
+router.post("/checklists", requireFeature("questionarios"), async (req, res): Promise<void> => {
   const { title, description, questions, targetRoles, recurrence, dayOfWeek, startDate, mandatory, active } = req.body ?? {};
   const t = typeof title === "string" ? title.trim().slice(0, 150) : "";
   if (!t) { res.status(400).json({ error: "Informe o título" }); return; }
@@ -213,7 +213,7 @@ router.post("/checklists", requireAdmin, async (req, res): Promise<void> => {
   res.status(201).json(created);
 });
 
-router.patch("/checklists/:id", requireAdmin, async (req, res): Promise<void> => {
+router.patch("/checklists/:id", requireFeature("questionarios"), async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   const { title, description, questions, targetRoles, recurrence, dayOfWeek, startDate, mandatory, active } = req.body ?? {};
@@ -245,7 +245,7 @@ router.patch("/checklists/:id", requireAdmin, async (req, res): Promise<void> =>
   res.json(updated);
 });
 
-router.delete("/checklists/:id", requireAdmin, async (req, res): Promise<void> => {
+router.delete("/checklists/:id", requireFeature("questionarios"), async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   await db.delete(checklistsTable).where(eq(checklistsTable.id, id));
@@ -254,7 +254,7 @@ router.delete("/checklists/:id", requireAdmin, async (req, res): Promise<void> =
 });
 
 // Respostas de um questionário (admin).
-router.get("/checklists/:id/responses", requireAdmin, async (req, res): Promise<void> => {
+router.get("/checklists/:id/responses", requireFeature("questionarios"), async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   const rows = await db

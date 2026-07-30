@@ -13,15 +13,29 @@ import Peliculas from "./Peliculas";
 import Avaliacao from "./Avaliacao";
 import ChecklistGate from "@/components/ChecklistGate";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
+import Financeiro from "./Financeiro";
+import Sorteios from "./Sorteios";
+import Robo from "./Robo";
+import RH from "./RH";
+import Questionarios from "./Questionarios";
 import TrainingGate from "@/components/TrainingGate";
 import Treinamentos from "./Treinamentos";
 import Planilhas from "./Planilhas";
 import {
   Smartphone, LogOut, KeyRound, Clock, PhoneCall, CheckCircle,
-  ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, Shield, BadgeDollarSign, GraduationCap, Table2
+  ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, Shield, BadgeDollarSign, GraduationCap, Table2, Gift, Bot, UserSearch, ClipboardList
 } from "lucide-react";
 
-type MainTab = "queue" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "peliculas" | "avaliacao" | "treinamentos" | "planilhas";
+type MainTab = "queue" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "peliculas" | "avaliacao" | "treinamentos" | "planilhas" | "financeiro" | "sorteios" | "robo" | "rh" | "questionarios";
+
+// Abas de admin que podem ser liberadas para vendedores no cadastro (adminAccess)
+const GRANTED_TABS: { id: MainTab; label: string; icon: typeof PhoneCall }[] = [
+  { id: "financeiro", label: "Financeiro", icon: BadgeDollarSign },
+  { id: "sorteios", label: "Sorteios", icon: Gift },
+  { id: "robo", label: "Robô", icon: Bot },
+  { id: "rh", label: "RH", icon: UserSearch },
+  { id: "questionarios", label: "Questionários", icon: ClipboardList },
+];
 
 const MAIN_TABS = [
   { id: "queue" as MainTab, label: "Fila", icon: PhoneCall },
@@ -200,7 +214,7 @@ export default function AttendantDashboard() {
         {/* Sidebar tabs */}
         <aside className="hidden md:block w-52 shrink-0 border-r border-border bg-white sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3">
           <div className="flex flex-col gap-1">
-            {MAIN_TABS.filter(({ id }) => (id !== "crm" || can(user, "crm")) && (id !== "tarefas" || can(user, "tarefas"))).map(({ id, label, icon: Icon }) => (
+            {[...MAIN_TABS.filter(({ id }) => (id !== "crm" || can(user, "crm")) && (id !== "tarefas" || can(user, "tarefas"))), ...GRANTED_TABS.filter(({ id }) => user?.adminAccess?.includes(id))].map(({ id, label, icon: Icon }) => (
               <button key={id} onClick={() => setMainTab(id)}
                 className={`flex items-center gap-2 w-full px-3 py-2.5 rounded-lg text-xs font-semibold text-left transition-colors ${
                   mainTab === id ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
@@ -230,6 +244,23 @@ export default function AttendantDashboard() {
         <div className="max-w-5xl mx-auto px-4 py-6">
           <TaskBoard />
         </div>
+      )}
+
+      {/* Abas de admin liberadas no cadastro */}
+      {mainTab === "financeiro" && user?.adminAccess?.includes("financeiro") && (
+        <div className="max-w-6xl mx-auto px-4 py-6"><Financeiro /></div>
+      )}
+      {mainTab === "sorteios" && user?.adminAccess?.includes("sorteios") && (
+        <div className="max-w-5xl mx-auto px-4 py-6"><Sorteios /></div>
+      )}
+      {mainTab === "robo" && user?.adminAccess?.includes("robo") && (
+        <div className="max-w-6xl mx-auto px-4 py-6"><Robo /></div>
+      )}
+      {mainTab === "rh" && user?.adminAccess?.includes("rh") && (
+        <div className="max-w-6xl mx-auto px-4 py-6"><RH /></div>
+      )}
+      {mainTab === "questionarios" && user?.adminAccess?.includes("questionarios") && (
+        <div className="max-w-5xl mx-auto px-4 py-6"><Questionarios /></div>
       )}
 
       {mainTab === "treinamentos" && (
@@ -438,7 +469,7 @@ export default function AttendantDashboard() {
 
       {/* Barra de navegação inferior — somente celular */}
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-white border-t border-border flex items-stretch h-[calc(3.5rem+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)]">
-        {[...MAIN_TABS.filter(({ id }) => (id !== "crm" || can(user, "crm")) && (id !== "tarefas" || can(user, "tarefas"))), { id: "equipe" as MainTab, label: "Equipe", icon: MessagesSquare }].map(({ id, label, icon: Icon }) => (
+        {[...MAIN_TABS.filter(({ id }) => (id !== "crm" || can(user, "crm")) && (id !== "tarefas" || can(user, "tarefas"))), { id: "equipe" as MainTab, label: "Equipe", icon: MessagesSquare }, ...GRANTED_TABS.filter(({ id }) => user?.adminAccess?.includes(id))].map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             onClick={() => setMainTab(id)}

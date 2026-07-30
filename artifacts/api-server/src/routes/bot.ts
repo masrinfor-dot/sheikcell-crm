@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db, botSettingsTable, botStatesTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
-import { requireAdmin } from "../middlewares/auth";
+import { requireFeature } from "../middlewares/auth";
 import { getBotSettings, toEngineSettings, todayUsage, aiClassify } from "../lib/bot";
 import { botStep, type BotStateShape, type BotQuestion } from "../lib/botEngine";
 
@@ -22,12 +22,12 @@ function sanitizeQuestions(v: unknown): BotQuestion[] | null {
   return out;
 }
 
-router.get("/bot/settings", requireAdmin, async (_req, res): Promise<void> => {
+router.get("/bot/settings", requireFeature("robo"), async (_req, res): Promise<void> => {
   const s = await getBotSettings();
   res.json({ ...s, usageToday: await todayUsage() });
 });
 
-router.put("/bot/settings", requireAdmin, async (req, res): Promise<void> => {
+router.put("/bot/settings", requireFeature("robo"), async (req, res): Promise<void> => {
   const existing = await getBotSettings();
   const body = (req.body ?? {}) as Record<string, unknown>;
 
@@ -72,7 +72,7 @@ router.put("/bot/settings", requireAdmin, async (req, res): Promise<void> => {
 });
 
 // Estatísticas simples: conversas triadas pelo robô.
-router.get("/bot/stats", requireAdmin, async (_req, res): Promise<void> => {
+router.get("/bot/stats", requireFeature("robo"), async (_req, res): Promise<void> => {
   const [row] = await db.select({
     total: sql<number>`count(*)::int`,
     active: sql<number>`count(*) filter (where ${botStatesTable.active})::int`,
@@ -84,7 +84,7 @@ router.get("/bot/stats", requireAdmin, async (_req, res): Promise<void> => {
 
 const testStates = new Map<number, BotStateShape>();
 
-router.post("/bot/test", requireAdmin, async (req, res): Promise<void> => {
+router.post("/bot/test", requireFeature("robo"), async (req, res): Promise<void> => {
   const uid = req.session.userId!;
   const { message, reset } = (req.body ?? {}) as { message?: string; reset?: boolean };
   if (reset) { testStates.delete(uid); res.json({ replies: [], reset: true }); return; }

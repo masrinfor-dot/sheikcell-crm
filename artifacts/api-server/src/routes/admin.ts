@@ -98,6 +98,7 @@ router.get("/admin/users", requireAdmin, async (_req, res): Promise<void> => {
       role: usersTable.role,
       sectorId: usersTable.sectorId,
       storeName: usersTable.storeName,
+      adminAccess: usersTable.adminAccess,
       isActive: usersTable.isActive,
       permissions: usersTable.permissions,
       createdAt: usersTable.createdAt,
@@ -117,14 +118,24 @@ router.get("/admin/users", requireAdmin, async (_req, res): Promise<void> => {
   res.json(usersWithSector);
 });
 
+// Funções de admin que podem ser liberadas para não-admins
+const GRANTABLE_FEATURES = ["financeiro", "sorteios", "robo", "rh", "questionarios", "whatsapp"];
+
+function sanitizeAdminAccess(v: unknown): string[] | null {
+  if (!Array.isArray(v)) return null;
+  const out = v.map((x) => String(x)).filter((x) => GRANTABLE_FEATURES.includes(x));
+  return out.length ? [...new Set(out)] : null;
+}
+
 router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
-  const { name, email, password, role, sectorId, storeName } = req.body as {
+  const { name, email, password, role, sectorId, storeName, adminAccess } = req.body as {
     name?: string;
     email?: string;
     password?: string;
     role?: string;
     sectorId?: number;
     storeName?: string;
+    adminAccess?: unknown;
   };
 
   if (!name || !email || !password) {
@@ -149,6 +160,7 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
       sectorId: sectorId ?? undefined,
       storeName: typeof storeName === "string" && storeName.trim() ? storeName.trim().slice(0, 120) : null,
       mustChangePassword: true, // primeiro acesso: obriga trocar a senha
+      adminAccess: sanitizeAdminAccess(adminAccess),
     })
     .returning();
 
@@ -161,7 +173,8 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   const id = parseInt(rawId, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
 
-  const { name, email, password, role, sectorId, isActive, permissions, storeName } = req.body as {
+  const { name, email, password, role, sectorId, isActive, permissions, storeName, adminAccess } = req.body as {
+    adminAccess?: unknown;
     name?: string;
     email?: string;
     password?: string;
@@ -177,6 +190,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   if (email) updateData.email = email.toLowerCase();
   if (role) updateData.role = role;
   if (sectorId !== undefined) updateData.sectorId = sectorId;
+  if (adminAccess !== undefined) updateData.adminAccess = sanitizeAdminAccess(adminAccess);
   if (storeName !== undefined) {
     updateData.storeName = typeof storeName === "string" && storeName.trim() ? storeName.trim().slice(0, 120) : null;
   }

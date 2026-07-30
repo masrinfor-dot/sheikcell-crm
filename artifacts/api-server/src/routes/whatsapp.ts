@@ -6,7 +6,7 @@
  */
 import { Router, type IRouter } from "express";
 import { createHmac } from "node:crypto";
-import { requireAdmin } from "../middlewares/auth";
+import { requireFeature } from "../middlewares/auth";
 import { db, whatsappSessionsTable, conversationsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 
@@ -117,7 +117,7 @@ function offlineState(
 }
 
 // ─── List all connections (DB rows merged with live bridge state) ──────────
-router.get("/whatsapp/sessions", requireAdmin, async (_req, res): Promise<void> => {
+router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (_req, res): Promise<void> => {
   const rows = await getSessionRows();
   const rowMap = new Map(rows.map((r) => [r.sessionKey, r]));
 
@@ -173,7 +173,7 @@ router.get("/whatsapp/sessions", requireAdmin, async (_req, res): Promise<void> 
 });
 
 // ─── Create a new connection ────────────────────────────────────────────────
-router.post("/whatsapp/sessions", requireAdmin, async (req, res): Promise<void> => {
+router.post("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): Promise<void> => {
   const { displayName } = req.body as { displayName?: string };
   const name = (displayName ?? "").trim();
   if (!name) {
@@ -218,7 +218,7 @@ router.post("/whatsapp/sessions", requireAdmin, async (req, res): Promise<void> 
 });
 
 // ─── Rename a connection ────────────────────────────────────────────────────
-router.post("/whatsapp/sessions/:key/rename", requireAdmin, async (req, res): Promise<void> => {
+router.post("/whatsapp/sessions/:key/rename", requireFeature("whatsapp"), async (req, res): Promise<void> => {
   const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
   const { displayName } = req.body as { displayName?: string };
   const name = (displayName ?? "").trim();
@@ -231,7 +231,7 @@ router.post("/whatsapp/sessions/:key/rename", requireAdmin, async (req, res): Pr
 });
 
 // ─── Remove a connection ────────────────────────────────────────────────────
-router.delete("/whatsapp/sessions/:key", requireAdmin, async (req, res): Promise<void> => {
+router.delete("/whatsapp/sessions/:key", requireFeature("whatsapp"), async (req, res): Promise<void> => {
   const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
   if (key === DEFAULT_SESSION_KEY) {
     res.status(400).json({ error: "A conexão principal não pode ser removida" });
@@ -257,7 +257,7 @@ router.delete("/whatsapp/sessions/:key", requireAdmin, async (req, res): Promise
 });
 
 // ─── Status (single session; ?session=key, default "default") ──────────────
-router.get("/whatsapp/status", requireAdmin, async (req, res): Promise<void> => {
+router.get("/whatsapp/status", requireFeature("whatsapp"), async (req, res): Promise<void> => {
   const raw = req.query["session"];
   if (raw !== undefined && (typeof raw !== "string" || !VALID_KEY.test(raw))) {
     res.status(400).json({ error: "Conexão inválida" });
@@ -289,7 +289,7 @@ router.get("/whatsapp/status", requireAdmin, async (req, res): Promise<void> => 
 });
 
 // ─── Reset (new QR) ─────────────────────────────────────────────────────────
-router.post("/whatsapp/reset", requireAdmin, async (req, res): Promise<void> => {
+router.post("/whatsapp/reset", requireFeature("whatsapp"), async (req, res): Promise<void> => {
   const { session } = req.body as { session?: string };
   if (session !== undefined && (typeof session !== "string" || !VALID_KEY.test(session))) {
     res.status(400).json({ error: "Conexão inválida" });
@@ -314,7 +314,7 @@ router.post("/whatsapp/reset", requireAdmin, async (req, res): Promise<void> => 
   }
 });
 
-router.post("/whatsapp/send", requireAdmin, async (req, res): Promise<void> => {
+router.post("/whatsapp/send", requireFeature("whatsapp"), async (req, res): Promise<void> => {
   try {
     const { ok, data, status } = await fetchFromBridge("/whatsapp/send", "POST", req.body);
     res.status(status).json(data);

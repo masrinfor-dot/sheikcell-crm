@@ -14,6 +14,8 @@ export const usersTable = pgTable("users", {
   storeName: text("store_name"),
   // Obriga trocar a senha no próximo login (primeiro acesso ou senha resetada pelo admin)
   mustChangePassword: boolean("must_change_password").notNull().default(false),
+  // Funções de admin liberadas para não-admins (ex.: ["financeiro","sorteios"])
+  adminAccess: jsonb("admin_access").$type<string[] | null>(),
   isActive: boolean("is_active").notNull().default(true),
   // Permissões individuais do vendedor (null = todas liberadas). Chaves:
   // ver_potenciais, transferir, finalizar, criar_atendimento, usar_ia,
