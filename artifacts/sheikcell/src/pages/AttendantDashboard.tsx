@@ -12,12 +12,14 @@ import Financeiras from "./Financeiras";
 import Peliculas from "./Peliculas";
 import Avaliacao from "./Avaliacao";
 import ChecklistGate from "@/components/ChecklistGate";
+import TrainingGate from "@/components/TrainingGate";
+import Treinamentos from "./Treinamentos";
 import {
   Smartphone, LogOut, Clock, PhoneCall, CheckCircle,
-  ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, Shield, BadgeDollarSign
+  ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, Shield, BadgeDollarSign, GraduationCap
 } from "lucide-react";
 
-type MainTab = "queue" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "peliculas" | "avaliacao";
+type MainTab = "queue" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "peliculas" | "avaliacao" | "treinamentos";
 
 const MAIN_TABS = [
   { id: "queue" as MainTab, label: "Fila", icon: PhoneCall },
@@ -27,6 +29,7 @@ const MAIN_TABS = [
   { id: "financeiras" as MainTab, label: "Financeiras", icon: Landmark },
   { id: "peliculas" as MainTab, label: "Películas", icon: Shield },
   { id: "avaliacao" as MainTab, label: "Avaliação", icon: BadgeDollarSign },
+  { id: "treinamentos" as MainTab, label: "Treinamentos", icon: GraduationCap },
 ] as const;
 
 function formatWait(createdAt: string): string {
@@ -142,6 +145,7 @@ export default function AttendantDashboard() {
   return (
     <div className="min-h-screen bg-background">
       <ChecklistGate />
+      <TrainingGate />
       {/* Navbar */}
       <nav className="bg-white border-b border-border sticky top-0 z-20">
         <div className="max-w-3xl mx-auto px-4 h-14 flex items-center justify-between">
@@ -211,6 +215,12 @@ export default function AttendantDashboard() {
       {mainTab === "tarefas" && (
         <div className="max-w-5xl mx-auto px-4 py-6">
           <TaskBoard />
+        </div>
+      )}
+
+      {mainTab === "treinamentos" && (
+        <div className="max-w-3xl mx-auto px-4 py-6">
+          <Treinamentos />
         </div>
       )}
 

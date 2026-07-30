@@ -10,17 +10,19 @@ import Financeiras from "./Financeiras";
 import Peliculas from "./Peliculas";
 import Avaliacao from "./Avaliacao";
 import Questionarios from "./Questionarios";
+import Treinamentos from "./Treinamentos";
 import ChecklistGate from "@/components/ChecklistGate";
+import TrainingGate from "@/components/TrainingGate";
 import InternalChat from "./InternalChat";
 import DistribuicaoPanel from "./DistribuicaoPanel";
 import TaskBoard from "./TaskBoard";
 import {
   Smartphone, LogOut, LayoutDashboard, ClipboardList,
   Settings, Users, RefreshCw, Plus, X, Clock, CheckCircle,
-  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign
+  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap
 } from "lucide-react";
 
-type Tab = "dashboard" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "questionarios" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies";
+type Tab = "dashboard" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "questionarios" | "treinamentos" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies";
 
 type WASession = {
   sessionKey: string;
@@ -271,6 +273,7 @@ export default function AdminDashboard() {
     { id: "peliculas" as Tab, label: "Películas", icon: ShieldCheck, adminOnly: false },
     { id: "avaliacao" as Tab, label: "Avaliação de Usados", icon: BadgeDollarSign, adminOnly: false },
     { id: "questionarios" as Tab, label: "Questionários", icon: ClipboardList, adminOnly: true },
+    { id: "treinamentos" as Tab, label: "Treinamentos", icon: GraduationCap, adminOnly: false },
     { id: "history" as Tab, label: "Histórico", icon: ClipboardList, adminOnly: false },
     { id: "users" as Tab, label: "Usuários", icon: Users, adminOnly: true },
     { id: "sectors" as Tab, label: "Setores", icon: Settings, adminOnly: true },
@@ -306,6 +309,7 @@ export default function AdminDashboard() {
         </div>
       </nav>
       <ChecklistGate />
+      <TrainingGate />
 
       {/* Left sidebar + content */}
       <div className="flex">
@@ -409,6 +413,8 @@ export default function AdminDashboard() {
         {tab === "avaliacao" && <Avaliacao />}
 
         {tab === "questionarios" && <Questionarios />}
+
+        {tab === "treinamentos" && <Treinamentos />}
 
         {/* === WHATSAPP TAB === */}
         {tab === "whatsapp" && (

@@ -113,7 +113,11 @@ export function invalidateChecklistBlock(uid: number): void { blockCache.delete(
 
 // Middleware global: com questionário OBRIGATÓRIO pendente, o usuário só
 // acessa autenticação e as rotas de pendências/resposta — o resto retorna 423.
-const BLOCK_ALLOWLIST = [/^\/auth\//, /^\/checklists\/pending$/, /^\/checklists\/\d+\/respond$/];
+const BLOCK_ALLOWLIST = [
+  /^\/auth\//,
+  /^\/checklists\/pending$/, /^\/checklists\/\d+\/respond$/,
+  /^\/trainings\/pending$/, /^\/trainings\/\d+\/complete$/,
+];
 export async function enforceMandatoryChecklists(
   req: import("express").Request,
   res: import("express").Response,

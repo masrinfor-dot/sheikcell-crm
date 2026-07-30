@@ -16,13 +16,15 @@ import partnerLinksRouter from "./partnerLinks";
 import filmCompatRouter from "./filmCompat";
 import tradeInRouter from "./tradeIn";
 import checklistsRouter, { enforceMandatoryChecklists } from "./checklists";
+import trainingsRouter, { enforceMandatoryTrainings } from "./trainings";
 
 const router: IRouter = Router();
 
 router.use(healthRouter);
 router.use(authRouter);
-// Trava o sistema (423) enquanto houver questionário obrigatório pendente.
+// Trava o sistema (423) enquanto houver questionário/treinamento obrigatório pendente.
 router.use(enforceMandatoryChecklists);
+router.use(enforceMandatoryTrainings);
 router.use(sectorsRouter);
 router.use(queueRouter);
 router.use(adminRouter);
@@ -38,5 +40,6 @@ router.use(partnerLinksRouter);
 router.use(filmCompatRouter);
 router.use(tradeInRouter);
 router.use(checklistsRouter);
+router.use(trainingsRouter);
 
 export default router;

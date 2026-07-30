@@ -220,6 +220,19 @@ export type TaskSubtask = {
   id: number; taskId: number; title: string; isDone: boolean; position: number; createdAt: string;
 };
 
+export type QuizQuestion = { id: string; label: string; options: string[]; correct?: number };
+export type Training = {
+  id: number; title: string; description: string | null;
+  type: "text" | "video" | "quiz"; content: string | null;
+  quiz: QuizQuestion[] | null; mandatory: boolean;
+  targetRoles?: string[]; active?: boolean; createdAt?: string;
+  completed?: boolean; myScore?: number | null;
+};
+export type TrainingCompletion = {
+  id: number; userId: number; userName: string | null;
+  quizScore: number | null; createdAt: string;
+};
+
 export type ChecklistQuestion = { id: string; label: string; type: "text" | "options" | "rating"; options?: string[] };
 export type Checklist = {
   id: number; title: string; description: string | null;
@@ -500,6 +513,16 @@ export const api = {
         req<CrmCustomField>(`/crm/custom-fields/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number) => req<{ ok: boolean }>(`/crm/custom-fields/${id}`, { method: "DELETE" }),
     },
+  },
+  trainings: {
+    pending: () => req<Training[]>("/trainings/pending"),
+    list: () => req<Training[]>("/trainings"),
+    complete: (id: number, answers?: Record<string, number>) =>
+      req<{ ok: boolean; score: number | null }>(`/trainings/${id}/complete`, { method: "POST", body: JSON.stringify({ answers }) }),
+    create: (data: Partial<Training>) => req<Training>("/trainings", { method: "POST", body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<Training>) => req<Training>(`/trainings/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/trainings/${id}`, { method: "DELETE" }),
+    completions: (id: number) => req<TrainingCompletion[]>(`/trainings/${id}/completions`),
   },
   checklists: {
     pending: () => req<PendingChecklist[]>("/checklists/pending"),

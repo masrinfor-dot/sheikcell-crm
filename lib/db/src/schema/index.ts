@@ -4,6 +4,7 @@ export * from "./partner_links";
 export * from "./film_compat";
 export * from "./trade_in";
 export * from "./checklists";
+export * from "./trainings";
 export * from "./sectors";
 export * from "./queue_entries";
 export * from "./attendance_logs";

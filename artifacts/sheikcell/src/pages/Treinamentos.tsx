@@ -1,0 +1,382 @@
+import { useState, useEffect } from "react";
+import { api, type Training, type TrainingCompletion, type QuizQuestion } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
+import { useToast } from "@/hooks/use-toast";
+import TrainingViewer from "@/components/TrainingViewer";
+import {
+  GraduationCap, Plus, X, Trash2, Pencil, Eye, CheckCircle, FileText, PlayCircle, HelpCircle,
+} from "lucide-react";
+
+const ROLE_LABELS: Record<string, string> = { admin: "Admin", supervisor: "Supervisor", vendedor: "Vendedor" };
+const TYPE_META = {
+  text: { label: "Texto", icon: FileText },
+  video: { label: "Vídeo", icon: PlayCircle },
+  quiz: { label: "Quiz", icon: HelpCircle },
+} as const;
+
+type FormQuiz = { label: string; optionsText: string; correct: number };
+
+const EMPTY_FORM = {
+  title: "", description: "", type: "text" as Training["type"], content: "",
+  mandatory: true, active: true, targetRoles: ["vendedor"] as string[],
+  quiz: [{ label: "", optionsText: "", correct: 0 }] as FormQuiz[],
+};
+
+// Aba "Treinamentos": admin/supervisor criam material (texto, vídeo ou quiz);
+// a equipe consulta e conclui. Obrigatórios travam o sistema (TrainingGate).
+export default function Treinamentos() {
+  const { user } = useAuth();
+  const { toast } = useToast();
+  const canManage = user?.role === "admin" || user?.role === "supervisor";
+
+  const [items, setItems] = useState<Training[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [opened, setOpened] = useState<Training | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState<Training | null>(null);
+  const [form, setForm] = useState(EMPTY_FORM);
+  const [saving, setSaving] = useState(false);
+  const [viewing, setViewing] = useState<Training | null>(null);
+  const [completions, setCompletions] = useState<TrainingCompletion[]>([]);
+
+  const fetchItems = () => api.trainings.list().then(setItems).catch(() => {}).finally(() => setLoading(false));
+  useEffect(() => { fetchItems(); }, []);
+
+  const openForm = (t?: Training) => {
+    setEditing(t ?? null);
+    setForm(t ? {
+      title: t.title, description: t.description ?? "", type: t.type, content: t.content ?? "",
+      mandatory: t.mandatory, active: t.active !== false, targetRoles: t.targetRoles ?? ["vendedor"],
+      quiz: (t.quiz ?? []).length
+        ? (t.quiz ?? []).map((q) => ({ label: q.label, optionsText: q.options.join(", "), correct: q.correct ?? 0 }))
+        : [{ label: "", optionsText: "", correct: 0 }],
+    } : { ...EMPTY_FORM, quiz: [{ label: "", optionsText: "", correct: 0 }] });
+    setShowForm(true);
+  };
+
+  const quizValid = form.type !== "quiz" || (form.quiz.length > 0 && form.quiz.every((q) => {
+    const opts = q.optionsText.split(",").map((o) => o.trim()).filter(Boolean);
+    return q.label.trim() && opts.length >= 2 && q.correct >= 0 && q.correct < opts.length;
+  }));
+  const valid = form.title.trim() && form.targetRoles.length > 0 && quizValid
+    && (form.type === "quiz" || form.content.trim());
+
+  const handleSave = async () => {
+    if (!valid || saving) return;
+    setSaving(true);
+    const payload: Partial<Training> = {
+      title: form.title, description: form.description, type: form.type,
+      content: form.content, mandatory: form.mandatory, active: form.active, targetRoles: form.targetRoles,
+      ...(form.type === "quiz" ? {
+        quiz: form.quiz.map((q, i): QuizQuestion => ({
+          id: `q${i + 1}`, label: q.label,
+          options: q.optionsText.split(",").map((o) => o.trim()).filter(Boolean),
+          correct: q.correct,
+        })),
+      } : {}),
+    };
+    try {
+      if (editing) await api.trainings.update(editing.id, payload);
+      else await api.trainings.create(payload);
+      setShowForm(false);
+      fetchItems();
+      toast({ title: editing ? "Treinamento atualizado" : "Treinamento criado" });
+    } catch (err) {
+      toast({ title: "Erro", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (t: Training) => {
+    if (!window.confirm(`Excluir o treinamento "${t.title}"?`)) return;
+    try {
+      await api.trainings.remove(t.id);
+      setItems((prev) => prev.filter((x) => x.id !== t.id));
+      toast({ title: "Treinamento excluído" });
+    } catch {
+      toast({ title: "Erro ao excluir", variant: "destructive" });
+    }
+  };
+
+  const openCompletions = async (t: Training) => {
+    setViewing(t);
+    setCompletions([]);
+    try { setCompletions(await api.trainings.completions(t.id)); } catch { /* noop */ }
+  };
+
+  const setQz = (i: number, patch: Partial<FormQuiz>) =>
+    setForm((f) => ({ ...f, quiz: f.quiz.map((q, j) => (j === i ? { ...q, ...patch } : q)) }));
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <h2 className="text-lg font-bold flex items-center gap-2">
+          <GraduationCap className="w-5 h-5 text-primary" /> Treinamentos
+        </h2>
+        {canManage && (
+          <button onClick={() => openForm()} data-testid="button-add-training"
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-primary text-white text-xs font-semibold">
+            <Plus className="w-3.5 h-3.5" /> Novo treinamento
+          </button>
+        )}
+      </div>
+
+      {loading ? (
+        <div className="h-24 rounded-xl bg-secondary/40 animate-pulse" />
+      ) : items.length === 0 ? (
+        <div className="shk-card p-8 text-center text-muted-foreground">
+          <GraduationCap className="w-8 h-8 mx-auto mb-2 opacity-30" />
+          <p className="text-sm font-semibold">Nenhum treinamento disponível</p>
+          {canManage && <p className="text-xs mt-1">Crie materiais de texto, vídeo ou quiz para a equipe.</p>}
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {items.map((t) => {
+            const Meta = TYPE_META[t.type] ?? TYPE_META.text;
+            return (
+              <div key={t.id} className="shk-card p-4 flex items-start gap-3" data-testid={`training-${t.id}`}>
+                <div className="w-9 h-9 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
+                  <Meta.icon className="w-4 h-4 text-primary" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="font-bold text-sm break-words">{t.title}</p>
+                    <span className="text-[10px] font-bold bg-blue-50 text-blue-600 border border-blue-100 px-2 py-0.5 rounded-full">{Meta.label}</span>
+                    {t.mandatory && <span className="text-[10px] font-bold bg-red-50 text-red-600 border border-red-100 px-2 py-0.5 rounded-full">Obrigatório</span>}
+                    {canManage && t.active === false && <span className="text-[10px] font-bold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inativo</span>}
+                    {t.completed && (
+                      <span className="text-[10px] font-bold bg-green-50 text-green-700 border border-green-100 px-2 py-0.5 rounded-full flex items-center gap-1">
+                        <CheckCircle className="w-3 h-3" /> Concluído{t.myScore != null ? ` (${t.myScore}%)` : ""}
+                      </span>
+                    )}
+                  </div>
+                  {t.description && <p className="text-xs text-muted-foreground mt-0.5 break-words">{t.description}</p>}
+                  {canManage && t.targetRoles && (
+                    <p className="text-[11px] text-muted-foreground mt-1">Para: {t.targetRoles.map((r) => ROLE_LABELS[r] ?? r).join(", ")}</p>
+                  )}
+                </div>
+                <div className="flex gap-1 shrink-0">
+                  <button onClick={() => setOpened(t)} data-testid={`button-open-training-${t.id}`}
+                    className="px-3 py-1.5 rounded-xl bg-primary/10 text-primary text-xs font-bold hover:bg-primary/20 transition">
+                    {t.completed ? "Rever" : "Fazer"}
+                  </button>
+                  {canManage && (
+                    <>
+                      <button onClick={() => openCompletions(t)} title="Quem concluiu"
+                        className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground transition"><Eye className="w-3.5 h-3.5" /></button>
+                      <button onClick={() => openForm(t)} title="Editar"
+                        className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground transition"><Pencil className="w-3.5 h-3.5" /></button>
+                      <button onClick={() => handleDelete(t)} title="Excluir"
+                        className="p-1.5 rounded-lg hover:bg-red-50 text-red-400 transition"><Trash2 className="w-3.5 h-3.5" /></button>
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Modal fazer/rever treinamento */}
+      {opened && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="shk-card w-full max-w-lg p-6 my-8 bg-white">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-bold">{opened.title}</h3>
+              <button onClick={() => setOpened(null)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            {opened.completed ? (
+              <div className="space-y-3">
+                {opened.description && <p className="text-xs text-muted-foreground">{opened.description}</p>}
+                {opened.type === "video" && opened.content && (
+                  <a href={opened.content} target="_blank" rel="noopener noreferrer"
+                    className="flex items-center gap-2 px-4 py-3 rounded-xl border border-border text-sm font-semibold text-primary hover:bg-secondary transition">
+                    <PlayCircle className="w-5 h-5" /> Assistir novamente
+                  </a>
+                )}
+                {opened.content && opened.type !== "video" && (
+                  <div className="text-sm whitespace-pre-wrap bg-secondary/40 rounded-xl p-4 max-h-80 overflow-y-auto">{opened.content}</div>
+                )}
+                <p className="text-xs font-semibold text-green-700 flex items-center gap-1">
+                  <CheckCircle className="w-4 h-4" /> Você já concluiu este treinamento{opened.myScore != null ? ` com ${opened.myScore}% de acerto` : ""}.
+                </p>
+              </div>
+            ) : (
+              <TrainingViewer training={opened} onCompleted={() => { setOpened(null); fetchItems(); }} />
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Modal criar/editar */}
+      {showForm && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="shk-card w-full max-w-2xl p-6 my-8 bg-white">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-bold">{editing ? "Editar treinamento" : "Novo treinamento"}</h3>
+              <button onClick={() => setShowForm(false)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+
+            <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1">
+              <div>
+                <label className="text-xs font-medium mb-1 block">Título</label>
+                <input value={form.title} onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))}
+                  placeholder="Ex.: Como atender dúvidas sobre garantia" data-testid="input-training-title"
+                  className="w-full px-3 py-2 rounded-xl border border-border text-sm" />
+              </div>
+              <div>
+                <label className="text-xs font-medium mb-1 block">Descrição (opcional)</label>
+                <input value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+                  className="w-full px-3 py-2 rounded-xl border border-border text-sm" />
+              </div>
+
+              <div>
+                <label className="text-xs font-medium mb-1 block">Tipo</label>
+                <div className="flex gap-1.5">
+                  {(Object.keys(TYPE_META) as (keyof typeof TYPE_META)[]).map((ty) => (
+                    <button key={ty} onClick={() => setForm((f) => ({ ...f, type: ty }))}
+                      className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition ${
+                        form.type === ty ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"
+                      }`}>
+                      {TYPE_META[ty].label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {form.type !== "quiz" ? (
+                <div>
+                  <label className="text-xs font-medium mb-1 block">{form.type === "video" ? "Link do vídeo (YouTube abre dentro do sistema)" : "Conteúdo do treinamento"}</label>
+                  {form.type === "video" ? (
+                    <input value={form.content} onChange={(e) => setForm((f) => ({ ...f, content: e.target.value }))}
+                      placeholder="https://youtube.com/watch?v=..." data-testid="input-training-content"
+                      className="w-full px-3 py-2 rounded-xl border border-border text-sm" />
+                  ) : (
+                    <textarea value={form.content} onChange={(e) => setForm((f) => ({ ...f, content: e.target.value }))}
+                      rows={6} placeholder="Escreva aqui o material do treinamento..." data-testid="input-training-content"
+                      className="w-full px-3 py-2 rounded-xl border border-border text-sm resize-none" />
+                  )}
+                </div>
+              ) : (
+                <>
+                  <div>
+                    <label className="text-xs font-medium mb-1 block">Material de apoio (opcional, aparece antes do quiz)</label>
+                    <textarea value={form.content} onChange={(e) => setForm((f) => ({ ...f, content: e.target.value }))}
+                      rows={3} className="w-full px-3 py-2 rounded-xl border border-border text-sm resize-none" />
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-xs font-bold">Perguntas do quiz (mínimo 70% de acerto para concluir)</p>
+                    {form.quiz.map((q, i) => {
+                      const opts = q.optionsText.split(",").map((o) => o.trim()).filter(Boolean);
+                      return (
+                        <div key={i} className="border border-border rounded-xl p-3 space-y-2">
+                          <div className="flex gap-2">
+                            <input value={q.label} onChange={(e) => setQz(i, { label: e.target.value })}
+                              placeholder={`Pergunta ${i + 1}`} data-testid={`input-quiz-q-${i}`}
+                              className="flex-1 px-3 py-2 rounded-xl border border-border text-sm" />
+                            <button onClick={() => setForm((f) => ({ ...f, quiz: f.quiz.filter((_, j) => j !== i) }))}
+                              disabled={form.quiz.length === 1}
+                              className="p-2 rounded-lg hover:bg-red-50 text-red-400 disabled:opacity-30"><Trash2 className="w-3.5 h-3.5" /></button>
+                          </div>
+                          <input value={q.optionsText} onChange={(e) => setQz(i, { optionsText: e.target.value, correct: 0 })}
+                            placeholder="Opções separadas por vírgula (ex.: 30 dias, 90 dias, 1 ano)"
+                            className="w-full px-3 py-2 rounded-xl border border-border text-xs" />
+                          {opts.length >= 2 && (
+                            <div>
+                              <p className="text-[11px] text-muted-foreground mb-1">Qual é a resposta certa?</p>
+                              <div className="flex gap-1.5 flex-wrap">
+                                {opts.map((o, oi) => (
+                                  <button key={oi} onClick={() => setQz(i, { correct: oi })}
+                                    className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border transition ${
+                                      q.correct === oi ? "bg-green-600 text-white border-green-600" : "bg-white text-muted-foreground border-border"
+                                    }`}>
+                                    {o}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                    <button onClick={() => setForm((f) => ({ ...f, quiz: [...f.quiz, { label: "", optionsText: "", correct: 0 }] }))}
+                      disabled={form.quiz.length >= 30}
+                      className="flex items-center gap-1 text-xs font-semibold text-primary disabled:opacity-40">
+                      <Plus className="w-3.5 h-3.5" /> Adicionar pergunta
+                    </button>
+                  </div>
+                </>
+              )}
+
+              <div>
+                <label className="text-xs font-medium mb-1 block">Quem participa</label>
+                <div className="flex gap-1.5 flex-wrap">
+                  {Object.entries(ROLE_LABELS).map(([role, label]) => (
+                    <button key={role}
+                      onClick={() => setForm((f) => ({
+                        ...f,
+                        targetRoles: f.targetRoles.includes(role) ? f.targetRoles.filter((r) => r !== role) : [...f.targetRoles, role],
+                      }))}
+                      className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition ${
+                        form.targetRoles.includes(role) ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"
+                      }`}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex gap-4">
+                <label className="flex items-center gap-2 text-xs font-medium">
+                  <input type="checkbox" checked={form.mandatory} onChange={(e) => setForm((f) => ({ ...f, mandatory: e.target.checked }))} />
+                  Obrigatório (trava o sistema até concluir)
+                </label>
+                <label className="flex items-center gap-2 text-xs font-medium">
+                  <input type="checkbox" checked={form.active} onChange={(e) => setForm((f) => ({ ...f, active: e.target.checked }))} />
+                  Ativo
+                </label>
+              </div>
+            </div>
+
+            <div className="flex gap-2 mt-5">
+              <button onClick={() => setShowForm(false)}
+                className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold border border-border hover:bg-secondary transition">Cancelar</button>
+              <button onClick={handleSave} disabled={!valid || saving} data-testid="button-save-training"
+                className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold bg-primary text-white disabled:opacity-40 transition">
+                {saving ? "Salvando..." : "Salvar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal quem concluiu */}
+      {viewing && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="shk-card w-full max-w-md p-6 my-8 bg-white">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-bold">Concluíram — {viewing.title}</h3>
+              <button onClick={() => setViewing(null)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-1">
+              {completions.length === 0 ? (
+                <p className="text-xs text-muted-foreground text-center py-4">Ninguém concluiu ainda.</p>
+              ) : completions.map((c) => (
+                <div key={c.id} className="flex items-center justify-between border-b border-border/50 pb-2 last:border-0">
+                  <p className="text-xs font-bold">{c.userName ?? "—"}</p>
+                  <div className="text-right">
+                    {c.quizScore != null && <span className="text-xs font-bold text-green-700 mr-2">{c.quizScore}%</span>}
+                    <span className="text-[10px] text-muted-foreground">
+                      {new Date(c.createdAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
