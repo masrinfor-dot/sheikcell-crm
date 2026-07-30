@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import { Router, type IRouter } from "express";
 import { and, desc, eq, gte, inArray, or, sql } from "drizzle-orm";
 import { db, rafflesTable, raffleDrawsTable, conversationsTable, usersTable, attendanceLogsTable } from "@workspace/db";
-import { requireFeature } from "../middlewares/auth";
+import { requireAuth } from "../middlewares/auth";
 import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
@@ -351,56 +351,113 @@ export async function runDueRaffles(): Promise<void> {
   }
 }
 
-// ---------- rotas (admin) ----------
+// ---------- rotas ----------
+// Admin (e quem tem a função "sorteios" liberada) gerencia TODOS os sorteios.
+// Vendedor comum também pode criar sorteios, mas só entre os PRÓPRIOS clientes
+// e só vê/gerencia os sorteios que ele mesmo criou (prospecção).
 
-router.get("/raffles", requireFeature("sorteios"), async (_req, res): Promise<void> => {
-  const rows = await db.select().from(rafflesTable).orderBy(desc(rafflesTable.id));
+async function isRaffleManager(req: { session: { userId?: number; userRole?: string } }): Promise<boolean> {
+  if (req.session.userRole === "admin") return true;
+  const userId = req.session.userId;
+  if (!userId) return false;
+  const [u] = await db.select({ adminAccess: usersTable.adminAccess })
+    .from(usersTable).where(eq(usersTable.id, userId)).limit(1);
+  return Array.isArray(u?.adminAccess) && (u.adminAccess as string[]).includes("sorteios");
+}
+
+/** Carrega o sorteio e garante que o usuário pode mexer nele. */
+async function loadOwnRaffle(req: { session: { userId?: number; userRole?: string } }, id: number): Promise<{ raffle?: Raffle; status?: number; error?: string }> {
+  if (isNaN(id)) return { status: 400, error: "ID inválido" };
+  const [raffle] = await db.select().from(rafflesTable).where(eq(rafflesTable.id, id)).limit(1);
+  if (!raffle) return { status: 404, error: "Sorteio não encontrado" };
+  if (!(await isRaffleManager(req)) && raffle.createdById !== req.session.userId) {
+    return { status: 404, error: "Sorteio não encontrado" };
+  }
+  return { raffle };
+}
+
+router.get("/raffles", requireAuth, async (req, res): Promise<void> => {
+  const manager = await isRaffleManager(req);
+  const rows = manager
+    ? await db.select().from(rafflesTable).orderBy(desc(rafflesTable.id))
+    : await db.select().from(rafflesTable)
+        .where(eq(rafflesTable.createdById, req.session.userId!))
+        .orderBy(desc(rafflesTable.id));
   res.json(rows);
 });
 
-router.post("/raffles", requireFeature("sorteios"), async (req, res): Promise<void> => {
+router.post("/raffles", requireAuth, async (req, res): Promise<void> => {
   const { data, error } = sanitizeRaffle((req.body ?? {}) as Record<string, unknown>);
   if (!data) { res.status(400).json({ error }); return; }
+  data.createdById = req.session.userId!;
+  if (!(await isRaffleManager(req))) {
+    // Vendedor comum: sorteio SEMPRE restrito aos próprios clientes.
+    data.vendedorIds = [req.session.userId!];
+    data.sectorIds = null;
+    data.sessionKeys = null;
+  }
   const [created] = await db.insert(rafflesTable).values(data).returning();
   res.status(201).json(created);
 });
 
-router.patch("/raffles/:id", requireFeature("sorteios"), async (req, res): Promise<void> => {
+router.patch("/raffles/:id", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
-  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const [existing] = await db.select().from(rafflesTable).where(eq(rafflesTable.id, id)).limit(1);
-  if (!existing) { res.status(404).json({ error: "Sorteio não encontrado" }); return; }
+  const { raffle: existing, status, error: loadErr } = await loadOwnRaffle(req, id);
+  if (!existing) { res.status(status!).json({ error: loadErr }); return; }
+
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  // Sorteio já realizado não pode ser editado (só pausar/reativar) — garante
+  // que o histórico reflita as regras usadas no sorteio.
+  const [hasDraw] = await db.select({ id: raffleDrawsTable.id })
+    .from(raffleDrawsTable).where(eq(raffleDrawsTable.raffleId, id)).limit(1);
+  const onlyActiveToggle = Object.keys(body).every((k) => k === "active");
+  if (hasDraw && !onlyActiveToggle) {
+    res.status(400).json({ error: "Este sorteio já foi realizado e não pode mais ser editado. Você pode pausá-lo ou criar um novo sorteio." });
+    return;
+  }
+  if (hasDraw && onlyActiveToggle) {
+    const [updated] = await db.update(rafflesTable).set({ active: body["active"] !== false })
+      .where(eq(rafflesTable.id, id)).returning();
+    res.json(updated);
+    return;
+  }
+
   // Valida o registro FINAL (campos novos por cima dos atuais)
-  const merged = { ...existing, ...(req.body ?? {}) } as Record<string, unknown>;
+  const merged = { ...existing, ...body } as Record<string, unknown>;
   const { data, error } = sanitizeRaffle(merged);
   if (!data) { res.status(400).json({ error }); return; }
+  data.createdById = existing.createdById;
+  if (!(await isRaffleManager(req))) {
+    data.vendedorIds = [req.session.userId!];
+    data.sectorIds = null;
+    data.sessionKeys = null;
+  }
   const [updated] = await db.update(rafflesTable).set(data).where(eq(rafflesTable.id, id)).returning();
   res.json(updated);
 });
 
-router.delete("/raffles/:id", requireFeature("sorteios"), async (req, res): Promise<void> => {
+router.delete("/raffles/:id", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
-  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const { raffle, status, error } = await loadOwnRaffle(req, id);
+  if (!raffle) { res.status(status!).json({ error }); return; }
   await db.delete(rafflesTable).where(eq(rafflesTable.id, id));
   res.json({ ok: true });
 });
 
 // Prévia: quantos clientes participam com os filtros atuais.
-router.get("/raffles/:id/eligible", requireFeature("sorteios"), async (req, res): Promise<void> => {
+router.get("/raffles/:id/eligible", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
-  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const [raffle] = await db.select().from(rafflesTable).where(eq(rafflesTable.id, id)).limit(1);
-  if (!raffle) { res.status(404).json({ error: "Sorteio não encontrado" }); return; }
+  const { raffle, status, error } = await loadOwnRaffle(req, id);
+  if (!raffle) { res.status(status!).json({ error }); return; }
   const pool = await eligibleClients(raffle);
   res.json({ count: pool.length });
 });
 
 // Sortear agora (manual).
-router.post("/raffles/:id/run", requireFeature("sorteios"), async (req, res): Promise<void> => {
+router.post("/raffles/:id/run", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
-  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const [raffle] = await db.select().from(rafflesTable).where(eq(rafflesTable.id, id)).limit(1);
-  if (!raffle) { res.status(404).json({ error: "Sorteio não encontrado" }); return; }
+  const { raffle, status, error } = await loadOwnRaffle(req, id);
+  if (!raffle) { res.status(status!).json({ error }); return; }
   const pool = await eligibleClients(raffle);
   if (pool.length === 0) { res.status(400).json({ error: "Nenhum cliente elegível com esses filtros" }); return; }
   try {
@@ -411,12 +468,45 @@ router.post("/raffles/:id/run", requireFeature("sorteios"), async (req, res): Pr
   }
 });
 
-router.get("/raffles/:id/draws", requireFeature("sorteios"), async (req, res): Promise<void> => {
+router.get("/raffles/:id/draws", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(String(req.params.id), 10);
-  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const { raffle, status, error } = await loadOwnRaffle(req, id);
+  if (!raffle) { res.status(status!).json({ error }); return; }
   const rows = await db.select().from(raffleDrawsTable)
     .where(eq(raffleDrawsTable.raffleId, id)).orderBy(desc(raffleDrawsTable.id)).limit(50);
   res.json(rows);
+});
+
+// Reenviar a mensagem para um ganhador cujo envio falhou.
+router.post("/raffles/:id/draws/:drawId/resend", requireAuth, async (req, res): Promise<void> => {
+  const id = parseInt(String(req.params.id), 10);
+  const drawId = parseInt(String(req.params.drawId), 10);
+  const { raffle, status, error } = await loadOwnRaffle(req, id);
+  if (!raffle) { res.status(status!).json({ error }); return; }
+  if (isNaN(drawId)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const [draw] = await db.select().from(raffleDrawsTable)
+    .where(and(eq(raffleDrawsTable.id, drawId), eq(raffleDrawsTable.raffleId, id))).limit(1);
+  if (!draw) { res.status(404).json({ error: "Sorteio não encontrado" }); return; }
+
+  const phone = String((req.body as Record<string, unknown> | undefined)?.["phone"] ?? "");
+  const winners = ((draw.winners as Winner[] | null) ?? []).map((w) => ({ ...w }));
+  const target = winners.find((w) => w.phone === phone && !w.sent);
+  if (!target) { res.status(400).json({ error: "Ganhador não encontrado ou mensagem já enviada" }); return; }
+
+  let sent = false;
+  let sendError: string | undefined;
+  try {
+    const vendedorStore = raffle.storeName ? null : await storeOfConversation(target.conversationId);
+    sent = await sendWhatsAppText(target.conversationId, fillTemplate(raffle.messageTemplate, target, raffle, vendedorStore));
+    if (!sent) sendError = "Falha no envio pelo WhatsApp — confira se o WhatsApp está conectado";
+  } catch (err) {
+    sendError = err instanceof Error ? err.message : "Erro no envio";
+  }
+  target.sent = sent;
+  if (sendError) target.error = sendError; else delete target.error;
+  const [updated] = await db.update(raffleDrawsTable).set({ winners })
+    .where(eq(raffleDrawsTable.id, drawId)).returning();
+  res.json({ draw: updated, sent });
 });
 
 export default router;

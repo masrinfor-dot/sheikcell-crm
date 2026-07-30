@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { api, type Raffle, type RaffleDraw, type Sector, type User } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import { Gift, Plus, X, Trash2, Pencil, Play, History, Users, RefreshCw } from "lucide-react";
 
@@ -41,6 +42,10 @@ const emptyForm = (): FormState => ({
 // e mensagem automática para o ganhador.
 export default function Sorteios() {
   const { toast } = useToast();
+  const { user } = useAuth();
+  // Admin (ou quem tem "sorteios" liberado) gerencia tudo; vendedor comum
+  // só cria sorteios entre os próprios clientes.
+  const isManager = user?.role === "admin" || !!user?.adminAccess?.includes("sorteios");
   const [raffles, setRaffles] = useState<Raffle[]>([]);
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [vendedores, setVendedores] = useState<User[]>([]);
@@ -151,6 +156,23 @@ export default function Sorteios() {
       toast({ title: "Erro no sorteio", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     } finally {
       setRunningId(null);
+    }
+  };
+
+  const [resending, setResending] = useState<string | null>(null);
+  const handleResend = async (drawId: number, phone: string) => {
+    if (!drawsOf || resending) return;
+    setResending(`${drawId}:${phone}`);
+    try {
+      const { sent } = await api.raffles.resend(drawsOf.id, drawId, phone);
+      setDraws(await api.raffles.draws(drawsOf.id));
+      toast(sent
+        ? { title: "Mensagem enviada ao ganhador! 🎉" }
+        : { title: "Ainda não foi possível enviar", description: "Confira se o WhatsApp está conectado e tente de novo.", variant: "destructive" });
+    } catch (err) {
+      toast({ title: "Erro ao reenviar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setResending(null);
     }
   };
 
@@ -294,8 +316,13 @@ export default function Sorteios() {
               )}
 
               <div className="border-t border-border pt-3">
-                <p className="font-bold mb-2">Quem participa (deixe em branco = todos)</p>
-                {sectors.length > 0 && (
+                <p className="font-bold mb-2">{isManager ? "Quem participa (deixe em branco = todos)" : "Quem participa"}</p>
+                {!isManager && (
+                  <p className="text-[11px] text-muted-foreground mb-2 bg-secondary/60 rounded-lg px-2.5 py-1.5">
+                    🎯 O sorteio será feito entre os <b>seus clientes</b> (conversas atendidas por você).
+                  </p>
+                )}
+                {isManager && sectors.length > 0 && (
                   <div className="mb-2">
                     <label className="font-semibold">Setores</label>
                     <div className="flex flex-wrap gap-1.5 mt-1">
@@ -321,7 +348,7 @@ export default function Sorteios() {
                   </div>
                   <p className="text-[10px] text-muted-foreground mt-1">Pode marcar vários: participa quem se encaixa em qualquer um deles.</p>
                 </div>
-                {stores.length > 0 && (
+                {isManager && stores.length > 0 && (
                   <div className="mb-2">
                     <label className="font-semibold">Lojas (marca todos os vendedores da loja)</label>
                     <div className="flex flex-wrap gap-1.5 mt-1">
@@ -343,7 +370,7 @@ export default function Sorteios() {
                     </div>
                   </div>
                 )}
-                {vendedores.length > 0 && (
+                {isManager && vendedores.length > 0 && (
                   <div className="mb-2">
                     <label className="font-semibold">Vendedores (clientes atendidos por)</label>
                     <div className="flex flex-wrap gap-1.5 mt-1">
@@ -356,9 +383,10 @@ export default function Sorteios() {
                     </div>
                   </div>
                 )}
-                {waSessions.length > 1 && (
+                {isManager && waSessions.length > 1 && (
                   <div className="mb-2">
                     <label className="font-semibold">Número de WhatsApp (loja)</label>
+                    <p className="text-[10px] text-muted-foreground">Marque um ou mais números: só participam clientes que falaram por eles. Nenhum marcado = todos os números.</p>
                     <div className="flex flex-wrap gap-1.5 mt-1">
                       {waSessions.map((w) => (
                         <button key={w.sessionKey} onClick={() => setForm({ ...form, sessionKeys: toggleStr(form.sessionKeys, w.sessionKey) })}
@@ -422,8 +450,17 @@ export default function Sorteios() {
                       {d.winners.map((w, i) => (
                         <div key={i} className="flex items-center justify-between gap-2 text-xs">
                           <span className="font-semibold truncate">🏆 {w.name || w.phone}</span>
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold shrink-0 ${w.sent ? "bg-green-500/10 text-green-600" : "bg-destructive/10 text-destructive"}`}>
-                            {w.sent ? "mensagem enviada" : "envio falhou"}
+                          <span className="flex items-center gap-1.5 shrink-0">
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${w.sent ? "bg-green-500/10 text-green-600" : "bg-destructive/10 text-destructive"}`}>
+                              {w.sent ? "mensagem enviada" : "envio falhou"}
+                            </span>
+                            {!w.sent && (
+                              <button onClick={() => handleResend(d.id, w.phone)} disabled={resending != null}
+                                data-testid={`button-resend-winner-${d.id}-${i}`}
+                                className="text-[10px] px-1.5 py-0.5 rounded font-bold bg-primary text-white hover:opacity-90 disabled:opacity-50 transition">
+                                {resending === `${d.id}:${w.phone}` ? "Enviando..." : "Reenviar"}
+                              </button>
+                            )}
                           </span>
                         </div>
                       ))}

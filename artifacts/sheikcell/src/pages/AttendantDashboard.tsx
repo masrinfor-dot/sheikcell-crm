@@ -214,7 +214,7 @@ export default function AttendantDashboard() {
         {/* Sidebar tabs */}
         <aside className="hidden md:block w-52 shrink-0 border-r border-border bg-white sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3">
           <div className="flex flex-col gap-1">
-            {[...MAIN_TABS.filter(({ id }) => (id !== "crm" || can(user, "crm")) && (id !== "tarefas" || can(user, "tarefas"))), ...GRANTED_TABS.filter(({ id }) => user?.adminAccess?.includes(id))].map(({ id, label, icon: Icon }) => (
+            {[...MAIN_TABS.filter(({ id }) => (id !== "crm" || can(user, "crm")) && (id !== "tarefas" || can(user, "tarefas"))), ...GRANTED_TABS.filter(({ id }) => id === "sorteios" || user?.adminAccess?.includes(id))].map(({ id, label, icon: Icon }) => (
               <button key={id} onClick={() => setMainTab(id)}
                 className={`flex items-center gap-2 w-full px-3 py-2.5 rounded-lg text-xs font-semibold text-left transition-colors ${
                   mainTab === id ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
@@ -469,7 +469,7 @@ export default function AttendantDashboard() {
 
       {/* Barra de navegação inferior — somente celular */}
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-white border-t border-border flex items-stretch h-[calc(3.5rem+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)]">
-        {[...MAIN_TABS.filter(({ id }) => (id !== "crm" || can(user, "crm")) && (id !== "tarefas" || can(user, "tarefas"))), { id: "equipe" as MainTab, label: "Equipe", icon: MessagesSquare }, ...GRANTED_TABS.filter(({ id }) => user?.adminAccess?.includes(id))].map(({ id, label, icon: Icon }) => (
+        {[...MAIN_TABS.filter(({ id }) => (id !== "crm" || can(user, "crm")) && (id !== "tarefas" || can(user, "tarefas"))), { id: "equipe" as MainTab, label: "Equipe", icon: MessagesSquare }, ...GRANTED_TABS.filter(({ id }) => id === "sorteios" || user?.adminAccess?.includes(id))].map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             onClick={() => setMainTab(id)}

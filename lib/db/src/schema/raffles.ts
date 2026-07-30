@@ -23,6 +23,8 @@ export const rafflesTable = pgTable("raffles", {
   dayOfMonth: integer("day_of_month"), // 1..28 (monthly)
   active: boolean("active").notNull().default(true),
   lastRunKey: text("last_run_key"),    // evita sortear duas vezes no mesmo período
+  // Quem criou: vendedor comum só vê/gerencia os próprios sorteios
+  createdById: integer("created_by_id"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

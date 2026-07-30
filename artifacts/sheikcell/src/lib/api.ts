@@ -621,6 +621,8 @@ export const api = {
     eligible: (id: number) => req<{ count: number }>(`/raffles/${id}/eligible`),
     run: (id: number) => req<{ draw: RaffleDraw; eligible: number }>(`/raffles/${id}/run`, { method: "POST" }),
     draws: (id: number) => req<RaffleDraw[]>(`/raffles/${id}/draws`),
+    resend: (id: number, drawId: number, phone: string) =>
+      req<{ draw: RaffleDraw; sent: boolean }>(`/raffles/${id}/draws/${drawId}/resend`, { method: "POST", body: JSON.stringify({ phone }) }),
   },
   filmCompat: {
     import: (fileData: string, mode: "replace" | "append") =>
