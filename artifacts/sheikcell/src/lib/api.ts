@@ -230,6 +230,7 @@ export type Conversation = {
   sector: Sector | null;
   assignee: { id: number; name: string } | null;
   participants: { id: number; name: string }[];
+  crmProfile?: string | null;
 };
 
 export type ScheduledMessage = {

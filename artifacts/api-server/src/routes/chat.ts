@@ -259,12 +259,32 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
     participantsMap[p.conversationId].push({ id: p.id, name: p.name });
   }
 
-  const enriched = rows.map((c) => ({
-    ...c,
-    sector: c.sectorId ? (sectorMap[c.sectorId] ?? null) : null,
-    assignee: c.assigneeId ? (userMap[c.assigneeId] ?? null) : null,
-    participants: participantsMap[c.id] ?? [],
-  }));
+  // Nível do cliente no CRM (Novo/Regular/VIP) para os filtros da central.
+  const normPhones = [...new Set(rows.map((c) => (c.phone ?? "").replace(/\D/g, "")).filter(Boolean))];
+  const crmRows = normPhones.length > 0
+    ? await db
+        .select({ phone: crmContactsTable.phone, sectorId: crmContactsTable.sectorId, profile: crmContactsTable.profile })
+        .from(crmContactsTable)
+        .where(and(eq(crmContactsTable.isArchived, false), inArray(crmContactsTable.phone, normPhones)))
+    : [];
+  const crmProfileMap: Record<string, string> = {};
+  for (const r of crmRows) {
+    if (!r.phone) continue;
+    // Prioriza o contato do mesmo setor; telefone sozinho fica como fallback.
+    crmProfileMap[`${r.phone}|${r.sectorId ?? ""}`] = r.profile;
+    if (!(r.phone in crmProfileMap)) crmProfileMap[r.phone] = r.profile;
+  }
+
+  const enriched = rows.map((c) => {
+    const np = (c.phone ?? "").replace(/\D/g, "");
+    return {
+      ...c,
+      sector: c.sectorId ? (sectorMap[c.sectorId] ?? null) : null,
+      assignee: c.assigneeId ? (userMap[c.assigneeId] ?? null) : null,
+      participants: participantsMap[c.id] ?? [],
+      crmProfile: crmProfileMap[`${np}|${c.sectorId ?? ""}`] ?? crmProfileMap[np] ?? null,
+    };
+  });
 
   res.json(enriched);
 });

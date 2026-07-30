@@ -349,6 +349,10 @@ export default function ChatCenter() {
   const [showStatusPicker, setShowStatusPicker] = useState(false);
   const [showFilter, setShowFilter] = useState(false);
   const [onlyUnanswered, setOnlyUnanswered] = useState(false);
+  // Filtros avançados da lista: vendedor, setor e nível do cliente no CRM.
+  const [filterVendedor, setFilterVendedor] = useState("");
+  const [filterSetor, setFilterSetor] = useState("");
+  const [filterNivel, setFilterNivel] = useState("");
   // Finalizar atendimento: modal para capturar o motivo da finalização.
   const [finalizeTarget, setFinalizeTarget] = useState<number | null>(null);
   const [finalizeReason, setFinalizeReason] = useState<string>(FINALIZE_REASONS[0]);
@@ -1248,10 +1252,15 @@ export default function ChatCenter() {
   };
 
   const visibleConvs = convs.filter((c) =>
-    (!search || c.name.toLowerCase().includes(search.toLowerCase()) || c.phone.includes(search)) &&
+    // Busca por nome ou número (aceita número digitado com espaços/traços).
+    (!search || c.name.toLowerCase().includes(search.toLowerCase()) || c.phone.includes(search) || c.phone.replace(/\D/g, "").includes(search.replace(/\D/g, "") || "\u0000")) &&
     // Filtro "não respondidas": o cliente falou por último (ou há não lidas).
-    (!onlyUnanswered || c.lastMessageDirection === "inbound" || c.unreadCount > 0)
+    (!onlyUnanswered || c.lastMessageDirection === "inbound" || c.unreadCount > 0) &&
+    (!filterVendedor || String(c.assigneeId ?? "") === filterVendedor) &&
+    (!filterSetor || String(c.sectorId ?? "") === filterSetor) &&
+    (!filterNivel || (c.crmProfile ?? "") === filterNivel)
   );
+  const hasAdvancedFilter = !!(filterVendedor || filterSetor || filterNivel);
 
   const counts: Record<Category, number> = { potenciais: 0, pendentes: 0, ativos: 0, resolvidas: 0 };
   for (const c of visibleConvs) {
@@ -1424,6 +1433,36 @@ export default function ChatCenter() {
             >
               ● Não respondidas
             </button>
+            {/* Vendedor / Setor / Nível CRM */}
+            <div className="flex gap-1.5 flex-wrap">
+              <select value={filterVendedor} onChange={(e) => setFilterVendedor(e.target.value)}
+                data-testid="filter-conv-vendedor"
+                className="text-xs px-2 py-1 rounded-lg border border-border bg-white max-w-[140px]">
+                <option value="">Vendedor: todos</option>
+                {chatUsers.map((u) => <option key={u.id} value={String(u.id)}>{u.name}</option>)}
+              </select>
+              <select value={filterSetor} onChange={(e) => setFilterSetor(e.target.value)}
+                data-testid="filter-conv-setor"
+                className="text-xs px-2 py-1 rounded-lg border border-border bg-white max-w-[140px]">
+                <option value="">Setor: todos</option>
+                {sectors.map((s) => <option key={s.id} value={String(s.id)}>{s.name}</option>)}
+              </select>
+              <select value={filterNivel} onChange={(e) => setFilterNivel(e.target.value)}
+                data-testid="filter-conv-nivel"
+                className="text-xs px-2 py-1 rounded-lg border border-border bg-white max-w-[140px]">
+                <option value="">Nível CRM: todos</option>
+                <option value="Novo">Novo</option>
+                <option value="Regular">Regular</option>
+                <option value="VIP">VIP</option>
+              </select>
+              {hasAdvancedFilter && (
+                <button onClick={() => { setFilterVendedor(""); setFilterSetor(""); setFilterNivel(""); }}
+                  data-testid="button-clear-conv-filters"
+                  className="text-xs px-2 py-1 rounded-lg border border-red-200 bg-red-50 text-red-600 font-semibold">
+                  Limpar
+                </button>
+              )}
+            </div>
             {labels.length === 0 ? (
               <p className="text-xs text-muted-foreground">Nenhuma etiqueta criada.</p>
             ) : (
