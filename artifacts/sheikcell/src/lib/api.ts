@@ -556,6 +556,9 @@ export const api = {
         "/trade-in/evaluate", { method: "POST", body: JSON.stringify(data) }),
   },
   filmCompat: {
+    import: (fileData: string, mode: "replace" | "append") =>
+      req<{ ok: boolean; imported: number; skipped: number; errors: string[]; mode: string }>(
+        "/film-compat/import", { method: "POST", body: JSON.stringify({ fileData, mode }) }),
     list: () => req<FilmCompat[]>("/film-compat"),
     create: (data: { film: string; models: string; notes?: string }) =>
       req<FilmCompat>("/film-compat", { method: "POST", body: JSON.stringify(data) }),
