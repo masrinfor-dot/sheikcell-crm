@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, tasksTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable } from "@workspace/db";
+import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, conversationParticipantsTable, tasksTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable } from "@workspace/db";
 import { eq, sql, desc, and, gte, isNull, isNotNull, notInArray, or, ilike } from "drizzle-orm";
 import { requireAdmin, requireAdminOrSupervisor } from "../middlewares/auth";
 import { sanitizePermissions } from "../lib/permissions";
@@ -277,9 +277,16 @@ router.post("/admin/users/:id/deactivate", requireAdmin, async (req, res): Promi
 
   await db.transaction(async (tx) => {
     if (transferToId != null) {
+      // Atendimentos entram como PENDENTES para quem recebeu: ele vira
+      // participante (vê a conversa) e clica em "Iniciar atendimento".
       await tx.update(conversationsTable)
-        .set({ assigneeId: transferToId, updatedAt: new Date() })
+        .set({ assigneeId: null, status: "pending", attendanceStartedAt: null, updatedAt: new Date() })
         .where(and(eq(conversationsTable.assigneeId, id), notInArray(conversationsTable.status, ["resolved", "archived"])));
+      if (openConvs.length > 0) {
+        await tx.insert(conversationParticipantsTable)
+          .values(openConvs.map((c) => ({ conversationId: c.id, userId: transferToId })))
+          .onConflictDoNothing();
+      }
       await tx.update(tasksTable).set({ assigneeId: transferToId }).where(eq(tasksTable.assigneeId, id));
       await tx.update(crmContactsTable).set({ attendantId: transferToId, updatedAt: new Date() }).where(eq(crmContactsTable.attendantId, id));
     } else {
@@ -297,8 +304,8 @@ router.post("/admin/users/:id/deactivate", requireAdmin, async (req, res): Promi
     await syncCrmAttendant({
       phone: conv.phone,
       sectorId: conv.sectorId,
-      assigneeId: transferToId,
-      status: transferToId == null ? "open" : conv.status,
+      assigneeId: null,
+      status: transferToId == null ? "open" : "pending",
       isArchived: conv.isArchived,
     });
   }
@@ -336,7 +343,19 @@ router.delete("/admin/users/:id", requireAdmin, async (req, res): Promise<void> 
 
   await db.transaction(async (tx) => {
     if (transferToId != null) {
-      // Transfere todas as conversas para o novo responsável.
+      // Em andamento: entram como PENDENTES para quem recebeu (participante).
+      const openIds = ownedConvs
+        .filter((c) => c.status !== "resolved" && c.status !== "archived")
+        .map((c) => c.id);
+      await tx.update(conversationsTable)
+        .set({ assigneeId: null, status: "pending", attendanceStartedAt: null, updatedAt: new Date() })
+        .where(and(eq(conversationsTable.assigneeId, id), notInArray(conversationsTable.status, ["resolved", "archived"])));
+      if (openIds.length > 0) {
+        await tx.insert(conversationParticipantsTable)
+          .values(openIds.map((cid) => ({ conversationId: cid, userId: transferToId })))
+          .onConflictDoNothing();
+      }
+      // Histórico (resolvidas) fica com o novo responsável.
       await tx.update(conversationsTable)
         .set({ assigneeId: transferToId, updatedAt: new Date() })
         .where(eq(conversationsTable.assigneeId, id));
@@ -367,8 +386,8 @@ router.delete("/admin/users/:id", requireAdmin, async (req, res): Promise<void> 
     await syncCrmAttendant({
       phone: conv.phone,
       sectorId: conv.sectorId,
-      assigneeId: transferToId,
-      status: transferToId == null && conv.status !== "resolved" && conv.status !== "archived" ? "open" : conv.status,
+      assigneeId: conv.status === "resolved" || conv.status === "archived" ? transferToId : null,
+      status: conv.status === "resolved" || conv.status === "archived" ? conv.status : (transferToId == null ? "open" : "pending"),
       isArchived: conv.isArchived,
     });
   }
