@@ -206,6 +206,22 @@ export type Task = {
   sector: Sector | null;
   assignee: { id: number; name: string } | null;
   createdBy: { id: number; name: string } | null;
+  subtaskTotal?: number;
+  subtaskDone?: number;
+  commentCount?: number;
+};
+
+export type TaskComment = {
+  id: number; taskId: number; authorId: number | null;
+  authorName: string | null; content: string; createdAt: string;
+};
+
+export type TaskSubtask = {
+  id: number; taskId: number; title: string; isDone: boolean; position: number; createdAt: string;
+};
+
+export type TaskReportBucket = {
+  name: string; total: number; todo: number; doing: number; done: number; overdue: number;
 };
 
 export type Conversation = {
@@ -459,6 +475,17 @@ export const api = {
       assigneeId: number | null; sectorId: number | null; dueDate: string | null;
       position: number; isArchived: boolean;
     }>) => req<Task>(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    report: () => req<{ bySector: TaskReportBucket[]; byUser: TaskReportBucket[] }>("/tasks/report"),
+    comments: (id: number) => req<TaskComment[]>(`/tasks/${id}/comments`),
+    addComment: (id: number, content: string) =>
+      req<TaskComment>(`/tasks/${id}/comments`, { method: "POST", body: JSON.stringify({ content }) }),
+    subtasks: (id: number) => req<TaskSubtask[]>(`/tasks/${id}/subtasks`),
+    addSubtask: (id: number, title: string) =>
+      req<TaskSubtask>(`/tasks/${id}/subtasks`, { method: "POST", body: JSON.stringify({ title }) }),
+    updateSubtask: (id: number, subId: number, data: Partial<{ isDone: boolean; title: string }>) =>
+      req<TaskSubtask>(`/tasks/${id}/subtasks/${subId}`, { method: "PATCH", body: JSON.stringify(data) }),
+    removeSubtask: (id: number, subId: number) =>
+      req<{ ok: boolean }>(`/tasks/${id}/subtasks/${subId}`, { method: "DELETE" }),
     remove: (id: number) => req<{ ok: boolean }>(`/tasks/${id}`, { method: "DELETE" }),
   },
   admin: {

@@ -18,3 +18,22 @@ export const tasksTable = pgTable("tasks", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
+
+// Chat da tarefa: comentários para esclarecer dúvidas e complementar informações.
+export const taskCommentsTable = pgTable("task_comments", {
+  id: serial("id").primaryKey(),
+  taskId: integer("task_id").notNull().references(() => tasksTable.id, { onDelete: "cascade" }),
+  authorId: integer("author_id").references(() => usersTable.id, { onDelete: "set null" }),
+  content: text("content").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+// Subtarefas (checklist estilo Kerika/Trello) dentro de uma tarefa.
+export const taskSubtasksTable = pgTable("task_subtasks", {
+  id: serial("id").primaryKey(),
+  taskId: integer("task_id").notNull().references(() => tasksTable.id, { onDelete: "cascade" }),
+  title: text("title").notNull(),
+  isDone: boolean("is_done").notNull().default(false),
+  position: integer("position").notNull().default(0),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});

@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback } from "react";
-import { api, type Task, type TaskStatus, type TaskPriority, type Sector } from "@/lib/api";
+import { api, type Task, type TaskStatus, type TaskPriority, type Sector, type TaskComment, type TaskSubtask, type TaskReportBucket } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
   Plus, X, RefreshCw, Trash2, ChevronRight, ChevronLeft,
   User, Calendar, Flag, ListTodo, Pencil, AlertCircle,
+  MessageSquare, CheckSquare, Send, BarChart3,
 } from "lucide-react";
 
 const COLUMNS = [
@@ -54,7 +55,7 @@ function isOverdue(iso: string, status: TaskStatus): boolean {
 }
 
 function TaskCard({
-  task, onMove, onEdit, onDelete, colIdx, canComplete,
+  task, onMove, onEdit, onDelete, colIdx, canComplete, onOpenDetail,
 }: {
   task: Task;
   onMove: (id: number, status: TaskStatus) => void;
@@ -62,6 +63,7 @@ function TaskCard({
   onDelete: (id: number) => void;
   colIdx: number;
   canComplete: boolean;
+  onOpenDetail: (t: Task) => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const prev = COLUMNS[colIdx - 1];
@@ -138,6 +140,17 @@ function TaskCard({
           <User className="w-3 h-3 shrink-0" />
           <span className="truncate">{task.assignee ? task.assignee.name : "Sem responsável"}</span>
         </div>
+        <button onClick={() => onOpenDetail(task)} data-testid={`button-task-detail-${task.id}`}
+          className="flex items-center gap-2 text-[11px] text-muted-foreground hover:text-primary transition shrink-0">
+          {(task.subtaskTotal ?? 0) > 0 && (
+            <span className={`inline-flex items-center gap-0.5 font-semibold ${task.subtaskDone === task.subtaskTotal ? "text-green-600" : ""}`}>
+              <CheckSquare className="w-3 h-3" />{task.subtaskDone}/{task.subtaskTotal}
+            </span>
+          )}
+          <span className="inline-flex items-center gap-0.5 font-semibold">
+            <MessageSquare className="w-3 h-3" />{task.commentCount ?? 0}
+          </span>
+        </button>
       </div>
     </div>
   );
@@ -156,6 +169,16 @@ export default function TaskBoard() {
   // Filtros do quadro: por setor e por responsável (vendedor).
   const [filterSector, setFilterSector] = useState("");
   const [filterAssignee, setFilterAssignee] = useState("");
+  // Detalhe da tarefa: subtarefas (checklist) + chat de comentários.
+  const [detailTask, setDetailTask] = useState<Task | null>(null);
+  const [subtasks, setSubtasks] = useState<TaskSubtask[]>([]);
+  const [comments, setComments] = useState<TaskComment[]>([]);
+  const [newSubtask, setNewSubtask] = useState("");
+  const [newComment, setNewComment] = useState("");
+  const [sendingComment, setSendingComment] = useState(false);
+  // Relatório por setor/vendedor.
+  const [showReport, setShowReport] = useState(false);
+  const [report, setReport] = useState<{ bySector: TaskReportBucket[]; byUser: TaskReportBucket[] } | null>(null);
   const isGlobal = user?.role === "admin" || user?.role === "supervisor";
 
   const fetchTasks = useCallback(async () => {
@@ -191,6 +214,82 @@ export default function TaskBoard() {
       dueDate: t.dueDate ? t.dueDate.slice(0, 10) : "",
     });
     setShowForm(true);
+  };
+
+  const openDetail = async (t: Task) => {
+    setDetailTask(t);
+    setSubtasks([]);
+    setComments([]);
+    setNewSubtask("");
+    setNewComment("");
+    try {
+      const [subs, coms] = await Promise.all([api.tasks.subtasks(t.id), api.tasks.comments(t.id)]);
+      // Ignora respostas atrasadas de outra tarefa (usuário trocou de cartão).
+      setDetailTask((current) => {
+        if (current?.id === t.id) { setSubtasks(subs); setComments(coms); }
+        return current;
+      });
+    } catch { /* modal fica vazio; usuário pode reabrir */ }
+  };
+
+  // Mantém os contadores do cartão em dia após mexer em subtarefas/comentários.
+  const bumpCounts = (taskId: number, delta: Partial<{ subtaskTotal: number; subtaskDone: number; commentCount: number }>) => {
+    setTasks((prev) => prev.map((t) => t.id === taskId ? {
+      ...t,
+      subtaskTotal: (t.subtaskTotal ?? 0) + (delta.subtaskTotal ?? 0),
+      subtaskDone: (t.subtaskDone ?? 0) + (delta.subtaskDone ?? 0),
+      commentCount: (t.commentCount ?? 0) + (delta.commentCount ?? 0),
+    } : t));
+  };
+
+  const addSubtask = async () => {
+    if (!detailTask || !newSubtask.trim()) return;
+    try {
+      const s = await api.tasks.addSubtask(detailTask.id, newSubtask.trim());
+      setSubtasks((prev) => [...prev, s]);
+      setNewSubtask("");
+      bumpCounts(detailTask.id, { subtaskTotal: 1 });
+    } catch { toast({ title: "Erro ao adicionar subtarefa", variant: "destructive" }); }
+  };
+
+  const toggleSubtask = async (s: TaskSubtask) => {
+    if (!detailTask) return;
+    setSubtasks((prev) => prev.map((x) => x.id === s.id ? { ...x, isDone: !s.isDone } : x));
+    bumpCounts(detailTask.id, { subtaskDone: s.isDone ? -1 : 1 });
+    try {
+      await api.tasks.updateSubtask(detailTask.id, s.id, { isDone: !s.isDone });
+    } catch {
+      setSubtasks((prev) => prev.map((x) => x.id === s.id ? { ...x, isDone: s.isDone } : x));
+      bumpCounts(detailTask.id, { subtaskDone: s.isDone ? 1 : -1 });
+    }
+  };
+
+  const removeSubtask = async (s: TaskSubtask) => {
+    if (!detailTask) return;
+    try {
+      await api.tasks.removeSubtask(detailTask.id, s.id);
+      setSubtasks((prev) => prev.filter((x) => x.id !== s.id));
+      bumpCounts(detailTask.id, { subtaskTotal: -1, subtaskDone: s.isDone ? -1 : 0 });
+    } catch { toast({ title: "Erro ao remover subtarefa", variant: "destructive" }); }
+  };
+
+  const addComment = async () => {
+    if (!detailTask || !newComment.trim() || sendingComment) return;
+    setSendingComment(true);
+    try {
+      const c = await api.tasks.addComment(detailTask.id, newComment.trim());
+      setComments((prev) => [...prev, c]);
+      setNewComment("");
+      bumpCounts(detailTask.id, { commentCount: 1 });
+    } catch { toast({ title: "Erro ao comentar", variant: "destructive" }); }
+    finally { setSendingComment(false); }
+  };
+
+  const openReport = async () => {
+    setShowReport(true);
+    setReport(null);
+    try { setReport(await api.tasks.report()); }
+    catch { toast({ title: "Erro ao carregar relatório", variant: "destructive" }); }
   };
 
   const handleMove = async (id: number, status: TaskStatus) => {
@@ -278,6 +377,11 @@ export default function TaskBoard() {
             <option value="">Todos os responsáveis</option>
             {team.map((u) => <option key={u.id} value={String(u.id)}>{u.name}</option>)}
           </select>
+          <button onClick={openReport} data-testid="button-task-report"
+            title="Relatório por setor e vendedor"
+            className="flex items-center gap-1.5 px-3 py-2 border border-border rounded-xl text-xs font-semibold text-muted-foreground hover:bg-secondary transition">
+            <BarChart3 className="w-3.5 h-3.5" /> Relatório
+          </button>
           <button onClick={fetchTasks}
             className="p-2 text-muted-foreground hover:text-foreground rounded-xl hover:bg-secondary transition">
             <RefreshCw className="w-4 h-4" />
@@ -336,6 +440,7 @@ export default function TaskBoard() {
                       onEdit={openEdit} onDelete={handleDelete}
                       colIdx={colIdx}
                       canComplete={t.assigneeId == null || t.assigneeId === user?.id}
+                      onOpenDetail={openDetail}
                     />
                   ))
                 )}
@@ -344,6 +449,153 @@ export default function TaskBoard() {
           );
         })}
       </div>
+
+      {/* Detalhe: subtarefas + chat de comentários */}
+      {detailTask && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setDetailTask(null)}>
+          <div className="shk-card w-full max-w-md p-5 max-h-[90vh] overflow-y-auto space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <h3 className="font-bold text-sm break-words">{detailTask.title}</h3>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  {detailTask.assignee ? `Responsável: ${detailTask.assignee.name}` : "Sem responsável"}
+                  {detailTask.sector ? ` · ${detailTask.sector.name}` : ""}
+                </p>
+              </div>
+              <button onClick={() => setDetailTask(null)}><X className="w-5 h-5 text-muted-foreground shrink-0" /></button>
+            </div>
+
+            {/* Subtarefas */}
+            <div>
+              <div className="flex items-center gap-1.5 mb-2">
+                <CheckSquare className="w-3.5 h-3.5 text-primary" />
+                <span className="text-xs font-bold">Subtarefas</span>
+                {subtasks.length > 0 && (
+                  <span className="text-[10px] text-muted-foreground font-semibold">
+                    {subtasks.filter((s) => s.isDone).length}/{subtasks.length}
+                  </span>
+                )}
+              </div>
+              {subtasks.length > 0 && (
+                <div className="h-1.5 bg-secondary rounded-full mb-2 overflow-hidden">
+                  <div className="h-full bg-green-500 rounded-full transition-all"
+                    style={{ width: `${(subtasks.filter((s) => s.isDone).length / subtasks.length) * 100}%` }} />
+                </div>
+              )}
+              <div className="space-y-1">
+                {subtasks.map((s) => (
+                  <div key={s.id} className="flex items-center gap-2 group/sub px-1 py-1 rounded-lg hover:bg-secondary/40">
+                    <input type="checkbox" checked={s.isDone} onChange={() => toggleSubtask(s)}
+                      data-testid={`subtask-check-${s.id}`}
+                      className="w-4 h-4 accent-green-600 shrink-0 cursor-pointer" />
+                    <span className={`text-xs flex-1 break-words ${s.isDone ? "line-through text-muted-foreground" : ""}`}>{s.title}</span>
+                    <button onClick={() => removeSubtask(s)} className="opacity-0 group-hover/sub:opacity-100 transition">
+                      <Trash2 className="w-3 h-3 text-red-400" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div className="flex gap-1.5 mt-2">
+                <input value={newSubtask} onChange={(e) => setNewSubtask(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addSubtask(); } }}
+                  placeholder="Nova subtarefa..." data-testid="input-new-subtask"
+                  className="flex-1 px-3 py-1.5 rounded-xl border border-border text-xs" />
+                <button onClick={addSubtask} disabled={!newSubtask.trim()} data-testid="button-add-subtask"
+                  className="px-3 py-1.5 rounded-xl bg-primary text-white text-xs font-semibold disabled:opacity-40">
+                  <Plus className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Chat de comentários */}
+            <div className="border-t border-border pt-3">
+              <div className="flex items-center gap-1.5 mb-2">
+                <MessageSquare className="w-3.5 h-3.5 text-primary" />
+                <span className="text-xs font-bold">Comentários</span>
+              </div>
+              <div className="space-y-2 max-h-52 overflow-y-auto">
+                {comments.length === 0 && (
+                  <p className="text-xs text-muted-foreground text-center py-3">Nenhum comentário. Tire dúvidas ou complemente a tarefa aqui.</p>
+                )}
+                {comments.map((c) => {
+                  const mine = c.authorId === user?.id;
+                  return (
+                    <div key={c.id} className={`flex ${mine ? "justify-end" : "justify-start"}`}>
+                      <div className={`max-w-[85%] rounded-2xl px-3 py-1.5 ${mine ? "bg-primary text-white rounded-br-sm" : "bg-secondary rounded-bl-sm"}`}>
+                        {!mine && <div className="text-[10px] font-bold text-primary">{c.authorName ?? "—"}</div>}
+                        <div className="text-xs whitespace-pre-wrap break-words">{c.content}</div>
+                        <div className={`text-[9px] mt-0.5 text-right ${mine ? "text-white/70" : "text-muted-foreground"}`}>
+                          {new Date(c.createdAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex gap-1.5 mt-2">
+                <input value={newComment} onChange={(e) => setNewComment(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addComment(); } }}
+                  placeholder="Escreva um comentário..." data-testid="input-new-comment"
+                  className="flex-1 px-3 py-1.5 rounded-xl border border-border text-xs" />
+                <button onClick={addComment} disabled={!newComment.trim() || sendingComment} data-testid="button-add-comment"
+                  className="px-3 py-1.5 rounded-xl bg-primary text-white text-xs font-semibold disabled:opacity-40">
+                  <Send className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Relatório por setor e vendedor */}
+      {showReport && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowReport(false)}>
+          <div className="shk-card w-full max-w-lg p-5 max-h-[90vh] overflow-y-auto space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold flex items-center gap-2"><BarChart3 className="w-4 h-4 text-primary" /> Relatório de Tarefas</h3>
+              <button onClick={() => setShowReport(false)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            {!report ? (
+              <div className="h-24 rounded-xl bg-secondary/40 animate-pulse" />
+            ) : (
+              (["bySector", "byUser"] as const).map((key) => (
+                <div key={key}>
+                  <p className="text-xs font-bold mb-2">{key === "bySector" ? "Por setor" : "Por vendedor"}</p>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-muted-foreground border-b border-border">
+                          <th className="text-left py-1.5 pr-2 font-semibold">{key === "bySector" ? "Setor" : "Vendedor"}</th>
+                          <th className="text-center py-1.5 px-2 font-semibold">Total</th>
+                          <th className="text-center py-1.5 px-2 font-semibold">A Fazer</th>
+                          <th className="text-center py-1.5 px-2 font-semibold">Andamento</th>
+                          <th className="text-center py-1.5 px-2 font-semibold">Concluídas</th>
+                          <th className="text-center py-1.5 pl-2 font-semibold text-red-600">Atrasadas</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {report[key].length === 0 && (
+                          <tr><td colSpan={6} className="py-3 text-center text-muted-foreground">Sem tarefas.</td></tr>
+                        )}
+                        {report[key].map((b) => (
+                          <tr key={b.name} className="border-b border-border/50">
+                            <td className="py-1.5 pr-2 font-medium">{b.name}</td>
+                            <td className="text-center py-1.5 px-2 font-bold">{b.total}</td>
+                            <td className="text-center py-1.5 px-2">{b.todo}</td>
+                            <td className="text-center py-1.5 px-2 text-blue-600">{b.doing}</td>
+                            <td className="text-center py-1.5 px-2 text-green-600">{b.done}</td>
+                            <td className={`text-center py-1.5 pl-2 font-bold ${b.overdue > 0 ? "text-red-600" : "text-muted-foreground"}`}>{b.overdue}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Add/Edit form modal */}
       {showForm && (
