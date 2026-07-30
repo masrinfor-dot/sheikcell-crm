@@ -27,10 +27,44 @@ export default function Peliculas() {
   const [importMode, setImportMode] = useState<"append" | "replace">("append");
   const [importFile, setImportFile] = useState<File | null>(null);
   const [importing, setImporting] = useState(false);
+  const [sheetUrl, setSheetUrl] = useState("");
+  const [sheetSaved, setSheetSaved] = useState("");
+  const [syncing, setSyncing] = useState(false);
 
   useEffect(() => {
     api.filmCompat.list().then(setRows).catch(() => {}).finally(() => setLoading(false));
+    if (isAdmin) {
+      api.filmCompat.getSheet().then(({ url }) => { setSheetUrl(url); setSheetSaved(url); }).catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const handleSaveSheet = async () => {
+    try {
+      const { url } = await api.filmCompat.saveSheet(sheetUrl.trim());
+      setSheetSaved(url);
+      setSheetUrl(url);
+      toast({ title: url ? "Link do Google Planilhas salvo!" : "Link removido" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar link", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
+  };
+
+  const handleSyncSheet = async () => {
+    if (syncing) return;
+    if (!window.confirm("Atualizar a tabela com os dados do Google Planilhas? A tabela atual será substituída pelo conteúdo da planilha.")) return;
+    setSyncing(true);
+    try {
+      const r = await api.filmCompat.syncSheet();
+      setRows(await api.filmCompat.list());
+      setShowImport(false);
+      toast({ title: `Tabela atualizada! ${r.imported} película(s) importada(s) da planilha. ✅` });
+    } catch (err) {
+      toast({ title: "Erro ao atualizar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const handleImport = async () => {
     if (!importFile || importing) return;
@@ -204,6 +238,29 @@ export default function Peliculas() {
                 </label>
               </div>
             </div>
+
+            {/* Google Planilhas: link fixo para manter a tabela sempre atualizada */}
+            <div className="mt-4 pt-4 border-t border-border space-y-2">
+              <p className="text-xs font-bold flex items-center gap-1.5">📊 Ou conecte um Google Planilhas</p>
+              <p className="text-[10px] text-muted-foreground">
+                Cole o link da planilha (Compartilhar → "Qualquer pessoa com o link" → Leitor).
+                Depois é só clicar em <b>Atualizar agora</b> sempre que mudar algo na planilha — sem baixar arquivo.
+              </p>
+              <input value={sheetUrl} onChange={(e) => setSheetUrl(e.target.value)} data-testid="input-sheet-url"
+                placeholder="https://docs.google.com/spreadsheets/d/..."
+                className="w-full px-3 py-2 rounded-xl border border-border text-xs" />
+              <div className="flex gap-2">
+                <button onClick={handleSaveSheet} disabled={sheetUrl.trim() === sheetSaved} data-testid="button-save-sheet-url"
+                  className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold border border-border hover:bg-secondary disabled:opacity-40 transition">
+                  Salvar link
+                </button>
+                <button onClick={handleSyncSheet} disabled={!sheetSaved || syncing} data-testid="button-sync-sheet"
+                  className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold bg-primary text-white disabled:opacity-40 transition">
+                  {syncing ? "Atualizando..." : "Atualizar agora"}
+                </button>
+              </div>
+            </div>
+
             <div className="flex gap-2 mt-5">
               <button onClick={() => setShowImport(false)}
                 className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold border border-border hover:bg-secondary transition">Cancelar</button>

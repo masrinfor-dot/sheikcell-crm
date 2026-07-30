@@ -629,6 +629,9 @@ export const api = {
       req<{ ok: boolean; imported: number; skipped: number; errors: string[]; mode: string }>(
         "/film-compat/import", { method: "POST", body: JSON.stringify({ fileData, mode }) }),
     list: () => req<FilmCompat[]>("/film-compat"),
+    getSheet: () => req<{ url: string }>("/film-compat/sheet"),
+    saveSheet: (url: string) => req<{ url: string }>("/film-compat/sheet", { method: "PUT", body: JSON.stringify({ url }) }),
+    syncSheet: () => req<{ ok: boolean; imported: number }>("/film-compat/sheet/sync", { method: "POST" }),
     create: (data: { film: string; models: string; notes?: string }) =>
       req<FilmCompat>("/film-compat", { method: "POST", body: JSON.stringify(data) }),
     update: (id: number, data: Partial<{ film: string; models: string; notes: string }>) =>
