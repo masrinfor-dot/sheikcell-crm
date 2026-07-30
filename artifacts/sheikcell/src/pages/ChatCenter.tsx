@@ -848,6 +848,17 @@ export default function ChatCenter() {
 
   const handleStartRecording = async () => {
     if (!activeId || recording || sending) return;
+    // Navegadores só liberam o microfone em página segura (https). Sem isso,
+    // navigator.mediaDevices nem existe — avisa o motivo real em vez de um
+    // erro genérico.
+    if (typeof window !== "undefined" && !window.isSecureContext) {
+      toast({
+        title: "Microfone bloqueado: o site precisa abrir com https://",
+        description: "Acesse o sistema pelo endereço com cadeado (https) para gravar áudios.",
+        variant: "destructive",
+      });
+      return;
+    }
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
       toast({ title: "Gravação de áudio não suportada neste navegador", variant: "destructive" });
       return;
@@ -898,8 +909,17 @@ export default function ChatCenter() {
       setRecording(true);
       setRecordSecs(0);
       recordTimerRef.current = setInterval(() => setRecordSecs((s) => s + 1), 1000);
-    } catch {
-      toast({ title: "Permissão do microfone negada", variant: "destructive" });
+    } catch (err) {
+      const name = err instanceof DOMException ? err.name : "";
+      toast({
+        title: name === "NotFoundError" || name === "DevicesNotFoundError"
+          ? "Nenhum microfone encontrado neste aparelho"
+          : "Permissão do microfone negada",
+        description: name === "NotAllowedError" || name === "PermissionDeniedError"
+          ? "Libere o microfone nas permissões do navegador (ícone de cadeado ao lado do endereço) e tente de novo."
+          : undefined,
+        variant: "destructive",
+      });
     }
   };
 
