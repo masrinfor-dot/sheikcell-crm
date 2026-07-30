@@ -77,6 +77,22 @@ export type InternalMessage = {
   createdAt: string;
 };
 
+export type Raffle = {
+  id: number; name: string; prize: string;
+  sectorIds: number[] | null; vendedorIds: number[] | null; sessionKeys: string[] | null;
+  periodDays: number | null; onlyResolved: boolean; excludePreviousWinners: boolean;
+  winnersCount: number; messageTemplate: string; storeName: string | null;
+  recurrence: "once" | "weekly" | "monthly"; dayOfWeek: number | null; dayOfMonth: number | null;
+  active: boolean; lastRunKey: string | null; createdAt: string;
+};
+
+export type RaffleWinner = { phone: string; name: string; conversationId: number; sent: boolean; error?: string };
+
+export type RaffleDraw = {
+  id: number; raffleId: number; periodKey: string; eligibleCount: number;
+  winners: RaffleWinner[]; createdAt: string;
+};
+
 export type Sector = {
   id: number;
   name: string;
@@ -554,6 +570,15 @@ export const api = {
     evaluate: (data: { device: string; answers: Record<string, string> }) =>
       req<{ id: number; device: string; marketPrice: string; suggestedPrice: string; summary: string; createdAt: string }>(
         "/trade-in/evaluate", { method: "POST", body: JSON.stringify(data) }),
+  },
+  raffles: {
+    list: () => req<Raffle[]>("/raffles"),
+    create: (data: Partial<Raffle>) => req<Raffle>("/raffles", { method: "POST", body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<Raffle>) => req<Raffle>(`/raffles/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/raffles/${id}`, { method: "DELETE" }),
+    eligible: (id: number) => req<{ count: number }>(`/raffles/${id}/eligible`),
+    run: (id: number) => req<{ draw: RaffleDraw; eligible: number }>(`/raffles/${id}/run`, { method: "POST" }),
+    draws: (id: number) => req<RaffleDraw[]>(`/raffles/${id}/draws`),
   },
   filmCompat: {
     import: (fileData: string, mode: "replace" | "append") =>

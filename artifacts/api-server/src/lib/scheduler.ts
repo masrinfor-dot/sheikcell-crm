@@ -131,5 +131,9 @@ export async function deliverScheduledMessages(): Promise<void> {
 
 export function startScheduler(): void {
   setInterval(() => { void deliverScheduledMessages(); }, 30_000);
+  // Sorteios recorrentes: checa a cada 5 minutos (roda no dia certo, após as 10h).
+  setInterval(() => {
+    void import("../routes/raffles").then((m) => m.runDueRaffles()).catch(() => {});
+  }, 5 * 60_000);
   logger.info("Agendador de mensagens iniciado (tick 30s)");
 }
