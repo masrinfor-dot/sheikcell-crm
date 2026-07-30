@@ -8,6 +8,7 @@ export * from "./trainings";
 export * from "./sheet_links";
 export * from "./rh";
 export * from "./raffles";
+export * from "./bot";
 export * from "./sectors";
 export * from "./queue_entries";
 export * from "./attendance_logs";

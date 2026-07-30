@@ -376,6 +376,11 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   // Conflito = mensagem duplicada chegando em paralelo; não notifica de novo.
   if (!msg) return;
   broadcast("message", { conversationId: conv.id, message: msg }, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
+
+  // Robô de pré-atendimento (assíncrono: nunca atrasa nem derruba o webhook)
+  if (msgType === "text") {
+    void import("./bot").then((m) => m.handleBotInbound(conv, displayContent)).catch(() => {});
+  }
 }
 
 export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<void> {
@@ -477,6 +482,13 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
         // Conflito = mensagem duplicada chegando em paralelo; não notifica de novo.
         if (!saved) continue;
         broadcast("message", { conversationId: conv.id, message: saved }, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
+
+        // Robô de pré-atendimento (assíncrono)
+        if (saved.type === "text") {
+          const convRef = conv;
+          const textRef = saved.content;
+          void import("./bot").then((m) => m.handleBotInbound(convRef, textRef)).catch(() => {});
+        }
       }
     }
   }

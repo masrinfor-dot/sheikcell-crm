@@ -20,6 +20,7 @@ import trainingsRouter, { enforceMandatoryTrainings } from "./trainings";
 import sheetLinksRouter from "./sheetLinks";
 import rhRouter from "./rh";
 import rafflesRouter from "./raffles";
+import botRouter from "./bot";
 
 const router: IRouter = Router();
 
@@ -47,5 +48,6 @@ router.use(trainingsRouter);
 router.use(sheetLinksRouter);
 router.use(rhRouter);
 router.use(rafflesRouter);
+router.use(botRouter);
 
 export default router;

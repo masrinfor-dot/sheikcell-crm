@@ -77,6 +77,17 @@ export type InternalMessage = {
   createdAt: string;
 };
 
+export type BotQuestion = { question: string; options?: string[] };
+
+export type BotSettings = {
+  id: number; enabled: boolean; botName: string; greeting: string;
+  questions: BotQuestion[]; knowledgeBase: string;
+  doneMessage: string; handoffMessage: string;
+  mode: "always" | "off_hours"; hoursStart: string; hoursEnd: string;
+  urgencyWords: string; maxPerConversation: number; maxPerDay: number;
+  usageToday: number;
+};
+
 export type Raffle = {
   id: number; name: string; prize: string;
   sectorIds: number[] | null; vendedorIds: number[] | null; sessionKeys: string[] | null;
@@ -570,6 +581,13 @@ export const api = {
     evaluate: (data: { device: string; answers: Record<string, string> }) =>
       req<{ id: number; device: string; marketPrice: string; suggestedPrice: string; summary: string; createdAt: string }>(
         "/trade-in/evaluate", { method: "POST", body: JSON.stringify(data) }),
+  },
+  bot: {
+    settings: () => req<BotSettings>("/bot/settings"),
+    save: (data: Partial<BotSettings>) => req<BotSettings>("/bot/settings", { method: "PUT", body: JSON.stringify(data) }),
+    stats: () => req<{ conversations: number; activeFlows: number; usageToday: number }>("/bot/stats"),
+    test: (message: string, reset?: boolean) =>
+      req<{ replies: string[]; ended?: boolean; reset?: boolean }>("/bot/test", { method: "POST", body: JSON.stringify({ message, reset }) }),
   },
   raffles: {
     list: () => req<Raffle[]>("/raffles"),
