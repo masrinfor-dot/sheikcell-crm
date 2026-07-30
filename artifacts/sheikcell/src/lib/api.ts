@@ -27,6 +27,12 @@ export const PERMISSION_KEYS = [
   "crm",
   "tarefas",
   "enviar_midia",
+  "equipe",
+  "financeiras",
+  "peliculas",
+  "avaliacao",
+  "treinamentos",
+  "planilhas",
 ] as const;
 
 export const PERMISSION_LABELS: Record<string, string> = {
@@ -38,6 +44,12 @@ export const PERMISSION_LABELS: Record<string, string> = {
   crm: "Acessar o CRM",
   tarefas: "Acessar o quadro de Tarefas",
   enviar_midia: "Enviar fotos, áudios e arquivos",
+  equipe: "Aba Equipe (chat interno)",
+  financeiras: "Aba Financeiras (bancos)",
+  peliculas: "Aba Películas",
+  avaliacao: "Aba Avaliação (aparelho usado)",
+  treinamentos: "Aba Treinamentos",
+  planilhas: "Aba Planilhas",
 };
 
 export type User = {
@@ -54,10 +66,10 @@ export type User = {
   permissions?: VendedorPermissions;
 };
 
-// Vendedor tem a permissão? (admin/supervisor sempre têm; ausência = liberado)
+// Tem a permissão? (admin sempre tem; vendedor/supervisor: ausência = liberado)
 export function can(user: User | null, key: string): boolean {
   if (!user) return false;
-  if (user.role !== "vendedor") return true;
+  if (user.role === "admin") return true;
   return user.permissions?.[key] !== false;
 }
 

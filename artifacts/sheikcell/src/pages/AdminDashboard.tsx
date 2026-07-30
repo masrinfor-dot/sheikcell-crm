@@ -833,7 +833,7 @@ export default function AdminDashboard() {
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
                             )}
-                            {u.role === "vendedor" && (
+                            {(u.role === "vendedor" || u.role === "supervisor") && (
                               <button
                                 onClick={() => {
                                   const draft: Record<string, boolean> = {};
@@ -842,7 +842,7 @@ export default function AdminDashboard() {
                                   setPermUser(u);
                                 }}
                                 data-testid={`button-perms-user-${u.id}`}
-                                title="Permissões do vendedor"
+                                title="Permissões e abas"
                                 className="p-1.5 text-muted-foreground hover:text-primary hover:bg-blue-50 rounded-lg transition">
                                 <ShieldCheck className="w-3.5 h-3.5" />
                               </button>

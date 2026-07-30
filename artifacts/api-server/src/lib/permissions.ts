@@ -2,8 +2,8 @@ import type { Request, Response, NextFunction } from "express";
 import { db, usersTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 
-// Permissões individuais de vendedor. null/ausente = liberado (padrão).
-// Admin e supervisor sempre têm tudo liberado — as chaves só valem p/ vendedor.
+// Permissões individuais de vendedor E supervisor. null/ausente = liberado
+// (padrão). Admin sempre tem tudo liberado.
 export const PERMISSION_KEYS = [
   "ver_potenciais",   // ver e assumir Potenciais (leads novos)
   "transferir",       // transferir conversa para outro setor
@@ -13,6 +13,13 @@ export const PERMISSION_KEYS = [
   "crm",              // acessar o CRM
   "tarefas",          // acessar o quadro de Tarefas
   "enviar_midia",     // enviar fotos, áudios e arquivos
+  // Abas do painel (visibilidade controlada pelo admin)
+  "equipe",           // chat interno Equipe
+  "financeiras",      // aba Financeiras (links de bancos)
+  "peliculas",        // aba Películas (compatibilidade)
+  "avaliacao",        // aba Avaliação (trade-in)
+  "treinamentos",     // aba Treinamentos
+  "planilhas",        // aba Planilhas
 ] as const;
 export type PermissionKey = (typeof PERMISSION_KEYS)[number];
 
@@ -22,9 +29,9 @@ export function permAllowed(perms: Record<string, boolean> | null | undefined, k
 }
 
 /** Busca as permissões atuais do usuário no banco (sempre frescas — mudanças
- *  do admin valem sem precisar de novo login). Admin/supervisor → null (tudo). */
+ *  do admin valem sem precisar de novo login). Admin → null (tudo). */
 export async function getVendedorPermissions(req: Request): Promise<Record<string, boolean> | null> {
-  if (req.session.userRole !== "vendedor") return null;
+  if (req.session.userRole === "admin") return null;
   const [row] = await db
     .select({ permissions: usersTable.permissions })
     .from(usersTable)
@@ -34,7 +41,7 @@ export async function getVendedorPermissions(req: Request): Promise<Record<strin
 }
 
 export async function checkPerm(req: Request, key: PermissionKey): Promise<boolean> {
-  if (req.session.userRole !== "vendedor") return true;
+  if (req.session.userRole === "admin") return true;
   return permAllowed(await getVendedorPermissions(req), key);
 }
 
