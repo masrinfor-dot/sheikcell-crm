@@ -637,10 +637,47 @@ function toJid(to: string): string {
   return to.includes("@lid") ? `${digits}@lid` : `${digits}@s.whatsapp.net`;
 }
 
+// Números digitados à mão (atendimento criado manualmente) muitas vezes não
+// batem com o JID real: nono dígito brasileiro a mais/a menos, DDI faltando…
+// Enviar para digits@s.whatsapp.net inexistente FALHA EM SILÊNCIO no Baileys.
+// Por isso, para números simples, confirmamos com o WhatsApp qual é o JID
+// certo via onWhatsApp() — e recusamos com erro claro se o número não existir.
+const jidCache = new Map<string, string>();
+
+async function resolveJid(s: Session, to: string): Promise<string> {
+  // Grupos e @lid já vêm em formato final — não passam por onWhatsApp.
+  if (to.includes("@g.us") || to.includes("@lid")) return toJid(to);
+  const digits = to.replace(/\D/g, "");
+  if (!digits) throw new Error(`Destino de envio inválido: "${to}"`);
+  const cached = jidCache.get(digits);
+  if (cached) return cached;
+  const candidates = [digits];
+  // Brasil sem DDI: usuário digitou só DDD+número (10–11 dígitos) → tenta com 55.
+  if (digits.length === 10 || digits.length === 11) candidates.push(`55${digits}`);
+  for (const cand of candidates) {
+    try {
+      const results = await s.sock!.onWhatsApp(cand);
+      const hit = results?.find((r) => r.exists && r.jid);
+      if (hit?.jid) {
+        jidCache.set(digits, hit.jid);
+        if (hit.jid !== `${cand}@s.whatsapp.net`) {
+          logger.info({ typed: digits, resolved: hit.jid, sessionKey: s.key }, "JID resolvido via onWhatsApp (número normalizado)");
+        }
+        return hit.jid;
+      }
+    } catch (err) {
+      // onWhatsApp indisponível: cai no formato direto em vez de bloquear tudo.
+      logger.warn({ err, cand, sessionKey: s.key }, "onWhatsApp falhou — enviando no formato direto");
+      return toJid(to);
+    }
+  }
+  throw new Error(`O número ${digits} não está no WhatsApp — confira o DDD/DDI e o nono dígito`);
+}
+
 export async function sendMessage(key: string, to: string, text: string): Promise<void> {
   const s = requireOpenSession(key);
   const phone = to.replace(/\D/g, "");
-  const jid = toJid(to);
+  const jid = await resolveJid(s, to);
   await enqueueSend(s, jid, text.length, async () => {
     const cur = requireOpenSession(key);
     await cur.sock!.sendMessage(jid, { text });
@@ -660,7 +697,7 @@ export async function sendMedia(
 ): Promise<void> {
   const s = requireOpenSession(key);
   const phone = to.replace(/\D/g, "");
-  const jid = toJid(to);
+  const jid = await resolveJid(s, to);
   await enqueueSend(s, jid, caption?.length ?? 30, async () => {
     const cur = requireOpenSession(key);
     if (type === "image") {
