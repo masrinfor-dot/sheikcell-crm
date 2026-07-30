@@ -354,6 +354,10 @@ export default function ChatCenter() {
   const [finalizeReason, setFinalizeReason] = useState<string>(FINALIZE_REASONS[0]);
   const [finalizeDetail, setFinalizeDetail] = useState("");
   const [finalizing, setFinalizing] = useState(false);
+  // Venda no atendimento: informada ao finalizar e lançada no CRM do cliente.
+  const [finalizeHadSale, setFinalizeHadSale] = useState<boolean | null>(null);
+  const [finalizeSaleAmount, setFinalizeSaleAmount] = useState("");
+  const [finalizeSaleDesc, setFinalizeSaleDesc] = useState("");
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [chatUsers, setChatUsers] = useState<{ id: number; name: string; role: string; sectorId?: number | null }[]>([]);
   const [quickReplies, setQuickReplies] = useState<QuickReply[]>([]);
@@ -1006,6 +1010,9 @@ export default function ChatCenter() {
     setFinalizeTarget(id);
     setFinalizeReason(FINALIZE_REASONS[0]);
     setFinalizeDetail("");
+    setFinalizeHadSale(null);
+    setFinalizeSaleAmount("");
+    setFinalizeSaleDesc("");
   };
 
   const submitFinalize = async () => {
@@ -1018,9 +1025,22 @@ export default function ChatCenter() {
       toast({ title: "Descreva o motivo da finalização", variant: "destructive" });
       return;
     }
+    if (finalizeHadSale == null) {
+      toast({ title: "Informe se teve venda neste atendimento", variant: "destructive" });
+      return;
+    }
+    const saleAmount = parseFloat(finalizeSaleAmount.replace(",", "."));
+    if (finalizeHadSale && (!Number.isFinite(saleAmount) || saleAmount <= 0)) {
+      toast({ title: "Informe o valor da venda", variant: "destructive" });
+      return;
+    }
     setFinalizing(true);
     try {
-      const updated = await api.chat.updateConversation(id, { status: "resolved", resolutionReason });
+      const updated = await api.chat.updateConversation(id, {
+        status: "resolved", resolutionReason,
+        hadSale: finalizeHadSale,
+        ...(finalizeHadSale ? { saleAmount, saleDescription: finalizeSaleDesc.trim() } : {}),
+      });
       setConvs((prev) => prev.map((c) => c.id === id ? { ...c, ...updated, status: "resolved" } : c));
       toast({ title: "Atendimento finalizado" });
       setFinalizeTarget(null);
@@ -2308,6 +2328,38 @@ export default function ChatCenter() {
                   rows={3} autoFocus data-testid="input-finalize-detail"
                   placeholder="Ex.: cliente pediu para retornar amanhã"
                   className="w-full px-3 py-2 rounded-xl border border-border text-sm resize-none" />
+              </div>
+            )}
+            {/* Teve venda? Valor entra como compra no CRM do cliente */}
+            <div>
+              <label className="text-xs font-medium mb-1 block">Teve venda neste atendimento?</label>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setFinalizeHadSale(true)} data-testid="button-sale-yes"
+                  className={`flex-1 py-2 rounded-xl border text-sm font-semibold transition ${finalizeHadSale === true ? "bg-green-600 text-white border-green-600" : "border-border hover:bg-secondary"}`}>
+                  Sim 💰
+                </button>
+                <button type="button" onClick={() => setFinalizeHadSale(false)} data-testid="button-sale-no"
+                  className={`flex-1 py-2 rounded-xl border text-sm font-semibold transition ${finalizeHadSale === false ? "bg-gray-600 text-white border-gray-600" : "border-border hover:bg-secondary"}`}>
+                  Não
+                </button>
+              </div>
+            </div>
+            {finalizeHadSale === true && (
+              <div className="space-y-2">
+                <div>
+                  <label className="text-xs font-medium mb-1 block">Valor da venda (R$)</label>
+                  <input type="text" inputMode="decimal" value={finalizeSaleAmount}
+                    onChange={(e) => setFinalizeSaleAmount(e.target.value)}
+                    placeholder="Ex.: 1500,00" autoFocus data-testid="input-sale-amount"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm" />
+                </div>
+                <div>
+                  <label className="text-xs font-medium mb-1 block">O que foi vendido? (opcional)</label>
+                  <input type="text" value={finalizeSaleDesc}
+                    onChange={(e) => setFinalizeSaleDesc(e.target.value)}
+                    placeholder="Ex.: iPhone 13 128GB + película" data-testid="input-sale-desc"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm" />
+                </div>
               </div>
             )}
             <div className="flex gap-2 pt-1">

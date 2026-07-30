@@ -1,4 +1,4 @@
-import { pgTable, serial, text, timestamp, integer } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, timestamp, integer, boolean, numeric } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -14,6 +14,9 @@ export const attendanceLogsTable = pgTable("attendance_logs", {
   channel: text("channel").notNull().default("manual"),
   outcome: text("outcome"), // "completed" | "transferred" | "abandoned"
   resolutionReason: text("resolution_reason"), // motivo escolhido ao finalizar o atendimento
+  // Resultado comercial informado ao finalizar: teve venda? de quanto?
+  hadSale: boolean("had_sale"),
+  saleAmount: numeric("sale_amount"),
   notes: text("notes"),
   waitTimeSeconds: integer("wait_time_seconds"),
   serviceTimeSeconds: integer("service_time_seconds"),

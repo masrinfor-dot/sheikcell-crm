@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
-import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable } from "@workspace/db";
+import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, crmPurchasesTable } from "@workspace/db";
 import { eq, desc, and, or, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireAdminOrSupervisor } from "../middlewares/auth";
 import { checkPerm, requirePerm } from "../lib/permissions";
@@ -558,6 +558,8 @@ async function syncResolvedConversation(
   tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
   conv: typeof conversationsTable.$inferSelect,
   resolutionReason?: string | null,
+  // Resultado comercial informado no modal de finalização: houve venda? valor?
+  sale?: { hadSale: boolean; amount: number; description: string } | null,
 ): Promise<void> {
   const [attendant] = conv.assigneeId
     ? await tx.select().from(usersTable).where(eq(usersTable.id, conv.assigneeId)).limit(1)
@@ -587,6 +589,8 @@ async function syncResolvedConversation(
       outcome: "completed",
       resolutionReason: resolutionReason?.trim() || null,
       serviceTimeSeconds: serviceSeconds >= 0 ? serviceSeconds : null,
+      hadSale: sale ? sale.hadSale : null,
+      saleAmount: sale?.hadSale ? String(sale.amount) : null,
     });
   }
 
@@ -602,12 +606,14 @@ async function syncResolvedConversation(
     const [existing] = await tx.select().from(crmContactsTable)
       .where(and(eq(crmContactsTable.isArchived, false), eq(crmContactsTable.phone, normalizedPhone), sectorCondition))
       .limit(1);
+    let contactId: number | null = null;
     if (existing) {
+      contactId = existing.id;
       await tx.update(crmContactsTable)
         .set({ updatedAt: new Date() })
         .where(eq(crmContactsTable.id, existing.id));
     } else {
-      await tx.insert(crmContactsTable).values({
+      const [created] = await tx.insert(crmContactsTable).values({
         name: conv.name,
         contact: conv.phone,
         phone: normalizedPhone,
@@ -615,7 +621,26 @@ async function syncResolvedConversation(
         attendantId: conv.assigneeId ?? null,
         status: "active",
         profile: "Novo",
+      }).returning();
+      contactId = created?.id ?? null;
+    }
+
+    // 3) Venda informada ao finalizar → vira uma compra no histórico do cliente
+    //    no CRM, atualizando o total gasto e o perfil (Regular/VIP) — mesma
+    //    regra da compra lançada manualmente no CRM.
+    if (sale?.hadSale && sale.amount > 0 && contactId != null) {
+      await tx.insert(crmPurchasesTable).values({
+        contactId,
+        description: sale.description || `Venda no atendimento — ${conv.name}`,
+        amount: String(sale.amount),
+        notes: resolutionReason?.trim() || null,
       });
+      const all = await tx.select().from(crmPurchasesTable).where(eq(crmPurchasesTable.contactId, contactId));
+      const total = all.reduce((s, p) => s + parseFloat(String(p.amount ?? "0")), 0);
+      const profileUpdate: Record<string, unknown> = { totalPurchases: String(total), updatedAt: new Date() };
+      if (total >= 5000) profileUpdate.profile = "VIP";
+      else if (total >= 1000) profileUpdate.profile = "Regular";
+      await tx.update(crmContactsTable).set(profileUpdate).where(eq(crmContactsTable.id, contactId));
     }
   }
 }
@@ -623,10 +648,11 @@ async function syncResolvedConversation(
 // ─── Update conversation ───────────────────────────────────────────────────
 router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<void> => {
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
-  const { status, labels, sectorId, assigneeId, name, isArchived, resolutionReason } = req.body as {
+  const { status, labels, sectorId, assigneeId, name, isArchived, resolutionReason, hadSale, saleAmount, saleDescription } = req.body as {
     status?: string; labels?: string; sectorId?: number;
     assigneeId?: number; name?: string; isArchived?: boolean;
     resolutionReason?: string;
+    hadSale?: boolean; saleAmount?: number | string; saleDescription?: string;
   };
 
   const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
@@ -737,7 +763,16 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
     if (status === "resolved" && !wasResolved) {
       // Sanitize untrusted client input: only accept a string motive, capped.
       const cleanReason = typeof resolutionReason === "string" ? resolutionReason.slice(0, 500) : null;
-      await syncResolvedConversation(tx, row, cleanReason);
+      // Venda informada no modal: sanitiza valor (número positivo) e descrição.
+      const amountNum = Number(saleAmount);
+      const sale = typeof hadSale === "boolean"
+        ? {
+            hadSale,
+            amount: hadSale && Number.isFinite(amountNum) && amountNum > 0 ? amountNum : 0,
+            description: typeof saleDescription === "string" ? saleDescription.trim().slice(0, 300) : "",
+          }
+        : null;
+      await syncResolvedConversation(tx, row, cleanReason, sale);
     }
     return row;
   });
