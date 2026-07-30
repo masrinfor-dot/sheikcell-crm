@@ -1447,7 +1447,11 @@ export default function ChatCenter() {
 
         {/* Category tabs: Potenciais / Pendentes / Ativos */}
         <div className="flex border-b border-border bg-white">
-          {CATEGORIES.filter((cat) => cat.id !== "potenciais" || can(user, "ver_potenciais")).map((cat) => {
+          {CATEGORIES.filter((cat) =>
+            (cat.id !== "potenciais" || can(user, "ver_potenciais")) &&
+            // Resolvidas só para admin/supervisor
+            (cat.id !== "resolvidas" || user?.role === "admin" || user?.role === "supervisor")
+          ).map((cat) => {
             const isActive = category === cat.id;
             return (
               <button

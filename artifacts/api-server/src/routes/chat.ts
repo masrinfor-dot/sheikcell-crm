@@ -220,6 +220,9 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
       ? and(eq(conversationsTable.sectorId, userSectorId), sql`NOT (${restricted})`)!
       : sql`FALSE`;
     conditions.push(or(potencial, mine, sectorUnrestricted)!);
+    // Resolvidas só aparecem para admin/supervisor: vendedor não vê
+    // conversas finalizadas, nem as que ele mesmo finalizou.
+    conditions.push(notInArray(conversationsTable.status, ["resolved", "archived"]));
   }
 
   if (status) conditions.push(eq(conversationsTable.status, status));
