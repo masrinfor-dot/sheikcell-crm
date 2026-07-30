@@ -220,6 +220,11 @@ export type TaskSubtask = {
   id: number; taskId: number; title: string; isDone: boolean; position: number; createdAt: string;
 };
 
+export type AppSettings = {
+  alertUnansweredEnabled: boolean;
+  alertUnansweredMinutes: number;
+};
+
 export type TaskReportBucket = {
   name: string; total: number; todo: number; doing: number; done: number; overdue: number;
 };
@@ -463,6 +468,11 @@ export const api = {
         req<CrmCustomField>(`/crm/custom-fields/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number) => req<{ ok: boolean }>(`/crm/custom-fields/${id}`, { method: "DELETE" }),
     },
+  },
+  settings: {
+    get: () => req<AppSettings>("/settings"),
+    update: (data: Partial<AppSettings>) =>
+      req<AppSettings>("/settings", { method: "PATCH", body: JSON.stringify(data) }),
   },
   tasks: {
     list: () => req<Task[]>("/tasks"),

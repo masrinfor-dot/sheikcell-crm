@@ -1,4 +1,5 @@
 export * from "./users";
+export * from "./app_settings";
 export * from "./sectors";
 export * from "./queue_entries";
 export * from "./attendance_logs";

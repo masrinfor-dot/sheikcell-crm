@@ -152,7 +152,7 @@ function waSessionLabel(key: string, sessions: WaSessionInfo[]): string {
 }
 
 // ─── Conversation list item ─────────────────────────────────────────────────
-function ConvItem({ conv, active, onClick, sessionBadge }: { conv: Conversation; active: boolean; onClick: () => void; sessionBadge?: string | null }) {
+function ConvItem({ conv, active, onClick, sessionBadge, overdue }: { conv: Conversation; active: boolean; onClick: () => void; sessionBadge?: string | null; overdue?: boolean }) {
   return (
     <button
       onClick={onClick}
@@ -171,6 +171,11 @@ function ConvItem({ conv, active, onClick, sessionBadge }: { conv: Conversation;
         <div className="flex items-center justify-between gap-1">
           <p className="text-xs text-muted-foreground truncate flex-1">{conv.lastMessage ?? "Sem mensagens"}</p>
           <div className="flex items-center gap-1 shrink-0">
+            {overdue && (
+              <span className="text-[10px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full font-bold animate-pulse" title="Cliente aguardando resposta há mais tempo que o limite">
+                ⚠ sem resposta
+              </span>
+            )}
             {sessionBadge && (
               <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full font-semibold truncate max-w-[90px]" title={`Recebida pelo número: ${sessionBadge}`}>
                 {sessionBadge}
@@ -353,6 +358,11 @@ export default function ChatCenter() {
   const [filterVendedor, setFilterVendedor] = useState("");
   const [filterSetor, setFilterSetor] = useState("");
   const [filterNivel, setFilterNivel] = useState("");
+  // Alerta de atendimento sem resposta (configurável por admin/supervisor).
+  const [alertEnabled, setAlertEnabled] = useState(true);
+  const [alertMinutes, setAlertMinutes] = useState(5);
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const alertedRef = useRef<Set<number>>(new Set());
   // Finalizar atendimento: modal para capturar o motivo da finalização.
   const [finalizeTarget, setFinalizeTarget] = useState<number | null>(null);
   const [finalizeReason, setFinalizeReason] = useState<string>(FINALIZE_REASONS[0]);
@@ -740,6 +750,7 @@ export default function ChatCenter() {
   useEffect(() => {
     api.sectors.list().then(setSectors).catch(() => {});
     api.chatUsers().then(setChatUsers).catch(() => {});
+    api.settings.get().then((s) => { setAlertEnabled(s.alertUnansweredEnabled); setAlertMinutes(s.alertUnansweredMinutes); }).catch(() => {});
     api.chat.quickReplies.list().then(setQuickReplies).catch(() => {});
     api.chat.labels.list().then(setLabels).catch(() => {});
     api.chat.waSessions().then(setWaSessions).catch(() => {});
@@ -1251,6 +1262,46 @@ export default function ChatCenter() {
     }
   };
 
+  // Relógio de 30s para reavaliar quais conversas estouraram o tempo limite.
+  useEffect(() => {
+    const t = setInterval(() => setNowTick(Date.now()), 30000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Conversa "estourada": cliente falou por último e ninguém respondeu dentro
+  // do limite (padrão 5 min). Não vale para resolvidas/arquivadas.
+  const isOverdue = useCallback((c: Conversation): boolean => {
+    if (!alertEnabled) return false;
+    if (c.status === "resolved" || c.status === "archived") return false;
+    if (c.lastMessageDirection !== "inbound") return false;
+    if (!c.lastMessageAt) return false;
+    return nowTick - new Date(c.lastMessageAt).getTime() >= alertMinutes * 60000;
+  }, [alertEnabled, alertMinutes, nowTick]);
+
+  // Alerta sonoro + aviso quando uma conversa estoura o limite (1x por estouro).
+  useEffect(() => {
+    if (!alertEnabled) return;
+    const overdueNow = convs.filter(isOverdue);
+    for (const c of overdueNow) {
+      if (!alertedRef.current.has(c.id)) {
+        alertedRef.current.add(c.id);
+        toast({
+          title: `⚠ ${c.name} sem resposta`,
+          description: `Cliente aguardando há mais de ${alertMinutes} min.`,
+          variant: "destructive",
+        });
+        if (soundEnabledRef.current) playAlertSound();
+      }
+    }
+    // Quando a conversa é respondida, libera para alertar de novo no futuro.
+    for (const id of [...alertedRef.current]) {
+      const c = convs.find((x) => x.id === id);
+      if (!c || !isOverdue(c)) alertedRef.current.delete(id);
+    }
+  }, [convs, isOverdue, alertEnabled, alertMinutes]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const overdueCount = alertEnabled ? convs.filter(isOverdue).length : 0;
+
   const visibleConvs = convs.filter((c) =>
     // Busca por nome ou número (aceita número digitado com espaços/traços).
     (!search || c.name.toLowerCase().includes(search.toLowerCase()) || c.phone.includes(search) || c.phone.replace(/\D/g, "").includes(search.replace(/\D/g, "") || "\u0000")) &&
@@ -1433,6 +1484,36 @@ export default function ChatCenter() {
             >
               ● Não respondidas
             </button>
+            {/* Alerta de sem resposta: só admin/supervisor liga/desliga */}
+            {(user?.role === "admin" || user?.role === "supervisor") && (
+              <button
+                onClick={async () => {
+                  const next = !alertEnabled;
+                  setAlertEnabled(next);
+                  try {
+                    const s = await api.settings.update({ alertUnansweredEnabled: next });
+                    setAlertEnabled(s.alertUnansweredEnabled);
+                    setAlertMinutes(s.alertUnansweredMinutes);
+                    toast({ title: next ? "Alerta de sem resposta LIGADO" : "Alerta de sem resposta DESLIGADO", description: next ? `Avisa quando o cliente espera mais de ${s.alertUnansweredMinutes} min.` : "Ninguém mais recebe este alerta." });
+                  } catch {
+                    setAlertEnabled(!next);
+                    toast({ title: "Erro ao salvar configuração", variant: "destructive" });
+                  }
+                }}
+                data-testid="button-toggle-unanswered-alert"
+                title={`Alerta para atendimentos com mais de ${alertMinutes} min sem resposta (vale para toda a equipe)`}
+                className={`ml-1 text-xs px-2.5 py-1 rounded-full transition border font-semibold ${alertEnabled
+                  ? "bg-amber-50 text-amber-700 border-amber-300"
+                  : "bg-white text-muted-foreground border-border"}`}
+              >
+                ⏰ Alerta {alertMinutes} min: {alertEnabled ? "LIGADO" : "desligado"}
+              </button>
+            )}
+            {overdueCount > 0 && (
+              <span className="ml-1 text-xs px-2 py-1 rounded-full bg-red-100 text-red-600 font-bold">
+                {overdueCount} sem resposta há {alertMinutes}+ min
+              </span>
+            )}
             {/* Vendedor / Setor / Nível CRM */}
             <div className="flex gap-1.5 flex-wrap">
               <select value={filterVendedor} onChange={(e) => setFilterVendedor(e.target.value)}
@@ -1505,6 +1586,7 @@ export default function ChatCenter() {
                 conv={conv}
                 active={conv.id === activeId}
                 onClick={() => setActiveId(conv.id)}
+                overdue={isOverdue(conv)}
                 sessionBadge={
                   // Só etiqueta quando há mais de um número de atendimento
                   // pareado (ou a conversa vem de uma conexão secundária).

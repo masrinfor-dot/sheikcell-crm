@@ -11,6 +11,7 @@ import routingRouter from "./routing";
 import whatsappProxyRouter from "./whatsapp";
 import internalChatRouter from "./internalChat";
 import tasksRouter from "./tasks";
+import settingsRouter from "./settings";
 
 const router: IRouter = Router();
 
@@ -26,5 +27,6 @@ router.use(routingRouter);
 router.use(whatsappProxyRouter);
 router.use(internalChatRouter);
 router.use(tasksRouter);
+router.use(settingsRouter);
 
 export default router;
