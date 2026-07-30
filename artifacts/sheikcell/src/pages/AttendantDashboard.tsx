@@ -9,12 +9,13 @@ import ChatCenter from "./ChatCenter";
 import InternalChat from "./InternalChat";
 import TaskBoard from "./TaskBoard";
 import Financeiras from "./Financeiras";
+import Peliculas from "./Peliculas";
 import {
   Smartphone, LogOut, Clock, PhoneCall, CheckCircle,
-  ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark
+  ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, Shield
 } from "lucide-react";
 
-type MainTab = "queue" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras";
+type MainTab = "queue" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "peliculas";
 
 const MAIN_TABS = [
   { id: "queue" as MainTab, label: "Fila", icon: PhoneCall },
@@ -22,6 +23,7 @@ const MAIN_TABS = [
   { id: "tarefas" as MainTab, label: "Tarefas", icon: ListTodo },
   { id: "crm" as MainTab, label: "CRM", icon: Kanban },
   { id: "financeiras" as MainTab, label: "Financeiras", icon: Landmark },
+  { id: "peliculas" as MainTab, label: "Películas", icon: Shield },
 ] as const;
 
 function formatWait(createdAt: string): string {
@@ -205,6 +207,12 @@ export default function AttendantDashboard() {
       {mainTab === "tarefas" && (
         <div className="max-w-5xl mx-auto px-4 py-6">
           <TaskBoard />
+        </div>
+      )}
+
+      {mainTab === "peliculas" && (
+        <div className="max-w-3xl mx-auto px-4 py-6">
+          <Peliculas />
         </div>
       )}
 

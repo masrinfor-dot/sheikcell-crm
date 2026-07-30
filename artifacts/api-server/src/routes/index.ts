@@ -13,6 +13,7 @@ import internalChatRouter from "./internalChat";
 import tasksRouter from "./tasks";
 import settingsRouter from "./settings";
 import partnerLinksRouter from "./partnerLinks";
+import filmCompatRouter from "./filmCompat";
 
 const router: IRouter = Router();
 
@@ -30,5 +31,6 @@ router.use(internalChatRouter);
 router.use(tasksRouter);
 router.use(settingsRouter);
 router.use(partnerLinksRouter);
+router.use(filmCompatRouter);
 
 export default router;
