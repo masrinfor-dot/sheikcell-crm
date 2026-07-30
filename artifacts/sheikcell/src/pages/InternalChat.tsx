@@ -464,7 +464,7 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
         {viewTabs}
         {view === "tasks" ? (
           <div className="flex-1 overflow-y-auto p-3">
-            <TaskBoard />
+            <TaskBoard compact />
           </div>
         ) : active ? (
           <section className="flex-1 flex flex-col min-h-0">{threadPanel}</section>

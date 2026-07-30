@@ -156,7 +156,10 @@ function TaskCard({
   );
 }
 
-export default function TaskBoard() {
+// `compact`: usado dentro da coluna lateral do chat interno (~300px no
+// desktop) — as 3 colunas do kanban lado a lado ali ficam distorcidas, então
+// empilha tudo em uma coluna só.
+export default function TaskBoard({ compact = false }: { compact?: boolean } = {}) {
   const { user } = useAuth();
   const { toast } = useToast();
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -394,7 +397,7 @@ export default function TaskBoard() {
       </div>
 
       {/* Stats bar */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div className={`grid gap-3 ${compact ? "grid-cols-2" : "grid-cols-2 sm:grid-cols-4"}`}>
         {[
           { label: "Total", value: visibleTasks.length, color: "text-foreground" },
           { label: "A Fazer", value: byStatus("todo").length, color: "text-slate-600" },
@@ -409,7 +412,7 @@ export default function TaskBoard() {
       </div>
 
       {/* Kanban */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-start">
+      <div className={`grid gap-4 items-start ${compact ? "grid-cols-1" : "grid-cols-1 sm:grid-cols-3"}`}>
         {COLUMNS.map((col, colIdx) => {
           const cards = byStatus(col.key);
           return (
