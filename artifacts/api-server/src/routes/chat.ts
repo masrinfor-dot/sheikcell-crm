@@ -320,12 +320,15 @@ router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Pr
     await db.update(conversationsTable).set({ unreadCount: 0 }).where(eq(conversationsTable.id, id));
   }
 
-  const msgs = await db
+  // Sempre as MAIS RECENTES: ordena decrescente, corta, e devolve em ordem
+  // cronológica. (Antes cortava as 200 mais ANTIGAS — em conversas longas as
+  // mensagens novas "sumiam" do histórico.)
+  const msgs = (await db
     .select()
     .from(messagesTable)
     .where(eq(messagesTable.conversationId, id))
-    .orderBy(messagesTable.createdAt)
-    .limit(200);
+    .orderBy(desc(messagesTable.createdAt), desc(messagesTable.id))
+    .limit(500)).reverse();
 
   res.json(msgs);
 });
