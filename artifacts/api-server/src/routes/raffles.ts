@@ -356,8 +356,12 @@ router.post("/raffles/:id/run", requireAdmin, async (req, res): Promise<void> =>
   if (!raffle) { res.status(404).json({ error: "Sorteio não encontrado" }); return; }
   const pool = await eligibleClients(raffle);
   if (pool.length === 0) { res.status(400).json({ error: "Nenhum cliente elegível com esses filtros" }); return; }
-  const { draw, eligible } = await runRaffleDraw(raffle, `manual-${Date.now()}`);
-  res.json({ draw, eligible });
+  try {
+    const { draw, eligible } = await runRaffleDraw(raffle, `manual-${Date.now()}`);
+    res.json({ draw, eligible });
+  } catch (err) {
+    res.status(409).json({ error: err instanceof Error ? err.message : "Não foi possível sortear agora" });
+  }
 });
 
 router.get("/raffles/:id/draws", requireAdmin, async (req, res): Promise<void> => {
