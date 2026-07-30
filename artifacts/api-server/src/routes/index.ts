@@ -21,6 +21,7 @@ import sheetLinksRouter from "./sheetLinks";
 import rhRouter from "./rh";
 import rafflesRouter from "./raffles";
 import botRouter from "./bot";
+import financeRouter from "./finance";
 
 const router: IRouter = Router();
 
@@ -49,5 +50,6 @@ router.use(sheetLinksRouter);
 router.use(rhRouter);
 router.use(rafflesRouter);
 router.use(botRouter);
+router.use(financeRouter);
 
 export default router;

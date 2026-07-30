@@ -78,6 +78,19 @@ export type InternalMessage = {
   createdAt: string;
 };
 
+export type FinanceVendedorRow = {
+  vendedorId: number; nome: string; loja: string | null; ativo: boolean;
+  finalizados: number; vendas: number; totalVendido: number; ticketMedio: number;
+  conversao: number; orcamentos: number; vaiPensar: number; semInteresse: number;
+  emProspeccao: number;
+};
+
+export type FinanceSummary = {
+  days: number; sectorId: number | null;
+  totals: { finalizados: number; vendas: number; totalVendido: number; orcamentos: number; emProspeccao: number; ticketMedio: number; conversao: number };
+  vendedores: FinanceVendedorRow[];
+};
+
 export type BotQuestion = { question: string; options?: string[] };
 
 export type BotSettings = {
@@ -583,6 +596,10 @@ export const api = {
     evaluate: (data: { device: string; answers: Record<string, string> }) =>
       req<{ id: number; device: string; marketPrice: string; suggestedPrice: string; summary: string; createdAt: string }>(
         "/trade-in/evaluate", { method: "POST", body: JSON.stringify(data) }),
+  },
+  finance: {
+    summary: (days: number, sectorId?: number | null) =>
+      req<FinanceSummary>(`/finance/summary?days=${days}${sectorId ? `&sectorId=${sectorId}` : ""}`),
   },
   bot: {
     settings: () => req<BotSettings>("/bot/settings"),

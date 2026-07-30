@@ -15,6 +15,7 @@ import Planilhas from "./Planilhas";
 import RH from "./RH";
 import Sorteios from "./Sorteios";
 import Robo from "./Robo";
+import Financeiro from "./Financeiro";
 import ChecklistGate from "@/components/ChecklistGate";
 import TrainingGate from "@/components/TrainingGate";
 import InternalChat from "./InternalChat";
@@ -26,7 +27,7 @@ import {
   PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, Table2, UserSearch, Gift, Bot
 } from "lucide-react";
 
-type Tab = "dashboard" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "questionarios" | "treinamentos" | "planilhas" | "rh" | "sorteios" | "robo" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies";
+type Tab = "dashboard" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "questionarios" | "treinamentos" | "planilhas" | "rh" | "sorteios" | "robo" | "financeiro" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies";
 
 type WASession = {
   sessionKey: string;
@@ -274,6 +275,7 @@ export default function AdminDashboard() {
     { id: "tarefas" as Tab, label: "Tarefas", icon: ListTodo, adminOnly: false },
     { id: "distribuicao" as Tab, label: "Distribuição", icon: GitFork, adminOnly: false },
     { id: "crm" as Tab, label: "CRM", icon: Kanban, adminOnly: false },
+    { id: "financeiro" as Tab, label: "Financeiro", icon: BadgeDollarSign, adminOnly: true },
     { id: "financeiras" as Tab, label: "Financeiras", icon: Landmark, adminOnly: false },
     { id: "peliculas" as Tab, label: "Películas", icon: ShieldCheck, adminOnly: false },
     { id: "avaliacao" as Tab, label: "Avaliação de Usados", icon: BadgeDollarSign, adminOnly: false },
@@ -432,6 +434,8 @@ export default function AdminDashboard() {
         {tab === "sorteios" && <Sorteios />}
 
         {tab === "robo" && <Robo />}
+
+        {tab === "financeiro" && <Financeiro />}
 
         {/* === WHATSAPP TAB === */}
         {tab === "whatsapp" && (
