@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
 import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, tasksTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable } from "@workspace/db";
-import { eq, sql, desc, and, gte, isNull, isNotNull, notInArray } from "drizzle-orm";
+import { eq, sql, desc, and, gte, isNull, isNotNull, notInArray, or, ilike } from "drizzle-orm";
 import { requireAdmin, requireAdminOrSupervisor } from "../middlewares/auth";
 import { sanitizePermissions } from "../lib/permissions";
 import { syncCrmAttendant } from "../lib/crmSync";
@@ -69,21 +69,33 @@ router.get("/admin/summary", requireAdminOrSupervisor, async (_req, res): Promis
 
 // Recent attendance logs
 router.get("/admin/logs", requireAdminOrSupervisor, async (req, res): Promise<void> => {
-  const limit = parseInt(String(req.query.limit ?? "50"), 10);
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "50"), 10) || 50, 1), 500);
   const sectorId = req.query.sectorId ? parseInt(String(req.query.sectorId), 10) : null;
+  const attendantId = req.query.attendantId ? parseInt(String(req.query.attendantId), 10) : null;
+  const days = req.query.days ? parseInt(String(req.query.days), 10) : null;
+  const outcome = req.query.outcome ? String(req.query.outcome) : null;
+  const reason = req.query.reason ? String(req.query.reason) : null;
+  const search = req.query.search ? String(req.query.search).trim() : null;
 
-  const logs = sectorId
-    ? await db
-        .select()
-        .from(attendanceLogsTable)
-        .where(eq(attendanceLogsTable.sectorId, sectorId))
-        .orderBy(desc(attendanceLogsTable.createdAt))
-        .limit(limit)
-    : await db
-        .select()
-        .from(attendanceLogsTable)
-        .orderBy(desc(attendanceLogsTable.createdAt))
-        .limit(limit);
+  const conds = [];
+  if (sectorId) conds.push(eq(attendanceLogsTable.sectorId, sectorId));
+  if (attendantId) conds.push(eq(attendanceLogsTable.attendantId, attendantId));
+  if (days && days > 0) conds.push(gte(attendanceLogsTable.createdAt, new Date(Date.now() - days * 86400000)));
+  if (outcome) conds.push(eq(attendanceLogsTable.outcome, outcome));
+  if (reason) conds.push(eq(attendanceLogsTable.resolutionReason, reason));
+  if (search) {
+    conds.push(or(
+      ilike(attendanceLogsTable.clientName, `%${search}%`),
+      ilike(attendanceLogsTable.clientContact, `%${search}%`),
+    )!);
+  }
+
+  const logs = await db
+    .select()
+    .from(attendanceLogsTable)
+    .where(conds.length ? and(...conds) : undefined)
+    .orderBy(desc(attendanceLogsTable.createdAt))
+    .limit(limit);
 
   res.json(logs);
 });

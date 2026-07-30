@@ -69,6 +69,9 @@ export default function AdminDashboard() {
   const [tab, setTab] = useState<Tab>("dashboard");
   const [summary, setSummary] = useState<SectorSummary[]>([]);
   const [logs, setLogs] = useState<AttendanceLog[]>([]);
+  // Filtros do histórico de atendimentos
+  const [logFilters, setLogFilters] = useState({ search: "", days: 0, sectorId: 0, attendantId: 0, outcome: "", reason: "" });
+  const [logAttendants, setLogAttendants] = useState<{ id: number; name: string }[]>([]);
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [userRows, setUserRows] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -101,6 +104,35 @@ export default function AdminDashboard() {
       setLogs(l);
     } catch { /* silent */ } finally { setLoading(false); }
   }, []);
+
+  const fetchLogs = useCallback(async (f: typeof logFilters) => {
+    try {
+      const l = await api.admin.logs({
+        limit: 200,
+        days: f.days || undefined,
+        sectorId: f.sectorId || undefined,
+        attendantId: f.attendantId || undefined,
+        outcome: f.outcome || undefined,
+        reason: f.reason || undefined,
+        search: f.search.trim() || undefined,
+      });
+      setLogs(l);
+      // Acumula vendedores conhecidos para o filtro (união dos resultados)
+      setLogAttendants((prev) => {
+        const map = new Map(prev.map((a) => [a.id, a.name]));
+        for (const log of l) if (log.attendantId && log.attendantName) map.set(log.attendantId, log.attendantName);
+        return [...map.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+      });
+    } catch { /* silent */ }
+  }, []);
+
+  // Rebusca o histórico quando os filtros mudam (busca por texto com atraso)
+  useEffect(() => {
+    if (tab !== "history") return;
+    const t = setTimeout(() => fetchLogs(logFilters), logFilters.search ? 400 : 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, logFilters]);
 
   const fetchUsersAndSectors = useCallback(async () => {
     try {
@@ -653,15 +685,58 @@ export default function AdminDashboard() {
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <h2 className="font-bold">Histórico de Atendimentos</h2>
-              <button onClick={() => api.admin.logs({ limit: 40 }).then(setLogs)}
+              <button onClick={() => fetchLogs(logFilters)}
                 className="p-2 text-muted-foreground hover:text-foreground rounded-xl hover:bg-secondary transition">
                 <RefreshCw className="w-4 h-4" />
               </button>
             </div>
+            {/* Filtros do histórico */}
+            <div className="shk-card p-3 flex flex-wrap items-center gap-2">
+              <input value={logFilters.search} data-testid="input-history-search"
+                onChange={(e) => setLogFilters({ ...logFilters, search: e.target.value })}
+                placeholder="Buscar cliente ou telefone..."
+                className="px-3 py-1.5 rounded-lg border border-border text-xs w-48 focus:outline-none focus:ring-2 focus:ring-primary/30" />
+              <select value={logFilters.days} onChange={(e) => setLogFilters({ ...logFilters, days: Number(e.target.value) })}
+                data-testid="select-history-days" className="px-2 py-1.5 rounded-lg border border-border text-xs bg-white">
+                <option value={0}>Todo o período</option>
+                <option value={1}>Hoje</option>
+                <option value={7}>Últimos 7 dias</option>
+                <option value={30}>Últimos 30 dias</option>
+                <option value={90}>Últimos 90 dias</option>
+              </select>
+              <select value={logFilters.sectorId} onChange={(e) => setLogFilters({ ...logFilters, sectorId: Number(e.target.value) })}
+                data-testid="select-history-sector" className="px-2 py-1.5 rounded-lg border border-border text-xs bg-white">
+                <option value={0}>Todos os setores</option>
+                {sectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+              <select value={logFilters.attendantId} onChange={(e) => setLogFilters({ ...logFilters, attendantId: Number(e.target.value) })}
+                data-testid="select-history-attendant" className="px-2 py-1.5 rounded-lg border border-border text-xs bg-white">
+                <option value={0}>Todos os vendedores</option>
+                {logAttendants.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+              <select value={logFilters.outcome} onChange={(e) => setLogFilters({ ...logFilters, outcome: e.target.value })}
+                data-testid="select-history-outcome" className="px-2 py-1.5 rounded-lg border border-border text-xs bg-white">
+                <option value="">Todos os resultados</option>
+                <option value="completed">Finalizado</option>
+                <option value="transferred">Transferido</option>
+              </select>
+              <select value={logFilters.reason} onChange={(e) => setLogFilters({ ...logFilters, reason: e.target.value })}
+                data-testid="select-history-reason" className="px-2 py-1.5 rounded-lg border border-border text-xs bg-white">
+                <option value="">Todos os motivos</option>
+                {["Venda realizada","Orçamento enviado","Cliente vai pensar","Sem interesse","Sem resposta do cliente","Dúvida esclarecida","Problema resolvido","Outro"].map((r) => (
+                  <option key={r} value={r}>{r}</option>
+                ))}
+              </select>
+              {(logFilters.search || logFilters.days || logFilters.sectorId || logFilters.attendantId || logFilters.outcome || logFilters.reason) ? (
+                <button onClick={() => setLogFilters({ search: "", days: 0, sectorId: 0, attendantId: 0, outcome: "", reason: "" })}
+                  data-testid="button-history-clear" className="text-xs text-primary font-semibold hover:underline">Limpar filtros</button>
+              ) : null}
+              <span className="ml-auto text-[11px] text-muted-foreground">{logs.length} resultado{logs.length === 1 ? "" : "s"}{logs.length === 200 ? " (máx.)" : ""}</span>
+            </div>
             {logs.length === 0 ? (
               <div className="shk-card p-10 text-center">
                 <CheckCircle className="w-10 h-10 mx-auto text-muted-foreground mb-2" />
-                <p className="text-muted-foreground text-sm">Nenhum atendimento registrado ainda</p>
+                <p className="text-muted-foreground text-sm">Nenhum atendimento encontrado com esses filtros</p>
               </div>
             ) : (
               <div className="shk-card overflow-hidden">

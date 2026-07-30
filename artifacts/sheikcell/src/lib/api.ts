@@ -694,10 +694,15 @@ export const api = {
   },
   admin: {
     summary: () => req<SectorSummary[]>("/admin/summary"),
-    logs: (params?: { limit?: number; sectorId?: number }) => {
+    logs: (params?: { limit?: number; sectorId?: number; attendantId?: number; days?: number; outcome?: string; reason?: string; search?: string }) => {
       const qs = new URLSearchParams();
       if (params?.limit) qs.set("limit", String(params.limit));
       if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      if (params?.attendantId) qs.set("attendantId", String(params.attendantId));
+      if (params?.days) qs.set("days", String(params.days));
+      if (params?.outcome) qs.set("outcome", params.outcome);
+      if (params?.reason) qs.set("reason", params.reason);
+      if (params?.search) qs.set("search", params.search);
       return req<AttendanceLog[]>(`/admin/logs?${qs.toString()}`);
     },
     users: {

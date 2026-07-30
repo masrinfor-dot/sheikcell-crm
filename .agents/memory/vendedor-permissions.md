@@ -17,3 +17,9 @@ Regra: `users.permissions` (jsonb, null/chave ausente = liberado) vale SÓ para 
 
 **Why:** admin quer ligar/desligar capacidades por vendedor sem criar novos roles.
 **How to apply:** nova ação sensível de vendedor → nova chave em PERMISSION_KEYS (backend+frontend), requirePerm/checkPerm no servidor E esconder na UI; padrão sempre liberado.
+
+## adminAccess (funções de admin liberáveis)
+- `users.adminAccess` jsonb string[]: funções de admin liberadas a não-admins (financeiro, sorteios, robo, rh, questionarios, whatsapp).
+- Servidor: middleware `requireFeature("x")` (admin passa direto; senão consulta adminAccess no DB, fail closed). Rotas dessas features usam requireFeature, não requireAdmin.
+- UI: AdminDashboard mostra aba adminOnly se granted; AttendantDashboard (vendedor) tem GRANTED_TABS extras (exceto whatsapp, que é inline no AdminDashboard).
+- Sanitizado no servidor contra lista GRANTABLE_FEATURES; role admin salva null.
