@@ -944,6 +944,34 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
   };
   if (!phone || !name) { res.status(400).json({ error: "Telefone e nome obrigatórios" }); return; }
 
+  // Bloqueia atendimento duplicado: se já existe conversa EM ANDAMENTO (não
+  // finalizada/arquivada) para esse número, não cria outra. Compara só os
+  // dígitos e também com/sem DDI 55, pois o número salvo pode ter formato
+  // diferente do digitado.
+  const digits = phone.replace(/\D/g, "");
+  if (digits) {
+    const [dup] = await db.select({
+      id: conversationsTable.id,
+      name: conversationsTable.name,
+      status: conversationsTable.status,
+      assigneeId: conversationsTable.assigneeId,
+    })
+      .from(conversationsTable)
+      .where(and(
+        notInArray(conversationsTable.status, ["resolved", "archived"]),
+        sql`regexp_replace(${conversationsTable.phone}, '\\D', '', 'g') IN (${digits}, ${`55${digits}`}, ${digits.startsWith("55") ? digits.slice(2) : digits})`,
+      ))
+      .limit(1);
+    if (dup) {
+      const quem = dup.assigneeId != null ? "já está em atendimento" : "já está na fila aguardando atendimento";
+      res.status(409).json({
+        error: `Este número ${quem} (${dup.name}). Abra a conversa existente em vez de criar outra.`,
+        conversationId: dup.id,
+      });
+      return;
+    }
+  }
+
   const userRole = req.session.userRole!;
   const userSectorId = req.session.userSectorId;
 
