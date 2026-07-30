@@ -972,6 +972,34 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
     }
   }
 
+  // Número precisa EXISTIR no WhatsApp para abrir atendimento de WhatsApp.
+  // Se o bridge estiver fora do ar ou desconectado, libera (não trava a loja).
+  if ((channel ?? "whatsapp") === "whatsapp" && digits) {
+    const bridgeUrl = process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
+    const bridgeSecret = createHmac(
+      "sha256",
+      process.env["SESSION_SECRET"] ?? "sheikcell-dev-only-secret",
+    ).update("whatsapp-bridge-v1").digest("hex");
+    try {
+      const r = await fetch(`${bridgeUrl}/whatsapp/check-number`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Bridge-Secret": bridgeSecret },
+        body: JSON.stringify({ phone: digits }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (r.ok) {
+        const check = await r.json() as { exists?: boolean };
+        if (check.exists === false) {
+          res.status(400).json({ error: `O número ${digits} não existe no WhatsApp. Confira o DDD e o nono dígito antes de criar o atendimento.` });
+          return;
+        }
+      }
+      // 503 (desconectado) ou outro status: segue sem bloquear.
+    } catch {
+      // Bridge inacessível: segue sem bloquear.
+    }
+  }
+
   const userRole = req.session.userRole!;
   const userSectorId = req.session.userSectorId;
 

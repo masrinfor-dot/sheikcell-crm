@@ -6,6 +6,7 @@ import {
   startSession,
   removeSession,
   getAllSessionStates,
+  checkNumber,
   DEFAULT_SESSION_KEY,
 } from "../lib/waConnection";
 
@@ -84,6 +85,20 @@ router.post("/whatsapp/reset", requireBridgeSecret, async (req, res): Promise<vo
   if (!key) { res.status(400).json({ error: "session inválida" }); return; }
   await disconnectAndReset(key);
   res.json({ ok: true, message: "Sessão reiniciada — aguarde o QR code" });
+});
+
+// Verifica se um número existe no WhatsApp (criação manual de atendimento)
+router.post("/whatsapp/check-number", requireBridgeSecret, async (req, res): Promise<void> => {
+  const { phone, session } = (req.body ?? {}) as { phone?: string; session?: string };
+  const key = sessionKeyFrom(session);
+  if (!key) { res.status(400).json({ error: "session inválida" }); return; }
+  if (!phone) { res.status(400).json({ error: "phone obrigatório" }); return; }
+  try {
+    res.json(await checkNumber(key, phone));
+  } catch (err) {
+    // Sessão desconectada ou onWhatsApp indisponível — deixe o chamador decidir.
+    res.status(503).json({ error: err instanceof Error ? err.message : "verificação indisponível" });
+  }
 });
 
 router.post("/whatsapp/send", requireBridgeSecret, async (req, res): Promise<void> => {

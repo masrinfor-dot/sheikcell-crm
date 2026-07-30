@@ -674,6 +674,30 @@ async function resolveJid(s: Session, to: string): Promise<string> {
   throw new Error(`O número ${digits} não está no WhatsApp — confira o DDD/DDI e o nono dígito`);
 }
 
+/**
+ * Verifica se um número existe no WhatsApp (usado ao criar atendimento manual).
+ * Lança erro se a sessão não estiver conectada ou o onWhatsApp falhar — o
+ * chamador decide se bloqueia ou libera nesses casos.
+ */
+export async function checkNumber(key: string, to: string): Promise<{ exists: boolean; jid?: string }> {
+  const s = requireOpenSession(key);
+  const digits = to.replace(/\D/g, "");
+  if (!digits) return { exists: false };
+  const cached = jidCache.get(digits);
+  if (cached) return { exists: true, jid: cached };
+  const candidates = [digits];
+  if (digits.length === 10 || digits.length === 11) candidates.push(`55${digits}`);
+  for (const cand of candidates) {
+    const results = await s.sock!.onWhatsApp(cand);
+    const hit = results?.find((r) => r.exists && r.jid);
+    if (hit?.jid) {
+      jidCache.set(digits, hit.jid);
+      return { exists: true, jid: hit.jid };
+    }
+  }
+  return { exists: false };
+}
+
 export async function sendMessage(key: string, to: string, text: string): Promise<void> {
   const s = requireOpenSession(key);
   const phone = to.replace(/\D/g, "");
