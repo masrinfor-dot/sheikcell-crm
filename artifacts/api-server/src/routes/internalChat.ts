@@ -151,7 +151,11 @@ router.get("/internal-chat/conversations", requireAuth, async (req, res): Promis
         ))
     : [];
   const otherMap: Record<number, { id: number; name: string; role: string }> = {};
-  for (const o of others) otherMap[o.conversationId] = { id: o.id, name: o.name, role: o.role };
+  const memberNamesMap: Record<number, string[]> = {};
+  for (const o of others) {
+    otherMap[o.conversationId] = { id: o.id, name: o.name, role: o.role };
+    (memberNamesMap[o.conversationId] ??= []).push(o.name);
+  }
 
   // Unread counts: messages newer than my lastReadAt, not sent by me.
   const unreadRows = convIds.length > 0
@@ -179,9 +183,12 @@ router.get("/internal-chat/conversations", requireAuth, async (req, res): Promis
     const other = otherMap[m.conversationId] ?? null;
     return {
       id: m.conversationId,
-      kind: m.kind as "direct" | "general",
-      name: m.kind === "general" ? (m.name ?? GENERAL_ROOM_NAME) : (other?.name ?? "Conversa"),
-      otherUser: m.kind === "general" ? null : other,
+      kind: m.kind as "direct" | "general" | "group",
+      name: m.kind === "general" ? (m.name ?? GENERAL_ROOM_NAME)
+        : m.kind === "group" ? (m.name ?? "Grupo")
+        : (other?.name ?? "Conversa"),
+      otherUser: m.kind === "direct" ? other : null,
+      memberNames: m.kind === "group" ? (memberNamesMap[m.conversationId] ?? []) : undefined,
       lastMessage: m.lastMessage,
       lastMessageAt: m.lastMessageAt,
       unreadCount: unreadMap[m.conversationId] ?? 0,
@@ -198,6 +205,45 @@ router.get("/internal-chat/conversations", requireAuth, async (req, res): Promis
   });
 
   res.json(result);
+});
+
+// ─── Create a group conversation (grupo do chat interno) ───────────────────
+// Any staff user may create a group, naming it and escolhendo os participantes.
+// O criador sempre entra como membro. Grupos usam o mesmo escopo dos diretos:
+// só membros veem, recebem eventos e podem enviar mensagens.
+router.post("/internal-chat/conversations/group", requireAuth, async (req, res): Promise<void> => {
+  const userId = req.session.userId!;
+  const { name, memberIds } = req.body as { name?: string; memberIds?: number[] };
+  const cleanName = (name ?? "").trim().slice(0, 80);
+  if (!cleanName) { res.status(400).json({ error: "Dê um nome ao grupo" }); return; }
+  const ids = Array.isArray(memberIds) ? [...new Set(memberIds.map(Number).filter((n) => Number.isInteger(n) && n > 0 && n !== userId))] : [];
+  if (ids.length === 0) { res.status(400).json({ error: "Escolha pelo menos um participante" }); return; }
+
+  // Só usuários ativos existentes entram no grupo.
+  const valid = await db.select({ id: usersTable.id }).from(usersTable).where(inArray(usersTable.id, ids));
+  if (valid.length === 0) { res.status(400).json({ error: "Nenhum participante válido" }); return; }
+
+  const [created] = await db
+    .insert(internalConversationsTable)
+    .values({ kind: "group", name: cleanName })
+    .returning();
+  await db.insert(internalConversationMembersTable).values([
+    { conversationId: created!.id, userId },
+    ...valid.map((v) => ({ conversationId: created!.id, userId: v.id })),
+  ]).onConflictDoNothing();
+
+  const conv = {
+    id: created!.id,
+    kind: "group" as const,
+    name: cleanName,
+    otherUser: null,
+    lastMessage: null,
+    lastMessageAt: null,
+    unreadCount: 0,
+  };
+  // Avisa os participantes em tempo real para o grupo aparecer na lista deles.
+  broadcastInternal("internal_conversation_new", conv, [userId, ...valid.map((v) => v.id)]);
+  res.status(201).json(conv);
 });
 
 // ─── Start (or fetch) a direct 1:1 conversation ────────────────────────────

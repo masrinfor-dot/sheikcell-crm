@@ -58,9 +58,10 @@ export function can(user: User | null, key: string): boolean {
 
 export type InternalConversation = {
   id: number;
-  kind: "direct" | "general";
+  kind: "direct" | "general" | "group";
   name: string;
   otherUser: { id: number; name: string; role: string } | null;
+  memberNames?: string[];
   lastMessage: string | null;
   lastMessageAt: string | null;
   unreadCount: number;
@@ -392,6 +393,8 @@ export const api = {
     conversations: () => req<InternalConversation[]>("/internal-chat/conversations"),
     startDirect: (userId: number) =>
       req<InternalConversation>("/internal-chat/conversations/direct", { method: "POST", body: JSON.stringify({ userId }) }),
+    createGroup: (name: string, memberIds: number[]) =>
+      req<InternalConversation>("/internal-chat/conversations/group", { method: "POST", body: JSON.stringify({ name, memberIds }) }),
     messages: (id: number) => req<InternalMessage[]>(`/internal-chat/conversations/${id}/messages`),
     send: (id: number, content: string) =>
       req<InternalMessage>(`/internal-chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),

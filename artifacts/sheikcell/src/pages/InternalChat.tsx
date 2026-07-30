@@ -38,6 +38,11 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
   const [view, setView] = useState<"chat" | "tasks">("chat");
   const [colleagues, setColleagues] = useState<{ id: number; name: string; role: string }[]>([]);
   const [colleagueSearch, setColleagueSearch] = useState("");
+  // Criação de grupo: modo do modal "Novo", nome e participantes escolhidos.
+  const [newMode, setNewMode] = useState<"direct" | "group">("direct");
+  const [groupName, setGroupName] = useState("");
+  const [groupMembers, setGroupMembers] = useState<number[]>([]);
+  const [creatingGroup, setCreatingGroup] = useState(false);
 
   const activeIdRef = useRef<number | null>(null);
   activeIdRef.current = activeId;
@@ -134,6 +139,11 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
     // the server restarted), the server asks the client to resync. Reconcile the
     // conversation list (authoritative unread counts) and the open conversation's
     // messages so nothing sent during the outage is lost.
+    // Novo grupo criado por um colega: aparece na lista em tempo real.
+    es.addEventListener("internal_conversation_new", (e) => {
+      const conv = JSON.parse((e as MessageEvent).data) as InternalConversation;
+      setConversations((prev) => (prev.some((c) => c.id === conv.id) ? prev : [...prev, conv]));
+    });
     es.addEventListener("resync", () => {
       reconcileAfterReconnect();
     });
@@ -148,6 +158,9 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
 
   const openNew = async () => {
     setShowNew(true);
+    setNewMode("direct");
+    setGroupName("");
+    setGroupMembers([]);
     try {
       const users = await api.chatUsers();
       setColleagues(users.filter((u) => u.id !== user?.id));
@@ -165,6 +178,25 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
       setColleagueSearch("");
     } catch (err) {
       toast({ title: "Erro", description: err instanceof Error ? err.message : "Falha ao iniciar conversa", variant: "destructive" });
+    }
+  };
+
+  const createGroup = async () => {
+    const name = groupName.trim();
+    if (!name) { toast({ title: "Dê um nome ao grupo", variant: "destructive" }); return; }
+    if (groupMembers.length === 0) { toast({ title: "Escolha pelo menos um participante", variant: "destructive" }); return; }
+    setCreatingGroup(true);
+    try {
+      const conv = await api.internalChat.createGroup(name, groupMembers);
+      setConversations((prev) => (prev.some((c) => c.id === conv.id) ? prev : [conv, ...prev]));
+      setActiveId(conv.id);
+      setShowNew(false);
+      setColleagueSearch("");
+      toast({ title: `Grupo "${name}" criado! 🎉` });
+    } catch (err) {
+      toast({ title: "Erro ao criar grupo", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setCreatingGroup(false);
     }
   };
 
@@ -215,9 +247,9 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
                 }`}
               >
                 <div className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-semibold shrink-0 ${
-                  c.kind === "general" ? "bg-amber-500 text-white" : "bg-primary text-white"
+                  c.kind === "general" ? "bg-amber-500 text-white" : c.kind === "group" ? "bg-violet-500 text-white" : "bg-primary text-white"
                 }`}>
-                  {c.kind === "general" ? <Users className="w-4 h-4" /> : initials(c.name)}
+                  {c.kind !== "direct" ? <Users className="w-4 h-4" /> : initials(c.name)}
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center justify-between gap-1">
@@ -225,7 +257,7 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
                     <span className="text-[10px] text-muted-foreground shrink-0">{timeLabel(c.lastMessageAt)}</span>
                   </div>
                   <div className="flex items-center justify-between gap-1">
-                    <span className="text-xs text-muted-foreground truncate">{c.lastMessage ?? (c.kind === "general" ? "Sala da equipe" : "Iniciar conversa")}</span>
+                    <span className="text-xs text-muted-foreground truncate">{c.lastMessage ?? (c.kind === "general" ? "Sala da equipe" : c.kind === "group" ? "Grupo da equipe" : "Iniciar conversa")}</span>
                     {c.unreadCount > 0 && (
                       <span className="shrink-0 bg-primary text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] px-1 flex items-center justify-center">
                         {c.unreadCount}
@@ -252,14 +284,16 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
                   </button>
                 )}
                 <div className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-semibold ${
-                  active.kind === "general" ? "bg-amber-500 text-white" : "bg-primary text-white"
+                  active.kind === "general" ? "bg-amber-500 text-white" : active.kind === "group" ? "bg-violet-500 text-white" : "bg-primary text-white"
                 }`}>
-                  {active.kind === "general" ? <Users className="w-4 h-4" /> : initials(active.name)}
+                  {active.kind !== "direct" ? <Users className="w-4 h-4" /> : initials(active.name)}
                 </div>
                 <div>
                   <div className="font-semibold text-sm">{active.name}</div>
                   <div className="text-xs text-muted-foreground">
-                    {active.kind === "general" ? "Todos os membros da equipe" : (active.otherUser ? roleLabel[active.otherUser.role] ?? active.otherUser.role : "")}
+                    {active.kind === "general" ? "Todos os membros da equipe"
+                      : active.kind === "group" ? `Você${active.memberNames && active.memberNames.length > 0 ? ", " + active.memberNames.join(", ") : ""}`
+                      : (active.otherUser ? roleLabel[active.otherUser.role] ?? active.otherUser.role : "")}
                   </div>
                 </div>
               </header>
@@ -275,7 +309,7 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
                       <div className={`max-w-[75%] rounded-2xl px-3.5 py-2 ${
                         mine ? "bg-primary text-white rounded-br-sm" : "bg-card border rounded-bl-sm"
                       }`}>
-                        {!mine && active.kind === "general" && (
+                        {!mine && active.kind !== "direct" && (
                           <div className="text-[11px] font-semibold text-primary mb-0.5">{m.senderName}</div>
                         )}
                         <div className="text-sm whitespace-pre-wrap break-words">{m.content}</div>
@@ -327,6 +361,28 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
                   <X className="w-4 h-4" />
                 </button>
               </div>
+              {/* Conversa direta ou grupo */}
+              <div className="flex gap-1 p-2 border-b">
+                <button onClick={() => setNewMode("direct")} data-testid="tab-new-direct"
+                  className={`flex-1 text-xs font-semibold rounded-lg px-3 py-2 transition ${newMode === "direct" ? "bg-primary text-white" : "text-muted-foreground hover:bg-muted/60"}`}>
+                  Conversa
+                </button>
+                <button onClick={() => setNewMode("group")} data-testid="tab-new-group"
+                  className={`flex-1 text-xs font-semibold rounded-lg px-3 py-2 transition ${newMode === "group" ? "bg-violet-600 text-white" : "text-muted-foreground hover:bg-muted/60"}`}>
+                  <Users className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />Grupo
+                </button>
+              </div>
+              {newMode === "group" && (
+                <div className="p-3 border-b">
+                  <input
+                    value={groupName}
+                    onChange={(e) => setGroupName(e.target.value)}
+                    placeholder="Nome do grupo (ex.: Vendas Loja 1)"
+                    data-testid="input-group-name"
+                    className="w-full px-3 py-2 text-sm rounded-lg border focus:outline-none focus:ring-2 focus:ring-primary/40"
+                  />
+                </div>
+              )}
               <div className="p-3 border-b">
                 <div className="relative">
                   <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
@@ -342,23 +398,41 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
                 {filteredColleagues.length === 0 && (
                   <div className="p-4 text-center text-xs text-muted-foreground">Nenhum colega encontrado.</div>
                 )}
-                {filteredColleagues.map((c) => (
+                {filteredColleagues.map((c) => {
+                  const selected = groupMembers.includes(c.id);
+                  return (
                   <button
                     key={c.id}
-                    onClick={() => startDirect(c.id)}
+                    onClick={() => newMode === "direct"
+                      ? startDirect(c.id)
+                      : setGroupMembers((prev) => selected ? prev.filter((id) => id !== c.id) : [...prev, c.id])}
                     data-testid={`start-chat-${c.id}`}
-                    className="w-full text-left px-4 py-2.5 flex items-center gap-3 hover:bg-muted/50 border-b border-border/50"
+                    className={`w-full text-left px-4 py-2.5 flex items-center gap-3 border-b border-border/50 transition ${newMode === "group" && selected ? "bg-violet-50" : "hover:bg-muted/50"}`}
                   >
-                    <div className="w-8 h-8 rounded-full bg-primary text-white flex items-center justify-center text-xs font-semibold">
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold ${newMode === "group" && selected ? "bg-violet-600 text-white" : "bg-primary text-white"}`}>
                       {initials(c.name)}
                     </div>
-                    <div>
+                    <div className="flex-1">
                       <div className="text-sm font-medium">{c.name}</div>
                       <div className="text-xs text-muted-foreground">{roleLabel[c.role] ?? c.role}</div>
                     </div>
+                    {newMode === "group" && (
+                      <div className={`w-4 h-4 rounded border flex items-center justify-center ${selected ? "bg-violet-600 border-violet-600" : "border-border"}`}>
+                        {selected && <span className="text-white text-[10px] leading-none">✓</span>}
+                      </div>
+                    )}
                   </button>
-                ))}
+                  );
+                })}
               </div>
+              {newMode === "group" && (
+                <div className="p-3 border-t">
+                  <button onClick={createGroup} disabled={creatingGroup} data-testid="button-create-group"
+                    className="w-full py-2.5 rounded-xl bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700 transition disabled:opacity-50">
+                    {creatingGroup ? "Criando..." : `Criar grupo${groupMembers.length > 0 ? ` (${groupMembers.length} participante${groupMembers.length > 1 ? "s" : ""})` : ""}`}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
   );
