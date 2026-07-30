@@ -46,6 +46,7 @@ export type User = {
   email: string;
   role: string;
   sectorId: number | null;
+  storeName?: string | null;
   sector: Sector | null;
   permissions?: VendedorPermissions;
 };
@@ -679,9 +680,9 @@ export const api = {
     },
     users: {
       list: () => req<(User & { isActive: boolean; createdAt: string })[]>("/admin/users"),
-      create: (data: { name: string; email: string; password: string; role: string; sectorId: number }) =>
+      create: (data: { name: string; email: string; password: string; role: string; sectorId: number; storeName?: string }) =>
         req<User>("/admin/users", { method: "POST", body: JSON.stringify(data) }),
-      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorId: number; isActive: boolean; permissions: Record<string, boolean> }>) =>
+      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; isActive: boolean; permissions: Record<string, boolean> }>) =>
         req<User>(`/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number, transferToId: number | null) =>
         req<{ ok: boolean; transferredConversations: number }>(`/admin/users/${id}`, { method: "DELETE", body: JSON.stringify({ transferToId }) }),

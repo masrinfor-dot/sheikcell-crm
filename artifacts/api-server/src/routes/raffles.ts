@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { Router, type IRouter } from "express";
 import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
-import { db, rafflesTable, raffleDrawsTable, conversationsTable } from "@workspace/db";
+import { db, rafflesTable, raffleDrawsTable, conversationsTable, usersTable } from "@workspace/db";
 import { requireAdmin } from "../middlewares/auth";
 import { logger } from "../lib/logger";
 
@@ -121,11 +121,23 @@ async function eligibleClients(raffle: Raffle): Promise<{ phone: string; name: s
   return list.map(({ phone, name, conversationId }) => ({ phone, name, conversationId }));
 }
 
-function fillTemplate(template: string, w: { name: string }, raffle: Raffle): string {
+function fillTemplate(template: string, w: { name: string }, raffle: Raffle, vendedorStore?: string | null): string {
+  // {loja}: primeiro o que foi digitado no sorteio; senão, a loja do vendedor
+  // responsável pela conversa do ganhador (redes de lojas); senão, genérico.
   return template
     .replaceAll("{nome}", w.name || "cliente")
     .replaceAll("{premio}", raffle.prize)
-    .replaceAll("{loja}", raffle.storeName || "nossa loja");
+    .replaceAll("{loja}", raffle.storeName || vendedorStore || "nossa loja");
+}
+
+/** Loja do vendedor responsável pela conversa (para preencher {loja} em redes). */
+async function storeOfConversation(conversationId: number): Promise<string | null> {
+  const [row] = await db.select({ storeName: usersTable.storeName })
+    .from(conversationsTable)
+    .innerJoin(usersTable, eq(usersTable.id, conversationsTable.assigneeId))
+    .where(eq(conversationsTable.id, conversationId))
+    .limit(1);
+  return row?.storeName ?? null;
 }
 
 async function sendWhatsAppText(conversationId: number, content: string): Promise<boolean> {
@@ -227,7 +239,8 @@ async function doRunRaffleDraw(raffle: Raffle, periodKey: string): Promise<{ dra
     let sent = false;
     let error: string | undefined;
     try {
-      sent = await sendWhatsAppText(w.conversationId, fillTemplate(raffle.messageTemplate, w, raffle));
+      const vendedorStore = raffle.storeName ? null : await storeOfConversation(w.conversationId);
+      sent = await sendWhatsAppText(w.conversationId, fillTemplate(raffle.messageTemplate, w, raffle, vendedorStore));
       if (!sent) error = "Falha no envio pelo WhatsApp";
     } catch (err) {
       error = err instanceof Error ? err.message : "Erro no envio";

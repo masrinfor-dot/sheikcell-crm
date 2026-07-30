@@ -97,6 +97,7 @@ router.get("/admin/users", requireAdmin, async (_req, res): Promise<void> => {
       email: usersTable.email,
       role: usersTable.role,
       sectorId: usersTable.sectorId,
+      storeName: usersTable.storeName,
       isActive: usersTable.isActive,
       permissions: usersTable.permissions,
       createdAt: usersTable.createdAt,
@@ -117,12 +118,13 @@ router.get("/admin/users", requireAdmin, async (_req, res): Promise<void> => {
 });
 
 router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
-  const { name, email, password, role, sectorId } = req.body as {
+  const { name, email, password, role, sectorId, storeName } = req.body as {
     name?: string;
     email?: string;
     password?: string;
     role?: string;
     sectorId?: number;
+    storeName?: string;
   };
 
   if (!name || !email || !password) {
@@ -142,7 +144,11 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
 
   const [user] = await db
     .insert(usersTable)
-    .values({ name, email: email.toLowerCase(), passwordHash, role: resolvedRole, sectorId: sectorId ?? undefined })
+    .values({
+      name, email: email.toLowerCase(), passwordHash, role: resolvedRole,
+      sectorId: sectorId ?? undefined,
+      storeName: typeof storeName === "string" && storeName.trim() ? storeName.trim().slice(0, 120) : null,
+    })
     .returning();
 
   const { passwordHash: _ph, ...safeUser } = user;
@@ -154,7 +160,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   const id = parseInt(rawId, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
 
-  const { name, email, password, role, sectorId, isActive, permissions } = req.body as {
+  const { name, email, password, role, sectorId, isActive, permissions, storeName } = req.body as {
     name?: string;
     email?: string;
     password?: string;
@@ -162,6 +168,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
     sectorId?: number;
     isActive?: boolean;
     permissions?: unknown;
+    storeName?: string | null;
   };
 
   const updateData: Record<string, unknown> = {};
@@ -169,6 +176,9 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   if (email) updateData.email = email.toLowerCase();
   if (role) updateData.role = role;
   if (sectorId !== undefined) updateData.sectorId = sectorId;
+  if (storeName !== undefined) {
+    updateData.storeName = typeof storeName === "string" && storeName.trim() ? storeName.trim().slice(0, 120) : null;
+  }
   if (isActive !== undefined) updateData.isActive = isActive;
   if (permissions !== undefined) updateData.permissions = sanitizePermissions(permissions);
   if (password) updateData.passwordHash = await bcrypt.hash(password, 10);

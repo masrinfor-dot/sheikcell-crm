@@ -43,7 +43,7 @@ type WASession = {
 
 type UserRow = {
   id: number; name: string; email: string; role: string;
-  isActive: boolean; sector: Sector | null; sectorId: number | null; createdAt: string;
+  isActive: boolean; sector: Sector | null; sectorId: number | null; storeName?: string | null; createdAt: string;
   permissions?: Record<string, boolean> | null;
 };
 
@@ -88,7 +88,7 @@ export default function AdminDashboard() {
   const [deleteTransferTo, setDeleteTransferTo] = useState("");
   const [deletingUser, setDeletingUser] = useState(false);
 
-  const [userForm, setUserForm] = useState({ name: "", email: "", password: "", role: "vendedor", sectorId: 1 });
+  const [userForm, setUserForm] = useState({ name: "", email: "", password: "", role: "vendedor", sectorId: 1, storeName: "" });
   const [sectorForm, setSectorForm] = useState({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true });
 
   const fetchAll = useCallback(async () => {
@@ -170,12 +170,12 @@ export default function AdminDashboard() {
   // ---- User handlers ----
   const openAddUser = () => {
     setEditUser(null);
-    setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorId: sectors[0]?.id ?? 1 });
+    setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorId: sectors[0]?.id ?? 1, storeName: "" });
     setShowAddUser(true);
   };
   const openEditUser = (u: UserRow) => {
     setEditUser(u);
-    setUserForm({ name: u.name, email: u.email, password: "", role: u.role, sectorId: u.sectorId ?? 1 });
+    setUserForm({ name: u.name, email: u.email, password: "", role: u.role, sectorId: u.sectorId ?? 1, storeName: u.storeName ?? "" });
     setShowAddUser(true);
   };
   const handleSaveUser = async (e: React.FormEvent) => {
@@ -184,6 +184,7 @@ export default function AdminDashboard() {
       if (editUser) {
         const payload: Parameters<typeof api.admin.users.update>[1] = {
           name: userForm.name, email: userForm.email, role: userForm.role, sectorId: userForm.sectorId,
+          storeName: userForm.storeName,
         };
         if (userForm.password) payload.password = userForm.password;
         await api.admin.users.update(editUser.id, payload);
@@ -1019,6 +1020,12 @@ export default function AdminDashboard() {
                   className="w-full px-3 py-2 rounded-xl border border-border text-sm">
                   {sectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
+              </div>
+              <div>
+                <label className="text-xs font-medium mb-1 block">Loja (para redes de lojas)</label>
+                <input value={userForm.storeName} onChange={(e) => setUserForm({ ...userForm, storeName: e.target.value })}
+                  placeholder="Ex.: Loja Centro (opcional)" data-testid="input-user-store"
+                  className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
               </div>
               <div className="flex gap-2 pt-1">
                 <button type="button" onClick={() => setShowAddUser(false)}

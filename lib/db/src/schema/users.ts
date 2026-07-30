@@ -10,6 +10,8 @@ export const usersTable = pgTable("users", {
   passwordHash: text("password_hash").notNull(),
   role: text("role").notNull().default("vendedor"), // "vendedor" | "supervisor" | "admin"
   sectorId: integer("sector_id").references(() => sectorsTable.id),
+  // Loja da rede a que o vendedor pertence (texto livre; ex.: "Loja Centro")
+  storeName: text("store_name"),
   isActive: boolean("is_active").notNull().default(true),
   // Permissões individuais do vendedor (null = todas liberadas). Chaves:
   // ver_potenciais, transferir, finalizar, criar_atendimento, usar_ia,

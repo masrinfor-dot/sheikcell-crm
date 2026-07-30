@@ -144,6 +144,8 @@ export default function Sorteios() {
     try { setDraws(await api.raffles.draws(r.id)); } catch { /* toast abaixo já cobre */ }
   };
 
+  const stores = [...new Set(vendedores.map((v) => v.storeName ?? "").filter(Boolean))].sort();
+
   const toggleNum = (arr: number[], v: number) => arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v];
   const toggleStr = (arr: string[], v: string) => arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v];
 
@@ -290,6 +292,28 @@ export default function Sorteios() {
                     </div>
                   </div>
                 )}
+                {stores.length > 0 && (
+                  <div className="mb-2">
+                    <label className="font-semibold">Lojas (marca todos os vendedores da loja)</label>
+                    <div className="flex flex-wrap gap-1.5 mt-1">
+                      {stores.map((st) => {
+                        const ids = vendedores.filter((v) => (v.storeName ?? "") === st).map((v) => v.id);
+                        const allOn = ids.length > 0 && ids.every((id) => form.vendedorIds.includes(id));
+                        return (
+                          <button key={st} onClick={() => setForm({
+                            ...form,
+                            vendedorIds: allOn
+                              ? form.vendedorIds.filter((id) => !ids.includes(id))
+                              : [...new Set([...form.vendedorIds, ...ids])],
+                          })}
+                            className={`px-2 py-1 rounded-lg border text-[11px] font-bold transition ${allOn ? "bg-primary text-white border-primary" : "border-border text-muted-foreground hover:bg-secondary"}`}>
+                            🏪 {st}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
                 {vendedores.length > 0 && (
                   <div className="mb-2">
                     <label className="font-semibold">Vendedores (clientes atendidos por)</label>
@@ -297,7 +321,7 @@ export default function Sorteios() {
                       {vendedores.map((v) => (
                         <button key={v.id} onClick={() => setForm({ ...form, vendedorIds: toggleNum(form.vendedorIds, v.id) })}
                           className={`px-2 py-1 rounded-lg border text-[11px] font-medium transition ${form.vendedorIds.includes(v.id) ? "bg-primary text-white border-primary" : "border-border text-muted-foreground hover:bg-secondary"}`}>
-                          {v.name}
+                          {v.name}{v.storeName ? ` · ${v.storeName}` : ""}
                         </button>
                       ))}
                     </div>
