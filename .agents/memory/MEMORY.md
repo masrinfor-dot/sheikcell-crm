@@ -24,3 +24,4 @@
 - [Mobile responsive layout](mobile-layout.md) — <md = celular: bottom nav fixa, ChatCenter vira single-column (lista some c/ conversa ativa), InternalChat vira aba "Equipe"; alturas usam 100dvh + safe-area
 - [Permissões por vendedor](vendedor-permissions.md) — users.permissions jsonb (null=liberado), só role vendedor; checar no servidor E esconder na UI; archived=finalizar; SSE refaz perm a cada 30s
 - [Restricted conversation visibility](restricted-conv-visibility.md) — conversas com responsável ou finalizadas só p/ assignee+participantes, admin e supervisor do MESMO setor; SSE usa restrictedTo + conversation_hidden
+- [Scheduled messages](scheduled-messages.md) — agendamentos com tarefa espelho; scheduler reivindica pending→processing atomicamente; vendedor só agenda em conversa própria

@@ -13,3 +13,7 @@ Related rules added in the same change:
 - Vendedor transfer: PATCH assigneeId requires perm `transferir`; target must be an active user; when caller is vendedor, target must be role vendedor and same sector as the conversation; vendedor cannot set assigneeId=null; status forced "open" on vendedor transfer.
 - Claim is atomic: `UPDATE ... WHERE assignee_id IS NULL OR assignee_id = me`, 409 if no row.
 - unreadCount only cleared when the viewer is the assignee (or a vendedor if unassigned) — admin/supervisor peeking must not clear the vendedor's notification.
+
+## Coluna do cartão acompanha a conversa
+- crmStageForConversation() em api-server lib/crmSync.ts mapeia estado da conversa → coluna do CRM (potential/pending/active; finalizada mantém "active").
+- syncCrmAttendant agora atualiza atendente E coluna; deve ser chamado em QUALQUER mudança de assigneeId, status ou isArchived (PATCH, claim, reabertura por mensagem inbound em whatsappInbound).
