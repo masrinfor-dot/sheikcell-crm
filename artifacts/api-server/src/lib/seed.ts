@@ -1,7 +1,30 @@
 import bcrypt from "bcryptjs";
-import { db, usersTable, sectorsTable } from "@workspace/db";
+import { db, usersTable, sectorsTable, quickRepliesTable } from "@workspace/db";
 import { eq, count } from "drizzle-orm";
 import { logger } from "./logger";
+
+// Mensagens rápidas iniciais da Sheikcell (o admin edita com os dados reais).
+// Só são criadas se ainda não existir nenhuma com o mesmo título.
+const DEFAULT_QUICK_REPLIES = [
+  { title: "Saudação", content: "Olá {cliente}! 😊 Aqui é o {vendedor} da Sheikcell. Como posso te ajudar hoje?" },
+  { title: "Endereço", content: "📍 Nosso endereço: [COLOQUE AQUI O ENDEREÇO DA LOJA]. Esperamos sua visita!" },
+  { title: "Telefones", content: "📞 Nossos telefones: [COLOQUE AQUI OS TELEFONES/WHATSAPP DAS LOJAS]" },
+  { title: "Redes sociais", content: "📱 Siga a Sheikcell nas redes sociais: Instagram: [@seu_instagram] | Facebook: [sua página]" },
+  { title: "Site", content: "🌐 Visite nosso site: [COLOQUE AQUI O LINK DO SITE]" },
+  { title: "Horário de atendimento", content: "🕐 Nosso horário de atendimento: segunda a sexta das [08h às 18h] e sábado das [08h às 13h]." },
+  { title: "Agradecimento", content: "Obrigado pelo contato, {cliente}! 🙏 Qualquer coisa é só chamar. A Sheikcell agradece a preferência!" },
+  { title: "Formas de pagamento", content: "💳 Aceitamos: dinheiro, PIX, cartão de débito e crédito (parcelamos!). Consulte condições com o vendedor." },
+] as const;
+
+async function ensureQuickReplies(): Promise<void> {
+  const existing = await db.select({ title: quickRepliesTable.title }).from(quickRepliesTable);
+  const have = new Set(existing.map((r) => r.title));
+  const missing = DEFAULT_QUICK_REPLIES.filter((q) => !have.has(q.title));
+  if (missing.length) {
+    await db.insert(quickRepliesTable).values(missing.map((q) => ({ ...q, sectorId: null })));
+    logger.info({ count: missing.length }, "Seeded default quick replies");
+  }
+}
 
 const DEFAULT_SECTORS = [
   { name: "Vendas de Celulares", description: "Venda de smartphones e aparelhos", icon: "smartphone", color: "#1a2e6e" },
@@ -30,6 +53,7 @@ function resolveAdminPassword(): string {
 
 export async function ensureSeed(): Promise<void> {
   try {
+    await ensureQuickReplies().catch((err) => logger.error({ err }, "Quick replies seed failed"));
     // Seed sectors if none exist
     const [{ sectorCount }] = await db
       .select({ sectorCount: count() })

@@ -376,6 +376,7 @@ export default function ChatCenter() {
   const [chatUsers, setChatUsers] = useState<{ id: number; name: string; role: string; sectorId?: number | null }[]>([]);
   const [quickReplies, setQuickReplies] = useState<QuickReply[]>([]);
   const [showQuickReplies, setShowQuickReplies] = useState(false);
+  const [quickSearch, setQuickSearch] = useState("");
   // Agendamentos: mensagem programada ou lembrete de retorno (vira tarefa no quadro)
   const [showSchedule, setShowSchedule] = useState(false);
   const [schedules, setSchedules] = useState<ScheduledMessage[]>([]);
@@ -1990,13 +1991,26 @@ export default function ChatCenter() {
                 <Zap className="w-4 h-4" />
               </button>
               {showQuickReplies && (
-                <div className="absolute bottom-11 left-0 bg-white border border-border rounded-xl shadow-lg z-30 w-72 max-h-64 overflow-y-auto">
-                  <div className="px-3 py-2 border-b border-border text-xs font-semibold text-muted-foreground">Mensagens rápidas</div>
-                  {quickReplies.map((q) => (
+                <div className="absolute bottom-11 left-0 bg-white border border-border rounded-xl shadow-lg z-30 w-80 max-h-80 overflow-y-auto">
+                  <div className="px-3 py-2 border-b border-border sticky top-0 bg-white">
+                    <p className="text-xs font-semibold text-muted-foreground mb-1.5">Mensagens rápidas</p>
+                    <input autoFocus value={quickSearch} onChange={(e) => setQuickSearch(e.target.value)}
+                      placeholder="Buscar..." data-testid="input-quickreply-search"
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-border text-xs focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                  </div>
+                  {quickReplies
+                    .filter((q) => !quickSearch.trim() || `${q.title} ${q.content}`.toLowerCase().includes(quickSearch.toLowerCase()))
+                    .map((q) => (
                     <button key={q.id} type="button" data-testid={`button-quickreply-${q.id}`}
                       onClick={() => {
-                        setMsgText((prev) => prev ? `${prev} ${q.content}` : q.content);
+                        // Substitui variáveis pelo nome do cliente e do vendedor
+                        const firstName = (activeConv?.name ?? "").split(" ")[0] ?? "";
+                        const content = q.content
+                          .replaceAll("{cliente}", firstName)
+                          .replaceAll("{vendedor}", user?.name?.split(" ")[0] ?? "");
+                        setMsgText((prev) => prev ? `${prev} ${content}` : content);
                         setShowQuickReplies(false);
+                        setQuickSearch("");
                         inputRef.current?.focus();
                       }}
                       className="w-full text-left px-3 py-2.5 hover:bg-secondary transition">
@@ -2004,6 +2018,12 @@ export default function ChatCenter() {
                       <p className="text-[11px] text-muted-foreground line-clamp-2">{q.content}</p>
                     </button>
                   ))}
+                  {quickReplies.filter((q) => !quickSearch.trim() || `${q.title} ${q.content}`.toLowerCase().includes(quickSearch.toLowerCase())).length === 0 && (
+                    <p className="px-3 py-4 text-center text-[11px] text-muted-foreground">Nenhuma mensagem encontrada</p>
+                  )}
+                  <div className="px-3 py-2 border-t border-border text-[10px] text-muted-foreground sticky bottom-0 bg-white">
+                    Dica: use {"{cliente}"} e {"{vendedor}"} nas mensagens — viram o nome real na hora de enviar.
+                  </div>
                 </div>
               )}
             </div>
