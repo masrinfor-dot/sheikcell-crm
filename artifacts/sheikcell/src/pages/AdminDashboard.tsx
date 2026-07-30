@@ -605,10 +605,13 @@ export default function AdminDashboard() {
                     <RefreshCw className="w-4 h-4" />
                     {s.status === "connected" ? "Desconectar / Trocar número" : "Reconectar / Novo QR"}
                   </button>
-                  {s.sessionKey !== "default" && (
+                  {(
                     <button
                       onClick={async () => {
-                        if (!window.confirm(`Remover a conexão "${s.displayName ?? s.sessionKey}"? As conversas dela passam a responder pela conexão principal.`)) return;
+                        const msg = s.sessionKey === "default"
+                          ? "Excluir esta conexão? O QR code atual é apagado, o número é desvinculado e um novo QR será gerado para conectar outro WhatsApp."
+                          : `Remover a conexão "${s.displayName ?? s.sessionKey}"? As conversas dela passam a responder pela conexão principal.`;
+                        if (!window.confirm(msg)) return;
                         setWaLoading(true);
                         try {
                           const r = await fetch(`/api/whatsapp/sessions/${s.sessionKey}`, { method: "DELETE", credentials: "include" });
@@ -616,7 +619,9 @@ export default function AdminDashboard() {
                             const d = await r.json().catch(() => null) as { error?: string } | null;
                             toast({ title: "Erro", description: d?.error ?? "Erro ao remover", variant: "destructive" });
                           } else {
-                            toast({ title: "Conexão removida" });
+                            toast(s.sessionKey === "default"
+                              ? { title: "Conexão excluída", description: "Aguarde o novo QR code para conectar outro WhatsApp." }
+                              : { title: "Conexão removida" });
                           }
                           await fetchWAStatus();
                         } finally { setWaLoading(false); }
@@ -624,7 +629,7 @@ export default function AdminDashboard() {
                       disabled={waLoading}
                       className="flex items-center gap-2 px-3 py-2 rounded-xl border border-red-200 text-red-600 hover:bg-red-50 transition text-sm disabled:opacity-50">
                       <X className="w-4 h-4" />
-                      Remover
+                      {s.sessionKey === "default" ? "Excluir conexão" : "Remover"}
                     </button>
                   )}
                 </div>

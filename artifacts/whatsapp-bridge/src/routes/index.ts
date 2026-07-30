@@ -68,7 +68,11 @@ router.delete("/whatsapp/sessions/:key", requireBridgeSecret, async (req, res): 
   const key = sessionKeyFrom(req.params.key);
   if (!key) { res.status(400).json({ error: "session inválida" }); return; }
   if (key === DEFAULT_SESSION_KEY) {
-    res.status(400).json({ error: "A conexão principal não pode ser removida" });
+    // A conexão principal não pode sumir do sistema, mas pode ser "excluída":
+    // apaga tudo (logout + credenciais) e volta zerada aguardando novo QR.
+    await removeSession(key);
+    await startSession(key);
+    res.json({ ok: true, restarted: true, message: "Conexão apagada — aguarde o novo QR code" });
     return;
   }
   await removeSession(key);

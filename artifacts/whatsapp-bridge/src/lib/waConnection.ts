@@ -343,11 +343,14 @@ export async function disconnectAndReset(key: string): Promise<void> {
     return;
   }
   clearReconnectTimer(s);
-  await clearAuthState(key);
   if (s.sock) {
+    // Logout first (while creds still exist) so o aparelho antigo é
+    // desvinculado no WhatsApp — sem isso, parear um número novo pode falhar.
+    try { await Promise.race([s.sock.logout(), new Promise((r) => setTimeout(r, 5000))]); } catch { /* ignore */ }
     try { s.sock.end(undefined); } catch { /* ignore */ }
     s.sock = null;
   }
+  await clearAuthState(key);
   s.qr = null;
   s.status = "connecting";
   s.phone = null;

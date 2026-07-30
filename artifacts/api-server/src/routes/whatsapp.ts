@@ -233,11 +233,20 @@ router.post("/whatsapp/sessions/:key/rename", requireFeature("whatsapp"), async 
 // ─── Remove a connection ────────────────────────────────────────────────────
 router.delete("/whatsapp/sessions/:key", requireFeature("whatsapp"), async (req, res): Promise<void> => {
   const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  if (!VALID_KEY.test(key)) { res.status(400).json({ error: "Conexão inválida" }); return; }
+
+  // Conexão principal: o bridge apaga tudo (logout + credenciais) e volta
+  // zerada aguardando um novo QR. Não mexer nas conversas nem na linha do DB.
   if (key === DEFAULT_SESSION_KEY) {
-    res.status(400).json({ error: "A conexão principal não pode ser removida" });
+    try {
+      const { ok, data, status } = await fetchFromBridge(`/whatsapp/sessions/${key}`, "DELETE");
+      if (!ok) { res.status(status).json(data); return; }
+      res.json(data);
+    } catch {
+      res.status(503).json({ error: "WhatsApp Bridge está fora do ar — tente novamente em instantes" });
+    }
     return;
   }
-  if (!VALID_KEY.test(key)) { res.status(400).json({ error: "Conexão inválida" }); return; }
 
   try {
     const { ok, data, status } = await fetchFromBridge(`/whatsapp/sessions/${key}`, "DELETE");
