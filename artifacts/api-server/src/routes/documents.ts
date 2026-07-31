@@ -30,6 +30,35 @@ const ALLOWED_MIME: Record<string, string> = {
 };
 const MAX_SIZE = 15 * 1024 * 1024; // 15MB
 
+// Só PDF e imagens verificadas abrem direto no navegador; o resto baixa.
+const INLINE_SAFE = new Set(["application/pdf", "image/jpeg", "image/png", "image/webp"]);
+
+// Valida a assinatura (magic bytes) contra o MIME declarado.
+function contentMatchesMime(buf: Buffer, mime: string): boolean {
+  const startsWith = (sig: number[], offset = 0) => sig.every((b, i) => buf[offset + i] === b);
+  switch (mime) {
+    case "application/pdf": return startsWith([0x25, 0x50, 0x44, 0x46]); // %PDF
+    case "image/jpeg": return startsWith([0xff, 0xd8, 0xff]);
+    case "image/png": return startsWith([0x89, 0x50, 0x4e, 0x47]);
+    case "image/webp": return startsWith([0x52, 0x49, 0x46, 0x46]) && buf.length > 11 && buf.toString("ascii", 8, 12) === "WEBP";
+    case "application/msword":
+    case "application/vnd.ms-excel":
+    case "application/vnd.ms-powerpoint":
+      return startsWith([0xd0, 0xcf, 0x11, 0xe0]); // OLE2
+    case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+    case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+    case "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+      return startsWith([0x50, 0x4b]); // ZIP
+    case "text/plain": {
+      // Precisa ser UTF-8 válido e sem cara de HTML/SVG.
+      let text: string;
+      try { text = new TextDecoder("utf-8", { fatal: true }).decode(buf.subarray(0, 64 * 1024)); } catch { return false; }
+      return !/<\s*(script|svg|html|iframe|!doctype)/i.test(text);
+    }
+    default: return false;
+  }
+}
+
 // ─── Listar documentos ───────────────────────────────────────────────────────
 router.get("/documents", requireAuth, async (_req, res): Promise<void> => {
   const rows = await db
@@ -64,6 +93,12 @@ router.post("/documents", requireAdminOrSupervisor, async (req, res): Promise<vo
 
   const buf = Buffer.from(data, "base64");
   if (buf.length === 0) { res.status(400).json({ error: "Arquivo vazio" }); return; }
+  // Confere a assinatura do arquivo: o tipo declarado precisa bater com o
+  // conteúdo real (impede HTML/SVG disfarçado de imagem/PDF).
+  if (!contentMatchesMime(buf, mime)) {
+    res.status(400).json({ error: "O conteúdo do arquivo não corresponde ao tipo informado" });
+    return;
+  }
   if (buf.length > MAX_SIZE) { res.status(400).json({ error: "Arquivo muito grande (máximo 15MB)" }); return; }
 
   await mkdir(DOCS_DIR, { recursive: true });
@@ -91,8 +126,10 @@ router.get("/documents/:id/file", requireAuth, async (req: Request, res: Respons
   const filepath = path.join(DOCS_DIR, path.basename(doc.storedName));
   if (!existsSync(filepath)) { res.status(404).json({ error: "Arquivo não encontrado no servidor" }); return; }
   res.setHeader("Content-Type", doc.mimeType);
-  // "inline" deixa o navegador abrir PDF/imagem direto; download continua possível.
-  res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(doc.fileName)}"`);
+  // PDF/imagem verificados abrem no navegador; os demais tipos sempre baixam.
+  const disposition = INLINE_SAFE.has(doc.mimeType) ? "inline" : "attachment";
+  res.setHeader("Content-Disposition", `${disposition}; filename="${encodeURIComponent(doc.fileName)}"`);
+  res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Cache-Control", "private, max-age=3600");
   res.sendFile(filepath);
 });
