@@ -439,9 +439,15 @@ router.delete("/internal-chat/conversations/:id", requireAuth, async (req, res):
     if (!member) { res.status(403).json({ error: "Você não participa desse grupo" }); return; }
   }
 
-  // Avisa os membros ANTES de apagar (depois não dá mais para saber quem eram).
+  // Captura os membros ANTES de apagar (depois não dá mais para saber quem eram)
+  // e só avisa se ESTA requisição realmente apagou o grupo (evita evento falso
+  // quando duas exclusões simultâneas disputam o mesmo grupo).
   const recipients = await recipientsFor(conv);
-  await db.delete(internalConversationsTable).where(eq(internalConversationsTable.id, convId)); // cascade apaga membros e mensagens
+  const deleted = await db
+    .delete(internalConversationsTable)
+    .where(and(eq(internalConversationsTable.id, convId), eq(internalConversationsTable.kind, "group")))
+    .returning({ id: internalConversationsTable.id }); // cascade apaga membros e mensagens
+  if (deleted.length === 0) { res.status(404).json({ error: "Grupo não encontrado" }); return; }
   broadcastInternal("internal_conversation_removed", { id: convId }, recipients);
   res.json({ ok: true });
 });
