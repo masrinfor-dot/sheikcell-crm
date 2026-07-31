@@ -7,6 +7,7 @@ export * from "./checklists";
 export * from "./trainings";
 export * from "./documents";
 export * from "./access_logs";
+export * from "./stores";
 export * from "./sheet_links";
 export * from "./rh";
 export * from "./raffles";

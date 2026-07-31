@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   api, type CrmContact, type CrmPurchase, type CrmInternalNote,
-  type AttendanceLog, type Sector, type CrmCustomField,
+  type AttendanceLog, type Sector, type CrmCustomField, type Store as StoreType,
 } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -72,6 +72,10 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
   // Edit state
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState({ name: "", contact: "", phone: "", email: "", notes: "", tags: "", sectorId: "", profile: "Novo" as CrmContact["profile"], isNew: true, city: "", serviceStore: "", attendanceSource: "" });
+
+  // Lojas da rede (para o select "Loja para atendimento")
+  const [storesList, setStoresList] = useState<StoreType[]>([]);
+  useEffect(() => { api.stores.list().then(setStoresList).catch(() => {}); }, []);
 
   // Custom fields
   const [customDefs, setCustomDefs] = useState<CrmCustomField[]>([]);
@@ -376,9 +380,15 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
                       </div>
                       <div>
                         <label className="text-xs text-muted-foreground mb-1 block">Loja para atendimento</label>
-                        <input value={editForm.serviceStore} onChange={(e) => setEditForm({ ...editForm, serviceStore: e.target.value })}
-                          placeholder="Loja Centro"
-                          className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                        <select value={editForm.serviceStore} onChange={(e) => setEditForm({ ...editForm, serviceStore: e.target.value })}
+                          data-testid="select-contact-store"
+                          className="w-full px-3 py-2 rounded-xl border border-border text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary/30">
+                          <option value="">Sem loja</option>
+                          {storesList.map((s) => <option key={s.id} value={s.name}>{s.name}</option>)}
+                          {editForm.serviceStore && !storesList.some((s) => s.name === editForm.serviceStore) && (
+                            <option value={editForm.serviceStore}>{editForm.serviceStore}</option>
+                          )}
+                        </select>
                       </div>
                     </div>
                     <div>

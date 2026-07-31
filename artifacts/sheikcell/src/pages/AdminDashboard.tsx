@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, PERMISSION_KEYS, PERMISSION_LABELS, type SectorSummary, type AttendanceLog, type Sector, type QuickReply } from "@/lib/api";
+import { api, PERMISSION_KEYS, PERMISSION_LABELS, type SectorSummary, type AttendanceLog, type Sector, type QuickReply, type Store } from "@/lib/api";
 import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
@@ -76,6 +76,8 @@ export default function AdminDashboard() {
   const [logFilters, setLogFilters] = useState({ search: "", days: 0, sectorId: 0, attendantId: 0, outcome: "", reason: "" });
   const [logAttendants, setLogAttendants] = useState<{ id: number; name: string }[]>([]);
   const [sectors, setSectors] = useState<Sector[]>([]);
+  const [stores, setStores] = useState<Store[]>([]);
+  const [newStoreName, setNewStoreName] = useState("");
   const [userRows, setUserRows] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [waSessions, setWaSessions] = useState<WASession[] | null>(null);
@@ -142,9 +144,10 @@ export default function AdminDashboard() {
 
   const fetchUsersAndSectors = useCallback(async () => {
     try {
-      const [u, sec] = await Promise.all([api.admin.users.list(), api.sectors.listAll()]);
+      const [u, sec, st] = await Promise.all([api.admin.users.list(), api.sectors.listAll(), api.stores.list(true)]);
       setUserRows(u as UserRow[]);
       setSectors(sec);
+      setStores(st);
     } catch { /* silent */ }
   }, []);
 
@@ -994,6 +997,66 @@ export default function AdminDashboard() {
                 </div>
               ))}
             </div>
+
+            {/* ===== Lojas da Rede ===== */}
+            <div className="flex items-center justify-between pt-4">
+              <h2 className="font-bold">Lojas da Rede</h2>
+            </div>
+            <div className="shk-card p-4 space-y-3">
+              <p className="text-xs text-muted-foreground">As lojas cadastradas aqui aparecem como opção no cadastro de vendedores e de clientes.</p>
+              <form className="flex gap-2" onSubmit={async (e) => {
+                e.preventDefault();
+                const name = newStoreName.trim();
+                if (!name) return;
+                try {
+                  const st = await api.stores.create(name);
+                  setStores((prev) => [...prev, st].sort((a, b) => a.name.localeCompare(b.name)));
+                  setNewStoreName("");
+                } catch (err) {
+                  toast({ title: err instanceof Error ? err.message : "Erro ao cadastrar loja", variant: "destructive" });
+                }
+              }}>
+                <input value={newStoreName} onChange={(e) => setNewStoreName(e.target.value)}
+                  placeholder="Nome da loja (ex.: Loja Centro)" data-testid="input-new-store"
+                  className="flex-1 px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                <button type="submit" data-testid="button-add-store"
+                  className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition">
+                  <Plus className="w-3.5 h-3.5" /> Cadastrar
+                </button>
+              </form>
+              {stores.length === 0 ? (
+                <p className="text-xs text-muted-foreground py-2">Nenhuma loja cadastrada ainda.</p>
+              ) : (
+                <div className="grid sm:grid-cols-2 gap-2">
+                  {stores.map((s) => (
+                    <div key={s.id} className="flex items-center gap-2 rounded-xl border border-border px-3 py-2" data-testid={`store-row-${s.id}`}>
+                      <span className={`text-sm font-medium flex-1 truncate ${s.isActive ? "" : "line-through text-muted-foreground"}`}>{s.name}</span>
+                      <span className={s.isActive ? "shk-badge-done" : "shk-badge-waiting"}>{s.isActive ? "Ativa" : "Inativa"}</span>
+                      <button onClick={async () => {
+                        const novo = prompt("Novo nome da loja:", s.name);
+                        if (!novo || !novo.trim() || novo.trim() === s.name) return;
+                        try {
+                          const upd = await api.stores.update(s.id, { name: novo.trim() });
+                          setStores((prev) => prev.map((x) => x.id === s.id ? upd : x));
+                        } catch (err) { toast({ title: err instanceof Error ? err.message : "Erro", variant: "destructive" }); }
+                      }} data-testid={`button-rename-store-${s.id}`}
+                        className="p-1.5 text-muted-foreground hover:text-primary hover:bg-blue-50 rounded-lg transition">
+                        <Pencil className="w-3.5 h-3.5" />
+                      </button>
+                      <button onClick={async () => {
+                        try {
+                          const upd = await api.stores.update(s.id, { isActive: !s.isActive });
+                          setStores((prev) => prev.map((x) => x.id === s.id ? upd : x));
+                        } catch { /* silent */ }
+                      }} data-testid={`button-toggle-store-${s.id}`}
+                        className={`text-[11px] font-semibold px-2 py-1 rounded-lg transition ${s.isActive ? "text-red-600 hover:bg-red-50" : "text-green-600 hover:bg-green-50"}`}>
+                        {s.isActive ? "Desativar" : "Reativar"}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
           </div>
@@ -1261,9 +1324,18 @@ export default function AdminDashboard() {
               )}
               <div>
                 <label className="text-xs font-medium mb-1 block">Loja (para redes de lojas)</label>
-                <input value={userForm.storeName} onChange={(e) => setUserForm({ ...userForm, storeName: e.target.value })}
-                  placeholder="Ex.: Loja Centro (opcional)" data-testid="input-user-store"
-                  className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                <select value={userForm.storeName} onChange={(e) => setUserForm({ ...userForm, storeName: e.target.value })}
+                  data-testid="select-user-store"
+                  className="w-full px-3 py-2 rounded-xl border border-border text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary/30">
+                  <option value="">Sem loja</option>
+                  {stores.filter((s) => s.isActive || s.name === userForm.storeName).map((s) => (
+                    <option key={s.id} value={s.name}>{s.name}</option>
+                  ))}
+                  {userForm.storeName && !stores.some((s) => s.name === userForm.storeName) && (
+                    <option value={userForm.storeName}>{userForm.storeName}</option>
+                  )}
+                </select>
+                <p className="text-[10px] text-muted-foreground mt-1">Cadastre as lojas na aba Setores → Lojas da Rede.</p>
               </div>
               <div className="flex gap-2 pt-1">
                 <button type="button" onClick={() => setShowAddUser(false)}

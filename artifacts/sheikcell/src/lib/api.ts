@@ -84,6 +84,13 @@ export type InternalConversation = {
   unreadCount: number;
 };
 
+export type Store = {
+  id: number;
+  name: string;
+  isActive: boolean;
+  createdAt: string;
+};
+
 export type TeamStatusRow = {
   id: number;
   name: string;
@@ -742,6 +749,12 @@ export const api = {
       req<DocumentItem>("/documents", { method: "POST", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/documents/${id}`, { method: "DELETE" }),
     fileUrl: (id: number) => `/api/documents/${id}/file`,
+  },
+  stores: {
+    list: (all?: boolean) => req<Store[]>(`/stores${all ? "?all=1" : ""}`),
+    create: (name: string) => req<Store>("/stores", { method: "POST", body: JSON.stringify({ name }) }),
+    update: (id: number, data: Partial<{ name: string; isActive: boolean }>) =>
+      req<Store>(`/stores/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   },
   teamStatus: {
     list: () => req<TeamStatusRow[]>("/admin/team-status"),

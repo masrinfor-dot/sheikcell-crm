@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { api, can, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage } from "@/lib/api";
+import { api, can, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type Store as StoreType } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -408,6 +408,9 @@ export default function ChatCenter() {
   const [infoForm, setInfoForm] = useState({ name: "", city: "", serviceStore: "", attendanceSource: "", notes: "" });
   const [infoCustomValues, setInfoCustomValues] = useState<Record<string, string>>({});
   const [customDefs, setCustomDefs] = useState<CrmCustomField[]>([]);
+  // Lojas da rede (select "Loja para atendimento")
+  const [storesList, setStoresList] = useState<StoreType[]>([]);
+  useEffect(() => { api.stores.list().then(setStoresList).catch(() => {}); }, []);
 
   // AI reply suggestion in the composer
   const [suggesting, setSuggesting] = useState(false);
@@ -2225,9 +2228,15 @@ export default function ChatCenter() {
                 </div>
                 <div>
                   <label className="text-xs text-muted-foreground mb-1 block">Loja para atendimento</label>
-                  <input value={infoForm.serviceStore} onChange={(e) => setInfoForm({ ...infoForm, serviceStore: e.target.value })}
-                    placeholder="Loja Centro"
-                    className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                  <select value={infoForm.serviceStore} onChange={(e) => setInfoForm({ ...infoForm, serviceStore: e.target.value })}
+                    data-testid="select-info-store"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary/30">
+                    <option value="">Sem loja</option>
+                    {storesList.map((s) => <option key={s.id} value={s.name}>{s.name}</option>)}
+                    {infoForm.serviceStore && !storesList.some((s) => s.name === infoForm.serviceStore) && (
+                      <option value={infoForm.serviceStore}>{infoForm.serviceStore}</option>
+                    )}
+                  </select>
                 </div>
                 <div>
                   <label className="text-xs text-muted-foreground mb-1 block">De onde veio o atendimento</label>

@@ -3,6 +3,7 @@ import { db, crmContactsTable, crmPurchasesTable, crmInternalNotesTable, crmCust
 import { eq, and, desc, asc, ilike, or } from "drizzle-orm";
 import { requireAuth, requireAdminOrSupervisor } from "../middlewares/auth";
 import { requirePerm } from "../lib/permissions";
+import { isValidStoreName } from "./stores";
 import { broadcast } from "../lib/sseEmitter";
 import type { Request } from "express";
 
@@ -292,6 +293,10 @@ router.post("/crm", requireAuth, async (req, res): Promise<void> => {
   const userSectorId = req.session.userSectorId ?? null;
   // Sector-scoped roles are pinned to their own sector; the caller-supplied sectorId is ignored.
   const effectiveSectorId = isGlobalRole(userRole) ? (sectorId ?? null) : userSectorId;
+  if (serviceStore && !(await isValidStoreName(serviceStore))) {
+    res.status(400).json({ error: "Loja não cadastrada. Peça ao admin para cadastrá-la em Setores → Lojas da Rede." });
+    return;
+  }
   const [created] = await db.insert(crmContactsTable).values({
     name, contact, phone, email,
     sectorId: effectiveSectorId,
@@ -345,7 +350,13 @@ router.patch("/crm/:id", requireAuth, async (req, res): Promise<void> => {
   if (profile !== undefined) update.profile = profile;
   if (isNew !== undefined) update.isNew = isNew;
   if (city !== undefined) update.city = city || null;
-  if (serviceStore !== undefined) update.serviceStore = serviceStore || null;
+  if (serviceStore !== undefined) {
+    if (serviceStore && !(await isValidStoreName(serviceStore, existing.serviceStore))) {
+      res.status(400).json({ error: "Loja não cadastrada. Peça ao admin para cadastrá-la em Setores → Lojas da Rede." });
+      return;
+    }
+    update.serviceStore = serviceStore || null;
+  }
   if (attendanceSource !== undefined) update.attendanceSource = attendanceSource || null;
   if (notes !== undefined) update.notes = notes;
   if (tags !== undefined) update.tags = tags;

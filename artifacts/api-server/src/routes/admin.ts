@@ -5,6 +5,7 @@ import { eq, sql, desc, and, gte, isNull, isNotNull, notInArray, or, ilike } fro
 import { requireAdmin, requireAdminOrSupervisor } from "../middlewares/auth";
 import { sanitizePermissions } from "../lib/permissions";
 import { getPresence } from "../lib/sseEmitter";
+import { isValidStoreName } from "./stores";
 import { syncCrmAttendant } from "../lib/crmSync";
 
 const router: IRouter = Router();
@@ -214,6 +215,12 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
     return;
   }
 
+  const cleanStore = typeof storeName === "string" && storeName.trim() ? storeName.trim().slice(0, 120) : null;
+  if (cleanStore && !(await isValidStoreName(cleanStore))) {
+    res.status(400).json({ error: "Loja não cadastrada. Cadastre-a em Setores → Lojas da Rede." });
+    return;
+  }
+
   const passwordHash = await bcrypt.hash(password, 10);
 
   const [user] = await db
@@ -221,7 +228,7 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
     .values({
       name, email: email.toLowerCase(), passwordHash, role: resolvedRole,
       sectorId: sectorId ?? undefined,
-      storeName: typeof storeName === "string" && storeName.trim() ? storeName.trim().slice(0, 120) : null,
+      storeName: cleanStore,
       mustChangePassword: true, // primeiro acesso: obriga trocar a senha
       adminAccess: sanitizeAdminAccess(adminAccess),
       accessHours: resolvedRole === "vendedor" ? sanitizeAccessHours(accessHours) : null,
@@ -258,7 +265,15 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   if (adminAccess !== undefined) updateData.adminAccess = sanitizeAdminAccess(adminAccess);
   if (accessHours !== undefined) updateData.accessHours = sanitizeAccessHours(accessHours);
   if (storeName !== undefined) {
-    updateData.storeName = typeof storeName === "string" && storeName.trim() ? storeName.trim().slice(0, 120) : null;
+    const cleanStore = typeof storeName === "string" && storeName.trim() ? storeName.trim().slice(0, 120) : null;
+    if (cleanStore) {
+      const [current] = await db.select({ storeName: usersTable.storeName }).from(usersTable).where(eq(usersTable.id, id)).limit(1);
+      if (!(await isValidStoreName(cleanStore, current?.storeName))) {
+        res.status(400).json({ error: "Loja não cadastrada. Cadastre-a em Setores → Lojas da Rede." });
+        return;
+      }
+    }
+    updateData.storeName = cleanStore;
   }
   if (isActive !== undefined) updateData.isActive = isActive;
   if (permissions !== undefined) updateData.permissions = sanitizePermissions(permissions);
