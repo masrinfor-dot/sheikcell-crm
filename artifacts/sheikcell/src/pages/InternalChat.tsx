@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, type InternalConversation, type InternalMessage } from "@/lib/api";
+import { api, can, type InternalConversation, type InternalMessage } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
-import { Users, Send, Plus, X, Search, MessagesSquare, ChevronLeft, SquareKanban } from "lucide-react";
+import { Users, Send, Plus, X, Search, MessagesSquare, ChevronLeft, SquareKanban, ClipboardPlus } from "lucide-react";
 import TaskBoard from "./TaskBoard";
 
 const roleLabel: Record<string, string> = {
@@ -14,6 +14,33 @@ const roleLabel: Record<string, string> = {
 
 function initials(name: string): string {
   return name.split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
+}
+
+// Destaca @menções no texto da mensagem. Recebe os nomes conhecidos da equipe
+// e realça `@Nome` (menção a você fica mais forte para chamar atenção).
+function renderWithMentions(content: string, names: string[], myName: string | undefined, mine: boolean) {
+  if (names.length === 0 || !content.includes("@")) return content;
+  const escaped = [...names].sort((a, b) => b.length - a.length).map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  // Fronteira no fim: evita realçar só "Ana" dentro de "@Anabela".
+  const re = new RegExp(`@(${escaped.join("|")})(?![\\p{L}\\p{N}])`, "giu");
+  const parts: (string | { name: string })[] = [];
+  let last = 0;
+  for (const m of content.matchAll(re)) {
+    if (m.index! > last) parts.push(content.slice(last, m.index));
+    parts.push({ name: m[1] });
+    last = m.index! + m[0].length;
+  }
+  if (parts.length === 0) return content;
+  if (last < content.length) parts.push(content.slice(last));
+  return parts.map((p, i) => {
+    if (typeof p === "string") return <span key={i}>{p}</span>;
+    const isMe = myName && p.name.toLowerCase() === myName.toLowerCase();
+    return (
+      <span key={i} className={`font-semibold rounded px-1 ${
+        isMe ? "bg-amber-200 text-amber-900" : mine ? "bg-white/25 text-white" : "bg-primary/10 text-primary"
+      }`}>@{p.name}</span>
+    );
+  });
 }
 
 function timeLabel(iso: string | null): string {
@@ -43,6 +70,14 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
   const [groupName, setGroupName] = useState("");
   const [groupMembers, setGroupMembers] = useState<number[]>([]);
   const [creatingGroup, setCreatingGroup] = useState(false);
+  // @menção: sugestões enquanto digita "@..." no composer.
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  // Criar tarefa a partir de uma mensagem do chat (vínculo com o quadro).
+  const [taskFromMsg, setTaskFromMsg] = useState<InternalMessage | null>(null);
+  const [taskTitle, setTaskTitle] = useState("");
+  const [taskAssignee, setTaskAssignee] = useState<string>("");
+  const [taskDue, setTaskDue] = useState("");
+  const [creatingTask, setCreatingTask] = useState(false);
 
   const activeIdRef = useRef<number | null>(null);
   activeIdRef.current = activeId;
@@ -62,6 +97,11 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
   useEffect(() => {
     loadConversations();
   }, [loadConversations]);
+
+  // Equipe carregada já na abertura: usada nas @menções e no "criar tarefa".
+  useEffect(() => {
+    api.chatUsers().then((users) => setColleagues(users.filter((u) => u.id !== user?.id))).catch(() => {});
+  }, [user?.id]);
 
   // After a reconnection, the client's per-conversation unread counters may
   // have drifted (replay bumps them +1 per message, which is only approximate).
@@ -161,12 +201,51 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
     setNewMode("direct");
     setGroupName("");
     setGroupMembers([]);
+  };
+
+  // Abre o modal "criar tarefa" preenchido com a mensagem; se ela menciona
+  // alguém (@Nome), já sugere esse colega como responsável.
+  const teamNames = [...colleagues.map((c) => c.name), ...(user?.name ? [user.name] : [])];
+  const openTaskFromMsg = (m: InternalMessage) => {
+    setTaskFromMsg(m);
+    setTaskTitle(m.content.length > 80 ? `${m.content.slice(0, 77)}...` : m.content);
+    const mentioned = colleagues.find((c) => m.content.toLowerCase().includes(`@${c.name.toLowerCase()}`));
+    setTaskAssignee(mentioned ? String(mentioned.id) : "");
+    setTaskDue("");
+  };
+
+  const createTaskFromMsg = async () => {
+    if (!taskFromMsg || creatingTask) return;
+    const title = taskTitle.trim();
+    if (!title) { toast({ title: "Dê um título à tarefa", variant: "destructive" }); return; }
+    setCreatingTask(true);
     try {
-      const users = await api.chatUsers();
-      setColleagues(users.filter((u) => u.id !== user?.id));
-    } catch {
-      /* ignore */
+      await api.tasks.create({
+        title,
+        description: `Criada a partir do chat interno — mensagem de ${taskFromMsg.senderName} em ${new Date(taskFromMsg.createdAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}:\n\n"${taskFromMsg.content}"`,
+        assigneeId: taskAssignee ? Number(taskAssignee) : null,
+        dueDate: taskDue || null,
+      });
+      setTaskFromMsg(null);
+      toast({ title: "Tarefa criada no quadro! 📋" });
+    } catch (err) {
+      toast({ title: "Erro ao criar tarefa", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setCreatingTask(false);
     }
+  };
+
+  // @menção: procura um "@texto" logo antes do fim do rascunho.
+  const updateMentionState = (value: string) => {
+    const m = /(?:^|\s)@([\p{L}\p{N} ]{0,30})$/u.exec(value);
+    setMentionQuery(m ? m[1] : null);
+  };
+  const mentionOptions = mentionQuery != null
+    ? colleagues.filter((c) => c.name.toLowerCase().startsWith(mentionQuery.toLowerCase())).slice(0, 6)
+    : [];
+  const insertMention = (name: string) => {
+    setDraft((prev) => prev.replace(/@[\p{L}\p{N} ]{0,30}$/u, `@${name} `));
+    setMentionQuery(null);
   };
 
   const startDirect = async (userId: number) => {
@@ -205,6 +284,7 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
     if (!content || activeId == null || sending) return;
     setSending(true);
     setDraft("");
+    setMentionQuery(null);
     try {
       const msg = await api.internalChat.send(activeId, content);
       setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
@@ -303,30 +383,72 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
                 {messages.map((m) => {
                   const mine = m.senderId === user?.id;
                   return (
-                    <div key={m.id} className={`flex ${mine ? "justify-end" : "justify-start"}`}>
+                    <div key={m.id} className={`group flex items-center gap-1 ${mine ? "justify-end" : "justify-start"}`}>
+                      {mine && can(user, "tarefas") && (
+                        <button
+                          onClick={() => openTaskFromMsg(m)}
+                          data-testid={`button-task-from-msg-${m.id}`}
+                          title="Criar tarefa desta mensagem"
+                          className="opacity-0 group-hover:opacity-100 transition p-1.5 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10 shrink-0"
+                        >
+                          <ClipboardPlus className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                       <div className={`max-w-[75%] rounded-2xl px-3.5 py-2 ${
                         mine ? "bg-primary text-white rounded-br-sm" : "bg-card border rounded-bl-sm"
                       }`}>
                         {!mine && active.kind !== "direct" && (
                           <div className="text-[11px] font-semibold text-primary mb-0.5">{m.senderName}</div>
                         )}
-                        <div className="text-sm whitespace-pre-wrap break-words">{m.content}</div>
+                        <div className="text-sm whitespace-pre-wrap break-words">{renderWithMentions(m.content, teamNames, user?.name, mine)}</div>
                         <div className={`text-[10px] mt-0.5 text-right ${mine ? "text-white/70" : "text-muted-foreground"}`}>
                           {timeLabel(m.createdAt)}
                         </div>
                       </div>
+                      {!mine && can(user, "tarefas") && (
+                        <button
+                          onClick={() => openTaskFromMsg(m)}
+                          data-testid={`button-task-from-msg-${m.id}`}
+                          title="Criar tarefa desta mensagem"
+                          className="opacity-0 group-hover:opacity-100 transition p-1.5 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10 shrink-0"
+                        >
+                          <ClipboardPlus className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
                   );
                 })}
                 <div ref={bottomRef} />
               </div>
 
-              <div className="p-3 border-t flex items-end gap-2 shrink-0">
+              <div className="relative p-3 border-t flex items-end gap-2 shrink-0">
+                {/* Sugestões de @menção */}
+                {mentionOptions.length > 0 && (
+                  <div className="absolute bottom-full left-3 mb-1 z-30 bg-card border rounded-xl shadow-lg overflow-hidden min-w-[200px]" data-testid="mention-suggestions">
+                    {mentionOptions.map((c) => (
+                      <button
+                        key={c.id}
+                        onClick={() => insertMention(c.name)}
+                        data-testid={`mention-option-${c.id}`}
+                        className="w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-primary/10 transition"
+                      >
+                        <span className="w-6 h-6 rounded-full bg-primary text-white text-[10px] font-semibold flex items-center justify-center shrink-0">{initials(c.name)}</span>
+                        <span className="text-sm font-medium truncate">{c.name}</span>
+                        <span className="text-[10px] text-muted-foreground ml-auto shrink-0">{roleLabel[c.role] ?? c.role}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <textarea
                   value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
+                  onChange={(e) => { setDraft(e.target.value); updateMentionState(e.target.value); }}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      if (mentionOptions.length > 0) { insertMention(mentionOptions[0].name); return; }
+                      handleSend();
+                    }
+                    if (e.key === "Escape") setMentionQuery(null);
                   }}
                   placeholder="Escreva uma mensagem..."
                   rows={1}
@@ -348,6 +470,46 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
               <MessagesSquare className="w-12 h-12 mb-3 opacity-30" />
               <p className="text-sm">Selecione uma conversa ou inicie uma nova para conversar com a equipe.</p>
             </div>
+  );
+
+  // Modal: criar tarefa no quadro a partir de uma mensagem do chat.
+  const taskModal = taskFromMsg && (
+    <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setTaskFromMsg(null)}>
+      <div className="bg-card rounded-xl w-full max-w-sm shadow-xl border overflow-hidden mx-3" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-4 py-3 border-b">
+          <span className="font-semibold text-sm flex items-center gap-2"><ClipboardPlus className="w-4 h-4 text-primary" /> Criar tarefa desta mensagem</span>
+          <button onClick={() => setTaskFromMsg(null)} data-testid="button-close-task-modal" className="p-1 rounded hover:bg-muted/60"><X className="w-4 h-4" /></button>
+        </div>
+        <div className="p-4 space-y-3">
+          <div className="text-xs bg-muted/40 border rounded-lg px-3 py-2 text-muted-foreground line-clamp-3">
+            "{taskFromMsg.content}" — {taskFromMsg.senderName}
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-muted-foreground">Título da tarefa</label>
+            <input value={taskTitle} onChange={(e) => setTaskTitle(e.target.value)} data-testid="input-task-title"
+              className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-muted-foreground">Responsável</label>
+            <select value={taskAssignee} onChange={(e) => setTaskAssignee(e.target.value)} data-testid="select-task-assignee"
+              className="mt-1 w-full rounded-lg border px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary/40">
+              <option value="">Sem responsável</option>
+              {user && <option value={String(user.id)}>Eu ({user.name})</option>}
+              {colleagues.map((c) => <option key={c.id} value={String(c.id)}>{c.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-muted-foreground">Prazo (opcional)</label>
+            <input type="date" value={taskDue} onChange={(e) => setTaskDue(e.target.value)} data-testid="input-task-due"
+              className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
+          </div>
+          <button onClick={createTaskFromMsg} disabled={creatingTask} data-testid="button-create-task-from-msg"
+            className="w-full py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition">
+            {creatingTask ? "Criando..." : "Criar tarefa no quadro"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 
   const newModal = showNew && (
@@ -471,7 +633,7 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
         ) : (
           <div className="flex flex-col h-full min-h-0">{listPanel}</div>
         )}
-        {newModal}
+        {newModal}{taskModal}
       </div>
     );
   }
@@ -492,7 +654,7 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
             <section className={`flex-1 flex-col min-w-0 ${active ? "flex" : "hidden md:flex"}`}>{threadPanel}</section>
           </div>
         )}
-        {newModal}
+        {newModal}{taskModal}
       </div>
     </div>
   );
