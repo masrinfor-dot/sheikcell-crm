@@ -1,14 +1,49 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, conversationParticipantsTable, tasksTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable } from "@workspace/db";
+import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, conversationParticipantsTable, tasksTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable, accessLogsTable } from "@workspace/db";
 import { eq, sql, desc, and, gte, isNull, isNotNull, notInArray, or, ilike } from "drizzle-orm";
 import { requireAdmin, requireAdminOrSupervisor } from "../middlewares/auth";
 import { sanitizePermissions } from "../lib/permissions";
+import { getPresence } from "../lib/sseEmitter";
 import { syncCrmAttendant } from "../lib/crmSync";
 
 const router: IRouter = Router();
 
 // Dashboard summary
+// ─── Quem está online + horários de acesso ──────────────────────────────────
+router.get("/admin/team-status", requireAdminOrSupervisor, async (_req, res): Promise<void> => {
+  const { onlineIds, lastSeen } = getPresence();
+  const users = await db
+    .select({ id: usersTable.id, name: usersTable.name, role: usersTable.role, sectorId: usersTable.sectorId, isActive: usersTable.isActive })
+    .from(usersTable)
+    .where(eq(usersTable.isActive, true));
+  // Último login de cada usuário em uma consulta só.
+  const lastLogins = await db
+    .select({ userId: accessLogsTable.userId, lastLoginAt: sql<string>`max(${accessLogsTable.loggedInAt})` })
+    .from(accessLogsTable)
+    .groupBy(accessLogsTable.userId);
+  const lastLoginMap = Object.fromEntries(lastLogins.map((l) => [l.userId, l.lastLoginAt]));
+  const online = new Set(onlineIds);
+  res.json(users.map((u) => ({
+    ...u,
+    online: online.has(u.id),
+    lastSeenAt: lastSeen[u.id] ?? null,
+    lastLoginAt: lastLoginMap[u.id] ?? null,
+  })));
+});
+
+// Histórico de logins de um usuário (últimos 50).
+router.get("/admin/users/:id/access-logs", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const rows = await db
+    .select({ loggedInAt: accessLogsTable.loggedInAt })
+    .from(accessLogsTable)
+    .where(eq(accessLogsTable.userId, id))
+    .orderBy(desc(accessLogsTable.loggedInAt))
+    .limit(50);
+  res.json(rows);
+});
+
 router.get("/admin/summary", requireAdminOrSupervisor, async (_req, res): Promise<void> => {
   const sectors = await db.select().from(sectorsTable).where(eq(sectorsTable.isActive, true));
 

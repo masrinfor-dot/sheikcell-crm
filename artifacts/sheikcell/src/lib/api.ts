@@ -84,6 +84,16 @@ export type InternalConversation = {
   unreadCount: number;
 };
 
+export type TeamStatusRow = {
+  id: number;
+  name: string;
+  role: string;
+  sectorId: number | null;
+  online: boolean;
+  lastSeenAt: string | null;
+  lastLoginAt: string | null;
+};
+
 export type DocumentItem = {
   id: number;
   title: string;
@@ -732,6 +742,10 @@ export const api = {
       req<DocumentItem>("/documents", { method: "POST", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/documents/${id}`, { method: "DELETE" }),
     fileUrl: (id: number) => `/api/documents/${id}/file`,
+  },
+  teamStatus: {
+    list: () => req<TeamStatusRow[]>("/admin/team-status"),
+    accessLogs: (userId: number) => req<{ loggedInAt: string }[]>(`/admin/users/${userId}/access-logs`),
   },
   admin: {
     summary: () => req<SectorSummary[]>("/admin/summary"),

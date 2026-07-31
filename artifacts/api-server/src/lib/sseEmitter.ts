@@ -1,6 +1,30 @@
 import { EventEmitter } from "events";
 
 export const sseEmitter = new EventEmitter();
+
+// ── Presença: quem está com o painel aberto agora ──────────────────────────
+// Conta conexões SSE por usuário (várias abas = vários "refs") e guarda o
+// último instante em que cada um esteve conectado.
+const presenceRefs = new Map<number, number>();
+const lastSeenAt = new Map<number, Date>();
+
+export function presenceConnect(userId: number): void {
+  presenceRefs.set(userId, (presenceRefs.get(userId) ?? 0) + 1);
+  lastSeenAt.set(userId, new Date());
+}
+
+export function presenceDisconnect(userId: number): void {
+  const n = (presenceRefs.get(userId) ?? 1) - 1;
+  if (n <= 0) presenceRefs.delete(userId);
+  else presenceRefs.set(userId, n);
+  lastSeenAt.set(userId, new Date());
+}
+
+export function getPresence(): { onlineIds: number[]; lastSeen: Record<number, string> } {
+  const lastSeen: Record<number, string> = {};
+  for (const [id, d] of lastSeenAt) lastSeen[id] = d.toISOString();
+  return { onlineIds: [...presenceRefs.keys()], lastSeen };
+}
 sseEmitter.setMaxListeners(200);
 
 // ─── Replay buffer for reconnect recovery ──────────────────────────────────

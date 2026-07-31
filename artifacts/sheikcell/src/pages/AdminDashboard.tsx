@@ -13,6 +13,7 @@ import Questionarios from "./Questionarios";
 import Treinamentos from "./Treinamentos";
 import Planilhas from "./Planilhas";
 import Documentos from "./Documentos";
+import EquipeOnline from "@/components/EquipeOnline";
 import RH from "./RH";
 import Sorteios from "./Sorteios";
 import Robo from "./Robo";
@@ -793,6 +794,7 @@ export default function AdminDashboard() {
         {/* === USERS TAB === */}
         {tab === "users" && (
           <div className="space-y-4">
+            <EquipeOnline />
             <div className="flex items-center justify-between">
               <h2 className="font-bold">Usuários</h2>
               <button onClick={openAddUser} data-testid="button-add-user"

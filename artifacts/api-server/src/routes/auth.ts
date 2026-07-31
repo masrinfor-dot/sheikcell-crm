@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { db, usersTable, sectorsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { db, usersTable, sectorsTable, accessLogsTable } from "@workspace/db";
+import { eq, sql } from "drizzle-orm";
 import { requireAuth, isWithinAccessHours } from "../middlewares/auth";
 
 const router: IRouter = Router();
@@ -43,6 +43,18 @@ router.post("/auth/login", async (req, res): Promise<void> => {
       .where(eq(sectorsTable.id, user.sectorId));
     sector = s ?? null;
   }
+
+  // Registra o horário de acesso (histórico de logins). Uma falha aqui não
+  // deve impedir o login, mas fica visível no log do servidor.
+  try {
+    await db.insert(accessLogsTable).values({ userId: user.id });
+  } catch (err) {
+    console.error("[auth] falha ao registrar acesso:", err);
+  }
+  // Retenção: apaga registros com mais de 90 dias (1x por login, barato com índice).
+  db.delete(accessLogsTable)
+    .where(sql`${accessLogsTable.loggedInAt} < now() - interval '90 days'`)
+    .catch(() => {});
 
   req.session.userId = user.id;
   req.session.accessHours = user.role === "vendedor" ? (user.accessHours ?? null) : null;

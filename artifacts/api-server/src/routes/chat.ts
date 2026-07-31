@@ -11,6 +11,8 @@ import {
   sseEmitter,
   bufferedEventsSince,
   reconnectStrategy,
+  presenceConnect,
+  presenceDisconnect,
   type BufferedEvent,
 } from "../lib/sseEmitter";
 import { isPotentialConversation, isRestrictedConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES } from "../lib/conversationScope";
@@ -104,10 +106,15 @@ router.get("/chat/events", requireAuth, async (req: Request, res: Response): Pro
     res.write(": keepalive\n\n");
   }, 25_000);
 
+  presenceConnect(userId);
+  let closed = false; // garante teardown único (não descontar presença 2x)
   req.on("close", () => {
+    if (closed) return;
+    closed = true;
     clearInterval(heartbeat);
     clearInterval(permRefresh);
     sseEmitter.off("broadcast", send);
+    presenceDisconnect(userId);
   });
 });
 
