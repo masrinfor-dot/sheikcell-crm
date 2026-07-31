@@ -18,8 +18,11 @@ let running = false;
  * - kind "mensagem": grava a mensagem na conversa, avisa via SSE e encaminha ao
  *   bridge do WhatsApp (mesmo caminho do envio manual). Marca a tarefa espelho
  *   como concluída.
- * - kind "retorno": nada é enviado — a tarefa no quadro é o lembrete; aqui só
- *   marcamos o agendamento como "done" para sair da lista de pendentes.
+ * - kind "retorno": nada é enviado ao cliente — no horário, o vendedor
+ *   responsável recebe um aviso em tempo real (evento SSE "schedule_due") na
+ *   Central de Atendimento, e o agendamento vira "done" para sair dos pendentes.
+ * - envio agendado que falhar: além de marcar a mensagem como "failed", avisa o
+ *   autor via SSE ("schedule_failed") para que a falha não passe despercebida.
  * Nunca lança: falha em um agendamento não pode derrubar o servidor nem os demais.
  */
 export async function deliverScheduledMessages(): Promise<void> {
@@ -48,6 +51,21 @@ export async function deliverScheduledMessages(): Promise<void> {
         if (item.kind !== "mensagem") {
           await db.update(scheduledMessagesTable).set({ status: "done" })
             .where(eq(scheduledMessagesTable.id, item.id));
+          // Aviso em tempo real ao vendedor responsável: chegou a hora do
+          // retorno ao cliente. Direcionado ao autor do agendamento (admin e
+          // supervisor do setor também recebem, pela semântica de restrictedTo).
+          const [rConv] = await db.select().from(conversationsTable)
+            .where(eq(conversationsTable.id, item.conversationId)).limit(1);
+          if (rConv) {
+            broadcast("schedule_due", {
+              scheduledId: item.id,
+              kind: "retorno",
+              conversationId: rConv.id,
+              convName: rConv.name,
+              content: item.content,
+              sendAt: item.sendAt,
+            }, rConv.sectorId, false, item.createdById != null ? [item.createdById] : null);
+          }
           continue;
         }
 
@@ -104,6 +122,16 @@ export async function deliverScheduledMessages(): Promise<void> {
               broadcast("message_updated", { conversationId: conv.id, message: failedMsg }, conv.sectorId,
                 isPotentialConversation(conv), await restrictedRecipients(conv));
             }
+            // Aviso direcionado ao autor: o envio agendado falhou (ex.: WhatsApp
+            // despareado). Sem isso, a falha só apareceria abrindo a conversa.
+            broadcast("schedule_failed", {
+              scheduledId: item.id,
+              kind: "mensagem",
+              conversationId: conv.id,
+              convName: conv.name,
+              content: item.content,
+              sendAt: item.sendAt,
+            }, conv.sectorId, false, item.createdById != null ? [item.createdById] : null);
           }
         }
 

@@ -7,7 +7,7 @@ import {
   MessageCircle, CheckCheck, AlertCircle, Tag, Filter,
   Smartphone, Instagram, UserCircle2, Circle,
   ArrowRightLeft, FileText, Volume2, Image, Video, Mic, Users, Paperclip, IdCard,
-  Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX, Zap, CalendarClock
+  Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX, Zap, CalendarClock, AlertTriangle
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 
@@ -81,7 +81,10 @@ function isVisibleToMe(c: Conversation, user: User | null): boolean {
   return conversationCategory(c) === "potenciais";
 }
 
-// A received (inbound) message surfaced in the notification bell, in arrival order.
+// A notice surfaced in the notification bell, in arrival order:
+// - "message": mensagem recebida do cliente
+// - "retorno": chegou a hora do retorno ao cliente agendado
+// - "failed": uma mensagem agendada falhou no envio
 type MsgNotification = {
   id: string;
   conversationId: number;
@@ -89,6 +92,7 @@ type MsgNotification = {
   preview: string;
   createdAt: string;
   read: boolean;
+  kind?: "message" | "retorno" | "failed";
 };
 
 // Grupos e comunidades do WhatsApp: o campo "phone" guarda o JID do grupo.
@@ -651,6 +655,40 @@ export default function ChatCenter() {
         }
       } catch { /* silent */ }
     });
+    // Agendamentos: hora do retorno ao cliente ("schedule_due") e falha no envio
+    // de mensagem agendada ("schedule_failed"). Toast + sino + som/notificação
+    // nativa, sem depender de olhar o quadro de Tarefas.
+    const onSchedule = (e: MessageEvent, kind: "retorno" | "failed") => {
+      try {
+        const p = JSON.parse(e.data) as { scheduledId: number; conversationId: number; convName: string; content: string; sendAt: string };
+        const notif: MsgNotification = {
+          id: `sched-${kind}-${p.scheduledId}`,
+          conversationId: p.conversationId,
+          convName: p.convName || "Cliente",
+          preview: p.content,
+          createdAt: new Date().toISOString(),
+          read: false,
+          kind,
+        };
+        setNotifications((prev) => prev.some((n) => n.id === notif.id) ? prev : [notif, ...prev].slice(0, 100));
+        const title = kind === "retorno"
+          ? `📞 Hora do retorno — ${notif.convName}`
+          : `⚠️ Mensagem agendada falhou — ${notif.convName}`;
+        toast({
+          title,
+          description: `${p.content.slice(0, 120)} — toque para abrir a conversa`,
+          variant: kind === "failed" ? "destructive" : undefined,
+          onClick: () => { setActiveId(p.conversationId); setShowNotifications(false); },
+          className: "cursor-pointer",
+        });
+        if (soundEnabledRef.current) playAlertSound();
+        if (desktopEnabledRef.current) {
+          showDesktopNotification(title, p.content, p.conversationId);
+        }
+      } catch { /* silent */ }
+    };
+    es.addEventListener("schedule_due", (e) => onSchedule(e, "retorno"));
+    es.addEventListener("schedule_failed", (e) => onSchedule(e, "failed"));
     es.addEventListener("conversation_new", (e) => {
       try {
         const conv = JSON.parse(e.data) as Conversation;
@@ -1357,14 +1395,14 @@ export default function ChatCenter() {
               <button
                 onClick={() => setShowNotifications((v) => !v)}
                 data-testid="button-notifications"
-                title="Mensagens recebidas"
-                className={`relative p-1.5 rounded-lg hover:bg-secondary transition ${showNotifications ? "bg-secondary" : ""}`}
+                title="Notificações"
+                className={`relative p-2 md:p-1.5 rounded-lg hover:bg-secondary transition ${showNotifications ? "bg-secondary" : ""}`}
               >
-                <Bell className="w-4 h-4 text-muted-foreground" />
+                <Bell className={`w-5 h-5 md:w-4 md:h-4 ${unreadNotifications > 0 ? "text-primary" : "text-muted-foreground"}`} />
                 {unreadNotifications > 0 && (
                   <span
                     data-testid="badge-notifications"
-                    className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] leading-none rounded-full px-1 py-0.5 min-w-[16px] text-center font-bold"
+                    className="absolute -top-0.5 -right-0.5 bg-red-500 text-white text-[10px] leading-none rounded-full px-1 py-0.5 min-w-[17px] text-center font-bold ring-2 ring-white animate-in zoom-in duration-200"
                   >
                     {unreadNotifications > 99 ? "99+" : unreadNotifications}
                   </span>
@@ -1373,11 +1411,11 @@ export default function ChatCenter() {
               {showNotifications && (
                 <div
                   data-testid="panel-notifications"
-                  className="absolute right-0 top-9 z-30 w-80 max-w-[calc(100vw-2rem)] bg-white border border-border rounded-xl shadow-lg overflow-hidden"
+                  className="fixed inset-x-2 top-14 md:absolute md:inset-x-auto md:right-0 md:top-10 z-30 md:w-96 bg-white border border-border rounded-xl shadow-xl overflow-hidden"
                 >
                   <div className="border-b border-border bg-[#ededed]">
                     <div className="flex items-center justify-between px-3 py-2">
-                      <span className="text-sm font-bold text-foreground">Mensagens recebidas</span>
+                      <span className="text-sm font-bold text-foreground">Notificações</span>
                       <div className="flex items-center gap-1">
                         <button
                           onClick={() => setSoundEnabled((v) => !v)}
@@ -1409,25 +1447,39 @@ export default function ChatCenter() {
                       </div>
                     )}
                   </div>
-                  <div className="max-h-96 overflow-y-auto">
+                  <div className="max-h-[60vh] md:max-h-96 overflow-y-auto overscroll-contain">
                     {notifications.length === 0 ? (
-                      <p className="text-xs text-muted-foreground text-center py-8">Nenhuma mensagem recebida</p>
+                      <div className="flex flex-col items-center gap-2 py-10">
+                        <Bell className="w-8 h-8 text-muted-foreground/40" />
+                        <p className="text-xs text-muted-foreground">Nenhuma notificação por enquanto</p>
+                      </div>
                     ) : (
                       notifications.map((n) => (
                         <button
                           key={n.id}
                           onClick={() => openNotification(n)}
                           data-testid={`notification-item-${n.conversationId}`}
-                          className={`w-full flex gap-2 items-start px-3 py-2 text-left border-b border-border/50 hover:bg-secondary/60 transition ${n.read ? "opacity-60" : ""}`}
+                          className={`w-full flex gap-2.5 items-start px-3 py-2.5 text-left border-b border-border/50 hover:bg-secondary/60 active:bg-secondary transition ${n.read ? "opacity-60" : ""}`}
                         >
-                          <span className={`mt-1.5 w-2 h-2 rounded-full shrink-0 ${n.read ? "bg-transparent" : "bg-red-500"}`} />
+                          <span className={`mt-1 w-7 h-7 rounded-full shrink-0 flex items-center justify-center ${
+                            n.kind === "retorno" ? "bg-amber-100" : n.kind === "failed" ? "bg-red-100" : "bg-green-100"
+                          }`}>
+                            {n.kind === "retorno"
+                              ? <CalendarClock className="w-4 h-4 text-amber-600" />
+                              : n.kind === "failed"
+                                ? <AlertTriangle className="w-4 h-4 text-red-600" />
+                                : <MessageCircle className="w-4 h-4 text-green-600" />}
+                          </span>
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center justify-between gap-2">
-                              <span className="text-sm font-semibold text-foreground truncate">{n.convName}</span>
+                              <span className="text-sm font-semibold text-foreground truncate">
+                                {n.kind === "retorno" ? `Retorno: ${n.convName}` : n.kind === "failed" ? `Falha no envio: ${n.convName}` : n.convName}
+                              </span>
                               <span className="text-[11px] text-muted-foreground shrink-0">{msgTime(n.createdAt)}</span>
                             </div>
                             <p className="text-xs text-muted-foreground truncate">{n.preview || "Mensagem"}</p>
                           </div>
+                          {!n.read && <span className="mt-2 w-2 h-2 rounded-full shrink-0 bg-red-500" />}
                         </button>
                       ))
                     )}
