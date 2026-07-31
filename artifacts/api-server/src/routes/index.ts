@@ -24,9 +24,9 @@ import botRouter from "./bot";
 import financeRouter from "./finance";
 import documentsRouter from "./documents";
 import storesRouter from "./stores";
+import resultsRouter from "./results";
 
 const router: IRouter = Router();
-
 router.use(healthRouter);
 router.use(authRouter);
 // Trava o sistema (423) enquanto houver questionário/treinamento obrigatório pendente.
@@ -55,5 +55,6 @@ router.use(botRouter);
 router.use(financeRouter);
 router.use(documentsRouter);
 router.use(storesRouter);
+router.use(resultsRouter);
 
 export default router;

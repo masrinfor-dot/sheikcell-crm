@@ -30,8 +30,9 @@ import {
   PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, Table2, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck,
   FolderArchive,
 } from "lucide-react";
+import Resultados from "./Resultados";
 
-type Tab = "dashboard" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "questionarios" | "treinamentos" | "planilhas" | "documentos" | "rh" | "sorteios" | "robo" | "financeiro" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies";
+type Tab = "dashboard" | "resultados" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "questionarios" | "treinamentos" | "planilhas" | "documentos" | "rh" | "sorteios" | "robo" | "financeiro" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies";
 
 type WASession = {
   sessionKey: string;
@@ -317,6 +318,7 @@ export default function AdminDashboard() {
 
   const allTabs = [
     { id: "dashboard" as Tab, label: "Visão Geral", icon: LayoutDashboard, adminOnly: false },
+    { id: "resultados" as Tab, label: "Resultados", icon: TrendingUp, adminOnly: false },
     { id: "chat" as Tab, label: "Atendimento", icon: MessageCircle, adminOnly: false },
     { id: "equipe" as Tab, label: "Chat Interno", icon: MessagesSquare, adminOnly: false },
     { id: "tarefas" as Tab, label: "Tarefas", icon: ListTodo, adminOnly: false },
@@ -400,6 +402,9 @@ export default function AdminDashboard() {
         <div className="flex-1 min-w-0 pb-[calc(3.5rem+env(safe-area-inset-bottom))] md:pb-0">
           {/* O chat ocupa a largura toda; as demais abas ficam na coluna central */}
           <div className={tab === "chat" ? "max-w-full px-0 py-0 md:px-4 md:py-4" : "max-w-5xl mx-auto px-4 py-6"}>
+
+        {/* === RESULTADOS TAB === */}
+        {tab === "resultados" && <Resultados />}
 
         {/* === DASHBOARD TAB === */}
         {tab === "dashboard" && (

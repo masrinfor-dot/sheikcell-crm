@@ -26,3 +26,4 @@
 - [Restricted conversation visibility](restricted-conv-visibility.md) — conversas com responsável ou finalizadas só p/ assignee+participantes, admin e supervisor do MESMO setor; SSE usa restrictedTo + conversation_hidden
 - [Team presence & access logs](team-presence.md) — online = in-memory SSE refcount (single instance!); logins in access_logs, 90-day retention
 - [Scheduled messages](scheduled-messages.md) — agendamentos com tarefa espelho; scheduler reivindica pending→processing atomicamente; vendedor só agenda em conversa própria
+- [Per-seller metrics scoping](results-panel.md) — vendedor só vê os próprios números: forçar setor+attendant do solicitante em TODAS as métricas de qualquer endpoint de relatório; ranking é admin/supervisor-only

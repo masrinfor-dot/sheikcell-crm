@@ -24,11 +24,12 @@ import Planilhas from "./Planilhas";
 import Documentos from "./Documentos";
 import {
   Smartphone, LogOut, KeyRound, Clock, PhoneCall, CheckCircle,
-  ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, Shield, BadgeDollarSign, GraduationCap, Table2, Gift, Bot, UserSearch, ClipboardList,
+  ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, Shield, BadgeDollarSign, GraduationCap, Table2, Gift, Bot, UserSearch, ClipboardList, TrendingUp,
   FolderArchive,
 } from "lucide-react";
+import Resultados from "./Resultados";
 
-type MainTab = "queue" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "peliculas" | "avaliacao" | "treinamentos" | "planilhas" | "documentos" | "financeiro" | "sorteios" | "robo" | "rh" | "questionarios";
+type MainTab = "queue" | "resultados" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "peliculas" | "avaliacao" | "treinamentos" | "planilhas" | "documentos" | "financeiro" | "sorteios" | "robo" | "rh" | "questionarios";
 
 // Abas de admin que podem ser liberadas para vendedores no cadastro (adminAccess)
 const GRANTED_TABS: { id: MainTab; label: string; icon: typeof PhoneCall }[] = [
@@ -43,6 +44,7 @@ const MAIN_TABS = [
   { id: "queue" as MainTab, label: "Fila", icon: PhoneCall },
   { id: "chat" as MainTab, label: "Atendimento", icon: MessageCircle },
   { id: "tarefas" as MainTab, label: "Tarefas", icon: ListTodo },
+  { id: "resultados" as MainTab, label: "Resultados", icon: TrendingUp },
   { id: "crm" as MainTab, label: "CRM", icon: Kanban },
   { id: "financeiras" as MainTab, label: "Financeiras", icon: Landmark },
   { id: "peliculas" as MainTab, label: "Películas", icon: Shield },
@@ -246,6 +248,12 @@ export default function AttendantDashboard() {
       {mainTab === "tarefas" && (
         <div className="max-w-5xl mx-auto px-4 py-6">
           <TaskBoard />
+        </div>
+      )}
+
+      {mainTab === "resultados" && (
+        <div className="max-w-5xl mx-auto px-4 py-6">
+          <Resultados />
         </div>
       )}
 

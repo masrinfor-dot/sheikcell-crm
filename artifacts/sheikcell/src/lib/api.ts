@@ -136,6 +136,11 @@ export type FinanceSummary = {
   vendedores: FinanceVendedorRow[];
 };
 
+export type ResultsRankingRow = {
+  attendantId: number; name: string; ativo: boolean;
+  atendimentos: number; avgServiceSeconds: number;
+  vendas: number; totalVendido: number; conversao: number;
+};
 export type BotQuestion = { question: string; options?: string[] };
 
 export type BotSettings = {
@@ -648,6 +653,16 @@ export const api = {
       req<{ id: number; device: string; marketPrice: string; suggestedPrice: string; summary: string; createdAt: string }>(
         "/trade-in/evaluate", { method: "POST", body: JSON.stringify(data) }),
   },
+  results: {
+    summary: (params?: { from?: string; to?: string; sectorId?: number; attendantId?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.from) qs.set("from", params.from);
+      if (params?.to) qs.set("to", params.to);
+      if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      if (params?.attendantId) qs.set("attendantId", String(params.attendantId));
+      return req<ResultsSummary>(`/results/summary?${qs.toString()}`);
+    },
+  },
   finance: {
     summary: (days: number, sectorId?: number | null) =>
       req<FinanceSummary>(`/finance/summary?days=${days}${sectorId ? `&sectorId=${sectorId}` : ""}`),
@@ -786,4 +801,15 @@ export const api = {
         req<{ ok: boolean; transferredConversations: number }>(`/admin/users/${id}/deactivate`, { method: "POST", body: JSON.stringify({ transferToId }) }),
     },
   },
+};
+
+export type ResultsSummary = {
+  from: string; to: string; sectorId: number | null; attendantId: number | null;
+  totals: {
+    atendimentos: number; avgServiceSeconds: number; avgWaitSeconds: number;
+    vendas: number; totalVendido: number;
+    newLeads: number; recurringLeads: number; repurchaseClients: number;
+  };
+  ranking: ResultsRankingRow[];
+  leadsPorMes: { mes: string; novos: number }[];
 };
