@@ -413,6 +413,39 @@ router.post("/internal-chat/conversations/:id/messages", requireAuth, async (req
   res.json(message);
 });
 
+// ─── Excluir grupo ──────────────────────────────────────────────────────────
+// Só grupos podem ser excluídos (nunca a sala geral nem conversas diretas).
+// Quem pode: admin (qualquer grupo) ou supervisor que seja membro do grupo.
+router.delete("/internal-chat/conversations/:id", requireAuth, async (req, res): Promise<void> => {
+  const userId = req.session.userId!;
+  const userRole = req.session.userRole!;
+  const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
+  if (Number.isNaN(convId)) { res.status(400).json({ error: "Conversa inválida" }); return; }
+
+  const [conv] = await db.select().from(internalConversationsTable).where(eq(internalConversationsTable.id, convId)).limit(1);
+  if (!conv) { res.status(404).json({ error: "Grupo não encontrado" }); return; }
+  if (conv.kind !== "group") { res.status(400).json({ error: "Só grupos podem ser excluídos" }); return; }
+
+  if (userRole !== "admin") {
+    if (userRole !== "supervisor") { res.status(403).json({ error: "Só admin ou supervisor pode excluir grupos" }); return; }
+    const [member] = await db
+      .select({ userId: internalConversationMembersTable.userId })
+      .from(internalConversationMembersTable)
+      .where(and(
+        eq(internalConversationMembersTable.conversationId, convId),
+        eq(internalConversationMembersTable.userId, userId),
+      ))
+      .limit(1);
+    if (!member) { res.status(403).json({ error: "Você não participa desse grupo" }); return; }
+  }
+
+  // Avisa os membros ANTES de apagar (depois não dá mais para saber quem eram).
+  const recipients = await recipientsFor(conv);
+  await db.delete(internalConversationsTable).where(eq(internalConversationsTable.id, convId)); // cascade apaga membros e mensagens
+  broadcastInternal("internal_conversation_removed", { id: convId }, recipients);
+  res.json({ ok: true });
+});
+
 // ─── Mark a conversation as read ───────────────────────────────────────────
 router.post("/internal-chat/conversations/:id/read", requireAuth, async (req, res): Promise<void> => {
   const userId = req.session.userId!;

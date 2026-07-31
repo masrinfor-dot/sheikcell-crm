@@ -573,6 +573,7 @@ export const api = {
     send: (id: number, content: string) =>
       req<InternalMessage>(`/internal-chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
     markRead: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}/read`, { method: "POST" }),
+    deleteGroup: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}`, { method: "DELETE" }),
   },
   routing: {
     rules: () => req<RoutingRule[]>("/routing/rules"),

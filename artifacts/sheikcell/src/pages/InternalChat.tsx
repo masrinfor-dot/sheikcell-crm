@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
 import { api, can, type InternalConversation, type InternalMessage } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
-import { Users, Send, Plus, X, Search, MessagesSquare, ChevronLeft, SquareKanban, ClipboardPlus } from "lucide-react";
+import { Users, Send, Plus, X, Search, MessagesSquare, ChevronLeft, SquareKanban, ClipboardPlus, Trash2 } from "lucide-react";
 import TaskBoard from "./TaskBoard";
 
 const roleLabel: Record<string, string> = {
@@ -183,6 +183,12 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
     es.addEventListener("internal_conversation_new", (e) => {
       const conv = JSON.parse((e as MessageEvent).data) as InternalConversation;
       setConversations((prev) => (prev.some((c) => c.id === conv.id) ? prev : [...prev, conv]));
+    });
+    // Grupo excluído por um admin/supervisor: some da lista de todos na hora.
+    es.addEventListener("internal_conversation_removed", (e) => {
+      const { id } = JSON.parse((e as MessageEvent).data) as { id: number };
+      setConversations((prev) => prev.filter((c) => c.id !== id));
+      setActiveId((cur) => (cur === id ? null : cur));
     });
     es.addEventListener("resync", () => {
       reconcileAfterReconnect();
@@ -374,6 +380,25 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
                       : (active.otherUser ? roleLabel[active.otherUser.role] ?? active.otherUser.role : "")}
                   </div>
                 </div>
+                {active.kind === "group" && (user?.role === "admin" || user?.role === "supervisor") && (
+                  <button
+                    onClick={async () => {
+                      if (!confirm(`Excluir o grupo "${active.name}"? Todas as mensagens dele serão apagadas para todos.`)) return;
+                      try {
+                        await api.internalChat.deleteGroup(active.id);
+                        setConversations((prev) => prev.filter((c) => c.id !== active.id));
+                        setActiveId(null);
+                      } catch (err) {
+                        alert(err instanceof Error ? err.message : "Erro ao excluir grupo");
+                      }
+                    }}
+                    data-testid="button-delete-group"
+                    title="Excluir grupo"
+                    className="ml-auto p-2 rounded-lg text-red-600 hover:bg-red-50 transition shrink-0"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
               </header>
 
               <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3 bg-muted/10">
