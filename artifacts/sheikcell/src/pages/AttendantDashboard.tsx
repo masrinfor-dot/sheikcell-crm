@@ -21,12 +21,14 @@ import Questionarios from "./Questionarios";
 import TrainingGate from "@/components/TrainingGate";
 import Treinamentos from "./Treinamentos";
 import Planilhas from "./Planilhas";
+import Documentos from "./Documentos";
 import {
   Smartphone, LogOut, KeyRound, Clock, PhoneCall, CheckCircle,
-  ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, Shield, BadgeDollarSign, GraduationCap, Table2, Gift, Bot, UserSearch, ClipboardList
+  ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, Shield, BadgeDollarSign, GraduationCap, Table2, Gift, Bot, UserSearch, ClipboardList,
+  FolderArchive,
 } from "lucide-react";
 
-type MainTab = "queue" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "peliculas" | "avaliacao" | "treinamentos" | "planilhas" | "financeiro" | "sorteios" | "robo" | "rh" | "questionarios";
+type MainTab = "queue" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "peliculas" | "avaliacao" | "treinamentos" | "planilhas" | "documentos" | "financeiro" | "sorteios" | "robo" | "rh" | "questionarios";
 
 // Abas de admin que podem ser liberadas para vendedores no cadastro (adminAccess)
 const GRANTED_TABS: { id: MainTab; label: string; icon: typeof PhoneCall }[] = [
@@ -47,6 +49,7 @@ const MAIN_TABS = [
   { id: "avaliacao" as MainTab, label: "Avaliação", icon: BadgeDollarSign },
   { id: "treinamentos" as MainTab, label: "Treinamentos", icon: GraduationCap },
   { id: "planilhas" as MainTab, label: "Planilhas", icon: Table2 },
+  { id: "documentos" as MainTab, label: "Documentos", icon: FolderArchive },
 ] as const;
 
 function formatWait(createdAt: string): string {
@@ -274,6 +277,8 @@ export default function AttendantDashboard() {
           <Planilhas />
         </div>
       )}
+
+      {mainTab === "documentos" && <Documentos />}
 
       {mainTab === "avaliacao" && (
         <div className="max-w-3xl mx-auto px-4 py-6">

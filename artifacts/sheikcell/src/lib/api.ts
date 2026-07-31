@@ -84,6 +84,19 @@ export type InternalConversation = {
   unreadCount: number;
 };
 
+export type DocumentItem = {
+  id: number;
+  title: string;
+  category: string; // ata | documento | comunicado | contrato
+  description: string | null;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  createdAt: string;
+  uploadedBy: number | null;
+  uploaderName: string | null;
+};
+
 export type InternalMessage = {
   id: number;
   conversationId: number;
@@ -712,6 +725,13 @@ export const api = {
     removeSubtask: (id: number, subId: number) =>
       req<{ ok: boolean }>(`/tasks/${id}/subtasks/${subId}`, { method: "DELETE" }),
     remove: (id: number) => req<{ ok: boolean }>(`/tasks/${id}`, { method: "DELETE" }),
+  },
+  documents: {
+    list: () => req<DocumentItem[]>("/documents"),
+    create: (data: { title: string; category: string; description?: string; fileName: string; mimeType: string; data: string }) =>
+      req<DocumentItem>("/documents", { method: "POST", body: JSON.stringify(data) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/documents/${id}`, { method: "DELETE" }),
+    fileUrl: (id: number) => `/api/documents/${id}/file`,
   },
   admin: {
     summary: () => req<SectorSummary[]>("/admin/summary"),

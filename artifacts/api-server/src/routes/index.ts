@@ -22,6 +22,7 @@ import rhRouter from "./rh";
 import rafflesRouter from "./raffles";
 import botRouter from "./bot";
 import financeRouter from "./finance";
+import documentsRouter from "./documents";
 
 const router: IRouter = Router();
 
@@ -51,5 +52,6 @@ router.use(rhRouter);
 router.use(rafflesRouter);
 router.use(botRouter);
 router.use(financeRouter);
+router.use(documentsRouter);
 
 export default router;

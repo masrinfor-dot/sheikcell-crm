@@ -12,6 +12,7 @@ import Avaliacao from "./Avaliacao";
 import Questionarios from "./Questionarios";
 import Treinamentos from "./Treinamentos";
 import Planilhas from "./Planilhas";
+import Documentos from "./Documentos";
 import RH from "./RH";
 import Sorteios from "./Sorteios";
 import Robo from "./Robo";
@@ -25,10 +26,11 @@ import TaskBoard from "./TaskBoard";
 import {
   Smartphone, LogOut, LayoutDashboard, ClipboardList,
   Settings, Users, RefreshCw, Plus, X, Clock, CheckCircle,
-  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, Table2, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck
+  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, Table2, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck,
+  FolderArchive,
 } from "lucide-react";
 
-type Tab = "dashboard" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "questionarios" | "treinamentos" | "planilhas" | "rh" | "sorteios" | "robo" | "financeiro" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies";
+type Tab = "dashboard" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "questionarios" | "treinamentos" | "planilhas" | "documentos" | "rh" | "sorteios" | "robo" | "financeiro" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies";
 
 type WASession = {
   sessionKey: string;
@@ -323,6 +325,7 @@ export default function AdminDashboard() {
     { id: "questionarios" as Tab, label: "Questionários", icon: ClipboardList, adminOnly: true },
     { id: "treinamentos" as Tab, label: "Treinamentos", icon: GraduationCap, adminOnly: false },
     { id: "planilhas" as Tab, label: "Planilhas", icon: Table2, adminOnly: false },
+    { id: "documentos" as Tab, label: "Documentos", icon: FolderArchive, adminOnly: false },
     { id: "rh" as Tab, label: "RH", icon: UserSearch, adminOnly: true },
     { id: "sorteios" as Tab, label: "Sorteios", icon: Gift, adminOnly: true },
     { id: "robo" as Tab, label: "Robô", icon: Bot, adminOnly: true },
@@ -479,6 +482,7 @@ export default function AdminDashboard() {
         {tab === "treinamentos" && <Treinamentos />}
 
         {tab === "planilhas" && <Planilhas />}
+        {tab === "documentos" && <Documentos />}
 
         {tab === "rh" && <RH />}
 
