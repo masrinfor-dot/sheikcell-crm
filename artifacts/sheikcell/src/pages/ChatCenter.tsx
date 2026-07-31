@@ -7,7 +7,8 @@ import {
   MessageCircle, CheckCheck, AlertCircle, Tag, Filter,
   Smartphone, Instagram, UserCircle2, Circle,
   ArrowRightLeft, FileText, Volume2, Image, Video, Mic, Users, Paperclip, IdCard,
-  Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX, Zap, CalendarClock, AlertTriangle
+  Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX, Zap, CalendarClock, AlertTriangle,
+  Pin, PinOff
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 
@@ -169,7 +170,10 @@ function ConvItem({ conv, active, onClick, sessionBadge, overdue }: { conv: Conv
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-1 mb-0.5">
-          <span className="font-semibold text-sm text-foreground truncate">{conv.name}</span>
+          <span className="font-semibold text-sm text-foreground truncate flex items-center gap-1">
+            {conv.pinned && <Pin className="w-3 h-3 text-primary shrink-0 rotate-45" data-testid={`pin-indicator-${conv.id}`} />}
+            {conv.name}
+          </span>
           <span className="text-xs text-muted-foreground shrink-0">{timeAgo(conv.lastMessageAt)}</span>
         </div>
         <div className="flex items-center justify-between gap-1">
@@ -1014,6 +1018,19 @@ export default function ChatCenter() {
   };
 
   // ── Pendente → Ativo (iniciar atendimento: assume a conversa) ──
+  // Fixar/desafixar conversa (só para o próprio usuário) com atualização otimista.
+  const handleTogglePin = async (conv: Conversation) => {
+    const next = !conv.pinned;
+    setConvs((prev) => prev.map((c) => (c.id === conv.id ? { ...c, pinned: next } : c)));
+    try {
+      if (next) await api.chat.pinConversation(conv.id);
+      else await api.chat.unpinConversation(conv.id);
+    } catch {
+      setConvs((prev) => prev.map((c) => (c.id === conv.id ? { ...c, pinned: !next } : c)));
+      toast({ title: "Não foi possível alterar a fixação", variant: "destructive" });
+    }
+  };
+
   const handleClaim = async (id: number) => {
     try {
       const updated = await api.chat.claimConversation(id);
@@ -1377,7 +1394,10 @@ export default function ChatCenter() {
     counts[conversationCategory(c)]++;
   }
 
-  const filteredConvs = visibleConvs.filter((c) => conversationCategory(c) === category);
+  // Fixadas primeiro; dentro de cada grupo mantém a ordem por última mensagem.
+  const filteredConvs = visibleConvs
+    .filter((c) => conversationCategory(c) === category)
+    .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned));
   const activeCategory = activeConv ? conversationCategory(activeConv) : null;
 
   const currentLabels = activeConv?.labels ? activeConv.labels.split(",").map((l) => l.trim()).filter(Boolean) : [];
@@ -1725,6 +1745,15 @@ export default function ChatCenter() {
               </div>
             </div>
             <div className="flex items-center gap-1 shrink-0">
+              {/* Fixar/desafixar conversa no topo da lista (só para você) */}
+              <button
+                onClick={() => handleTogglePin(activeConv)}
+                data-testid="button-pin-conv"
+                className={`p-2 rounded-lg border transition ${activeConv.pinned ? "text-primary bg-primary/10 border-primary/30 hover:bg-primary/20" : "text-muted-foreground bg-white border-border hover:bg-secondary"}`}
+                title={activeConv.pinned ? "Desafixar conversa" : "Fixar conversa no topo"}
+              >
+                {activeConv.pinned ? <PinOff className="w-3.5 h-3.5" /> : <Pin className="w-3.5 h-3.5" />}
+              </button>
               {/* Excluir atendimento — só admin e só em Potenciais */}
               {user?.role === "admin" && activeCategory === "potenciais" && (
                 <button

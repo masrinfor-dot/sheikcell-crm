@@ -369,6 +369,7 @@ export type Conversation = {
   assignee: { id: number; name: string } | null;
   participants: { id: number; name: string }[];
   crmProfile?: string | null;
+  pinned?: boolean;
 };
 
 export type ScheduledMessage = {
@@ -469,6 +470,8 @@ export const api = {
       if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
       return req<Conversation[]>(`/chat/conversations?${qs.toString()}`);
     },
+    pinConversation: (id: number) => req<{ ok: boolean }>(`/chat/conversations/${id}/pin`, { method: "POST" }),
+    unpinConversation: (id: number) => req<{ ok: boolean }>(`/chat/conversations/${id}/pin`, { method: "DELETE" }),
     messages: (id: number) => req<ChatMessage[]>(`/chat/conversations/${id}/messages`),
     sendMessage: (id: number, content: string) =>
       req<ChatMessage>(`/chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),

@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
-import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, crmPurchasesTable } from "@workspace/db";
+import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, crmPurchasesTable } from "@workspace/db";
 import { eq, desc, and, or, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireAdminOrSupervisor } from "../middlewares/auth";
 import { checkPerm, requirePerm } from "../lib/permissions";
@@ -278,6 +278,15 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
     if (!(r.phone in crmProfileMap)) crmProfileMap[r.phone] = r.profile;
   }
 
+  // Conversas fixadas pelo usuário logado (fixar é individual).
+  const myPins = convIds.length > 0
+    ? await db
+        .select({ conversationId: conversationPinsTable.conversationId })
+        .from(conversationPinsTable)
+        .where(and(eq(conversationPinsTable.userId, req.session.userId!), inArray(conversationPinsTable.conversationId, convIds)))
+    : [];
+  const pinnedSet = new Set(myPins.map((p) => p.conversationId));
+
   const enriched = rows.map((c) => {
     const np = (c.phone ?? "").replace(/\D/g, "");
     return {
@@ -286,6 +295,7 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
       assignee: c.assigneeId ? (userMap[c.assigneeId] ?? null) : null,
       participants: participantsMap[c.id] ?? [],
       crmProfile: crmProfileMap[`${np}|${c.sectorId ?? ""}`] ?? crmProfileMap[np] ?? null,
+      pinned: pinnedSet.has(c.id),
     };
   });
 
@@ -299,6 +309,28 @@ router.get("/chat/conversations/:id", requireAuth, async (req, res): Promise<voi
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
   res.json(await enrichConversation(conv));
+});
+
+// ─── Fixar / desafixar conversa (por usuário) ──────────────────────────────
+router.post("/chat/conversations/:id/pin", requireAuth, async (req, res): Promise<void> => {
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id));
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+  await db.insert(conversationPinsTable)
+    .values({ conversationId: id, userId: req.session.userId! })
+    .onConflictDoNothing();
+  res.json({ ok: true, pinned: true });
+});
+
+router.delete("/chat/conversations/:id/pin", requireAuth, async (req, res): Promise<void> => {
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id));
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+  await db.delete(conversationPinsTable)
+    .where(and(eq(conversationPinsTable.conversationId, id), eq(conversationPinsTable.userId, req.session.userId!)));
+  res.json({ ok: true, pinned: false });
 });
 
 // ─── Get messages ──────────────────────────────────────────────────────────

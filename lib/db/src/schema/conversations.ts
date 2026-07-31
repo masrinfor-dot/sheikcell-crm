@@ -37,6 +37,17 @@ export const conversationParticipantsTable = pgTable(
   (t) => [primaryKey({ columns: [t.conversationId, t.userId] })],
 );
 
+// Conversas fixadas — por usuário: cada um fixa as suas, sem afetar os colegas.
+export const conversationPinsTable = pgTable(
+  "conversation_pins",
+  {
+    conversationId: integer("conversation_id").notNull().references(() => conversationsTable.id, { onDelete: "cascade" }),
+    userId: integer("user_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }),
+    pinnedAt: timestamp("pinned_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.conversationId, t.userId] })],
+);
+
 export const messagesTable = pgTable(
   "messages",
   {
