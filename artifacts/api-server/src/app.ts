@@ -76,6 +76,26 @@ app.use(
   })
 );
 
+// Sessões criadas ANTES do multi-loja não têm tenantId gravado — sem isso o
+// fail-closed esconde todos os dados ("Sessão sem loja"). Aqui a sessão antiga
+// se corrige sozinha: busca a loja do usuário no banco uma única vez e grava.
+app.use("/api", async (req, _res, next) => {
+  const s = req.session;
+  if (s?.userId && typeof s.tenantId !== "number" && s.userRole !== "superadmin") {
+    try {
+      const { db, usersTable } = await import("@workspace/db");
+      const { eq } = await import("drizzle-orm");
+      const [u] = await db.select({ tenantId: usersTable.tenantId, role: usersTable.role })
+        .from(usersTable).where(eq(usersTable.id, s.userId));
+      if (u && u.role !== "superadmin" && typeof u.tenantId === "number") {
+        s.tenantId = u.tenantId;
+        s.userRole = u.role;
+      }
+    } catch { /* segue fail-closed; o login normal ainda resolve */ }
+  }
+  next();
+});
+
 app.use("/api", router);
 
 export default app;
