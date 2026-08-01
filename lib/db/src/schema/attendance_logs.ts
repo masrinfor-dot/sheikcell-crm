@@ -17,6 +17,8 @@ export const attendanceLogsTable = pgTable("attendance_logs", {
   // Resultado comercial informado ao finalizar: teve venda? de quanto?
   hadSale: boolean("had_sale"),
   saleAmount: numeric("sale_amount"),
+  // Pesquisa de satisfação: nota 1–5 dada pelo cliente após finalizar (WhatsApp)
+  satisfactionRating: integer("satisfaction_rating"),
   notes: text("notes"),
   waitTimeSeconds: integer("wait_time_seconds"),
   serviceTimeSeconds: integer("service_time_seconds"),

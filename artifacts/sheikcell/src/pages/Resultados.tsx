@@ -3,7 +3,7 @@ import { useAuth } from "@/lib/auth";
 import { api, type ResultsSummary, type Sector } from "@/lib/api";
 import {
   Trophy, Clock, Timer, Users, UserPlus, Repeat, ShoppingBag,
-  TrendingUp, RefreshCw, BadgeDollarSign,
+  TrendingUp, RefreshCw, BadgeDollarSign, Star,
 } from "lucide-react";
 
 // Períodos pré-definidos do filtro
@@ -104,6 +104,7 @@ export default function Resultados() {
     { label: "Novos leads", value: t ? String(t.newLeads) : "—", icon: UserPlus, color: "text-cyan-600", bg: "bg-cyan-50" },
     { label: "Leads recorrentes (voltaram)", value: t ? String(t.recurringLeads) : "—", icon: Repeat, color: "text-purple-600", bg: "bg-purple-50" },
     { label: "Clientes com recompra", value: t ? String(t.repurchaseClients) : "—", icon: ShoppingBag, color: "text-rose-600", bg: "bg-rose-50" },
+    { label: "Satisfação (nota média)", value: t ? (t.ratings > 0 ? `${t.avgRating.toFixed(1)} ⭐ · ${t.ratings} aval.` : "Sem avaliações") : "—", icon: Star, color: "text-yellow-600", bg: "bg-yellow-50" },
   ];
 
   return (
@@ -173,6 +174,7 @@ export default function Resultados() {
                     <th className="text-right py-2 pr-2 font-semibold">Atend.</th>
                     <th className="text-right py-2 pr-2 font-semibold">Tempo médio</th>
                     <th className="text-right py-2 pr-2 font-semibold">Vendas</th>
+                    <th className="text-right py-2 pr-2 font-semibold">Nota</th>
                     <th className="text-right py-2 font-semibold">Total</th>
                   </tr>
                 </thead>
@@ -186,11 +188,36 @@ export default function Resultados() {
                       <td className="py-2 pr-2 text-right font-bold">{r.atendimentos}</td>
                       <td className="py-2 pr-2 text-right">{fmtDuration(r.avgServiceSeconds)}</td>
                       <td className="py-2 pr-2 text-right">{r.vendas} <span className="text-muted-foreground">({r.conversao}%)</span></td>
+                      <td className="py-2 pr-2 text-right">{r.ratings > 0 ? `${r.avgRating.toFixed(1)} ⭐` : "—"}</td>
                       <td className="py-2 text-right font-semibold text-green-700">{fmtMoney(r.totalVendido)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+        </div>
+
+        {/* Satisfação por setor */}
+        <div className="shk-card p-5">
+          <div className="flex items-center gap-2 mb-3">
+            <Star className="w-4 h-4 text-yellow-500" />
+            <h3 className="font-bold text-sm text-foreground">Satisfação por setor</h3>
+          </div>
+          {!data || !data.satisfacaoPorSetor?.length ? (
+            <p className="text-xs text-muted-foreground py-4 text-center">Nenhuma avaliação no período.</p>
+          ) : (
+            <div className="space-y-2">
+              {data.satisfacaoPorSetor.map((s) => (
+                <div key={s.sectorId} className="flex items-center gap-2" data-testid={`satisfaction-sector-${s.sectorId}`}>
+                  <span className="text-[11px] text-muted-foreground w-28 shrink-0 truncate">{s.sectorName}</span>
+                  <div className="flex-1 h-5 bg-secondary rounded-lg overflow-hidden">
+                    <div className="h-full bg-yellow-400/80 rounded-lg transition-all"
+                      style={{ width: `${Math.max(4, Math.round((s.avgRating / 5) * 100))}%` }} />
+                  </div>
+                  <span className="text-xs font-bold text-foreground w-20 text-right">{s.avgRating.toFixed(1)} ⭐ <span className="text-muted-foreground font-normal">({s.ratings})</span></span>
+                </div>
+              ))}
             </div>
           )}
         </div>

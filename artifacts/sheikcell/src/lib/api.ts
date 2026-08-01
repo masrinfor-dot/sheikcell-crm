@@ -140,6 +140,7 @@ export type ResultsRankingRow = {
   attendantId: number; name: string; ativo: boolean;
   atendimentos: number; avgServiceSeconds: number;
   vendas: number; totalVendido: number; conversao: number;
+  avgRating: number; ratings: number;
 };
 export type BotQuestion = { question: string; options?: string[] };
 
@@ -809,7 +810,9 @@ export type ResultsSummary = {
     atendimentos: number; avgServiceSeconds: number; avgWaitSeconds: number;
     vendas: number; totalVendido: number;
     newLeads: number; recurringLeads: number; repurchaseClients: number;
+    avgRating: number; ratings: number;
   };
   ranking: ResultsRankingRow[];
   leadsPorMes: { mes: string; novos: number }[];
+  satisfacaoPorSetor: { sectorId: number; sectorName: string; avgRating: number; ratings: number }[];
 };

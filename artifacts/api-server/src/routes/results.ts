@@ -55,6 +55,8 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
     avgWaitSeconds: sql<number>`coalesce(round(avg(${attendanceLogsTable.waitTimeSeconds}) filter (where ${attendanceLogsTable.waitTimeSeconds} is not null)), 0)::int`,
     vendas: sql<number>`count(*) filter (where ${attendanceLogsTable.hadSale})::int`,
     totalVendido: sql<string>`coalesce(sum(${attendanceLogsTable.saleAmount}) filter (where ${attendanceLogsTable.hadSale}), 0)::text`,
+    avgRating: sql<string>`coalesce(round(avg(${attendanceLogsTable.satisfactionRating}) filter (where ${attendanceLogsTable.satisfactionRating} is not null), 1), 0)::text`,
+    ratings: sql<number>`count(*) filter (where ${attendanceLogsTable.satisfactionRating} is not null)::int`,
   }).from(attendanceLogsTable).where(logWhere);
 
   // ── Ranking dos vendedores no período ──
@@ -64,6 +66,8 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
     avgServiceSeconds: sql<number>`coalesce(round(avg(${attendanceLogsTable.serviceTimeSeconds}) filter (where ${attendanceLogsTable.serviceTimeSeconds} is not null)), 0)::int`,
     vendas: sql<number>`count(*) filter (where ${attendanceLogsTable.hadSale})::int`,
     totalVendido: sql<string>`coalesce(sum(${attendanceLogsTable.saleAmount}) filter (where ${attendanceLogsTable.hadSale}), 0)::text`,
+    avgRating: sql<string>`coalesce(round(avg(${attendanceLogsTable.satisfactionRating}) filter (where ${attendanceLogsTable.satisfactionRating} is not null), 1), 0)::text`,
+    ratings: sql<number>`count(*) filter (where ${attendanceLogsTable.satisfactionRating} is not null)::int`,
   }).from(attendanceLogsTable)
     .where(and(logWhere, isNotNull(attendanceLogsTable.attendantId))!)
     .groupBy(attendanceLogsTable.attendantId);
@@ -86,8 +90,22 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
       vendas: r.vendas,
       totalVendido: Number(r.totalVendido),
       conversao: r.atendimentos > 0 ? Math.round((r.vendas / r.atendimentos) * 100) : 0,
+      avgRating: Number(r.avgRating),
+      ratings: r.ratings,
     };
   }).sort((a, b) => b.atendimentos - a.atendimentos || b.totalVendido - a.totalVendido);
+
+  // ── Satisfação por setor (pesquisa pós-atendimento, nota 1–5) ──
+  const satisfacaoPorSetor = (await db.select({
+    sectorId: attendanceLogsTable.sectorId,
+    sectorName: sql<string>`max(${attendanceLogsTable.sectorName})`,
+    avgRating: sql<string>`round(avg(${attendanceLogsTable.satisfactionRating}), 1)::text`,
+    ratings: sql<number>`count(*)::int`,
+  }).from(attendanceLogsTable)
+    .where(and(logWhere, isNotNull(attendanceLogsTable.satisfactionRating))!)
+    .groupBy(attendanceLogsTable.sectorId))
+    .map((s) => ({ sectorId: s.sectorId, sectorName: s.sectorName, avgRating: Number(s.avgRating), ratings: s.ratings }))
+    .sort((a, b) => b.avgRating - a.avgRating);
 
   // ── Leads: novos (conversas criadas no período) e recorrentes (cliente que
   // voltou: telefone com atendimento no período E atendimento anterior ao período).
@@ -158,9 +176,12 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
       newLeads,
       recurringLeads,
       repurchaseClients,
+      avgRating: Number(totals?.avgRating ?? 0),
+      ratings: Number(totals?.ratings ?? 0),
     },
     ranking,
     leadsPorMes,
+    satisfacaoPorSetor,
   });
 });
 

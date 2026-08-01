@@ -1,4 +1,4 @@
-import { db, conversationsTable, messagesTable, sectorsTable } from "@workspace/db";
+import { db, conversationsTable, messagesTable, sectorsTable, attendanceLogsTable } from "@workspace/db";
 import { eq, and, desc, sql } from "drizzle-orm";
 import { broadcast } from "./sseEmitter";
 import { isPotentialConversation, restrictedRecipients } from "./conversationScope";
@@ -247,6 +247,115 @@ async function upsertConversation(
   return conv;
 }
 
+// ── Pesquisa de satisfação: primeira resposta após a pesquisa ────────────────
+// Se a conversa está aguardando a nota (pendingSurveyLogId), a PRIMEIRA
+// mensagem do cliente consome a pesquisa: nota 1–5 (texto, até 48h) é gravada
+// no attendance_log e a conversa NÃO reabre; qualquer outra resposta apenas
+// encerra a espera e retorna false para seguir o fluxo normal (reabertura,
+// robô etc.). Compartilhado pelos dois caminhos de entrada (Baileys e Meta).
+// Retorna true quando a mensagem foi totalmente tratada aqui.
+async function tryConsumeSurveyReply(input: {
+  phone: string;
+  sessionKey: string;
+  text: string;
+  msgType: string;
+  displayContent: string;
+  pushName: string;
+  externalId: string | null;
+}): Promise<boolean> {
+  const { phone, sessionKey, text, msgType, displayContent, pushName, externalId } = input;
+
+  const outcome = await db.transaction(async (tx) => {
+    // Trava a conversa: webhooks concorrentes/reentregues serializam aqui, e
+    // só o primeiro encontra a pesquisa pendente (consumo atômico).
+    const [conv] = await tx
+      .select()
+      .from(conversationsTable)
+      .where(and(
+        eq(conversationsTable.phone, phone),
+        eq(conversationsTable.sessionKey, sessionKey),
+        eq(conversationsTable.isArchived, false),
+      ))
+      .orderBy(desc(conversationsTable.lastMessageAt))
+      .limit(1)
+      .for("update");
+    if (!conv) return null;
+
+    // Perdeu a corrida para uma reentrega da MESMA mensagem que já foi
+    // consumida como avaliação: trata como duplicada (não reabre nada).
+    if (conv.pendingSurveyLogId == null) {
+      if (externalId) {
+        const [dup] = await tx.select({ id: messagesTable.id }).from(messagesTable)
+          .where(and(eq(messagesTable.externalId, externalId), eq(messagesTable.direction, "inbound")))
+          .limit(1);
+        if (dup) return { conv, rating: null as number | null, msg: null, duplicate: true };
+      }
+      return null;
+    }
+
+    const surveyLogId = conv.pendingSurveyLogId;
+    const ratingMatch = /^\s*([1-5])\s*(?:⭐|estrelas?)?\s*$/iu.exec(text ?? "");
+    const sentAt = conv.surveySentAt?.getTime() ?? 0;
+    const fresh = Date.now() - sentAt <= 48 * 3_600_000;
+
+    // Em qualquer resposta, a pesquisa deixa de esperar (evita que um "5"
+    // solto dias depois vire avaliação).
+    await tx.update(conversationsTable)
+      .set({ pendingSurveyLogId: null, surveySentAt: null })
+      .where(eq(conversationsTable.id, conv.id));
+
+    if (!(msgType === "text" && ratingMatch && fresh)) return null;
+
+    const rating = parseInt(ratingMatch[1], 10);
+    await tx.update(attendanceLogsTable)
+      .set({ satisfactionRating: rating })
+      .where(eq(attendanceLogsTable.id, surveyLogId));
+
+    // Grava a resposta como mensagem da conversa (sem reabrir o atendimento).
+    // Conflito de externalId = reentrega duplicada: mantém a nota, sem
+    // broadcast/agradecimento repetidos.
+    const [msg] = await tx.insert(messagesTable).values({
+      conversationId: conv.id,
+      content: displayContent,
+      direction: "inbound",
+      type: "text",
+      status: "delivered",
+      senderName: pushName,
+      externalId,
+    }).onConflictDoNothing().returning();
+    if (msg) {
+      await tx.update(conversationsTable).set({
+        lastMessage: displayContent,
+        lastMessageDirection: "inbound",
+        lastMessageAt: new Date(),
+        updatedAt: new Date(),
+      }).where(eq(conversationsTable.id, conv.id));
+    }
+    return { conv, rating, msg: msg ?? null, duplicate: false };
+  });
+
+  if (!outcome) return false;
+  if (outcome.duplicate || outcome.rating == null) return true;
+
+  if (outcome.msg) {
+    broadcast(
+      "message",
+      { conversationId: outcome.conv.id, message: outcome.msg },
+      outcome.conv.sectorId,
+      isPotentialConversation(outcome.conv),
+      await restrictedRecipients(outcome.conv),
+    );
+    // Agradece pelo mesmo caminho anti-ban do bridge (melhor esforço).
+    const { sendOutboundText } = await import("./outbound");
+    void sendOutboundText(
+      outcome.conv.id,
+      `Obrigado pela sua avaliação! Nota ${outcome.rating} registrada. 🙏`,
+      "Pesquisa de satisfação",
+    ).catch(() => {});
+  }
+  return true;
+}
+
 export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   const fromMe = body.data?.key?.fromMe ?? body.fromMe ?? false;
   if (fromMe) return;
@@ -362,6 +471,15 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     typeof body.sessionKey === "string" && /^[a-z0-9][a-z0-9_-]{0,39}$/.test(body.sessionKey)
       ? body.sessionKey
       : "default";
+  // Pesquisa de satisfação: se a resposta consumiu a pesquisa, não reabre a
+  // conversa nem aciona o robô.
+  if (!isGroup) {
+    const handled = await tryConsumeSurveyReply({
+      phone, sessionKey, text, msgType, displayContent, pushName, externalId,
+    });
+    if (handled) return;
+  }
+
   // Só sincroniza o nome quando o subject real do grupo veio na mensagem —
   // nunca sobrescreve um nome existente com o rótulo genérico.
   const conv = await upsertConversation(
@@ -472,6 +590,19 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
            msgType === "video" ? "🎥 Vídeo" :
            msgType === "audio" ? "🎵 Áudio" :
            msgType === "doc" ? "📄 Documento" : "(mídia)");
+
+        // Pesquisa de satisfação: mesma regra do caminho Baileys — se a
+        // resposta consumiu a pesquisa, não reabre a conversa nem aciona o robô.
+        const surveyHandled = await tryConsumeSurveyReply({
+          phone,
+          sessionKey: "default",
+          text,
+          msgType,
+          displayContent,
+          pushName,
+          externalId: externalId ?? null,
+        });
+        if (surveyHandled) continue;
 
         const conv = await upsertConversation(phone, pushName, displayContent);
 

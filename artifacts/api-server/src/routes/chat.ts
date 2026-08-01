@@ -17,6 +17,7 @@ import {
 } from "../lib/sseEmitter";
 import { isPotentialConversation, isRestrictedConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES } from "../lib/conversationScope";
 import { ensureCrmContactForConversation, syncCrmAttendant } from "../lib/crmSync";
+import { sendOutboundText } from "../lib/outbound";
 import {
   processInboundWA,
   processMetaInboundWA,
@@ -627,7 +628,9 @@ async function syncResolvedConversation(
   resolutionReason?: string | null,
   // Resultado comercial informado no modal de finalização: houve venda? valor?
   sale?: { hadSale: boolean; amount: number; description: string } | null,
-): Promise<void> {
+  // Retorna o id do attendance_log criado (ou null) para ligar a pesquisa de
+  // satisfação enviada ao cliente à avaliação que ele responder.
+): Promise<number | null> {
   const [attendant] = conv.assigneeId
     ? await tx.select().from(usersTable).where(eq(usersTable.id, conv.assigneeId)).limit(1)
     : [];
@@ -642,9 +645,10 @@ async function syncResolvedConversation(
   // 1) Attendance log — feeds the Visão Geral dashboard and CRM service history.
   //    sectorId is required (NOT NULL); skip the log only when the attendance
   //    cannot be attributed to any sector.
+  let attendanceLogId: number | null = null;
   if (effectiveSectorId != null) {
     const serviceSeconds = Math.round((Date.now() - conv.createdAt.getTime()) / 1000);
-    await tx.insert(attendanceLogsTable).values({
+    const [log] = await tx.insert(attendanceLogsTable).values({
       queueEntryId: 0, // chat attendances have no queue entry
       clientName: conv.name,
       clientContact: conv.phone,
@@ -658,7 +662,8 @@ async function syncResolvedConversation(
       serviceTimeSeconds: serviceSeconds >= 0 ? serviceSeconds : null,
       hadSale: sale ? sale.hadSale : null,
       saleAmount: sale?.hadSale ? String(sale.amount) : null,
-    });
+    }).returning({ id: attendanceLogsTable.id });
+    attendanceLogId = log?.id ?? null;
   }
 
   // 2) CRM contact — link the conversation to a CRM record (find-or-create by
@@ -710,6 +715,8 @@ async function syncResolvedConversation(
       await tx.update(crmContactsTable).set(profileUpdate).where(eq(crmContactsTable.id, contactId));
     }
   }
+
+  return attendanceLogId;
 }
 
 // ─── Update conversation ───────────────────────────────────────────────────
@@ -819,6 +826,7 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
   // pre-update status guarantees the sync fires exactly once per transition into
   // "resolved" even under concurrent PATCH requests, and rolls back the status
   // change if the sync fails.
+  let resolvedLogId: number | null = null;
   const updated = await db.transaction(async (tx) => {
     const [locked] = await tx.select().from(conversationsTable)
       .where(eq(conversationsTable.id, id)).for("update").limit(1);
@@ -839,10 +847,49 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
             description: typeof saleDescription === "string" ? saleDescription.trim().slice(0, 300) : "",
           }
         : null;
-      await syncResolvedConversation(tx, row, cleanReason, sale);
+      resolvedLogId = await syncResolvedConversation(tx, row, cleanReason, sale);
     }
     return row;
   });
+
+  // Pesquisa de satisfação: ao finalizar um atendimento de WhatsApp (1:1, não
+  // grupo), envia a pergunta de nota pelo mesmo caminho do envio manual — que
+  // passa pela fila anti-ban do bridge — e marca a conversa como aguardando a
+  // resposta ligada ao attendance_log recém-criado. Falha no envio nunca
+  // desfaz a finalização (a pesquisa é melhor esforço).
+  if (
+    resolvedLogId != null &&
+    updated.channel === "whatsapp" &&
+    updated.phone &&
+    !updated.phone.includes("@g.us")
+  ) {
+    try {
+      // Marca a espera ANTES do envio: o cliente pode responder no instante em
+      // que a pergunta chega (antes de o bridge retornar), e essa resposta já
+      // precisa encontrar a pesquisa pendente — senão a nota se perde e a
+      // conversa reabre.
+      await db.update(conversationsTable)
+        .set({ pendingSurveyLogId: resolvedLogId, surveySentAt: new Date() })
+        .where(eq(conversationsTable.id, updated.id));
+      const delivered = await sendOutboundText(
+        updated.id,
+        "Seu atendimento foi finalizado. ✅\n\nDe 1 a 5, que nota você dá para este atendimento? (5 = excelente)\n\nResponda apenas com o número. Obrigado! 🙏",
+        "Pesquisa de satisfação",
+      );
+      if (!delivered) {
+        // Envio falhou: desfaz a espera — mas só se ela ainda apontar para ESTE
+        // log (uma resposta concorrente ou uma pesquisa mais nova nunca é apagada).
+        await db.update(conversationsTable)
+          .set({ pendingSurveyLogId: null, surveySentAt: null })
+          .where(and(
+            eq(conversationsTable.id, updated.id),
+            eq(conversationsTable.pendingSurveyLogId, resolvedLogId),
+          ));
+      }
+    } catch (err) {
+      console.error("[survey] falha ao enviar pesquisa de satisfação:", err);
+    }
+  }
 
   // Deliver to everyone who could see it BEFORE the change (potenciais are
   // cross-sector visible, so read wasPotential from the pre-update row) as well
