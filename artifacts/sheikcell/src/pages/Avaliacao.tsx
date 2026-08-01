@@ -85,6 +85,9 @@ export default function Avaliacao() {
   const [color, setColor] = useState("");
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [evaluating, setEvaluating] = useState(false);
+  const [loadingBase, setLoadingBase] = useState(false);
+  const [basePrice, setBasePrice] = useState("");
+  const [baseMarket, setBaseMarket] = useState("");
   const [result, setResult] = useState<{ device: string; marketPrice: string; suggestedPrice: string; summary: string } | null>(null);
   const [history, setHistory] = useState<TradeInEvaluation[]>([]);
   const [showHistory, setShowHistory] = useState(false);
@@ -107,13 +110,33 @@ export default function Avaliacao() {
   const blockedAnswer = questions.map((qq) => ({ q: qq.key, a: answers[qq.key] }))
     .find((x) => x.a && BLOCKED_ANSWERS.includes(x.a));
 
+  // Etapa 1 → 2: busca o preço base (valor máximo em perfeito estado).
+  const handleContinue = async () => {
+    if (!deviceOk || loadingBase) return;
+    setLoadingBase(true);
+    setBasePrice(""); setBaseMarket("");
+    try {
+      const r = await api.tradeIn.basePrice({
+        brand: brand.trim(), model: model.trim(), memory: memory.trim(), color: color.trim(), marginTable,
+      });
+      setBasePrice(r.basePrice); setBaseMarket(r.marketPrice);
+    } catch (err) {
+      // Sem preço base, segue mesmo assim — a avaliação final ainda funciona.
+      toast({ title: "Não consegui buscar o preço base", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setLoadingBase(false);
+      setStep(2);
+    }
+  };
+
   const handleEvaluate = async () => {
     if (!allAnswered || evaluating || blockedAnswer) return;
     setEvaluating(true);
     setResult(null);
     try {
       const r = await api.tradeIn.evaluate({
-        brand: brand.trim(), model: model.trim(), memory: memory.trim(), color: color.trim(), marginTable, answers,
+        brand: brand.trim(), model: model.trim(), memory: memory.trim(), color: color.trim(), marginTable,
+        basePrice: basePrice || undefined, answers,
       });
       setResult(r);
       setStep(3);
@@ -127,6 +150,7 @@ export default function Avaliacao() {
 
   const resetForm = () => {
     setBrand(""); setOtherBrand(false); setModel(""); setMemory(""); setColor("");
+    setBasePrice(""); setBaseMarket("");
     setAnswers({}); setResult(null); setStep(1);
   };
 
@@ -291,30 +315,7 @@ export default function Avaliacao() {
               </datalist>
             </div>
           </div>
-          <button onClick={() => deviceOk && setStep(2)} disabled={!deviceOk}
-            data-testid="button-tradein-next"
-            className="w-full px-4 py-3 rounded-xl bg-primary text-white text-sm font-bold disabled:opacity-40 transition">
-            Continuar → Condições
-          </button>
-          {!deviceOk && <p className="text-[11px] text-muted-foreground text-center">Escolha a marca e informe o modelo para continuar.</p>}
-        </div>
-      )}
-
-      {/* Etapa 2: Condições */}
-      {currentStep === 2 && (
-        <div className="shk-card p-4 md:p-5 space-y-4">
-          <div className="flex items-center justify-between gap-2">
-            <div>
-              <p className="text-sm font-bold">{[brand, model, memory, color].filter(Boolean).join(" ")}</p>
-              <p className="text-[11px] text-muted-foreground">Como está o aparelho? ({answeredCount}/{questions.length} respondidas)</p>
-            </div>
-            <button onClick={() => setStep(1)} data-testid="button-tradein-back"
-              className="flex items-center gap-1 text-xs font-semibold text-primary shrink-0">
-              <ChevronLeft className="w-3.5 h-3.5" /> Voltar
-            </button>
-          </div>
-
-          {/* Tabela de margem (1 maior, 2 média, 3 menor) */}
+          {/* Tabela de margem (1 maior, 2 média, 3 menor) — define o preço base */}
           <div>
             <div className="flex items-center justify-between">
               <p className="text-xs font-bold mb-1.5">Tabela de margem</p>
@@ -342,6 +343,42 @@ export default function Avaliacao() {
               ))}
             </div>
           </div>
+
+          <button onClick={handleContinue} disabled={!deviceOk || loadingBase}
+            data-testid="button-tradein-next"
+            className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-primary text-white text-sm font-bold disabled:opacity-40 transition">
+            {loadingBase
+              ? (<><RefreshCw className="w-4 h-4 animate-spin" /> Buscando preço base...</>)
+              : "Ver preço base → Condições"}
+          </button>
+          {!deviceOk && <p className="text-[11px] text-muted-foreground text-center">Escolha a marca e informe o modelo para continuar.</p>}
+        </div>
+      )}
+
+      {/* Etapa 2: Condições */}
+      {currentStep === 2 && (
+        <div className="shk-card p-4 md:p-5 space-y-4">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <p className="text-sm font-bold">{[brand, model, memory, color].filter(Boolean).join(" ")}</p>
+              <p className="text-[11px] text-muted-foreground">Como está o aparelho? ({answeredCount}/{questions.length} respondidas)</p>
+            </div>
+            <button onClick={() => setStep(1)} data-testid="button-tradein-back"
+              className="flex items-center gap-1 text-xs font-semibold text-primary shrink-0">
+              <ChevronLeft className="w-3.5 h-3.5" /> Voltar
+            </button>
+          </div>
+
+          {/* Preço base (estilo Trocafone): valor máximo em perfeito estado */}
+          {basePrice && (
+            <div className="rounded-xl border-2 border-primary/30 bg-primary/5 p-3 text-center" data-testid="tradein-base-price">
+              <p className="text-[10px] font-semibold text-muted-foreground uppercase">Estimativa de valor até</p>
+              <p className="text-xl font-extrabold text-primary">{basePrice}</p>
+              <p className="text-[10px] text-muted-foreground">
+                aparelho em perfeito estado{baseMarket ? ` · revenda ${baseMarket}` : ""} — o valor final depende das condições abaixo
+              </p>
+            </div>
+          )}
 
           {questions.map((qq) => (
             <div key={qq.key}>

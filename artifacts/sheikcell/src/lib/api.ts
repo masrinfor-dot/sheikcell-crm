@@ -665,7 +665,10 @@ export const api = {
   },
   tradeIn: {
     list: () => req<TradeInEvaluation[]>("/trade-in"),
-    evaluate: (data: { device?: string; brand?: string; model?: string; memory?: string; color?: string; marginTable?: 1 | 2 | 3; answers: Record<string, string> }) =>
+    basePrice: (data: { brand: string; model: string; memory?: string; color?: string; marginTable?: 1 | 2 | 3 }) =>
+      req<{ device: string; marketPrice: string; basePrice: string }>(
+        "/trade-in/base-price", { method: "POST", body: JSON.stringify(data) }),
+    evaluate: (data: { device?: string; brand?: string; model?: string; memory?: string; color?: string; marginTable?: 1 | 2 | 3; basePrice?: string; answers: Record<string, string> }) =>
       req<{ id: number; device: string; marketPrice: string; suggestedPrice: string; summary: string; createdAt: string }>(
         "/trade-in/evaluate", { method: "POST", body: JSON.stringify(data) }),
     margins: () => req<TradeInMargins>("/trade-in/margins"),

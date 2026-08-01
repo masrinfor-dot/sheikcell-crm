@@ -86,6 +86,91 @@ router.patch("/trade-in/margins", requireAdmin, async (req, res): Promise<void> 
 // Respostas que indicam parte sem funcionar: a loja NÃO avalia esses aparelhos.
 const BLOCKED_ANSWERS = ["Não liga", "Não faz ligações", "Não funciona", "Com problema"];
 
+// Sanitiza texto como DADO de aparelho (sem quebras/aspas — evita injeção).
+const clean = (v: unknown, max: number) => (typeof v === "string"
+  ? v.normalize("NFC").replace(/[^\p{L}\p{N} .,+\-()/%–]/gu, " ").replace(/\s+/g, " ").trim().slice(0, max)
+  : "");
+
+// Chama a IA de preços (com busca na web; cai para estimativa sem web).
+async function askPriceAI(prompt: string): Promise<string> {
+  const { openai } = await import("@workspace/integrations-openai-ai");
+  try {
+    const r = await openai.responses.create({
+      model: "gpt-4o",
+      tools: [{ type: "web_search_preview" }],
+      input: prompt,
+      max_output_tokens: 1024,
+    });
+    return (r.output_text ?? "").trim();
+  } catch {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o",
+      max_tokens: 1024,
+      messages: [{ role: "user", content: `${prompt}\n\n(Obs.: você está sem acesso à web; estime pelos preços que conhece do mercado brasileiro e diga na justificativa que é uma estimativa.)` }],
+    });
+    return completion.choices[0]?.message?.content?.trim() ?? "";
+  }
+}
+
+function extractJson<T>(raw: string): T | null {
+  const jsonText = raw.replace(/^```(?:json)?/m, "").replace(/```$/m, "").trim();
+  const start = jsonText.indexOf("{");
+  const end = jsonText.lastIndexOf("}");
+  if (start === -1 || end === -1) return null;
+  try { return JSON.parse(jsonText.slice(start, end + 1)) as T; } catch { return null; }
+}
+
+// Preço base (estilo Trocafone): logo após informar marca/modelo/memória/cor,
+// estima o valor MÁXIMO de compra para aparelho em perfeito estado.
+router.post("/trade-in/base-price", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
+  const { brand, model, memory, color } = req.body as { brand?: string; model?: string; memory?: string; color?: string };
+  const fBrand = clean(brand, 40);
+  const fModel = clean(model, 60);
+  const fMemory = clean(memory, 20);
+  const fColor = clean(color, 30);
+  if (!fBrand || !fModel) { res.status(400).json({ error: "Informe a marca e o modelo do aparelho" }); return; }
+  const dev = [fBrand, fModel, fMemory, fColor].filter(Boolean).join(" ");
+
+  const marginTableRaw = (req.body as { marginTable?: unknown }).marginTable;
+  const marginTable = marginTableRaw === 1 || marginTableRaw === 2 || marginTableRaw === 3 ? marginTableRaw : 2;
+  const margins = await getMargins();
+  const marginPct = marginTable === 1 ? margins.t1 : marginTable === 2 ? margins.t2 : margins.t3;
+  const payPct = 100 - marginPct;
+
+  const uid = req.session.userId!;
+  if (inFlight.has(uid)) { res.status(429).json({ error: "Já existe uma avaliação em andamento. Aguarde." }); return; }
+  const last = lastCallByUser.get(uid) ?? 0;
+  if (Date.now() - last < COOLDOWN_MS) { res.status(429).json({ error: "Aguarde alguns segundos antes de avaliar novamente." }); return; }
+  inFlight.add(uid);
+  lastCallByUser.set(uid, Date.now());
+
+  const prompt = [
+    `Você é o avaliador de compra de celulares usados da Sheikcell (loja no Brasil).`,
+    `Pesquise na web os preços ATUAIS de venda do aparelho usado abaixo no mercado brasileiro (OLX, Mercado Livre, Trocafone).`,
+    ``,
+    `Aparelho: ${dev.slice(0, 120)}`,
+    ``,
+    `Considere um aparelho em PERFEITO estado (tudo funcionando, sem marcas, bateria ótima).`,
+    `A loja trabalha com margem de ${marginPct}%: o valor MÁXIMO de compra fica em torno de ${payPct}% do valor de revenda.`,
+    ``,
+    `Responda SOMENTE com um JSON válido, sem markdown, neste formato:`,
+    `{"marketPrice":"R$ X – R$ Y (faixa de revenda)","basePrice":"R$ Z"}`,
+  ].join("\n");
+
+  try {
+    const parsed = extractJson<{ marketPrice?: string; basePrice?: string }>(await askPriceAI(prompt));
+    const marketPrice = (parsed?.marketPrice ?? "").toString().slice(0, 200);
+    const basePrice = (parsed?.basePrice ?? "").toString().slice(0, 100);
+    if (!basePrice) { res.status(502).json({ error: "A IA não retornou um preço base. Tente novamente." }); return; }
+    res.json({ device: dev, marketPrice, basePrice });
+  } catch (err) {
+    req.log.error({ err }, "Trade-in base price failed");
+    res.status(503).json({ error: "A IA está indisponível no momento. Tente novamente em instantes." });
+  } finally {
+    inFlight.delete(uid);
+  }
+});
+
 // Avaliação com IA: pesquisa preços atuais na web e sugere valor de compra.
 router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
   const { device, answers, brand, model, memory, color } = req.body as {
@@ -94,11 +179,6 @@ router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (re
   };
   // Campos estruturados (novo formulário). Se vierem, o texto do aparelho é
   // montado a partir deles; senão vale o texto livre (compatibilidade).
-  // Sanitiza como DADO de aparelho: só letras/números/espaço e pontuação leve
-  // (nada de quebras de linha, aspas, chaves etc. — evita injeção no prompt).
-  const clean = (v: unknown, max: number) => (typeof v === "string"
-    ? v.normalize("NFC").replace(/[^\p{L}\p{N} .,+\-()/]/gu, " ").replace(/\s+/g, " ").trim().slice(0, max)
-    : "");
   const fBrand = clean(brand, 40);
   const fModel = clean(model, 60);
   const fMemory = clean(memory, 20);
@@ -153,6 +233,9 @@ router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (re
     `Pesquise na web os preços ATUAIS de venda do aparelho usado abaixo no mercado brasileiro (OLX, Mercado Livre, Trocafone).`,
     ``,
     `Aparelho: ${dev.slice(0, 120)}`,
+    ...(clean((req.body as { basePrice?: unknown }).basePrice, 60)
+      ? [`Preço base já estimado para este aparelho em perfeito estado: ${clean((req.body as { basePrice?: unknown }).basePrice, 60)} (use como teto e desconte pelo estado abaixo).`]
+      : []),
     `Estado informado pelo vendedor:`,
     condLines || "- (sem detalhes)",
     ``,
@@ -165,38 +248,8 @@ router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (re
   ].join("\n");
 
   try {
-    const { openai } = await import("@workspace/integrations-openai-ai");
-    let raw = "";
-    try {
-      // Primeiro tenta com busca na web (preços reais de hoje).
-      const r = await openai.responses.create({
-        model: "gpt-4o",
-        tools: [{ type: "web_search_preview" }],
-        input: prompt,
-        max_output_tokens: 1024,
-      });
-      raw = (r.output_text ?? "").trim();
-    } catch {
-      // Sem acesso à busca: cai para estimativa pelo conhecimento do modelo.
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o",
-        max_tokens: 1024,
-        messages: [{ role: "user", content: `${prompt}\n\n(Obs.: você está sem acesso à web; estime pelos preços que conhece do mercado brasileiro e diga na justificativa que é uma estimativa.)` }],
-      });
-      raw = completion.choices[0]?.message?.content?.trim() ?? "";
-    }
-
-    const jsonText = raw.replace(/^```(?:json)?/m, "").replace(/```$/m, "").trim();
-    const start = jsonText.indexOf("{");
-    const end = jsonText.lastIndexOf("}");
-    if (start === -1 || end === -1) {
-      res.status(502).json({ error: "A IA não retornou uma avaliação válida. Tente novamente." });
-      return;
-    }
-    let parsed: { marketPrice?: string; suggestedPrice?: string; summary?: string };
-    try {
-      parsed = JSON.parse(jsonText.slice(start, end + 1));
-    } catch {
+    const parsed = extractJson<{ marketPrice?: string; suggestedPrice?: string; summary?: string }>(await askPriceAI(prompt));
+    if (!parsed) {
       res.status(502).json({ error: "A IA não retornou uma avaliação válida. Tente novamente." });
       return;
     }
