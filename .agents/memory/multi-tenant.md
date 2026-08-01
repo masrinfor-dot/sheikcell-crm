@@ -17,3 +17,5 @@ Durable rules (fail closed — a missing tenant filter = cross-lojista data leak
 
 **Why:** the system is sold to multiple lojistas; any unscoped query, broadcast, or WhatsApp fallback leaks one customer's data (or sends via another customer's WhatsApp account).
 **How to apply:** when adding tables, routes, broadcasts, or WhatsApp flows, add tenant scoping at the same time — reviewers reject silently fail-open paths (default-tenant fallbacks, unscoped SSE, cached allow-on-error).
+
+- Sessões antigas (criadas antes do multi-loja) não têm tenantId e o fail-closed esconde TODOS os dados ("Sessão sem loja"). Um middleware em /api backfilla o tenantId da sessão a partir do usuário no banco (1x por sessão). Qualquer novo campo obrigatório de sessão precisa do mesmo self-heal, ou todo deploy exige relogin geral.
