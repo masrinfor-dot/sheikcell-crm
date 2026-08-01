@@ -6,6 +6,7 @@ export * from "./trade_in";
 export * from "./checklists";
 export * from "./trainings";
 export * from "./documents";
+export * from "./meetings";
 export * from "./access_logs";
 export * from "./stores";
 export * from "./sheet_links";

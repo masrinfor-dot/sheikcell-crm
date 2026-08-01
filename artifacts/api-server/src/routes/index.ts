@@ -23,6 +23,7 @@ import rafflesRouter from "./raffles";
 import botRouter from "./bot";
 import financeRouter from "./finance";
 import documentsRouter from "./documents";
+import meetingsRouter from "./meetings";
 import storesRouter from "./stores";
 import resultsRouter from "./results";
 import superadminRouter from "./superadmin";
@@ -58,6 +59,7 @@ router.use(rafflesRouter);
 router.use(botRouter);
 router.use(financeRouter);
 router.use(documentsRouter);
+router.use(meetingsRouter);
 router.use(storesRouter);
 router.use(resultsRouter);
 

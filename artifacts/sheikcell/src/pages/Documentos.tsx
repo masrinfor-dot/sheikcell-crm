@@ -3,6 +3,7 @@ import { api, type DocumentItem } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import { FolderArchive, Plus, X, Search, FileText, Image, Download, Trash2, Eye } from "lucide-react";
+import Reunioes from "@/components/Reunioes";
 
 const CATEGORIES: { value: string; label: string; badge: string }[] = [
   { value: "ata", label: "Ata de Reunião", badge: "bg-violet-100 text-violet-700" },
@@ -86,7 +87,12 @@ export default function Documentos() {
   );
 
   return (
-    <div className="max-w-5xl mx-auto px-4 py-6 space-y-4">
+    <div className="max-w-5xl mx-auto px-4 py-6 space-y-6">
+      {/* Reuniões online: sala + gravação + IA gera documentos aqui embaixo */}
+      <Reunioes onDocumentCreated={(doc) => setDocs((prev) => [{ ...doc, uploaderName: user?.name ?? null }, ...prev])} />
+
+      <div className="border-t border-border" />
+
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <FolderArchive className="w-5 h-5 text-primary" />

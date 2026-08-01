@@ -114,6 +114,18 @@ export type DocumentItem = {
   uploaderName: string | null;
 };
 
+export type MeetingItem = {
+  id: number;
+  title: string;
+  roomCode: string;
+  status: string; // aberta | gravada | transcrita
+  transcript: string | null;
+  recordingBytes: number | null;
+  createdAt: string;
+  endedAt: string | null;
+  creatorName: string | null;
+};
+
 export type InternalMessage = {
   id: number;
   conversationId: number;
@@ -931,6 +943,15 @@ export const api = {
       req<DocumentItem>("/documents", { method: "POST", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/documents/${id}`, { method: "DELETE" }),
     fileUrl: (id: number) => `/api/documents/${id}/file`,
+  },
+  meetings: {
+    list: () => req<MeetingItem[]>("/meetings"),
+    create: (title: string) => req<MeetingItem>("/meetings", { method: "POST", body: JSON.stringify({ title }) }),
+    uploadRecording: (id: number, data: { mimeType: string; data: string }) =>
+      req<{ transcript: string }>(`/meetings/${id}/recording`, { method: "POST", body: JSON.stringify(data) }),
+    generate: (id: number, kind: "ata" | "resumo" | "tarefas") =>
+      req<DocumentItem>(`/meetings/${id}/generate`, { method: "POST", body: JSON.stringify({ kind }) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/meetings/${id}`, { method: "DELETE" }),
   },
   stores: {
     list: (all?: boolean) => req<Store[]>(`/stores${all ? "?all=1" : ""}`),
