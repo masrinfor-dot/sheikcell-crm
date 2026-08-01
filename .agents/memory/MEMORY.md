@@ -29,4 +29,5 @@
 - [Scheduled messages](scheduled-messages.md) — agendamentos com tarefa espelho; scheduler reivindica pending→processing atomicamente; vendedor só agenda em conversa própria
 - [Satisfaction survey](satisfaction-survey.md) — resolve envia pesquisa 1–5; 1ª resposta consome (nota grava sem reabrir, resto segue fluxo normal); captura vem ANTES do upsert inbound
 - [SaaS owner panel](saas-owner-panel.md) — "inadimplente" is derived, never stored; cancelar lojista cascades atomically to contract+invoices; billing serializes on the tenant row lock
+- [Mobile chat is minimal](mobile-chat-minimal.md) — Expo app lacks full chat; SSE via XHR client in lib/chatEvents.ts; expo web preview can't log in (CORS), test on device
 - [Per-seller metrics scoping](results-panel.md) — vendedor só vê os próprios números: forçar setor+attendant do solicitante em TODAS as métricas de qualquer endpoint de relatório; ranking é admin/supervisor-only

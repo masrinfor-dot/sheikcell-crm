@@ -80,7 +80,49 @@ export type AttendanceLog = {
   createdAt: string;
 };
 
+export type Conversation = {
+  id: number;
+  name: string;
+  phone: string;
+  channel: string;
+  status: string;
+  sectorId: number | null;
+  assigneeId: number | null;
+  assignee: { id: number; name: string } | null;
+  sector: Sector | null;
+  lastMessage: string | null;
+  lastMessageAt: string | null;
+  unreadCount: number;
+  avatarUrl: string | null;
+  isArchived: boolean;
+};
+
+export type ChatMessage = {
+  id: number;
+  conversationId: number;
+  content: string;
+  direction: "inbound" | "outbound";
+  type: string;
+  status: string;
+  senderName: string | null;
+  mediaUrl: string | null;
+  createdAt: string;
+};
+
+export function getBaseUrl() {
+  return baseUrl;
+}
+
 export const api = {
+  chat: {
+    conversation: (id: number) => req<Conversation>(`/chat/conversations/${id}`),
+    messages: (id: number) => req<ChatMessage[]>(`/chat/conversations/${id}/messages`),
+    sendMessage: (id: number, content: string) =>
+      req<ChatMessage>(`/chat/conversations/${id}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ content }),
+      }),
+  },
   auth: {
     login: (email: string, password: string) =>
       req<{ user: User }>("/auth/login", {

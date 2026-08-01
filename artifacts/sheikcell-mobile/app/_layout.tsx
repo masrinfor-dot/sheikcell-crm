@@ -14,6 +14,7 @@ import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { ScheduleAlerts } from "@/components/ScheduleAlerts";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { setBaseUrl } from "@/lib/api";
 
@@ -54,7 +55,11 @@ function RootLayoutNav() {
       <Stack screenOptions={{ headerShown: false }}>
         <Stack.Screen name="login" options={{ animation: "fade" }} />
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen name="conversation/[id]" options={{ headerShown: false }} />
       </Stack>
+      {/* Aviso em tempo real de retorno agendado / falha de envio agendado
+          (eventos SSE "schedule_due" e "schedule_failed" do canal do chat). */}
+      <ScheduleAlerts />
     </>
   );
 }
