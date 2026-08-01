@@ -79,7 +79,7 @@ function TaskCard({
     >
       <div className="flex items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
-          <p className="font-semibold text-sm text-foreground break-words">{task.title}</p>
+          <p className="font-semibold text-[15px] leading-snug text-foreground break-words">{task.title}</p>
         </div>
         <div className="relative shrink-0">
           <button
@@ -114,7 +114,7 @@ function TaskCard({
       </div>
 
       {task.description && (
-        <p className="text-xs text-muted-foreground line-clamp-3">{task.description}</p>
+        <p className="text-[13px] leading-relaxed text-muted-foreground line-clamp-3">{task.description}</p>
       )}
 
       <div className="flex items-center gap-1.5 flex-wrap">
@@ -136,8 +136,8 @@ function TaskCard({
       </div>
 
       <div className="flex items-center justify-between gap-1 pt-1 border-t border-border">
-        <div className="flex items-center gap-1 text-xs text-muted-foreground min-w-0">
-          <User className="w-3 h-3 shrink-0" />
+        <div className="flex items-center gap-1 text-[13px] text-muted-foreground min-w-0">
+          <User className="w-3.5 h-3.5 shrink-0" />
           <span className="truncate">{task.assignee ? task.assignee.name : "Sem responsável"}</span>
         </div>
         <button onClick={() => onOpenDetail(task)} data-testid={`button-task-detail-${task.id}`}
@@ -158,16 +158,16 @@ function TaskCard({
         <div className="flex gap-1.5 pt-1">
           {prev && (
             <button onClick={() => onMove(task.id, prev.key)} data-testid={`button-task-prev-${task.id}`}
-              className="flex-1 flex items-center justify-center gap-1 text-[11px] font-semibold px-2 py-1.5 rounded-lg border border-border text-muted-foreground hover:bg-secondary transition">
-              <ChevronLeft className="w-3 h-3" /> {prev.label}
+              className="flex-1 flex items-center justify-center gap-1 text-xs font-semibold px-2 py-2 rounded-lg border border-border text-muted-foreground hover:bg-secondary transition">
+              <ChevronLeft className="w-3.5 h-3.5" /> {prev.label}
             </button>
           )}
           {next && (
             <button onClick={() => onMove(task.id, next.key)} data-testid={`button-task-next-${task.id}`}
-              className={`flex-1 flex items-center justify-center gap-1 text-[11px] font-semibold px-2 py-1.5 rounded-lg transition ${
+              className={`flex-1 flex items-center justify-center gap-1 text-xs font-semibold px-2 py-2 rounded-lg transition ${
                 next.key === "done" ? "bg-green-600 text-white hover:bg-green-700" : "bg-primary text-white hover:opacity-90"
               }`}>
-              {next.label} <ChevronRight className="w-3 h-3" />
+              {next.label} <ChevronRight className="w-3.5 h-3.5" />
             </button>
           )}
         </div>
@@ -432,7 +432,9 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
       </div>
 
       {/* Kanban */}
-      <div className={`grid gap-4 items-start ${compact ? "grid-cols-1" : "grid-cols-1 sm:grid-cols-3"}`}>
+      {/* Em telas médias as 3 colunas lado a lado ficavam espremidas e ilegíveis;
+          agora só abre em 3 colunas quando há espaço de verdade (xl). */}
+      <div className={`grid gap-4 items-start ${compact ? "grid-cols-1" : "grid-cols-1 md:grid-cols-2 xl:grid-cols-3"}`}>
         {COLUMNS.map((col, colIdx) => {
           const cards = byStatus(col.key);
           return (
