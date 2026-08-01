@@ -198,6 +198,14 @@ function ConvItem({ conv, active, onClick, sessionBadge, overdue }: { conv: Conv
             )}
           </div>
         </div>
+        {conv.assignee && (
+          <div className="flex items-center gap-1 mt-1">
+            <UserCircle2 className="w-3 h-3 text-indigo-500 shrink-0" />
+            <span className="text-[10px] text-indigo-600 font-medium truncate" data-testid={`conv-assignee-${conv.id}`} title={`Atendido por ${conv.assignee.name}`}>
+              {conv.assignee.name}
+            </span>
+          </div>
+        )}
         {conv.labels && (
           <div className="flex gap-1 mt-1 flex-wrap">
             {conv.labels.split(",").map((l) => l.trim()).filter(Boolean).slice(0, 2).map((label) => (
@@ -1935,6 +1943,13 @@ export default function ChatCenter() {
                 {activeConv.sector && (
                   <span className="px-1.5 py-0.5 rounded-full text-white font-medium" style={{ backgroundColor: activeConv.sector.color, fontSize: "10px" }}>
                     {activeConv.sector.name}
+                  </span>
+                )}
+                {/* Quem está atendendo esta conversa */}
+                {activeConv.assignee && (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-semibold truncate max-w-[160px]" style={{ fontSize: "10px" }} title="Vendedor responsável pelo atendimento" data-testid="text-conv-assignee">
+                    <UserCircle2 className="w-3 h-3" />
+                    {activeConv.assignee.name}
                   </span>
                 )}
                 {/* Data e hora de início do atendimento (quando foi assumido) */}
