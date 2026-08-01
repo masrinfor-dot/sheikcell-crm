@@ -26,6 +26,11 @@ export const conversationsTable = pgTable("conversations", {
   // cliente (setado quando a pesquisa foi enviada; limpo na primeira resposta).
   pendingSurveyLogId: integer("pending_survey_log_id"),
   surveySentAt: timestamp("survey_sent_at", { withTimezone: true }),
+  // Retrato da configuração NO MOMENTO do envio da pesquisa: mudar a escala,
+  // o prazo ou o cupom depois não muda as pesquisas já enviadas.
+  surveyScaleMax: integer("survey_scale_max"),
+  surveyWindowHours: integer("survey_window_hours"),
+  surveyRewardText: text("survey_reward_text"),
   isArchived: boolean("is_archived").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

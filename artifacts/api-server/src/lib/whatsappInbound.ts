@@ -4,6 +4,7 @@ import { broadcast } from "./sseEmitter";
 import { isPotentialConversation, restrictedRecipients } from "./conversationScope";
 import { classifyText } from "./autoRouter";
 import { ensureCrmContactForConversation, syncCrmAttendant } from "./crmSync";
+import { getSurveySettings, SURVEY_DEFAULTS, surveyScaleMin } from "./surveySettings";
 import { writeFile, mkdir } from "fs/promises";
 import { randomUUID } from "crypto";
 import path from "path";
@@ -265,6 +266,17 @@ async function tryConsumeSurveyReply(input: {
 }): Promise<boolean> {
   const { phone, sessionKey, text, msgType, displayContent, pushName, externalId } = input;
 
+  // Configuração da pesquisa (escala, prazo, recompensa) — lida antes da
+  // transação; falha na leitura cai nos padrões (nunca perde a nota por isso).
+  const cfg = await getSurveySettings().catch(() => ({ ...SURVEY_DEFAULTS }));
+  const surveyCfg = {
+    scaleMin: surveyScaleMin(cfg),
+    scaleMax: cfg.scaleMax,
+    windowHours: cfg.responseWindowHours,
+    rewardEnabled: cfg.rewardEnabled,
+    rewardText: cfg.rewardText,
+  };
+
   const outcome = await db.transaction(async (tx) => {
     // Trava a conversa: webhooks concorrentes/reentregues serializam aqui, e
     // só o primeiro encontra a pesquisa pendente (consumo atômico).
@@ -294,19 +306,29 @@ async function tryConsumeSurveyReply(input: {
     }
 
     const surveyLogId = conv.pendingSurveyLogId;
-    const ratingMatch = /^\s*([1-5])\s*(?:⭐|estrelas?)?\s*$/iu.exec(text ?? "");
+    // Escala/prazo/recompensa do RETRATO gravado no envio da pesquisa: mudar a
+    // configuração depois não afeta pesquisas já enviadas. Pesquisas antigas
+    // (sem retrato) caem na configuração atual.
+    const scaleMax = conv.surveyScaleMax ?? surveyCfg.scaleMax;
+    const scaleMin = scaleMax === 10 ? 0 : 1;
+    const windowHours = conv.surveyWindowHours ?? surveyCfg.windowHours;
+    const rewardText = conv.surveyRewardText
+      ?? (surveyCfg.rewardEnabled && surveyCfg.rewardText.trim() ? surveyCfg.rewardText.trim() : null);
+    const numMatch = /^\s*(10|[0-9])\s*(?:⭐|estrelas?)?\s*$/iu.exec(text ?? "");
+    const num = numMatch ? parseInt(numMatch[1]!, 10) : null;
+    const inScale = num != null && num >= scaleMin && num <= scaleMax;
     const sentAt = conv.surveySentAt?.getTime() ?? 0;
-    const fresh = Date.now() - sentAt <= 48 * 3_600_000;
+    const fresh = Date.now() - sentAt <= windowHours * 3_600_000;
 
     // Em qualquer resposta, a pesquisa deixa de esperar (evita que um "5"
     // solto dias depois vire avaliação).
     await tx.update(conversationsTable)
-      .set({ pendingSurveyLogId: null, surveySentAt: null })
+      .set({ pendingSurveyLogId: null, surveySentAt: null, surveyScaleMax: null, surveyWindowHours: null, surveyRewardText: null })
       .where(eq(conversationsTable.id, conv.id));
 
-    if (!(msgType === "text" && ratingMatch && fresh)) return null;
+    if (!(msgType === "text" && inScale && fresh)) return null;
 
-    const rating = parseInt(ratingMatch[1], 10);
+    const rating = num!;
     await tx.update(attendanceLogsTable)
       .set({ satisfactionRating: rating })
       .where(eq(attendanceLogsTable.id, surveyLogId));
@@ -331,7 +353,7 @@ async function tryConsumeSurveyReply(input: {
         updatedAt: new Date(),
       }).where(eq(conversationsTable.id, conv.id));
     }
-    return { conv, rating, msg: msg ?? null, duplicate: false };
+    return { conv, rating, msg: msg ?? null, duplicate: false, rewardText };
   });
 
   if (!outcome) return false;
@@ -345,11 +367,15 @@ async function tryConsumeSurveyReply(input: {
       isPotentialConversation(outcome.conv),
       await restrictedRecipients(outcome.conv),
     );
-    // Agradece pelo mesmo caminho anti-ban do bridge (melhor esforço).
+    // Agradece pelo mesmo caminho anti-ban do bridge (melhor esforço) e, se
+    // configurado, entrega a recompensa (cupom/voucher) a quem respondeu.
     const { sendOutboundText } = await import("./outbound");
+    const reward = "rewardText" in outcome && outcome.rewardText
+      ? `\n\n🎁 ${outcome.rewardText}`
+      : "";
     void sendOutboundText(
       outcome.conv.id,
-      `Obrigado pela sua avaliação! Nota ${outcome.rating} registrada. 🙏`,
+      `Obrigado pela sua avaliação! Nota ${outcome.rating} registrada. 🙏${reward}`,
       "Pesquisa de satisfação",
     ).catch(() => {});
   }

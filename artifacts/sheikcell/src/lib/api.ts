@@ -157,10 +157,21 @@ export type Raffle = {
   id: number; name: string; prize: string;
   sectorIds: number[] | null; vendedorIds: number[] | null; sessionKeys: string[] | null;
   clientTypes: string[] | null;
-  periodDays: number | null; onlyResolved: boolean; excludePreviousWinners: boolean;
+  periodDays: number | null; onlyResolved: boolean; surveyRespondedOnly: boolean; excludePreviousWinners: boolean;
   winnersCount: number; messageTemplate: string; storeName: string | null;
   recurrence: "once" | "weekly" | "monthly"; dayOfWeek: number | null; dayOfMonth: number | null;
   active: boolean; lastRunKey: string | null; createdAt: string;
+};
+
+// Configuração da pesquisa de satisfação (admin/supervisor)
+export type SurveySettings = {
+  enabled: boolean;
+  scaleMax: 5 | 10;
+  message: string;
+  responseWindowHours: number;
+  rewardEnabled: boolean;
+  rewardText: string;
+  raffleInvite: boolean;
 };
 
 export type RaffleWinner = { phone: string; name: string; conversationId: number; sent: boolean; error?: string };
@@ -674,6 +685,10 @@ export const api = {
     stats: () => req<{ conversations: number; activeFlows: number; usageToday: number }>("/bot/stats"),
     test: (message: string, reset?: boolean) =>
       req<{ replies: string[]; ended?: boolean; reset?: boolean }>("/bot/test", { method: "POST", body: JSON.stringify({ message, reset }) }),
+  },
+  surveySettings: {
+    get: () => req<SurveySettings>("/settings/survey"),
+    save: (data: Partial<SurveySettings>) => req<SurveySettings>("/settings/survey", { method: "PATCH", body: JSON.stringify(data) }),
   },
   raffles: {
     list: () => req<Raffle[]>("/raffles"),

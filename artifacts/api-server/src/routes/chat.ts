@@ -18,6 +18,10 @@ import {
 import { isPotentialConversation, isRestrictedConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES } from "../lib/conversationScope";
 import { ensureCrmContactForConversation, syncCrmAttendant } from "../lib/crmSync";
 import { sendOutboundText } from "../lib/outbound";
+import { getSurveySettings, buildSurveyMessage } from "../lib/surveySettings";
+
+// Sinaliza que a pesquisa está desligada nas configurações (não é erro).
+class SurveyDisabled extends Error {}
 import {
   processInboundWA,
   processMetaInboundWA,
@@ -864,30 +868,42 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
     !updated.phone.includes("@g.us")
   ) {
     try {
+      const surveyCfg = await getSurveySettings();
+      if (!surveyCfg.enabled) throw new SurveyDisabled();
       // Marca a espera ANTES do envio: o cliente pode responder no instante em
       // que a pergunta chega (antes de o bridge retornar), e essa resposta já
       // precisa encontrar a pesquisa pendente — senão a nota se perde e a
       // conversa reabre.
       await db.update(conversationsTable)
-        .set({ pendingSurveyLogId: resolvedLogId, surveySentAt: new Date() })
+        .set({
+          pendingSurveyLogId: resolvedLogId,
+          surveySentAt: new Date(),
+          // Retrato da configuração no envio: mudar a escala/prazo/cupom depois
+          // não afeta esta pesquisa já enviada.
+          surveyScaleMax: surveyCfg.scaleMax,
+          surveyWindowHours: surveyCfg.responseWindowHours,
+          surveyRewardText: surveyCfg.rewardEnabled && surveyCfg.rewardText.trim() ? surveyCfg.rewardText.trim() : null,
+        })
         .where(eq(conversationsTable.id, updated.id));
       const delivered = await sendOutboundText(
         updated.id,
-        "Seu atendimento foi finalizado. ✅\n\nDe 1 a 5, que nota você dá para este atendimento? (5 = excelente)\n\nResponda apenas com o número. Obrigado! 🙏",
+        buildSurveyMessage(surveyCfg),
         "Pesquisa de satisfação",
       );
       if (!delivered) {
         // Envio falhou: desfaz a espera — mas só se ela ainda apontar para ESTE
         // log (uma resposta concorrente ou uma pesquisa mais nova nunca é apagada).
         await db.update(conversationsTable)
-          .set({ pendingSurveyLogId: null, surveySentAt: null })
+          .set({ pendingSurveyLogId: null, surveySentAt: null, surveyScaleMax: null, surveyWindowHours: null, surveyRewardText: null })
           .where(and(
             eq(conversationsTable.id, updated.id),
             eq(conversationsTable.pendingSurveyLogId, resolvedLogId),
           ));
       }
     } catch (err) {
-      console.error("[survey] falha ao enviar pesquisa de satisfação:", err);
+      if (!(err instanceof SurveyDisabled)) {
+        console.error("[survey] falha ao enviar pesquisa de satisfação:", err);
+      }
     }
   }
 

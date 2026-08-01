@@ -13,6 +13,8 @@ export const rafflesTable = pgTable("raffles", {
   // Tipo de cliente: "comprou" | "prospeccao" | motivo de finalização exato. null = todos
   clientTypes: jsonb("client_types"),   // string[] | null
   onlyResolved: boolean("only_resolved").notNull().default(false),
+  // Só participa quem respondeu a pesquisa de satisfação (nota registrada)
+  surveyRespondedOnly: boolean("survey_responded_only").notNull().default(false),
   excludePreviousWinners: boolean("exclude_previous_winners").notNull().default(true),
   winnersCount: integer("winners_count").notNull().default(1),
   // Mensagem automática: {nome}, {premio}, {loja}

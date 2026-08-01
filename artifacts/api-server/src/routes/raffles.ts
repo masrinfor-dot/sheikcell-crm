@@ -63,6 +63,7 @@ function sanitizeRaffle(body: Record<string, unknown>): { data?: typeof rafflesT
       clientTypes: strArrayOrNull(body["clientTypes"]),
       periodDays,
       onlyResolved: body["onlyResolved"] === true,
+      surveyRespondedOnly: body["surveyRespondedOnly"] === true,
       excludePreviousWinners: body["excludePreviousWinners"] !== false,
       winnersCount,
       recurrence,
@@ -128,6 +129,23 @@ async function eligibleClients(raffle: Raffle): Promise<{ phone: string; name: s
       if (wantProspec && r.status !== "resolved" && r.status !== "archived") return true;
       return false;
     });
+  }
+
+  // Só quem respondeu a pesquisa de satisfação: telefone com pelo menos um
+  // attendance_log com nota registrada (respeita o período do sorteio, se houver).
+  if (raffle.surveyRespondedOnly) {
+    const surveyWhere = [sql`${attendanceLogsTable.satisfactionRating} IS NOT NULL`];
+    if (raffle.periodDays) {
+      surveyWhere.push(gte(attendanceLogsTable.createdAt, new Date(Date.now() - raffle.periodDays * 86_400_000)));
+    }
+    const rated = await db.select({ contact: attendanceLogsTable.clientContact })
+      .from(attendanceLogsTable).where(and(...surveyWhere));
+    const ratedPhones = new Set<string>();
+    for (const l of rated) {
+      const key = (l.contact ?? "").replace(/\D/g, "");
+      if (key) ratedPhones.add(key);
+    }
+    rows = rows.filter((r) => ratedPhones.has(r.phone.replace(/\D/g, "")));
   }
 
   // Cada cliente (telefone) entra UMA vez — fica com a conversa mais recente.

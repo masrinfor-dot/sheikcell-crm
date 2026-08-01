@@ -1,9 +1,10 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
 import { api, type ResultsSummary, type Sector } from "@/lib/api";
+import type { SurveySettings } from "@/lib/api";
 import {
   Trophy, Clock, Timer, Users, UserPlus, Repeat, ShoppingBag,
-  TrendingUp, RefreshCw, BadgeDollarSign, Star,
+  TrendingUp, RefreshCw, BadgeDollarSign, Star, Settings, X,
 } from "lucide-react";
 
 // Períodos pré-definidos do filtro
@@ -67,6 +68,28 @@ export default function Resultados() {
   const [attendants, setAttendants] = useState<{ id: number; name: string }[]>([]);
   const [data, setData] = useState<ResultsSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  // Configurações da pesquisa de satisfação (admin/supervisor)
+  const [showSurveyCfg, setShowSurveyCfg] = useState(false);
+  const [surveyCfg, setSurveyCfg] = useState<SurveySettings | null>(null);
+  const [savingCfg, setSavingCfg] = useState(false);
+
+  const openSurveyCfg = async () => {
+    setShowSurveyCfg(true);
+    if (!surveyCfg) {
+      try { setSurveyCfg(await api.surveySettings.get()); } catch { /* silent */ }
+    }
+  };
+
+  const saveSurveyCfg = async () => {
+    if (!surveyCfg) return;
+    setSavingCfg(true);
+    try {
+      setSurveyCfg(await api.surveySettings.save(surveyCfg));
+      setShowSurveyCfg(false);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Erro ao salvar");
+    } finally { setSavingCfg(false); }
+  };
 
   useEffect(() => {
     // Vendedor só vê os próprios números (o servidor força isso de qualquer
@@ -138,11 +161,83 @@ export default function Resultados() {
               {attendants.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
             </select>
           )}
+          {isGlobal && (
+            <button onClick={openSurveyCfg} data-testid="button-survey-settings" title="Configurar pesquisa de satisfação"
+              className="px-3 py-1.5 rounded-xl border border-border text-xs bg-white flex items-center gap-1.5 hover:bg-secondary">
+              <Settings className="w-3.5 h-3.5" /> Pesquisa
+            </button>
+          )}
           <button onClick={fetchData} className="p-1.5 rounded-xl text-muted-foreground hover:bg-secondary transition" data-testid="results-refresh">
             <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
           </button>
         </div>
       </div>
+
+      {/* Configurações da pesquisa de satisfação */}
+      {showSurveyCfg && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setShowSurveyCfg(false)}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto p-5 space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-base flex items-center gap-2"><Star className="w-4 h-4 text-yellow-500" /> Pesquisa de Satisfação</h3>
+              <button onClick={() => setShowSurveyCfg(false)} className="p-1 rounded-lg hover:bg-muted"><X className="w-4 h-4" /></button>
+            </div>
+            {!surveyCfg ? (
+              <div className="text-sm text-muted-foreground py-6 text-center">Carregando...</div>
+            ) : (
+              <div className="space-y-4 text-sm">
+                <label className="flex items-center gap-2 font-medium">
+                  <input type="checkbox" checked={surveyCfg.enabled} onChange={(e) => setSurveyCfg({ ...surveyCfg, enabled: e.target.checked })} />
+                  Enviar pesquisa ao finalizar o atendimento
+                </label>
+                <div>
+                  <label className="font-semibold">Escala da nota</label>
+                  <div className="flex gap-2 mt-1">
+                    {([5, 10] as const).map((s) => (
+                      <button key={s} onClick={() => setSurveyCfg({ ...surveyCfg, scaleMax: s })}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-semibold border ${surveyCfg.scaleMax === s ? "bg-primary text-white border-primary" : "border-border text-muted-foreground"}`}>
+                        {s === 5 ? "1 a 5" : "0 a 10"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <label className="font-semibold">Mensagem da pesquisa (vazio = padrão)</label>
+                  <textarea value={surveyCfg.message} rows={3} maxLength={1000}
+                    placeholder={`Seu atendimento foi finalizado. ✅ De ${surveyCfg.scaleMax === 10 ? 0 : 1} a ${surveyCfg.scaleMax}, que nota você dá para este atendimento?`}
+                    onChange={(e) => setSurveyCfg({ ...surveyCfg, message: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm mt-1" />
+                </div>
+                <div>
+                  <label className="font-semibold">Prazo para responder (horas)</label>
+                  <input type="number" min={1} max={168} value={surveyCfg.responseWindowHours}
+                    onChange={(e) => setSurveyCfg({ ...surveyCfg, responseWindowHours: Number(e.target.value) })}
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm mt-1" />
+                  <p className="text-xs text-muted-foreground mt-1">Depois desse prazo, a resposta não vale mais como nota.</p>
+                </div>
+                <label className="flex items-center gap-2 font-medium">
+                  <input type="checkbox" checked={surveyCfg.rewardEnabled} onChange={(e) => setSurveyCfg({ ...surveyCfg, rewardEnabled: e.target.checked })} />
+                  Enviar cupom/voucher para quem responder
+                </label>
+                {surveyCfg.rewardEnabled && (
+                  <textarea value={surveyCfg.rewardText} rows={2} maxLength={1000}
+                    placeholder="Ex.: Use o cupom OBRIGADO10 e ganhe 10% de desconto na próxima compra!"
+                    onChange={(e) => setSurveyCfg({ ...surveyCfg, rewardText: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm" />
+                )}
+                <label className="flex items-center gap-2 font-medium">
+                  <input type="checkbox" checked={surveyCfg.raffleInvite} onChange={(e) => setSurveyCfg({ ...surveyCfg, raffleInvite: e.target.checked })} />
+                  Avisar que quem responder participa do sorteio
+                </label>
+                <p className="text-xs text-muted-foreground">💡 Na aba Sorteios, marque "Só quem respondeu a pesquisa de satisfação" para o filtro valer no sorteio.</p>
+                <button onClick={saveSurveyCfg} disabled={savingCfg} data-testid="button-save-survey-settings"
+                  className="w-full py-2.5 rounded-xl bg-primary text-white font-semibold text-sm disabled:opacity-50">
+                  {savingCfg ? "Salvando..." : "Salvar"}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Cards de métricas */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">

@@ -55,4 +55,27 @@ router.patch("/settings", requireAdminOrSupervisor, async (req, res): Promise<vo
   });
 });
 
+// ── Pesquisa de satisfação: configuração (escala, mensagem, prazo, recompensa) ──
+import { getSurveySettings, saveSurveySettings } from "../lib/surveySettings";
+
+router.get("/settings/survey", requireAdminOrSupervisor, async (_req, res): Promise<void> => {
+  res.json(await getSurveySettings());
+});
+
+router.patch("/settings/survey", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const body = req.body as Record<string, unknown>;
+  if (body["scaleMax"] !== undefined && body["scaleMax"] !== 5 && body["scaleMax"] !== 10) {
+    res.status(400).json({ error: "Escala deve ser 5 (1 a 5) ou 10 (0 a 10)" });
+    return;
+  }
+  if (body["responseWindowHours"] !== undefined) {
+    const h = Math.round(Number(body["responseWindowHours"]));
+    if (!Number.isFinite(h) || h < 1 || h > 168) {
+      res.status(400).json({ error: "Prazo de resposta deve ser entre 1 e 168 horas" });
+      return;
+    }
+  }
+  res.json(await saveSurveySettings(body));
+});
+
 export default router;

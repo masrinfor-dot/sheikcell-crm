@@ -13,7 +13,7 @@ type FormState = {
   name: string; prize: string; storeName: string; messageTemplate: string;
   winnersCount: number; recurrence: "once" | "weekly" | "monthly";
   dayOfWeek: number; dayOfMonth: number; periodDays: string;
-  onlyResolved: boolean; excludePreviousWinners: boolean; active: boolean;
+  onlyResolved: boolean; surveyRespondedOnly: boolean; excludePreviousWinners: boolean; active: boolean;
   sectorIds: number[]; vendedorIds: number[]; sessionKeys: string[];
   clientTypes: string[];
 };
@@ -34,7 +34,7 @@ const CLIENT_TYPES: { value: string; label: string }[] = [
 const emptyForm = (): FormState => ({
   name: "", prize: "", storeName: "", messageTemplate: DEFAULT_TEMPLATE,
   winnersCount: 1, recurrence: "once", dayOfWeek: 5, dayOfMonth: 1, periodDays: "",
-  onlyResolved: false, excludePreviousWinners: true, active: true,
+  onlyResolved: false, surveyRespondedOnly: false, excludePreviousWinners: true, active: true,
   sectorIds: [], vendedorIds: [], sessionKeys: [], clientTypes: [],
 });
 
@@ -83,7 +83,7 @@ export default function Sorteios() {
       winnersCount: r.winnersCount, recurrence: r.recurrence,
       dayOfWeek: r.dayOfWeek ?? 5, dayOfMonth: r.dayOfMonth ?? 1,
       periodDays: r.periodDays != null ? String(r.periodDays) : "",
-      onlyResolved: r.onlyResolved, excludePreviousWinners: r.excludePreviousWinners, active: r.active,
+      onlyResolved: r.onlyResolved, surveyRespondedOnly: r.surveyRespondedOnly, excludePreviousWinners: r.excludePreviousWinners, active: r.active,
       sectorIds: r.sectorIds ?? [], vendedorIds: r.vendedorIds ?? [], sessionKeys: r.sessionKeys ?? [],
       clientTypes: r.clientTypes ?? [],
     } : emptyForm());
@@ -405,6 +405,10 @@ export default function Sorteios() {
                 <label className="flex items-center gap-2 font-medium mt-2">
                   <input type="checkbox" checked={form.onlyResolved} onChange={(e) => setForm({ ...form, onlyResolved: e.target.checked })} />
                   Só clientes com atendimento finalizado
+                </label>
+                <label className="flex items-center gap-2 font-medium mt-1.5">
+                  <input type="checkbox" checked={form.surveyRespondedOnly} onChange={(e) => setForm({ ...form, surveyRespondedOnly: e.target.checked })} />
+                  Só quem respondeu a pesquisa de satisfação
                 </label>
                 <label className="flex items-center gap-2 font-medium mt-1.5">
                   <input type="checkbox" checked={form.excludePreviousWinners} onChange={(e) => setForm({ ...form, excludePreviousWinners: e.target.checked })} />
