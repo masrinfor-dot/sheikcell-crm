@@ -396,6 +396,9 @@ export type RhCandidate = {
 
 export type SheetLink = {
   id: number; name: string; url: string; position: number; createdAt: string;
+  // null nas duas = liberada para toda a equipe
+  allowedSectorIds: number[] | null;
+  allowedUserIds: number[] | null;
 };
 
 export type PartnerLink = {
@@ -897,9 +900,9 @@ export const api = {
   },
   sheetLinks: {
     list: () => req<SheetLink[]>("/sheet-links"),
-    create: (data: { name: string; url: string }) =>
+    create: (data: { name: string; url: string; allowedSectorIds?: number[] | null; allowedUserIds?: number[] | null }) =>
       req<SheetLink>("/sheet-links", { method: "POST", body: JSON.stringify(data) }),
-    update: (id: number, data: Partial<{ name: string; url: string }>) =>
+    update: (id: number, data: Partial<{ name: string; url: string; allowedSectorIds: number[] | null; allowedUserIds: number[] | null }>) =>
       req<SheetLink>(`/sheet-links/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/sheet-links/${id}`, { method: "DELETE" }),
   },

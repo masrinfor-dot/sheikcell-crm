@@ -8,5 +8,9 @@ export const sheetLinksTable = pgTable("sheet_links", {
   name: text("name").notNull(),
   url: text("url").notNull(),
   position: integer("position").notNull().default(0),
+  // Acesso personalizado: NULL nas duas = toda a equipe vê.
+  // Senão, vendedor vê se o setor dele OU o id dele estiver nas listas.
+  allowedSectorIds: integer("allowed_sector_ids").array(),
+  allowedUserIds: integer("allowed_user_ids").array(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });

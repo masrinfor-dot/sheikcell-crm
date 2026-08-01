@@ -18,25 +18,47 @@ function normalizeUrl(raw: string): string | null {
   }
 }
 
-// Toda a equipe vê as planilhas/formulários.
+// Sanitiza listas de acesso: array de ids inteiros ou null (= todos).
+function cleanIdList(raw: unknown): number[] | null {
+  if (raw == null) return null;
+  if (!Array.isArray(raw)) return null;
+  const ids = raw.map((v) => parseInt(String(v), 10)).filter((n) => Number.isInteger(n) && n > 0);
+  const uniq = [...new Set(ids)].slice(0, 200);
+  return uniq.length > 0 ? uniq : null;
+}
+
+// Lista: admin/supervisor veem todas; vendedor só vê as liberadas
+// (sem restrição, ou com o setor dele, ou com o id dele).
 router.get("/sheet-links", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const userRole = req.session.userRole!;
+  const userId = req.session.userId!;
+  const userSectorId = req.session.userSectorId ?? null;
   const rows = await db.select().from(sheetLinksTable)
     .where(eq(sheetLinksTable.tenantId, tenantId))
     .orderBy(asc(sheetLinksTable.position), asc(sheetLinksTable.id));
-  res.json(rows);
+  const visible = (userRole === "admin" || userRole === "supervisor")
+    ? rows
+    : rows.filter((l) => {
+        const noRestriction = l.allowedSectorIds == null && l.allowedUserIds == null;
+        if (noRestriction) return true;
+        if (l.allowedUserIds?.includes(userId)) return true;
+        if (userSectorId != null && l.allowedSectorIds?.includes(userSectorId)) return true;
+        return false;
+      });
+  res.json(visible);
 });
 
 // Só o admin gerencia.
 router.post("/sheet-links", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { name, url } = req.body as { name?: string; url?: string };
+  const { name, url, allowedSectorIds, allowedUserIds } = req.body as { name?: string; url?: string; allowedSectorIds?: unknown; allowedUserIds?: unknown };
   const cleanName = (name ?? "").trim();
   const cleanUrl = normalizeUrl(url ?? "");
   if (!cleanName) { res.status(400).json({ error: "Nome é obrigatório" }); return; }
   if (!cleanUrl) { res.status(400).json({ error: "Link inválido — cole o endereço da planilha ou formulário" }); return; }
   const [inserted] = await db.insert(sheetLinksTable)
-    .values({ tenantId, name: cleanName.slice(0, 80), url: cleanUrl })
+    .values({ tenantId, name: cleanName.slice(0, 80), url: cleanUrl, allowedSectorIds: cleanIdList(allowedSectorIds), allowedUserIds: cleanIdList(allowedUserIds) })
     .returning();
   res.status(201).json(inserted);
 });
@@ -45,8 +67,10 @@ router.patch("/sheet-links/:id", requireAdmin, async (req, res): Promise<void> =
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const { name, url } = req.body as { name?: string; url?: string };
+  const { name, url, allowedSectorIds, allowedUserIds } = req.body as { name?: string; url?: string; allowedSectorIds?: unknown; allowedUserIds?: unknown };
   const update: Record<string, unknown> = {};
+  if (allowedSectorIds !== undefined) update.allowedSectorIds = cleanIdList(allowedSectorIds);
+  if (allowedUserIds !== undefined) update.allowedUserIds = cleanIdList(allowedUserIds);
   if (name !== undefined) {
     const n = name.trim();
     if (!n) { res.status(400).json({ error: "Nome é obrigatório" }); return; }

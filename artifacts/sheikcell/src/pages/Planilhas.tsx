@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { api, type SheetLink } from "@/lib/api";
+import { api, type SheetLink, type Sector, type User } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -20,6 +20,17 @@ export default function Planilhas() {
   const [editing, setEditing] = useState<SheetLink | null>(null);
   const [form, setForm] = useState({ name: "", url: "" });
   const [saving, setSaving] = useState(false);
+  // Acesso personalizado (só admin usa)
+  const [accSectors, setAccSectors] = useState<number[]>([]);
+  const [accUsers, setAccUsers] = useState<number[]>([]);
+  const [sectors, setSectors] = useState<Sector[]>([]);
+  const [team, setTeam] = useState<User[]>([]);
+
+  useEffect(() => {
+    if (!canManage) return;
+    api.sectors.list().then(setSectors).catch(() => {});
+    api.admin.users.list().then((us) => setTeam(us.filter((u) => u.isActive && u.role !== "admin"))).catch(() => {});
+  }, [canManage]);
 
   const fetchLinks = () => {
     api.sheetLinks.list().then((rows) => {
@@ -35,19 +46,29 @@ export default function Planilhas() {
   const openForm = (l?: SheetLink) => {
     setEditing(l ?? null);
     setForm(l ? { name: l.name, url: l.url } : { name: "", url: "" });
+    setAccSectors(l?.allowedSectorIds ?? []);
+    setAccUsers(l?.allowedUserIds ?? []);
     setShowForm(true);
   };
+
+  const toggleId = (list: number[], id: number) =>
+    list.includes(id) ? list.filter((x) => x !== id) : [...list, id];
 
   const handleSave = async () => {
     if (!form.name.trim() || !form.url.trim() || saving) return;
     setSaving(true);
     try {
+      const payload = {
+        ...form,
+        allowedSectorIds: accSectors.length > 0 ? accSectors : null,
+        allowedUserIds: accUsers.length > 0 ? accUsers : null,
+      };
       if (editing) {
-        const upd = await api.sheetLinks.update(editing.id, form);
+        const upd = await api.sheetLinks.update(editing.id, payload);
         setLinks((prev) => prev.map((l) => (l.id === upd.id ? upd : l)));
         if (activeId === upd.id) setIframeKey((k) => k + 1);
       } else {
-        const created = await api.sheetLinks.create(form);
+        const created = await api.sheetLinks.create(payload);
         setLinks((prev) => [...prev, created]);
         setActiveId(created.id);
       }
@@ -182,6 +203,47 @@ export default function Planilhas() {
                 <p className="text-[11px] text-muted-foreground mt-1">
                   Dica: no Google, use "Compartilhar" e deixe o acesso liberado para quem tem o link, assim a equipe consegue abrir e editar aqui dentro.
                 </p>
+              </div>
+              {/* Acesso personalizado por setor e vendedor */}
+              <div className="border-t border-border pt-3">
+                <p className="text-xs font-bold mb-1">Quem pode ver esta planilha?</p>
+                <p className="text-[11px] text-muted-foreground mb-2">
+                  {accSectors.length === 0 && accUsers.length === 0
+                    ? "Sem seleção = toda a equipe vê. Marque setores e/ou vendedores para restringir."
+                    : "Só quem estiver marcado abaixo vai ver (admins veem sempre)."}
+                </p>
+                {sectors.length > 0 && (
+                  <>
+                    <p className="text-[11px] font-semibold text-muted-foreground mb-1">Setores</p>
+                    <div className="flex flex-wrap gap-1.5 mb-2">
+                      {sectors.map((s) => (
+                        <button key={s.id} type="button" onClick={() => setAccSectors((p) => toggleId(p, s.id))}
+                          data-testid={`sheet-acc-sector-${s.id}`}
+                          className={`px-2 py-1 rounded-full text-[11px] font-semibold border transition ${
+                            accSectors.includes(s.id) ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border hover:bg-secondary"
+                          }`}>
+                          {s.name}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+                {team.length > 0 && (
+                  <>
+                    <p className="text-[11px] font-semibold text-muted-foreground mb-1">Vendedores / equipe</p>
+                    <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
+                      {team.map((u) => (
+                        <button key={u.id} type="button" onClick={() => setAccUsers((p) => toggleId(p, u.id))}
+                          data-testid={`sheet-acc-user-${u.id}`}
+                          className={`px-2 py-1 rounded-full text-[11px] font-semibold border transition ${
+                            accUsers.includes(u.id) ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border hover:bg-secondary"
+                          }`}>
+                          {u.name}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
               </div>
             </div>
             <div className="flex gap-2 mt-5">
