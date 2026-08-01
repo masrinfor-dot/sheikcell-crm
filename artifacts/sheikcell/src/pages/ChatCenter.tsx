@@ -1420,7 +1420,9 @@ export default function ChatCenter() {
   // ── Alarme fixo (tipo despertador) ─────────────────────────────────────────
   // Enquanto houver conversa estourada não silenciada, um aviso grande fica na
   // tela e o toque repete a cada 20s até alguém responder ou silenciar.
-  const overdueConvs = alertEnabled ? convs.filter(isOverdue) : [];
+  // Admin não recebe o alarme fixo (banner + som repetido) — só a equipe.
+  const alarmForRole = user?.role !== "admin";
+  const overdueConvs = alertEnabled && alarmForRole ? convs.filter(isOverdue) : [];
   const alarmConvs = overdueConvs.filter((c) => !alarmMuted.has(c.id));
   const alarmByCat = { potenciais: 0, pendentes: 0, ativos: 0 } as Record<string, number>;
   for (const c of alarmConvs) alarmByCat[conversationCategory(c)] = (alarmByCat[conversationCategory(c)] ?? 0) + 1;
