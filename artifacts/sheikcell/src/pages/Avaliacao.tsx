@@ -89,6 +89,9 @@ export default function Avaliacao() {
   const [basePrice, setBasePrice] = useState("");
   const [baseMarket, setBaseMarket] = useState("");
   const [result, setResult] = useState<{ device: string; marketPrice: string; suggestedPrice: string; summary: string } | null>(null);
+  // Tabela usada quando a IA calculou a oferta (para recalcular ao trocar).
+  const [resultTable, setResultTable] = useState<1 | 2 | 3>(2);
+  const [offerTable, setOfferTable] = useState<1 | 2 | 3>(2);
   const [history, setHistory] = useState<TradeInEvaluation[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   // Pesquisa e filtros do histórico
@@ -139,6 +142,8 @@ export default function Avaliacao() {
         basePrice: basePrice || undefined, answers,
       });
       setResult(r);
+      setResultTable(marginTable);
+      setOfferTable(marginTable);
       setStep(3);
       fetchHistory();
     } catch (err) {
@@ -146,6 +151,23 @@ export default function Avaliacao() {
     } finally {
       setEvaluating(false);
     }
+  };
+
+  // Recalcula a oferta na hora ao trocar a tabela de margem (sem chamar a IA):
+  // preço novo = preço da IA × (100 − margem nova) / (100 − margem original).
+  const offerPrice = (aiPrice: string): string => {
+    if (offerTable === resultTable || !margins) return aiPrice;
+    const pctOf = (t: 1 | 2 | 3) => (t === 1 ? margins.t1 : t === 2 ? margins.t2 : margins.t3);
+    const origPay = 100 - pctOf(resultTable);
+    const newPay = 100 - pctOf(offerTable);
+    if (origPay <= 0) return aiPrice;
+    // Aceita "R$ 1.800", "R$ 1.800,00", "1800" etc.
+    const m = aiPrice.replace(/\./g, "").replace(",", ".").match(/(\d+(?:\.\d+)?)/);
+    if (!m) return aiPrice;
+    const value = parseFloat(m[1]!);
+    if (!Number.isFinite(value) || value <= 0) return aiPrice;
+    const scaled = Math.round((value * newPay) / origPay / 10) * 10; // arredonda de 10 em 10
+    return scaled.toLocaleString("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 });
   };
 
   const resetForm = () => {
@@ -424,7 +446,27 @@ export default function Avaliacao() {
             </div>
             <div className="bg-green-600 rounded-xl p-3 text-white">
               <p className="text-[10px] font-semibold uppercase text-white/80">Sugestão de valor de compra</p>
-              <p className="text-xl font-extrabold mt-0.5" data-testid="text-suggested-price">{result.suggestedPrice}</p>
+              <p className="text-xl font-extrabold mt-0.5" data-testid="text-suggested-price">{offerPrice(result.suggestedPrice)}</p>
+              {offerTable !== resultTable && (
+                <p className="text-[10px] mt-0.5 text-white/80">Recalculado para a Tabela {offerTable}</p>
+              )}
+            </div>
+          </div>
+          {/* Trocar a tabela de margem direto na oferta */}
+          <div>
+            <p className="text-[10px] font-semibold text-muted-foreground uppercase mb-1.5">Tabela de margem</p>
+            <div className="flex gap-2">
+              {([1, 2, 3] as const).map((t) => {
+                const pct = margins ? (t === 1 ? margins.t1 : t === 2 ? margins.t2 : margins.t3) : null;
+                return (
+                  <button key={t} onClick={() => setOfferTable(t)} data-testid={`button-offer-table-${t}`}
+                    className={`flex-1 rounded-xl border-2 px-2 py-1.5 text-xs font-bold transition-colors ${
+                      offerTable === t ? "border-green-600 bg-green-600 text-white" : "border-border bg-white hover:bg-secondary"
+                    }`}>
+                    Tabela {t}{pct != null ? ` · ${pct}%` : ""}
+                  </button>
+                );
+              })}
             </div>
           </div>
           {result.summary && <p className="text-xs text-foreground/80 whitespace-pre-wrap">{result.summary}</p>}
