@@ -369,6 +369,14 @@ export default function ChatCenter() {
   // Alerta de atendimento sem resposta (configurável por admin/supervisor).
   const [alertEnabled, setAlertEnabled] = useState(true);
   const [alertMinutes, setAlertMinutes] = useState(5);
+  // Conversas estouradas silenciadas manualmente (o alarme fixo some até
+  // aparecer coisa nova). Limpa quando a conversa é respondida.
+  const [alarmMuted, setAlarmMuted] = useState<Set<number>>(new Set());
+  // Modal de configuração do alerta (ligar/desligar + minutos).
+  const [showAlertCfg, setShowAlertCfg] = useState(false);
+  const [cfgMinutes, setCfgMinutes] = useState(5);
+  const [cfgEnabled, setCfgEnabled] = useState(true);
+  const [savingAlertCfg, setSavingAlertCfg] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const alertedRef = useRef<Set<number>>(new Set());
   // Finalizar atendimento: modal para capturar o motivo da finalização.
@@ -441,27 +449,45 @@ export default function ChatCenter() {
     try { localStorage.setItem("chat.alertDesktop", desktopEnabled ? "on" : "off"); } catch { /* ignore */ }
   }, [desktopEnabled]);
 
-  // Short two-tone beep synthesized via Web Audio (no asset needed).
-  const playAlertSound = useCallback(() => {
+  // Sons sintetizados via Web Audio (sem arquivos). Cada área tem um toque
+  // diferente e mais chamativo que o bipe de mensagem nova:
+  //  - msg: bipe curto de mensagem nova (como antes)
+  //  - potenciais: sirene urgente alternando agudo/grave (cliente novo esperando!)
+  //  - pendentes: três toques subindo
+  //  - ativos: dois toques graves
+  const playAlertSound = useCallback((kind: "msg" | "potenciais" | "pendentes" | "ativos" = "msg") => {
     try {
       const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (!Ctx) return;
       let ctx = audioCtxRef.current;
       if (!ctx) { ctx = new Ctx(); audioCtxRef.current = ctx; }
       if (ctx.state === "suspended") ctx.resume().catch(() => {});
+      const patterns: Record<string, { wave: OscillatorType; vol: number; notes: [number, number][] }> = {
+        msg: { wave: "sine", vol: 0.15, notes: [[880, 0.12], [660, 0.24]] },
+        potenciais: { wave: "square", vol: 0.22, notes: [[988, 0.18], [740, 0.18], [988, 0.18], [740, 0.18], [1175, 0.3]] },
+        pendentes: { wave: "triangle", vol: 0.25, notes: [[659, 0.16], [831, 0.16], [1046, 0.32]] },
+        ativos: { wave: "sine", vol: 0.25, notes: [[523, 0.2], [392, 0.3]] },
+      };
+      const p = patterns[kind] ?? patterns.msg!;
       const now = ctx.currentTime;
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(880, now);
-      osc.frequency.setValueAtTime(660, now + 0.12);
+      osc.type = p.wave;
+      let t = now;
+      let total = 0;
+      for (const [freq, dur] of p.notes) {
+        osc.frequency.setValueAtTime(freq, t);
+        t += dur;
+        total += dur;
+      }
       gain.gain.setValueAtTime(0.0001, now);
-      gain.gain.exponentialRampToValueAtTime(0.15, now + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.35);
+      gain.gain.exponentialRampToValueAtTime(p.vol, now + 0.02);
+      gain.gain.setValueAtTime(p.vol, now + total - 0.08);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + total);
       osc.connect(gain);
       gain.connect(ctx.destination);
       osc.start(now);
-      osc.stop(now + 0.36);
+      osc.stop(now + total + 0.02);
     } catch { /* ignore */ }
   }, []);
 
@@ -1358,26 +1384,55 @@ export default function ChatCenter() {
   }, [alertEnabled, alertMinutes, nowTick]);
 
   // Alerta sonoro + aviso quando uma conversa estoura o limite (1x por estouro).
+  // O toque muda conforme a área da conversa (Potenciais/Pendentes/Ativos).
   useEffect(() => {
     if (!alertEnabled) return;
     const overdueNow = convs.filter(isOverdue);
     for (const c of overdueNow) {
       if (!alertedRef.current.has(c.id)) {
         alertedRef.current.add(c.id);
+        const cat = conversationCategory(c);
         toast({
           title: `⚠ ${c.name} sem resposta`,
-          description: `Cliente aguardando há mais de ${alertMinutes} min.`,
+          description: `Cliente aguardando há mais de ${alertMinutes} min (${cat}).`,
           variant: "destructive",
         });
-        if (soundEnabledRef.current) playAlertSound();
+        if (soundEnabledRef.current && (cat === "potenciais" || cat === "pendentes" || cat === "ativos")) playAlertSound(cat);
       }
     }
-    // Quando a conversa é respondida, libera para alertar de novo no futuro.
+    // Quando a conversa é respondida, libera para alertar de novo no futuro
+    // e sai do alarme fixo (inclusive se estava silenciada).
     for (const id of [...alertedRef.current]) {
       const c = convs.find((x) => x.id === id);
-      if (!c || !isOverdue(c)) alertedRef.current.delete(id);
+      if (!c || !isOverdue(c)) {
+        alertedRef.current.delete(id);
+        setAlarmMuted((prev) => {
+          if (!prev.has(id)) return prev;
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }
     }
   }, [convs, isOverdue, alertEnabled, alertMinutes]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Alarme fixo (tipo despertador) ─────────────────────────────────────────
+  // Enquanto houver conversa estourada não silenciada, um aviso grande fica na
+  // tela e o toque repete a cada 20s até alguém responder ou silenciar.
+  const overdueConvs = alertEnabled ? convs.filter(isOverdue) : [];
+  const alarmConvs = overdueConvs.filter((c) => !alarmMuted.has(c.id));
+  const alarmByCat = { potenciais: 0, pendentes: 0, ativos: 0 } as Record<string, number>;
+  for (const c of alarmConvs) alarmByCat[conversationCategory(c)] = (alarmByCat[conversationCategory(c)] ?? 0) + 1;
+  const alarmActiveRef = useRef(false);
+  alarmActiveRef.current = alarmConvs.length > 0;
+  const alarmTopCatRef = useRef<"potenciais" | "pendentes" | "ativos">("potenciais");
+  alarmTopCatRef.current = alarmByCat.potenciais! > 0 ? "potenciais" : alarmByCat.pendentes! > 0 ? "pendentes" : "ativos";
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (alarmActiveRef.current && soundEnabledRef.current) playAlertSound(alarmTopCatRef.current);
+    }, 20000);
+    return () => clearInterval(t);
+  }, [playAlertSound]);
 
   const overdueCount = alertEnabled ? convs.filter(isOverdue).length : 0;
 
@@ -1587,21 +1642,9 @@ export default function ChatCenter() {
             {/* Alerta de sem resposta: só admin/supervisor liga/desliga */}
             {(user?.role === "admin" || user?.role === "supervisor") && (
               <button
-                onClick={async () => {
-                  const next = !alertEnabled;
-                  setAlertEnabled(next);
-                  try {
-                    const s = await api.settings.update({ alertUnansweredEnabled: next });
-                    setAlertEnabled(s.alertUnansweredEnabled);
-                    setAlertMinutes(s.alertUnansweredMinutes);
-                    toast({ title: next ? "Alerta de sem resposta LIGADO" : "Alerta de sem resposta DESLIGADO", description: next ? `Avisa quando o cliente espera mais de ${s.alertUnansweredMinutes} min.` : "Ninguém mais recebe este alerta." });
-                  } catch {
-                    setAlertEnabled(!next);
-                    toast({ title: "Erro ao salvar configuração", variant: "destructive" });
-                  }
-                }}
+                onClick={() => { setCfgEnabled(alertEnabled); setCfgMinutes(alertMinutes); setShowAlertCfg(true); }}
                 data-testid="button-toggle-unanswered-alert"
-                title={`Alerta para atendimentos com mais de ${alertMinutes} min sem resposta (vale para toda a equipe)`}
+                title={`Configurar alerta de atendimentos sem resposta (vale para toda a equipe)`}
                 className={`ml-1 text-xs px-2.5 py-1 rounded-full transition border font-semibold ${alertEnabled
                   ? "bg-amber-50 text-amber-700 border-amber-300"
                   : "bg-white text-muted-foreground border-border"}`}
@@ -2429,6 +2472,92 @@ export default function ChatCenter() {
                 ))
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Alarme fixo de conversas sem resposta (tipo despertador) ────── */}
+      {alarmConvs.length > 0 && (
+        <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[60] w-[calc(100%-1.5rem)] max-w-lg" data-testid="alarm-banner">
+          <div className="bg-red-600 text-white rounded-2xl shadow-2xl border-4 border-red-300 animate-pulse-slow p-4"
+            style={{ animation: "pulse 1.5s ease-in-out infinite" }}>
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2 font-extrabold text-base">
+                <span className="text-2xl animate-bounce inline-block">⏰</span>
+                {alarmConvs.length === 1 ? "1 cliente sem resposta!" : `${alarmConvs.length} clientes sem resposta!`}
+              </div>
+              <button
+                onClick={() => setAlarmMuted((prev) => { const n = new Set(prev); for (const c of alarmConvs) n.add(c.id); return n; })}
+                data-testid="button-alarm-mute"
+                className="text-xs font-bold bg-white/20 hover:bg-white/30 rounded-lg px-2.5 py-1.5 shrink-0">
+                🔕 Silenciar
+              </button>
+            </div>
+            <div className="flex gap-2 mt-2 flex-wrap text-xs font-bold">
+              {alarmByCat.potenciais! > 0 && <span className="bg-yellow-400 text-yellow-950 rounded-full px-2.5 py-1">🟡 Potenciais: {alarmByCat.potenciais}</span>}
+              {alarmByCat.pendentes! > 0 && <span className="bg-orange-300 text-orange-950 rounded-full px-2.5 py-1">🟠 Pendentes: {alarmByCat.pendentes}</span>}
+              {alarmByCat.ativos! > 0 && <span className="bg-white text-red-700 rounded-full px-2.5 py-1">🔴 Ativos: {alarmByCat.ativos}</span>}
+            </div>
+            <div className="mt-2 space-y-1">
+              {alarmConvs.slice(0, 4).map((c) => (
+                <button key={c.id}
+                  onClick={() => { setCategory(conversationCategory(c)); setActiveId(c.id); }}
+                  data-testid={`button-alarm-open-${c.id}`}
+                  className="w-full text-left text-sm bg-white/15 hover:bg-white/25 rounded-lg px-3 py-1.5 font-semibold truncate">
+                  💬 {c.name} — esperando há {Math.max(1, Math.floor((nowTick - new Date(c.lastMessageAt!).getTime()) / 60000))} min
+                </button>
+              ))}
+              {alarmConvs.length > 4 && <div className="text-xs font-semibold opacity-90">… e mais {alarmConvs.length - 4}</div>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Configuração do alerta de sem resposta ──────────────────────── */}
+      {showAlertCfg && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowAlertCfg(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-sm p-6 shadow-xl space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold">⏰ Alerta de sem resposta</h3>
+              <button onClick={() => setShowAlertCfg(false)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <label className="flex items-center gap-2 text-sm font-medium">
+              <input type="checkbox" checked={cfgEnabled} onChange={(e) => setCfgEnabled(e.target.checked)} />
+              Alertar quando o cliente ficar sem resposta
+            </label>
+            <div>
+              <label className="text-sm font-semibold">Tempo para alertar (minutos)</label>
+              <input type="number" min={1} max={120} value={cfgMinutes}
+                onChange={(e) => setCfgMinutes(Number(e.target.value))}
+                data-testid="input-alert-minutes"
+                className="w-full px-3 py-2 rounded-xl border border-border text-sm mt-1" />
+              <p className="text-xs text-muted-foreground mt-1">Vale para toda a equipe. Cada área tem um toque diferente (Potenciais, Pendentes e Ativos) e o alarme fica na tela repetindo até responder ou silenciar.</p>
+            </div>
+            <button
+              onClick={async () => {
+                const mins = Math.round(cfgMinutes);
+                if (!Number.isFinite(mins) || mins < 1 || mins > 120) {
+                  toast({ title: "Tempo inválido", description: "Use entre 1 e 120 minutos.", variant: "destructive" });
+                  return;
+                }
+                setSavingAlertCfg(true);
+                try {
+                  const s = await api.settings.update({ alertUnansweredEnabled: cfgEnabled, alertUnansweredMinutes: mins });
+                  setAlertEnabled(s.alertUnansweredEnabled);
+                  setAlertMinutes(s.alertUnansweredMinutes);
+                  setShowAlertCfg(false);
+                  toast({ title: "Alerta salvo! ✅", description: s.alertUnansweredEnabled ? `Avisa após ${s.alertUnansweredMinutes} min sem resposta.` : "Alerta desligado para toda a equipe." });
+                } catch (err) {
+                  toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+                } finally {
+                  setSavingAlertCfg(false);
+                }
+              }}
+              disabled={savingAlertCfg}
+              data-testid="button-save-alert-cfg"
+              className="w-full py-2.5 rounded-xl bg-primary text-white font-semibold text-sm disabled:opacity-50">
+              {savingAlertCfg ? "Salvando..." : "Salvar"}
+            </button>
           </div>
         </div>
       )}
