@@ -1,43 +1,17 @@
 import { useState, useEffect } from "react";
-import { api, type TradeInEvaluation, type TradeInMargins } from "@/lib/api";
+import { api, type TradeInEvaluation, type TradeInMargins, type TradeInQuestion, type TradeInQuestionsConfig } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
   Smartphone, Sparkles, History, ChevronDown, ChevronLeft, RefreshCw, BadgeDollarSign, Settings, X,
+  ListChecks, Plus, Trash2, ArrowUp, ArrowDown,
 } from "lucide-react";
 
 // Fluxo em etapas inspirado na Trocafone (trocafacil.trocafone.com.br):
 // 1) Aparelho (marca → modelo → memória → cor)  2) Condições  3) Oferta.
-type Question = { key: string; label: string; options: string[] };
-
-// Perguntas baseadas nos critérios de condições do aparelho (padrão do
-// mercado de trade-in), personalizadas pela marca: só iPhone tem saúde da
-// bateria em %, Face ID/iCloud e aviso de peça não genuína.
-function questionsFor(brand: string): Question[] {
-  const isApple = /apple|iphone/i.test(brand);
-  return [
-    { key: "Liga", label: "O aparelho liga? (tela acende, sistema inicia e o toque na tela funciona)", options: ["Sim", "Não liga"] },
-    { key: "Ligações", label: "Faz e recebe ligações pela rede móvel? (chip/operadora — não vale WhatsApp)", options: ["Sim", "Não faz ligações"] },
-    { key: "Wi-Fi e Bluetooth", label: "Wi-Fi e Bluetooth funcionam normalmente? (conecta, navega e recebe arquivos)", options: ["Sim", "Não funciona"] },
-    { key: "Marcas de uso", label: "Tem marcas de uso?", options: ["Sem marcas de uso", "Quase imperceptíveis", "Marcas visíveis"] },
-    { key: "Carcaça / traseira", label: "Traseira ou laterais trincadas, rachadas, descascando, com peças faltando ou riscos?", options: ["Não", "Sim, com avarias"] },
-    { key: "Tela", label: "Tela quebrada, trincada, riscada ou com mancha/burn-in (tela fantasma, pixel queimado, LCD vazando)?", options: ["Não", "Sim, com avarias"] },
-    isApple
-      ? { key: "Biometria", label: "Face ID / Touch ID funciona e cadastra nova biometria?", options: ["Funciona", "Não funciona", "Não tem"] }
-      : { key: "Biometria", label: "Leitor de digital / desbloqueio facial funciona e cadastra nova biometria?", options: ["Funciona", "Não funciona", "Não tem"] },
-    { key: "Câmeras", label: "As câmeras (frontal e traseira) abrem e registram fotos normalmente?", options: ["Sem problemas", "Com problema"] },
-    isApple
-      ? { key: "Saúde da bateria", label: "Qual o nível de saúde da bateria (Ajustes → Bateria)?", options: ["Superior a 90%", "Entre 80% e 90%", "Inferior a 80%"] }
-      : { key: "Bateria", label: "Como está a bateria?", options: ["Segura bem a carga", "Descarrega rápido", "Ruim / estufada"] },
-    ...(isApple
-      ? [{ key: "Peça não genuína", label: "Aparece mensagem de \"peça não genuína ou desconhecida\" (Ajustes → Bateria)?", options: ["Não", "Sim, aparece"] }]
-      : []),
-    { key: "Acessórios", label: "Acompanha acessórios?", options: ["Caixa e carregador originais", "Só carregador", "Sem acessórios"] },
-    isApple
-      ? { key: "Conta desvinculada", label: "iCloud (Buscar iPhone) já desvinculado?", options: ["Sim", "Ainda não"] }
-      : { key: "Conta desvinculada", label: "Conta Google já desvinculada?", options: ["Sim", "Ainda não"] },
-  ];
-}
+// As perguntas de condições são EDITÁVEIS pelo admin (por marca: Apple x
+// Android) e vêm do servidor; cada opção pode bloquear a avaliação.
+const isAppleBrand = (brand: string) => /apple|iphone/i.test(brand);
 
 const BRANDS = ["Apple", "Samsung", "Motorola", "Xiaomi", "Realme", "Outra"];
 
@@ -52,8 +26,11 @@ const MODELS_BY_BRAND: Record<string, string[]> = {
 
 const MEMORIES = ["16GB", "32GB", "64GB", "128GB", "256GB", "512GB", "1TB"];
 
-// Respostas que indicam parte sem funcionar — a loja NÃO avalia (bloqueia).
-const BLOCKED_ANSWERS = ["Não liga", "Não faz ligações", "Não funciona", "Com problema"];
+// Modelo em branco para o editor de perguntas do admin.
+const emptyQuestion = (): TradeInQuestion => ({
+  key: "", label: "",
+  options: [{ label: "", blocks: false }, { label: "", blocks: false }],
+});
 
 const MARGIN_TABLES: { table: 1 | 2 | 3; key: keyof TradeInMargins; label: string }[] = [
   { table: 1, key: "t1", label: "Margem maior" },
@@ -99,19 +76,28 @@ export default function Avaliacao() {
   const [histBrand, setHistBrand] = useState("");
   const [histMemory, setHistMemory] = useState("");
 
+  // Perguntas configuráveis (servidor) + editor do admin.
+  const [qConfig, setQConfig] = useState<TradeInQuestionsConfig | null>(null);
+  const [showQuestionCfg, setShowQuestionCfg] = useState(false);
+  const [cfgQuestions, setCfgQuestions] = useState<TradeInQuestionsConfig | null>(null);
+  const [cfgTab, setCfgTab] = useState<"apple" | "android">("apple");
+  const [savingQuestions, setSavingQuestions] = useState(false);
+
   const fetchHistory = () => { api.tradeIn.list().then(setHistory).catch(() => {}); };
   useEffect(() => {
     fetchHistory();
     api.tradeIn.margins().then(setMargins).catch(() => {});
+    api.tradeIn.questions().then(setQConfig).catch(() => {});
   }, []);
 
   const deviceOk = Boolean(brand.trim() && model.trim());
-  const questions = questionsFor(brand);
-  const allAnswered = deviceOk && questions.every((q) => answers[q.key]);
+  const questions: TradeInQuestion[] = qConfig ? (isAppleBrand(brand) ? qConfig.apple : qConfig.android) : [];
+  const allAnswered = deviceOk && questions.length > 0 && questions.every((q) => answers[q.key]);
   const answeredCount = questions.filter((q) => answers[q.key]).length;
-  // Alguma resposta indica parte sem funcionar? Então a loja não avalia.
-  const blockedAnswer = questions.map((qq) => ({ q: qq.key, a: answers[qq.key] }))
-    .find((x) => x.a && BLOCKED_ANSWERS.includes(x.a));
+  // Alguma resposta marcada como "bloqueia avaliação"? Então a loja não avalia.
+  const blockedAnswer = questions
+    .map((qq) => ({ q: qq.key, a: answers[qq.key], opt: qq.options.find((o) => o.label === answers[qq.key]) }))
+    .find((x) => x.a && x.opt?.blocks);
 
   // Etapa 1 → 2: busca o preço base (valor máximo em perfeito estado).
   const handleContinue = async () => {
@@ -342,11 +328,22 @@ export default function Avaliacao() {
             <div className="flex items-center justify-between">
               <p className="text-xs font-bold mb-1.5">Tabela de margem</p>
               {user?.role === "admin" && (
-                <button onClick={() => { if (margins) setCfgMargins(margins); setShowMarginCfg(true); }}
-                  data-testid="button-margin-settings"
-                  className="flex items-center gap-1 text-[11px] font-semibold text-primary">
-                  <Settings className="w-3 h-3" /> Editar margens
-                </button>
+                <div className="flex items-center gap-3">
+                  <button onClick={() => { if (margins) setCfgMargins(margins); setShowMarginCfg(true); }}
+                    data-testid="button-margin-settings"
+                    className="flex items-center gap-1 text-[11px] font-semibold text-primary">
+                    <Settings className="w-3 h-3" /> Editar margens
+                  </button>
+                  <button onClick={() => {
+                      if (qConfig) setCfgQuestions(JSON.parse(JSON.stringify(qConfig)) as TradeInQuestionsConfig);
+                      setCfgTab(isAppleBrand(brand) ? "apple" : "android");
+                      setShowQuestionCfg(true);
+                    }}
+                    data-testid="button-question-settings"
+                    className="flex items-center gap-1 text-[11px] font-semibold text-primary">
+                    <ListChecks className="w-3 h-3" /> Editar perguntas
+                  </button>
+                </div>
               )}
             </div>
             <div className="grid grid-cols-3 gap-2">
@@ -402,16 +399,19 @@ export default function Avaliacao() {
             </div>
           )}
 
+          {questions.length === 0 && (
+            <p className="text-xs text-muted-foreground text-center py-3">Carregando perguntas...</p>
+          )}
           {questions.map((qq) => (
             <div key={qq.key}>
               <p className="text-xs font-bold mb-1.5">{qq.label}</p>
               <div className="flex gap-1.5 flex-wrap">
                 {qq.options.map((opt) => (
-                  <button key={opt}
-                    onClick={() => setAnswers((a) => ({ ...a, [qq.key]: opt }))}
-                    data-testid={`tradein-${qq.key}-${opt}`}
-                    className={chip(answers[qq.key] === opt)}>
-                    {opt}
+                  <button key={opt.label}
+                    onClick={() => setAnswers((a) => ({ ...a, [qq.key]: opt.label }))}
+                    data-testid={`tradein-${qq.key}-${opt.label}`}
+                    className={chip(answers[qq.key] === opt.label)}>
+                    {opt.label}
                   </button>
                 ))}
               </div>
@@ -476,6 +476,175 @@ export default function Avaliacao() {
               className="text-xs font-semibold text-muted-foreground underline">Ajustar condições</button>
             <button onClick={resetForm} data-testid="button-tradein-new"
               className="text-xs font-semibold text-primary underline">Fazer nova avaliação</button>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: editar perguntas do questionário (só admin) */}
+      {showQuestionCfg && cfgQuestions && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowQuestionCfg(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="p-5 pb-3 space-y-3 border-b border-border">
+              <div className="flex items-center justify-between">
+                <h3 className="font-bold flex items-center gap-2"><ListChecks className="w-4 h-4 text-primary" /> Perguntas da avaliação</h3>
+                <button onClick={() => setShowQuestionCfg(false)} data-testid="button-close-question-cfg"><X className="w-5 h-5 text-muted-foreground" /></button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Edite as perguntas e opções do questionário de condições. Marque <b>🚫 bloqueia</b> nas respostas que indicam
+                parte sem funcionar — a loja não avalia o aparelho nesses casos. As perguntas podem ser diferentes para Apple e Android.
+              </p>
+              <div className="flex gap-2">
+                {(["apple", "android"] as const).map((g) => (
+                  <button key={g} onClick={() => setCfgTab(g)} data-testid={`tab-questions-${g}`}
+                    className={`flex-1 rounded-xl border-2 px-3 py-1.5 text-xs font-bold transition ${
+                      cfgTab === g ? "border-primary bg-primary/5 text-primary" : "border-border bg-white hover:bg-secondary"
+                    }`}>
+                    {g === "apple" ? "Apple (iPhone)" : "Android / outras"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-5 space-y-4">
+              {cfgQuestions[cfgTab].map((qq, qi) => (
+                <div key={qi} className="rounded-xl border border-border p-3 space-y-2">
+                  <div className="flex items-start gap-2">
+                    <div className="flex-1 grid grid-cols-1 sm:grid-cols-[1fr_2fr] gap-2">
+                      <input value={qq.key}
+                        onChange={(e) => setCfgQuestions((c) => {
+                          const n = structuredClone(c!); n[cfgTab][qi]!.key = e.target.value; return n;
+                        })}
+                        placeholder="Título curto (ex.: Tela)" maxLength={60}
+                        data-testid={`input-question-key-${qi}`}
+                        className="px-3 py-2 rounded-xl border border-border text-xs font-semibold" />
+                      <input value={qq.label}
+                        onChange={(e) => setCfgQuestions((c) => {
+                          const n = structuredClone(c!); n[cfgTab][qi]!.label = e.target.value; return n;
+                        })}
+                        placeholder="Texto da pergunta" maxLength={200}
+                        data-testid={`input-question-label-${qi}`}
+                        className="px-3 py-2 rounded-xl border border-border text-xs" />
+                    </div>
+                    <div className="flex flex-col gap-1 shrink-0">
+                      <div className="flex gap-1">
+                        <button disabled={qi === 0} title="Mover para cima"
+                          onClick={() => setCfgQuestions((c) => {
+                            const n = structuredClone(c!); const arr = n[cfgTab];
+                            [arr[qi - 1], arr[qi]] = [arr[qi]!, arr[qi - 1]!]; return n;
+                          })}
+                          className="p-1 rounded-lg border border-border text-muted-foreground disabled:opacity-30 hover:bg-secondary">
+                          <ArrowUp className="w-3.5 h-3.5" />
+                        </button>
+                        <button disabled={qi === cfgQuestions[cfgTab].length - 1} title="Mover para baixo"
+                          onClick={() => setCfgQuestions((c) => {
+                            const n = structuredClone(c!); const arr = n[cfgTab];
+                            [arr[qi], arr[qi + 1]] = [arr[qi + 1]!, arr[qi]!]; return n;
+                          })}
+                          className="p-1 rounded-lg border border-border text-muted-foreground disabled:opacity-30 hover:bg-secondary">
+                          <ArrowDown className="w-3.5 h-3.5" />
+                        </button>
+                        <button title="Remover pergunta" data-testid={`button-remove-question-${qi}`}
+                          onClick={() => setCfgQuestions((c) => {
+                            const n = structuredClone(c!); n[cfgTab].splice(qi, 1); return n;
+                          })}
+                          className="p-1 rounded-lg border border-red-200 text-red-600 hover:bg-red-50">
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    {qq.options.map((opt, oi) => (
+                      <div key={oi} className="flex items-center gap-2">
+                        <input value={opt.label}
+                          onChange={(e) => setCfgQuestions((c) => {
+                            const n = structuredClone(c!); n[cfgTab][qi]!.options[oi]!.label = e.target.value; return n;
+                          })}
+                          placeholder={`Opção ${oi + 1}`} maxLength={80}
+                          data-testid={`input-option-${qi}-${oi}`}
+                          className="flex-1 px-3 py-1.5 rounded-xl border border-border text-xs" />
+                        <label className={`flex items-center gap-1 text-[11px] font-semibold cursor-pointer select-none px-2 py-1.5 rounded-xl border transition ${
+                          opt.blocks ? "border-red-300 bg-red-50 text-red-700" : "border-border text-muted-foreground"
+                        }`}>
+                          <input type="checkbox" checked={opt.blocks}
+                            onChange={(e) => setCfgQuestions((c) => {
+                              const n = structuredClone(c!); n[cfgTab][qi]!.options[oi]!.blocks = e.target.checked; return n;
+                            })}
+                            data-testid={`checkbox-blocks-${qi}-${oi}`}
+                            className="accent-red-600" />
+                          🚫 bloqueia
+                        </label>
+                        <button title="Remover opção" disabled={qq.options.length <= 2}
+                          onClick={() => setCfgQuestions((c) => {
+                            const n = structuredClone(c!); n[cfgTab][qi]!.options.splice(oi, 1); return n;
+                          })}
+                          className="p-1 rounded-lg text-muted-foreground disabled:opacity-30 hover:text-red-600">
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                    {qq.options.length < 8 && (
+                      <button onClick={() => setCfgQuestions((c) => {
+                          const n = structuredClone(c!); n[cfgTab][qi]!.options.push({ label: "", blocks: false }); return n;
+                        })}
+                        data-testid={`button-add-option-${qi}`}
+                        className="flex items-center gap-1 text-[11px] font-semibold text-primary">
+                        <Plus className="w-3 h-3" /> Adicionar opção
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+              {cfgQuestions[cfgTab].length < 30 && (
+                <button onClick={() => setCfgQuestions((c) => {
+                    const n = structuredClone(c!); n[cfgTab].push(emptyQuestion()); return n;
+                  })}
+                  data-testid="button-add-question"
+                  className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl border-2 border-dashed border-border text-xs font-bold text-primary hover:bg-secondary transition">
+                  <Plus className="w-4 h-4" /> Adicionar pergunta
+                </button>
+              )}
+            </div>
+
+            <div className="p-5 pt-3 border-t border-border flex items-center gap-3">
+              <button
+                onClick={async () => {
+                  if (!confirm("Restaurar as perguntas padrão do sistema? As personalizações serão perdidas.")) return;
+                  try {
+                    const def = await api.tradeIn.resetQuestions();
+                    setQConfig(def);
+                    setCfgQuestions(JSON.parse(JSON.stringify(def)) as TradeInQuestionsConfig);
+                    setAnswers({});
+                    toast({ title: "Perguntas padrão restauradas" });
+                  } catch (err) {
+                    toast({ title: "Erro ao restaurar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+                  }
+                }}
+                data-testid="button-reset-questions"
+                className="text-xs font-semibold text-muted-foreground underline">
+                Restaurar padrão
+              </button>
+              <button
+                onClick={async () => {
+                  setSavingQuestions(true);
+                  try {
+                    const saved = await api.tradeIn.saveQuestions(cfgQuestions);
+                    setQConfig(saved);
+                    setShowQuestionCfg(false);
+                    setAnswers({}); // respostas antigas podem não existir mais
+                    toast({ title: "Perguntas salvas! ✅" });
+                  } catch (err) {
+                    toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+                  } finally {
+                    setSavingQuestions(false);
+                  }
+                }}
+                disabled={savingQuestions}
+                data-testid="button-save-questions"
+                className="flex-1 py-2.5 rounded-xl bg-primary text-white font-semibold text-sm disabled:opacity-50">
+                {savingQuestions ? "Salvando..." : "Salvar perguntas"}
+              </button>
+            </div>
           </div>
         </div>
       )}

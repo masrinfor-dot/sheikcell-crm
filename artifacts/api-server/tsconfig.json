@@ -5,7 +5,11 @@
     "tsBuildInfoFile": ".tsbuildinfo",
     "outDir": "dist",
     "rootDir": "src",
-    "types": ["node"]
+    "types": ["node"],
+    // Build real é via esbuild (build.mjs); o tsc só typechecka. Permitir
+    // import "./x.ts" deixa os testes rodarem direto com `node --test`.
+    "noEmit": true,
+    "allowImportingTsExtensions": true
   },
   "include": ["src"],
   "references": [

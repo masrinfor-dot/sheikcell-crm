@@ -3,6 +3,9 @@ import { db, tradeInEvaluationsTable, usersTable, appSettingsTable } from "@work
 import { eq, and, desc } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
 import { requirePerm } from "../lib/permissions";
+import {
+  QUESTIONS_KEY, DEFAULT_QUESTIONS, sanitizeQuestions, validateTradeInAnswers, type QuestionsConfig,
+} from "../lib/tradeInQuestions";
 
 const router: IRouter = Router();
 
@@ -93,8 +96,50 @@ router.patch("/trade-in/margins", requireAdmin, async (req, res): Promise<void> 
   res.json(next);
 });
 
-// Respostas que indicam parte sem funcionar: a loja NÃO avalia esses aparelhos.
-const BLOCKED_ANSWERS = ["Não liga", "Não faz ligações", "Não funciona", "Com problema"];
+// ─── Perguntas do questionário (editáveis por loja) ─────────────────────────
+// O admin edita perguntas/opções nas configurações; cada opção pode ser marcada
+// como "bloqueia avaliação" (parte sem funcionar). Perguntas variam por marca
+// (Apple x Android). Guardado por loja em app_settings (tenant_id + key).
+// Lógica pura (defaults, sanitização e validação) em lib/tradeInQuestions.
+
+async function getQuestionsConfig(tenantId: number): Promise<QuestionsConfig> {
+  const [row] = await db.select().from(appSettingsTable)
+    .where(and(eq(appSettingsTable.tenantId, tenantId), eq(appSettingsTable.key, QUESTIONS_KEY))).limit(1);
+  if (!row) return DEFAULT_QUESTIONS;
+  try {
+    const { config } = sanitizeQuestions(JSON.parse(row.value));
+    return config ?? DEFAULT_QUESTIONS;
+  } catch {
+    return DEFAULT_QUESTIONS;
+  }
+}
+
+router.get("/trade-in/questions", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  res.json(await getQuestionsConfig(tenantId));
+});
+
+router.put("/trade-in/questions", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { config, error } = sanitizeQuestions(req.body);
+  if (!config) { res.status(400).json({ error: error ?? "Configuração inválida" }); return; }
+  await db.insert(appSettingsTable)
+    .values({ tenantId, key: QUESTIONS_KEY, value: JSON.stringify(config) })
+    .onConflictDoUpdate({
+      // Chave composta: nunca sobrescreve as perguntas de outra loja.
+      target: [appSettingsTable.tenantId, appSettingsTable.key],
+      set: { value: JSON.stringify(config) },
+    });
+  res.json(config);
+});
+
+// Restaurar as perguntas padrão do sistema.
+router.delete("/trade-in/questions", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  await db.delete(appSettingsTable)
+    .where(and(eq(appSettingsTable.tenantId, tenantId), eq(appSettingsTable.key, QUESTIONS_KEY)));
+  res.json(DEFAULT_QUESTIONS);
+});
 
 // Sanitiza texto como DADO de aparelho (sem quebras/aspas — evita injeção).
 const clean = (v: unknown, max: number) => (typeof v === "string"
@@ -203,7 +248,7 @@ router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (re
 
   // Limita e sanitiza as respostas ANTES de usar e de gravar (anti-abuso).
   const cleanAnswers: Answers = {};
-  for (const [k, v] of Object.entries(answers).slice(0, 20)) {
+  for (const [k, v] of Object.entries(answers).slice(0, 30)) {
     if (typeof v !== "string") continue;
     const key = k.trim().slice(0, 60);
     const val = v.trim().slice(0, 200);
@@ -211,10 +256,15 @@ router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (re
   }
   if (Object.keys(cleanAnswers).length === 0) { res.status(400).json({ error: "Responda o questionário de estado" }); return; }
 
-  // Não avaliamos aparelho com parte sem funcionar (não liga, tela apagada etc.).
-  const blocked = Object.entries(cleanAnswers).find(([, v]) => BLOCKED_ANSWERS.includes(v));
-  if (blocked) {
-    res.status(422).json({ error: `Não avaliamos aparelho com parte sem funcionar (${blocked[0].toLowerCase()}: "${blocked[1]}").` });
+  // Validação estrita contra o questionário configurado da loja (por marca):
+  // toda pergunta respondida, nenhuma chave desconhecida, cada valor uma opção
+  // configurada e nenhuma opção que bloqueia — senão dá para burlar o bloqueio
+  // chamando a API direto com respostas inventadas.
+  const qConfig = await getQuestionsConfig(tenantId);
+  const isApple = /apple|iphone/i.test(fBrand || dev);
+  const validation = validateTradeInAnswers(isApple ? qConfig.apple : qConfig.android, cleanAnswers);
+  if (!validation.ok) {
+    res.status(validation.status).json({ error: validation.error });
     return;
   }
 

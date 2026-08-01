@@ -36,3 +36,4 @@
 - [Schema change path](drizzle-push-drift.md) — drizzle push broken by drift; ship every schema change as idempotent SQL in migrations/ + MIGRATION_FILES (boot runner) or prod won't have it
 - [Reuniões online](meetings-online.md) — Jitsi iframe + gravação no navegador → Whisper → GPT gera ata; upload 20MB por causa do body limit 30MB + base64; reunião transcrita não retranscreve
 - [Per-seller metrics scoping](results-panel.md) — vendedor só vê os próprios números: forçar setor+attendant do solicitante em TODAS as métricas de qualquer endpoint de relatório; ranking é admin/supervisor-only
+- [api-server unit tests](api-server-unit-tests.md) — node:test files must import "./module.ts" with extension; tsc noEmit + allowImportingTsExtensions (build é esbuild)

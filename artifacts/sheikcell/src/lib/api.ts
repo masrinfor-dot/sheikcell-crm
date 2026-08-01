@@ -380,6 +380,11 @@ export type TradeInEvaluation = {
 // Tabelas de margem da avaliação: 1 = maior, 2 = média, 3 = menor (em %).
 export type TradeInMargins = { t1: number; t2: number; t3: number };
 
+// Perguntas do questionário de condições (editáveis pelo admin, por marca).
+export type TradeInQuestionOption = { label: string; blocks: boolean };
+export type TradeInQuestion = { key: string; label: string; options: TradeInQuestionOption[] };
+export type TradeInQuestionsConfig = { apple: TradeInQuestion[]; android: TradeInQuestion[] };
+
 export type FilmCompat = {
   id: number; film: string; models: string; notes: string | null;
   createdAt: string; updatedAt: string;
@@ -836,6 +841,10 @@ export const api = {
     margins: () => req<TradeInMargins>("/trade-in/margins"),
     saveMargins: (data: Partial<TradeInMargins>) =>
       req<TradeInMargins>("/trade-in/margins", { method: "PATCH", body: JSON.stringify(data) }),
+    questions: () => req<TradeInQuestionsConfig>("/trade-in/questions"),
+    saveQuestions: (data: TradeInQuestionsConfig) =>
+      req<TradeInQuestionsConfig>("/trade-in/questions", { method: "PUT", body: JSON.stringify(data) }),
+    resetQuestions: () => req<TradeInQuestionsConfig>("/trade-in/questions", { method: "DELETE" }),
   },
   results: {
     summary: (params?: { from?: string; to?: string; sectorId?: number; attendantId?: number; store?: string }) => {
