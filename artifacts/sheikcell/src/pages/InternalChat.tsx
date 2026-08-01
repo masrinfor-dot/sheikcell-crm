@@ -380,7 +380,7 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
                       : (active.otherUser ? roleLabel[active.otherUser.role] ?? active.otherUser.role : "")}
                   </div>
                 </div>
-                {active.kind === "group" && (user?.role === "admin" || user?.role === "supervisor") && (
+                {active.kind === "group" && user?.role === "admin" && (
                   <button
                     onClick={async () => {
                       if (!confirm(`Excluir o grupo "${active.name}"? Todas as mensagens dele serão apagadas para todos.`)) return;
@@ -552,10 +552,12 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
                   className={`flex-1 text-xs font-semibold rounded-lg px-3 py-2 transition ${newMode === "direct" ? "bg-primary text-white" : "text-muted-foreground hover:bg-muted/60"}`}>
                   Conversa
                 </button>
-                <button onClick={() => setNewMode("group")} data-testid="tab-new-group"
-                  className={`flex-1 text-xs font-semibold rounded-lg px-3 py-2 transition ${newMode === "group" ? "bg-violet-600 text-white" : "text-muted-foreground hover:bg-muted/60"}`}>
-                  <Users className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />Grupo
-                </button>
+                {user?.role === "admin" && (
+                  <button onClick={() => setNewMode("group")} data-testid="tab-new-group"
+                    className={`flex-1 text-xs font-semibold rounded-lg px-3 py-2 transition ${newMode === "group" ? "bg-violet-600 text-white" : "text-muted-foreground hover:bg-muted/60"}`}>
+                    <Users className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />Grupo
+                  </button>
+                )}
               </div>
               {newMode === "group" && (
                 <div className="p-3 border-b">

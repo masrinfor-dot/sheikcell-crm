@@ -1,7 +1,7 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import { db, internalConversationsTable, internalConversationMembersTable, internalMessagesTable, usersTable } from "@workspace/db";
 import { eq, and, asc, inArray, sql, ne } from "drizzle-orm";
-import { requireAuth } from "../middlewares/auth";
+import { requireAuth, requireAdmin } from "../middlewares/auth";
 import {
   sseEmitter,
   broadcastInternal,
@@ -211,7 +211,8 @@ router.get("/internal-chat/conversations", requireAuth, async (req, res): Promis
 // Any staff user may create a group, naming it and escolhendo os participantes.
 // O criador sempre entra como membro. Grupos usam o mesmo escopo dos diretos:
 // só membros veem, recebem eventos e podem enviar mensagens.
-router.post("/internal-chat/conversations/group", requireAuth, async (req, res): Promise<void> => {
+// Só admin cria grupos (conversas diretas continuam liberadas para todos).
+router.post("/internal-chat/conversations/group", requireAdmin, async (req, res): Promise<void> => {
   const userId = req.session.userId!;
   const { name, memberIds } = req.body as { name?: string; memberIds?: number[] };
   const cleanName = (name ?? "").trim().slice(0, 80);
@@ -415,29 +416,14 @@ router.post("/internal-chat/conversations/:id/messages", requireAuth, async (req
 
 // ─── Excluir grupo ──────────────────────────────────────────────────────────
 // Só grupos podem ser excluídos (nunca a sala geral nem conversas diretas).
-// Quem pode: admin (qualquer grupo) ou supervisor que seja membro do grupo.
-router.delete("/internal-chat/conversations/:id", requireAuth, async (req, res): Promise<void> => {
-  const userId = req.session.userId!;
-  const userRole = req.session.userRole!;
+// Quem pode: somente admin (qualquer grupo).
+router.delete("/internal-chat/conversations/:id", requireAdmin, async (req, res): Promise<void> => {
   const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
   if (Number.isNaN(convId)) { res.status(400).json({ error: "Conversa inválida" }); return; }
 
   const [conv] = await db.select().from(internalConversationsTable).where(eq(internalConversationsTable.id, convId)).limit(1);
   if (!conv) { res.status(404).json({ error: "Grupo não encontrado" }); return; }
   if (conv.kind !== "group") { res.status(400).json({ error: "Só grupos podem ser excluídos" }); return; }
-
-  if (userRole !== "admin") {
-    if (userRole !== "supervisor") { res.status(403).json({ error: "Só admin ou supervisor pode excluir grupos" }); return; }
-    const [member] = await db
-      .select({ userId: internalConversationMembersTable.userId })
-      .from(internalConversationMembersTable)
-      .where(and(
-        eq(internalConversationMembersTable.conversationId, convId),
-        eq(internalConversationMembersTable.userId, userId),
-      ))
-      .limit(1);
-    if (!member) { res.status(403).json({ error: "Você não participa desse grupo" }); return; }
-  }
 
   // Captura os membros ANTES de apagar (depois não dá mais para saber quem eram)
   // e só avisa se ESTA requisição realmente apagou o grupo (evita evento falso
