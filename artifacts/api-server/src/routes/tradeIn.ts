@@ -46,7 +46,11 @@ router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (re
   };
   // Campos estruturados (novo formulário). Se vierem, o texto do aparelho é
   // montado a partir deles; senão vale o texto livre (compatibilidade).
-  const clean = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+  // Sanitiza como DADO de aparelho: só letras/números/espaço e pontuação leve
+  // (nada de quebras de linha, aspas, chaves etc. — evita injeção no prompt).
+  const clean = (v: unknown, max: number) => (typeof v === "string"
+    ? v.normalize("NFC").replace(/[^\p{L}\p{N} .,+\-()/]/gu, " ").replace(/\s+/g, " ").trim().slice(0, max)
+    : "");
   const fBrand = clean(brand, 40);
   const fModel = clean(model, 60);
   const fMemory = clean(memory, 20);

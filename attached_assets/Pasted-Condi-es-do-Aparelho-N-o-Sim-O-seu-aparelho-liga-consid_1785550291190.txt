@@ -1,0 +1,57 @@
+Condições do Aparelho
+Não/Sim
+O seu aparelho liga?
+É considerado "ligar" o aparelho que a tela acenda, o sistema operacional é iniciado e é possível navegar por meio do toque direto na tela, realizando a remoção de contas clouds e reset do mesmo.
+
+
+Não
+
+O aparelho faz e recebe ligações, através de rede móvel (não considerar chamadas com conexão de internet - Ex: Whatsapp, Telegram etc)?
+Considera-se a realização de ligações por meio do uso da rede móvel de telefonia.
+
+
+Não
+
+A conectividade com wifi e bluetooth está funcionando normalmente?
+É necessário que o aparelho seja capaz de se conectar a rede wifi e navegar pela internet por meio dela usando-se o navegador nativo do sistema. No que tange o uso do bluetooth espera-se que o aparelho seja capaz de receber arquivo por meio dessa conexão.
+
+
+Não
+
+Tem marcas de uso?
+
+Não possui marcas de uso
+
+Possui marcas de uso, quase que imperceptíveis
+
+Possui marcas de uso visíveis
+O aparelho está com a parte traseira ou laterais trincadas, rachadas, descascando, com peças faltando (ex. botões) ou com riscos?
+
+Não
+
+O aparelho está com a tela quebrada, trincada, rachada, descascando ou com riscos? Está com mancha na tela /Burning (Ex: tons de branco, rosa, amarelo, tela sobreposta/fantasma, LCD vazando, pixel queimado, branco ou morto)?
+
+Não
+
+O aparelho possui funcionalidade de Leitores Biométricos (Touch ID, Face ID, Leitor de Impressão Digital e Scanner de Rosto, Leitor de Íris)? É possível cadastrar uma nova biometria?
+
+Não
+
+As câmeras do dispositivo apresentam algum problema (Frontal e Traseira)?
+Se faz necessário que o aplicativo nativo de câmera do aparelho seja aberto e consiga registrar fotos tanto com as câmeras traseiras quanto com as frontais.
+
+
+Não
+
+Qual o nível de saúde da sua bateria?
+
+Inferior a 80%
+
+Entre 80% e 90%
+
+Superior a 90%
+O dispositivo apresenta mensagem de peça não genuína ou desconhecida?
+Verificar através do caminho: Ajustes > Bateria em aparelhos com sistema IOS é verificado a mensagem "Peça não genuína ou desconhecida"
+
+
+Não
