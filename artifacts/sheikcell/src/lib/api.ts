@@ -476,6 +476,7 @@ export type ChatMessage = {
   status: string;
   senderName: string | null;
   mediaUrl: string | null;
+  transcript: string | null;
   externalId: string | null;
   createdAt: string;
 };
@@ -645,6 +646,8 @@ export const api = {
       req<ChatMessage>(`/chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
     suggestReply: (id: number) =>
       req<{ suggestion: string }>(`/chat/conversations/${id}/suggest-reply`, { method: "POST" }),
+    transcribe: (messageId: number) =>
+      req<{ transcript: string }>(`/chat/messages/${messageId}/transcribe`, { method: "POST" }),
     correctText: (text: string) =>
       req<{ corrected: string }>(`/chat/correct-text`, { method: "POST", body: JSON.stringify({ text }) }),
     sendMedia: (id: number, file: File, caption?: string, opts?: { ptt?: boolean }): Promise<ChatMessage> => {

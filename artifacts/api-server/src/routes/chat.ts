@@ -1459,6 +1459,29 @@ router.delete("/chat/conversations/:id/participants/:userId", requireAuth, async
   res.json({ ok: true });
 });
 
+// ─── Transcrever áudio (Whisper) ───────────────────────────────────────────
+router.post("/chat/messages/:id/transcribe", requireAuth, async (req: Request, res: Response): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const msgId = parseInt(req.params.id as string, 10);
+  if (!Number.isFinite(msgId)) { res.status(400).json({ error: "ID inválido" }); return; }
+
+  const [msg] = await db.select().from(messagesTable)
+    .where(and(eq(messagesTable.id, msgId), eq(messagesTable.tenantId, tenantId))).limit(1);
+  if (!msg) { res.status(404).json({ error: "Mensagem não encontrada" }); return; }
+  const [conv] = await db.select().from(conversationsTable)
+    .where(and(eq(conversationsTable.id, msg.conversationId), eq(conversationsTable.tenantId, tenantId))).limit(1);
+  if (!conv || !(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+
+  try {
+    const { transcribeMessage } = await import("../lib/transcribe");
+    const transcript = await transcribeMessage(msgId);
+    broadcast("message_updated", { conversationId: conv.id, message: { ...msg, transcript } }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+    res.json({ transcript });
+  } catch (err) {
+    res.status(422).json({ error: err instanceof Error ? err.message : "Falha ao transcrever" });
+  }
+});
+
 // ─── Serve saved media files ───────────────────────────────────────────────
 router.get("/chat/media/:filename", requireAuth, async (req: Request, res: Response): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
@@ -1676,7 +1699,11 @@ router.post("/chat/conversations/:id/suggest-reply", requireAuth, requirePerm("u
     .limit(15);
   const history = recent
     .reverse()
-    .map((m) => `${m.direction === "inbound" ? "Cliente" : "Atendente"}: ${m.content}`)
+    .map((m) => {
+      // Áudio já transcrito entra como texto — a IA entende o que foi falado.
+      const body = m.type === "audio" && m.transcript ? `🎵 Áudio (transcrição): ${m.transcript}` : m.content;
+      return `${m.direction === "inbound" ? "Cliente" : "Atendente"}: ${body}`;
+    })
     .join("\n");
 
   if (!history.trim()) {

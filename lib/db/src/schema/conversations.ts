@@ -72,6 +72,8 @@ export const messagesTable = pgTable(
     status: text("status").notNull().default("sent"), // sent | delivered | read | failed
     senderName: text("sender_name"),
     mediaUrl: text("media_url"),
+    // Transcrição do áudio (Whisper) — preenchida sob demanda ou pelo robô.
+    transcript: text("transcript"),
     externalId: text("external_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

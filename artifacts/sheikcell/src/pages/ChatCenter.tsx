@@ -214,6 +214,59 @@ function ConvItem({ conv, active, onClick, sessionBadge, overdue }: { conv: Conv
 function MediaContent({ msg }: { msg: ChatMessage }) {
   if (!msg.mediaUrl) return null;
 
+  if (msg.type === "audio") {
+    return <AudioBubble msg={msg} />;
+  }
+
+  return <MediaContentRest msg={msg} />;
+}
+
+/** Áudio com botão de transcrição (Whisper). */
+function AudioBubble({ msg }: { msg: ChatMessage }) {
+  const [local, setLocal] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const transcript = msg.transcript ?? local;
+
+  const handleTranscribe = async () => {
+    if (busy) return;
+    setBusy(true); setErr(null);
+    try {
+      const r = await api.chat.transcribe(msg.id);
+      setLocal(r.transcript);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Falha ao transcrever");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mb-1">
+      <div className="flex items-center gap-2 bg-black/5 rounded-xl px-3 py-2 min-w-[200px]">
+        <Volume2 className="w-4 h-4 text-primary shrink-0" />
+        <audio controls className="flex-1 h-8 max-w-[200px]" style={{ minWidth: 0 }}>
+          <source src={msg.mediaUrl ?? undefined} />
+        </audio>
+      </div>
+      {transcript ? (
+        <p className="text-xs mt-1 bg-black/5 rounded-lg px-2.5 py-1.5 whitespace-pre-wrap" data-testid={`text-transcript-${msg.id}`}>
+          📝 {transcript}
+        </p>
+      ) : (
+        <button onClick={handleTranscribe} disabled={busy} data-testid={`button-transcribe-${msg.id}`}
+          className="text-[11px] font-semibold text-primary underline mt-0.5 disabled:opacity-60">
+          {busy ? "Transcrevendo…" : "📝 Transcrever áudio"}
+        </button>
+      )}
+      {err && <p className="text-[11px] text-red-600 mt-0.5">{err}</p>}
+    </div>
+  );
+}
+
+function MediaContentRest({ msg }: { msg: ChatMessage }) {
+  if (!msg.mediaUrl) return null;
+
   if (msg.type === "image") {
     return (
       <a href={msg.mediaUrl} target="_blank" rel="noopener noreferrer" className="block mb-1">
@@ -237,17 +290,6 @@ function MediaContent({ msg }: { msg: ChatMessage }) {
       >
         <source src={msg.mediaUrl} />
       </video>
-    );
-  }
-
-  if (msg.type === "audio") {
-    return (
-      <div className="flex items-center gap-2 mb-1 bg-black/5 rounded-xl px-3 py-2 min-w-[200px]">
-        <Volume2 className="w-4 h-4 text-primary shrink-0" />
-        <audio controls className="flex-1 h-8 max-w-[200px]" style={{ minWidth: 0 }}>
-          <source src={msg.mediaUrl} />
-        </audio>
-      </div>
     );
   }
 
@@ -908,7 +950,7 @@ export default function ChatCenter() {
     const optimistic: ChatMessage = {
       id: -Date.now(), conversationId: activeId, content: text,
       direction: "outbound", type: "text", status: "sent",
-      senderName: user?.name ?? null, mediaUrl: null, externalId: null,
+      senderName: user?.name ?? null, mediaUrl: null, transcript: null, externalId: null,
       createdAt: new Date().toISOString(),
     };
     setMessages((prev) => [...prev, optimistic]);
@@ -940,7 +982,7 @@ export default function ChatCenter() {
       id: -Date.now(), conversationId: activeId,
       content: fileCaption ? `${baseContent}\n${fileCaption}` : baseContent,
       direction: "outbound", type: isImage ? "image" : isVideo ? "video" : isAudio ? "audio" : "doc", status: "sent",
-      senderName: user?.name ?? null, mediaUrl: null, externalId: null,
+      senderName: user?.name ?? null, mediaUrl: null, transcript: null, externalId: null,
       createdAt: new Date().toISOString(),
     };
     setMessages((prev) => [...prev, optimistic]);
@@ -1004,7 +1046,7 @@ export default function ChatCenter() {
           id: -Date.now(), conversationId: convId,
           content: "🎤 Áudio",
           direction: "outbound", type: "audio", status: "sent",
-          senderName: user?.name ?? null, mediaUrl: null, externalId: null,
+          senderName: user?.name ?? null, mediaUrl: null, transcript: null, externalId: null,
           createdAt: new Date().toISOString(),
         };
         setMessages((prev) => [...prev, optimistic]);
@@ -1237,7 +1279,7 @@ export default function ChatCenter() {
         id: Date.now(), conversationId: activeConv.id,
         content: `🔀 Conversa transferida para ${targetSector?.name ?? "outro setor"}`,
         direction: "outbound" as const, type: "system", status: "sent",
-        senderName: "Sistema", mediaUrl: null, externalId: null,
+        senderName: "Sistema", mediaUrl: null, transcript: null, externalId: null,
         createdAt: new Date().toISOString(),
       }]);
       toast({ title: `Transferido para ${targetSector?.name ?? "setor"}`, description: "Conversa enviada para Pendentes para aprovar o atendimento." });

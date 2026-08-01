@@ -573,6 +573,27 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   // Robô de pré-atendimento (assíncrono: nunca atrasa nem derruba o webhook)
   if (msgType === "text") {
     void import("./bot").then((m) => m.handleBotInbound(conv, displayContent)).catch(() => {});
+  } else if (msgType === "audio") {
+    // Áudio: transcreve com o Whisper e entrega o texto ao robô, como se o
+    // cliente tivesse digitado. Falha de transcrição não derruba o webhook.
+    void transcribeAndBot(conv, msg.id);
+  }
+}
+
+/** Transcreve um áudio recém-chegado, avisa as telas e aciona o robô. */
+async function transcribeAndBot(conv: typeof conversationsTable.$inferSelect, messageId: number): Promise<void> {
+  try {
+    const { transcribeMessage } = await import("./transcribe");
+    const transcript = await transcribeMessage(messageId);
+    const [updated] = await db.select().from(messagesTable).where(eq(messagesTable.id, messageId)).limit(1);
+    if (updated) {
+      broadcast("message_updated", { conversationId: conv.id, message: updated }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+    }
+    const { handleBotInbound } = await import("./bot");
+    await handleBotInbound(conv, transcript);
+  } catch (err) {
+    const { logger } = await import("./logger");
+    logger.warn({ err, messageId }, "Falha ao transcrever áudio inbound");
   }
 }
 
@@ -698,6 +719,8 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
           const convRef = conv;
           const textRef = saved.content;
           void import("./bot").then((m) => m.handleBotInbound(convRef, textRef)).catch(() => {});
+        } else if (saved.type === "audio") {
+          void transcribeAndBot(conv, saved.id);
         }
       }
     }
