@@ -152,6 +152,26 @@ function TaskCard({
           </span>
         </button>
       </div>
+
+      {/* Botões visíveis para mudar a tarefa de fase (sem precisar abrir o menu) */}
+      {(prev || next) && (
+        <div className="flex gap-1.5 pt-1">
+          {prev && (
+            <button onClick={() => onMove(task.id, prev.key)} data-testid={`button-task-prev-${task.id}`}
+              className="flex-1 flex items-center justify-center gap-1 text-[11px] font-semibold px-2 py-1.5 rounded-lg border border-border text-muted-foreground hover:bg-secondary transition">
+              <ChevronLeft className="w-3 h-3" /> {prev.label}
+            </button>
+          )}
+          {next && (
+            <button onClick={() => onMove(task.id, next.key)} data-testid={`button-task-next-${task.id}`}
+              className={`flex-1 flex items-center justify-center gap-1 text-[11px] font-semibold px-2 py-1.5 rounded-lg transition ${
+                next.key === "done" ? "bg-green-600 text-white hover:bg-green-700" : "bg-primary text-white hover:opacity-90"
+              }`}>
+              {next.label} <ChevronRight className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
