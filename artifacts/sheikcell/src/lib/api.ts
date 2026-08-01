@@ -480,10 +480,67 @@ export type ChatMessage = {
   createdAt: string;
 };
 
+export type SaasContract = {
+  id: number;
+  tenantId: number;
+  plan: string;
+  monthlyValueCents: number;
+  startDate: string | null;
+  renewalDate: string | null;
+  notes: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+  tenantName?: string;
+};
+
+export type SaasInvoice = {
+  id: number;
+  tenantId: number;
+  tenantName: string;
+  description: string;
+  amountCents: number;
+  dueDate: string;
+  status: "pendente" | "paga" | "cancelada";
+  overdue: boolean;
+  paidAt: string | null;
+  createdAt: string;
+};
+
+export type SaasTicket = {
+  id: number;
+  tenantId: number;
+  tenantName: string;
+  title: string;
+  description: string | null;
+  status: "aberto" | "em_andamento" | "resolvido";
+  createdAt: string;
+  resolvedAt: string | null;
+};
+
+export type SaasOverview = {
+  mrrCents: number;
+  paidMonthCents: number;
+  paidMonthCount: number;
+  paidTotalCents: number;
+  overdueCents: number;
+  overdueCount: number;
+  pendingCents: number;
+  pendingCount: number;
+  openTickets: number;
+  newContractsMonth: number;
+};
+
 export type TenantSummary = {
   id: number;
   name: string;
   isActive: boolean;
+  saasStatus: "ativo" | "inadimplente" | "cancelado";
+  contactName: string | null;
+  contactPhone: string | null;
+  contactEmail: string | null;
+  overdueCount: number;
+  contract: SaasContract | null;
   createdAt: string;
   userCount: number;
   conversationCount: number;
@@ -495,10 +552,36 @@ export const api = {
     listTenants: () => req<{ tenants: TenantSummary[] }>("/superadmin/tenants"),
     createTenant: (data: { name: string; adminName?: string; adminEmail?: string; adminPassword?: string }) =>
       req<{ tenant: TenantSummary }>("/superadmin/tenants", { method: "POST", body: JSON.stringify(data) }),
-    updateTenant: (id: number, data: { name?: string; isActive?: boolean }) =>
+    updateTenant: (id: number, data: {
+      name?: string; isActive?: boolean; saasStatus?: "ativo" | "cancelado";
+      contactName?: string | null; contactPhone?: string | null; contactEmail?: string | null;
+    }) =>
       req<{ tenant: TenantSummary }>(`/superadmin/tenants/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     upsertTenantAdmin: (id: number, data: { name?: string; email: string; password: string }) =>
       req<{ admin: { id: number; name: string; email: string } | null }>(`/superadmin/tenants/${id}/admin`, { method: "POST", body: JSON.stringify(data) }),
+    saasOverview: () => req<SaasOverview>("/superadmin/saas/overview"),
+    listContracts: () => req<{ contracts: SaasContract[] }>("/superadmin/saas/contracts"),
+    saveContract: (tenantId: number, data: {
+      plan?: string; monthlyValueCents?: number; startDate?: string | null;
+      renewalDate?: string | null; notes?: string | null; isActive?: boolean;
+    }) => req<{ contract: SaasContract }>(`/superadmin/tenants/${tenantId}/contract`, { method: "PUT", body: JSON.stringify(data) }),
+    getContractTemplate: () => req<{ template: string }>("/superadmin/saas/contract-template"),
+    saveContractTemplate: (template: string) =>
+      req<{ ok: boolean }>("/superadmin/saas/contract-template", { method: "PUT", body: JSON.stringify({ template }) }),
+    listInvoices: () => req<{ invoices: SaasInvoice[] }>("/superadmin/saas/invoices"),
+    createInvoice: (data: { tenantId: number; description?: string; amountCents: number; dueDate: string }) =>
+      req<{ invoice: SaasInvoice }>("/superadmin/saas/invoices", { method: "POST", body: JSON.stringify(data) }),
+    generateInvoices: (month?: string) =>
+      req<{ created: number; month: string }>("/superadmin/saas/invoices/generate", { method: "POST", body: JSON.stringify({ month }) }),
+    setInvoiceStatus: (id: number, status: "pendente" | "paga" | "cancelada") =>
+      req<{ invoice: SaasInvoice }>(`/superadmin/saas/invoices/${id}`, { method: "PATCH", body: JSON.stringify({ status }) }),
+    deleteInvoice: (id: number) =>
+      req<{ ok: boolean }>(`/superadmin/saas/invoices/${id}`, { method: "DELETE" }),
+    listTickets: () => req<{ tickets: SaasTicket[] }>("/superadmin/saas/tickets"),
+    createTicket: (data: { tenantId: number; title: string; description?: string }) =>
+      req<{ ticket: SaasTicket }>("/superadmin/saas/tickets", { method: "POST", body: JSON.stringify(data) }),
+    updateTicket: (id: number, data: { status?: "aberto" | "em_andamento" | "resolvido"; title?: string; description?: string }) =>
+      req<{ ticket: SaasTicket }>(`/superadmin/saas/tickets/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   },
   auth: {
     login: (email: string, password: string) =>

@@ -26,11 +26,13 @@ import documentsRouter from "./documents";
 import storesRouter from "./stores";
 import resultsRouter from "./results";
 import superadminRouter from "./superadmin";
+import superadminSaasRouter from "./superadminSaas";
 
 const router: IRouter = Router();
 router.use(healthRouter);
 router.use(authRouter);
 router.use(superadminRouter);
+router.use(superadminSaasRouter);
 // Trava o sistema (423) enquanto houver questionário/treinamento obrigatório pendente.
 router.use(enforceMandatoryChecklists);
 router.use(enforceMandatoryTrainings);

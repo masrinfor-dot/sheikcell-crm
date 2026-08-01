@@ -9,6 +9,13 @@ export const tenantsTable = pgTable("tenants", {
   name: text("name").notNull(),
   // suspensa = ninguém da loja consegue logar/usar (fail closed)
   isActive: boolean("is_active").notNull().default(true),
+  // Situação comercial do lojista no SaaS: ativo | cancelado.
+  // "Inadimplente" é derivado (mensalidade pendente vencida), não gravado.
+  saasStatus: text("saas_status").notNull().default("ativo"),
+  // Dados de contato do lojista (dono da loja que aluga o sistema)
+  contactName: text("contact_name"),
+  contactPhone: text("contact_phone"),
+  contactEmail: text("contact_email"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

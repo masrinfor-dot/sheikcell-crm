@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { db, tenantsTable, usersTable, sectorsTable, conversationsTable, whatsappSessionsTable } from "@workspace/db";
-import { eq, and, count, desc } from "drizzle-orm";
+import { db, tenantsTable, usersTable, sectorsTable, conversationsTable, whatsappSessionsTable, saasContractsTable, saasInvoicesTable } from "@workspace/db";
+import { eq, and, count, desc, lt } from "drizzle-orm";
 import { requireSuperadmin, invalidateTenantCache } from "../middlewares/auth";
 
 // Painel do superadmin (dono do sistema): cria/suspende lojas (tenants) e
@@ -24,7 +24,25 @@ router.get("/superadmin/tenants", async (_req, res): Promise<void> => {
         .select({ id: usersTable.id, name: usersTable.name, email: usersTable.email, isActive: usersTable.isActive })
         .from(usersTable)
         .where(and(eq(usersTable.tenantId, t.id), eq(usersTable.role, "admin")));
-      return { ...t, userCount: Number(u?.n ?? 0), conversationCount: Number(c?.n ?? 0), whatsappCount: Number(w?.n ?? 0), admins };
+      const today = new Date().toISOString().slice(0, 10);
+      const [contract] = await db.select().from(saasContractsTable).where(eq(saasContractsTable.tenantId, t.id));
+      const [[overdue]] = await Promise.all([
+        db.select({ n: count() }).from(saasInvoicesTable)
+          .where(and(eq(saasInvoicesTable.tenantId, t.id), eq(saasInvoicesTable.status, "pendente"), lt(saasInvoicesTable.dueDate, today))),
+      ]);
+      const overdueCount = Number(overdue?.n ?? 0);
+      // Situação comercial: cancelado (manual) > inadimplente (derivada) > ativo
+      const saasStatus = t.saasStatus === "cancelado" ? "cancelado" : overdueCount > 0 ? "inadimplente" : "ativo";
+      return {
+        ...t,
+        saasStatus,
+        overdueCount,
+        contract: contract ?? null,
+        userCount: Number(u?.n ?? 0),
+        conversationCount: Number(c?.n ?? 0),
+        whatsappCount: Number(w?.n ?? 0),
+        admins,
+      };
     }),
   );
   res.json({ tenants: result });
@@ -83,13 +101,50 @@ router.post("/superadmin/tenants", async (req, res): Promise<void> => {
 // Renomeia / suspende / reativa loja
 router.patch("/superadmin/tenants/:id", async (req, res): Promise<void> => {
   const id = Number(req.params.id);
-  const { name, isActive } = req.body as { name?: string; isActive?: boolean };
+  const { name, isActive, saasStatus, contactName, contactPhone, contactEmail } = req.body as {
+    name?: string; isActive?: boolean; saasStatus?: string;
+    contactName?: string | null; contactPhone?: string | null; contactEmail?: string | null;
+  };
   if (!Number.isFinite(id)) { res.status(400).json({ error: "Loja inválida" }); return; }
-  const updates: Partial<{ name: string; isActive: boolean }> = {};
+  const updates: Partial<{
+    name: string; isActive: boolean; saasStatus: string;
+    contactName: string | null; contactPhone: string | null; contactEmail: string | null;
+  }> = {};
   if (typeof name === "string" && name.trim()) updates.name = name.trim();
   if (typeof isActive === "boolean") updates.isActive = isActive;
+  if (typeof saasStatus === "string") {
+    // "inadimplente" é derivada das mensalidades — só ativo/cancelado é manual
+    if (!["ativo", "cancelado"].includes(saasStatus)) { res.status(400).json({ error: "Situação inválida" }); return; }
+    updates.saasStatus = saasStatus;
+    // Cancelar o contrato também suspende o acesso da loja (fail closed)
+    if (saasStatus === "cancelado") updates.isActive = false;
+  }
+  if (contactName !== undefined) updates.contactName = contactName?.trim() || null;
+  if (contactPhone !== undefined) updates.contactPhone = contactPhone?.trim() || null;
+  if (contactEmail !== undefined) updates.contactEmail = contactEmail?.trim() || null;
   if (!Object.keys(updates).length) { res.status(400).json({ error: "Nada para atualizar" }); return; }
-  const [tenant] = await db.update(tenantsTable).set(updates).where(eq(tenantsTable.id, id)).returning();
+  // Tudo numa transação única: cancelar/reativar o lojista também
+  // encerra/reativa o contrato dele e, ao cancelar, cancela as mensalidades
+  // pendentes — nunca pode sobrar loja cancelada com contrato ativo ou
+  // cobrança em aberto (nem parcialmente, se algo falhar no meio).
+  const tenant = await db.transaction(async (tx) => {
+    const [t] = await tx.update(tenantsTable).set(updates).where(eq(tenantsTable.id, id)).returning();
+    if (!t) return null;
+    if (updates.saasStatus) {
+      const cancelling = updates.saasStatus === "cancelado";
+      await tx
+        .update(saasContractsTable)
+        .set({ isActive: !cancelling, updatedAt: new Date() })
+        .where(eq(saasContractsTable.tenantId, id));
+      if (cancelling) {
+        await tx
+          .update(saasInvoicesTable)
+          .set({ status: "cancelada" })
+          .where(and(eq(saasInvoicesTable.tenantId, id), eq(saasInvoicesTable.status, "pendente")));
+      }
+    }
+    return t;
+  });
   if (!tenant) { res.status(404).json({ error: "Loja não encontrada" }); return; }
   invalidateTenantCache();
   res.json({ tenant });
