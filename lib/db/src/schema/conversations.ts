@@ -32,6 +32,9 @@ export const conversationsTable = pgTable("conversations", {
   surveyScaleMax: integer("survey_scale_max"),
   surveyWindowHours: integer("survey_window_hours"),
   surveyRewardText: text("survey_reward_text"),
+  // Lembrete único da pesquisa: marcado quando o lembrete foi enviado (ou
+  // reivindicado pelo agendador). Nunca é enviado mais de um por atendimento.
+  surveyReminderSentAt: timestamp("survey_reminder_sent_at", { withTimezone: true }),
   isArchived: boolean("is_archived").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

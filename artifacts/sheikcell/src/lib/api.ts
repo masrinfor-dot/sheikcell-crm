@@ -184,6 +184,8 @@ export type SurveySettings = {
   rewardEnabled: boolean;
   rewardText: string;
   raffleInvite: boolean;
+  reminderEnabled: boolean;
+  reminderHours: number;
 };
 
 export type RaffleWinner = { phone: string; name: string; conversationId: number; sent: boolean; error?: string };

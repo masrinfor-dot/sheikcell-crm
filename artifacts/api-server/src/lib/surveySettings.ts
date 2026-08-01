@@ -16,6 +16,10 @@ export type SurveySettings = {
   rewardText: string;
   // Acrescenta na pesquisa o aviso de que quem responder participa do sorteio.
   raffleInvite: boolean;
+  // Lembrete único quando o cliente não respondeu a pesquisa.
+  reminderEnabled: boolean;
+  // Horas após o envio da pesquisa para mandar o lembrete. 1–167.
+  reminderHours: number;
 };
 
 const KEY = "survey_settings";
@@ -28,6 +32,8 @@ export const SURVEY_DEFAULTS: SurveySettings = {
   rewardEnabled: false,
   rewardText: "",
   raffleInvite: false,
+  reminderEnabled: true,
+  reminderHours: 24,
 };
 
 export function surveyScaleMin(s: SurveySettings): number {
@@ -61,6 +67,7 @@ export async function getSurveySettings(tenantId: number): Promise<SurveySetting
 // Normaliza qualquer entrada (banco ou request) para valores válidos.
 export function sanitizeSurveySettings(input: Partial<SurveySettings>): SurveySettings {
   const hours = Math.round(Number(input.responseWindowHours));
+  const reminderH = Math.round(Number(input.reminderHours));
   return {
     enabled: input.enabled !== false,
     scaleMax: input.scaleMax === 10 ? 10 : 5,
@@ -69,6 +76,8 @@ export function sanitizeSurveySettings(input: Partial<SurveySettings>): SurveySe
     rewardEnabled: input.rewardEnabled === true,
     rewardText: typeof input.rewardText === "string" ? input.rewardText.slice(0, 1000) : "",
     raffleInvite: input.raffleInvite === true,
+    reminderEnabled: input.reminderEnabled !== false,
+    reminderHours: Number.isFinite(reminderH) ? Math.min(167, Math.max(1, reminderH)) : SURVEY_DEFAULTS.reminderHours,
   };
 }
 

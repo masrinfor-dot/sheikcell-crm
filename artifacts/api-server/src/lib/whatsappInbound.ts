@@ -349,7 +349,7 @@ async function tryConsumeSurveyReply(input: {
     // Em qualquer resposta, a pesquisa deixa de esperar (evita que um "5"
     // solto dias depois vire avaliação).
     await tx.update(conversationsTable)
-      .set({ pendingSurveyLogId: null, surveySentAt: null, surveyScaleMax: null, surveyWindowHours: null, surveyRewardText: null })
+      .set({ pendingSurveyLogId: null, surveySentAt: null, surveyScaleMax: null, surveyWindowHours: null, surveyRewardText: null, surveyReminderSentAt: null })
       .where(eq(conversationsTable.id, conv.id));
 
     if (!(msgType === "text" && inScale && fresh)) return null;

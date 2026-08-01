@@ -8,7 +8,7 @@ import { logger } from "./logger";
 // tráfego dependente do novo schema. Fonte: migrations/*.sql na raiz do repo
 // (copiadas para a imagem no deploy). Cada arquivo é idempotente (IF NOT
 // EXISTS / DO $$ guards), então re-executar a cada boot é seguro.
-const MIGRATION_FILES = ["0001_multi_tenant.sql", "0002_saas_owner_panel.sql", "0003_audio_transcript.sql", "0004_chat_notifications.sql", "0005_meetings.sql"] as const;
+const MIGRATION_FILES = ["0001_multi_tenant.sql", "0002_saas_owner_panel.sql", "0003_audio_transcript.sql", "0004_chat_notifications.sql", "0005_meetings.sql", "0006_survey_reminder.sql"] as const;
 
 function findMigrationsDir(): string | null {
   for (const c of [

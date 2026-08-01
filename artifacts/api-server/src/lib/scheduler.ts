@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { and, eq, lte } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, lte, sql } from "drizzle-orm";
 import {
   db,
   chatNotificationsTable,
@@ -11,6 +11,9 @@ import {
 import { broadcast } from "./sseEmitter";
 import { isPotentialConversation, restrictedRecipients } from "./conversationScope";
 import { logger } from "./logger";
+import { getSurveySettings, SURVEY_DEFAULTS, type SurveySettings } from "./surveySettings";
+import { sendOutboundText } from "./outbound";
+import { isSurveyReminderDue } from "./surveyReminderEligibility";
 
 let running = false;
 
@@ -195,8 +198,80 @@ export async function deliverScheduledMessages(): Promise<void> {
   }
 }
 
+// ── Lembrete único da pesquisa de satisfação ─────────────────────────────────
+// Cliente não respondeu a pesquisa? Um único lembrete é enviado depois de
+// `reminderHours` (config por loja, padrão 24h), desde que a janela de
+// resposta (retrato gravado no envio) ainda esteja aberta. O envio passa pelo
+// mesmo caminho do envio manual (fila anti-ban do bridge). A conversa é
+// reivindicada atomicamente (survey_reminder_sent_at IS NULL → agora), então
+// nunca sai mais de um lembrete por atendimento — mesmo se o tick concorrer.
+let remindersRunning = false;
+export async function sendSurveyReminders(): Promise<void> {
+  if (remindersRunning) return;
+  remindersRunning = true;
+  try {
+    const now = Date.now();
+    // Candidatas: pesquisa pendente, sem lembrete, enviada há pelo menos 1h
+    // (piso do reminderHours) e com a janela do RETRATO ainda aberta — o prazo
+    // gravado no envio é a autoridade (pesquisas antigas sem retrato ficam de
+    // fora). O filtro fino por loja acontece abaixo.
+    const candidates = await db.select().from(conversationsTable)
+      .where(and(
+        isNotNull(conversationsTable.pendingSurveyLogId),
+        isNull(conversationsTable.surveyReminderSentAt),
+        lte(conversationsTable.surveySentAt, new Date(now - 3_600_000)),
+        isNotNull(conversationsTable.surveyWindowHours),
+        sql`${conversationsTable.surveySentAt} + make_interval(hours => ${conversationsTable.surveyWindowHours}) > now()`,
+      ))
+      .limit(50);
+
+    const cfgByTenant = new Map<number, SurveySettings>();
+    for (const conv of candidates) {
+      try {
+        let cfg = cfgByTenant.get(conv.tenantId);
+        if (!cfg) {
+          cfg = await getSurveySettings(conv.tenantId).catch(() => ({ ...SURVEY_DEFAULTS }));
+          cfgByTenant.set(conv.tenantId, cfg);
+        }
+        // Regras completas (fácil de desligar por loja, janela do retrato
+        // autoritativa, só WhatsApp 1:1 etc.) na função pura testável.
+        if (!isSurveyReminderDue(conv, cfg, now)) continue;
+
+        // Reivindica ANTES de enviar: se o cliente respondeu nesse meio-tempo
+        // (pendingSurveyLogId mudou/limpou) ou outro tick chegou primeiro, o
+        // UPDATE não pega nenhuma linha e nada é enviado.
+        const claimed = await db.update(conversationsTable)
+          .set({ surveyReminderSentAt: new Date() })
+          .where(and(
+            eq(conversationsTable.id, conv.id),
+            eq(conversationsTable.pendingSurveyLogId, conv.pendingSurveyLogId!),
+            isNull(conversationsTable.surveyReminderSentAt),
+          ))
+          .returning({ id: conversationsTable.id });
+        if (claimed.length === 0) continue;
+
+        const scaleMax = conv.surveyScaleMax ?? cfg.scaleMax;
+        const scaleMin = scaleMax === 10 ? 0 : 1;
+        const text = `Oi! 👋 Ainda dá tempo de avaliar seu atendimento: de ${scaleMin} a ${scaleMax}, que nota você dá? (${scaleMax} = excelente)\n\nResponda apenas com o número. Obrigado! 🙏`;
+        // Falhou o envio? O lembrete fica marcado mesmo assim — melhor perder o
+        // lembrete do que arriscar mandar dois para o mesmo cliente.
+        const delivered = await sendOutboundText(conv.id, text, "Pesquisa de satisfação (lembrete)");
+        if (!delivered) logger.warn({ conversationId: conv.id }, "Lembrete de pesquisa não entregue pelo bridge");
+      } catch (err) {
+        logger.warn({ err, conversationId: conv.id }, "Falha ao processar lembrete de pesquisa");
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, "Tick de lembretes de pesquisa falhou");
+  } finally {
+    remindersRunning = false;
+  }
+}
+
 export function startScheduler(): void {
   setInterval(() => { void deliverScheduledMessages(); }, 30_000);
+  // Lembrete da pesquisa de satisfação: granularidade de minutos basta.
+  setInterval(() => { void sendSurveyReminders(); }, 60_000);
   // Sorteios recorrentes: checa a cada 5 minutos (roda no dia certo, após as 10h).
   setInterval(() => {
     void import("../routes/raffles").then((m) => m.runDueRaffles()).catch(() => {});

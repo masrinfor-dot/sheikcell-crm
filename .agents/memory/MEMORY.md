@@ -31,6 +31,8 @@
 - [SaaS owner panel](saas-owner-panel.md) — "inadimplente" is derived, never stored; cancelar lojista cascades atomically to contract+invoices; billing serializes on the tenant row lock
 - [Mobile chat is minimal](mobile-chat-minimal.md) — Expo app lacks full chat; SSE via XHR client in lib/chatEvents.ts; expo web preview can't log in (CORS), test on device
 - [Persistent bell notifications](persistent-bell-notifications.md) — schedule due/failed avisos persist in chat_notifications per-user; scheduler inserts before SSE; bell dedupes by sched-<kind>-<id>
+- [db package build](db-package-build.md) — after editing lib/db schema, run `tsc -b lib/db` or dependents' typecheck sees the old columns (project-reference dist)
+- [Survey reminder](survey-reminder.md) — lembrete único da pesquisa: claim atômico em survey_reminder_sent_at; janela do RETRATO é autoritativa (sem fallback p/ config atual)
 - [Schema change path](drizzle-push-drift.md) — drizzle push broken by drift; ship every schema change as idempotent SQL in migrations/ + MIGRATION_FILES (boot runner) or prod won't have it
 - [Reuniões online](meetings-online.md) — Jitsi iframe + gravação no navegador → Whisper → GPT gera ata; upload 20MB por causa do body limit 30MB + base64; reunião transcrita não retranscreve
 - [Per-seller metrics scoping](results-panel.md) — vendedor só vê os próprios números: forçar setor+attendant do solicitante em TODAS as métricas de qualquer endpoint de relatório; ranking é admin/supervisor-only

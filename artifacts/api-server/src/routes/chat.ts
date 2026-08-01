@@ -938,6 +938,8 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
           surveyScaleMax: surveyCfg.scaleMax,
           surveyWindowHours: surveyCfg.responseWindowHours,
           surveyRewardText: surveyCfg.rewardEnabled && surveyCfg.rewardText.trim() ? surveyCfg.rewardText.trim() : null,
+          // Pesquisa nova = lembrete novo (um por atendimento).
+          surveyReminderSentAt: null,
         })
         .where(and(eq(conversationsTable.id, updated.id), eq(conversationsTable.tenantId, tenantId)));
       const delivered = await sendOutboundText(
@@ -949,7 +951,7 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
         // Envio falhou: desfaz a espera — mas só se ela ainda apontar para ESTE
         // log (uma resposta concorrente ou uma pesquisa mais nova nunca é apagada).
         await db.update(conversationsTable)
-          .set({ pendingSurveyLogId: null, surveySentAt: null, surveyScaleMax: null, surveyWindowHours: null, surveyRewardText: null })
+          .set({ pendingSurveyLogId: null, surveySentAt: null, surveyScaleMax: null, surveyWindowHours: null, surveyRewardText: null, surveyReminderSentAt: null })
           .where(and(
             eq(conversationsTable.id, updated.id),
             eq(conversationsTable.tenantId, tenantId),

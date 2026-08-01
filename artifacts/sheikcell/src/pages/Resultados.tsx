@@ -227,6 +227,20 @@ export default function Resultados() {
                   <p className="text-xs text-muted-foreground mt-1">Depois desse prazo, a resposta não vale mais como nota.</p>
                 </div>
                 <label className="flex items-center gap-2 font-medium">
+                  <input type="checkbox" checked={surveyCfg.reminderEnabled} data-testid="checkbox-survey-reminder"
+                    onChange={(e) => setSurveyCfg({ ...surveyCfg, reminderEnabled: e.target.checked })} />
+                  Lembrar quem não respondeu (1 lembrete)
+                </label>
+                {surveyCfg.reminderEnabled && (
+                  <div>
+                    <label className="font-semibold">Enviar o lembrete após (horas)</label>
+                    <input type="number" min={1} max={167} value={surveyCfg.reminderHours} data-testid="input-survey-reminder-hours"
+                      onChange={(e) => setSurveyCfg({ ...surveyCfg, reminderHours: Number(e.target.value) })}
+                      className="w-full px-3 py-2 rounded-xl border border-border text-sm mt-1" />
+                    <p className="text-xs text-muted-foreground mt-1">Um único lembrete por atendimento, e só se o prazo de resposta ainda estiver aberto.</p>
+                  </div>
+                )}
+                <label className="flex items-center gap-2 font-medium">
                   <input type="checkbox" checked={surveyCfg.rewardEnabled} onChange={(e) => setSurveyCfg({ ...surveyCfg, rewardEnabled: e.target.checked })} />
                   Enviar cupom/voucher para quem responder
                 </label>
