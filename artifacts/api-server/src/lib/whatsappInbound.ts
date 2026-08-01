@@ -583,14 +583,29 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
 /** Transcreve um áudio recém-chegado, avisa as telas e aciona o robô. */
 async function transcribeAndBot(conv: typeof conversationsTable.$inferSelect, messageId: number): Promise<void> {
   try {
+    // Só paga a transcrição se o robô fosse mesmo responder (ligado, conversa
+    // sem responsável, dentro do modo configurado). Senão, o vendedor usa o
+    // botão "Transcrever" manualmente quando precisar.
+    const bot = await import("./bot");
+    if (!(await bot.botWouldHandle(conv))) return;
+
     const { transcribeMessage } = await import("./transcribe");
     const transcript = await transcribeMessage(messageId);
+
+    // Estado FRESCO da conversa: durante a transcrição ela pode ter sido
+    // assumida/finalizada — o aviso SSE e o robô usam o retrato atual, nunca
+    // o antigo (senão a transcrição vaza para quem perdeu o acesso).
+    const [freshConv] = await db.select().from(conversationsTable)
+      .where(eq(conversationsTable.id, conv.id)).limit(1);
+    if (!freshConv) return;
     const [updated] = await db.select().from(messagesTable).where(eq(messagesTable.id, messageId)).limit(1);
     if (updated) {
-      broadcast("message_updated", { conversationId: conv.id, message: updated }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+      broadcast("message_updated", { conversationId: freshConv.id, message: updated }, { tenantId: freshConv.tenantId, sectorId: freshConv.sectorId, isPotential: isPotentialConversation(freshConv), restrictedTo: await restrictedRecipients(freshConv) });
     }
-    const { handleBotInbound } = await import("./bot");
-    await handleBotInbound(conv, transcript);
+    // Recheca a elegibilidade com o estado atual antes do robô falar.
+    if (await bot.botWouldHandle(freshConv)) {
+      await bot.handleBotInbound(freshConv, transcript);
+    }
   } catch (err) {
     const { logger } = await import("./logger");
     logger.warn({ err, messageId }, "Falha ao transcrever áudio inbound");

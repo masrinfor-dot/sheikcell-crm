@@ -149,6 +149,23 @@ const queues = new Map<number, Promise<void>>();
 type Conv = typeof conversationsTable.$inferSelect;
 
 /** Chamado pelo webhook a cada mensagem recebida. Nunca lança. */
+/**
+ * Checagem BARATA de elegibilidade do robô, sem efeitos colaterais. Usada
+ * antes de gastar com transcrição de áudio: se o robô não fosse responder,
+ * não pagamos o Whisper à toa.
+ */
+export async function botWouldHandle(conv: Conv): Promise<boolean> {
+  if (conv.channel !== "whatsapp") return false;
+  if (conv.assigneeId != null) return false;
+  if (conv.status === "resolved" || conv.status === "archived") return false;
+  const settings = await getBotSettings(conv.tenantId);
+  if (!settings.enabled) return false;
+  if (settings.mode === "off_hours" && withinBusinessHours(settings)) return false;
+  const [state] = await db.select({ active: botStatesTable.active })
+    .from(botStatesTable).where(eq(botStatesTable.conversationId, conv.id));
+  return state ? state.active : true; // sem estado ainda = conversa nova, robô atende
+}
+
 export async function handleBotInbound(conv: Conv, text: string): Promise<void> {
   const prev = queues.get(conv.id) ?? Promise.resolve();
   const next = prev
