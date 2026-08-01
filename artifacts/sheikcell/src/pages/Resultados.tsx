@@ -220,6 +220,30 @@ export default function Resultados() {
                     className="w-full px-3 py-2 rounded-xl border border-border text-sm mt-1" />
                 </div>
                 <div>
+                  <label className="font-semibold">Mensagem de agradecimento (vazio = padrão)</label>
+                  <textarea value={surveyCfg.thankYouMessage} rows={2} maxLength={1000} data-testid="input-survey-thankyou"
+                    placeholder={"Obrigado pela sua avaliação! Nota {nota} registrada. 🙏"}
+                    onChange={(e) => setSurveyCfg({ ...surveyCfg, thankYouMessage: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm mt-1" />
+                  <p className="text-xs text-muted-foreground mt-1">Use {"{nota}"} para incluir a nota que o cliente deu.</p>
+                </div>
+                <div className="rounded-xl border border-border bg-muted/40 p-3 space-y-2" data-testid="survey-preview">
+                  <p className="text-xs font-semibold text-muted-foreground">Pré-visualização</p>
+                  <div className="rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 px-3 py-2 text-xs whitespace-pre-wrap">
+                    {(surveyCfg.message.trim()
+                      ? surveyCfg.message.trim()
+                      : `Seu atendimento foi finalizado. ✅\n\nDe ${surveyCfg.scaleMax === 10 ? 0 : 1} a ${surveyCfg.scaleMax}, que nota você dá para este atendimento? (${surveyCfg.scaleMax} = excelente)\n\nResponda apenas com o número. Obrigado! 🙏`)
+                      + (surveyCfg.raffleInvite ? "\n\n🎁 Respondendo, você participa do nosso sorteio!" : "")}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">Cliente responde: <span className="font-semibold">{surveyCfg.scaleMax}</span></p>
+                  <div className="rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 px-3 py-2 text-xs whitespace-pre-wrap">
+                    {(surveyCfg.thankYouMessage.trim()
+                      ? surveyCfg.thankYouMessage.trim().replace(/\{nota\}/gi, String(surveyCfg.scaleMax))
+                      : `Obrigado pela sua avaliação! Nota ${surveyCfg.scaleMax} registrada. 🙏`)
+                      + (surveyCfg.rewardEnabled && surveyCfg.rewardText.trim() ? `\n\n🎁 ${surveyCfg.rewardText.trim()}` : "")}
+                  </div>
+                </div>
+                <div>
                   <label className="font-semibold">Prazo para responder (horas)</label>
                   <input type="number" min={1} max={168} value={surveyCfg.responseWindowHours}
                     onChange={(e) => setSurveyCfg({ ...surveyCfg, responseWindowHours: Number(e.target.value) })}

@@ -9,6 +9,8 @@ export type SurveySettings = {
   scaleMax: 5 | 10;
   // Mensagem personalizada. Vazia = mensagem padrão gerada a partir da escala.
   message: string;
+  // Agradecimento após a nota. Vazio = padrão. Aceita {nota} como placeholder.
+  thankYouMessage: string;
   // Janela (em horas) para a resposta valer como nota. 1–168.
   responseWindowHours: number;
   // Recompensa enviada a quem responde (cupom/voucher). Texto livre.
@@ -28,6 +30,7 @@ export const SURVEY_DEFAULTS: SurveySettings = {
   enabled: true,
   scaleMax: 5,
   message: "",
+  thankYouMessage: "",
   responseWindowHours: 48,
   rewardEnabled: false,
   rewardText: "",
@@ -51,6 +54,13 @@ export function buildSurveyMessage(s: SurveySettings): string {
     : base;
 }
 
+// Agradecimento após a nota (usa o personalizado quando existir; {nota} vira a nota).
+export function buildThankYouMessage(custom: string | null | undefined, rating: number): string {
+  const t = (custom ?? "").trim();
+  if (!t) return `Obrigado pela sua avaliação! Nota ${rating} registrada. 🙏`;
+  return t.replace(/\{nota\}/gi, String(rating));
+}
+
 // Multi-loja: configuração POR LOJA (app_settings tem PK composta tenant_id+key).
 export async function getSurveySettings(tenantId: number): Promise<SurveySettings> {
   const [row] = await db.select().from(appSettingsTable)
@@ -72,6 +82,7 @@ export function sanitizeSurveySettings(input: Partial<SurveySettings>): SurveySe
     enabled: input.enabled !== false,
     scaleMax: input.scaleMax === 10 ? 10 : 5,
     message: typeof input.message === "string" ? input.message.slice(0, 1000) : "",
+    thankYouMessage: typeof input.thankYouMessage === "string" ? input.thankYouMessage.slice(0, 1000) : "",
     responseWindowHours: Number.isFinite(hours) ? Math.min(168, Math.max(1, hours)) : SURVEY_DEFAULTS.responseWindowHours,
     rewardEnabled: input.rewardEnabled === true,
     rewardText: typeof input.rewardText === "string" ? input.rewardText.slice(0, 1000) : "",

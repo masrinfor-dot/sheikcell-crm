@@ -180,6 +180,7 @@ export type SurveySettings = {
   enabled: boolean;
   scaleMax: 5 | 10;
   message: string;
+  thankYouMessage: string;
   responseWindowHours: number;
   rewardEnabled: boolean;
   rewardText: string;

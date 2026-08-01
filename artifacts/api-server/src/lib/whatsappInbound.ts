@@ -4,7 +4,7 @@ import { broadcast } from "./sseEmitter";
 import { isPotentialConversation, restrictedRecipients } from "./conversationScope";
 import { classifyText } from "./autoRouter";
 import { ensureCrmContactForConversation, syncCrmAttendant } from "./crmSync";
-import { getSurveySettings, SURVEY_DEFAULTS, surveyScaleMin } from "./surveySettings";
+import { getSurveySettings, SURVEY_DEFAULTS, surveyScaleMin, buildThankYouMessage } from "./surveySettings";
 import { writeFile, mkdir } from "fs/promises";
 import { randomUUID } from "crypto";
 import path from "path";
@@ -405,7 +405,7 @@ async function tryConsumeSurveyReply(input: {
       : "";
     void sendOutboundText(
       outcome.conv.id,
-      `Obrigado pela sua avaliação! Nota ${outcome.rating} registrada. 🙏${reward}`,
+      `${buildThankYouMessage(cfg.thankYouMessage, outcome.rating)}${reward}`,
       "Pesquisa de satisfação",
     ).catch(() => {});
   }
