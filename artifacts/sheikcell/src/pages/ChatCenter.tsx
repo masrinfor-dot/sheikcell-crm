@@ -472,6 +472,24 @@ export default function ChatCenter() {
   // Notification bell: inbound messages accumulated in arrival order
   const [showNotifications, setShowNotifications] = useState(false);
   const [notifications, setNotifications] = useState<MsgNotification[]>([]);
+  // Posição do painel de notificações (portal): ancora no sino no desktop.
+  const bellBtnRef = useRef<HTMLButtonElement | null>(null);
+  const [notifPanelPos, setNotifPanelPos] = useState<{ left: number; top: number } | null>(null);
+  useEffect(() => {
+    if (!showNotifications) { setNotifPanelPos(null); return; }
+    const place = () => {
+      // Só no desktop (no celular o painel ocupa a largura da tela via CSS).
+      if (window.innerWidth < 768 || !bellBtnRef.current) { setNotifPanelPos(null); return; }
+      const r = bellBtnRef.current.getBoundingClientRect();
+      const width = 384; // md:w-96
+      const left = Math.max(8, Math.min(r.left, window.innerWidth - width - 8));
+      setNotifPanelPos({ left, top: r.bottom + 8 });
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showNotifications]);
 
   // Alert preferences: play a sound and/or show a native browser notification for
   // inbound messages even when the attendant is on another tab. Persisted locally.
@@ -1558,6 +1576,7 @@ export default function ChatCenter() {
           <div className="flex items-center gap-1">
             <div className="relative">
               <button
+                ref={bellBtnRef}
                 onClick={() => setShowNotifications((v) => !v)}
                 data-testid="button-notifications"
                 title="Notificações"
@@ -1573,10 +1592,13 @@ export default function ChatCenter() {
                   </span>
                 )}
               </button>
-              {showNotifications && (
+              {/* Painel num portal (body): antes ele era cortado pelo
+                  overflow-hidden do container do chat e não dava para ver. */}
+              {showNotifications && createPortal(
                 <div
                   data-testid="panel-notifications"
-                  className="fixed inset-x-2 top-14 md:absolute md:inset-x-auto md:right-0 md:top-10 z-30 md:w-96 bg-white border border-border rounded-xl shadow-xl overflow-hidden"
+                  className="fixed inset-x-2 top-14 md:inset-x-auto md:w-96 z-[70] bg-white border border-border rounded-xl shadow-xl overflow-hidden"
+                  style={notifPanelPos ?? undefined}
                 >
                   <div className="border-b border-border bg-[#ededed]">
                     <div className="flex items-center justify-between px-3 py-2">
@@ -1649,7 +1671,8 @@ export default function ChatCenter() {
                       ))
                     )}
                   </div>
-                </div>
+                </div>,
+                document.body
               )}
             </div>
             <button onClick={() => setShowFilter(!showFilter)} className={`p-1.5 rounded-lg hover:bg-secondary transition ${showFilter ? "bg-secondary" : ""}`}>

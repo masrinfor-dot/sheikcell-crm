@@ -12,3 +12,4 @@ description: Convenções de mídia (vídeo/áudio/ptt) no pipeline chat↔bridg
 - Áudio outbound: NÃO basta renomear mimetype para ogg/opus — WhatsApp rejeita ("algo errado com o arquivo"). Converter de verdade com ffmpeg (toOggOpus no bridge); ffmpeg precisa estar na imagem Docker do bridge.
 
 - Grupos/comunidades: conversas de grupo guardam o JID completo (…@g.us) em conversations.phone; detecção de grupo = phone.includes("@g.us") em todo o stack (toJid passa @g.us direto, CRM/Meta-fallback devem ignorar grupos).
+- Transcrição de áudio: whisper-1 com a chave do usuário; transcript cacheado em messages.transcript; inbound só transcreve se botWouldHandle(conv) passar (senão paga à toa) e o broadcast/robô usam a conversa relida FRESCA (senão vaza p/ quem perdeu acesso).
