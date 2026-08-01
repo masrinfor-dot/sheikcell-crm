@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { api, type FinanceSummary, type Sector } from "@/lib/api";
+import { api, type FinanceSummary, type Sector, type Store } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { BadgeDollarSign, TrendingUp, Search, ShoppingCart, FileText } from "lucide-react";
 
@@ -11,20 +11,25 @@ export default function Financeiro() {
   const { toast } = useToast();
   const [data, setData] = useState<FinanceSummary | null>(null);
   const [sectors, setSectors] = useState<Sector[]>([]);
+  const [stores, setStores] = useState<Store[]>([]);
   const [days, setDays] = useState(30);
   const [sectorId, setSectorId] = useState<number | null>(null);
+  const [store, setStore] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(() => {
     setLoading(true);
-    api.finance.summary(days, sectorId)
+    api.finance.summary(days, sectorId, store)
       .then(setData)
       .catch(() => toast({ title: "Erro ao carregar o financeiro", variant: "destructive" }))
       .finally(() => setLoading(false));
-  }, [days, sectorId, toast]);
+  }, [days, sectorId, store, toast]);
 
   useEffect(() => { load(); }, [load]);
-  useEffect(() => { api.sectors.list().then(setSectors).catch(() => {}); }, []);
+  useEffect(() => {
+    api.sectors.list().then(setSectors).catch(() => {});
+    api.stores.list().then(setStores).catch(() => {});
+  }, []);
 
   const t = data?.totals;
 
@@ -49,6 +54,13 @@ export default function Financeiro() {
             <option value="">Todos os setores</option>
             {sectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
+          {stores.length > 0 && (
+            <select value={store ?? ""} onChange={(e) => setStore(e.target.value || null)} data-testid="select-finance-store"
+              className="px-3 py-2 rounded-xl border border-border text-xs">
+              <option value="">Todas as lojas</option>
+              {stores.map((s) => <option key={s.id} value={s.name}>{s.name}</option>)}
+            </select>
+          )}
         </div>
       </div>
 

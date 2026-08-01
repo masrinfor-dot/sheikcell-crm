@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, type ResultsSummary, type Sector } from "@/lib/api";
+import { api, type ResultsSummary, type Sector, type Store } from "@/lib/api";
 import type { SurveySettings } from "@/lib/api";
 import {
   Trophy, Clock, Timer, Users, UserPlus, Repeat, ShoppingBag,
@@ -64,6 +64,8 @@ export default function Resultados() {
   const [period, setPeriod] = useState<PeriodKey>("30d");
   const [sectorId, setSectorId] = useState(0);
   const [attendantId, setAttendantId] = useState(0);
+  const [store, setStore] = useState("");
+  const [stores, setStores] = useState<Store[]>([]);
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [attendants, setAttendants] = useState<{ id: number; name: string }[]>([]);
   const [data, setData] = useState<ResultsSummary | null>(null);
@@ -96,6 +98,7 @@ export default function Resultados() {
     // forma) — os filtros de setor/vendedor são exclusivos de admin/supervisor.
     if (!isGlobal) return;
     api.sectors.list().then(setSectors).catch(() => {});
+    api.stores.list().then(setStores).catch(() => {});
     api.chatUsers()
       .then((us) => setAttendants(us.filter((u) => u.role === "vendedor").map((u) => ({ id: u.id, name: u.name }))))
       .catch(() => {});
@@ -109,10 +112,11 @@ export default function Resultados() {
         from, to,
         sectorId: isGlobal && sectorId ? sectorId : undefined,
         attendantId: attendantId || undefined,
+        store: isGlobal && store ? store : undefined,
       });
       setData(d);
     } catch { /* silent */ } finally { setLoading(false); }
-  }, [period, sectorId, attendantId, isGlobal]);
+  }, [period, sectorId, attendantId, store, isGlobal]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -151,6 +155,14 @@ export default function Resultados() {
               className="px-3 py-1.5 rounded-xl border border-border text-xs bg-white">
               <option value={0}>Todos os setores</option>
               {sectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          )}
+          {isGlobal && stores.length > 0 && (
+            <select value={store} onChange={(e) => setStore(e.target.value)}
+              data-testid="results-filter-store"
+              className="px-3 py-1.5 rounded-xl border border-border text-xs bg-white">
+              <option value="">Todas as lojas</option>
+              {stores.map((s) => <option key={s.id} value={s.name}>{s.name}</option>)}
             </select>
           )}
           {isGlobal && (

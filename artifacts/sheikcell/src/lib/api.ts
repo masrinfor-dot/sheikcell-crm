@@ -828,18 +828,19 @@ export const api = {
       req<TradeInMargins>("/trade-in/margins", { method: "PATCH", body: JSON.stringify(data) }),
   },
   results: {
-    summary: (params?: { from?: string; to?: string; sectorId?: number; attendantId?: number }) => {
+    summary: (params?: { from?: string; to?: string; sectorId?: number; attendantId?: number; store?: string }) => {
       const qs = new URLSearchParams();
       if (params?.from) qs.set("from", params.from);
       if (params?.to) qs.set("to", params.to);
       if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
       if (params?.attendantId) qs.set("attendantId", String(params.attendantId));
+      if (params?.store) qs.set("store", params.store);
       return req<ResultsSummary>(`/results/summary?${qs.toString()}`);
     },
   },
   finance: {
-    summary: (days: number, sectorId?: number | null) =>
-      req<FinanceSummary>(`/finance/summary?days=${days}${sectorId ? `&sectorId=${sectorId}` : ""}`),
+    summary: (days: number, sectorId?: number | null, store?: string | null) =>
+      req<FinanceSummary>(`/finance/summary?days=${days}${sectorId ? `&sectorId=${sectorId}` : ""}${store ? `&store=${encodeURIComponent(store)}` : ""}`),
   },
   bot: {
     settings: () => req<BotSettings>("/bot/settings"),

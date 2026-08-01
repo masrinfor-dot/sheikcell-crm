@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { db, usersTable, attendanceLogsTable } from "@workspace/db";
-import { and, eq, gte, lte, isNotNull, sql } from "drizzle-orm";
+import { and, eq, gte, lte, isNotNull, inArray, sql } from "drizzle-orm";
 import { requireAuth, requireTenant } from "../middlewares/auth";
 
 const router: IRouter = Router();
@@ -32,6 +32,7 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
 
   let sectorId = req.query.sectorId ? parseInt(String(req.query.sectorId), 10) || null : null;
   let attendantId = req.query.attendantId ? parseInt(String(req.query.attendantId), 10) || null : null;
+  let store = typeof req.query.store === "string" && req.query.store.trim() ? req.query.store.trim().slice(0, 120) : null;
 
   // Vendedor: sempre restrito ao próprio setor E aos próprios números —
   // qualquer filtro pedido é ignorado (fail closed, servidor manda).
@@ -39,6 +40,16 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
     if (!me.sectorId) { res.status(403).json({ error: "Vendedor sem setor" }); return; }
     sectorId = me.sectorId;
     attendantId = me.id;
+    store = null; // filtro por loja é exclusivo de admin/supervisor
+  }
+
+  // Filtro por loja da rede: métricas do conjunto de vendedores daquela loja
+  // (users.store_name), sempre dentro do tenant. Loja sem vendedor ⇒ zero.
+  let storeUserIds: number[] | null = null;
+  if (store) {
+    const storeUsers = await db.select({ id: usersTable.id }).from(usersTable)
+      .where(and(eq(usersTable.tenantId, tenantId), eq(usersTable.storeName, store)));
+    storeUserIds = storeUsers.map((u) => u.id);
   }
 
   const logConds = [
@@ -48,6 +59,10 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
   ];
   if (sectorId) logConds.push(eq(attendanceLogsTable.sectorId, sectorId));
   if (attendantId) logConds.push(eq(attendanceLogsTable.attendantId, attendantId));
+  if (storeUserIds) {
+    // loja sem vendedores ⇒ condição impossível (zero resultados, nunca vaza tudo)
+    logConds.push(storeUserIds.length ? inArray(attendanceLogsTable.attendantId, storeUserIds) : sql`false`);
+  }
   const logWhere = and(...logConds)!;
 
   // ── Totais do período (attendance_logs) ──
@@ -114,8 +129,14 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
   // Filtro por vendedor também nas métricas de leads/CRM: conversas do
   // responsável e clientes da carteira dele (obrigatório para vendedor).
   // Todas as métricas abaixo são restritas à loja (tenant) — fail closed.
+  const storeIdsSql = storeUserIds
+    ? (storeUserIds.length ? sql`(${sql.join(storeUserIds.map((i) => sql`${i}`), sql`, `)})` : null)
+    : undefined; // undefined = sem filtro de loja; null = loja sem vendedores
   const sectorSql = sectorId ? sql` and c.sector_id = ${sectorId}` : sql``;
-  const convAttSql = attendantId ? sql` and c.assignee_id = ${attendantId}` : sql``;
+  const convAttSql = attendantId
+    ? sql` and c.assignee_id = ${attendantId}`
+    : storeIdsSql === null ? sql` and false`
+    : storeIdsSql ? sql` and c.assignee_id in ${storeIdsSql}` : sql``;
   const newLeadsRow = await db.execute(sql`
     select count(*)::int as novos
     from conversations c
@@ -124,7 +145,10 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
   const newLeads = Number((newLeadsRow.rows[0] as { novos: number } | undefined)?.novos ?? 0);
 
   const logSectorSql = sectorId ? sql` and l.sector_id = ${sectorId}` : sql``;
-  const logAttSql = attendantId ? sql` and l.attendant_id = ${attendantId}` : sql``;
+  const logAttSql = attendantId
+    ? sql` and l.attendant_id = ${attendantId}`
+    : storeIdsSql === null ? sql` and false`
+    : storeIdsSql ? sql` and l.attendant_id in ${storeIdsSql}` : sql``;
   const recurringRow = await db.execute(sql`
     select count(distinct l.client_contact)::int as recorrentes
     from attendance_logs l
@@ -139,7 +163,10 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
 
   // ── Recompra: clientes do CRM com mais de uma compra, sendo ao menos uma no período.
   const crmSectorSql = sectorId ? sql` and ct.sector_id = ${sectorId}` : sql``;
-  const crmAttSql = attendantId ? sql` and ct.attendant_id = ${attendantId}` : sql``;
+  const crmAttSql = attendantId
+    ? sql` and ct.attendant_id = ${attendantId}`
+    : storeIdsSql === null ? sql` and false`
+    : storeIdsSql ? sql` and ct.attendant_id in ${storeIdsSql}` : sql``;
   const repurchaseRow = await db.execute(sql`
     select count(*)::int as recompra from (
       select p.contact_id
@@ -170,6 +197,7 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
     to: to.toISOString(),
     sectorId,
     attendantId,
+    store,
     totals: {
       atendimentos: Number(totals?.atendimentos ?? 0),
       avgServiceSeconds: Number(totals?.avgServiceSeconds ?? 0),

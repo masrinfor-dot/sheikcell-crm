@@ -12,11 +12,22 @@ router.get("/finance/summary", requireFeature("financeiro"), async (req, res): P
   let days = parseInt(String(req.query.days ?? "30"), 10);
   if (!Number.isFinite(days) || days < 1 || days > 365) days = 30;
   const sectorId = req.query.sectorId ? parseInt(String(req.query.sectorId), 10) : null;
+  const store = typeof req.query.store === "string" && req.query.store.trim() ? req.query.store.trim().slice(0, 120) : null;
   const since = new Date(Date.now() - days * 86_400_000);
+
+  // Filtro por loja da rede: restringe as métricas aos vendedores daquela
+  // loja (users.store_name), sempre dentro do tenant. Loja sem vendedor ⇒ zero.
+  let storeUserIds: number[] | null = null;
+  if (store) {
+    const storeUsers = await db.select({ id: usersTable.id }).from(usersTable)
+      .where(and(eq(usersTable.tenantId, tenantId), eq(usersTable.storeName, store)));
+    storeUserIds = storeUsers.map((u) => u.id);
+  }
 
   // ── atendimentos finalizados no período (fonte: attendance_logs) ──
   const logConds = [eq(attendanceLogsTable.tenantId, tenantId), gte(attendanceLogsTable.createdAt, since), isNotNull(attendanceLogsTable.attendantId)];
   if (sectorId) logConds.push(eq(attendanceLogsTable.sectorId, sectorId));
+  if (storeUserIds) logConds.push(storeUserIds.length ? inArray(attendanceLogsTable.attendantId, storeUserIds) : sql`false`);
 
   const logAgg = await db.select({
     attendantId: attendanceLogsTable.attendantId,
@@ -35,6 +46,7 @@ router.get("/finance/summary", requireFeature("financeiro"), async (req, res): P
     notInArray(conversationsTable.status, ["resolved", "archived"]),
   ];
   if (sectorId) prospConds.push(eq(conversationsTable.sectorId, sectorId));
+  if (storeUserIds) prospConds.push(storeUserIds.length ? inArray(conversationsTable.assigneeId, storeUserIds) : sql`false`);
   const prospAgg = await db.select({
     assigneeId: conversationsTable.assigneeId,
     emProspeccao: sql<number>`count(*)::int`,
@@ -101,6 +113,7 @@ router.get("/finance/summary", requireFeature("financeiro"), async (req, res): P
   res.json({
     days,
     sectorId,
+    store,
     totals: {
       ...totals,
       ticketMedio: totals.vendas > 0 ? totals.totalVendido / totals.vendas : 0,
