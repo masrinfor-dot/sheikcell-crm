@@ -88,6 +88,20 @@ router.patch("/sheet-links/:id", requireAdmin, async (req, res): Promise<void> =
   res.json(updated);
 });
 
+// Reordenar: recebe a lista completa de ids na nova ordem; position = índice.
+router.post("/sheet-links/reorder", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const ids = cleanIdList((req.body as { ids?: unknown }).ids);
+  if (!ids || ids.length === 0) { res.status(400).json({ error: "Lista de ids inválida" }); return; }
+  await db.transaction(async (tx) => {
+    for (let i = 0; i < ids.length; i++) {
+      await tx.update(sheetLinksTable).set({ position: i })
+        .where(and(eq(sheetLinksTable.id, ids[i]!), eq(sheetLinksTable.tenantId, tenantId)));
+    }
+  });
+  res.json({ ok: true });
+});
+
 router.delete("/sheet-links/:id", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);

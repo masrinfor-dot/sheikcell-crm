@@ -910,6 +910,8 @@ export const api = {
     update: (id: number, data: Partial<{ name: string; url: string; allowedSectorIds: number[] | null; allowedUserIds: number[] | null }>) =>
       req<SheetLink>(`/sheet-links/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/sheet-links/${id}`, { method: "DELETE" }),
+    reorder: (ids: number[]) =>
+      req<{ ok: boolean }>("/sheet-links/reorder", { method: "POST", body: JSON.stringify({ ids }) }),
   },
   partnerLinks: {
     list: () => req<PartnerLink[]>("/partner-links"),

@@ -4,6 +4,7 @@ import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
   Table2, Plus, X, Trash2, Pencil, RefreshCw, ExternalLink, FileSpreadsheet,
+  ArrowLeft, ChevronUp, ChevronDown, Users,
 } from "lucide-react";
 
 // Aba "Planilhas": planilhas online e formulários (Google Sheets/Forms etc.)
@@ -35,8 +36,24 @@ export default function Planilhas() {
   const fetchLinks = () => {
     api.sheetLinks.list().then((rows) => {
       setLinks(rows);
-      setActiveId((cur) => (cur && rows.some((r) => r.id === cur) ? cur : (rows[0]?.id ?? null)));
+      setActiveId((cur) => (cur && rows.some((r) => r.id === cur) ? cur : null));
     }).catch(() => {});
+  };
+
+  // Move a planilha uma posição para cima/baixo na grade e salva a ordem.
+  const handleMove = async (l: SheetLink, dir: -1 | 1) => {
+    const idx = links.findIndex((x) => x.id === l.id);
+    const target = idx + dir;
+    if (idx < 0 || target < 0 || target >= links.length) return;
+    const next = [...links];
+    [next[idx], next[target]] = [next[target]!, next[idx]!];
+    setLinks(next);
+    try {
+      await api.sheetLinks.reorder(next.map((x) => x.id));
+    } catch {
+      toast({ title: "Erro ao salvar a ordem", variant: "destructive" });
+      fetchLinks();
+    }
   };
 
   useEffect(() => { fetchLinks(); }, []);
@@ -95,41 +112,83 @@ export default function Planilhas() {
 
   return (
     <div className="flex flex-col h-[calc(100dvh-8rem)] md:h-[calc(100vh-6rem)]">
-      {/* Barra de planilhas/formulários */}
-      <div className="flex items-center gap-2 px-3 py-2 bg-white border border-border rounded-t-2xl overflow-x-auto">
-        <Table2 className="w-4 h-4 text-primary shrink-0" />
-        <div className="flex items-center gap-1.5 flex-1 min-w-0 overflow-x-auto">
-          {links.length === 0 && (
-            <span className="text-xs text-muted-foreground">Nenhuma planilha ou formulário cadastrado ainda.</span>
-          )}
-          {links.map((l) => (
-            <div key={l.id} className="group/link relative shrink-0">
-              <button
-                onClick={() => { setActiveId(l.id); setIframeKey((k) => k + 1); }}
-                data-testid={`sheet-link-${l.id}`}
-                className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition whitespace-nowrap ${
-                  activeId === l.id
-                    ? "bg-primary text-white border-primary"
-                    : "bg-white text-muted-foreground border-border hover:bg-secondary"
-                } ${canManage ? "pr-9" : ""}`}
-              >
-                {l.name}
-              </button>
-              {canManage && (
-                <span className="absolute right-1.5 top-1/2 -translate-y-1/2 hidden group-hover/link:flex items-center gap-0.5">
-                  <button onClick={() => openForm(l)} title="Editar">
-                    <Pencil className={`w-3 h-3 ${activeId === l.id ? "text-white/80" : "text-muted-foreground"}`} />
-                  </button>
-                  <button onClick={() => handleDelete(l)} title="Remover">
-                    <Trash2 className={`w-3 h-3 ${activeId === l.id ? "text-white/80" : "text-red-400"}`} />
-                  </button>
-                </span>
-              )}
+      {!active ? (
+        /* ── Grade de planilhas em colunas ─────────────────────────────── */
+        <div className="flex-1 bg-white border border-border rounded-2xl overflow-y-auto p-4">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <Table2 className="w-5 h-5 text-primary" />
+              <h2 className="font-bold text-sm">Planilhas e formulários</h2>
             </div>
-          ))}
+            {canManage && (
+              <button onClick={() => openForm()} data-testid="button-add-sheet-link"
+                className="flex items-center gap-1 px-3 py-1.5 rounded-full bg-primary text-white text-xs font-semibold">
+                <Plus className="w-3.5 h-3.5" /> Adicionar
+              </button>
+            )}
+          </div>
+          {links.length === 0 ? (
+            <div className="h-64 flex flex-col items-center justify-center text-muted-foreground text-center">
+              <FileSpreadsheet className="w-10 h-10 mb-3 opacity-30" />
+              <p className="text-sm font-semibold">Nenhuma planilha ou formulário cadastrado ainda</p>
+              <p className="text-xs mt-1 max-w-sm">
+                {canManage
+                  ? 'Clique em "Adicionar" e cole o link de uma planilha online ou formulário (Google Planilhas, Google Forms...).'
+                  : "Peça ao administrador para cadastrar os links das planilhas e formulários."}
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
+              {links.map((l, idx) => (
+                <div key={l.id} className="group/card relative border border-border rounded-2xl p-3 hover:border-primary/50 hover:shadow-sm transition bg-white flex flex-col">
+                  <button
+                    onClick={() => { setActiveId(l.id); setIframeKey((k) => k + 1); }}
+                    data-testid={`sheet-link-${l.id}`}
+                    className="flex flex-col items-start text-left flex-1"
+                  >
+                    <FileSpreadsheet className="w-7 h-7 text-emerald-600 mb-2" />
+                    <span className="text-xs font-bold text-foreground leading-snug break-words">{l.name}</span>
+                    {(l.allowedSectorIds || l.allowedUserIds) && canManage && (
+                      <span className="mt-1 inline-flex items-center gap-1 text-[10px] text-indigo-600 font-medium" title="Acesso restrito a setores/vendedores selecionados">
+                        <Users className="w-3 h-3" /> restrita
+                      </span>
+                    )}
+                  </button>
+                  {canManage && (
+                    <div className="flex items-center gap-1 mt-2 pt-2 border-t border-border/60">
+                      <button onClick={() => handleMove(l, -1)} disabled={idx === 0} title="Mover para cima na ordem"
+                        data-testid={`sheet-move-up-${l.id}`}
+                        className="p-1 rounded hover:bg-secondary text-muted-foreground disabled:opacity-25">
+                        <ChevronUp className="w-3.5 h-3.5" />
+                      </button>
+                      <button onClick={() => handleMove(l, 1)} disabled={idx === links.length - 1} title="Mover para baixo na ordem"
+                        data-testid={`sheet-move-down-${l.id}`}
+                        className="p-1 rounded hover:bg-secondary text-muted-foreground disabled:opacity-25">
+                        <ChevronDown className="w-3.5 h-3.5" />
+                      </button>
+                      <span className="flex-1" />
+                      <button onClick={() => openForm(l)} title="Editar" className="p-1 rounded hover:bg-secondary">
+                        <Pencil className="w-3.5 h-3.5 text-muted-foreground" />
+                      </button>
+                      <button onClick={() => handleDelete(l)} title="Remover" className="p-1 rounded hover:bg-red-50">
+                        <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
-        {active && (
-          <>
+      ) : (
+        /* ── Planilha aberta ───────────────────────────────────────────── */
+        <>
+          <div className="flex items-center gap-2 px-3 py-2 bg-white border border-border rounded-t-2xl">
+            <button onClick={() => setActiveId(null)} data-testid="button-back-sheets"
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-full text-xs font-semibold border border-border hover:bg-secondary transition shrink-0">
+              <ArrowLeft className="w-3.5 h-3.5" /> Voltar
+            </button>
+            <span className="font-bold text-sm truncate flex-1">{active.name}</span>
             <button onClick={() => setIframeKey((k) => k + 1)} title="Recarregar"
               className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground transition shrink-0">
               <RefreshCw className="w-3.5 h-3.5" />
@@ -138,30 +197,8 @@ export default function Planilhas() {
               className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground transition shrink-0">
               <ExternalLink className="w-3.5 h-3.5" />
             </a>
-          </>
-        )}
-        {canManage && (
-          <button onClick={() => openForm()} data-testid="button-add-sheet-link"
-            className="flex items-center gap-1 px-2.5 py-1.5 rounded-full bg-primary text-white text-xs font-semibold shrink-0">
-            <Plus className="w-3.5 h-3.5" /> Adicionar
-          </button>
-        )}
-      </div>
-
-      {/* Planilha/formulário embutido */}
-      <div className="flex-1 bg-white border border-t-0 border-border rounded-b-2xl overflow-hidden relative">
-        {!active ? (
-          <div className="h-full flex flex-col items-center justify-center text-muted-foreground p-6 text-center">
-            <FileSpreadsheet className="w-10 h-10 mb-3 opacity-30" />
-            <p className="text-sm font-semibold">Nenhuma planilha selecionada</p>
-            <p className="text-xs mt-1 max-w-sm">
-              {canManage
-                ? 'Clique em "Adicionar" e cole o link de uma planilha online ou formulário (Google Planilhas, Google Forms...). Abre aqui dentro do sistema.'
-                : "Peça ao administrador para cadastrar os links das planilhas e formulários."}
-            </p>
           </div>
-        ) : (
-          <>
+          <div className="flex-1 bg-white border border-t-0 border-border rounded-b-2xl overflow-hidden relative">
             <iframe
               key={`${active.id}-${iframeKey}`}
               src={active.url}
@@ -176,9 +213,9 @@ export default function Planilhas() {
                 abrir em nova aba
               </a>
             </div>
-          </>
-        )}
-      </div>
+          </div>
+        </>
+      )}
 
       {/* Modal adicionar/editar */}
       {showForm && (
