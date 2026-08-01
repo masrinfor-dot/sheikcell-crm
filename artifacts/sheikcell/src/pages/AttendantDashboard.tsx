@@ -67,6 +67,13 @@ export default function AttendantDashboard() {
   const { toast } = useToast();
 
   const [mainTab, setMainTab] = useState<MainTab>("queue");
+
+  // Alarme de sem resposta clicado em outra aba → volta para o chat.
+  useEffect(() => {
+    const h = () => setMainTab("chat");
+    window.addEventListener("sheikcell:open-chat", h);
+    return () => window.removeEventListener("sheikcell:open-chat", h);
+  }, []);
   const [queue, setQueue] = useState<QueueEntry[]>([]);
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [loading, setLoading] = useState(true);
@@ -233,11 +240,11 @@ export default function AttendantDashboard() {
         {/* Content */}
         <div className="flex-1 min-w-0 pb-[calc(3.5rem+env(safe-area-inset-bottom))] md:pb-0">
 
-      {mainTab === "chat" && (
-        <div className="max-w-full px-0 py-0 md:px-4 md:py-4">
-          <ChatCenter />
-        </div>
-      )}
+      {/* ChatCenter fica SEMPRE montado (escondido nas outras abas) para o
+          alarme de mensagem sem resposta tocar e aparecer em qualquer tela. */}
+      <div className={mainTab === "chat" ? "max-w-full px-0 py-0 md:px-4 md:py-4" : "hidden"}>
+        <ChatCenter />
+      </div>
 
       {mainTab === "equipe" && (
         <div className="md:hidden h-[calc(100dvh-7rem-env(safe-area-inset-bottom))] flex flex-col bg-card">

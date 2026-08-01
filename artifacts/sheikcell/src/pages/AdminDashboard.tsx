@@ -71,6 +71,13 @@ export default function AdminDashboard() {
   const [showChangePassword, setShowChangePassword] = useState(false);
   const { toast } = useToast();
   const [tab, setTab] = useState<Tab>("dashboard");
+
+  // Alarme de sem resposta clicado em outra aba → volta para o chat.
+  useEffect(() => {
+    const h = () => setTab("chat");
+    window.addEventListener("sheikcell:open-chat", h);
+    return () => window.removeEventListener("sheikcell:open-chat", h);
+  }, []);
   const [summary, setSummary] = useState<SectorSummary[]>([]);
   const [logs, setLogs] = useState<AttendanceLog[]>([]);
   // Filtros do histórico de atendimentos
@@ -470,7 +477,11 @@ export default function AdminDashboard() {
         )}
 
         {/* === CRM TAB === */}
-        {tab === "chat" && <ChatCenter />}
+        {/* ChatCenter fica SEMPRE montado (escondido nas outras abas) para o
+            alarme de mensagem sem resposta tocar e aparecer em qualquer tela. */}
+        <div className={tab === "chat" ? "" : "hidden"}>
+          <ChatCenter />
+        </div>
 
         {tab === "equipe" && <InternalChat />}
 

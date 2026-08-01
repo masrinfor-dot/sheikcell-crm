@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { api, can, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type Store as StoreType } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
@@ -2476,8 +2477,10 @@ export default function ChatCenter() {
         </div>
       )}
 
-      {/* ── Alarme fixo de conversas sem resposta (tipo despertador) ────── */}
-      {alarmConvs.length > 0 && (
+      {/* ── Alarme fixo de conversas sem resposta (tipo despertador) ──────
+          Renderizado num portal (document.body) para aparecer em QUALQUER
+          tela, mesmo com o ChatCenter escondido em outra aba. */}
+      {alarmConvs.length > 0 && createPortal(
         <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[60] w-[calc(100%-1.5rem)] max-w-lg" data-testid="alarm-banner">
           <div className="bg-red-600 text-white rounded-2xl shadow-2xl border-4 border-red-300 animate-pulse-slow p-4"
             style={{ animation: "pulse 1.5s ease-in-out infinite" }}>
@@ -2501,7 +2504,11 @@ export default function ChatCenter() {
             <div className="mt-2 space-y-1">
               {alarmConvs.slice(0, 4).map((c) => (
                 <button key={c.id}
-                  onClick={() => { setCategory(conversationCategory(c)); setActiveId(c.id); }}
+                  onClick={() => {
+                    setCategory(conversationCategory(c)); setActiveId(c.id);
+                    // Se o usuário estiver em outra aba, pede para o painel voltar ao chat.
+                    window.dispatchEvent(new CustomEvent("sheikcell:open-chat"));
+                  }}
                   data-testid={`button-alarm-open-${c.id}`}
                   className="w-full text-left text-sm bg-white/15 hover:bg-white/25 rounded-lg px-3 py-1.5 font-semibold truncate">
                   💬 {c.name} — esperando há {Math.max(1, Math.floor((nowTick - new Date(c.lastMessageAt!).getTime()) / 60000))} min
@@ -2510,7 +2517,8 @@ export default function ChatCenter() {
               {alarmConvs.length > 4 && <div className="text-xs font-semibold opacity-90">… e mais {alarmConvs.length - 4}</div>}
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* ── Configuração do alerta de sem resposta ──────────────────────── */}
