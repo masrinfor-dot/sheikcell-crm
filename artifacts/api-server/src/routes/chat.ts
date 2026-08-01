@@ -3,7 +3,7 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
 import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, crmPurchasesTable } from "@workspace/db";
-import { eq, desc, and, or, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
+import { eq, desc, and, or, lt, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
 import { checkPerm, requirePerm } from "../lib/permissions";
 import {
@@ -385,13 +385,42 @@ router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Pr
   // Sempre as MAIS RECENTES: ordena decrescente, corta, e devolve em ordem
   // cronológica. (Antes cortava as 200 mais ANTIGAS — em conversas longas as
   // mensagens novas "sumiam" do histórico.)
-  const msgs = (await db
+  // Paginação por cursor: ?before=<messageId> devolve o bloco ANTERIOR à
+  // mensagem indicada (mesma ordem cronológica), para "carregar mais" no topo.
+  const PAGE = 500;
+  const beforeId = req.query.before != null
+    ? parseInt(Array.isArray(req.query.before) ? String(req.query.before[0]) : String(req.query.before), 10)
+    : null;
+
+  let cursorFilter = undefined;
+  if (beforeId != null && Number.isFinite(beforeId)) {
+    const [anchor] = await db.select({ id: messagesTable.id, createdAt: messagesTable.createdAt })
+      .from(messagesTable)
+      .where(and(eq(messagesTable.id, beforeId), eq(messagesTable.conversationId, id)))
+      .limit(1);
+    if (!anchor) { res.status(404).json({ error: "Mensagem de referência não encontrada" }); return; }
+    // Estritamente antes do anchor na ordem (createdAt, id).
+    cursorFilter = or(
+      lt(messagesTable.createdAt, anchor.createdAt),
+      and(eq(messagesTable.createdAt, anchor.createdAt), lt(messagesTable.id, anchor.id)),
+    );
+  }
+
+  const page = await db
     .select()
     .from(messagesTable)
-    .where(eq(messagesTable.conversationId, id))
+    .where(cursorFilter
+      ? and(eq(messagesTable.conversationId, id), cursorFilter)
+      : eq(messagesTable.conversationId, id))
     .orderBy(desc(messagesTable.createdAt), desc(messagesTable.id))
-    .limit(500)).reverse();
+    .limit(PAGE + 1);
 
+  const hasMore = page.length > PAGE;
+  const msgs = (hasMore ? page.slice(0, PAGE) : page).reverse();
+
+  // Compat: sem cursor e sem cabeçalho, clientes antigos continuam recebendo o
+  // array puro. O cabeçalho X-Has-More indica se existe bloco mais antigo.
+  res.setHeader("X-Has-More", hasMore ? "1" : "0");
   res.json(msgs);
 });
 

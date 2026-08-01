@@ -626,6 +626,21 @@ export const api = {
     pinConversation: (id: number) => req<{ ok: boolean }>(`/chat/conversations/${id}/pin`, { method: "POST" }),
     unpinConversation: (id: number) => req<{ ok: boolean }>(`/chat/conversations/${id}/pin`, { method: "DELETE" }),
     messages: (id: number) => req<ChatMessage[]>(`/chat/conversations/${id}/messages`),
+    // Paginação por cursor: devolve o bloco de mensagens + flag de "tem mais
+    // antigas" (cabeçalho X-Has-More). Sem `before`, é o bloco mais recente.
+    messagesPage: async (id: number, before?: number): Promise<{ messages: ChatMessage[]; hasMore: boolean }> => {
+      const qs = before != null ? `?before=${before}` : "";
+      const res = await fetch(`${BASE}/chat/conversations/${id}/messages${qs}`, {
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error((err as { error?: string }).error ?? res.statusText);
+      }
+      const messages = (await res.json()) as ChatMessage[];
+      return { messages, hasMore: res.headers.get("X-Has-More") === "1" };
+    },
     sendMessage: (id: number, content: string) =>
       req<ChatMessage>(`/chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
     suggestReply: (id: number) =>

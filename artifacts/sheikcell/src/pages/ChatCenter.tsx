@@ -351,6 +351,8 @@ export default function ChatCenter() {
   const [msgText, setMsgText] = useState("");
   const [loadingConvs, setLoadingConvs] = useState(true);
   const [loadingMsgs, setLoadingMsgs] = useState(false);
+  const [hasMoreOlder, setHasMoreOlder] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [sending, setSending] = useState(false);
   const [showNewConv, setShowNewConv] = useState(false);
   const [showLabelPicker, setShowLabelPicker] = useState(false);
@@ -514,6 +516,12 @@ export default function ChatCenter() {
   }, [desktopEnabled, toast]);
 
   const msgsEndRef = useRef<HTMLDivElement>(null);
+  const msgsContainerRef = useRef<HTMLDivElement>(null);
+  // Sempre reflete a conversa aberta AGORA — usado para descartar respostas de
+  // paginação que chegam depois de trocar de conversa.
+  const activeIdRef = useRef<number | null>(null);
+  // Ao prependar mensagens antigas, NÃO rolar para o fim — preservar a posição.
+  const skipAutoScrollRef = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Latest conversations, read from inside the SSE handler without re-subscribing.
@@ -571,15 +579,48 @@ export default function ChatCenter() {
   const fetchMsgs = useCallback(async (id: number) => {
     setLoadingMsgs(true);
     try {
-      const data = await api.chat.messages(id);
+      const { messages: data, hasMore } = await api.chat.messagesPage(id);
+      if (activeIdRef.current !== id) return; // trocou de conversa no meio
       setMessages(data);
+      setHasMoreOlder(hasMore);
       setConvs((prev) => prev.map((c) => c.id === id ? { ...c, unreadCount: 0 } : c));
     } catch { /* silent */ } finally { setLoadingMsgs(false); }
   }, []);
 
+  // ── Load older messages (cursor pagination) ──
+  const loadOlderMsgs = useCallback(async () => {
+    const id = activeId;
+    const oldest = messages[0];
+    if (id == null || !oldest || loadingOlder) return;
+    setLoadingOlder(true);
+    // Preserva a posição do scroll: mede a altura antes, ajusta depois.
+    const el = msgsContainerRef.current;
+    const prevHeight = el?.scrollHeight ?? 0;
+    const prevTop = el?.scrollTop ?? 0;
+    try {
+      const { messages: older, hasMore } = await api.chat.messagesPage(id, oldest.id);
+      // Trocou de conversa enquanto a página carregava? Descarta a resposta —
+      // o ref reflete a conversa aberta AGORA (o closure ficaria desatualizado).
+      if (activeIdRef.current !== id) return;
+      skipAutoScrollRef.current = true;
+      setMessages((prev) => {
+        const seen = new Set(prev.map((m) => m.id));
+        return [...older.filter((m) => !seen.has(m.id)), ...prev];
+      });
+      setHasMoreOlder(hasMore);
+      requestAnimationFrame(() => {
+        if (activeIdRef.current !== id) return;
+        const node = msgsContainerRef.current;
+        if (node) node.scrollTop = node.scrollHeight - prevHeight + prevTop;
+      });
+    } catch { /* silent */ } finally { setLoadingOlder(false); }
+  }, [activeId, messages, loadingOlder]);
+
   useEffect(() => { fetchConvs(); }, [fetchConvs]);
 
   useEffect(() => { convsRef.current = convs; }, [convs]);
+
+  useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
 
   useEffect(() => {
     if (activeId) { fetchMsgs(activeId); inputRef.current?.focus(); }
@@ -596,6 +637,7 @@ export default function ChatCenter() {
   }, [activeId]);
 
   useEffect(() => {
+    if (skipAutoScrollRef.current) { skipAutoScrollRef.current = false; return; }
     msgsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
@@ -2046,6 +2088,7 @@ export default function ChatCenter() {
 
           {/* Messages area — WhatsApp wallpaper */}
           <div
+            ref={msgsContainerRef}
             className="flex-1 overflow-y-auto px-4 py-4"
             style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400'%3E%3Crect width='400' height='400' fill='%23e5ddd5'/%3E%3C/svg%3E\")", backgroundColor: "#e5ddd5" }}
           >
@@ -2059,6 +2102,18 @@ export default function ChatCenter() {
               </div>
             ) : (
               <>
+                {hasMoreOlder && (
+                  <div className="flex justify-center pb-3">
+                    <button
+                      onClick={loadOlderMsgs}
+                      disabled={loadingOlder}
+                      data-testid="button-load-older"
+                      className="text-xs bg-white/90 hover:bg-white text-primary font-medium px-4 py-1.5 rounded-full shadow-sm border border-border transition disabled:opacity-60"
+                    >
+                      {loadingOlder ? "Carregando..." : "Carregar mensagens antigas"}
+                    </button>
+                  </div>
+                )}
                 {messages.map((msg) => <MsgBubble key={msg.id} msg={msg} />)}
                 <div ref={msgsEndRef} />
               </>
