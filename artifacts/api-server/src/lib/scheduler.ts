@@ -276,5 +276,12 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("../routes/raffles").then((m) => m.runDueRaffles()).catch(() => {});
   }, 5 * 60_000);
+  // Mensalidades dos lojistas: garante que as cobranças do mês corrente
+  // existam. Idempotente (não duplica), então rodar a cada hora é seguro e
+  // cobre reinícios/quedas no dia 1º. Roda uma vez logo no boot também.
+  void import("./saasBilling").then((m) => m.runMonthlyBilling()).catch(() => {});
+  setInterval(() => {
+    void import("./saasBilling").then((m) => m.runMonthlyBilling()).catch(() => {});
+  }, 60 * 60_000);
   logger.info("Agendador de mensagens iniciado (tick 30s)");
 }

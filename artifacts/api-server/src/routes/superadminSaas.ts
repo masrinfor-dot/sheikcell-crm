@@ -9,6 +9,7 @@ import {
 } from "@workspace/db";
 import { eq, and, desc, sql, lt } from "drizzle-orm";
 import { requireSuperadmin } from "../middlewares/auth";
+import { generateInvoicesForMonth } from "../lib/saasBilling";
 
 // Rotas do "negócio SaaS" do dono do sistema: contratos de aluguel,
 // mensalidades (financeiro) e chamados de suporte por lojista.
@@ -209,59 +210,8 @@ router.post("/superadmin/saas/invoices", async (req, res): Promise<void> => {
 router.post("/superadmin/saas/invoices/generate", async (req, res): Promise<void> => {
   const { month } = req.body as { month?: string }; // "YYYY-MM"
   const m = month && /^\d{4}-\d{2}$/.test(month) ? month : todayISO().slice(0, 7);
-  // Só contratos ativos de lojistas não cancelados — nunca cobrar loja cancelada
-  const contracts = await db
-    .select({ tenantId: saasContractsTable.tenantId, monthlyValueCents: saasContractsTable.monthlyValueCents, startDate: saasContractsTable.startDate })
-    .from(saasContractsTable)
-    .innerJoin(tenantsTable, eq(saasContractsTable.tenantId, tenantsTable.id))
-    .where(and(
-      eq(saasContractsTable.isActive, true),
-      sql`${saasContractsTable.monthlyValueCents} > 0`,
-      sql`${tenantsTable.saasStatus} <> 'cancelado'`,
-    ));
-  let created = 0;
-  for (const c of contracts) {
-    // vencimento no dia do início do contrato (ou dia 5)
-    const day = c.startDate ? c.startDate.slice(8, 10) : "05";
-    const lastDay = new Date(Number(m.slice(0, 4)), Number(m.slice(5, 7)), 0).getDate();
-    const dueDate = `${m}-${String(Math.min(Number(day), lastDay)).padStart(2, "0")}`;
-    // Cada loja numa transação que trava a linha do tenant (FOR UPDATE) e
-    // re-checa status/contrato após o lock: cancelamento simultâneo espera e
-    // nunca sobra cobrança pendente de loja cancelada. A não-duplicação por
-    // mês é garantida NO BANCO pelo índice único (tenant_id, billing_month).
-    const inserted = await db.transaction(async (tx) => {
-      const [tenant] = await tx.select().from(tenantsTable).where(eq(tenantsTable.id, c.tenantId)).for("update");
-      if (!tenant || tenant.saasStatus === "cancelado") return false;
-      const [contract] = await tx.select().from(saasContractsTable).where(eq(saasContractsTable.tenantId, c.tenantId));
-      if (!contract?.isActive || contract.monthlyValueCents <= 0) return false;
-      // Pula lojas que JÁ têm mensalidade no mês (inclui as lançadas
-      // manualmente, que têm billing_month nulo) — checado sob o mesmo lock
-      // da loja, então não há corrida com o lançamento manual.
-      const [already] = await tx
-        .select({ id: saasInvoicesTable.id })
-        .from(saasInvoicesTable)
-        .where(and(
-          eq(saasInvoicesTable.tenantId, c.tenantId),
-          sql`${saasInvoicesTable.status} <> 'cancelada'`,
-          sql`to_char(${saasInvoicesTable.dueDate}, 'YYYY-MM') = ${m}`,
-        ))
-        .limit(1);
-      if (already) return false;
-      const rows = await tx
-        .insert(saasInvoicesTable)
-        .values({
-          tenantId: c.tenantId,
-          description: `Mensalidade ${m.slice(5, 7)}/${m.slice(0, 4)}`,
-          amountCents: contract.monthlyValueCents,
-          dueDate,
-          billingMonth: m,
-        })
-        .onConflictDoNothing({ target: [saasInvoicesTable.tenantId, saasInvoicesTable.billingMonth] })
-        .returning({ id: saasInvoicesTable.id });
-      return rows.length > 0;
-    });
-    if (inserted) created++;
-  }
+  // Lógica compartilhada com o agendador automático (lib/saasBilling).
+  const created = await generateInvoicesForMonth(m);
   res.json({ created, month: m });
 });
 
