@@ -19,6 +19,10 @@ router.get("/trade-in", requireAuth, async (_req, res): Promise<void> => {
       userId: tradeInEvaluationsTable.userId,
       userName: usersTable.name,
       device: tradeInEvaluationsTable.device,
+      brand: tradeInEvaluationsTable.brand,
+      model: tradeInEvaluationsTable.model,
+      memory: tradeInEvaluationsTable.memory,
+      color: tradeInEvaluationsTable.color,
       answers: tradeInEvaluationsTable.answers,
       marketPrice: tradeInEvaluationsTable.marketPrice,
       suggestedPrice: tradeInEvaluationsTable.suggestedPrice,
@@ -28,7 +32,7 @@ router.get("/trade-in", requireAuth, async (_req, res): Promise<void> => {
     .from(tradeInEvaluationsTable)
     .leftJoin(usersTable, eq(tradeInEvaluationsTable.userId, usersTable.id))
     .orderBy(desc(tradeInEvaluationsTable.createdAt))
-    .limit(50);
+    .limit(200);
   res.json(rows);
 });
 
@@ -36,9 +40,21 @@ type Answers = Record<string, string>;
 
 // Avaliação com IA: pesquisa preços atuais na web e sugere valor de compra.
 router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
-  const { device, answers } = req.body as { device?: string; answers?: Answers };
-  const dev = (device ?? "").trim();
-  if (!dev || dev.length > 120) { res.status(400).json({ error: "Informe o modelo do aparelho (até 120 caracteres)" }); return; }
+  const { device, answers, brand, model, memory, color } = req.body as {
+    device?: string; answers?: Answers;
+    brand?: string; model?: string; memory?: string; color?: string;
+  };
+  // Campos estruturados (novo formulário). Se vierem, o texto do aparelho é
+  // montado a partir deles; senão vale o texto livre (compatibilidade).
+  const clean = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+  const fBrand = clean(brand, 40);
+  const fModel = clean(model, 60);
+  const fMemory = clean(memory, 20);
+  const fColor = clean(color, 30);
+  const composed = [fBrand, fModel, fMemory, fColor].filter(Boolean).join(" ");
+  const dev = (composed || (device ?? "")).trim().slice(0, 160);
+  if (!dev) { res.status(400).json({ error: "Informe a marca e o modelo do aparelho" }); return; }
+  if (composed && (!fBrand || !fModel)) { res.status(400).json({ error: "Informe a marca e o modelo do aparelho" }); return; }
   if (!answers || typeof answers !== "object" || Array.isArray(answers)) { res.status(400).json({ error: "Responda o questionário de estado" }); return; }
 
   // Limita e sanitiza as respostas ANTES de usar e de gravar (anti-abuso).
@@ -129,7 +145,11 @@ router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (re
 
     const [saved] = await db.insert(tradeInEvaluationsTable).values({
       userId: req.session.userId ?? null,
-      device: dev.slice(0, 120),
+      device: dev.slice(0, 160),
+      brand: fBrand || null,
+      model: fModel || null,
+      memory: fMemory || null,
+      color: fColor || null,
       answers: cleanAnswers,
       marketPrice: marketPrice || null,
       suggestedPrice,

@@ -6,7 +6,12 @@ import { usersTable } from "./users";
 export const tradeInEvaluationsTable = pgTable("trade_in_evaluations", {
   id: serial("id").primaryKey(),
   userId: integer("user_id").references(() => usersTable.id, { onDelete: "set null" }),
-  device: text("device").notNull(),            // ex.: "iPhone 13 128GB"
+  device: text("device").notNull(),            // ex.: "iPhone 13 128GB" (texto composto p/ IA e exibição)
+  // Campos estruturados p/ filtros do histórico (marca/modelo/memória/cor).
+  brand: text("brand"),
+  model: text("model"),
+  memory: text("memory"),
+  color: text("color"),
   answers: jsonb("answers").notNull(),         // respostas do questionário de estado
   marketPrice: text("market_price"),           // faixa de preço de mercado (texto, ex.: "R$ 2.100 – R$ 2.600")
   suggestedPrice: text("suggested_price"),     // sugestão de valor de compra
