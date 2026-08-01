@@ -8,15 +8,28 @@ import {
 
 // Fluxo em etapas inspirado na Trocafone (trocafacil.trocafone.com.br):
 // 1) Aparelho (marca → modelo → memória → cor)  2) Condições  3) Oferta.
-const QUESTIONS: { key: string; label: string; options: string[] }[] = [
-  { key: "Liga e funciona", label: "O aparelho liga e funciona normalmente?", options: ["Sim, funciona tudo", "Liga, mas tem defeito", "Não liga"] },
-  { key: "Tela", label: "Como está a tela?", options: ["Perfeita", "Riscos leves", "Trincada / quebrada", "Não acende"] },
-  { key: "Carcaça / traseira", label: "Como está a carcaça (laterais e traseira)?", options: ["Perfeita", "Marcas de uso", "Amassada / trincada"] },
-  { key: "Bateria", label: "Como está a bateria?", options: ["Ótima (saúde acima de 85%)", "Regular (descarrega rápido)", "Ruim / estufada"] },
-  { key: "Face ID / biometria", label: "Face ID ou leitor de digital funciona?", options: ["Funciona", "Não funciona", "Não tem"] },
-  { key: "Acessórios", label: "Acompanha acessórios?", options: ["Caixa e carregador originais", "Só carregador", "Sem acessórios"] },
-  { key: "Conta desvinculada", label: "iCloud / conta Google já desvinculada?", options: ["Sim", "Ainda não"] },
-];
+type Question = { key: string; label: string; options: string[] };
+
+// Perguntas personalizadas pela marca: só iPhone tem "saúde da bateria" e
+// Face ID/iCloud; Android pergunta leitor de digital e conta Google.
+function questionsFor(brand: string): Question[] {
+  const isApple = /apple|iphone/i.test(brand);
+  return [
+    { key: "Liga e funciona", label: "O aparelho liga e funciona normalmente?", options: ["Sim, funciona tudo", "Liga, mas tem defeito", "Não liga"] },
+    { key: "Tela", label: "Como está a tela?", options: ["Perfeita", "Riscos leves", "Trincada / quebrada", "Não acende"] },
+    { key: "Carcaça / traseira", label: "Como está a carcaça (laterais e traseira)?", options: ["Perfeita", "Marcas de uso", "Amassada / trincada"] },
+    isApple
+      ? { key: "Saúde da bateria", label: "Qual a saúde da bateria (Ajustes → Bateria)?", options: ["Acima de 85%", "Entre 75% e 85%", "Abaixo de 75%", "Ruim / estufada"] }
+      : { key: "Bateria", label: "Como está a bateria?", options: ["Segura bem a carga", "Descarrega rápido", "Ruim / estufada"] },
+    isApple
+      ? { key: "Face ID", label: "O Face ID funciona?", options: ["Funciona", "Não funciona", "Não tem (Touch ID funciona)"] }
+      : { key: "Biometria", label: "Leitor de digital / desbloqueio facial funciona?", options: ["Funciona", "Não funciona", "Não tem"] },
+    { key: "Acessórios", label: "Acompanha acessórios?", options: ["Caixa e carregador originais", "Só carregador", "Sem acessórios"] },
+    isApple
+      ? { key: "Conta desvinculada", label: "iCloud (Buscar iPhone) já desvinculado?", options: ["Sim", "Ainda não"] }
+      : { key: "Conta desvinculada", label: "Conta Google já desvinculada?", options: ["Sim", "Ainda não"] },
+  ];
+}
 
 const BRANDS = ["Apple", "Samsung", "Motorola", "Xiaomi", "Realme", "Outra"];
 
@@ -79,10 +92,11 @@ export default function Avaliacao() {
   }, []);
 
   const deviceOk = Boolean(brand.trim() && model.trim());
-  const allAnswered = deviceOk && QUESTIONS.every((q) => answers[q.key]);
-  const answeredCount = QUESTIONS.filter((q) => answers[q.key]).length;
+  const questions = questionsFor(brand);
+  const allAnswered = deviceOk && questions.every((q) => answers[q.key]);
+  const answeredCount = questions.filter((q) => answers[q.key]).length;
   // Alguma resposta indica parte sem funcionar? Então a loja não avalia.
-  const blockedAnswer = QUESTIONS.map((qq) => ({ q: qq.key, a: answers[qq.key] }))
+  const blockedAnswer = questions.map((qq) => ({ q: qq.key, a: answers[qq.key] }))
     .find((x) => x.a && BLOCKED_ANSWERS.includes(x.a));
 
   const handleEvaluate = async () => {
@@ -226,7 +240,7 @@ export default function Avaliacao() {
             <div className="flex gap-1.5 flex-wrap">
               {BRANDS.map((b) => (
                 <button key={b}
-                  onClick={() => { setOtherBrand(b === "Outra"); setBrand(b === "Outra" ? "" : b); setModel(""); }}
+                  onClick={() => { setOtherBrand(b === "Outra"); setBrand(b === "Outra" ? "" : b); setModel(""); setAnswers({}); }}
                   data-testid={`tradein-brand-${b}`}
                   className={chip(b === "Outra" ? otherBrand : (!otherBrand && brand === b))}>
                   {b}
@@ -284,7 +298,7 @@ export default function Avaliacao() {
           <div className="flex items-center justify-between gap-2">
             <div>
               <p className="text-sm font-bold">{[brand, model, memory, color].filter(Boolean).join(" ")}</p>
-              <p className="text-[11px] text-muted-foreground">Como está o aparelho? ({answeredCount}/{QUESTIONS.length} respondidas)</p>
+              <p className="text-[11px] text-muted-foreground">Como está o aparelho? ({answeredCount}/{questions.length} respondidas)</p>
             </div>
             <button onClick={() => setStep(1)} data-testid="button-tradein-back"
               className="flex items-center gap-1 text-xs font-semibold text-primary shrink-0">
@@ -321,7 +335,7 @@ export default function Avaliacao() {
             </div>
           </div>
 
-          {QUESTIONS.map((qq) => (
+          {questions.map((qq) => (
             <div key={qq.key}>
               <p className="text-xs font-bold mb-1.5">{qq.label}</p>
               <div className="flex gap-1.5 flex-wrap">
