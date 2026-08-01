@@ -467,6 +467,135 @@ router.delete("/internal-chat/conversations/:id", requireAdmin, async (req, res)
   res.json({ ok: true });
 });
 
+// ─── Listar membros de um grupo (para o modal de edição) ───────────────────
+// Só admin edita, mas qualquer membro pode ver quem participa.
+router.get("/internal-chat/conversations/:id/members", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const userId = req.session.userId!;
+  const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
+  if (Number.isNaN(convId)) { res.status(400).json({ error: "Conversa inválida" }); return; }
+
+  // Membros veem quem participa; admin também (precisa para editar grupos que
+  // administra sem virar membro — ver PATCH abaixo: histórico segue restrito).
+  let conv = await getAccessibleConversation(convId, userId, tenantId);
+  if (!conv && req.session.userRole === "admin") {
+    const [adminView] = await db.select().from(internalConversationsTable)
+      .where(and(eq(internalConversationsTable.id, convId), eq(internalConversationsTable.tenantId, tenantId), eq(internalConversationsTable.kind, "group")))
+      .limit(1);
+    conv = adminView ?? null;
+  }
+  if (!conv) { res.status(403).json({ error: "Acesso negado" }); return; }
+
+  const members = await db
+    .select({ id: usersTable.id, name: usersTable.name, role: usersTable.role })
+    .from(internalConversationMembersTable)
+    .innerJoin(usersTable, eq(internalConversationMembersTable.userId, usersTable.id))
+    .where(eq(internalConversationMembersTable.conversationId, convId));
+  res.json(members);
+});
+
+// ─── Editar grupo (renomear e adicionar/remover participantes) ─────────────
+// Somente admin (mesma regra da criação/exclusão). As mensagens ficam intactas:
+// só o nome e a lista de membros mudam. memberIds é a lista COMPLETA desejada.
+// Eventos: added → internal_conversation_new; removed → internal_conversation_removed;
+// quem fica → internal_conversation_updated (nome/membros novos em tempo real).
+router.patch("/internal-chat/conversations/:id", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
+  if (Number.isNaN(convId)) { res.status(400).json({ error: "Conversa inválida" }); return; }
+
+  const [conv] = await db.select().from(internalConversationsTable)
+    .where(and(eq(internalConversationsTable.id, convId), eq(internalConversationsTable.tenantId, tenantId))).limit(1);
+  if (!conv) { res.status(404).json({ error: "Grupo não encontrado" }); return; }
+  if (conv.kind !== "group") { res.status(400).json({ error: "Só grupos podem ser editados" }); return; }
+
+  const { name, memberIds } = req.body as { name?: string; memberIds?: number[] };
+
+  let newName = conv.name;
+  if (name !== undefined) {
+    const cleanName = (name ?? "").trim().slice(0, 80);
+    if (!cleanName) { res.status(400).json({ error: "Dê um nome ao grupo" }); return; }
+    newName = cleanName;
+  }
+
+  // Membros atuais (antes da mudança) — necessários para saber quem avisar.
+  const currentRows = await db
+    .select({ userId: internalConversationMembersTable.userId })
+    .from(internalConversationMembersTable)
+    .where(eq(internalConversationMembersTable.conversationId, convId));
+  const currentIds = currentRows.map((r) => r.userId);
+
+  let addedIds: number[] = [];
+  let removedIds: number[] = [];
+  let finalIds = currentIds;
+
+  if (memberIds !== undefined) {
+    const wanted = Array.isArray(memberIds)
+      ? [...new Set(memberIds.map(Number).filter((n) => Number.isInteger(n) && n > 0))]
+      : [];
+    if (wanted.length === 0) { res.status(400).json({ error: "O grupo precisa de pelo menos um participante" }); return; }
+    // Só usuários da MESMA loja (tenant).
+    const valid = await db.select({ id: usersTable.id }).from(usersTable)
+      .where(and(eq(usersTable.tenantId, tenantId), inArray(usersTable.id, wanted)));
+    const validIds = valid.map((v) => v.id);
+    if (validIds.length === 0) { res.status(400).json({ error: "Nenhum participante válido" }); return; }
+
+    const currentSet = new Set(currentIds);
+    const wantedSet = new Set(validIds);
+    addedIds = validIds.filter((id) => !currentSet.has(id));
+    removedIds = currentIds.filter((id) => !wantedSet.has(id));
+    finalIds = validIds;
+
+    if (addedIds.length > 0) {
+      await db.insert(internalConversationMembersTable)
+        .values(addedIds.map((uid) => ({ tenantId, conversationId: convId, userId: uid })))
+        .onConflictDoNothing();
+    }
+    if (removedIds.length > 0) {
+      await db.delete(internalConversationMembersTable)
+        .where(and(
+          eq(internalConversationMembersTable.conversationId, convId),
+          inArray(internalConversationMembersTable.userId, removedIds),
+        ));
+    }
+  }
+
+  if (newName !== conv.name) {
+    await db.update(internalConversationsTable)
+      .set({ name: newName })
+      .where(eq(internalConversationsTable.id, convId));
+  }
+
+  // Nomes dos membros finais (o cliente monta o "Você, Fulano, ..." filtrando a si mesmo).
+  const finalMembers = finalIds.length > 0
+    ? await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable)
+        .where(inArray(usersTable.id, finalIds))
+    : [];
+
+  const convPayload = {
+    id: convId,
+    kind: "group" as const,
+    name: newName ?? "Grupo",
+    otherUser: null,
+    members: finalMembers,
+    lastMessage: conv.lastMessage,
+    lastMessageAt: conv.lastMessageAt,
+    unreadCount: 0,
+  };
+
+  // Adicionados: grupo aparece na lista deles na hora.
+  if (addedIds.length > 0) broadcastInternal("internal_conversation_new", convPayload, tenantId, addedIds);
+  // Removidos: grupo some da lista deles na hora.
+  if (removedIds.length > 0) broadcastInternal("internal_conversation_removed", { id: convId }, tenantId, removedIds);
+  // Quem fica: vê o nome/participantes atualizados em tempo real.
+  const staying = finalIds.filter((id) => !addedIds.includes(id));
+  if (staying.length > 0) {
+    broadcastInternal("internal_conversation_updated", { id: convId, name: newName ?? "Grupo", members: finalMembers }, tenantId, staying);
+  }
+
+  res.json(convPayload);
+});
+
 // ─── Mark a conversation as read ───────────────────────────────────────────
 router.post("/internal-chat/conversations/:id/read", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
 import { api, can, type InternalConversation, type InternalMessage } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
-import { Users, Send, Plus, X, Search, MessagesSquare, ChevronLeft, SquareKanban, ClipboardPlus, Trash2 } from "lucide-react";
+import { Users, Send, Plus, X, Search, MessagesSquare, ChevronLeft, SquareKanban, ClipboardPlus, Trash2, Pencil } from "lucide-react";
 import TaskBoard from "./TaskBoard";
 
 const roleLabel: Record<string, string> = {
@@ -70,6 +70,12 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
   const [groupName, setGroupName] = useState("");
   const [groupMembers, setGroupMembers] = useState<number[]>([]);
   const [creatingGroup, setCreatingGroup] = useState(false);
+  // Edição de grupo (admin): renomear e adicionar/remover participantes.
+  const [editingGroupId, setEditingGroupId] = useState<number | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editMembers, setEditMembers] = useState<number[]>([]);
+  const [editSearch, setEditSearch] = useState("");
+  const [savingGroup, setSavingGroup] = useState(false);
   // @menção: sugestões enquanto digita "@..." no composer.
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   // Criar tarefa a partir de uma mensagem do chat (vínculo com o quadro).
@@ -181,14 +187,25 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
     // messages so nothing sent during the outage is lost.
     // Novo grupo criado por um colega: aparece na lista em tempo real.
     es.addEventListener("internal_conversation_new", (e) => {
-      const conv = JSON.parse((e as MessageEvent).data) as InternalConversation;
+      const conv = JSON.parse((e as MessageEvent).data) as InternalConversation & { members?: { id: number; name: string }[] };
+      // Quando o servidor manda a lista de membros (ex.: fui adicionado a um
+      // grupo existente), monta o "Você, Fulano..." excluindo a si mesmo.
+      if (conv.members) conv.memberNames = conv.members.filter((m) => m.id !== user?.id).map((m) => m.name);
       setConversations((prev) => (prev.some((c) => c.id === conv.id) ? prev : [...prev, conv]));
     });
-    // Grupo excluído por um admin/supervisor: some da lista de todos na hora.
+    // Grupo excluído por um admin/supervisor (ou fui removido dele): some da
+    // lista na hora.
     es.addEventListener("internal_conversation_removed", (e) => {
       const { id } = JSON.parse((e as MessageEvent).data) as { id: number };
       setConversations((prev) => prev.filter((c) => c.id !== id));
       setActiveId((cur) => (cur === id ? null : cur));
+    });
+    // Grupo editado (renomeado / participantes mudaram): atualiza em tempo real.
+    es.addEventListener("internal_conversation_updated", (e) => {
+      const payload = JSON.parse((e as MessageEvent).data) as { id: number; name: string; members: { id: number; name: string }[] };
+      setConversations((prev) => prev.map((c) => c.id === payload.id
+        ? { ...c, name: payload.name, memberNames: payload.members.filter((m) => m.id !== user?.id).map((m) => m.name) }
+        : c));
     });
     es.addEventListener("resync", () => {
       reconcileAfterReconnect();
@@ -282,6 +299,49 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
       toast({ title: "Erro ao criar grupo", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     } finally {
       setCreatingGroup(false);
+    }
+  };
+
+  // Abre o modal de edição do grupo carregando os participantes atuais.
+  const openEditGroup = async (conv: InternalConversation) => {
+    setEditingGroupId(conv.id);
+    setEditName(conv.name);
+    setEditSearch("");
+    setEditMembers([]);
+    try {
+      const members = await api.internalChat.groupMembers(conv.id);
+      setEditMembers(members.map((m) => m.id));
+    } catch {
+      toast({ title: "Erro ao carregar participantes", variant: "destructive" });
+      setEditingGroupId(null);
+    }
+  };
+
+  const saveGroup = async () => {
+    if (editingGroupId == null || savingGroup) return;
+    const name = editName.trim();
+    if (!name) { toast({ title: "Dê um nome ao grupo", variant: "destructive" }); return; }
+    if (editMembers.length === 0) { toast({ title: "Escolha pelo menos um participante", variant: "destructive" }); return; }
+    setSavingGroup(true);
+    try {
+      // A lista é enviada exatamente como escolhida: o admin pode inclusive
+      // sair do grupo desmarcando a si mesmo (o servidor não readiciona ninguém).
+      const updated = await api.internalChat.updateGroup(editingGroupId, { name, memberIds: editMembers });
+      const stillMember = user != null && (updated.members ?? []).some((m) => m.id === user.id);
+      if (stillMember) {
+        const memberNames = (updated.members ?? []).filter((m) => m.id !== user?.id).map((m) => m.name);
+        setConversations((prev) => prev.map((c) => (c.id === editingGroupId ? { ...c, name: updated.name, memberNames } : c)));
+      } else {
+        // Saí do grupo: ele some da minha lista (o SSE também manda o evento).
+        setConversations((prev) => prev.filter((c) => c.id !== editingGroupId));
+        setActiveId((cur) => (cur === editingGroupId ? null : cur));
+      }
+      setEditingGroupId(null);
+      toast({ title: "Grupo atualizado! ✅" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar grupo", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSavingGroup(false);
     }
   };
 
@@ -382,6 +442,16 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
                 </div>
                 {active.kind === "group" && user?.role === "admin" && (
                   <button
+                    onClick={() => openEditGroup(active)}
+                    data-testid="button-edit-group"
+                    title="Editar grupo"
+                    className="ml-auto p-2 rounded-lg text-muted-foreground hover:text-primary hover:bg-primary/10 transition shrink-0"
+                  >
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                )}
+                {active.kind === "group" && user?.role === "admin" && (
+                  <button
                     onClick={async () => {
                       if (!confirm(`Excluir o grupo "${active.name}"? Todas as mensagens dele serão apagadas para todos.`)) return;
                       try {
@@ -394,7 +464,7 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
                     }}
                     data-testid="button-delete-group"
                     title="Excluir grupo"
-                    className="ml-auto p-2 rounded-lg text-red-600 hover:bg-red-50 transition shrink-0"
+                    className="p-2 rounded-lg text-red-600 hover:bg-red-50 transition shrink-0"
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>
@@ -624,6 +694,76 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
           </div>
   );
 
+  // Modal: editar grupo (renomear + adicionar/remover participantes).
+  // O próprio admin aparece na lista: ele também pode entrar/sair do grupo.
+  const editCandidates = user ? [{ id: user.id, name: `${user.name} (você)`, role: user.role }, ...colleagues] : colleagues;
+  const editFiltered = editCandidates.filter((c) => c.name.toLowerCase().includes(editSearch.toLowerCase()));
+  const editModal = editingGroupId != null && (
+    <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setEditingGroupId(null)}>
+      <div className="bg-card rounded-xl w-full max-w-sm shadow-xl border overflow-hidden mx-3" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-4 py-3 border-b">
+          <span className="font-semibold text-sm flex items-center gap-2"><Pencil className="w-4 h-4 text-violet-600" /> Editar grupo</span>
+          <button onClick={() => setEditingGroupId(null)} data-testid="button-close-edit-group" className="text-muted-foreground hover:text-foreground">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <div className="p-3 border-b">
+          <input
+            value={editName}
+            onChange={(e) => setEditName(e.target.value)}
+            placeholder="Nome do grupo"
+            data-testid="input-edit-group-name"
+            className="w-full px-3 py-2 text-sm rounded-lg border focus:outline-none focus:ring-2 focus:ring-primary/40"
+          />
+        </div>
+        <div className="p-3 border-b">
+          <div className="relative">
+            <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            <input
+              value={editSearch}
+              onChange={(e) => setEditSearch(e.target.value)}
+              placeholder="Buscar colega..."
+              className="w-full pl-8 pr-3 py-2 text-sm rounded-lg border focus:outline-none focus:ring-2 focus:ring-primary/40"
+            />
+          </div>
+        </div>
+        <div className="max-h-72 overflow-y-auto">
+          {editFiltered.length === 0 && (
+            <div className="p-4 text-center text-xs text-muted-foreground">Nenhum colega encontrado.</div>
+          )}
+          {editFiltered.map((c) => {
+            const selected = editMembers.includes(c.id);
+            return (
+              <button
+                key={c.id}
+                onClick={() => setEditMembers((prev) => selected ? prev.filter((id) => id !== c.id) : [...prev, c.id])}
+                data-testid={`edit-member-${c.id}`}
+                className={`w-full text-left px-4 py-2.5 flex items-center gap-3 border-b border-border/50 transition ${selected ? "bg-violet-50" : "hover:bg-muted/50"}`}
+              >
+                <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold ${selected ? "bg-violet-600 text-white" : "bg-primary text-white"}`}>
+                  {initials(c.name)}
+                </div>
+                <div className="flex-1">
+                  <div className="text-sm font-medium">{c.name}</div>
+                  <div className="text-xs text-muted-foreground">{roleLabel[c.role] ?? c.role}</div>
+                </div>
+                <div className={`w-4 h-4 rounded border flex items-center justify-center ${selected ? "bg-violet-600 border-violet-600" : "border-border"}`}>
+                  {selected && <span className="text-white text-[10px] leading-none">✓</span>}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+        <div className="p-3 border-t">
+          <button onClick={saveGroup} disabled={savingGroup} data-testid="button-save-group"
+            className="w-full py-2.5 rounded-xl bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700 transition disabled:opacity-50">
+            {savingGroup ? "Salvando..." : `Salvar alterações${editMembers.length > 0 ? ` (${editMembers.length} participante${editMembers.length > 1 ? "s" : ""})` : ""}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
   const viewTabs = (
     <div className="flex items-center gap-1 p-1.5 border-b bg-muted/20 shrink-0">
       <button
@@ -660,7 +800,7 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
         ) : (
           <div className="flex flex-col h-full min-h-0">{listPanel}</div>
         )}
-        {newModal}{taskModal}
+        {newModal}{editModal}{taskModal}
       </div>
     );
   }
@@ -681,7 +821,7 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
             <section className={`flex-1 flex-col min-w-0 ${active ? "flex" : "hidden md:flex"}`}>{threadPanel}</section>
           </div>
         )}
-        {newModal}{taskModal}
+        {newModal}{editModal}{taskModal}
       </div>
     </div>
   );

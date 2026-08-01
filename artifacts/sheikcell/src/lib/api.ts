@@ -753,6 +753,10 @@ export const api = {
       req<InternalMessage>(`/internal-chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
     markRead: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}/read`, { method: "POST" }),
     deleteGroup: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}`, { method: "DELETE" }),
+    groupMembers: (id: number) => req<{ id: number; name: string; role: string }[]>(`/internal-chat/conversations/${id}/members`),
+    updateGroup: (id: number, data: { name?: string; memberIds?: number[] }) =>
+      req<InternalConversation & { members?: { id: number; name: string }[] }>(
+        `/internal-chat/conversations/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   },
   routing: {
     rules: () => req<RoutingRule[]>("/routing/rules"),
