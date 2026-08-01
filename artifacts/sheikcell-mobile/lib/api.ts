@@ -95,6 +95,8 @@ export type Conversation = {
   unreadCount: number;
   avatarUrl: string | null;
   isArchived: boolean;
+  // Fixada pelo usuário logado (individual — vem do GET /chat/conversations)
+  pinned?: boolean;
 };
 
 export type ChatMessage = {
@@ -115,6 +117,12 @@ export function getBaseUrl() {
 
 export const api = {
   chat: {
+    conversations: (search?: string) =>
+      req<Conversation[]>(`/chat/conversations${search ? `?search=${encodeURIComponent(search)}` : ""}`),
+    pin: (id: number) =>
+      req<{ ok: boolean; pinned: boolean }>(`/chat/conversations/${id}/pin`, { method: "POST" }),
+    unpin: (id: number) =>
+      req<{ ok: boolean; pinned: boolean }>(`/chat/conversations/${id}/pin`, { method: "DELETE" }),
     conversation: (id: number) => req<Conversation>(`/chat/conversations/${id}`),
     messages: (id: number) => req<ChatMessage[]>(`/chat/conversations/${id}/messages`),
     sendMessage: (id: number, content: string) =>

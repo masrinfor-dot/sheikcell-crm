@@ -3,7 +3,7 @@ name: Mobile app chat is minimal
 description: The Expo mobile app does not have web-parity chat; scope "também no celular" tasks accordingly
 ---
 
-The Sheikcell Mobile (Expo) app does NOT have the full Central de Atendimento — only a minimal conversation screen and real-time alerts.
+The Sheikcell Mobile (Expo) app does NOT have the full Central de Atendimento — only a "Conversas" tab (list with pin-to-top + search, 15s polling), a minimal text-only conversation screen, and real-time alerts.
 
 **Why:** tasks phrased "também no celular" tend to assume web-parity chat exists on mobile; it doesn't, so such tasks usually require building missing UI, not just wiring events.
 

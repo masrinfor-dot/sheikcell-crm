@@ -17,6 +17,10 @@ function NativeTabLayoutAttendant() {
         <Icon sf={{ default: "list.bullet", selected: "list.bullet" }} />
         <Label>Fila</Label>
       </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="conversas">
+        <Icon sf={{ default: "bubble.left.and.bubble.right", selected: "bubble.left.and.bubble.right.fill" }} />
+        <Label>Conversas</Label>
+      </NativeTabs.Trigger>
       <NativeTabs.Trigger name="profile">
         <Icon sf={{ default: "person", selected: "person.fill" }} />
         <Label>Perfil</Label>
@@ -35,6 +39,10 @@ function NativeTabLayoutAdmin() {
       <NativeTabs.Trigger name="index">
         <Icon sf={{ default: "list.bullet", selected: "list.bullet" }} />
         <Label>Fila</Label>
+      </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="conversas">
+        <Icon sf={{ default: "bubble.left.and.bubble.right", selected: "bubble.left.and.bubble.right.fill" }} />
+        <Label>Conversas</Label>
       </NativeTabs.Trigger>
       <NativeTabs.Trigger name="profile">
         <Icon sf={{ default: "person", selected: "person.fill" }} />
@@ -105,6 +113,18 @@ function ClassicTabLayout({ isAdmin }: { isAdmin: boolean }) {
               <SymbolView name="list.bullet" tintColor={color} size={22} />
             ) : (
               <Feather name="list" size={22} color={color} />
+            ),
+        }}
+      />
+      <Tabs.Screen
+        name="conversas"
+        options={{
+          title: "Conversas",
+          tabBarIcon: ({ color }) =>
+            isIOS ? (
+              <SymbolView name="bubble.left.and.bubble.right" tintColor={color} size={22} />
+            ) : (
+              <Ionicons name="chatbubbles-outline" size={22} color={color} />
             ),
         }}
       />
