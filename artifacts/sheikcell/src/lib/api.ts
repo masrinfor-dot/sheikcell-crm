@@ -362,6 +362,9 @@ export type TradeInEvaluation = {
   aiSummary: string | null; createdAt: string;
 };
 
+// Tabelas de margem da avaliação: 1 = maior, 2 = média, 3 = menor (em %).
+export type TradeInMargins = { t1: number; t2: number; t3: number };
+
 export type FilmCompat = {
   id: number; film: string; models: string; notes: string | null;
   createdAt: string; updatedAt: string;
@@ -662,9 +665,12 @@ export const api = {
   },
   tradeIn: {
     list: () => req<TradeInEvaluation[]>("/trade-in"),
-    evaluate: (data: { device?: string; brand?: string; model?: string; memory?: string; color?: string; answers: Record<string, string> }) =>
+    evaluate: (data: { device?: string; brand?: string; model?: string; memory?: string; color?: string; marginTable?: 1 | 2 | 3; answers: Record<string, string> }) =>
       req<{ id: number; device: string; marketPrice: string; suggestedPrice: string; summary: string; createdAt: string }>(
         "/trade-in/evaluate", { method: "POST", body: JSON.stringify(data) }),
+    margins: () => req<TradeInMargins>("/trade-in/margins"),
+    saveMargins: (data: Partial<TradeInMargins>) =>
+      req<TradeInMargins>("/trade-in/margins", { method: "PATCH", body: JSON.stringify(data) }),
   },
   results: {
     summary: (params?: { from?: string; to?: string; sectorId?: number; attendantId?: number }) => {

@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
-import { db, tradeInEvaluationsTable, usersTable } from "@workspace/db";
+import { db, tradeInEvaluationsTable, usersTable, appSettingsTable } from "@workspace/db";
 import { eq, desc } from "drizzle-orm";
-import { requireAuth } from "../middlewares/auth";
+import { requireAuth, requireAdmin } from "../middlewares/auth";
 import { requirePerm } from "../lib/permissions";
 
 const router: IRouter = Router();
@@ -38,6 +38,54 @@ router.get("/trade-in", requireAuth, async (_req, res): Promise<void> => {
 
 type Answers = Record<string, string>;
 
+// ─── Tabelas de margem ──────────────────────────────────────────────────────
+// 1 = margem maior, 2 = média, 3 = menor. A % é a margem da loja: a sugestão
+// de compra fica em torno de (100 − margem)% do valor de revenda.
+type Margins = { t1: number; t2: number; t3: number };
+const MARGIN_DEFAULTS: Margins = { t1: 40, t2: 30, t3: 20 };
+const MARGINS_KEY = "trade_in_margins";
+
+async function getMargins(): Promise<Margins> {
+  const [row] = await db.select().from(appSettingsTable).where(eq(appSettingsTable.key, MARGINS_KEY)).limit(1);
+  if (!row) return { ...MARGIN_DEFAULTS };
+  try {
+    const p = JSON.parse(row.value) as Partial<Margins>;
+    const norm = (v: unknown, d: number) => {
+      const n = Math.round(Number(v));
+      return Number.isFinite(n) && n >= 1 && n <= 90 ? n : d;
+    };
+    return { t1: norm(p.t1, MARGIN_DEFAULTS.t1), t2: norm(p.t2, MARGIN_DEFAULTS.t2), t3: norm(p.t3, MARGIN_DEFAULTS.t3) };
+  } catch {
+    return { ...MARGIN_DEFAULTS };
+  }
+}
+
+router.get("/trade-in/margins", requireAuth, async (_req, res): Promise<void> => {
+  res.json(await getMargins());
+});
+
+router.patch("/trade-in/margins", requireAdmin, async (req, res): Promise<void> => {
+  const body = req.body as Partial<Margins>;
+  const cur = await getMargins();
+  const next: Margins = { ...cur };
+  for (const k of ["t1", "t2", "t3"] as const) {
+    if (body[k] === undefined) continue;
+    const n = Math.round(Number(body[k]));
+    if (!Number.isFinite(n) || n < 1 || n > 90) {
+      res.status(400).json({ error: "Margem deve ser entre 1% e 90%" });
+      return;
+    }
+    next[k] = n;
+  }
+  await db.insert(appSettingsTable)
+    .values({ key: MARGINS_KEY, value: JSON.stringify(next) })
+    .onConflictDoUpdate({ target: appSettingsTable.key, set: { value: JSON.stringify(next) } });
+  res.json(next);
+});
+
+// Respostas que indicam parte sem funcionar: a loja NÃO avalia esses aparelhos.
+const BLOCKED_ANSWERS = ["Liga, mas tem defeito", "Não liga", "Não acende", "Não funciona"];
+
 // Avaliação com IA: pesquisa preços atuais na web e sugere valor de compra.
 router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
   const { device, answers, brand, model, memory, color } = req.body as {
@@ -71,6 +119,20 @@ router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (re
   }
   if (Object.keys(cleanAnswers).length === 0) { res.status(400).json({ error: "Responda o questionário de estado" }); return; }
 
+  // Não avaliamos aparelho com parte sem funcionar (não liga, tela apagada etc.).
+  const blocked = Object.entries(cleanAnswers).find(([, v]) => BLOCKED_ANSWERS.includes(v));
+  if (blocked) {
+    res.status(422).json({ error: `Não avaliamos aparelho com parte sem funcionar (${blocked[0].toLowerCase()}: "${blocked[1]}").` });
+    return;
+  }
+
+  // Tabela de margem escolhida (1 = maior, 2 = média, 3 = menor).
+  const marginTableRaw = (req.body as { marginTable?: unknown }).marginTable;
+  const marginTable = marginTableRaw === 1 || marginTableRaw === 2 || marginTableRaw === 3 ? marginTableRaw : 2;
+  const margins = await getMargins();
+  const marginPct = marginTable === 1 ? margins.t1 : marginTable === 2 ? margins.t2 : margins.t3;
+  const payPct = 100 - marginPct;
+
   // Cooldown + 1 chamada em andamento por usuário (chamadas de IA custam).
   const uid = req.session.userId!;
   if (inFlight.has(uid)) { res.status(429).json({ error: "Já existe uma avaliação em andamento. Aguarde." }); return; }
@@ -96,8 +158,7 @@ router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (re
     ``,
     `Regras da sugestão:`,
     `1. Estime a faixa de preço que esse aparelho usado é VENDIDO hoje no Brasil, já descontando o estado informado (tela trincada, bateria ruim etc. reduzem bastante).`,
-    `2. A loja precisa de margem: sugira um valor de COMPRA em torno de 60% a 75% do valor de revenda estimado, mais baixo se o estado for ruim.`,
-    `3. Se o aparelho não liga ou tem defeito grave, avalie como aparelho para peças.`,
+    `2. A loja trabalha com margem de ${marginPct}% nesta avaliação: sugira um valor de COMPRA em torno de ${payPct}% do valor de revenda estimado (ajuste um pouco para baixo se o estado for regular).`,
     ``,
     `Responda SOMENTE com um JSON válido, sem markdown, neste formato:`,
     `{"marketPrice":"R$ X – R$ Y (faixa de revenda)","suggestedPrice":"R$ Z","summary":"justificativa curta em 2-4 frases, citando o que pesou na avaliação"}`,

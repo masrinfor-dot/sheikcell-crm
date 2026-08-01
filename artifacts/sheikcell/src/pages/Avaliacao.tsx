@@ -1,8 +1,9 @@
 import { useState, useEffect } from "react";
-import { api, type TradeInEvaluation } from "@/lib/api";
+import { api, type TradeInEvaluation, type TradeInMargins } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
-  Smartphone, Sparkles, History, ChevronDown, ChevronLeft, RefreshCw, BadgeDollarSign,
+  Smartphone, Sparkles, History, ChevronDown, ChevronLeft, RefreshCw, BadgeDollarSign, Settings, X,
 } from "lucide-react";
 
 // Fluxo em etapas inspirado na Trocafone (trocafacil.trocafone.com.br):
@@ -29,6 +30,15 @@ const MODELS_BY_BRAND: Record<string, string[]> = {
 };
 
 const MEMORIES = ["16GB", "32GB", "64GB", "128GB", "256GB", "512GB", "1TB"];
+
+// Respostas que indicam parte sem funcionar — a loja NÃO avalia (bloqueia).
+const BLOCKED_ANSWERS = ["Liga, mas tem defeito", "Não liga", "Não acende", "Não funciona"];
+
+const MARGIN_TABLES: { table: 1 | 2 | 3; key: keyof TradeInMargins; label: string }[] = [
+  { table: 1, key: "t1", label: "Margem maior" },
+  { table: 2, key: "t2", label: "Margem média" },
+  { table: 3, key: "t3", label: "Margem menor" },
+];
 const COLORS = ["Preto", "Branco", "Azul", "Verde", "Roxo", "Dourado", "Prata", "Rosa", "Vermelho", "Grafite", "Titânio"];
 
 const STEPS = [
@@ -39,8 +49,14 @@ const STEPS = [
 
 export default function Avaliacao() {
   const { toast } = useToast();
+  const { user } = useAuth();
 
   const [step, setStep] = useState(1);
+  const [marginTable, setMarginTable] = useState<1 | 2 | 3>(2);
+  const [margins, setMargins] = useState<TradeInMargins | null>(null);
+  const [showMarginCfg, setShowMarginCfg] = useState(false);
+  const [cfgMargins, setCfgMargins] = useState<TradeInMargins>({ t1: 40, t2: 30, t3: 20 });
+  const [savingMargins, setSavingMargins] = useState(false);
   const [brand, setBrand] = useState("");
   const [otherBrand, setOtherBrand] = useState(false);
   const [model, setModel] = useState("");
@@ -57,19 +73,25 @@ export default function Avaliacao() {
   const [histMemory, setHistMemory] = useState("");
 
   const fetchHistory = () => { api.tradeIn.list().then(setHistory).catch(() => {}); };
-  useEffect(() => { fetchHistory(); }, []);
+  useEffect(() => {
+    fetchHistory();
+    api.tradeIn.margins().then(setMargins).catch(() => {});
+  }, []);
 
   const deviceOk = Boolean(brand.trim() && model.trim());
   const allAnswered = deviceOk && QUESTIONS.every((q) => answers[q.key]);
   const answeredCount = QUESTIONS.filter((q) => answers[q.key]).length;
+  // Alguma resposta indica parte sem funcionar? Então a loja não avalia.
+  const blockedAnswer = QUESTIONS.map((qq) => ({ q: qq.key, a: answers[qq.key] }))
+    .find((x) => x.a && BLOCKED_ANSWERS.includes(x.a));
 
   const handleEvaluate = async () => {
-    if (!allAnswered || evaluating) return;
+    if (!allAnswered || evaluating || blockedAnswer) return;
     setEvaluating(true);
     setResult(null);
     try {
       const r = await api.tradeIn.evaluate({
-        brand: brand.trim(), model: model.trim(), memory: memory.trim(), color: color.trim(), answers,
+        brand: brand.trim(), model: model.trim(), memory: memory.trim(), color: color.trim(), marginTable, answers,
       });
       setResult(r);
       setStep(3);
@@ -270,6 +292,35 @@ export default function Avaliacao() {
             </button>
           </div>
 
+          {/* Tabela de margem (1 maior, 2 média, 3 menor) */}
+          <div>
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-bold mb-1.5">Tabela de margem</p>
+              {user?.role === "admin" && (
+                <button onClick={() => { if (margins) setCfgMargins(margins); setShowMarginCfg(true); }}
+                  data-testid="button-margin-settings"
+                  className="flex items-center gap-1 text-[11px] font-semibold text-primary">
+                  <Settings className="w-3 h-3" /> Editar margens
+                </button>
+              )}
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {MARGIN_TABLES.map((t) => (
+                <button key={t.table} onClick={() => setMarginTable(t.table)}
+                  data-testid={`tradein-margin-${t.table}`}
+                  className={`rounded-xl border-2 p-2.5 text-center transition ${
+                    marginTable === t.table ? "border-primary bg-primary/5" : "border-border bg-white hover:bg-secondary"
+                  }`}>
+                  <p className="text-[11px] font-bold">Tabela {t.table}</p>
+                  <p className="text-[10px] text-muted-foreground">{t.label}</p>
+                  <p className={`text-sm font-extrabold mt-0.5 ${marginTable === t.table ? "text-primary" : "text-foreground"}`}>
+                    {margins ? `${margins[t.key]}%` : "—"}
+                  </p>
+                </button>
+              ))}
+            </div>
+          </div>
+
           {QUESTIONS.map((qq) => (
             <div key={qq.key}>
               <p className="text-xs font-bold mb-1.5">{qq.label}</p>
@@ -286,12 +337,20 @@ export default function Avaliacao() {
             </div>
           ))}
 
-          <button onClick={handleEvaluate} disabled={!allAnswered || evaluating}
+          {blockedAnswer && (
+            <div className="rounded-xl border-2 border-red-200 bg-red-50 p-3 text-center" data-testid="tradein-blocked-warning">
+              <p className="text-sm font-bold text-red-700">🚫 Não avaliamos aparelho com parte sem funcionar</p>
+              <p className="text-xs text-red-600 mt-0.5">
+                {blockedAnswer.q}: "{blockedAnswer.a}" — mude a resposta se marcou errado.
+              </p>
+            </div>
+          )}
+          <button onClick={handleEvaluate} disabled={!allAnswered || evaluating || Boolean(blockedAnswer)}
             data-testid="button-evaluate-tradein"
             className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-primary text-white text-sm font-bold disabled:opacity-40 transition">
             {evaluating ? (<><RefreshCw className="w-4 h-4 animate-spin" /> Pesquisando preços e avaliando...</>) : (<><Sparkles className="w-4 h-4" /> Ver oferta →</>)}
           </button>
-          {!allAnswered && <p className="text-[11px] text-muted-foreground text-center">Responda todas as perguntas para ver a oferta.</p>}
+          {!allAnswered && !blockedAnswer && <p className="text-[11px] text-muted-foreground text-center">Responda todas as perguntas para ver a oferta.</p>}
         </div>
       )}
 
@@ -316,6 +375,62 @@ export default function Avaliacao() {
               className="text-xs font-semibold text-muted-foreground underline">Ajustar condições</button>
             <button onClick={resetForm} data-testid="button-tradein-new"
               className="text-xs font-semibold text-primary underline">Fazer nova avaliação</button>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: editar % das tabelas de margem (só admin) */}
+      {showMarginCfg && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowMarginCfg(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-sm p-6 shadow-xl space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold">Tabelas de margem</h3>
+              <button onClick={() => setShowMarginCfg(false)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              A margem é o lucro da loja: com margem de 30%, a sugestão de compra fica em torno de 70% do valor de revenda.
+            </p>
+            {MARGIN_TABLES.map((t) => (
+              <div key={t.table} className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold">Tabela {t.table}</p>
+                  <p className="text-[11px] text-muted-foreground">{t.label}</p>
+                </div>
+                <div className="flex items-center gap-1">
+                  <input type="number" min={1} max={90} value={cfgMargins[t.key]}
+                    onChange={(e) => setCfgMargins((m) => ({ ...m, [t.key]: Number(e.target.value) }))}
+                    data-testid={`input-margin-${t.table}`}
+                    className="w-20 px-3 py-2 rounded-xl border border-border text-sm text-right" />
+                  <span className="text-sm font-semibold text-muted-foreground">%</span>
+                </div>
+              </div>
+            ))}
+            <button
+              onClick={async () => {
+                for (const t of MARGIN_TABLES) {
+                  const v = Math.round(cfgMargins[t.key]);
+                  if (!Number.isFinite(v) || v < 1 || v > 90) {
+                    toast({ title: "Margem inválida", description: "Use entre 1% e 90%.", variant: "destructive" });
+                    return;
+                  }
+                }
+                setSavingMargins(true);
+                try {
+                  const saved = await api.tradeIn.saveMargins(cfgMargins);
+                  setMargins(saved);
+                  setShowMarginCfg(false);
+                  toast({ title: "Margens salvas! ✅" });
+                } catch (err) {
+                  toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+                } finally {
+                  setSavingMargins(false);
+                }
+              }}
+              disabled={savingMargins}
+              data-testid="button-save-margins"
+              className="w-full py-2.5 rounded-xl bg-primary text-white font-semibold text-sm disabled:opacity-50">
+              {savingMargins ? "Salvando..." : "Salvar"}
+            </button>
           </div>
         </div>
       )}
