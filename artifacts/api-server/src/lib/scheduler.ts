@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import { and, eq, lte } from "drizzle-orm";
 import {
   db,
+  chatNotificationsTable,
   conversationsTable,
   messagesTable,
   scheduledMessagesTable,
@@ -57,6 +58,20 @@ export async function deliverScheduledMessages(): Promise<void> {
           const [rConv] = await db.select().from(conversationsTable)
             .where(eq(conversationsTable.id, item.conversationId)).limit(1);
           if (rConv) {
+            // Persiste o aviso ANTES do broadcast: se o vendedor estiver
+            // offline (ou fora do buffer de replay do SSE), o sino carrega o
+            // não lido ao abrir a Central. Falha aqui não pode impedir o SSE.
+            if (item.createdById != null) {
+              await db.insert(chatNotificationsTable).values({
+                tenantId: rConv.tenantId,
+                userId: item.createdById,
+                kind: "retorno",
+                scheduledId: item.id,
+                conversationId: rConv.id,
+                convName: rConv.name,
+                content: item.content,
+              }).catch((err) => logger.warn({ err, scheduledId: item.id }, "Falha ao persistir aviso de retorno"));
+            }
             broadcast("schedule_due", {
               scheduledId: item.id,
               kind: "retorno",
@@ -130,6 +145,18 @@ export async function deliverScheduledMessages(): Promise<void> {
             }
             // Aviso direcionado ao autor: o envio agendado falhou (ex.: WhatsApp
             // despareado). Sem isso, a falha só apareceria abrindo a conversa.
+            // Persistido para sobreviver a vendedor offline (sino carrega depois).
+            if (item.createdById != null) {
+              await db.insert(chatNotificationsTable).values({
+                tenantId: conv.tenantId,
+                userId: item.createdById,
+                kind: "failed",
+                scheduledId: item.id,
+                conversationId: conv.id,
+                convName: conv.name,
+                content: item.content,
+              }).catch((err) => logger.warn({ err, scheduledId: item.id }, "Falha ao persistir aviso de falha de envio"));
+            }
             broadcast("schedule_failed", {
               scheduledId: item.id,
               kind: "mensagem",

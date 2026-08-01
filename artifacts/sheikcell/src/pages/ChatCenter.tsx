@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { api, can, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type Store as StoreType } from "@/lib/api";
+import { api, can, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -380,6 +380,7 @@ function MsgBubble({ msg }: { msg: ChatMessage }) {
 }
 
 // ─── Main component ─────────────────────────────────────────────────────────
+// hint: Logic changed on both sides. Requires understanding intent of each change.
 export default function ChatCenter() {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -472,6 +473,9 @@ export default function ChatCenter() {
   // Notification bell: inbound messages accumulated in arrival order
   const [showNotifications, setShowNotifications] = useState(false);
   const [notifications, setNotifications] = useState<MsgNotification[]>([]);
+  // Espelho para ler o estado atual dentro de efeitos sem re-assinar.
+  const notificationsRef = useRef<MsgNotification[]>([]);
+  useEffect(() => { notificationsRef.current = notifications; }, [notifications]);
   // Posição do painel de notificações (portal): ancora no sino no desktop.
   const bellBtnRef = useRef<HTMLButtonElement | null>(null);
   const [notifPanelPos, setNotifPanelPos] = useState<{ left: number; top: number } | null>(null);
@@ -608,11 +612,47 @@ export default function ChatCenter() {
   const activeConv = convs.find((c) => c.id === activeId) ?? null;
   const unreadNotifications = notifications.reduce((n, x) => n + (x.read ? 0 : 1), 0);
 
+  // Avisos persistidos (retorno vencido / falha de envio agendado): carregados
+  // do servidor ao abrir a Central, para que nada se perca se o vendedor
+  // estava offline quando o aviso venceu. O id espelha o formato dos eventos
+  // SSE ("sched-<kind>-<scheduledId>"), então o merge nunca duplica.
+  useEffect(() => {
+    api.chat.notifications.unread()
+      .then((rows: ChatNotification[]) => {
+        if (!rows.length) return;
+        const mapped: MsgNotification[] = rows.map((r) => ({
+          id: r.scheduledId != null ? `sched-${r.kind}-${r.scheduledId}` : `sched-db-${r.id}`,
+          conversationId: r.conversationId,
+          convName: r.convName || "Cliente",
+          preview: r.content,
+          createdAt: r.createdAt,
+          read: false,
+          kind: r.kind,
+        }));
+        setNotifications((prev) => {
+          const seen = new Set(prev.map((n) => n.id));
+          const fresh = mapped.filter((n) => !seen.has(n.id));
+          return fresh.length ? [...fresh, ...prev].slice(0, 100) : prev;
+        });
+      })
+      .catch(() => { /* silencioso: o sino segue funcionando só com o SSE */ });
+  }, []);
+
+  // Persiste a leitura no servidor quando um aviso de agendamento é lido —
+  // sem isso, ele voltaria como "não lido" na próxima abertura da Central.
+  const persistScheduleReads = useCallback((list: MsgNotification[], conversationId?: number) => {
+    const hasSched = list.some((n) => !n.read
+      && (n.kind === "retorno" || n.kind === "failed")
+      && (conversationId == null || n.conversationId === conversationId));
+    if (hasSched) api.chat.notifications.markRead(conversationId).catch(() => {});
+  }, []);
+
   // Open the conversation behind a notification and mark its notices read.
   const openNotification = (n: MsgNotification) => {
     // If the conversation is no longer visible/loaded (e.g. reassigned out of
     // scope), just clear its stale notices instead of trying to open it.
     const stillVisible = convs.some((c) => c.id === n.conversationId);
+    persistScheduleReads(notifications, n.conversationId);
     setNotifications((prev) =>
       stillVisible
         ? prev.map((x) => x.conversationId === n.conversationId ? { ...x, read: true } : x)
@@ -621,8 +661,10 @@ export default function ChatCenter() {
     if (stillVisible) setActiveId(n.conversationId);
     setShowNotifications(false);
   };
-  const markAllNotificationsRead = () =>
+  const markAllNotificationsRead = () => {
+    persistScheduleReads(notifications);
     setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+  };
 
   // ── Fetch conversations ──
   const fetchConvs = useCallback(async () => {
@@ -689,11 +731,15 @@ export default function ChatCenter() {
   // Opening a conversation clears its notification notices.
   useEffect(() => {
     if (activeId == null) return;
-    setNotifications((prev) =>
-      prev.some((n) => n.conversationId === activeId && !n.read)
-        ? prev.map((n) => n.conversationId === activeId ? { ...n, read: true } : n)
-        : prev
-    );
+    // Só avisos de MENSAGEM são lidos automaticamente ao abrir a conversa.
+    // Avisos de agendamento (retorno/falha) exigem clique explícito no sino:
+    // marcar aqui poderia dar baixa no servidor antes de o vendedor sequer
+    // ver o aviso (ex.: a conversa já estava restaurada como ativa ao abrir).
+    const isMsgNotice = (n: MsgNotification) => n.kind == null || n.kind === "message";
+    if (notificationsRef.current.some((n) => n.conversationId === activeId && !n.read && isMsgNotice(n))) {
+      setNotifications((prev) => prev.map((n) =>
+        n.conversationId === activeId && isMsgNotice(n) ? { ...n, read: true } : n));
+    }
   }, [activeId]);
 
   useEffect(() => {

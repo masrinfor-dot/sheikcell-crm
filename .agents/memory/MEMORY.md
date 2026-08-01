@@ -30,4 +30,6 @@
 - [Satisfaction survey](satisfaction-survey.md) — resolve envia pesquisa 1–5; 1ª resposta consome (nota grava sem reabrir, resto segue fluxo normal); captura vem ANTES do upsert inbound
 - [SaaS owner panel](saas-owner-panel.md) — "inadimplente" is derived, never stored; cancelar lojista cascades atomically to contract+invoices; billing serializes on the tenant row lock
 - [Mobile chat is minimal](mobile-chat-minimal.md) — Expo app lacks full chat; SSE via XHR client in lib/chatEvents.ts; expo web preview can't log in (CORS), test on device
+- [Persistent bell notifications](persistent-bell-notifications.md) — schedule due/failed avisos persist in chat_notifications per-user; scheduler inserts before SSE; bell dedupes by sched-<kind>-<id>
+- [Schema change path](drizzle-push-drift.md) — drizzle push broken by drift; ship every schema change as idempotent SQL in migrations/ + MIGRATION_FILES (boot runner) or prod won't have it
 - [Per-seller metrics scoping](results-panel.md) — vendedor só vê os próprios números: forçar setor+attendant do solicitante em TODAS as métricas de qualquer endpoint de relatório; ranking é admin/supervisor-only

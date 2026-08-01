@@ -434,6 +434,16 @@ export type ScheduledMessage = {
   createdAt: string;
 };
 
+export type ChatNotification = {
+  id: number;
+  kind: "retorno" | "failed";
+  scheduledId: number | null;
+  conversationId: number;
+  convName: string;
+  content: string;
+  read: boolean;
+  createdAt: string;
+};
 export type QuickReply = {
   id: number;
   title: string;
@@ -684,6 +694,16 @@ export const api = {
       create: (convId: number, data: { kind: "mensagem" | "retorno"; content: string; sendAt: string }) =>
         req<ScheduledMessage>(`/chat/conversations/${convId}/schedules`, { method: "POST", body: JSON.stringify(data) }),
       cancel: (id: number) => req<{ ok: boolean }>(`/chat/schedules/${id}`, { method: "DELETE" }),
+    },
+    // Avisos persistentes do sino (retorno vencido / falha de envio agendado):
+    // sobrevivem a vendedor offline e são carregados ao abrir a Central.
+    notifications: {
+      unread: () => req<ChatNotification[]>("/chat/notifications"),
+      markRead: (conversationId?: number) =>
+        req<{ ok: boolean }>("/chat/notifications/read", {
+          method: "POST",
+          body: JSON.stringify(conversationId != null ? { conversationId } : {}),
+        }),
     },
     quickReplies: {
       list: () => req<QuickReply[]>("/chat/quick-replies"),

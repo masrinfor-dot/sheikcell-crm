@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
-import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, crmPurchasesTable } from "@workspace/db";
+import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, crmPurchasesTable } from "@workspace/db";
 import { eq, desc, and, or, lt, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
 import { checkPerm, requirePerm } from "../lib/permissions";
@@ -1275,6 +1275,39 @@ router.delete("/chat/schedules/:schedId", requireAuth, async (req, res): Promise
   if (item.taskId != null) {
     await db.update(tasksTable).set({ isArchived: true, updatedAt: new Date() }).where(and(eq(tasksTable.id, item.taskId), eq(tasksTable.tenantId, tenantId)));
   }
+  res.json({ ok: true });
+});
+
+// ─── Notificações persistentes do sino ─────────────────────────────────────
+// Avisos de retorno vencido e de falha em envio agendado, gravados pelo
+// agendador. Cada usuário vê SOMENTE os próprios avisos (fail closed).
+router.get("/chat/notifications", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const userId = req.session.userId!;
+  const rows = await db.select().from(chatNotificationsTable)
+    .where(and(
+      eq(chatNotificationsTable.tenantId, tenantId),
+      eq(chatNotificationsTable.userId, userId),
+      eq(chatNotificationsTable.read, false),
+    ))
+    .orderBy(desc(chatNotificationsTable.createdAt))
+    .limit(100);
+  res.json(rows);
+});
+
+// Marca como lidos: todos os avisos do usuário, ou só os de uma conversa
+// (quando o vendedor abre a conversa a partir do sino).
+router.post("/chat/notifications/read", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const userId = req.session.userId!;
+  const conversationId = typeof req.body?.conversationId === "number" ? req.body.conversationId : null;
+  const conditions = [
+    eq(chatNotificationsTable.tenantId, tenantId),
+    eq(chatNotificationsTable.userId, userId),
+    eq(chatNotificationsTable.read, false),
+  ];
+  if (conversationId != null) conditions.push(eq(chatNotificationsTable.conversationId, conversationId));
+  await db.update(chatNotificationsTable).set({ read: true }).where(and(...conditions));
   res.json({ ok: true });
 });
 
