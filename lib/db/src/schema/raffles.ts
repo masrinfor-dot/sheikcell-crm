@@ -2,6 +2,7 @@ import { pgTable, serial, text, integer, timestamp, jsonb, boolean, uniqueIndex 
 
 // Sorteios entre clientes do atendimento, configuráveis pelo admin.
 export const rafflesTable = pgTable("raffles", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
   prize: text("prize").notNull(),
@@ -31,6 +32,7 @@ export const rafflesTable = pgTable("raffles", {
 });
 
 export const raffleDrawsTable = pgTable("raffle_draws", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   raffleId: integer("raffle_id").notNull().references(() => rafflesTable.id, { onDelete: "cascade" }),
   periodKey: text("period_key").notNull(), // 'manual-<ts>' | 'YYYY-Wnn' | 'YYYY-MM' | 'once'

@@ -4,6 +4,7 @@ import { z } from "zod/v4";
 import { sectorsTable } from "./sectors";
 
 export const usersTable = pgTable("users", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
   email: text("email").notNull().unique(),

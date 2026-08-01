@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db, appSettingsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
-import { requireAuth, requireAdminOrSupervisor } from "../middlewares/auth";
+import { requireAuth, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
@@ -13,8 +13,9 @@ const DEFAULTS: Record<string, string> = {
 };
 
 // Todos os papéis leem (o vendedor precisa saber se o alerta está ativo).
-router.get("/settings", requireAuth, async (_req, res): Promise<void> => {
-  const rows = await db.select().from(appSettingsTable);
+router.get("/settings", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rows = await db.select().from(appSettingsTable).where(eq(appSettingsTable.tenantId, tenantId));
   const map = { ...DEFAULTS };
   for (const r of rows) if (r.key in map) map[r.key] = r.value;
   res.json({
@@ -25,6 +26,7 @@ router.get("/settings", requireAuth, async (_req, res): Promise<void> => {
 
 // Só admin/supervisor alteram.
 router.patch("/settings", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { alertUnansweredEnabled, alertUnansweredMinutes } = req.body as {
     alertUnansweredEnabled?: boolean;
     alertUnansweredMinutes?: number;
@@ -43,10 +45,12 @@ router.patch("/settings", requireAdminOrSupervisor, async (req, res): Promise<vo
   }
   if (updates.length === 0) { res.status(400).json({ error: "Nada para atualizar" }); return; }
   for (const [key, value] of updates) {
-    await db.insert(appSettingsTable).values({ key, value, updatedAt: new Date() })
-      .onConflictDoUpdate({ target: appSettingsTable.key, set: { value, updatedAt: new Date() } });
+    // app_settings agora é chaveado por (tenant_id, key) — o upsert precisa
+    // considerar as duas colunas para não colidir entre lojas.
+    await db.insert(appSettingsTable).values({ tenantId, key, value, updatedAt: new Date() })
+      .onConflictDoUpdate({ target: [appSettingsTable.tenantId, appSettingsTable.key], set: { value, updatedAt: new Date() } });
   }
-  const rows = await db.select().from(appSettingsTable);
+  const rows = await db.select().from(appSettingsTable).where(eq(appSettingsTable.tenantId, tenantId));
   const map = { ...DEFAULTS };
   for (const r of rows) if (r.key in map) map[r.key] = r.value;
   res.json({
@@ -58,8 +62,9 @@ router.patch("/settings", requireAdminOrSupervisor, async (req, res): Promise<vo
 // ── Pesquisa de satisfação: configuração (escala, mensagem, prazo, recompensa) ──
 import { getSurveySettings, saveSurveySettings } from "../lib/surveySettings";
 
-router.get("/settings/survey", requireAdminOrSupervisor, async (_req, res): Promise<void> => {
-  res.json(await getSurveySettings());
+router.get("/settings/survey", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  res.json(await getSurveySettings(tenantId));
 });
 
 router.patch("/settings/survey", requireAdminOrSupervisor, async (req, res): Promise<void> => {
@@ -75,7 +80,8 @@ router.patch("/settings/survey", requireAdminOrSupervisor, async (req, res): Pro
       return;
     }
   }
-  res.json(await saveSurveySettings(body));
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  res.json(await saveSurveySettings(tenantId, body));
 });
 
 export default router;

@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db, tasksTable, sectorsTable, usersTable, taskCommentsTable, taskSubtasksTable } from "@workspace/db";
-import { eq, desc, asc, inArray, sql } from "drizzle-orm";
-import { requireAuth, isGlobalRole } from "../middlewares/auth";
+import { eq, and, desc, asc, inArray, sql } from "drizzle-orm";
+import { requireAuth, isGlobalRole, requireTenant } from "../middlewares/auth";
 import { requirePerm } from "../lib/permissions";
 import type { Request } from "express";
 
@@ -14,8 +14,9 @@ const STATUSES = ["todo", "doing", "done"];
 const PRIORITIES = ["baixa", "media", "alta"];
 
 async function enrichTask(t: typeof tasksTable.$inferSelect) {
-  const sectors = await db.select().from(sectorsTable);
-  const users = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable);
+  const tenantId = t.tenantId;
+  const sectors = await db.select().from(sectorsTable).where(eq(sectorsTable.tenantId, tenantId));
+  const users = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable).where(eq(usersTable.tenantId, tenantId));
   const sectorMap = Object.fromEntries(sectors.map((s) => [s.id, s]));
   const userMap = Object.fromEntries(users.map((u) => [u.id, u]));
   return {
@@ -43,10 +44,12 @@ function callerCanAccessTask(session: Request["session"], t: typeof tasksTable.$
 
 async function loadTaskWithAccess(
   id: number,
+  tenantId: number,
   session: Request["session"],
   res: Parameters<Parameters<typeof router.get>[1]>[1],
 ): Promise<typeof tasksTable.$inferSelect | null> {
-  const [t] = await db.select().from(tasksTable).where(eq(tasksTable.id, id));
+  const [t] = await db.select().from(tasksTable)
+    .where(and(eq(tasksTable.id, id), eq(tasksTable.tenantId, tenantId)));
   if (!t || t.isArchived) {
     res.status(404).json({ error: "Tarefa não encontrada" });
     return null;
@@ -60,20 +63,21 @@ async function loadTaskWithAccess(
 
 // ─── List tasks ─────────────────────────────────────────────────────────────
 router.get("/tasks", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const userRole = req.session.userRole!;
 
   const all = await db
     .select()
     .from(tasksTable)
-    .where(eq(tasksTable.isArchived, false))
+    .where(and(eq(tasksTable.tenantId, tenantId), eq(tasksTable.isArchived, false)))
     .orderBy(asc(tasksTable.position), desc(tasksTable.updatedAt));
 
   const visible = isGlobalRole(userRole)
     ? all
     : all.filter((t) => callerCanAccessTask(req.session, t));
 
-  const sectors = await db.select().from(sectorsTable);
-  const users = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable);
+  const sectors = await db.select().from(sectorsTable).where(eq(sectorsTable.tenantId, tenantId));
+  const users = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable).where(eq(usersTable.tenantId, tenantId));
   const sectorMap = Object.fromEntries(sectors.map((s) => [s.id, s]));
   const userMap = Object.fromEntries(users.map((u) => [u.id, u]));
 
@@ -108,13 +112,15 @@ router.get("/tasks", requireAuth, async (req, res): Promise<void> => {
 
 // ─── Relatório de tarefas por setor e por vendedor ──────────────────────────
 router.get("/tasks/report", requireAuth, async (req, res): Promise<void> => {
-  const all = await db.select().from(tasksTable).where(eq(tasksTable.isArchived, false));
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const all = await db.select().from(tasksTable)
+    .where(and(eq(tasksTable.tenantId, tenantId), eq(tasksTable.isArchived, false)));
   const visible = isGlobalRole(req.session.userRole)
     ? all
     : all.filter((t) => callerCanAccessTask(req.session, t));
 
-  const sectors = await db.select().from(sectorsTable);
-  const users = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable);
+  const sectors = await db.select().from(sectorsTable).where(eq(sectorsTable.tenantId, tenantId));
+  const users = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable).where(eq(usersTable.tenantId, tenantId));
   const sectorName = Object.fromEntries(sectors.map((s) => [s.id, s.name]));
   const userName = Object.fromEntries(users.map((u) => [u.id, u.name]));
 
@@ -142,9 +148,10 @@ router.get("/tasks/report", requireAuth, async (req, res): Promise<void> => {
 
 // ─── Comentários da tarefa (chat p/ dúvidas e complementos) ────────────────
 router.get("/tasks/:id/comments", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const existing = await loadTaskWithAccess(id, req.session, res);
+  const existing = await loadTaskWithAccess(id, tenantId, req.session, res);
   if (!existing) return;
   const rows = await db
     .select({
@@ -163,15 +170,16 @@ router.get("/tasks/:id/comments", requireAuth, async (req, res): Promise<void> =
 });
 
 router.post("/tasks/:id/comments", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const existing = await loadTaskWithAccess(id, req.session, res);
+  const existing = await loadTaskWithAccess(id, tenantId, req.session, res);
   if (!existing) return;
   const { content } = req.body as { content?: string };
   const text = (content ?? "").trim();
   if (!text) { res.status(400).json({ error: "Comentário vazio" }); return; }
   const [inserted] = await db.insert(taskCommentsTable)
-    .values({ taskId: id, authorId: req.session.userId ?? null, content: text.slice(0, 2000) })
+    .values({ tenantId, taskId: id, authorId: req.session.userId ?? null, content: text.slice(0, 2000) })
     .returning();
   const [author] = await db.select({ name: usersTable.name }).from(usersTable)
     .where(eq(usersTable.id, req.session.userId!)).limit(1);
@@ -180,9 +188,10 @@ router.post("/tasks/:id/comments", requireAuth, async (req, res): Promise<void> 
 
 // ─── Subtarefas (checklist) ─────────────────────────────────────────────────
 router.get("/tasks/:id/subtasks", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const existing = await loadTaskWithAccess(id, req.session, res);
+  const existing = await loadTaskWithAccess(id, tenantId, req.session, res);
   if (!existing) return;
   const rows = await db.select().from(taskSubtasksTable)
     .where(eq(taskSubtasksTable.taskId, id))
@@ -191,9 +200,10 @@ router.get("/tasks/:id/subtasks", requireAuth, async (req, res): Promise<void> =
 });
 
 router.post("/tasks/:id/subtasks", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const existing = await loadTaskWithAccess(id, req.session, res);
+  const existing = await loadTaskWithAccess(id, tenantId, req.session, res);
   if (!existing) return;
   const { title } = req.body as { title?: string };
   const text = (title ?? "").trim();
@@ -201,16 +211,17 @@ router.post("/tasks/:id/subtasks", requireAuth, async (req, res): Promise<void> 
   const [maxRow] = await db.select({ max: sql<number>`coalesce(max(${taskSubtasksTable.position}), 0)::int` })
     .from(taskSubtasksTable).where(eq(taskSubtasksTable.taskId, id));
   const [inserted] = await db.insert(taskSubtasksTable)
-    .values({ taskId: id, title: text.slice(0, 300), position: (maxRow?.max ?? 0) + 1 })
+    .values({ tenantId, taskId: id, title: text.slice(0, 300), position: (maxRow?.max ?? 0) + 1 })
     .returning();
   res.status(201).json(inserted);
 });
 
 router.patch("/tasks/:id/subtasks/:subId", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   const subId = parseInt(String(req.params.subId), 10);
   if (isNaN(id) || isNaN(subId)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const existing = await loadTaskWithAccess(id, req.session, res);
+  const existing = await loadTaskWithAccess(id, tenantId, req.session, res);
   if (!existing) return;
   const { isDone, title } = req.body as { isDone?: boolean; title?: string };
   const update: Record<string, unknown> = {};
@@ -225,10 +236,11 @@ router.patch("/tasks/:id/subtasks/:subId", requireAuth, async (req, res): Promis
 });
 
 router.delete("/tasks/:id/subtasks/:subId", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   const subId = parseInt(String(req.params.subId), 10);
   if (isNaN(id) || isNaN(subId)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const existing = await loadTaskWithAccess(id, req.session, res);
+  const existing = await loadTaskWithAccess(id, tenantId, req.session, res);
   if (!existing) return;
   await db.delete(taskSubtasksTable)
     .where(sql`${taskSubtasksTable.id} = ${subId} AND ${taskSubtasksTable.taskId} = ${id}`);
@@ -237,6 +249,7 @@ router.delete("/tasks/:id/subtasks/:subId", requireAuth, async (req, res): Promi
 
 // ─── Create task ─────────────────────────────────────────────────────────────
 router.post("/tasks", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { title, description, status, priority, assigneeId, sectorId, dueDate } = req.body as {
     title?: string; description?: string; status?: string; priority?: string;
     assigneeId?: number | null; sectorId?: number | null; dueDate?: string | null;
@@ -246,12 +259,21 @@ router.post("/tasks", requireAuth, async (req, res): Promise<void> => {
   const userSectorId = req.session.userSectorId ?? null;
   // Sector-scoped roles are pinned to their own sector; caller-supplied sectorId is ignored.
   const effectiveSectorId = isGlobalRole(userRole) ? (sectorId ?? null) : userSectorId;
+  // Responsável só pode ser um usuário da mesma loja (tenant).
+  let effectiveAssigneeId: number | null = null;
+  if (assigneeId != null) {
+    const [assignee] = await db.select({ id: usersTable.id }).from(usersTable)
+      .where(and(eq(usersTable.id, assigneeId), eq(usersTable.tenantId, tenantId)));
+    if (!assignee) { res.status(400).json({ error: "Responsável inválido" }); return; }
+    effectiveAssigneeId = assignee.id;
+  }
   const [created] = await db.insert(tasksTable).values({
+    tenantId,
     title: title.trim(),
     description: description || null,
     status: STATUSES.includes(status ?? "") ? status! : "todo",
     priority: PRIORITIES.includes(priority ?? "") ? priority! : "media",
-    assigneeId: assigneeId ?? null,
+    assigneeId: effectiveAssigneeId,
     createdById: req.session.userId ?? null,
     sectorId: effectiveSectorId,
     dueDate: dueDate ? new Date(dueDate) : null,
@@ -261,9 +283,10 @@ router.post("/tasks", requireAuth, async (req, res): Promise<void> => {
 
 // ─── Update task ─────────────────────────────────────────────────────────────
 router.patch("/tasks/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const existing = await loadTaskWithAccess(id, req.session, res);
+  const existing = await loadTaskWithAccess(id, tenantId, req.session, res);
   if (!existing) return;
   const userRole = req.session.userRole!;
   const { title, description, status, priority, assigneeId, sectorId, dueDate, position, isArchived } = req.body as {
@@ -283,23 +306,36 @@ router.patch("/tasks/:id", requireAuth, async (req, res): Promise<void> => {
   if (description !== undefined) update.description = description || null;
   if (status !== undefined && STATUSES.includes(status)) update.status = status;
   if (priority !== undefined && PRIORITIES.includes(priority)) update.priority = priority;
-  if (assigneeId !== undefined) update.assigneeId = assigneeId ?? null;
+  if (assigneeId !== undefined) {
+    if (assigneeId == null) {
+      update.assigneeId = null;
+    } else {
+      // Responsável só pode ser um usuário da mesma loja (tenant).
+      const [assignee] = await db.select({ id: usersTable.id }).from(usersTable)
+        .where(and(eq(usersTable.id, assigneeId), eq(usersTable.tenantId, tenantId)));
+      if (!assignee) { res.status(400).json({ error: "Responsável inválido" }); return; }
+      update.assigneeId = assignee.id;
+    }
+  }
   // Only admins/supervisors may move a task to a different sector.
   if (sectorId !== undefined && isGlobalRole(userRole)) update.sectorId = sectorId ?? null;
   if (dueDate !== undefined) update.dueDate = dueDate ? new Date(dueDate) : null;
   if (position !== undefined) update.position = position;
   if (isArchived !== undefined) update.isArchived = isArchived;
-  const [updated] = await db.update(tasksTable).set(update).where(eq(tasksTable.id, id)).returning();
+  const [updated] = await db.update(tasksTable).set(update)
+    .where(and(eq(tasksTable.id, id), eq(tasksTable.tenantId, tenantId))).returning();
   res.json(await enrichTask(updated));
 });
 
 // ─── Delete (archive) ────────────────────────────────────────────────────────
 router.delete("/tasks/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const existing = await loadTaskWithAccess(id, req.session, res);
+  const existing = await loadTaskWithAccess(id, tenantId, req.session, res);
   if (!existing) return;
-  await db.update(tasksTable).set({ isArchived: true }).where(eq(tasksTable.id, id));
+  await db.update(tasksTable).set({ isArchived: true })
+    .where(and(eq(tasksTable.id, id), eq(tasksTable.tenantId, tenantId)));
   res.json({ ok: true });
 });
 

@@ -4,6 +4,11 @@ import { eq, and, sql, desc } from "drizzle-orm";
 
 const router: IRouter = Router();
 
+// Multi-loja: este webhook legado (ManyChat / Z-API) não traz sessionKey de
+// WhatsApp para resolver a loja, então pertence à loja 1 (dados legados).
+// Toda leitura/escrita aqui é escopada nessa loja para não vazar entre lojas.
+const LEGACY_TENANT_ID = 1;
+
 // Keywords to sector mapping (case-insensitive)
 const SECTOR_KEYWORDS: Array<{ keywords: string[]; sectorName: string }> = [
   { keywords: ["assistência", "assistencia", "técnica", "tecnica", "reparo", "conserto", "quebrou", "problema", "não liga", "tela", "bateria"], sectorName: "Assistência Técnica" },
@@ -79,13 +84,18 @@ router.post("/webhook/inbound", (req, res, next): void => {
     const [sector] = await db
       .select()
       .from(sectorsTable)
-      .where(and(eq(sectorsTable.name, targetSectorName), eq(sectorsTable.isActive, true)));
+      .where(and(
+        eq(sectorsTable.tenantId, LEGACY_TENANT_ID),
+        eq(sectorsTable.name, targetSectorName),
+        eq(sectorsTable.isActive, true),
+      ));
 
     if (sector) {
       sectorId = sector.id;
     } else {
-      // fallback to first active sector
-      const [first] = await db.select().from(sectorsTable).where(eq(sectorsTable.isActive, true));
+      // fallback to first active sector (da loja legada)
+      const [first] = await db.select().from(sectorsTable)
+        .where(and(eq(sectorsTable.tenantId, LEGACY_TENANT_ID), eq(sectorsTable.isActive, true)));
       sectorId = first?.id ?? 1;
     }
   }
@@ -93,7 +103,11 @@ router.post("/webhook/inbound", (req, res, next): void => {
   const [lastInQueue] = await db
     .select({ position: queueEntriesTable.position })
     .from(queueEntriesTable)
-    .where(and(eq(queueEntriesTable.sectorId, sectorId), sql`${queueEntriesTable.status} IN ('waiting', 'in_progress')`))
+    .where(and(
+      eq(queueEntriesTable.tenantId, LEGACY_TENANT_ID),
+      eq(queueEntriesTable.sectorId, sectorId),
+      sql`${queueEntriesTable.status} IN ('waiting', 'in_progress')`,
+    ))
     .orderBy(desc(queueEntriesTable.position))
     .limit(1);
 
@@ -102,6 +116,7 @@ router.post("/webhook/inbound", (req, res, next): void => {
   const [entry] = await db
     .insert(queueEntriesTable)
     .values({
+      tenantId: LEGACY_TENANT_ID,
       clientName,
       clientContact,
       sectorId,

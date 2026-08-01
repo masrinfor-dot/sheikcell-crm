@@ -1,5 +1,5 @@
 import { db, routingRulesTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 export interface ClassifyResult {
   sectorId: number;
@@ -7,30 +7,33 @@ export interface ClassifyResult {
   matchedKeyword: string;
 }
 
-let cachedRules: Array<{ id: number; sectorId: number; name: string; keywords: string; priority: number }> = [];
-let cacheTs = 0;
+// Multi-loja: o cache de regras é por tenant — cada loja tem suas próprias
+// regras de roteamento e nunca deve enxergar as de outra loja.
+type Rule = { id: number; sectorId: number; name: string; keywords: string; priority: number };
+const cacheByTenant = new Map<number, { rules: Rule[]; ts: number }>();
 const CACHE_TTL = 60_000;
 
-async function getRules() {
-  if (Date.now() - cacheTs < CACHE_TTL) return cachedRules;
-  cachedRules = await db
+async function getRules(tenantId: number): Promise<Rule[]> {
+  const cached = cacheByTenant.get(tenantId);
+  if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.rules;
+  const rules = await db
     .select({ id: routingRulesTable.id, sectorId: routingRulesTable.sectorId, name: routingRulesTable.name, keywords: routingRulesTable.keywords, priority: routingRulesTable.priority })
     .from(routingRulesTable)
-    .where(eq(routingRulesTable.isActive, true))
+    .where(and(eq(routingRulesTable.isActive, true), eq(routingRulesTable.tenantId, tenantId)))
     .orderBy(routingRulesTable.priority);
-  cachedRules.sort((a, b) => b.priority - a.priority);
-  cacheTs = Date.now();
-  return cachedRules;
+  rules.sort((a, b) => b.priority - a.priority);
+  cacheByTenant.set(tenantId, { rules, ts: Date.now() });
+  return rules;
 }
 
 export function invalidateCache() {
-  cacheTs = 0;
+  cacheByTenant.clear();
 }
 
-export async function classifyText(text: string): Promise<ClassifyResult | null> {
+export async function classifyText(text: string, tenantId: number): Promise<ClassifyResult | null> {
   if (!text || text.trim().length === 0) return null;
   const normalized = text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  const rules = await getRules();
+  const rules = await getRules(tenantId);
   for (const rule of rules) {
     const kws = rule.keywords.split(",").map((k) => k.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")).filter(Boolean);
     for (const kw of kws) {

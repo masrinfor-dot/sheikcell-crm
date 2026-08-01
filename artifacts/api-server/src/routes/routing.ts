@@ -1,26 +1,31 @@
 import { Router, type IRouter } from "express";
 import { db, routingRulesTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
-import { requireAuth } from "../middlewares/auth";
+import { eq, and } from "drizzle-orm";
+import { requireAuth, requireTenant } from "../middlewares/auth";
 import { classifyText, invalidateCache } from "../lib/autoRouter";
 
 const router: IRouter = Router();
 
 router.get("/routing/rules", requireAuth, async (req, res): Promise<void> => {
-  const rules = await db.select().from(routingRulesTable).orderBy(routingRulesTable.priority);
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rules = await db.select().from(routingRulesTable)
+    .where(eq(routingRulesTable.tenantId, tenantId))
+    .orderBy(routingRulesTable.priority);
   res.json(rules);
 });
 
 router.post("/routing/rules", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   if (req.session.userRole !== "admin") { res.status(403).json({ error: "Apenas admins" }); return; }
   const { sectorId, name, keywords, priority } = req.body as { sectorId?: number; name?: string; keywords?: string; priority?: number };
   if (!sectorId || !name || !keywords) { res.status(400).json({ error: "sectorId, name e keywords são obrigatórios" }); return; }
-  const [rule] = await db.insert(routingRulesTable).values({ sectorId, name, keywords, priority: priority ?? 0 }).returning();
+  const [rule] = await db.insert(routingRulesTable).values({ tenantId, sectorId, name, keywords, priority: priority ?? 0 }).returning();
   invalidateCache();
   res.status(201).json(rule);
 });
 
 router.patch("/routing/rules/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   if (req.session.userRole !== "admin") { res.status(403).json({ error: "Apenas admins" }); return; }
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
@@ -31,25 +36,29 @@ router.patch("/routing/rules/:id", requireAuth, async (req, res): Promise<void> 
   if (priority !== undefined) update.priority = priority;
   if (isActive !== undefined) update.isActive = isActive;
   if (sectorId !== undefined) update.sectorId = sectorId;
-  const [rule] = await db.update(routingRulesTable).set(update).where(eq(routingRulesTable.id, id)).returning();
+  const [rule] = await db.update(routingRulesTable).set(update)
+    .where(and(eq(routingRulesTable.id, id), eq(routingRulesTable.tenantId, tenantId))).returning();
   if (!rule) { res.status(404).json({ error: "Regra não encontrada" }); return; }
   invalidateCache();
   res.json(rule);
 });
 
 router.delete("/routing/rules/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   if (req.session.userRole !== "admin") { res.status(403).json({ error: "Apenas admins" }); return; }
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  await db.delete(routingRulesTable).where(eq(routingRulesTable.id, id));
+  await db.delete(routingRulesTable)
+    .where(and(eq(routingRulesTable.id, id), eq(routingRulesTable.tenantId, tenantId)));
   invalidateCache();
   res.json({ ok: true });
 });
 
 router.post("/routing/classify", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { text } = req.body as { text?: string };
   if (!text) { res.status(400).json({ error: "text é obrigatório" }); return; }
-  const result = await classifyText(text);
+  const result = await classifyText(text, tenantId);
   res.json(result ?? { sectorId: null, ruleName: null, matchedKeyword: null });
 });
 

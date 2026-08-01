@@ -1,8 +1,8 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
 import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, conversationParticipantsTable, tasksTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable, accessLogsTable } from "@workspace/db";
-import { eq, sql, desc, and, gte, isNull, isNotNull, notInArray, or, ilike } from "drizzle-orm";
-import { requireAdmin, requireAdminOrSupervisor } from "../middlewares/auth";
+import { eq, sql, desc, and, gte, isNull, isNotNull, notInArray, inArray, or, ilike } from "drizzle-orm";
+import { requireAdmin, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
 import { sanitizePermissions } from "../lib/permissions";
 import { getPresence } from "../lib/sseEmitter";
 import { isValidStoreName } from "./stores";
@@ -12,16 +12,18 @@ const router: IRouter = Router();
 
 // Dashboard summary
 // ─── Quem está online + horários de acesso ──────────────────────────────────
-router.get("/admin/team-status", requireAdminOrSupervisor, async (_req, res): Promise<void> => {
+router.get("/admin/team-status", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { onlineIds, lastSeen } = getPresence();
   const users = await db
     .select({ id: usersTable.id, name: usersTable.name, role: usersTable.role, sectorId: usersTable.sectorId, isActive: usersTable.isActive })
     .from(usersTable)
-    .where(eq(usersTable.isActive, true));
-  // Último login de cada usuário em uma consulta só.
+    .where(and(eq(usersTable.tenantId, tenantId), eq(usersTable.isActive, true)));
+  // Último login de cada usuário em uma consulta só (dentro da loja).
   const lastLogins = await db
     .select({ userId: accessLogsTable.userId, lastLoginAt: sql<string>`max(${accessLogsTable.loggedInAt})` })
     .from(accessLogsTable)
+    .where(eq(accessLogsTable.tenantId, tenantId))
     .groupBy(accessLogsTable.userId);
   const lastLoginMap = Object.fromEntries(lastLogins.map((l) => [l.userId, l.lastLoginAt]));
   const online = new Set(onlineIds);
@@ -35,18 +37,25 @@ router.get("/admin/team-status", requireAdminOrSupervisor, async (_req, res): Pr
 
 // Histórico de logins de um usuário (últimos 50).
 router.get("/admin/users/:id/access-logs", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  // Só vê logs de usuário da própria loja.
+  const [target] = await db.select({ id: usersTable.id }).from(usersTable)
+    .where(and(eq(usersTable.id, id), eq(usersTable.tenantId, tenantId))).limit(1);
+  if (!target) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
   const rows = await db
     .select({ loggedInAt: accessLogsTable.loggedInAt })
     .from(accessLogsTable)
-    .where(eq(accessLogsTable.userId, id))
+    .where(and(eq(accessLogsTable.tenantId, tenantId), eq(accessLogsTable.userId, id)))
     .orderBy(desc(accessLogsTable.loggedInAt))
     .limit(50);
   res.json(rows);
 });
 
-router.get("/admin/summary", requireAdminOrSupervisor, async (_req, res): Promise<void> => {
-  const sectors = await db.select().from(sectorsTable).where(eq(sectorsTable.isActive, true));
+router.get("/admin/summary", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const sectors = await db.select().from(sectorsTable)
+    .where(and(eq(sectorsTable.tenantId, tenantId), eq(sectorsTable.isActive, true)));
 
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
@@ -55,7 +64,9 @@ router.get("/admin/summary", requireAdminOrSupervisor, async (_req, res): Promis
   // "aguardando"  = conversas sem responsável ainda abertas (potenciais + pendentes);
   // "em atendimento" = conversas com responsável e não finalizadas;
   // "finalizados hoje" segue vindo do histórico (attendance_logs).
+  // Sempre restrito à loja (tenant).
   const notFinished = and(
+    eq(conversationsTable.tenantId, tenantId),
     eq(conversationsTable.isArchived, false),
     notInArray(conversationsTable.status, ["resolved", "archived"]),
   )!;
@@ -75,13 +86,13 @@ router.get("/admin/summary", requireAdminOrSupervisor, async (_req, res): Promis
       const [completedToday] = await db
         .select({ count: sql<number>`count(*)` })
         .from(attendanceLogsTable)
-        .where(and(eq(attendanceLogsTable.sectorId, sector.id), gte(attendanceLogsTable.createdAt, startOfDay)));
+        .where(and(eq(attendanceLogsTable.tenantId, tenantId), eq(attendanceLogsTable.sectorId, sector.id), gte(attendanceLogsTable.createdAt, startOfDay)));
 
-      // Attendants assigned to this sector (active users)
+      // Attendants assigned to this sector (active users da loja)
       const [activeAttendants] = await db
         .select({ count: sql<number>`count(*)` })
         .from(usersTable)
-        .where(and(eq(usersTable.sectorId, sector.id), eq(usersTable.isActive, true)));
+        .where(and(eq(usersTable.tenantId, tenantId), eq(usersTable.sectorId, sector.id), eq(usersTable.isActive, true)));
 
       // Vendedores atualmente atendendo (responsáveis por conversa em andamento)
       const busyAttendants = await db
@@ -105,6 +116,7 @@ router.get("/admin/summary", requireAdminOrSupervisor, async (_req, res): Promis
 
 // Recent attendance logs
 router.get("/admin/logs", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "50"), 10) || 50, 1), 500);
   const sectorId = req.query.sectorId ? parseInt(String(req.query.sectorId), 10) : null;
   const attendantId = req.query.attendantId ? parseInt(String(req.query.attendantId), 10) : null;
@@ -113,7 +125,7 @@ router.get("/admin/logs", requireAdminOrSupervisor, async (req, res): Promise<vo
   const reason = req.query.reason ? String(req.query.reason) : null;
   const search = req.query.search ? String(req.query.search).trim() : null;
 
-  const conds = [];
+  const conds = [eq(attendanceLogsTable.tenantId, tenantId)];
   if (sectorId) conds.push(eq(attendanceLogsTable.sectorId, sectorId));
   if (attendantId) conds.push(eq(attendanceLogsTable.attendantId, attendantId));
   if (days && days > 0) conds.push(gte(attendanceLogsTable.createdAt, new Date(Date.now() - days * 86400000)));
@@ -129,7 +141,7 @@ router.get("/admin/logs", requireAdminOrSupervisor, async (req, res): Promise<vo
   const logs = await db
     .select()
     .from(attendanceLogsTable)
-    .where(conds.length ? and(...conds) : undefined)
+    .where(and(...conds))
     .orderBy(desc(attendanceLogsTable.createdAt))
     .limit(limit);
 
@@ -137,7 +149,8 @@ router.get("/admin/logs", requireAdminOrSupervisor, async (req, res): Promise<vo
 });
 
 // Users management
-router.get("/admin/users", requireAdmin, async (_req, res): Promise<void> => {
+router.get("/admin/users", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const users = await db
     .select({
       id: usersTable.id,
@@ -153,10 +166,11 @@ router.get("/admin/users", requireAdmin, async (_req, res): Promise<void> => {
       createdAt: usersTable.createdAt,
     })
     .from(usersTable)
+    .where(eq(usersTable.tenantId, tenantId))
     .orderBy(usersTable.name);
 
-  // Get sectors for each user
-  const sectors = await db.select().from(sectorsTable);
+  // Get sectors for each user (da loja)
+  const sectors = await db.select().from(sectorsTable).where(eq(sectorsTable.tenantId, tenantId));
   const sectorMap = Object.fromEntries(sectors.map((s) => [s.id, s]));
 
   const usersWithSector = users.map((u) => ({
@@ -191,6 +205,7 @@ function sanitizeAdminAccess(v: unknown): string[] | null {
 }
 
 router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { name, email, password, role, sectorId, storeName, adminAccess, accessHours } = req.body as {
     name?: string;
     email?: string;
@@ -208,15 +223,26 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
   }
 
   const resolvedRole = role ?? "vendedor";
+  // O papel "superadmin" (dono do sistema, sem loja) NUNCA é criado por aqui.
+  const ALLOWED_ROLES = ["vendedor", "supervisor", "admin"];
+  if (!ALLOWED_ROLES.includes(resolvedRole)) {
+    res.status(400).json({ error: "Função inválida" });
+    return;
+  }
 
-  // Vendedores must be assigned to a real sector
+  // Vendedores must be assigned to a real sector (da própria loja)
   if (resolvedRole === "vendedor" && !sectorId) {
     res.status(400).json({ error: "Vendedor precisa de um setor atribuído" });
     return;
   }
+  if (sectorId != null) {
+    const [sec] = await db.select({ id: sectorsTable.id }).from(sectorsTable)
+      .where(and(eq(sectorsTable.id, sectorId), eq(sectorsTable.tenantId, tenantId))).limit(1);
+    if (!sec) { res.status(400).json({ error: "Setor inválido" }); return; }
+  }
 
   const cleanStore = typeof storeName === "string" && storeName.trim() ? storeName.trim().slice(0, 120) : null;
-  if (cleanStore && !(await isValidStoreName(cleanStore))) {
+  if (cleanStore && !(await isValidStoreName(cleanStore, tenantId))) {
     res.status(400).json({ error: "Loja não cadastrada. Cadastre-a em Setores → Lojas da Rede." });
     return;
   }
@@ -226,6 +252,7 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
   const [user] = await db
     .insert(usersTable)
     .values({
+      tenantId,
       name, email: email.toLowerCase(), passwordHash, role: resolvedRole,
       sectorId: sectorId ?? undefined,
       storeName: cleanStore,
@@ -240,9 +267,15 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
 });
 
 router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const id = parseInt(rawId, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+
+  // Usuário editado precisa ser da própria loja.
+  const [existingUser] = await db.select({ id: usersTable.id }).from(usersTable)
+    .where(and(eq(usersTable.id, id), eq(usersTable.tenantId, tenantId))).limit(1);
+  if (!existingUser) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
 
   const { name, email, password, role, sectorId, isActive, permissions, storeName, adminAccess, accessHours } = req.body as {
     adminAccess?: unknown;
@@ -260,15 +293,28 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   const updateData: Record<string, unknown> = {};
   if (name) updateData.name = name;
   if (email) updateData.email = email.toLowerCase();
-  if (role) updateData.role = role;
-  if (sectorId !== undefined) updateData.sectorId = sectorId;
+  if (role) {
+    // Nunca é permitido promover ninguém a "superadmin" por aqui.
+    const ALLOWED_ROLES = ["vendedor", "supervisor", "admin"];
+    if (!ALLOWED_ROLES.includes(role)) { res.status(400).json({ error: "Função inválida" }); return; }
+    updateData.role = role;
+  }
+  if (sectorId !== undefined) {
+    if (sectorId != null) {
+      const [sec] = await db.select({ id: sectorsTable.id }).from(sectorsTable)
+        .where(and(eq(sectorsTable.id, sectorId), eq(sectorsTable.tenantId, tenantId))).limit(1);
+      if (!sec) { res.status(400).json({ error: "Setor inválido" }); return; }
+    }
+    updateData.sectorId = sectorId;
+  }
   if (adminAccess !== undefined) updateData.adminAccess = sanitizeAdminAccess(adminAccess);
   if (accessHours !== undefined) updateData.accessHours = sanitizeAccessHours(accessHours);
   if (storeName !== undefined) {
     const cleanStore = typeof storeName === "string" && storeName.trim() ? storeName.trim().slice(0, 120) : null;
     if (cleanStore) {
-      const [current] = await db.select({ storeName: usersTable.storeName }).from(usersTable).where(eq(usersTable.id, id)).limit(1);
-      if (!(await isValidStoreName(cleanStore, current?.storeName))) {
+      const [current] = await db.select({ storeName: usersTable.storeName }).from(usersTable)
+        .where(and(eq(usersTable.id, id), eq(usersTable.tenantId, tenantId))).limit(1);
+      if (!(await isValidStoreName(cleanStore, tenantId, current?.storeName))) {
         res.status(400).json({ error: "Loja não cadastrada. Cadastre-a em Setores → Lojas da Rede." });
         return;
       }
@@ -283,7 +329,8 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
     updateData.mustChangePassword = true;
   }
 
-  const [user] = await db.update(usersTable).set(updateData).where(eq(usersTable.id, id)).returning();
+  const [user] = await db.update(usersTable).set(updateData)
+    .where(and(eq(usersTable.id, id), eq(usersTable.tenantId, tenantId))).returning();
   if (!user) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
 
   // Usuário desativado perde as sessões ativas na hora (não só no próximo login).
@@ -300,6 +347,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
 // transferToId: para quem vão os atendimentos em andamento. Sem transferToId,
 // eles voltam para a fila do setor. Histórico (resolvidos) continua com ele.
 router.post("/admin/users/:id/deactivate", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const id = parseInt(rawId, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
@@ -312,18 +360,20 @@ router.post("/admin/users/:id/deactivate", requireAdmin, async (req, res): Promi
     return;
   }
 
-  const [target] = await db.select().from(usersTable).where(eq(usersTable.id, id)).limit(1);
+  const [target] = await db.select().from(usersTable)
+    .where(and(eq(usersTable.id, id), eq(usersTable.tenantId, tenantId))).limit(1);
   if (!target) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
 
   if (transferToId != null) {
+    // Destino precisa ser um usuário ativo da MESMA loja.
     const [dest] = await db.select({ id: usersTable.id, isActive: usersTable.isActive })
-      .from(usersTable).where(eq(usersTable.id, transferToId)).limit(1);
+      .from(usersTable).where(and(eq(usersTable.id, transferToId), eq(usersTable.tenantId, tenantId))).limit(1);
     if (!dest || !dest.isActive) { res.status(400).json({ error: "Usuário de destino não encontrado ou inativo" }); return; }
   }
 
-  // Só os atendimentos em andamento mudam de mãos — o histórico fica com ele.
+  // Só os atendimentos em andamento (da loja) mudam de mãos — o histórico fica com ele.
   const openConvs = await db.select().from(conversationsTable)
-    .where(and(eq(conversationsTable.assigneeId, id), notInArray(conversationsTable.status, ["resolved", "archived"])));
+    .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.assigneeId, id), notInArray(conversationsTable.status, ["resolved", "archived"])));
 
   await db.transaction(async (tx) => {
     if (transferToId != null) {
@@ -331,20 +381,20 @@ router.post("/admin/users/:id/deactivate", requireAdmin, async (req, res): Promi
       // participante (vê a conversa) e clica em "Iniciar atendimento".
       await tx.update(conversationsTable)
         .set({ assigneeId: null, status: "pending", attendanceStartedAt: null, updatedAt: new Date() })
-        .where(and(eq(conversationsTable.assigneeId, id), notInArray(conversationsTable.status, ["resolved", "archived"])));
+        .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.assigneeId, id), notInArray(conversationsTable.status, ["resolved", "archived"])));
       if (openConvs.length > 0) {
         await tx.insert(conversationParticipantsTable)
-          .values(openConvs.map((c) => ({ conversationId: c.id, userId: transferToId })))
+          .values(openConvs.map((c) => ({ tenantId, conversationId: c.id, userId: transferToId })))
           .onConflictDoNothing();
       }
-      await tx.update(tasksTable).set({ assigneeId: transferToId }).where(eq(tasksTable.assigneeId, id));
-      await tx.update(crmContactsTable).set({ attendantId: transferToId, updatedAt: new Date() }).where(eq(crmContactsTable.attendantId, id));
+      await tx.update(tasksTable).set({ assigneeId: transferToId }).where(and(eq(tasksTable.tenantId, tenantId), eq(tasksTable.assigneeId, id)));
+      await tx.update(crmContactsTable).set({ attendantId: transferToId, updatedAt: new Date() }).where(and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.attendantId, id)));
     } else {
       await tx.update(conversationsTable)
         .set({ assigneeId: null, status: "open", attendanceStartedAt: null, updatedAt: new Date() })
-        .where(and(eq(conversationsTable.assigneeId, id), notInArray(conversationsTable.status, ["resolved", "archived"])));
+        .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.assigneeId, id), notInArray(conversationsTable.status, ["resolved", "archived"])));
     }
-    await tx.update(usersTable).set({ isActive: false }).where(eq(usersTable.id, id));
+    await tx.update(usersTable).set({ isActive: false }).where(and(eq(usersTable.id, id), eq(usersTable.tenantId, tenantId)));
     // Derruba as sessões ativas na hora.
     await tx.execute(sql`DELETE FROM "session" WHERE (sess::json->>'userId')::int = ${id}`);
   });
@@ -352,6 +402,7 @@ router.post("/admin/users/:id/deactivate", requireAdmin, async (req, res): Promi
   // Espelha no quadro CRM (best-effort, fora da transação).
   for (const conv of openConvs) {
     await syncCrmAttendant({
+      tenantId,
       phone: conv.phone,
       sectorId: conv.sectorId,
       assigneeId: null,
@@ -367,6 +418,7 @@ router.post("/admin/users/:id/deactivate", requireAdmin, async (req, res): Promi
 // Sem transferToId, as conversas em andamento voltam para a fila (sem responsável)
 // e as demais referências ficam "sem responsável".
 router.delete("/admin/users/:id", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const id = parseInt(rawId, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
@@ -379,17 +431,20 @@ router.delete("/admin/users/:id", requireAdmin, async (req, res): Promise<void> 
     return;
   }
 
-  const [target] = await db.select().from(usersTable).where(eq(usersTable.id, id)).limit(1);
+  const [target] = await db.select().from(usersTable)
+    .where(and(eq(usersTable.id, id), eq(usersTable.tenantId, tenantId))).limit(1);
   if (!target) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
 
   if (transferToId != null) {
+    // Destino precisa ser um usuário ativo da MESMA loja.
     const [dest] = await db.select({ id: usersTable.id, isActive: usersTable.isActive })
-      .from(usersTable).where(eq(usersTable.id, transferToId)).limit(1);
+      .from(usersTable).where(and(eq(usersTable.id, transferToId), eq(usersTable.tenantId, tenantId))).limit(1);
     if (!dest || !dest.isActive) { res.status(400).json({ error: "Usuário de destino não encontrado ou inativo" }); return; }
   }
 
-  // Conversas do usuário (para sincronizar CRM/registro após a transação).
-  const ownedConvs = await db.select().from(conversationsTable).where(eq(conversationsTable.assigneeId, id));
+  // Conversas do usuário (da loja) para sincronizar CRM/registro após a transação.
+  const ownedConvs = await db.select().from(conversationsTable)
+    .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.assigneeId, id)));
 
   await db.transaction(async (tx) => {
     if (transferToId != null) {
@@ -399,33 +454,38 @@ router.delete("/admin/users/:id", requireAdmin, async (req, res): Promise<void> 
         .map((c) => c.id);
       await tx.update(conversationsTable)
         .set({ assigneeId: null, status: "pending", attendanceStartedAt: null, updatedAt: new Date() })
-        .where(and(eq(conversationsTable.assigneeId, id), notInArray(conversationsTable.status, ["resolved", "archived"])));
+        .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.assigneeId, id), notInArray(conversationsTable.status, ["resolved", "archived"])));
       if (openIds.length > 0) {
         await tx.insert(conversationParticipantsTable)
-          .values(openIds.map((cid) => ({ conversationId: cid, userId: transferToId })))
+          .values(openIds.map((cid) => ({ tenantId, conversationId: cid, userId: transferToId })))
           .onConflictDoNothing();
       }
       // Histórico (resolvidas) fica com o novo responsável.
       await tx.update(conversationsTable)
         .set({ assigneeId: transferToId, updatedAt: new Date() })
-        .where(eq(conversationsTable.assigneeId, id));
+        .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.assigneeId, id)));
     } else {
       // Sem destino: atendimentos em andamento voltam para a fila do setor.
       await tx.update(conversationsTable)
         .set({ assigneeId: null, status: "open", attendanceStartedAt: null, updatedAt: new Date() })
-        .where(and(eq(conversationsTable.assigneeId, id), notInArray(conversationsTable.status, ["resolved", "archived"])));
+        .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.assigneeId, id), notInArray(conversationsTable.status, ["resolved", "archived"])));
       await tx.update(conversationsTable)
         .set({ assigneeId: null, updatedAt: new Date() })
-        .where(eq(conversationsTable.assigneeId, id));
+        .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.assigneeId, id)));
     }
-    // Tarefas, agendamentos, clientes do CRM e anotações.
-    await tx.update(tasksTable).set({ assigneeId: transferToId }).where(eq(tasksTable.assigneeId, id));
-    await tx.update(tasksTable).set({ createdById: transferToId }).where(eq(tasksTable.createdById, id));
-    await tx.update(scheduledMessagesTable).set({ createdById: transferToId }).where(eq(scheduledMessagesTable.createdById, id));
-    await tx.update(crmContactsTable).set({ attendantId: transferToId, updatedAt: new Date() }).where(eq(crmContactsTable.attendantId, id));
-    await tx.update(crmInternalNotesTable).set({ authorId: transferToId }).where(eq(crmInternalNotesTable.authorId, id));
+    // Tarefas, agendamentos, clientes do CRM e anotações (todos da loja).
+    await tx.update(tasksTable).set({ assigneeId: transferToId }).where(and(eq(tasksTable.tenantId, tenantId), eq(tasksTable.assigneeId, id)));
+    await tx.update(tasksTable).set({ createdById: transferToId }).where(and(eq(tasksTable.tenantId, tenantId), eq(tasksTable.createdById, id)));
+    await tx.update(scheduledMessagesTable).set({ createdById: transferToId }).where(and(eq(scheduledMessagesTable.tenantId, tenantId), eq(scheduledMessagesTable.createdById, id)));
+    await tx.update(crmContactsTable).set({ attendantId: transferToId, updatedAt: new Date() }).where(and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.attendantId, id)));
+    await tx.update(crmInternalNotesTable).set({ authorId: transferToId })
+      .where(and(
+        eq(crmInternalNotesTable.authorId, id),
+        inArray(crmInternalNotesTable.contactId,
+          db.select({ id: crmContactsTable.id }).from(crmContactsTable).where(eq(crmContactsTable.tenantId, tenantId))),
+      ));
     // Chat interno e participações são removidos em cascata pelo banco.
-    await tx.delete(usersTable).where(eq(usersTable.id, id));
+    await tx.delete(usersTable).where(and(eq(usersTable.id, id), eq(usersTable.tenantId, tenantId)));
     // Derruba as sessões ativas do usuário excluído: sem isso, o cookie dele
     // continuaria autorizando requisições até expirar.
     await tx.execute(sql`DELETE FROM "session" WHERE (sess::json->>'userId')::int = ${id}`);
@@ -434,6 +494,7 @@ router.delete("/admin/users/:id", requireAdmin, async (req, res): Promise<void> 
   // Espelha a transferência no quadro CRM (best-effort, fora da transação).
   for (const conv of ownedConvs) {
     await syncCrmAttendant({
+      tenantId,
       phone: conv.phone,
       sectorId: conv.sectorId,
       assigneeId: conv.status === "resolved" || conv.status === "archived" ? transferToId : null,

@@ -1,25 +1,30 @@
 import { Router, type IRouter } from "express";
 import { db, sectorsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
-import { requireAuth, requireAdmin } from "../middlewares/auth";
+import { eq, and } from "drizzle-orm";
+import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
-router.get("/sectors", requireAuth, async (_req, res): Promise<void> => {
+router.get("/sectors", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const sectors = await db
     .select()
     .from(sectorsTable)
-    .where(eq(sectorsTable.isActive, true))
+    .where(and(eq(sectorsTable.tenantId, tenantId), eq(sectorsTable.isActive, true)))
     .orderBy(sectorsTable.id);
   res.json(sectors);
 });
 
-router.get("/sectors/all", requireAdmin, async (_req, res): Promise<void> => {
-  const sectors = await db.select().from(sectorsTable).orderBy(sectorsTable.id);
+router.get("/sectors/all", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const sectors = await db.select().from(sectorsTable)
+    .where(eq(sectorsTable.tenantId, tenantId))
+    .orderBy(sectorsTable.id);
   res.json(sectors);
 });
 
 router.post("/sectors", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { name, description, icon, color } = req.body as {
     name?: string;
     description?: string;
@@ -32,12 +37,13 @@ router.post("/sectors", requireAdmin, async (req, res): Promise<void> => {
   }
   const [sector] = await db
     .insert(sectorsTable)
-    .values({ name, description, icon: icon ?? "smartphone", color: color ?? "#1a2e6e" })
+    .values({ tenantId, name, description, icon: icon ?? "smartphone", color: color ?? "#1a2e6e" })
     .returning();
   res.status(201).json(sector);
 });
 
 router.patch("/sectors/:id", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const id = parseInt(rawId, 10);
   if (isNaN(id)) {
@@ -54,7 +60,7 @@ router.patch("/sectors/:id", requireAdmin, async (req, res): Promise<void> => {
   const [sector] = await db
     .update(sectorsTable)
     .set({ name, description, icon, color, isActive })
-    .where(eq(sectorsTable.id, id))
+    .where(and(eq(sectorsTable.id, id), eq(sectorsTable.tenantId, tenantId)))
     .returning();
   if (!sector) {
     res.status(404).json({ error: "Setor não encontrado" });

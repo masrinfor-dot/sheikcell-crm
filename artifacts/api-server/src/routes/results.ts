@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db, usersTable, attendanceLogsTable } from "@workspace/db";
 import { and, eq, gte, lte, isNotNull, sql } from "drizzle-orm";
-import { requireAuth } from "../middlewares/auth";
+import { requireAuth, requireTenant } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
@@ -11,10 +11,11 @@ const router: IRouter = Router();
 // Admin/supervisor: veem tudo (com filtros livres). Vendedor: travado no
 // próprio setor (fail closed) — pode filtrar por vendedor dentro do setor.
 router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const userId = req.session.userId!;
   const [me] = await db
     .select({ id: usersTable.id, role: usersTable.role, sectorId: usersTable.sectorId })
-    .from(usersTable).where(eq(usersTable.id, userId));
+    .from(usersTable).where(and(eq(usersTable.id, userId), eq(usersTable.tenantId, tenantId)));
   if (!me) { res.status(401).json({ error: "Unauthorized" }); return; }
 
   const isGlobal = me.role === "admin" || me.role === "supervisor";
@@ -41,6 +42,7 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
   }
 
   const logConds = [
+    eq(attendanceLogsTable.tenantId, tenantId),
     gte(attendanceLogsTable.createdAt, from),
     lte(attendanceLogsTable.createdAt, to),
   ];
@@ -75,7 +77,7 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
   const rankUserIds = rankingAgg.map((r) => r.attendantId!).filter(Boolean);
   const rankUsers = rankUserIds.length
     ? await db.select({ id: usersTable.id, name: usersTable.name, sectorId: usersTable.sectorId, isActive: usersTable.isActive })
-        .from(usersTable).where(sql`${usersTable.id} in (${sql.join(rankUserIds.map((i) => sql`${i}`), sql`, `)})`)
+        .from(usersTable).where(and(eq(usersTable.tenantId, tenantId), sql`${usersTable.id} in (${sql.join(rankUserIds.map((i) => sql`${i}`), sql`, `)})`))
     : [];
   const rankUserMap = new Map(rankUsers.map((u) => [u.id, u]));
 
@@ -111,12 +113,13 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
   // voltou: telefone com atendimento no período E atendimento anterior ao período).
   // Filtro por vendedor também nas métricas de leads/CRM: conversas do
   // responsável e clientes da carteira dele (obrigatório para vendedor).
+  // Todas as métricas abaixo são restritas à loja (tenant) — fail closed.
   const sectorSql = sectorId ? sql` and c.sector_id = ${sectorId}` : sql``;
   const convAttSql = attendantId ? sql` and c.assignee_id = ${attendantId}` : sql``;
   const newLeadsRow = await db.execute(sql`
     select count(*)::int as novos
     from conversations c
-    where c.created_at >= ${from} and c.created_at <= ${to}${sectorSql}${convAttSql}
+    where c.tenant_id = ${tenantId} and c.created_at >= ${from} and c.created_at <= ${to}${sectorSql}${convAttSql}
   `);
   const newLeads = Number((newLeadsRow.rows[0] as { novos: number } | undefined)?.novos ?? 0);
 
@@ -125,11 +128,11 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
   const recurringRow = await db.execute(sql`
     select count(distinct l.client_contact)::int as recorrentes
     from attendance_logs l
-    where l.client_contact is not null and l.client_contact <> ''
+    where l.tenant_id = ${tenantId} and l.client_contact is not null and l.client_contact <> ''
       and l.created_at >= ${from} and l.created_at <= ${to}${logSectorSql}${logAttSql}
       and exists (
         select 1 from attendance_logs prev
-        where prev.client_contact = l.client_contact and prev.created_at < ${from}
+        where prev.tenant_id = ${tenantId} and prev.client_contact = l.client_contact and prev.created_at < ${from}
       )
   `);
   const recurringLeads = Number((recurringRow.rows[0] as { recorrentes: number } | undefined)?.recorrentes ?? 0);
@@ -142,7 +145,7 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
       select p.contact_id
       from crm_purchases p
       join crm_contacts ct on ct.id = p.contact_id
-      where true${crmSectorSql}${crmAttSql}
+      where ct.tenant_id = ${tenantId}${crmSectorSql}${crmAttSql}
       group by p.contact_id
       having count(*) > 1
          and bool_or(p.purchase_date >= ${from} and p.purchase_date <= ${to})
@@ -155,7 +158,7 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
     select to_char(date_trunc('month', c.created_at), 'YYYY-MM') as mes,
            count(*)::int as novos
     from conversations c
-    where c.created_at >= date_trunc('month', now()) - interval '5 months'${sectorSql}${convAttSql}
+    where c.tenant_id = ${tenantId} and c.created_at >= date_trunc('month', now()) - interval '5 months'${sectorSql}${convAttSql}
     group by 1 order by 1
   `);
   const leadsPorMes = (monthlyRows.rows as { mes: string; novos: number }[]).map((r) => ({

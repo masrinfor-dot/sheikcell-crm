@@ -1,7 +1,7 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import { db, documentsTable, usersTable } from "@workspace/db";
-import { eq, desc } from "drizzle-orm";
-import { requireAuth, requireAdminOrSupervisor } from "../middlewares/auth";
+import { eq, and, desc } from "drizzle-orm";
+import { requireAuth, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
 import path from "path";
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
@@ -60,7 +60,8 @@ function contentMatchesMime(buf: Buffer, mime: string): boolean {
 }
 
 // ─── Listar documentos ───────────────────────────────────────────────────────
-router.get("/documents", requireAuth, async (_req, res): Promise<void> => {
+router.get("/documents", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rows = await db
     .select({
       id: documentsTable.id,
@@ -76,12 +77,14 @@ router.get("/documents", requireAuth, async (_req, res): Promise<void> => {
     })
     .from(documentsTable)
     .leftJoin(usersTable, eq(documentsTable.uploadedBy, usersTable.id))
+    .where(eq(documentsTable.tenantId, tenantId))
     .orderBy(desc(documentsTable.createdAt));
   res.json(rows);
 });
 
 // ─── Enviar documento (base64, como as mídias do chat) ──────────────────────
 router.post("/documents", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { title, category, description, fileName, mimeType, data } = req.body ?? {};
   const cleanTitle = typeof title === "string" ? title.trim().slice(0, 200) : "";
   if (!cleanTitle) { res.status(400).json({ error: "Informe um título" }); return; }
@@ -106,6 +109,7 @@ router.post("/documents", requireAdminOrSupervisor, async (req, res): Promise<vo
   await writeFile(path.join(DOCS_DIR, storedName), buf);
 
   const [doc] = await db.insert(documentsTable).values({
+    tenantId,
     title: cleanTitle,
     category: cat,
     description: typeof description === "string" ? description.trim().slice(0, 1000) || null : null,
@@ -120,8 +124,10 @@ router.post("/documents", requireAdminOrSupervisor, async (req, res): Promise<vo
 
 // ─── Baixar/visualizar arquivo ───────────────────────────────────────────────
 router.get("/documents/:id/file", requireAuth, async (req: Request, res: Response): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
-  const [doc] = await db.select().from(documentsTable).where(eq(documentsTable.id, id));
+  const [doc] = await db.select().from(documentsTable)
+    .where(and(eq(documentsTable.id, id), eq(documentsTable.tenantId, tenantId)));
   if (!doc) { res.status(404).json({ error: "Documento não encontrado" }); return; }
   const filepath = path.join(DOCS_DIR, path.basename(doc.storedName));
   if (!existsSync(filepath)) { res.status(404).json({ error: "Arquivo não encontrado no servidor" }); return; }
@@ -136,10 +142,13 @@ router.get("/documents/:id/file", requireAuth, async (req: Request, res: Respons
 
 // ─── Excluir documento ───────────────────────────────────────────────────────
 router.delete("/documents/:id", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
-  const [doc] = await db.select().from(documentsTable).where(eq(documentsTable.id, id));
+  const [doc] = await db.select().from(documentsTable)
+    .where(and(eq(documentsTable.id, id), eq(documentsTable.tenantId, tenantId)));
   if (!doc) { res.status(404).json({ error: "Documento não encontrado" }); return; }
-  await db.delete(documentsTable).where(eq(documentsTable.id, id));
+  await db.delete(documentsTable)
+    .where(and(eq(documentsTable.id, id), eq(documentsTable.tenantId, tenantId)));
   const filepath = path.join(DOCS_DIR, path.basename(doc.storedName));
   if (existsSync(filepath)) { await unlink(filepath).catch(() => {}); }
   res.json({ ok: true });

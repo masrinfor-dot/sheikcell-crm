@@ -4,6 +4,7 @@ import { sectorsTable } from "./sectors";
 import { usersTable } from "./users";
 
 export const conversationsTable = pgTable("conversations", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   phone: text("phone").notNull(),
   name: text("name").notNull(),
@@ -39,6 +40,7 @@ export const conversationsTable = pgTable("conversations", {
 export const conversationParticipantsTable = pgTable(
   "conversation_participants",
   {
+    tenantId: integer("tenant_id").notNull().default(1),
     conversationId: integer("conversation_id").notNull().references(() => conversationsTable.id, { onDelete: "cascade" }),
     userId: integer("user_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }),
     addedAt: timestamp("added_at", { withTimezone: true }).notNull().defaultNow(),
@@ -50,6 +52,7 @@ export const conversationParticipantsTable = pgTable(
 export const conversationPinsTable = pgTable(
   "conversation_pins",
   {
+    tenantId: integer("tenant_id").notNull().default(1),
     conversationId: integer("conversation_id").notNull().references(() => conversationsTable.id, { onDelete: "cascade" }),
     userId: integer("user_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }),
     pinnedAt: timestamp("pinned_at", { withTimezone: true }).notNull().defaultNow(),
@@ -60,6 +63,7 @@ export const conversationPinsTable = pgTable(
 export const messagesTable = pgTable(
   "messages",
   {
+    tenantId: integer("tenant_id").notNull().default(1),
     id: serial("id").primaryKey(),
     conversationId: integer("conversation_id").notNull().references(() => conversationsTable.id),
     content: text("content").notNull(),

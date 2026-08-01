@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db, checklistsTable, checklistResponsesTable, usersTable } from "@workspace/db";
 import { eq, desc, and, inArray } from "drizzle-orm";
-import { requireAuth, requireFeature } from "../middlewares/auth";
+import { requireAuth, requireFeature, requireTenant, tenantIdOf } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
@@ -78,8 +78,9 @@ type PendingItem = {
   questions: unknown; mandatory: boolean; periodKey: string;
 };
 
-async function getPendingChecklists(uid: number, role: string): Promise<PendingItem[]> {
-  const all = await db.select().from(checklistsTable).where(eq(checklistsTable.active, true));
+async function getPendingChecklists(uid: number, role: string, tenantId: number): Promise<PendingItem[]> {
+  const all = await db.select().from(checklistsTable)
+    .where(and(eq(checklistsTable.active, true), eq(checklistsTable.tenantId, tenantId)));
   const due: { c: typeof all[number]; periodKey: string }[] = [];
   for (const c of all) {
     if (!(c.targetRoles as string[]).includes(role)) continue;
@@ -108,8 +109,12 @@ async function getPendingChecklists(uid: number, role: string): Promise<PendingI
 
 // Cache curto do estado "bloqueado" para não pesar o banco a cada request.
 const BLOCK_CACHE_MS = 60000;
-const blockCache = new Map<number, { until: number; blocked: boolean }>();
-export function invalidateChecklistBlock(uid: number): void { blockCache.delete(uid); }
+// Chave composta loja:usuário — cache sensível a tenant nunca é keyed só
+// pelo id do usuário (padrão multi-loja fail-safe).
+const blockCache = new Map<string, { until: number; blocked: boolean }>();
+export function invalidateChecklistBlock(uid: number): void {
+  for (const k of blockCache.keys()) if (k.endsWith(`:${uid}`)) blockCache.delete(k);
+}
 
 // Middleware global: com questionário OBRIGATÓRIO pendente, o usuário só
 // acessa autenticação e as rotas de pendências/resposta — o resto retorna 423.
@@ -126,15 +131,19 @@ export async function enforceMandatoryChecklists(
   const uid = req.session?.userId;
   if (!uid) { next(); return; }
   if (BLOCK_ALLOWLIST.some((r) => r.test(req.path))) { next(); return; }
+  // Sem loja na sessão (superadmin/sessão antiga): não há questionário a exigir.
+  const tenantId = tenantIdOf(req);
+  if (tenantId == null) { next(); return; }
   try {
-    const cached = blockCache.get(uid);
+    const cacheKey = `${tenantId}:${uid}`;
+    const cached = blockCache.get(cacheKey);
     let blocked: boolean;
     if (cached && cached.until > Date.now()) {
       blocked = cached.blocked;
     } else {
-      const pending = await getPendingChecklists(uid, req.session.userRole ?? "");
+      const pending = await getPendingChecklists(uid, req.session.userRole ?? "", tenantId);
       blocked = pending.some((p) => p.mandatory);
-      blockCache.set(uid, { until: Date.now() + BLOCK_CACHE_MS, blocked });
+      blockCache.set(cacheKey, { until: Date.now() + BLOCK_CACHE_MS, blocked });
     }
     if (blocked) {
       res.status(423).json({ error: "Responda o questionário obrigatório para liberar o sistema", code: "CHECKLIST_REQUIRED" });
@@ -148,15 +157,18 @@ export async function enforceMandatoryChecklists(
 
 // ── Pendências do usuário logado (para o bloqueio de uso) ─────────────────
 router.get("/checklists/pending", requireAuth, async (req, res): Promise<void> => {
-  const pending = await getPendingChecklists(req.session.userId!, req.session.userRole ?? "");
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const pending = await getPendingChecklists(req.session.userId!, req.session.userRole ?? "", tenantId);
   res.json(pending);
 });
 
 // ── Responder ──────────────────────────────────────────────────────────────
 router.post("/checklists/:id/respond", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const [c] = await db.select().from(checklistsTable).where(eq(checklistsTable.id, id));
+  const [c] = await db.select().from(checklistsTable)
+    .where(and(eq(checklistsTable.id, id), eq(checklistsTable.tenantId, tenantId)));
   if (!c || !c.active) { res.status(404).json({ error: "Questionário não encontrado" }); return; }
   const roles = c.targetRoles as string[];
   if (!roles.includes(req.session.userRole ?? "")) { res.status(403).json({ error: "Este questionário não é para a sua função" }); return; }
@@ -177,7 +189,7 @@ router.post("/checklists/:id/respond", requireAuth, async (req, res): Promise<vo
 
   try {
     const [saved] = await db.insert(checklistResponsesTable).values({
-      checklistId: id, userId: req.session.userId!, periodKey, answers,
+      tenantId, checklistId: id, userId: req.session.userId!, periodKey, answers,
     }).returning();
     invalidateChecklistBlock(req.session.userId!);
     res.status(201).json(saved);
@@ -187,12 +199,15 @@ router.post("/checklists/:id/respond", requireAuth, async (req, res): Promise<vo
 });
 
 // ── Administração (admin) ──────────────────────────────────────────────────
-router.get("/checklists", requireFeature("questionarios"), async (_req, res): Promise<void> => {
-  const rows = await db.select().from(checklistsTable).orderBy(desc(checklistsTable.createdAt));
+router.get("/checklists", requireFeature("questionarios"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rows = await db.select().from(checklistsTable)
+    .where(eq(checklistsTable.tenantId, tenantId)).orderBy(desc(checklistsTable.createdAt));
   res.json(rows);
 });
 
 router.post("/checklists", requireFeature("questionarios"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { title, description, questions, targetRoles, recurrence, dayOfWeek, startDate, mandatory, active } = req.body ?? {};
   const t = typeof title === "string" ? title.trim().slice(0, 150) : "";
   if (!t) { res.status(400).json({ error: "Informe o título" }); return; }
@@ -204,6 +219,7 @@ router.post("/checklists", requireFeature("questionarios"), async (req, res): Pr
   const dow = rec === "weekly" ? Math.min(6, Math.max(0, parseInt(String(dayOfWeek ?? 1), 10) || 0)) : null;
   const sd = typeof startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(startDate) ? startDate : null;
   const [created] = await db.insert(checklistsTable).values({
+    tenantId,
     title: t,
     description: typeof description === "string" ? description.trim().slice(0, 500) || null : null,
     questions: qs, targetRoles: roles, recurrence: rec, dayOfWeek: dow, startDate: sd,
@@ -214,6 +230,7 @@ router.post("/checklists", requireFeature("questionarios"), async (req, res): Pr
 });
 
 router.patch("/checklists/:id", requireFeature("questionarios"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   const { title, description, questions, targetRoles, recurrence, dayOfWeek, startDate, mandatory, active } = req.body ?? {};
@@ -239,24 +256,32 @@ router.patch("/checklists/:id", requireFeature("questionarios"), async (req, res
   if (startDate !== undefined) update.startDate = typeof startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(startDate) ? startDate : null;
   if (mandatory !== undefined) update.mandatory = !!mandatory;
   if (active !== undefined) update.active = !!active;
-  const [updated] = await db.update(checklistsTable).set(update).where(eq(checklistsTable.id, id)).returning();
+  const [updated] = await db.update(checklistsTable).set(update)
+    .where(and(eq(checklistsTable.id, id), eq(checklistsTable.tenantId, tenantId))).returning();
   if (!updated) { res.status(404).json({ error: "Questionário não encontrado" }); return; }
   blockCache.clear();
   res.json(updated);
 });
 
 router.delete("/checklists/:id", requireFeature("questionarios"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  await db.delete(checklistsTable).where(eq(checklistsTable.id, id));
+  await db.delete(checklistsTable)
+    .where(and(eq(checklistsTable.id, id), eq(checklistsTable.tenantId, tenantId)));
   blockCache.clear();
   res.json({ ok: true });
 });
 
 // Respostas de um questionário (admin).
 router.get("/checklists/:id/responses", requireFeature("questionarios"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  // Filho (respostas) escopa pelo pai: confirma que o questionário é da loja.
+  const [parent] = await db.select({ id: checklistsTable.id }).from(checklistsTable)
+    .where(and(eq(checklistsTable.id, id), eq(checklistsTable.tenantId, tenantId)));
+  if (!parent) { res.status(404).json({ error: "Questionário não encontrado" }); return; }
   const rows = await db
     .select({
       id: checklistResponsesTable.id,

@@ -1,8 +1,8 @@
 import { Router, type IRouter } from "express";
 import { randomBytes } from "crypto";
 import { db, rhSettingsTable, rhCandidatesTable } from "@workspace/db";
-import { eq, desc } from "drizzle-orm";
-import { requireFeature } from "../middlewares/auth";
+import { eq, and, desc } from "drizzle-orm";
+import { requireFeature, requireTenant } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
@@ -57,14 +57,25 @@ function detectVideoMime(head: Buffer): string | null {
   return null;
 }
 
-async function getSettings() {
-  const [row] = await db.select().from(rhSettingsTable).limit(1);
+// Configurações de RH da loja (tenant). Cria a linha padrão na primeira vez.
+async function getSettings(tenantId: number) {
+  const [row] = await db.select().from(rhSettingsTable)
+    .where(eq(rhSettingsTable.tenantId, tenantId)).limit(1);
   if (row) return row;
   const [created] = await db.insert(rhSettingsTable).values({
+    tenantId,
     publicToken: randomBytes(16).toString("hex"),
     stages: DEFAULT_STAGES,
   }).returning();
   return created!;
+}
+
+// Endpoints públicos (candidato, sem login) resolvem a loja pelo próprio token
+// do link — o token é único e identifica a loja dona do processo seletivo.
+async function getSettingsByToken(token: string) {
+  const [row] = await db.select().from(rhSettingsTable)
+    .where(eq(rhSettingsTable.publicToken, token)).limit(1);
+  return row ?? null;
 }
 
 function sanitizeStages(input: unknown): RhStage[] | null {
@@ -108,8 +119,9 @@ function sanitizeStages(input: unknown): RhStage[] | null {
 
 // Etapas visíveis para o candidato (sem dados internos).
 router.get("/rh/public/:token", async (req, res): Promise<void> => {
-  const settings = await getSettings();
-  if (req.params.token !== settings.publicToken) {
+  // Rota pública (Candidatura, sem login): resolve a loja pelo token do link.
+  const settings = await getSettingsByToken(req.params.token);
+  if (!settings) {
     res.status(404).json({ error: "Link inválido ou expirado" }); return;
   }
   const stages = (settings.stages as RhStage[]).filter((s) => s.enabled);
@@ -117,8 +129,11 @@ router.get("/rh/public/:token", async (req, res): Promise<void> => {
 });
 
 router.post("/rh/public/:token/apply", async (req, res): Promise<void> => {
-  const settings = await getSettings();
-  if (req.params.token !== settings.publicToken) {
+  // Rota pública (sem login): a loja (tenant) vem do token do link — não há
+  // sessão. TODO(multi-loja): se um dia existir link "genérico" sem token,
+  // usar tenant 1 como padrão para não quebrar o fluxo público.
+  const settings = await getSettingsByToken(req.params.token);
+  if (!settings) {
     res.status(404).json({ error: "Link inválido ou expirado" }); return;
   }
   const stages = (settings.stages as RhStage[]).filter((s) => s.enabled);
@@ -163,6 +178,7 @@ router.post("/rh/public/:token/apply", async (req, res): Promise<void> => {
   }
 
   const [created] = await db.insert(rhCandidatesTable).values({
+    tenantId: settings.tenantId, // loja dona do processo (vem do token do link)
     name, phone, email, answers, videoData, videoMime,
     stagesSnapshot: stages, // congela as etapas do momento da candidatura
   }).returning({ id: rhCandidatesTable.id });
@@ -171,30 +187,36 @@ router.post("/rh/public/:token/apply", async (req, res): Promise<void> => {
 
 // ── Admin ──────────────────────────────────────────────────────────────────
 
-router.get("/rh/settings", requireFeature("rh"), async (_req, res): Promise<void> => {
-  const s = await getSettings();
+router.get("/rh/settings", requireFeature("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const s = await getSettings(tenantId);
   res.json({ publicToken: s.publicToken, stages: s.stages });
 });
 
 router.put("/rh/settings", requireFeature("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const stages = sanitizeStages((req.body ?? {}).stages);
   if (!stages) {
     res.status(400).json({ error: "Etapas inválidas — cada etapa precisa de título e (se for formulário) de 1 a 30 perguntas; opções precisam de 2+ alternativas" });
     return;
   }
-  const s = await getSettings();
-  await db.update(rhSettingsTable).set({ stages, updatedAt: new Date() }).where(eq(rhSettingsTable.id, s.id));
+  const s = await getSettings(tenantId);
+  await db.update(rhSettingsTable).set({ stages, updatedAt: new Date() })
+    .where(and(eq(rhSettingsTable.id, s.id), eq(rhSettingsTable.tenantId, tenantId)));
   res.json({ ok: true });
 });
 
-router.post("/rh/settings/regenerate-token", requireFeature("rh"), async (_req, res): Promise<void> => {
-  const s = await getSettings();
+router.post("/rh/settings/regenerate-token", requireFeature("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const s = await getSettings(tenantId);
   const publicToken = randomBytes(16).toString("hex");
-  await db.update(rhSettingsTable).set({ publicToken, updatedAt: new Date() }).where(eq(rhSettingsTable.id, s.id));
+  await db.update(rhSettingsTable).set({ publicToken, updatedAt: new Date() })
+    .where(and(eq(rhSettingsTable.id, s.id), eq(rhSettingsTable.tenantId, tenantId)));
   res.json({ publicToken });
 });
 
-router.get("/rh/candidates", requireFeature("rh"), async (_req, res): Promise<void> => {
+router.get("/rh/candidates", requireFeature("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rows = await db.select({
     id: rhCandidatesTable.id,
     name: rhCandidatesTable.name,
@@ -206,15 +228,18 @@ router.get("/rh/candidates", requireFeature("rh"), async (_req, res): Promise<vo
     stagesSnapshot: rhCandidatesTable.stagesSnapshot,
     hasVideo: rhCandidatesTable.videoMime,
     createdAt: rhCandidatesTable.createdAt,
-  }).from(rhCandidatesTable).orderBy(desc(rhCandidatesTable.createdAt)).limit(500);
+  }).from(rhCandidatesTable)
+    .where(eq(rhCandidatesTable.tenantId, tenantId))
+    .orderBy(desc(rhCandidatesTable.createdAt)).limit(500);
   res.json(rows.map((r) => ({ ...r, hasVideo: !!r.hasVideo })));
 });
 
 router.get("/rh/candidates/:id/video", requireFeature("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   const [row] = await db.select({ videoData: rhCandidatesTable.videoData, videoMime: rhCandidatesTable.videoMime })
-    .from(rhCandidatesTable).where(eq(rhCandidatesTable.id, id));
+    .from(rhCandidatesTable).where(and(eq(rhCandidatesTable.id, id), eq(rhCandidatesTable.tenantId, tenantId)));
   if (!row?.videoData) { res.status(404).json({ error: "Sem vídeo" }); return; }
   const buf = Buffer.from(row.videoData, "base64");
   const safeMime = ["video/webm", "video/mp4", "video/ogg"].includes(row.videoMime ?? "") ? row.videoMime! : "video/webm";
@@ -226,6 +251,7 @@ router.get("/rh/candidates/:id/video", requireFeature("rh"), async (req, res): P
 });
 
 router.patch("/rh/candidates/:id", requireFeature("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   const { status, notes } = (req.body ?? {}) as { status?: string; notes?: string };
@@ -236,16 +262,19 @@ router.patch("/rh/candidates/:id", requireFeature("rh"), async (req, res): Promi
   }
   if (notes !== undefined) update.notes = typeof notes === "string" ? notes.trim().slice(0, 5000) || null : null;
   if (Object.keys(update).length === 0) { res.status(400).json({ error: "Nada para atualizar" }); return; }
-  const [updated] = await db.update(rhCandidatesTable).set(update).where(eq(rhCandidatesTable.id, id))
+  const [updated] = await db.update(rhCandidatesTable).set(update)
+    .where(and(eq(rhCandidatesTable.id, id), eq(rhCandidatesTable.tenantId, tenantId)))
     .returning({ id: rhCandidatesTable.id, status: rhCandidatesTable.status, notes: rhCandidatesTable.notes });
   if (!updated) { res.status(404).json({ error: "Candidato não encontrado" }); return; }
   res.json(updated);
 });
 
 router.delete("/rh/candidates/:id", requireFeature("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  await db.delete(rhCandidatesTable).where(eq(rhCandidatesTable.id, id));
+  await db.delete(rhCandidatesTable)
+    .where(and(eq(rhCandidatesTable.id, id), eq(rhCandidatesTable.tenantId, tenantId)));
   res.json({ ok: true });
 });
 

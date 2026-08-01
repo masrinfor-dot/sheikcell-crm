@@ -37,6 +37,9 @@ export interface BufferedEvent {
   id: number;
   event: string;
   data: unknown;
+  // Loja (tenant) dona do evento. Eventos NUNCA cruzam a fronteira de loja:
+  // o endpoint SSE só entrega quando tenantId bate com o da sessão do cliente.
+  tenantId: number;
   sectorId: number | null;
   isPotential: boolean;
   // Conversas restritas (com responsável ou finalizadas): lista de userIds que
@@ -79,21 +82,27 @@ export function reconnectStrategy(sinceId: number): "replay" | "resync" | "curre
   return "replay";
 }
 
+// Multi-loja: tenantId é OBRIGATÓRIO — todo evento pertence a uma loja e o
+// endpoint SSE só entrega para clientes da mesma loja (fail closed).
 export function broadcast(
   event: string,
   data: unknown,
-  sectorId?: number | null,
-  isPotential?: boolean,
-  restrictedTo?: number[] | null,
+  scope: {
+    tenantId: number;
+    sectorId?: number | null;
+    isPotential?: boolean;
+    restrictedTo?: number[] | null;
+  },
 ): void {
   lastEventId += 1;
   const payload: BufferedEvent = {
     id: lastEventId,
     event,
     data,
-    sectorId: sectorId ?? null,
-    isPotential: isPotential ?? false,
-    restrictedTo: restrictedTo ?? null,
+    tenantId: scope.tenantId,
+    sectorId: scope.sectorId ?? null,
+    isPotential: scope.isPotential ?? false,
+    restrictedTo: scope.restrictedTo ?? null,
   };
   eventBuffer.push(payload);
   if (eventBuffer.length > MAX_BUFFERED_EVENTS) {
@@ -112,6 +121,9 @@ export interface BufferedInternalEvent {
   id: number;
   event: string;
   data: unknown;
+  // Multi-loja: evento SEMPRE pertence a uma loja; o SSE rejeita qualquer
+  // evento cuja loja não seja a da sessão (inclusive no replay).
+  tenantId: number;
   recipientIds: number[] | null;
 }
 
@@ -143,11 +155,13 @@ export function reconnectInternalStrategy(sinceId: number): "replay" | "resync" 
 }
 
 // Internal team chat targeting. `recipientIds` is the set of user ids that
-// should receive the event; pass `null` to reach every connected user (used by
-// the general/team room). Buffered for reconnect replay.
+// should receive the event; pass `null` to reach every connected user DA LOJA
+// (used by the general/team room — o tenantId limita o alcance). Buffered for
+// reconnect replay.
 export function broadcastInternal(
   event: string,
   data: unknown,
+  tenantId: number,
   recipientIds: number[] | null,
 ): void {
   lastInternalEventId += 1;
@@ -155,6 +169,7 @@ export function broadcastInternal(
     id: lastInternalEventId,
     event,
     data,
+    tenantId,
     recipientIds,
   };
   internalEventBuffer.push(payload);

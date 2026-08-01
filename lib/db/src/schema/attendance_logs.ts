@@ -3,6 +3,7 @@ import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
 export const attendanceLogsTable = pgTable("attendance_logs", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   queueEntryId: integer("queue_entry_id").notNull(),
   clientName: text("client_name").notNull(),

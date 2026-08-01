@@ -8,6 +8,7 @@ import { tasksTable } from "./tasks";
 // - kind "retorno": lembrete de retorno — vira só uma tarefa no quadro (nada é enviado).
 // Cada agendamento cria uma tarefa espelho no quadro (taskId) com o mesmo prazo.
 export const scheduledMessagesTable = pgTable("scheduled_messages", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   conversationId: integer("conversation_id").notNull().references(() => conversationsTable.id),
   kind: text("kind").notNull().default("mensagem"),       // mensagem | retorno

@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { db, usersTable, sectorsTable, accessLogsTable } from "@workspace/db";
+import { db, usersTable, sectorsTable, accessLogsTable, tenantsTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 import { requireAuth, isWithinAccessHours } from "../middlewares/auth";
 
@@ -35,6 +35,16 @@ router.post("/auth/login", async (req, res): Promise<void> => {
     return;
   }
 
+  // Multi-loja: loja suspensa/inexistente bloqueia o login (fail closed).
+  // Superadmin não pertence a loja nenhuma.
+  if (user.role !== "superadmin") {
+    const [tenant] = await db.select().from(tenantsTable).where(eq(tenantsTable.id, user.tenantId));
+    if (!tenant || !tenant.isActive) {
+      res.status(403).json({ error: "Loja suspensa. Fale com o administrador do sistema." });
+      return;
+    }
+  }
+
   let sector = null;
   if (user.sectorId) {
     const [s] = await db
@@ -47,7 +57,9 @@ router.post("/auth/login", async (req, res): Promise<void> => {
   // Registra o horário de acesso (histórico de logins). Uma falha aqui não
   // deve impedir o login, mas fica visível no log do servidor.
   try {
-    await db.insert(accessLogsTable).values({ userId: user.id });
+    // Multi-loja: o log de acesso pertence à loja do usuário (nunca cai na
+    // loja 1 por default de coluna).
+    await db.insert(accessLogsTable).values({ userId: user.id, tenantId: user.tenantId });
   } catch (err) {
     console.error("[auth] falha ao registrar acesso:", err);
   }
@@ -59,6 +71,7 @@ router.post("/auth/login", async (req, res): Promise<void> => {
   req.session.userId = user.id;
   req.session.accessHours = user.role === "vendedor" ? (user.accessHours ?? null) : null;
   req.session.userRole = user.role;
+  req.session.tenantId = user.role === "superadmin" ? undefined : user.tenantId;
   req.session.userSectorId = user.sectorId ?? undefined;
   req.session.userName = user.name;
 

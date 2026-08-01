@@ -97,6 +97,17 @@ function clearReconnectTimer(s: Session) {
   }
 }
 
+// Multi-loja: a loja dona da sessão é derivada da PRÓPRIA chave — "default"
+// pertence à loja 1 (legado) e chaves novas são "t{tenantId}-...". Chave fora
+// desses formatos não tem dono verificável → null (nunca cai na loja 1).
+function tenantOfSessionKey(key: string): number | null {
+  if (key === "default") return 1;
+  const m = /^t(\d+)-/.exec(key);
+  if (!m) return null;
+  const t = Number(m[1]);
+  return Number.isInteger(t) && t > 0 ? t : null;
+}
+
 async function persistStatus(
   key: string,
   status: string,
@@ -105,26 +116,29 @@ async function persistStatus(
 ): Promise<void> {
   try {
     const isConnected = status === "connected";
+    const set = {
+      status,
+      phoneNumber,
+      errorMessage,
+      lastHeartbeatAt: isConnected ? new Date() : undefined,
+      updatedAt: new Date(),
+    };
+    const tenantId = tenantOfSessionKey(key);
+    if (tenantId == null) {
+      // Dono não verificável pela chave: NUNCA insere (o default do schema
+      // atribuiria a loja 1 — vazamento). Só atualiza a linha existente, e o
+      // update não toca tenant_id, preservando a posse registrada pela API.
+      await db.update(whatsappSessionsTable).set(set)
+        .where(eq(whatsappSessionsTable.sessionKey, key));
+      return;
+    }
     await db
       .insert(whatsappSessionsTable)
-      .values({
-        sessionKey: key,
-        status,
-        phoneNumber,
-        phoneId: null,
-        errorMessage,
-        lastHeartbeatAt: isConnected ? new Date() : undefined,
-        updatedAt: new Date(),
-      })
+      .values({ sessionKey: key, tenantId, phoneId: null, ...set })
       .onConflictDoUpdate({
         target: whatsappSessionsTable.sessionKey,
-        set: {
-          status,
-          phoneNumber,
-          errorMessage,
-          lastHeartbeatAt: isConnected ? new Date() : undefined,
-          updatedAt: new Date(),
-        },
+        // tenant_id fica FORA do set: um upsert jamais transfere a sessão de loja.
+        set,
       });
   } catch (e) {
     logger.warn({ err: e, sessionKey: key }, "Failed to persist WhatsApp session status to DB");

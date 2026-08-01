@@ -4,7 +4,7 @@ import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
 import { db, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, crmPurchasesTable } from "@workspace/db";
 import { eq, desc, and, or, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
-import { requireAuth, requireAdmin, requireAdminOrSupervisor } from "../middlewares/auth";
+import { requireAuth, requireAdmin, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
 import { checkPerm, requirePerm } from "../lib/permissions";
 import {
   broadcast,
@@ -43,11 +43,20 @@ router.get("/chat/events", requireAuth, async (req: Request, res: Response): Pro
   const userRole = req.session.userRole!;
   const userSectorId = req.session.userSectorId;
   const userId = req.session.userId!;
+  // Multi-loja: a loja da sessão. Eventos NUNCA cruzam a fronteira de loja —
+  // superadmin (sem loja) e sessões antigas não recebem nada (fail closed).
+  const sessionTenantId = tenantIdOf(req);
   // Permissões do vendedor: recarregadas a cada 30s para que uma revogação
   // feita pelo admin pare de vazar eventos de Potenciais sem exigir reconexão.
   let canSeePotenciais = await checkPerm(req, "ver_potenciais");
   const permRefresh = setInterval(() => {
     checkPerm(req, "ver_potenciais").then((v) => { canSeePotenciais = v; }).catch(() => {});
+    // Loja suspensa: derruba streams já abertos (a suspensão não pode esperar
+    // o usuário reconectar). Fecha a conexão — o EventSource do cliente tenta
+    // reconectar e é barrado no requireAuth.
+    if (sessionTenantId != null) {
+      isTenantSuspended(sessionTenantId).then((s) => { if (s) res.end(); }).catch(() => {});
+    }
   }, 30_000);
 
   // Mirror canAccessConversation exactly.
@@ -56,7 +65,10 @@ router.get("/chat/events", requireAuth, async (req: Request, res: Response): Pro
   //   supervisor só se o setor bater (supervisor sem setor = global);
   //   vendedor só se estiver na lista.
   // - Demais eventos: potenciais chegam a todos; o resto é escopado por setor.
-  const allowed = (ev: { sectorId: number | null; isPotential?: boolean; restrictedTo?: number[] | null }): boolean => {
+  const allowed = (ev: { tenantId: number; sectorId: number | null; isPotential?: boolean; restrictedTo?: number[] | null }): boolean => {
+    // Fronteira de loja em primeiro lugar: só entrega eventos da MESMA loja.
+    // Sem loja na sessão (superadmin / sessão antiga) = não recebe nada.
+    if (sessionTenantId == null || ev.tenantId !== sessionTenantId) return false;
     if (userRole === "admin") return true;
     if (userRole === "supervisor") {
       // Supervisor com setor: só eventos do próprio setor + potenciais.
@@ -178,12 +190,14 @@ async function canAccessConversation(
 
 // ─── List conversations ────────────────────────────────────────────────────
 router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { search, label, status, sectorId } = req.query as Record<string, string | undefined>;
 
   const userRole = req.session.userRole!;
   const userSectorId = req.session.userSectorId;
 
-  const conditions = [eq(conversationsTable.isArchived, false)];
+  // Multi-loja: base de tudo é a loja do usuário.
+  const conditions = [eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.isArchived, false)];
 
   // Conversas RESTRITAS (com responsável ou finalizadas) têm visibilidade
   // reduzida: só o responsável/participantes (vendedor), o admin e o
@@ -255,8 +269,8 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
     .orderBy(desc(conversationsTable.lastMessageAt))
     .limit(100);
 
-  const sectors = await db.select().from(sectorsTable);
-  const users = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable);
+  const sectors = await db.select().from(sectorsTable).where(eq(sectorsTable.tenantId, tenantId));
+  const users = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable).where(eq(usersTable.tenantId, tenantId));
   const sectorMap = Object.fromEntries(sectors.map((s) => [s.id, s]));
   const userMap = Object.fromEntries(users.map((u) => [u.id, u]));
 
@@ -280,7 +294,7 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
     ? await db
         .select({ phone: crmContactsTable.phone, sectorId: crmContactsTable.sectorId, profile: crmContactsTable.profile })
         .from(crmContactsTable)
-        .where(and(eq(crmContactsTable.isArchived, false), inArray(crmContactsTable.phone, normPhones)))
+        .where(and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.isArchived, false), inArray(crmContactsTable.phone, normPhones)))
     : [];
   const crmProfileMap: Record<string, string> = {};
   for (const r of crmRows) {
@@ -316,8 +330,9 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
 
 // ─── Get single conversation ───────────────────────────────────────────────
 router.get("/chat/conversations/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
-  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id));
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
   res.json(await enrichConversation(conv));
@@ -325,19 +340,21 @@ router.get("/chat/conversations/:id", requireAuth, async (req, res): Promise<voi
 
 // ─── Fixar / desafixar conversa (por usuário) ──────────────────────────────
 router.post("/chat/conversations/:id/pin", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
-  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id));
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
   await db.insert(conversationPinsTable)
-    .values({ conversationId: id, userId: req.session.userId! })
+    .values({ tenantId, conversationId: id, userId: req.session.userId! })
     .onConflictDoNothing();
   res.json({ ok: true, pinned: true });
 });
 
 router.delete("/chat/conversations/:id/pin", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
-  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id));
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
   await db.delete(conversationPinsTable)
@@ -347,9 +364,10 @@ router.delete("/chat/conversations/:id/pin", requireAuth, async (req, res): Prom
 
 // ─── Get messages ──────────────────────────────────────────────────────────
 router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
 
-  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
 
@@ -379,6 +397,7 @@ router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Pr
 
 // ─── Send media ────────────────────────────────────────────────────────────
 router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_midia"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const { base64, mimetype: rawMimetype, filename, caption, ptt } = req.body as {
     base64?: string;
@@ -421,7 +440,7 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
 
   const senderName = req.session.userName ?? "Atendente";
 
-  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
   if (conv.assigneeId == null) {
@@ -464,6 +483,7 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
   const content = caption ? `${baseContent}\n${caption}` : baseContent;
 
   const [msg] = await db.insert(messagesTable).values({
+    tenantId,
     conversationId: id,
     content,
     direction: "outbound",
@@ -480,7 +500,7 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, id));
 
-  broadcast("message", { conversationId: id, message: msg }, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
+  broadcast("message", { conversationId: id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
 
   // Forward to WhatsApp bridge
   if (conv.channel === "whatsapp" && conv.phone) {
@@ -529,7 +549,7 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
         .where(eq(messagesTable.id, msg.id))
         .returning();
       if (failedMsg) {
-        broadcast("message_updated", { conversationId: id, message: failedMsg }, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
+        broadcast("message_updated", { conversationId: id, message: failedMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
         res.status(201).json(failedMsg);
         return;
       }
@@ -541,13 +561,14 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
 
 // ─── Send message ──────────────────────────────────────────────────────────
 router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const { content } = req.body as { content?: string };
   if (!content?.trim()) { res.status(400).json({ error: "Mensagem vazia" }); return; }
 
   const senderName = req.session.userName ?? "Atendente";
 
-  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
   if (conv.assigneeId == null) {
@@ -556,6 +577,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
   }
 
   const [msg] = await db.insert(messagesTable).values({
+    tenantId,
     conversationId: id,
     content: content.trim(),
     direction: "outbound",
@@ -571,7 +593,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, id));
 
-  broadcast("message", { conversationId: id, message: msg }, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
+  broadcast("message", { conversationId: id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
 
   // Forward to WhatsApp bridge (now uses Meta Cloud API) if this is a WhatsApp conversation
   if (conv.channel === "whatsapp" && conv.phone) {
@@ -611,7 +633,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
         .where(eq(messagesTable.id, msg.id))
         .returning();
       if (failedMsg) {
-        broadcast("message_updated", { conversationId: id, message: failedMsg }, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
+        broadcast("message_updated", { conversationId: id, message: failedMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
         res.status(201).json(failedMsg);
         return;
       }
@@ -643,7 +665,7 @@ async function syncResolvedConversation(
   // on the dashboard when it was handled by a sectorized attendant.
   const effectiveSectorId = conv.sectorId ?? attendant?.sectorId ?? null;
   const [sector] = effectiveSectorId != null
-    ? await tx.select().from(sectorsTable).where(eq(sectorsTable.id, effectiveSectorId)).limit(1)
+    ? await tx.select().from(sectorsTable).where(and(eq(sectorsTable.id, effectiveSectorId), eq(sectorsTable.tenantId, conv.tenantId))).limit(1)
     : [];
 
   // 1) Attendance log — feeds the Visão Geral dashboard and CRM service history.
@@ -653,6 +675,7 @@ async function syncResolvedConversation(
   if (effectiveSectorId != null) {
     const serviceSeconds = Math.round((Date.now() - conv.createdAt.getTime()) / 1000);
     const [log] = await tx.insert(attendanceLogsTable).values({
+      tenantId: conv.tenantId,
       queueEntryId: 0, // chat attendances have no queue entry
       clientName: conv.name,
       clientContact: conv.phone,
@@ -680,7 +703,7 @@ async function syncResolvedConversation(
       ? eq(crmContactsTable.sectorId, effectiveSectorId)
       : isNull(crmContactsTable.sectorId);
     const [existing] = await tx.select().from(crmContactsTable)
-      .where(and(eq(crmContactsTable.isArchived, false), eq(crmContactsTable.phone, normalizedPhone), sectorCondition))
+      .where(and(eq(crmContactsTable.tenantId, conv.tenantId), eq(crmContactsTable.isArchived, false), eq(crmContactsTable.phone, normalizedPhone), sectorCondition))
       .limit(1);
     let contactId: number | null = null;
     if (existing) {
@@ -690,6 +713,7 @@ async function syncResolvedConversation(
         .where(eq(crmContactsTable.id, existing.id));
     } else {
       const [created] = await tx.insert(crmContactsTable).values({
+        tenantId: conv.tenantId,
         name: conv.name,
         contact: conv.phone,
         phone: normalizedPhone,
@@ -706,6 +730,7 @@ async function syncResolvedConversation(
     //    regra da compra lançada manualmente no CRM.
     if (sale?.hadSale && sale.amount > 0 && contactId != null) {
       await tx.insert(crmPurchasesTable).values({
+        tenantId: conv.tenantId,
         contactId,
         description: sale.description || `Venda no atendimento — ${conv.name}`,
         amount: String(sale.amount),
@@ -725,6 +750,7 @@ async function syncResolvedConversation(
 
 // ─── Update conversation ───────────────────────────────────────────────────
 router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const { status, labels, sectorId, assigneeId, name, isArchived, resolutionReason, hadSale, saleAmount, saleDescription } = req.body as {
     status?: string; labels?: string; sectorId?: number;
@@ -733,7 +759,7 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
     hadSale?: boolean; saleAmount?: number | string; saleDescription?: string;
   };
 
-  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
 
@@ -758,7 +784,7 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
   // Transferência para outro vendedor: valida o destino (ativo; vendedor só
   // recebe conversa do próprio setor). Vendedor não pode "des-atribuir".
   if (assigneeId != null && assigneeId !== conv.assigneeId) {
-    const [target] = await db.select().from(usersTable).where(eq(usersTable.id, assigneeId)).limit(1);
+    const [target] = await db.select().from(usersTable).where(and(eq(usersTable.id, assigneeId), eq(usersTable.tenantId, tenantId))).limit(1);
     if (!target || !target.isActive) { res.status(400).json({ error: "Vendedor de destino inválido" }); return; }
     // Vendedor só transfere para outro vendedor — nunca para admin/supervisor.
     if (userRole === "vendedor" && target.role !== "vendedor") {
@@ -833,11 +859,11 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
   let resolvedLogId: number | null = null;
   const updated = await db.transaction(async (tx) => {
     const [locked] = await tx.select().from(conversationsTable)
-      .where(eq(conversationsTable.id, id)).for("update").limit(1);
+      .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).for("update").limit(1);
     const wasResolved = locked?.status === "resolved";
 
     const [row] = await tx.update(conversationsTable).set(update)
-      .where(eq(conversationsTable.id, id)).returning();
+      .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).returning();
 
     if (status === "resolved" && !wasResolved) {
       // Sanitize untrusted client input: only accept a string motive, capped.
@@ -868,7 +894,7 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
     !updated.phone.includes("@g.us")
   ) {
     try {
-      const surveyCfg = await getSurveySettings();
+      const surveyCfg = await getSurveySettings(tenantId);
       if (!surveyCfg.enabled) throw new SurveyDisabled();
       // Marca a espera ANTES do envio: o cliente pode responder no instante em
       // que a pergunta chega (antes de o bridge retornar), e essa resposta já
@@ -884,7 +910,7 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
           surveyWindowHours: surveyCfg.responseWindowHours,
           surveyRewardText: surveyCfg.rewardEnabled && surveyCfg.rewardText.trim() ? surveyCfg.rewardText.trim() : null,
         })
-        .where(eq(conversationsTable.id, updated.id));
+        .where(and(eq(conversationsTable.id, updated.id), eq(conversationsTable.tenantId, tenantId)));
       const delivered = await sendOutboundText(
         updated.id,
         buildSurveyMessage(surveyCfg),
@@ -897,6 +923,7 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
           .set({ pendingSurveyLogId: null, surveySentAt: null, surveyScaleMax: null, surveyWindowHours: null, surveyRewardText: null })
           .where(and(
             eq(conversationsTable.id, updated.id),
+            eq(conversationsTable.tenantId, tenantId),
             eq(conversationsTable.pendingSurveyLogId, resolvedLogId),
           ));
       }
@@ -917,18 +944,18 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
   if (updated.assigneeId !== conv.assigneeId || updated.status !== conv.status || updated.isArchived !== conv.isArchived) {
     await syncCrmAttendant(updated);
   }
-  broadcast("conversation_updated", updated, updated.sectorId, wasPotential || isPotentialConversation(updated), recipients);
+  broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, isPotential: wasPotential || isPotentialConversation(updated), restrictedTo: recipients });
   // Transição para RESTRITA (ganhou responsável ou foi finalizada): quem via a
   // conversa antes (setor/potencial) e não está na lista de autorizados precisa
   // removê-la da tela. O evento leva só o id + quem pode mantê-la (sem conteúdo).
   if (recipients != null && !isRestrictedConversation(conv)) {
-    broadcast("conversation_hidden", { id: updated.id, keepFor: recipients, sectorId: updated.sectorId }, conv.sectorId, wasPotential);
+    broadcast("conversation_hidden", { id: updated.id, keepFor: recipients, sectorId: updated.sectorId }, { tenantId: updated.tenantId, sectorId: conv.sectorId, isPotential: wasPotential });
   }
   // On a sector transfer the broadcast above targets the NEW sector, so the
   // ORIGIN sector's vendedores would otherwise never learn the conversation
   // left. Notify them explicitly so they drop it from their list.
   if (isSectorTransfer && conv.sectorId != null && conv.sectorId !== updated.sectorId) {
-    broadcast("conversation_updated", updated, conv.sectorId, false);
+    broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: conv.sectorId, isPotential: false });
   }
   res.json(updated);
 });
@@ -939,9 +966,10 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
 // sector-scoped self-assignment, so it is safe for vendedores who cannot
 // otherwise change assigneeId via the PATCH route.
 router.post("/chat/conversations/:id/claim", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
 
-  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
   // Permissão "ver_potenciais": sem ela o vendedor não pode assumir leads novos.
@@ -983,6 +1011,7 @@ router.post("/chat/conversations/:id/claim", requireAuth, async (req, res): Prom
     .set(claimSet)
     .where(and(
       eq(conversationsTable.id, id),
+      eq(conversationsTable.tenantId, tenantId),
       or(isNull(conversationsTable.assigneeId), eq(conversationsTable.assigneeId, req.session.userId!)),
     )).returning();
   if (!updated) {
@@ -992,11 +1021,11 @@ router.post("/chat/conversations/:id/claim", requireAuth, async (req, res): Prom
 
   const claimRecipients = await restrictedRecipients(updated);
   await syncCrmAttendant(updated);
-  broadcast("conversation_updated", updated, updated.sectorId, wasPotential, claimRecipients);
+  broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, isPotential: wasPotential, restrictedTo: claimRecipients });
   // A conversa ficou restrita ao vendedor que assumiu: avisa quem a via antes
   // (potencial cross-sector ou fila do setor) para removê-la da lista.
   if (claimRecipients != null) {
-    broadcast("conversation_hidden", { id: updated.id, keepFor: claimRecipients, sectorId: updated.sectorId }, conv.sectorId, wasPotential);
+    broadcast("conversation_hidden", { id: updated.id, keepFor: claimRecipients, sectorId: updated.sectorId }, { tenantId: updated.tenantId, sectorId: conv.sectorId, isPotential: wasPotential });
   }
   res.json(updated);
 });
@@ -1006,7 +1035,8 @@ router.post("/chat/conversations/:id/claim", requireAuth, async (req, res): Prom
 // frontend identifique por qual conexão cada conversa chega. Diferente de
 // /whatsapp/sessions (admin), aqui qualquer usuário logado pode ler — só
 // nome/numero, sem QR nem status detalhado.
-router.get("/chat/wa-sessions", requireAuth, async (_req, res): Promise<void> => {
+router.get("/chat/wa-sessions", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rows = await db
     .select({
       sessionKey: whatsappSessionsTable.sessionKey,
@@ -1014,6 +1044,7 @@ router.get("/chat/wa-sessions", requireAuth, async (_req, res): Promise<void> =>
       phoneNumber: whatsappSessionsTable.phoneNumber,
     })
     .from(whatsappSessionsTable)
+    .where(eq(whatsappSessionsTable.tenantId, tenantId))
     .orderBy(whatsappSessionsTable.id);
   res.json(rows);
 });
@@ -1023,8 +1054,9 @@ router.get("/chat/wa-sessions", requireAuth, async (_req, res): Promise<void> =>
 // Restrito a POTENCIAIS (lead novo sem dono): conversas já assumidas ou
 // finalizadas fazem parte do histórico e não podem ser apagadas por aqui.
 router.delete("/chat/conversations/:id", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
-  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   if (!isPotentialConversation(conv)) {
     res.status(409).json({ error: "Só é possível excluir atendimentos em Potenciais (sem responsável e não finalizados)" });
@@ -1034,16 +1066,17 @@ router.delete("/chat/conversations/:id", requireAdmin, async (req, res): Promise
   await db.transaction(async (tx) => {
     await tx.delete(messagesTable).where(eq(messagesTable.conversationId, id));
     await tx.delete(conversationParticipantsTable).where(eq(conversationParticipantsTable.conversationId, id));
-    await tx.delete(conversationsTable).where(eq(conversationsTable.id, id));
+    await tx.delete(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
   });
 
-  // Potenciais são visíveis a todos — o evento de remoção também precisa ser.
-  broadcast("conversation_deleted", { id }, conv.sectorId, true);
+  // Potenciais são visíveis a todos DA LOJA — o evento de remoção também precisa ser.
+  broadcast("conversation_deleted", { id }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: true });
   res.json({ ok: true });
 });
 
 // ─── Create conversation manually ─────────────────────────────────────────
 router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { phone, name, channel, sectorId } = req.body as {
     phone?: string; name?: string; channel?: string; sectorId?: number;
   };
@@ -1063,6 +1096,7 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
     })
       .from(conversationsTable)
       .where(and(
+        eq(conversationsTable.tenantId, tenantId),
         notInArray(conversationsTable.status, ["resolved", "archived"]),
         sql`regexp_replace(${conversationsTable.phone}, '\\D', '', 'g') IN (${digits}, ${`55${digits}`}, ${digits.startsWith("55") ? digits.slice(2) : digits})`,
       ))
@@ -1117,6 +1151,7 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
   // conversa nasce como "Potencial" sem dono e ele precisaria assumi-la (o que
   // falha se não tiver a permissão ver_potenciais).
   const [conv] = await db.insert(conversationsTable).values({
+    tenantId,
     phone, name,
     channel: channel ?? "manual",
     sectorId: effectiveSectorId,
@@ -1126,7 +1161,7 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
     lastMessageAt: new Date(),
   }).returning();
 
-  broadcast("conversation_new", conv, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
+  broadcast("conversation_new", conv, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
   // Keep the CRM in sync with atendimentos: register the customer immediately.
   await ensureCrmContactForConversation(conv);
   res.status(201).json(conv);
@@ -1136,10 +1171,11 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
 // ─── Agendamentos (mensagem agendada / retorno ao cliente) ─────────────────
 // Cria também uma tarefa espelho no quadro de Tarefas com o mesmo prazo.
 router.post("/chat/conversations/:id/schedules", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const { kind, content, sendAt } = req.body as { kind?: string; content?: string; sendAt?: string };
 
-  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
 
@@ -1159,6 +1195,7 @@ router.post("/chat/conversations/:id/schedules", requireAuth, async (req, res): 
 
   // Tarefa espelho no quadro (lembrete visível para a equipe)
   const [task] = await db.insert(tasksTable).values({
+    tenantId,
     title: cleanKind === "mensagem"
       ? `📅 Mensagem agendada — ${conv.name}`
       : `📞 Retorno ao cliente — ${conv.name}`,
@@ -1172,6 +1209,7 @@ router.post("/chat/conversations/:id/schedules", requireAuth, async (req, res): 
   }).returning();
 
   const [created] = await db.insert(scheduledMessagesTable).values({
+    tenantId,
     conversationId: conv.id,
     kind: cleanKind,
     content: text.slice(0, 2000),
@@ -1184,27 +1222,29 @@ router.post("/chat/conversations/:id/schedules", requireAuth, async (req, res): 
 });
 
 router.get("/chat/conversations/:id/schedules", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
-  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
   const rows = await db.select().from(scheduledMessagesTable)
-    .where(and(eq(scheduledMessagesTable.conversationId, id), eq(scheduledMessagesTable.status, "pending")))
+    .where(and(eq(scheduledMessagesTable.tenantId, tenantId), eq(scheduledMessagesTable.conversationId, id), eq(scheduledMessagesTable.status, "pending")))
     .orderBy(asc(scheduledMessagesTable.sendAt));
   res.json(rows);
 });
 
 router.delete("/chat/schedules/:schedId", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const schedId = parseInt(Array.isArray(req.params.schedId) ? req.params.schedId[0] : req.params.schedId, 10);
-  const [item] = await db.select().from(scheduledMessagesTable).where(eq(scheduledMessagesTable.id, schedId)).limit(1);
+  const [item] = await db.select().from(scheduledMessagesTable).where(and(eq(scheduledMessagesTable.id, schedId), eq(scheduledMessagesTable.tenantId, tenantId))).limit(1);
   if (!item) { res.status(404).json({ error: "Agendamento não encontrado" }); return; }
-  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, item.conversationId)).limit(1);
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, item.conversationId), eq(conversationsTable.tenantId, tenantId))).limit(1);
   if (!conv || !(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
   if (item.status !== "pending") { res.status(409).json({ error: "Esse agendamento já foi processado" }); return; }
-  await db.update(scheduledMessagesTable).set({ status: "cancelled" }).where(eq(scheduledMessagesTable.id, schedId));
+  await db.update(scheduledMessagesTable).set({ status: "cancelled" }).where(and(eq(scheduledMessagesTable.id, schedId), eq(scheduledMessagesTable.tenantId, tenantId)));
   // Arquiva a tarefa espelho para não ficar lembrete órfão no quadro.
   if (item.taskId != null) {
-    await db.update(tasksTable).set({ isArchived: true, updatedAt: new Date() }).where(eq(tasksTable.id, item.taskId));
+    await db.update(tasksTable).set({ isArchived: true, updatedAt: new Date() }).where(and(eq(tasksTable.id, item.taskId), eq(tasksTable.tenantId, tenantId)));
   }
   res.json({ ok: true });
 });
@@ -1213,9 +1253,10 @@ router.delete("/chat/schedules/:schedId", requireAuth, async (req, res): Promise
 // Leitura: qualquer usuário logado vê as globais + as do próprio setor.
 // Gestão (criar/editar/excluir): admin e supervisor.
 router.get("/chat/quick-replies", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const role = req.session.userRole!;
   const sectorId = req.session.userSectorId ?? null;
-  const rows = await db.select().from(quickRepliesTable).orderBy(asc(quickRepliesTable.title));
+  const rows = await db.select().from(quickRepliesTable).where(eq(quickRepliesTable.tenantId, tenantId)).orderBy(asc(quickRepliesTable.title));
   const visible = (role === "admin" || role === "supervisor")
     ? rows
     : rows.filter((r) => r.sectorId == null || r.sectorId === sectorId);
@@ -1223,9 +1264,11 @@ router.get("/chat/quick-replies", requireAuth, async (req, res): Promise<void> =
 });
 
 router.post("/chat/quick-replies", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { title, content, sectorId } = req.body as { title?: string; content?: string; sectorId?: number | null };
   if (!title?.trim() || !content?.trim()) { res.status(400).json({ error: "Título e mensagem são obrigatórios" }); return; }
   const [created] = await db.insert(quickRepliesTable).values({
+    tenantId,
     title: title.trim().slice(0, 80),
     content: content.trim().slice(0, 2000),
     sectorId: sectorId ?? null,
@@ -1234,37 +1277,42 @@ router.post("/chat/quick-replies", requireAdminOrSupervisor, async (req, res): P
 });
 
 router.patch("/chat/quick-replies/:qrId", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const qrId = parseInt(Array.isArray(req.params.qrId) ? req.params.qrId[0] : req.params.qrId, 10);
   const { title, content, sectorId } = req.body as { title?: string; content?: string; sectorId?: number | null };
   const update: Partial<typeof quickRepliesTable.$inferInsert> = {};
   if (title !== undefined) update.title = title.trim().slice(0, 80);
   if (content !== undefined) update.content = content.trim().slice(0, 2000);
   if (sectorId !== undefined) update.sectorId = sectorId;
-  const [updated] = await db.update(quickRepliesTable).set(update).where(eq(quickRepliesTable.id, qrId)).returning();
+  const [updated] = await db.update(quickRepliesTable).set(update).where(and(eq(quickRepliesTable.id, qrId), eq(quickRepliesTable.tenantId, tenantId))).returning();
   if (!updated) { res.status(404).json({ error: "Mensagem rápida não encontrada" }); return; }
   res.json(updated);
 });
 
 router.delete("/chat/quick-replies/:qrId", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const qrId = parseInt(Array.isArray(req.params.qrId) ? req.params.qrId[0] : req.params.qrId, 10);
-  await db.delete(quickRepliesTable).where(eq(quickRepliesTable.id, qrId));
+  await db.delete(quickRepliesTable).where(and(eq(quickRepliesTable.id, qrId), eq(quickRepliesTable.tenantId, tenantId)));
   res.json({ ok: true });
 });
 
-router.get("/chat/labels", requireAuth, async (_req, res): Promise<void> => {
+router.get("/chat/labels", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const labels = await db
     .select()
     .from(chatLabelsTable)
-    .where(eq(chatLabelsTable.isActive, true))
+    .where(and(eq(chatLabelsTable.tenantId, tenantId), eq(chatLabelsTable.isActive, true)))
     .orderBy(asc(chatLabelsTable.sortOrder), asc(chatLabelsTable.id));
   res.json(labels);
 });
 
 router.post("/chat/labels", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { name, color, sortOrder } = req.body as { name?: string; color?: string; sortOrder?: number };
   if (!name || !name.trim()) { res.status(400).json({ error: "Nome da etiqueta é obrigatório" }); return; }
   const hex = /^#[0-9a-fA-F]{6}$/.test(color ?? "") ? color! : "#1a2e6e";
   const [created] = await db.insert(chatLabelsTable).values({
+    tenantId,
     name: name.trim(),
     color: hex,
     sortOrder: sortOrder ?? 0,
@@ -1273,9 +1321,10 @@ router.post("/chat/labels", requireAdminOrSupervisor, async (req, res): Promise<
 });
 
 router.patch("/chat/labels/:labelId", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const labelId = parseInt(String(req.params.labelId), 10);
   if (isNaN(labelId)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const [existing] = await db.select().from(chatLabelsTable).where(eq(chatLabelsTable.id, labelId)).limit(1);
+  const [existing] = await db.select().from(chatLabelsTable).where(and(eq(chatLabelsTable.id, labelId), eq(chatLabelsTable.tenantId, tenantId))).limit(1);
   if (!existing) { res.status(404).json({ error: "Etiqueta não encontrada" }); return; }
   const { name, color, sortOrder, isActive } = req.body as {
     name?: string; color?: string; sortOrder?: number; isActive?: boolean;
@@ -1286,50 +1335,53 @@ router.patch("/chat/labels/:labelId", requireAdminOrSupervisor, async (req, res)
   if (sortOrder !== undefined) update.sortOrder = sortOrder;
   if (isActive !== undefined) update.isActive = isActive;
   if (Object.keys(update).length === 0) { res.status(400).json({ error: "Nenhum campo válido para atualizar" }); return; }
-  const [updated] = await db.update(chatLabelsTable).set(update).where(eq(chatLabelsTable.id, labelId)).returning();
+  const [updated] = await db.update(chatLabelsTable).set(update).where(and(eq(chatLabelsTable.id, labelId), eq(chatLabelsTable.tenantId, tenantId))).returning();
   res.json(updated);
 });
 
 router.delete("/chat/labels/:labelId", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const labelId = parseInt(String(req.params.labelId), 10);
   if (isNaN(labelId)) { res.status(400).json({ error: "ID inválido" }); return; }
-  await db.delete(chatLabelsTable).where(eq(chatLabelsTable.id, labelId));
+  await db.delete(chatLabelsTable).where(and(eq(chatLabelsTable.id, labelId), eq(chatLabelsTable.tenantId, tenantId)));
   res.json({ ok: true });
 });
 
 // ─── List users available for participant assignment ──────────────────────
-router.get("/chat/users", requireAuth, async (_req, res): Promise<void> => {
+router.get("/chat/users", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const users = await db
     .select({ id: usersTable.id, name: usersTable.name, role: usersTable.role, sectorId: usersTable.sectorId })
     .from(usersTable)
-    .where(eq(usersTable.isActive, true));
+    .where(and(eq(usersTable.tenantId, tenantId), eq(usersTable.isActive, true)));
   res.json(users);
 });
 
 // ─── Conversation participants ─────────────────────────────────────────────
 router.post("/chat/conversations/:id/participants", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const { userId } = req.body as { userId?: number };
   if (!userId) { res.status(400).json({ error: "userId obrigatório" }); return; }
 
-  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, convId));
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, convId), eq(conversationsTable.tenantId, tenantId)));
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
 
-  await db.insert(conversationParticipantsTable).values({ conversationId: convId, userId }).onConflictDoNothing();
+  // Fail closed: o participante precisa ser da mesma loja.
+  const [memberUser] = await db.select({ id: usersTable.id, role: usersTable.role })
+    .from(usersTable).where(and(eq(usersTable.id, userId), eq(usersTable.tenantId, tenantId))).limit(1);
+  if (!memberUser) { res.status(400).json({ error: "Usuário inválido" }); return; }
+
+  await db.insert(conversationParticipantsTable).values({ tenantId, conversationId: convId, userId }).onConflictDoNothing();
 
   // When a vendedor is added to a conversation, route it into the "Pendentes"
   // queue so they can review and approve/assume the attendance ("Iniciar
   // atendimento"). Only do this when nobody is actively handling it yet and it
   // isn't already queued or finished, so an active or resolved conversation is
   // never knocked back into the queue.
-  const [addedUser] = await db
-    .select({ role: usersTable.role })
-    .from(usersTable)
-    .where(eq(usersTable.id, userId))
-    .limit(1);
   const shouldQueue =
-    addedUser?.role === "vendedor" &&
+    memberUser.role === "vendedor" &&
     conv.assigneeId == null &&
     conv.status !== "pending" &&
     conv.status !== "resolved" &&
@@ -1342,23 +1394,24 @@ router.post("/chat/conversations/:id/participants", requireAuth, async (req, res
     const [updated] = await db
       .update(conversationsTable)
       .set({ status: "pending", updatedAt: new Date() })
-      .where(eq(conversationsTable.id, convId))
+      .where(and(eq(conversationsTable.id, convId), eq(conversationsTable.tenantId, tenantId)))
       .returning();
-    broadcast("conversation_updated", updated, updated.sectorId, wasPotential);
-    broadcast("participants_updated", { conversationId: convId }, updated.sectorId, false);
+    broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, isPotential: wasPotential });
+    broadcast("participants_updated", { conversationId: convId }, { tenantId: updated.tenantId, sectorId: updated.sectorId, isPotential: false });
     res.status(201).json({ ok: true, conversation: updated });
     return;
   }
 
-  broadcast("participants_updated", { conversationId: convId }, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
+  broadcast("participants_updated", { conversationId: convId }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
   res.status(201).json({ ok: true });
 });
 
 router.delete("/chat/conversations/:id/participants/:userId", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const userId = parseInt(Array.isArray(req.params.userId) ? req.params.userId[0] : req.params.userId, 10);
 
-  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, convId));
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, convId), eq(conversationsTable.tenantId, tenantId)));
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
 
@@ -1370,15 +1423,16 @@ router.delete("/chat/conversations/:id/participants/:userId", requireAuth, async
   // O participante removido também precisa receber o evento (para tirar a
   // conversa da tela dele), então entra na lista junto dos que permanecem.
   const removeRecipients = await restrictedRecipients(conv);
-  broadcast("participants_updated", { conversationId: convId }, conv.sectorId, isPotentialConversation(conv), removeRecipients ? [...new Set([...removeRecipients, userId])] : null);
+  broadcast("participants_updated", { conversationId: convId }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: removeRecipients ? [...new Set([...removeRecipients, userId])] : null });
   if (removeRecipients != null) {
-    broadcast("conversation_hidden", { id: convId, keepFor: removeRecipients, sectorId: conv.sectorId }, conv.sectorId, false, [...new Set([...removeRecipients, userId])]);
+    broadcast("conversation_hidden", { id: convId, keepFor: removeRecipients, sectorId: conv.sectorId }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: false, restrictedTo: [...new Set([...removeRecipients, userId])] });
   }
   res.json({ ok: true });
 });
 
 // ─── Serve saved media files ───────────────────────────────────────────────
 router.get("/chat/media/:filename", requireAuth, async (req: Request, res: Response): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const filename = path.basename(req.params.filename as string);
   const filepath = path.join(MEDIA_DIR, filename);
   if (!existsSync(filepath)) {
@@ -1403,7 +1457,7 @@ router.get("/chat/media/:filename", requireAuth, async (req: Request, res: Respo
   const [conv] = await db
     .select()
     .from(conversationsTable)
-    .where(eq(conversationsTable.id, owningMsg.conversationId))
+    .where(and(eq(conversationsTable.id, owningMsg.conversationId), eq(conversationsTable.tenantId, tenantId)))
     .limit(1);
 
   if (!conv || !(await canAccessConversation(conv, req))) {
@@ -1540,9 +1594,10 @@ router.post("/chat/webhook/whatsapp", async (req: Request, res: Response): Promi
 // Fails clearly (503) when the AI provider is unavailable so the rest of the
 // attendance keeps working.
 router.post("/chat/conversations/:id/suggest-reply", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
 
-  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, id)).limit(1);
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
 
@@ -1555,7 +1610,7 @@ router.post("/chat/conversations/:id/suggest-reply", requireAuth, requirePerm("u
       ? eq(crmContactsTable.sectorId, conv.sectorId)
       : isNull(crmContactsTable.sectorId);
     [contact] = await db.select().from(crmContactsTable)
-      .where(and(eq(crmContactsTable.isArchived, false), eq(crmContactsTable.phone, normalizedPhone), sectorCondition))
+      .where(and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.isArchived, false), eq(crmContactsTable.phone, normalizedPhone), sectorCondition))
       .limit(1);
   }
 
@@ -1569,7 +1624,7 @@ router.post("/chat/conversations/:id/suggest-reply", requireAuth, requirePerm("u
     if (contact.notes) infoLines.push(`Observações: ${contact.notes}`);
     const cf = contact.customFields ?? {};
     if (Object.keys(cf).length > 0) {
-      const defs = await db.select().from(crmCustomFieldsTable);
+      const defs = await db.select().from(crmCustomFieldsTable).where(eq(crmCustomFieldsTable.tenantId, tenantId));
       const defMap = Object.fromEntries(defs.map((d) => [String(d.id), d.name]));
       for (const [key, value] of Object.entries(cf)) {
         if (value == null || value === "") continue;
@@ -1579,7 +1634,7 @@ router.post("/chat/conversations/:id/suggest-reply", requireAuth, requirePerm("u
   }
   if (conv.sectorId != null) {
     const [sector] = await db.select({ name: sectorsTable.name }).from(sectorsTable)
-      .where(eq(sectorsTable.id, conv.sectorId)).limit(1);
+      .where(and(eq(sectorsTable.id, conv.sectorId), eq(sectorsTable.tenantId, tenantId))).limit(1);
     if (sector?.name) infoLines.push(`Setor: ${sector.name}`);
   }
 

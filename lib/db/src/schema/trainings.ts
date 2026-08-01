@@ -4,6 +4,7 @@ import { usersTable } from "./users";
 // Treinamentos criados por admin/supervisor: texto, vídeo ou quiz.
 // Se obrigatório, trava o uso do sistema até o usuário concluir.
 export const trainingsTable = pgTable("trainings", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   title: text("title").notNull(),
   description: text("description"),
@@ -19,6 +20,7 @@ export const trainingsTable = pgTable("trainings", {
 });
 
 export const trainingCompletionsTable = pgTable("training_completions", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   trainingId: integer("training_id").notNull().references(() => trainingsTable.id, { onDelete: "cascade" }),
   userId: integer("user_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }),

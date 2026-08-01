@@ -1,6 +1,6 @@
 // Robô de pré-atendimento: liga a máquina de estados (botEngine) ao banco,
 // ao WhatsApp e à IA. Nunca lança — falha do robô não pode derrubar o webhook.
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
   db,
   botSettingsTable,
@@ -24,18 +24,17 @@ const DEFAULT_QUESTIONS: BotQuestion[] = [
 export type BotSettingsRow = typeof botSettingsTable.$inferSelect;
 
 /**
- * Busca (ou cria) a linha única de configuração do robô.
- * A linha sempre tem id=1: o insert com id fixo + onConflictDoNothing garante
- * o singleton mesmo com dois processos criando ao mesmo tempo, e a leitura
- * por id=1 é determinística.
+ * Busca (ou cria) a linha de configuração do robô da loja (tenant).
+ * Multi-loja: cada loja tem sua própria configuração — a leitura e a criação
+ * são sempre escopadas pelo tenantId (a loja 1 mantém a config legada).
  */
-export async function getBotSettings(): Promise<BotSettingsRow> {
-  const [row] = await db.select().from(botSettingsTable).where(eq(botSettingsTable.id, 1));
+export async function getBotSettings(tenantId: number): Promise<BotSettingsRow> {
+  const [row] = await db.select().from(botSettingsTable).where(eq(botSettingsTable.tenantId, tenantId)).limit(1);
   if (row) return row;
   await db.insert(botSettingsTable)
-    .values({ id: 1, questions: DEFAULT_QUESTIONS })
+    .values({ tenantId, questions: DEFAULT_QUESTIONS })
     .onConflictDoNothing();
-  const [created] = await db.select().from(botSettingsTable).where(eq(botSettingsTable.id, 1));
+  const [created] = await db.select().from(botSettingsTable).where(eq(botSettingsTable.tenantId, tenantId)).limit(1);
   return created!;
 }
 
@@ -59,13 +58,13 @@ function todaySP(): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
 }
 
-/** Tenta consumir 1 resposta de IA do limite diário. Retorna false se estourou. */
-async function consumeDailyAi(maxPerDay: number): Promise<boolean> {
+/** Tenta consumir 1 resposta de IA do limite diário da loja. Retorna false se estourou. */
+async function consumeDailyAi(tenantId: number, maxPerDay: number): Promise<boolean> {
   const day = todaySP();
   const [row] = await db.insert(botUsageTable)
-    .values({ day, count: 1 })
+    .values({ tenantId, day, count: 1 })
     .onConflictDoUpdate({
-      target: botUsageTable.day,
+      target: [botUsageTable.tenantId, botUsageTable.day],
       set: { count: sql`${botUsageTable.count} + 1` },
       setWhere: sql`${botUsageTable.count} < ${maxPerDay}`,
     })
@@ -73,8 +72,10 @@ async function consumeDailyAi(maxPerDay: number): Promise<boolean> {
   return !!row; // sem linha = limite do dia estourado
 }
 
-export async function todayUsage(): Promise<number> {
-  const [row] = await db.select().from(botUsageTable).where(eq(botUsageTable.day, todaySP()));
+export async function todayUsage(tenantId: number): Promise<number> {
+  const [row] = await db.select().from(botUsageTable)
+    .where(and(eq(botUsageTable.day, todaySP()), eq(botUsageTable.tenantId, tenantId)))
+    .limit(1);
   return row?.count ?? 0;
 }
 
@@ -108,9 +109,10 @@ async function aiAnswer(settings: BotSettingsRow, question: string): Promise<str
   }
 }
 
-export async function aiClassify(settings: BotSettingsRow, answers: string[]): Promise<{ summary: string; sectorId: number | null }> {
+export async function aiClassify(tenantId: number, settings: BotSettingsRow, answers: string[]): Promise<{ summary: string; sectorId: number | null }> {
+  // Multi-loja: só considera os setores DESTA loja na triagem.
   const sectors = await db.select({ id: sectorsTable.id, name: sectorsTable.name })
-    .from(sectorsTable).where(eq(sectorsTable.isActive, true));
+    .from(sectorsTable).where(and(eq(sectorsTable.isActive, true), eq(sectorsTable.tenantId, tenantId)));
   const qs = toEngineSettings(settings).questions;
   const qa = qs.map((q, i) => `P: ${q.question}\nR: ${answers[i] ?? "(sem resposta)"}`).join("\n");
   try {
@@ -165,7 +167,8 @@ async function handle(conv: Conv, text: string): Promise<void> {
   if (conv.status === "resolved" || conv.status === "archived") return;
   if (!text || !text.trim()) return;
 
-  const settings = await getBotSettings();
+  const tenantId = conv.tenantId;
+  const settings = await getBotSettings(tenantId);
   if (!settings.enabled) return;
   if (settings.mode === "off_hours" && withinBusinessHours(settings)) return;
 
@@ -207,9 +210,9 @@ async function handle(conv: Conv, text: string): Promise<void> {
     await saveState();
     for (const r of step.replies) await sendOutboundText(conv.id, r, settings.botName);
     // Classifica com IA (respeitando o teto diário) e registra o resumo na conversa.
-    const canUseAi = await consumeDailyAi(settings.maxPerDay);
+    const canUseAi = await consumeDailyAi(tenantId, settings.maxPerDay);
     const { summary, sectorId } = canUseAi
-      ? await aiClassify(settings, step.answers)
+      ? await aiClassify(tenantId, settings, step.answers)
       : { summary: step.answers.join(" | ").slice(0, 500), sectorId: null };
     await db.update(botStatesTable).set({ summary }).where(eq(botStatesTable.id, state.id));
     if (sectorId != null && sectorId !== conv.sectorId) {
@@ -219,6 +222,7 @@ async function handle(conv: Conv, text: string): Promise<void> {
     }
     // Mensagem interna (type system) — o vendedor vê o resumo, o cliente não recebe.
     const [sysMsg] = await db.insert(messagesTable).values({
+      tenantId: conv.tenantId,
       conversationId: conv.id,
       content: `🤖 Triagem do robô: ${summary}`,
       direction: "outbound",
@@ -226,13 +230,13 @@ async function handle(conv: Conv, text: string): Promise<void> {
       status: "sent",
       senderName: settings.botName,
     }).returning();
-    broadcast("message", { conversationId: conv.id, message: sysMsg }, conv.sectorId,
-      isPotentialConversation(conv), await restrictedRecipients(conv));
+    broadcast("message", { conversationId: conv.id, message: sysMsg },
+      { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
     return;
   }
 
   // ai_question: dúvida livre pós-triagem
-  if (!(await consumeDailyAi(settings.maxPerDay))) { await saveState(); return; }
+  if (!(await consumeDailyAi(tenantId, settings.maxPerDay))) { await saveState(); return; }
   const answer = await aiAnswer(settings, step.question);
   await saveState({ aiReplies: state.aiReplies + 1 });
   if (answer) await sendOutboundText(conv.id, answer, settings.botName);

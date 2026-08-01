@@ -1,4 +1,4 @@
-import { db, conversationsTable, messagesTable, sectorsTable, attendanceLogsTable } from "@workspace/db";
+import { db, conversationsTable, messagesTable, sectorsTable, attendanceLogsTable, whatsappSessionsTable } from "@workspace/db";
 import { eq, and, desc, sql } from "drizzle-orm";
 import { broadcast } from "./sseEmitter";
 import { isPotentialConversation, restrictedRecipients } from "./conversationScope";
@@ -10,6 +10,25 @@ import { randomUUID } from "crypto";
 import path from "path";
 
 export const MEDIA_DIR = path.resolve(process.cwd(), "media");
+
+// Sessão padrão/legada pertence à loja 1 (dados legados). Chaves novas de
+// sessão são prefixadas t{tenantId}- (ver routes/whatsapp.ts).
+const DEFAULT_SESSION_KEY = "default";
+const LEGACY_TENANT_ID = 1;
+
+// Multi-loja: resolve a loja (tenant) dona da sessão de WhatsApp pela
+// sessionKey do webhook. FAIL CLOSED: só a chave legada "default" mapeia para
+// a loja 1; qualquer outra chave sem linha em whatsapp_sessions é rejeitada
+// (retorna null e a mensagem é descartada) — nunca cai em outra loja.
+async function resolveTenantForSession(sessionKey: string): Promise<number | null> {
+  if (sessionKey === DEFAULT_SESSION_KEY) return LEGACY_TENANT_ID;
+  const [row] = await db
+    .select({ tenantId: whatsappSessionsTable.tenantId })
+    .from(whatsappSessionsTable)
+    .where(eq(whatsappSessionsTable.sessionKey, sessionKey))
+    .limit(1);
+  return row?.tenantId ?? null;
+}
 
 const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 
@@ -168,6 +187,7 @@ async function downloadMetaMedia(
 }
 
 async function upsertConversation(
+  tenantId: number,
   phone: string,
   pushName: string,
   displayContent: string,
@@ -178,11 +198,12 @@ async function upsertConversation(
 ) {
   // Same customer talking to two different WhatsApp numbers = two separate
   // conversations, so replies always go out through the number the customer
-  // contacted.
+  // contacted. Multi-loja: sempre escopado pela loja (tenant) da sessão.
   let [conv] = await db
     .select()
     .from(conversationsTable)
     .where(and(
+      eq(conversationsTable.tenantId, tenantId),
       eq(conversationsTable.phone, phone),
       eq(conversationsTable.sessionKey, sessionKey),
       eq(conversationsTable.isArchived, false),
@@ -191,16 +212,18 @@ async function upsertConversation(
     .limit(1);
 
   if (!conv) {
-    const classified = displayContent ? await classifyText(displayContent) : null;
+    // Roteamento automático só considera regras e setores DESTA loja.
+    const classified = displayContent ? await classifyText(displayContent, tenantId) : null;
     const [first] = await db
       .select()
       .from(sectorsTable)
-      .where(eq(sectorsTable.isActive, true))
+      .where(and(eq(sectorsTable.isActive, true), eq(sectorsTable.tenantId, tenantId)))
       .limit(1);
     const targetSectorId = classified?.sectorId ?? first?.id ?? 1;
     [conv] = await db
       .insert(conversationsTable)
       .values({
+        tenantId,
         phone,
         name: pushName,
         avatarUrl: avatarUrl ?? null,
@@ -214,7 +237,7 @@ async function upsertConversation(
         unreadCount: 1,
       })
       .returning();
-    broadcast("conversation_new", conv, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
+    broadcast("conversation_new", conv, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
     // Keep the CRM in sync with atendimentos: register the customer as soon as
     // the conversation starts, not only when it is resolved.
     await ensureCrmContactForConversation(conv);
@@ -239,7 +262,7 @@ async function upsertConversation(
       .returning();
     if (updated) conv = updated;
     if (reopen && updated) {
-      broadcast("conversation_updated", updated, updated.sectorId, isPotentialConversation(updated), await restrictedRecipients(updated));
+      broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, isPotential: isPotentialConversation(updated), restrictedTo: await restrictedRecipients(updated) });
       // Cliente voltou: cartão do CRM volta para "Potenciais" e perde o atendente.
       await syncCrmAttendant(updated);
     }
@@ -256,6 +279,7 @@ async function upsertConversation(
 // robô etc.). Compartilhado pelos dois caminhos de entrada (Baileys e Meta).
 // Retorna true quando a mensagem foi totalmente tratada aqui.
 async function tryConsumeSurveyReply(input: {
+  tenantId: number;
   phone: string;
   sessionKey: string;
   text: string;
@@ -264,11 +288,11 @@ async function tryConsumeSurveyReply(input: {
   pushName: string;
   externalId: string | null;
 }): Promise<boolean> {
-  const { phone, sessionKey, text, msgType, displayContent, pushName, externalId } = input;
+  const { tenantId, phone, sessionKey, text, msgType, displayContent, pushName, externalId } = input;
 
   // Configuração da pesquisa (escala, prazo, recompensa) — lida antes da
   // transação; falha na leitura cai nos padrões (nunca perde a nota por isso).
-  const cfg = await getSurveySettings().catch(() => ({ ...SURVEY_DEFAULTS }));
+  const cfg = await getSurveySettings(tenantId).catch(() => ({ ...SURVEY_DEFAULTS }));
   const surveyCfg = {
     scaleMin: surveyScaleMin(cfg),
     scaleMax: cfg.scaleMax,
@@ -279,11 +303,13 @@ async function tryConsumeSurveyReply(input: {
 
   const outcome = await db.transaction(async (tx) => {
     // Trava a conversa: webhooks concorrentes/reentregues serializam aqui, e
-    // só o primeiro encontra a pesquisa pendente (consumo atômico).
+    // só o primeiro encontra a pesquisa pendente (consumo atômico). Escopado
+    // pela loja (tenant) da sessão.
     const [conv] = await tx
       .select()
       .from(conversationsTable)
       .where(and(
+        eq(conversationsTable.tenantId, tenantId),
         eq(conversationsTable.phone, phone),
         eq(conversationsTable.sessionKey, sessionKey),
         eq(conversationsTable.isArchived, false),
@@ -337,6 +363,7 @@ async function tryConsumeSurveyReply(input: {
     // Conflito de externalId = reentrega duplicada: mantém a nota, sem
     // broadcast/agradecimento repetidos.
     const [msg] = await tx.insert(messagesTable).values({
+      tenantId: conv.tenantId,
       conversationId: conv.id,
       content: displayContent,
       direction: "inbound",
@@ -363,9 +390,12 @@ async function tryConsumeSurveyReply(input: {
     broadcast(
       "message",
       { conversationId: outcome.conv.id, message: outcome.msg },
-      outcome.conv.sectorId,
-      isPotentialConversation(outcome.conv),
-      await restrictedRecipients(outcome.conv),
+      {
+        tenantId: outcome.conv.tenantId,
+        sectorId: outcome.conv.sectorId,
+        isPotential: isPotentialConversation(outcome.conv),
+        restrictedTo: await restrictedRecipients(outcome.conv),
+      },
     );
     // Agradece pelo mesmo caminho anti-ban do bridge (melhor esforço) e, se
     // configurado, entrega a recompensa (cupom/voucher) a quem respondeu.
@@ -497,11 +527,18 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     typeof body.sessionKey === "string" && /^[a-z0-9][a-z0-9_-]{0,39}$/.test(body.sessionKey)
       ? body.sessionKey
       : "default";
+  // Multi-loja: resolve a loja dona desta sessão de WhatsApp. Sessão
+  // desconhecida = descarta (fail closed — nunca grava na loja errada).
+  const tenantId = await resolveTenantForSession(sessionKey);
+  if (tenantId == null) {
+    console.warn(`[whatsapp] Mensagem descartada: sessão desconhecida "${sessionKey}"`);
+    return;
+  }
   // Pesquisa de satisfação: se a resposta consumiu a pesquisa, não reabre a
   // conversa nem aciona o robô.
   if (!isGroup) {
     const handled = await tryConsumeSurveyReply({
-      phone, sessionKey, text, msgType, displayContent, pushName, externalId,
+      tenantId, phone, sessionKey, text, msgType, displayContent, pushName, externalId,
     });
     if (handled) return;
   }
@@ -509,13 +546,14 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   // Só sincroniza o nome quando o subject real do grupo veio na mensagem —
   // nunca sobrescreve um nome existente com o rótulo genérico.
   const conv = await upsertConversation(
-    phone, convName, displayContent, sessionKey, body.data?.avatarUrl,
+    tenantId, phone, convName, displayContent, sessionKey, body.data?.avatarUrl,
     isGroup && !!body.data?.groupSubject,
   );
 
   const [msg] = await db
     .insert(messagesTable)
     .values({
+      tenantId: conv.tenantId,
       conversationId: conv.id,
       content: displayContent,
       direction: "inbound",
@@ -530,7 +568,7 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
 
   // Conflito = mensagem duplicada chegando em paralelo; não notifica de novo.
   if (!msg) return;
-  broadcast("message", { conversationId: conv.id, message: msg }, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
+  broadcast("message", { conversationId: conv.id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
 
   // Robô de pré-atendimento (assíncrono: nunca atrasa nem derruba o webhook)
   if (msgType === "text") {
@@ -619,7 +657,10 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
 
         // Pesquisa de satisfação: mesma regra do caminho Baileys — se a
         // resposta consumiu a pesquisa, não reabre a conversa nem aciona o robô.
+        // Meta Cloud API usa a conexão padrão → loja 1 (legado).
+        const tenantId = LEGACY_TENANT_ID;
         const surveyHandled = await tryConsumeSurveyReply({
+          tenantId,
           phone,
           sessionKey: "default",
           text,
@@ -630,11 +671,12 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
         });
         if (surveyHandled) continue;
 
-        const conv = await upsertConversation(phone, pushName, displayContent);
+        const conv = await upsertConversation(tenantId, phone, pushName, displayContent);
 
         const [saved] = await db
           .insert(messagesTable)
           .values({
+            tenantId: conv.tenantId,
             conversationId: conv.id,
             content: displayContent,
             direction: "inbound",
@@ -649,7 +691,7 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
 
         // Conflito = mensagem duplicada chegando em paralelo; não notifica de novo.
         if (!saved) continue;
-        broadcast("message", { conversationId: conv.id, message: saved }, conv.sectorId, isPotentialConversation(conv), await restrictedRecipients(conv));
+        broadcast("message", { conversationId: conv.id, message: saved }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
 
         // Robô de pré-atendimento (assíncrono)
         if (saved.type === "text") {

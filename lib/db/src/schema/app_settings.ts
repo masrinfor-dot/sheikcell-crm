@@ -1,9 +1,14 @@
-import { pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, integer, primaryKey } from "drizzle-orm/pg-core";
 
-// Configurações globais do sistema (chave → valor), ex.: alerta de
-// atendimentos sem resposta. Editável só por admin/supervisor.
-export const appSettingsTable = pgTable("app_settings", {
-  key: text("key").primaryKey(),
-  value: text("value").notNull(),
-  updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+// Configurações do sistema (chave → valor) POR LOJA (tenant), ex.: alerta de
+// atendimentos sem resposta. Editável só por admin/supervisor da loja.
+export const appSettingsTable = pgTable(
+  "app_settings",
+  {
+    tenantId: integer("tenant_id").notNull().default(1),
+    key: text("key").notNull(),
+    value: text("value").notNull(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.tenantId, t.key] })],
+);

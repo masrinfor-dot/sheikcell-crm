@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import { Router, type IRouter } from "express";
 import { and, desc, eq, gte, inArray, or, sql } from "drizzle-orm";
 import { db, rafflesTable, raffleDrawsTable, conversationsTable, usersTable, attendanceLogsTable } from "@workspace/db";
-import { requireAuth } from "../middlewares/auth";
+import { requireAuth, requireTenant } from "../middlewares/auth";
 import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
@@ -79,7 +79,12 @@ function sanitizeRaffle(body: Record<string, unknown>): { data?: typeof rafflesT
 type Raffle = typeof rafflesTable.$inferSelect;
 
 async function eligibleClients(raffle: Raffle): Promise<{ phone: string; name: string; conversationId: number }[]> {
-  const conds = [sql`${conversationsTable.phone} <> ''`, eq(conversationsTable.channel, "whatsapp")];
+  // Só clientes (conversas) da MESMA loja do sorteio (multi-loja: fail closed).
+  const conds = [
+    eq(conversationsTable.tenantId, raffle.tenantId),
+    sql`${conversationsTable.phone} <> ''`,
+    eq(conversationsTable.channel, "whatsapp"),
+  ];
   const sectorIds = numArrayOrNull(raffle.sectorIds);
   const vendedorIds = numArrayOrNull(raffle.vendedorIds);
   const sessionKeys = strArrayOrNull(raffle.sessionKeys);
@@ -112,7 +117,7 @@ async function eligibleClients(raffle: Raffle): Promise<{ phone: string; name: s
     if (wantComprou) logConds.push(eq(attendanceLogsTable.hadSale, true));
     if (reasons.length) logConds.push(inArray(attendanceLogsTable.resolutionReason, reasons));
     if (logConds.length) {
-      const logWhere = [or(...logConds)!];
+      const logWhere = [eq(attendanceLogsTable.tenantId, raffle.tenantId), or(...logConds)!];
       if (raffle.periodDays) {
         logWhere.push(gte(attendanceLogsTable.createdAt, new Date(Date.now() - raffle.periodDays * 86_400_000)));
       }
@@ -134,7 +139,11 @@ async function eligibleClients(raffle: Raffle): Promise<{ phone: string; name: s
   // Só quem respondeu a pesquisa de satisfação: telefone com pelo menos um
   // attendance_log com nota registrada (respeita o período do sorteio, se houver).
   if (raffle.surveyRespondedOnly) {
-    const surveyWhere = [sql`${attendanceLogsTable.satisfactionRating} IS NOT NULL`];
+    const surveyWhere = [
+      // Isolamento entre lojas: só notas de atendimentos DESTA loja contam.
+      eq(attendanceLogsTable.tenantId, raffle.tenantId),
+      sql`${attendanceLogsTable.satisfactionRating} IS NOT NULL`,
+    ];
     if (raffle.periodDays) {
       surveyWhere.push(gte(attendanceLogsTable.createdAt, new Date(Date.now() - raffle.periodDays * 86_400_000)));
     }
@@ -183,18 +192,18 @@ function fillTemplate(template: string, w: { name: string }, raffle: Raffle, ven
 }
 
 /** Loja do vendedor responsável pela conversa (para preencher {loja} em redes). */
-async function storeOfConversation(conversationId: number): Promise<string | null> {
+async function storeOfConversation(conversationId: number, tenantId: number): Promise<string | null> {
   const [row] = await db.select({ storeName: usersTable.storeName })
     .from(conversationsTable)
     .innerJoin(usersTable, eq(usersTable.id, conversationsTable.assigneeId))
-    .where(eq(conversationsTable.id, conversationId))
+    .where(and(eq(conversationsTable.id, conversationId), eq(conversationsTable.tenantId, tenantId)))
     .limit(1);
   return row?.storeName ?? null;
 }
 
-async function sendWhatsAppText(conversationId: number, content: string): Promise<boolean> {
+async function sendWhatsAppText(conversationId: number, content: string, tenantId: number): Promise<boolean> {
   const [conv] = await db.select().from(conversationsTable)
-    .where(eq(conversationsTable.id, conversationId)).limit(1);
+    .where(and(eq(conversationsTable.id, conversationId), eq(conversationsTable.tenantId, tenantId))).limit(1);
   if (!conv || !conv.phone) return false;
 
   const { messagesTable } = await import("@workspace/db");
@@ -202,6 +211,7 @@ async function sendWhatsAppText(conversationId: number, content: string): Promis
   const { isPotentialConversation, restrictedRecipients } = await import("../lib/conversationScope");
 
   const [msg] = await db.insert(messagesTable).values({
+    tenantId: conv.tenantId,
     conversationId: conv.id,
     content,
     direction: "outbound",
@@ -217,8 +227,12 @@ async function sendWhatsAppText(conversationId: number, content: string): Promis
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, conv.id));
 
-  broadcast("message", { conversationId: conv.id, message: msg }, conv.sectorId,
-    isPotentialConversation(conv), await restrictedRecipients(conv));
+  broadcast("message", { conversationId: conv.id, message: msg }, {
+    tenantId: conv.tenantId,
+    sectorId: conv.sectorId,
+    isPotential: isPotentialConversation(conv),
+    restrictedTo: await restrictedRecipients(conv),
+  });
 
   const bridgeUrl = process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
   const bridgeSecret = createHmac(
@@ -241,8 +255,12 @@ async function sendWhatsAppText(conversationId: number, content: string): Promis
     const [failedMsg] = await db.update(messagesTable).set({ status: "failed" })
       .where(eq(messagesTable.id, msg.id)).returning();
     if (failedMsg) {
-      broadcast("message_updated", { conversationId: conv.id, message: failedMsg }, conv.sectorId,
-        isPotentialConversation(conv), await restrictedRecipients(conv));
+      broadcast("message_updated", { conversationId: conv.id, message: failedMsg }, {
+        tenantId: conv.tenantId,
+        sectorId: conv.sectorId,
+        isPotential: isPotentialConversation(conv),
+        restrictedTo: await restrictedRecipients(conv),
+      });
     }
   }
   return delivered;
@@ -272,7 +290,7 @@ async function doRunRaffleDraw(raffle: Raffle, periodKey: string): Promise<{ dra
   if (isAuto) {
     try {
       const [ph] = await db.insert(raffleDrawsTable).values({
-        raffleId: raffle.id, periodKey, eligibleCount: pool.length, winners: [],
+        tenantId: raffle.tenantId, raffleId: raffle.id, periodKey, eligibleCount: pool.length, winners: [],
       }).returning({ id: raffleDrawsTable.id });
       placeholderId = ph?.id ?? null;
     } catch {
@@ -291,8 +309,8 @@ async function doRunRaffleDraw(raffle: Raffle, periodKey: string): Promise<{ dra
     let sent = false;
     let error: string | undefined;
     try {
-      const vendedorStore = raffle.storeName ? null : await storeOfConversation(w.conversationId);
-      sent = await sendWhatsAppText(w.conversationId, fillTemplate(raffle.messageTemplate, w, raffle, vendedorStore));
+      const vendedorStore = raffle.storeName ? null : await storeOfConversation(w.conversationId, raffle.tenantId);
+      sent = await sendWhatsAppText(w.conversationId, fillTemplate(raffle.messageTemplate, w, raffle, vendedorStore), raffle.tenantId);
       if (!sent) error = "Falha no envio pelo WhatsApp";
     } catch (err) {
       error = err instanceof Error ? err.message : "Erro no envio";
@@ -307,7 +325,7 @@ async function doRunRaffleDraw(raffle: Raffle, periodKey: string): Promise<{ dra
     draw = upd!;
   } else {
     const [ins] = await db.insert(raffleDrawsTable).values({
-      raffleId: raffle.id, periodKey, eligibleCount: pool.length, winners,
+      tenantId: raffle.tenantId, raffleId: raffle.id, periodKey, eligibleCount: pool.length, winners,
     }).returning();
     draw = ins!;
   }
@@ -383,10 +401,11 @@ async function isRaffleManager(req: { session: { userId?: number; userRole?: str
   return Array.isArray(u?.adminAccess) && (u.adminAccess as string[]).includes("sorteios");
 }
 
-/** Carrega o sorteio e garante que o usuário pode mexer nele. */
-async function loadOwnRaffle(req: { session: { userId?: number; userRole?: string } }, id: number): Promise<{ raffle?: Raffle; status?: number; error?: string }> {
+/** Carrega o sorteio (da loja) e garante que o usuário pode mexer nele. */
+async function loadOwnRaffle(req: { session: { userId?: number; userRole?: string } }, id: number, tenantId: number): Promise<{ raffle?: Raffle; status?: number; error?: string }> {
   if (isNaN(id)) return { status: 400, error: "ID inválido" };
-  const [raffle] = await db.select().from(rafflesTable).where(eq(rafflesTable.id, id)).limit(1);
+  const [raffle] = await db.select().from(rafflesTable)
+    .where(and(eq(rafflesTable.id, id), eq(rafflesTable.tenantId, tenantId))).limit(1);
   if (!raffle) return { status: 404, error: "Sorteio não encontrado" };
   if (!(await isRaffleManager(req)) && raffle.createdById !== req.session.userId) {
     return { status: 404, error: "Sorteio não encontrado" };
@@ -395,18 +414,22 @@ async function loadOwnRaffle(req: { session: { userId?: number; userRole?: strin
 }
 
 router.get("/raffles", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const manager = await isRaffleManager(req);
   const rows = manager
-    ? await db.select().from(rafflesTable).orderBy(desc(rafflesTable.id))
+    ? await db.select().from(rafflesTable)
+        .where(eq(rafflesTable.tenantId, tenantId)).orderBy(desc(rafflesTable.id))
     : await db.select().from(rafflesTable)
-        .where(eq(rafflesTable.createdById, req.session.userId!))
+        .where(and(eq(rafflesTable.tenantId, tenantId), eq(rafflesTable.createdById, req.session.userId!)))
         .orderBy(desc(rafflesTable.id));
   res.json(rows);
 });
 
 router.post("/raffles", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { data, error } = sanitizeRaffle((req.body ?? {}) as Record<string, unknown>);
   if (!data) { res.status(400).json({ error }); return; }
+  data.tenantId = tenantId;
   data.createdById = req.session.userId!;
   if (!(await isRaffleManager(req))) {
     // Vendedor comum: sorteio SEMPRE restrito aos próprios clientes.
@@ -419,8 +442,9 @@ router.post("/raffles", requireAuth, async (req, res): Promise<void> => {
 });
 
 router.patch("/raffles/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
-  const { raffle: existing, status, error: loadErr } = await loadOwnRaffle(req, id);
+  const { raffle: existing, status, error: loadErr } = await loadOwnRaffle(req, id, tenantId);
   if (!existing) { res.status(status!).json({ error: loadErr }); return; }
 
   const body = (req.body ?? {}) as Record<string, unknown>;
@@ -435,7 +459,7 @@ router.patch("/raffles/:id", requireAuth, async (req, res): Promise<void> => {
   }
   if (hasDraw && onlyActiveToggle) {
     const [updated] = await db.update(rafflesTable).set({ active: body["active"] !== false })
-      .where(eq(rafflesTable.id, id)).returning();
+      .where(and(eq(rafflesTable.id, id), eq(rafflesTable.tenantId, tenantId))).returning();
     res.json(updated);
     return;
   }
@@ -444,28 +468,32 @@ router.patch("/raffles/:id", requireAuth, async (req, res): Promise<void> => {
   const merged = { ...existing, ...body } as Record<string, unknown>;
   const { data, error } = sanitizeRaffle(merged);
   if (!data) { res.status(400).json({ error }); return; }
+  data.tenantId = existing.tenantId;
   data.createdById = existing.createdById;
   if (!(await isRaffleManager(req))) {
     data.vendedorIds = [req.session.userId!];
     data.sectorIds = null;
     data.sessionKeys = null;
   }
-  const [updated] = await db.update(rafflesTable).set(data).where(eq(rafflesTable.id, id)).returning();
+  const [updated] = await db.update(rafflesTable).set(data)
+    .where(and(eq(rafflesTable.id, id), eq(rafflesTable.tenantId, tenantId))).returning();
   res.json(updated);
 });
 
 router.delete("/raffles/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
-  const { raffle, status, error } = await loadOwnRaffle(req, id);
+  const { raffle, status, error } = await loadOwnRaffle(req, id, tenantId);
   if (!raffle) { res.status(status!).json({ error }); return; }
-  await db.delete(rafflesTable).where(eq(rafflesTable.id, id));
+  await db.delete(rafflesTable).where(and(eq(rafflesTable.id, id), eq(rafflesTable.tenantId, tenantId)));
   res.json({ ok: true });
 });
 
 // Prévia: quantos clientes participam com os filtros atuais.
 router.get("/raffles/:id/eligible", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
-  const { raffle, status, error } = await loadOwnRaffle(req, id);
+  const { raffle, status, error } = await loadOwnRaffle(req, id, tenantId);
   if (!raffle) { res.status(status!).json({ error }); return; }
   const pool = await eligibleClients(raffle);
   res.json({ count: pool.length });
@@ -473,8 +501,9 @@ router.get("/raffles/:id/eligible", requireAuth, async (req, res): Promise<void>
 
 // Sortear agora (manual).
 router.post("/raffles/:id/run", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
-  const { raffle, status, error } = await loadOwnRaffle(req, id);
+  const { raffle, status, error } = await loadOwnRaffle(req, id, tenantId);
   if (!raffle) { res.status(status!).json({ error }); return; }
   const pool = await eligibleClients(raffle);
   if (pool.length === 0) { res.status(400).json({ error: "Nenhum cliente elegível com esses filtros" }); return; }
@@ -487,8 +516,9 @@ router.post("/raffles/:id/run", requireAuth, async (req, res): Promise<void> => 
 });
 
 router.get("/raffles/:id/draws", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
-  const { raffle, status, error } = await loadOwnRaffle(req, id);
+  const { raffle, status, error } = await loadOwnRaffle(req, id, tenantId);
   if (!raffle) { res.status(status!).json({ error }); return; }
   const rows = await db.select().from(raffleDrawsTable)
     .where(eq(raffleDrawsTable.raffleId, id)).orderBy(desc(raffleDrawsTable.id)).limit(50);
@@ -497,9 +527,10 @@ router.get("/raffles/:id/draws", requireAuth, async (req, res): Promise<void> =>
 
 // Reenviar a mensagem para um ganhador cujo envio falhou.
 router.post("/raffles/:id/draws/:drawId/resend", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   const drawId = parseInt(String(req.params.drawId), 10);
-  const { raffle, status, error } = await loadOwnRaffle(req, id);
+  const { raffle, status, error } = await loadOwnRaffle(req, id, tenantId);
   if (!raffle) { res.status(status!).json({ error }); return; }
   if (isNaN(drawId)) { res.status(400).json({ error: "ID inválido" }); return; }
   const [draw] = await db.select().from(raffleDrawsTable)
@@ -514,8 +545,8 @@ router.post("/raffles/:id/draws/:drawId/resend", requireAuth, async (req, res): 
   let sent = false;
   let sendError: string | undefined;
   try {
-    const vendedorStore = raffle.storeName ? null : await storeOfConversation(target.conversationId);
-    sent = await sendWhatsAppText(target.conversationId, fillTemplate(raffle.messageTemplate, target, raffle, vendedorStore));
+    const vendedorStore = raffle.storeName ? null : await storeOfConversation(target.conversationId, raffle.tenantId);
+    sent = await sendWhatsAppText(target.conversationId, fillTemplate(raffle.messageTemplate, target, raffle, vendedorStore), raffle.tenantId);
     if (!sent) sendError = "Falha no envio pelo WhatsApp — confira se o WhatsApp está conectado";
   } catch (err) {
     sendError = err instanceof Error ? err.message : "Erro no envio";

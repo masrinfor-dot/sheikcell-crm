@@ -1,5 +1,5 @@
 import { db, appSettingsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 // Configuração da pesquisa de satisfação (guardada em app_settings como JSON).
 // Editável por admin/supervisor na tela de Resultados.
@@ -45,8 +45,10 @@ export function buildSurveyMessage(s: SurveySettings): string {
     : base;
 }
 
-export async function getSurveySettings(): Promise<SurveySettings> {
-  const [row] = await db.select().from(appSettingsTable).where(eq(appSettingsTable.key, KEY)).limit(1);
+// Multi-loja: configuração POR LOJA (app_settings tem PK composta tenant_id+key).
+export async function getSurveySettings(tenantId: number): Promise<SurveySettings> {
+  const [row] = await db.select().from(appSettingsTable)
+    .where(and(eq(appSettingsTable.tenantId, tenantId), eq(appSettingsTable.key, KEY))).limit(1);
   if (!row) return { ...SURVEY_DEFAULTS };
   try {
     const parsed = JSON.parse(row.value) as Partial<SurveySettings>;
@@ -70,10 +72,13 @@ export function sanitizeSurveySettings(input: Partial<SurveySettings>): SurveySe
   };
 }
 
-export async function saveSurveySettings(input: Partial<SurveySettings>): Promise<SurveySettings> {
-  const clean = sanitizeSurveySettings({ ...(await getSurveySettings()), ...input });
+export async function saveSurveySettings(tenantId: number, input: Partial<SurveySettings>): Promise<SurveySettings> {
+  const clean = sanitizeSurveySettings({ ...(await getSurveySettings(tenantId)), ...input });
   await db.insert(appSettingsTable)
-    .values({ key: KEY, value: JSON.stringify(clean), updatedAt: new Date() })
-    .onConflictDoUpdate({ target: appSettingsTable.key, set: { value: JSON.stringify(clean), updatedAt: new Date() } });
+    .values({ tenantId, key: KEY, value: JSON.stringify(clean), updatedAt: new Date() })
+    .onConflictDoUpdate({
+      target: [appSettingsTable.tenantId, appSettingsTable.key],
+      set: { value: JSON.stringify(clean), updatedAt: new Date() },
+    });
   return clean;
 }

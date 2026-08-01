@@ -1,7 +1,7 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import { db, internalConversationsTable, internalConversationMembersTable, internalMessagesTable, usersTable } from "@workspace/db";
 import { eq, and, asc, inArray, sql, ne } from "drizzle-orm";
-import { requireAuth, requireAdmin } from "../middlewares/auth";
+import { requireAuth, requireAdmin, requireTenant, isTenantSuspended } from "../middlewares/auth";
 import {
   sseEmitter,
   broadcastInternal,
@@ -14,32 +14,34 @@ const router: IRouter = Router();
 
 const GENERAL_ROOM_NAME = "Equipe (Geral)";
 
-// Ensure the single general/team room exists and return its id.
-async function ensureGeneralRoom(): Promise<number> {
+// Ensure the single general/team room DA LOJA (tenant) exists and return its id.
+// O índice único parcial é (tenant_id, kind) para kind='general', logo cada
+// loja tem exatamente uma sala geral.
+async function ensureGeneralRoom(tenantId: number): Promise<number> {
   const [existing] = await db
     .select({ id: internalConversationsTable.id })
     .from(internalConversationsTable)
-    .where(eq(internalConversationsTable.kind, "general"))
+    .where(and(eq(internalConversationsTable.tenantId, tenantId), eq(internalConversationsTable.kind, "general")))
     .limit(1);
   if (existing) return existing.id;
-  // Conflict-safe: a partial unique index on kind='general' guarantees a single
-  // row, so concurrent first accesses converge on the same conversation.
+  // Conflict-safe: a partial unique index on (tenant_id, kind='general')
+  // guarantees a single row per tenant, so concurrent first accesses converge.
   await db
     .insert(internalConversationsTable)
-    .values({ kind: "general", name: GENERAL_ROOM_NAME })
+    .values({ tenantId, kind: "general", name: GENERAL_ROOM_NAME })
     .onConflictDoNothing();
   const [row] = await db
     .select({ id: internalConversationsTable.id })
     .from(internalConversationsTable)
-    .where(eq(internalConversationsTable.kind, "general"))
+    .where(and(eq(internalConversationsTable.tenantId, tenantId), eq(internalConversationsTable.kind, "general")))
     .limit(1);
   return row!.id;
 }
 
-async function ensureMembership(conversationId: number, userId: number): Promise<void> {
+async function ensureMembership(conversationId: number, userId: number, tenantId: number): Promise<void> {
   await db
     .insert(internalConversationMembersTable)
-    .values({ conversationId, userId })
+    .values({ tenantId, conversationId, userId })
     .onConflictDoNothing();
 }
 
@@ -56,6 +58,8 @@ async function recipientsFor(conv: { id: number; kind: string }): Promise<number
 
 // ─── SSE real-time stream for internal chat ────────────────────────────────
 router.get("/internal-chat/events", requireAuth, (req: Request, res: Response): void => {
+  // Fail closed: sessão sem loja (superadmin / sessão antiga) não recebe eventos.
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
@@ -64,10 +68,10 @@ router.get("/internal-chat/events", requireAuth, (req: Request, res: Response): 
 
   const userId = req.session.userId!;
 
-  // An event reaches this user when it targets everyone (recipientIds == null)
-  // or explicitly includes their id.
-  const allowed = (ev: { recipientIds: number[] | null }): boolean =>
-    ev.recipientIds == null || ev.recipientIds.includes(userId);
+  // An event reaches this user when it belongs to the SAME loja (tenant) AND
+  // targets everyone in it (recipientIds == null) or explicitly includes them.
+  const allowed = (ev: { tenantId: number; recipientIds: number[] | null }): boolean =>
+    ev.tenantId === tenantId && (ev.recipientIds == null || ev.recipientIds.includes(userId));
 
   const writeEvent = (ev: { id?: number; event: string; data: unknown }) => {
     if (ev.id != null) res.write(`id: ${ev.id}\n`);
@@ -107,16 +111,26 @@ router.get("/internal-chat/events", requireAuth, (req: Request, res: Response): 
     }
   }
 
+  // Loja suspensa: derruba streams já abertos periodicamente (a suspensão não
+  // pode esperar o usuário reconectar — na reconexão o requireAuth barra).
+  const suspensionCheck = setInterval(() => {
+    isTenantSuspended(tenantId).then((s) => { if (s) res.end(); }).catch(() => {});
+  }, 30_000);
+
   sseEmitter.on("internal", send);
-  req.on("close", () => sseEmitter.off("internal", send));
+  req.on("close", () => {
+    clearInterval(suspensionCheck);
+    sseEmitter.off("internal", send);
+  });
 });
 
 // ─── List my conversations (general room + direct chats) ───────────────────
 router.get("/internal-chat/conversations", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const userId = req.session.userId!;
 
-  const generalId = await ensureGeneralRoom();
-  await ensureMembership(generalId, userId);
+  const generalId = await ensureGeneralRoom(tenantId);
+  await ensureMembership(generalId, userId, tenantId);
 
   const memberships = await db
     .select({
@@ -130,7 +144,10 @@ router.get("/internal-chat/conversations", requireAuth, async (req, res): Promis
     })
     .from(internalConversationMembersTable)
     .innerJoin(internalConversationsTable, eq(internalConversationMembersTable.conversationId, internalConversationsTable.id))
-    .where(eq(internalConversationMembersTable.userId, userId));
+    .where(and(
+      eq(internalConversationMembersTable.userId, userId),
+      eq(internalConversationsTable.tenantId, tenantId),
+    ));
 
   const convIds = memberships.map((m) => m.conversationId);
 
@@ -213,6 +230,7 @@ router.get("/internal-chat/conversations", requireAuth, async (req, res): Promis
 // só membros veem, recebem eventos e podem enviar mensagens.
 // Só admin cria grupos (conversas diretas continuam liberadas para todos).
 router.post("/internal-chat/conversations/group", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const userId = req.session.userId!;
   const { name, memberIds } = req.body as { name?: string; memberIds?: number[] };
   const cleanName = (name ?? "").trim().slice(0, 80);
@@ -220,13 +238,14 @@ router.post("/internal-chat/conversations/group", requireAdmin, async (req, res)
   const ids = Array.isArray(memberIds) ? [...new Set(memberIds.map(Number).filter((n) => Number.isInteger(n) && n > 0 && n !== userId))] : [];
   if (ids.length === 0) { res.status(400).json({ error: "Escolha pelo menos um participante" }); return; }
 
-  // Só usuários ativos existentes entram no grupo.
-  const valid = await db.select({ id: usersTable.id }).from(usersTable).where(inArray(usersTable.id, ids));
+  // Só usuários da MESMA loja (tenant) entram no grupo.
+  const valid = await db.select({ id: usersTable.id }).from(usersTable)
+    .where(and(eq(usersTable.tenantId, tenantId), inArray(usersTable.id, ids)));
   if (valid.length === 0) { res.status(400).json({ error: "Nenhum participante válido" }); return; }
 
   const [created] = await db
     .insert(internalConversationsTable)
-    .values({ kind: "group", name: cleanName })
+    .values({ tenantId, kind: "group", name: cleanName })
     .returning();
   await db.insert(internalConversationMembersTable).values([
     { conversationId: created!.id, userId },
@@ -243,28 +262,32 @@ router.post("/internal-chat/conversations/group", requireAdmin, async (req, res)
     unreadCount: 0,
   };
   // Avisa os participantes em tempo real para o grupo aparecer na lista deles.
-  broadcastInternal("internal_conversation_new", conv, [userId, ...valid.map((v) => v.id)]);
+  broadcastInternal("internal_conversation_new", conv, tenantId, [userId, ...valid.map((v) => v.id)]);
   res.status(201).json(conv);
 });
 
 // ─── Start (or fetch) a direct 1:1 conversation ────────────────────────────
 router.post("/internal-chat/conversations/direct", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const userId = req.session.userId!;
   const { userId: targetIdRaw } = req.body as { userId?: number };
   const targetId = Number(targetIdRaw);
   if (!targetId || Number.isNaN(targetId)) { res.status(400).json({ error: "Usuário inválido" }); return; }
   if (targetId === userId) { res.status(400).json({ error: "Não é possível conversar consigo mesmo" }); return; }
 
-  const [target] = await db.select({ id: usersTable.id }).from(usersTable).where(eq(usersTable.id, targetId)).limit(1);
+  // Só é possível iniciar DM com alguém da MESMA loja (tenant).
+  const [target] = await db.select({ id: usersTable.id }).from(usersTable)
+    .where(and(eq(usersTable.id, targetId), eq(usersTable.tenantId, tenantId))).limit(1);
   if (!target) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
 
-  // Find an existing direct conversation shared by both users.
+  // Find an existing direct conversation shared by both users (na mesma loja).
   const myDirect = await db
     .select({ conversationId: internalConversationMembersTable.conversationId })
     .from(internalConversationMembersTable)
     .innerJoin(internalConversationsTable, eq(internalConversationMembersTable.conversationId, internalConversationsTable.id))
     .where(and(
       eq(internalConversationMembersTable.userId, userId),
+      eq(internalConversationsTable.tenantId, tenantId),
       eq(internalConversationsTable.kind, "direct"),
     ));
   const myDirectIds = myDirect.map((r) => r.conversationId);
@@ -285,19 +308,19 @@ router.post("/internal-chat/conversations/direct", requireAuth, async (req, res)
   if (convId == null) {
     const [created] = await db
       .insert(internalConversationsTable)
-      .values({ kind: "direct" })
+      .values({ tenantId, kind: "direct" })
       .returning({ id: internalConversationsTable.id });
     convId = created!.id;
     await db.insert(internalConversationMembersTable).values([
-      { conversationId: convId, userId },
-      { conversationId: convId, userId: targetId },
+      { tenantId, conversationId: convId, userId },
+      { tenantId, conversationId: convId, userId: targetId },
     ]).onConflictDoNothing();
   }
 
   const [other] = await db
     .select({ id: usersTable.id, name: usersTable.name, role: usersTable.role })
     .from(usersTable)
-    .where(eq(usersTable.id, targetId))
+    .where(and(eq(usersTable.id, targetId), eq(usersTable.tenantId, tenantId)))
     .limit(1);
 
   res.json({
@@ -312,11 +335,13 @@ router.post("/internal-chat/conversations/direct", requireAuth, async (req, res)
 });
 
 // Verify the current user may access a conversation; returns the conv or null.
-async function getAccessibleConversation(convId: number, userId: number) {
-  const [conv] = await db.select().from(internalConversationsTable).where(eq(internalConversationsTable.id, convId)).limit(1);
+// Sempre restrito à loja (tenant): conversas de outra loja retornam null.
+async function getAccessibleConversation(convId: number, userId: number, tenantId: number) {
+  const [conv] = await db.select().from(internalConversationsTable)
+    .where(and(eq(internalConversationsTable.id, convId), eq(internalConversationsTable.tenantId, tenantId))).limit(1);
   if (!conv) return null;
   if (conv.kind === "general") {
-    await ensureMembership(conv.id, userId);
+    await ensureMembership(conv.id, userId, tenantId);
     return conv;
   }
   const [member] = await db
@@ -332,11 +357,12 @@ async function getAccessibleConversation(convId: number, userId: number) {
 
 // ─── List messages of a conversation (and mark as read) ────────────────────
 router.get("/internal-chat/conversations/:id/messages", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const userId = req.session.userId!;
   const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
   if (Number.isNaN(convId)) { res.status(400).json({ error: "Conversa inválida" }); return; }
 
-  const conv = await getAccessibleConversation(convId, userId);
+  const conv = await getAccessibleConversation(convId, userId, tenantId);
   if (!conv) { res.status(403).json({ error: "Acesso negado" }); return; }
 
   const rows = await db
@@ -368,6 +394,7 @@ router.get("/internal-chat/conversations/:id/messages", requireAuth, async (req,
 
 // ─── Send a message ────────────────────────────────────────────────────────
 router.post("/internal-chat/conversations/:id/messages", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const userId = req.session.userId!;
   const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
   if (Number.isNaN(convId)) { res.status(400).json({ error: "Conversa inválida" }); return; }
@@ -376,12 +403,12 @@ router.post("/internal-chat/conversations/:id/messages", requireAuth, async (req
   const text = (content ?? "").trim();
   if (!text) { res.status(400).json({ error: "Mensagem vazia" }); return; }
 
-  const conv = await getAccessibleConversation(convId, userId);
+  const conv = await getAccessibleConversation(convId, userId, tenantId);
   if (!conv) { res.status(403).json({ error: "Acesso negado" }); return; }
 
   const [inserted] = await db
     .insert(internalMessagesTable)
-    .values({ conversationId: convId, senderId: userId, content: text })
+    .values({ tenantId, conversationId: convId, senderId: userId, content: text })
     .returning();
 
   await db
@@ -409,19 +436,21 @@ router.post("/internal-chat/conversations/:id/messages", requireAuth, async (req
   };
 
   const recipients = await recipientsFor(conv);
-  broadcastInternal("internal_message", { conversationId: convId, kind: conv.kind, message }, recipients);
+  broadcastInternal("internal_message", { conversationId: convId, kind: conv.kind, message }, tenantId, recipients);
 
   res.json(message);
 });
 
 // ─── Excluir grupo ──────────────────────────────────────────────────────────
 // Só grupos podem ser excluídos (nunca a sala geral nem conversas diretas).
-// Quem pode: somente admin (qualquer grupo).
+// Quem pode: somente admin (qualquer grupo) — sempre da MESMA loja.
 router.delete("/internal-chat/conversations/:id", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
   if (Number.isNaN(convId)) { res.status(400).json({ error: "Conversa inválida" }); return; }
 
-  const [conv] = await db.select().from(internalConversationsTable).where(eq(internalConversationsTable.id, convId)).limit(1);
+  const [conv] = await db.select().from(internalConversationsTable)
+    .where(and(eq(internalConversationsTable.id, convId), eq(internalConversationsTable.tenantId, tenantId))).limit(1);
   if (!conv) { res.status(404).json({ error: "Grupo não encontrado" }); return; }
   if (conv.kind !== "group") { res.status(400).json({ error: "Só grupos podem ser excluídos" }); return; }
 
@@ -431,20 +460,21 @@ router.delete("/internal-chat/conversations/:id", requireAdmin, async (req, res)
   const recipients = await recipientsFor(conv);
   const deleted = await db
     .delete(internalConversationsTable)
-    .where(and(eq(internalConversationsTable.id, convId), eq(internalConversationsTable.kind, "group")))
+    .where(and(eq(internalConversationsTable.id, convId), eq(internalConversationsTable.tenantId, tenantId), eq(internalConversationsTable.kind, "group")))
     .returning({ id: internalConversationsTable.id }); // cascade apaga membros e mensagens
   if (deleted.length === 0) { res.status(404).json({ error: "Grupo não encontrado" }); return; }
-  broadcastInternal("internal_conversation_removed", { id: convId }, recipients);
+  broadcastInternal("internal_conversation_removed", { id: convId }, tenantId, recipients);
   res.json({ ok: true });
 });
 
 // ─── Mark a conversation as read ───────────────────────────────────────────
 router.post("/internal-chat/conversations/:id/read", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const userId = req.session.userId!;
   const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
   if (Number.isNaN(convId)) { res.status(400).json({ error: "Conversa inválida" }); return; }
 
-  const conv = await getAccessibleConversation(convId, userId);
+  const conv = await getAccessibleConversation(convId, userId, tenantId);
   if (!conv) { res.status(403).json({ error: "Acesso negado" }); return; }
 
   await db

@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
-import { db, botSettingsTable, botStatesTable } from "@workspace/db";
-import { eq, sql } from "drizzle-orm";
-import { requireFeature } from "../middlewares/auth";
+import { db, botSettingsTable, botStatesTable, conversationsTable } from "@workspace/db";
+import { and, eq, sql } from "drizzle-orm";
+import { requireFeature, requireTenant } from "../middlewares/auth";
 import { getBotSettings, toEngineSettings, todayUsage, aiClassify } from "../lib/bot";
 import { botStep, type BotStateShape, type BotQuestion } from "../lib/botEngine";
 
@@ -22,13 +22,15 @@ function sanitizeQuestions(v: unknown): BotQuestion[] | null {
   return out;
 }
 
-router.get("/bot/settings", requireFeature("robo"), async (_req, res): Promise<void> => {
-  const s = await getBotSettings();
-  res.json({ ...s, usageToday: await todayUsage() });
+router.get("/bot/settings", requireFeature("robo"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const s = await getBotSettings(tenantId);
+  res.json({ ...s, usageToday: await todayUsage(tenantId) });
 });
 
 router.put("/bot/settings", requireFeature("robo"), async (req, res): Promise<void> => {
-  const existing = await getBotSettings();
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const existing = await getBotSettings(tenantId);
   const body = (req.body ?? {}) as Record<string, unknown>;
 
   const questions = body["questions"] !== undefined
@@ -66,18 +68,23 @@ router.put("/bot/settings", requireFeature("robo"), async (req, res): Promise<vo
     maxPerConversation,
     maxPerDay,
     updatedAt: new Date(),
-  }).where(eq(botSettingsTable.id, existing.id)).returning();
+  }).where(and(eq(botSettingsTable.id, existing.id), eq(botSettingsTable.tenantId, tenantId))).returning();
 
-  res.json({ ...updated, usageToday: await todayUsage() });
+  res.json({ ...updated, usageToday: await todayUsage(tenantId) });
 });
 
-// Estatísticas simples: conversas triadas pelo robô.
-router.get("/bot/stats", requireFeature("robo"), async (_req, res): Promise<void> => {
+// Estatísticas simples: conversas triadas pelo robô (só da loja do usuário).
+// bot_states não tem tenantId — escopamos pela conversa (parent) via join.
+router.get("/bot/stats", requireFeature("robo"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const [row] = await db.select({
     total: sql<number>`count(*)::int`,
     active: sql<number>`count(*) filter (where ${botStatesTable.active})::int`,
-  }).from(botStatesTable);
-  res.json({ conversations: row?.total ?? 0, activeFlows: row?.active ?? 0, usageToday: await todayUsage() });
+  })
+    .from(botStatesTable)
+    .innerJoin(conversationsTable, eq(botStatesTable.conversationId, conversationsTable.id))
+    .where(eq(conversationsTable.tenantId, tenantId));
+  res.json({ conversations: row?.total ?? 0, activeFlows: row?.active ?? 0, usageToday: await todayUsage(tenantId) });
 });
 
 // ---------- modo teste (simulação, sem WhatsApp e sem banco de conversas) ----------
@@ -85,13 +92,14 @@ router.get("/bot/stats", requireFeature("robo"), async (_req, res): Promise<void
 const testStates = new Map<number, BotStateShape>();
 
 router.post("/bot/test", requireFeature("robo"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const uid = req.session.userId!;
   const { message, reset } = (req.body ?? {}) as { message?: string; reset?: boolean };
   if (reset) { testStates.delete(uid); res.json({ replies: [], reset: true }); return; }
   const text = String(message ?? "").trim();
   if (!text) { res.status(400).json({ error: "Escreva uma mensagem de teste" }); return; }
 
-  const settings = await getBotSettings();
+  const settings = await getBotSettings(tenantId);
   const state = testStates.get(uid) ?? { stage: 0, answers: [], aiReplies: 0, active: true };
   const { step, state: next } = botStep(toEngineSettings(settings), state, text);
   testStates.set(uid, next);
@@ -105,7 +113,7 @@ router.post("/bot/test", requireFeature("robo"), async (req, res): Promise<void>
     return;
   }
   if (step.kind === "triage_done") {
-    const { summary } = await aiClassify(settings, step.answers);
+    const { summary } = await aiClassify(tenantId, settings, step.answers);
     res.json({ replies: [...step.replies, `— [interno] Resumo para o vendedor: ${summary}`], simulated: true });
     return;
   }

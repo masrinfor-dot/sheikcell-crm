@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db, queueEntriesTable, usersTable, sectorsTable, attendanceLogsTable } from "@workspace/db";
 import { eq, and, asc, sql, desc } from "drizzle-orm";
-import { requireAuth } from "../middlewares/auth";
+import { requireAuth, requireTenant } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
@@ -12,6 +12,7 @@ function canActOnEntry(userRole: string, userSectorId: number | null, entrySecto
 }
 
 router.get("/queue", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const sectorIdParam = req.query.sectorId;
   const statusParam = req.query.status as string | undefined;
 
@@ -43,7 +44,8 @@ router.get("/queue", requireAuth, async (req, res): Promise<void> => {
     effectiveSectorId = userSectorId;
   }
 
-  const conditions = [];
+  // Fila sempre restrita à loja (tenant) do usuário.
+  const conditions = [eq(queueEntriesTable.tenantId, tenantId)];
 
   if (effectiveSectorId !== null) {
     conditions.push(eq(queueEntriesTable.sectorId, effectiveSectorId));
@@ -58,22 +60,17 @@ router.get("/queue", requireAuth, async (req, res): Promise<void> => {
     conditions.push(sql`${queueEntriesTable.status} IN ('waiting', 'in_progress')`);
   }
 
-  const entries = conditions.length
-    ? await db
-        .select()
-        .from(queueEntriesTable)
-        .where(and(...conditions))
-        .orderBy(asc(queueEntriesTable.position), asc(queueEntriesTable.createdAt))
-    : await db
-        .select()
-        .from(queueEntriesTable)
-        .where(sql`${queueEntriesTable.status} IN ('waiting', 'in_progress')`)
-        .orderBy(asc(queueEntriesTable.position), asc(queueEntriesTable.createdAt));
+  const entries = await db
+    .select()
+    .from(queueEntriesTable)
+    .where(and(...conditions))
+    .orderBy(asc(queueEntriesTable.position), asc(queueEntriesTable.createdAt));
 
   res.json(entries);
 });
 
 router.post("/queue", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { clientName, clientContact, sectorId, channel, notes } = req.body as {
     clientName?: string;
     clientContact?: string;
@@ -96,7 +93,7 @@ router.post("/queue", requireAuth, async (req, res): Promise<void> => {
   const [lastInQueue] = await db
     .select({ position: queueEntriesTable.position })
     .from(queueEntriesTable)
-    .where(and(eq(queueEntriesTable.sectorId, sectorId), sql`${queueEntriesTable.status} IN ('waiting', 'in_progress')`))
+    .where(and(eq(queueEntriesTable.tenantId, tenantId), eq(queueEntriesTable.sectorId, sectorId), sql`${queueEntriesTable.status} IN ('waiting', 'in_progress')`))
     .orderBy(desc(queueEntriesTable.position))
     .limit(1);
 
@@ -105,6 +102,7 @@ router.post("/queue", requireAuth, async (req, res): Promise<void> => {
   const [entry] = await db
     .insert(queueEntriesTable)
     .values({
+      tenantId,
       clientName,
       clientContact,
       sectorId,
@@ -119,11 +117,13 @@ router.post("/queue", requireAuth, async (req, res): Promise<void> => {
 });
 
 router.patch("/queue/:id/call", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const id = parseInt(rawId, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
 
-  const [existing] = await db.select().from(queueEntriesTable).where(eq(queueEntriesTable.id, id));
+  const [existing] = await db.select().from(queueEntriesTable)
+    .where(and(eq(queueEntriesTable.id, id), eq(queueEntriesTable.tenantId, tenantId)));
   if (!existing) { res.status(404).json({ error: "Entrada não encontrada" }); return; }
 
   if (!canActOnEntry(req.session.userRole!, req.session.userSectorId ?? null, existing.sectorId)) {
@@ -133,7 +133,7 @@ router.patch("/queue/:id/call", requireAuth, async (req, res): Promise<void> => 
   const [entry] = await db
     .update(queueEntriesTable)
     .set({ status: "in_progress", attendantId: req.session.userId, calledAt: new Date() })
-    .where(and(eq(queueEntriesTable.id, id), eq(queueEntriesTable.status, "waiting")))
+    .where(and(eq(queueEntriesTable.id, id), eq(queueEntriesTable.tenantId, tenantId), eq(queueEntriesTable.status, "waiting")))
     .returning();
 
   if (!entry) { res.status(409).json({ error: "Entrada já em atendimento ou não encontrada" }); return; }
@@ -141,11 +141,13 @@ router.patch("/queue/:id/call", requireAuth, async (req, res): Promise<void> => 
 });
 
 router.patch("/queue/:id/start", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const id = parseInt(rawId, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
 
-  const [existing] = await db.select().from(queueEntriesTable).where(eq(queueEntriesTable.id, id));
+  const [existing] = await db.select().from(queueEntriesTable)
+    .where(and(eq(queueEntriesTable.id, id), eq(queueEntriesTable.tenantId, tenantId)));
   if (!existing) { res.status(404).json({ error: "Entrada não encontrada" }); return; }
 
   if (!canActOnEntry(req.session.userRole!, req.session.userSectorId ?? null, existing.sectorId)) {
@@ -155,7 +157,7 @@ router.patch("/queue/:id/start", requireAuth, async (req, res): Promise<void> =>
   const [entry] = await db
     .update(queueEntriesTable)
     .set({ startedAt: new Date() })
-    .where(eq(queueEntriesTable.id, id))
+    .where(and(eq(queueEntriesTable.id, id), eq(queueEntriesTable.tenantId, tenantId)))
     .returning();
 
   if (!entry) { res.status(404).json({ error: "Entrada não encontrada" }); return; }
@@ -163,11 +165,13 @@ router.patch("/queue/:id/start", requireAuth, async (req, res): Promise<void> =>
 });
 
 router.patch("/queue/:id/complete", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const id = parseInt(rawId, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
 
-  const [existing] = await db.select().from(queueEntriesTable).where(eq(queueEntriesTable.id, id));
+  const [existing] = await db.select().from(queueEntriesTable)
+    .where(and(eq(queueEntriesTable.id, id), eq(queueEntriesTable.tenantId, tenantId)));
   if (!existing) { res.status(404).json({ error: "Entrada não encontrada" }); return; }
 
   if (!canActOnEntry(req.session.userRole!, req.session.userSectorId ?? null, existing.sectorId)) {
@@ -177,14 +181,16 @@ router.patch("/queue/:id/complete", requireAuth, async (req, res): Promise<void>
   const [entry] = await db
     .update(queueEntriesTable)
     .set({ status: "completed", completedAt: new Date() })
-    .where(eq(queueEntriesTable.id, id))
+    .where(and(eq(queueEntriesTable.id, id), eq(queueEntriesTable.tenantId, tenantId)))
     .returning();
 
   if (!entry) { res.status(404).json({ error: "Entrada não encontrada" }); return; }
 
-  // Create attendance log
-  const [attendant] = await db.select().from(usersTable).where(eq(usersTable.id, req.session.userId!));
-  const [sector] = await db.select().from(sectorsTable).where(eq(sectorsTable.id, entry.sectorId));
+  // Create attendance log (dentro da loja)
+  const [attendant] = await db.select().from(usersTable)
+    .where(and(eq(usersTable.id, req.session.userId!), eq(usersTable.tenantId, tenantId)));
+  const [sector] = await db.select().from(sectorsTable)
+    .where(and(eq(sectorsTable.id, entry.sectorId), eq(sectorsTable.tenantId, tenantId)));
 
   const now = new Date();
   const waitSeconds = entry.calledAt
@@ -195,6 +201,7 @@ router.patch("/queue/:id/complete", requireAuth, async (req, res): Promise<void>
     : null;
 
   await db.insert(attendanceLogsTable).values({
+    tenantId,
     queueEntryId: entry.id,
     clientName: entry.clientName,
     clientContact: entry.clientContact,
@@ -213,6 +220,7 @@ router.patch("/queue/:id/complete", requireAuth, async (req, res): Promise<void>
 });
 
 router.patch("/queue/:id/transfer", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const id = parseInt(rawId, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
@@ -220,17 +228,23 @@ router.patch("/queue/:id/transfer", requireAuth, async (req, res): Promise<void>
   const { targetSectorId } = req.body as { targetSectorId?: number };
   if (!targetSectorId) { res.status(400).json({ error: "Setor de destino é obrigatório" }); return; }
 
-  const [existingEntry] = await db.select().from(queueEntriesTable).where(eq(queueEntriesTable.id, id));
+  const [existingEntry] = await db.select().from(queueEntriesTable)
+    .where(and(eq(queueEntriesTable.id, id), eq(queueEntriesTable.tenantId, tenantId)));
   if (!existingEntry) { res.status(404).json({ error: "Entrada não encontrada" }); return; }
 
   if (!canActOnEntry(req.session.userRole!, req.session.userSectorId ?? null, existingEntry.sectorId)) {
     res.status(403).json({ error: "Acesso negado a este setor" }); return;
   }
 
+  // Setor de destino precisa pertencer à mesma loja (tenant).
+  const [targetSector] = await db.select({ id: sectorsTable.id }).from(sectorsTable)
+    .where(and(eq(sectorsTable.id, targetSectorId), eq(sectorsTable.tenantId, tenantId)));
+  if (!targetSector) { res.status(400).json({ error: "Setor de destino inválido" }); return; }
+
   const [lastInTarget] = await db
     .select({ position: queueEntriesTable.position })
     .from(queueEntriesTable)
-    .where(and(eq(queueEntriesTable.sectorId, targetSectorId), sql`${queueEntriesTable.status} IN ('waiting', 'in_progress')`))
+    .where(and(eq(queueEntriesTable.tenantId, tenantId), eq(queueEntriesTable.sectorId, targetSectorId), sql`${queueEntriesTable.status} IN ('waiting', 'in_progress')`))
     .orderBy(desc(queueEntriesTable.position))
     .limit(1);
 
@@ -239,13 +253,16 @@ router.patch("/queue/:id/transfer", requireAuth, async (req, res): Promise<void>
   const [entry] = await db
     .update(queueEntriesTable)
     .set({ sectorId: targetSectorId, status: "waiting", attendantId: null, position: nextPosition, calledAt: null })
-    .where(eq(queueEntriesTable.id, id))
+    .where(and(eq(queueEntriesTable.id, id), eq(queueEntriesTable.tenantId, tenantId)))
     .returning();
 
-  const [sector] = await db.select().from(sectorsTable).where(eq(sectorsTable.id, existingEntry.sectorId));
-  const [attendant] = await db.select().from(usersTable).where(eq(usersTable.id, req.session.userId!));
+  const [sector] = await db.select().from(sectorsTable)
+    .where(and(eq(sectorsTable.id, existingEntry.sectorId), eq(sectorsTable.tenantId, tenantId)));
+  const [attendant] = await db.select().from(usersTable)
+    .where(and(eq(usersTable.id, req.session.userId!), eq(usersTable.tenantId, tenantId)));
 
   await db.insert(attendanceLogsTable).values({
+    tenantId,
     queueEntryId: existingEntry.id,
     clientName: existingEntry.clientName,
     clientContact: existingEntry.clientContact,
@@ -262,18 +279,21 @@ router.patch("/queue/:id/transfer", requireAuth, async (req, res): Promise<void>
 });
 
 router.delete("/queue/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const id = parseInt(rawId, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
 
-  const [existing] = await db.select().from(queueEntriesTable).where(eq(queueEntriesTable.id, id));
+  const [existing] = await db.select().from(queueEntriesTable)
+    .where(and(eq(queueEntriesTable.id, id), eq(queueEntriesTable.tenantId, tenantId)));
   if (!existing) { res.status(404).json({ error: "Entrada não encontrada" }); return; }
 
   if (!canActOnEntry(req.session.userRole!, req.session.userSectorId ?? null, existing.sectorId)) {
     res.status(403).json({ error: "Acesso negado a este setor" }); return;
   }
 
-  await db.update(queueEntriesTable).set({ status: "completed", completedAt: new Date() }).where(eq(queueEntriesTable.id, id));
+  await db.update(queueEntriesTable).set({ status: "completed", completedAt: new Date() })
+    .where(and(eq(queueEntriesTable.id, id), eq(queueEntriesTable.tenantId, tenantId)));
   res.json({ ok: true });
 });
 

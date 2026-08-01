@@ -1,5 +1,6 @@
 import bcrypt from "bcryptjs";
-import { db, usersTable, sectorsTable, quickRepliesTable } from "@workspace/db";
+import { db, usersTable, sectorsTable, quickRepliesTable, tenantsTable } from "@workspace/db";
+import { sql } from "drizzle-orm";
 import { eq, count } from "drizzle-orm";
 import { logger } from "./logger";
 
@@ -51,8 +52,65 @@ function resolveAdminPassword(): string {
   return "admin123";
 }
 
+// Superadmin (dono do sistema): fica acima das lojas, cria/suspende tenants.
+const SUPERADMIN_EMAIL = process.env["SUPERADMIN_EMAIL"] ?? "superadmin@sheikcell.com";
+
+function resolveSuperadminPassword(): string {
+  if (process.env["SUPERADMIN_PASSWORD"]) return process.env["SUPERADMIN_PASSWORD"];
+  if (process.env["NODE_ENV"] === "production") {
+    const chars = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#";
+    let pwd = "";
+    for (let i = 0; i < 16; i++) pwd += chars[Math.floor(Math.random() * chars.length)];
+    return pwd;
+  }
+  return "superadmin123";
+}
+
+async function ensureTenantAndSuperadmin(): Promise<void> {
+  // Tenant 1 = loja original (backfill default de tenant_id)
+  await db
+    .insert(tenantsTable)
+    .values({ id: 1, name: "Sheikcell" })
+    .onConflictDoNothing();
+  await db.execute(sql`SELECT setval('tenants_id_seq', GREATEST((SELECT COALESCE(MAX(id),1) FROM tenants), 1))`);
+
+  const email = SUPERADMIN_EMAIL.trim().toLowerCase();
+  const [existing] = await db
+    .select({ id: usersTable.id, role: usersTable.role })
+    .from(usersTable)
+    .where(eq(usersTable.email, email))
+    .limit(1);
+  if (process.env["SUPERADMIN_EMAIL"] && process.env["SUPERADMIN_PASSWORD"]) {
+    // Self-heal: garante o superadmin com essas credenciais
+    const passwordHash = await bcrypt.hash(process.env["SUPERADMIN_PASSWORD"], 10);
+    if (existing) {
+      await db.update(usersTable).set({ passwordHash, role: "superadmin", isActive: true }).where(eq(usersTable.id, existing.id));
+    } else {
+      await db.insert(usersTable).values({ name: "Superadmin", email, passwordHash, role: "superadmin", isActive: true });
+    }
+    return;
+  }
+  if (!existing) {
+    // Em produção o superadmin SÓ é criado com credencial configurada por env
+    // var — nunca gerada e logada (segredo em log de servidor é vazamento).
+    if (process.env["NODE_ENV"] === "production" && !process.env["SUPERADMIN_PASSWORD"]) {
+      logger.warn({ email }, "Superadmin NÃO criado: defina SUPERADMIN_EMAIL / SUPERADMIN_PASSWORD nas env vars de produção e reinicie.");
+      return;
+    }
+    const password = resolveSuperadminPassword();
+    const passwordHash = await bcrypt.hash(password, 10);
+    await db.insert(usersTable).values({ name: "Superadmin", email, passwordHash, role: "superadmin", isActive: true });
+    if (process.env["NODE_ENV"] === "production") {
+      logger.warn({ email }, "⚠️  First-run SUPERADMIN created from env vars. Change the password after first login if it was shared.");
+    } else {
+      logger.info({ email }, "Seeded superadmin user (dev)");
+    }
+  }
+}
+
 export async function ensureSeed(): Promise<void> {
   try {
+    await ensureTenantAndSuperadmin().catch((err) => logger.error({ err }, "Tenant/superadmin seed failed"));
     await ensureQuickReplies().catch((err) => logger.error({ err }, "Quick replies seed failed"));
     // Seed sectors if none exist
     const [{ sectorCount }] = await db

@@ -6,6 +6,7 @@ import { AuthProvider, useAuth } from "@/lib/auth";
 import LoginPage from "@/pages/LoginPage";
 import AttendantDashboard from "@/pages/AttendantDashboard";
 import AdminDashboard from "@/pages/AdminDashboard";
+import SuperAdminDashboard from "@/pages/SuperAdminDashboard";
 import NotFound from "@/pages/not-found";
 import Candidatura from "@/pages/Candidatura";
 
@@ -52,7 +53,13 @@ function AppRoutes() {
         )}
       </Route>
       <Route path="/">
-        {!user ? <Redirect to="/login" /> : (user.role === "admin" || user.role === "supervisor") ? <AdminDashboard /> : <AttendantDashboard />}
+        {!user
+          ? <Redirect to="/login" />
+          : user.role === "superadmin"
+            ? <SuperAdminDashboard />
+            : (user.role === "admin" || user.role === "supervisor")
+              ? <AdminDashboard />
+              : <AttendantDashboard />}
       </Route>
       <Route component={NotFound} />
     </Switch>

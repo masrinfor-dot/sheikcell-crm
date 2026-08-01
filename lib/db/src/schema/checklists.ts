@@ -5,6 +5,7 @@ import { usersTable } from "./users";
 // diário por função etc. Aparecem automaticamente na data/recorrência
 // configurada; se obrigatório, trava o uso do sistema até responder.
 export const checklistsTable = pgTable("checklists", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   title: text("title").notNull(),
   description: text("description"),
@@ -21,6 +22,7 @@ export const checklistsTable = pgTable("checklists", {
 });
 
 export const checklistResponsesTable = pgTable("checklist_responses", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   checklistId: integer("checklist_id").notNull().references(() => checklistsTable.id, { onDelete: "cascade" }),
   userId: integer("user_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }),

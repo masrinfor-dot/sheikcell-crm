@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db, tradeInEvaluationsTable, usersTable, appSettingsTable } from "@workspace/db";
-import { eq, desc } from "drizzle-orm";
-import { requireAuth, requireAdmin } from "../middlewares/auth";
+import { eq, and, desc } from "drizzle-orm";
+import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
 import { requirePerm } from "../lib/permissions";
 
 const router: IRouter = Router();
@@ -12,7 +12,8 @@ const lastCallByUser = new Map<number, number>();
 const inFlight = new Set<number>();
 
 // Histórico das últimas avaliações (toda a equipe vê, para consulta rápida).
-router.get("/trade-in", requireAuth, async (_req, res): Promise<void> => {
+router.get("/trade-in", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rows = await db
     .select({
       id: tradeInEvaluationsTable.id,
@@ -31,6 +32,7 @@ router.get("/trade-in", requireAuth, async (_req, res): Promise<void> => {
     })
     .from(tradeInEvaluationsTable)
     .leftJoin(usersTable, eq(tradeInEvaluationsTable.userId, usersTable.id))
+    .where(eq(tradeInEvaluationsTable.tenantId, tenantId))
     .orderBy(desc(tradeInEvaluationsTable.createdAt))
     .limit(200);
   res.json(rows);
@@ -45,8 +47,10 @@ type Margins = { t1: number; t2: number; t3: number };
 const MARGIN_DEFAULTS: Margins = { t1: 40, t2: 30, t3: 20 };
 const MARGINS_KEY = "trade_in_margins";
 
-async function getMargins(): Promise<Margins> {
-  const [row] = await db.select().from(appSettingsTable).where(eq(appSettingsTable.key, MARGINS_KEY)).limit(1);
+// Multi-loja: margens POR LOJA (app_settings tem PK composta tenant_id+key).
+async function getMargins(tenantId: number): Promise<Margins> {
+  const [row] = await db.select().from(appSettingsTable)
+    .where(and(eq(appSettingsTable.tenantId, tenantId), eq(appSettingsTable.key, MARGINS_KEY))).limit(1);
   if (!row) return { ...MARGIN_DEFAULTS };
   try {
     const p = JSON.parse(row.value) as Partial<Margins>;
@@ -60,13 +64,15 @@ async function getMargins(): Promise<Margins> {
   }
 }
 
-router.get("/trade-in/margins", requireAuth, async (_req, res): Promise<void> => {
-  res.json(await getMargins());
+router.get("/trade-in/margins", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  res.json(await getMargins(tenantId));
 });
 
 router.patch("/trade-in/margins", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const body = req.body as Partial<Margins>;
-  const cur = await getMargins();
+  const cur = await getMargins(tenantId);
   const next: Margins = { ...cur };
   for (const k of ["t1", "t2", "t3"] as const) {
     if (body[k] === undefined) continue;
@@ -78,8 +84,12 @@ router.patch("/trade-in/margins", requireAdmin, async (req, res): Promise<void> 
     next[k] = n;
   }
   await db.insert(appSettingsTable)
-    .values({ key: MARGINS_KEY, value: JSON.stringify(next) })
-    .onConflictDoUpdate({ target: appSettingsTable.key, set: { value: JSON.stringify(next) } });
+    .values({ tenantId, key: MARGINS_KEY, value: JSON.stringify(next) })
+    .onConflictDoUpdate({
+      // Chave composta: nunca sobrescreve a margem de outra loja.
+      target: [appSettingsTable.tenantId, appSettingsTable.key],
+      set: { value: JSON.stringify(next) },
+    });
   res.json(next);
 });
 
@@ -123,6 +133,7 @@ function extractJson<T>(raw: string): T | null {
 // Preço base (estilo Trocafone): logo após informar marca/modelo/memória/cor,
 // estima o valor MÁXIMO de compra para aparelho em perfeito estado.
 router.post("/trade-in/base-price", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { brand, model, memory, color } = req.body as { brand?: string; model?: string; memory?: string; color?: string };
   const fBrand = clean(brand, 40);
   const fModel = clean(model, 60);
@@ -133,7 +144,7 @@ router.post("/trade-in/base-price", requireAuth, requirePerm("usar_ia"), async (
 
   const marginTableRaw = (req.body as { marginTable?: unknown }).marginTable;
   const marginTable = marginTableRaw === 1 || marginTableRaw === 2 || marginTableRaw === 3 ? marginTableRaw : 2;
-  const margins = await getMargins();
+  const margins = await getMargins(tenantId);
   const marginPct = marginTable === 1 ? margins.t1 : marginTable === 2 ? margins.t2 : margins.t3;
   const payPct = 100 - marginPct;
 
@@ -173,6 +184,7 @@ router.post("/trade-in/base-price", requireAuth, requirePerm("usar_ia"), async (
 
 // Avaliação com IA: pesquisa preços atuais na web e sugere valor de compra.
 router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { device, answers, brand, model, memory, color } = req.body as {
     device?: string; answers?: Answers;
     brand?: string; model?: string; memory?: string; color?: string;
@@ -209,7 +221,7 @@ router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (re
   // Tabela de margem escolhida (1 = maior, 2 = média, 3 = menor).
   const marginTableRaw = (req.body as { marginTable?: unknown }).marginTable;
   const marginTable = marginTableRaw === 1 || marginTableRaw === 2 || marginTableRaw === 3 ? marginTableRaw : 2;
-  const margins = await getMargins();
+  const margins = await getMargins(tenantId);
   const marginPct = marginTable === 1 ? margins.t1 : marginTable === 2 ? margins.t2 : margins.t3;
   const payPct = 100 - marginPct;
 
@@ -262,6 +274,7 @@ router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (re
     }
 
     const [saved] = await db.insert(tradeInEvaluationsTable).values({
+      tenantId,
       userId: req.session.userId ?? null,
       device: dev.slice(0, 160),
       brand: fBrand || null,

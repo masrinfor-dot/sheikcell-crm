@@ -4,6 +4,7 @@ import { usersTable } from "./users";
 // Arquivo de documentos da loja: atas de reunião, contratos, comunicados etc.
 // O arquivo em si fica no disco (DOCS_DIR); aqui só os metadados.
 export const documentsTable = pgTable("documents", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   title: text("title").notNull(),
   category: text("category").notNull().default("documento"), // ata | documento | comunicado | contrato

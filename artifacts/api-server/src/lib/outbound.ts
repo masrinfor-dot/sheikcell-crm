@@ -15,6 +15,7 @@ export async function sendOutboundText(conversationId: number, content: string, 
   if (!conv || !conv.phone) return false;
 
   const [msg] = await db.insert(messagesTable).values({
+    tenantId: conv.tenantId,
     conversationId: conv.id,
     content,
     direction: "outbound",
@@ -30,8 +31,8 @@ export async function sendOutboundText(conversationId: number, content: string, 
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, conv.id));
 
-  broadcast("message", { conversationId: conv.id, message: msg }, conv.sectorId,
-    isPotentialConversation(conv), await restrictedRecipients(conv));
+  broadcast("message", { conversationId: conv.id, message: msg },
+    { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
 
   let delivered = true;
   if (conv.channel === "whatsapp") {
@@ -55,8 +56,8 @@ export async function sendOutboundText(conversationId: number, content: string, 
       const [failedMsg] = await db.update(messagesTable).set({ status: "failed" })
         .where(eq(messagesTable.id, msg.id)).returning();
       if (failedMsg) {
-        broadcast("message_updated", { conversationId: conv.id, message: failedMsg }, conv.sectorId,
-          isPotentialConversation(conv), await restrictedRecipients(conv));
+        broadcast("message_updated", { conversationId: conv.id, message: failedMsg },
+          { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
       }
     }
   }

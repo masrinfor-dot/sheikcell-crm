@@ -6,9 +6,9 @@
  */
 import { Router, type IRouter } from "express";
 import { createHmac } from "node:crypto";
-import { requireFeature } from "../middlewares/auth";
+import { requireFeature, requireTenant } from "../middlewares/auth";
 import { db, whatsappSessionsTable, conversationsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 const router: IRouter = Router();
 
@@ -41,12 +41,13 @@ export interface AdminWAState extends BridgeWAState {
   bridgeAvailable: boolean;
 }
 
-async function persistSessionState(key: string, state: BridgeWAState): Promise<void> {
+async function persistSessionState(tenantId: number, key: string, state: BridgeWAState): Promise<void> {
   try {
     const isConnected = state.status === "connected";
     await db
       .insert(whatsappSessionsTable)
       .values({
+        tenantId,
         sessionKey: key,
         status: state.status,
         phoneNumber: state.phoneNumber,
@@ -71,9 +72,12 @@ async function persistSessionState(key: string, state: BridgeWAState): Promise<v
   }
 }
 
-async function getSessionRows(): Promise<(typeof whatsappSessionsTable.$inferSelect)[]> {
+// Multi-loja: lista apenas as conexões (whatsapp_sessions) da loja do usuário.
+async function getSessionRows(tenantId: number): Promise<(typeof whatsappSessionsTable.$inferSelect)[]> {
   try {
-    return await db.select().from(whatsappSessionsTable).orderBy(whatsappSessionsTable.id);
+    return await db.select().from(whatsappSessionsTable)
+      .where(eq(whatsappSessionsTable.tenantId, tenantId))
+      .orderBy(whatsappSessionsTable.id);
   } catch {
     return [];
   }
@@ -117,8 +121,13 @@ function offlineState(
 }
 
 // ─── List all connections (DB rows merged with live bridge state) ──────────
-router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (_req, res): Promise<void> => {
-  const rows = await getSessionRows();
+// Multi-loja: só as conexões da loja do usuário. As chaves pertencentes à loja
+// são as linhas do DB dessa loja (mais a "default" quando é a loja 1 legada);
+// o estado ao vivo do bridge é mesclado só para essas chaves — nunca expomos
+// conexões de outras lojas mesmo que o bridge as conheça.
+router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rows = await getSessionRows(tenantId);
   const rowMap = new Map(rows.map((r) => [r.sessionKey, r]));
 
   let bridgeStates: BridgeWAState[] = [];
@@ -131,18 +140,19 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (_req, res): 
     bridgeAvailable = false;
   }
 
-  const keys = [...new Set<string>([
-    ...rows.map((r) => r.sessionKey),
-    ...bridgeStates.map((s) => s.sessionKey ?? DEFAULT_SESSION_KEY),
-  ])];
-  if (keys.length === 0) keys.push(DEFAULT_SESSION_KEY);
+  // Chaves visíveis a esta loja: as linhas do DB da loja + a "default" (loja 1).
+  const keys = [...new Set<string>(rows.map((r) => r.sessionKey))];
+  if (tenantId === 1) keys.push(DEFAULT_SESSION_KEY);
+  const uniqueKeys = [...new Set(keys)];
+  // Sem fallback para a "default" fora da loja 1 — loja nova sem conexões vê
+  // lista vazia (fail closed), nunca a conexão de outra loja.
 
   const result: AdminWAState[] = [];
-  for (const key of keys) {
+  for (const key of uniqueKeys) {
     const row = rowMap.get(key);
     const live = bridgeStates.find((s) => s.sessionKey === key);
     if (live) {
-      await persistSessionState(key, live);
+      await persistSessionState(tenantId, key, live);
       result.push({
         ...live,
         sessionKey: key,
@@ -174,6 +184,7 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (_req, res): 
 
 // ─── Create a new connection ────────────────────────────────────────────────
 router.post("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { displayName } = req.body as { displayName?: string };
   const name = (displayName ?? "").trim();
   if (!name) {
@@ -182,16 +193,20 @@ router.post("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): 
   }
 
   // Generate a key from the name: "Vendas 2" → "vendas-2"
-  let key = name
+  let slug = name
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 30);
-  if (!key || !VALID_KEY.test(key)) key = `conexao-${Date.now().toString(36)}`;
+    .slice(0, 20);
+  if (!slug) slug = `conexao-${Date.now().toString(36)}`;
+  // Multi-loja: toda chave nova é prefixada t{tenantId}- para isolar as lojas
+  // (chaves legadas sem prefixo pertencem à loja 1). Mantém o padrão VALID_KEY.
+  let key = `t${tenantId}-${slug}`.slice(0, 40);
+  if (!VALID_KEY.test(key)) key = `t${tenantId}-conexao-${Date.now().toString(36)}`.slice(0, 40);
 
-  const rows = await getSessionRows();
+  const rows = await getSessionRows(tenantId);
   if (rows.some((r) => r.sessionKey === key)) {
     res.status(409).json({ error: "Já existe uma conexão com esse nome" });
     return;
@@ -199,6 +214,7 @@ router.post("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): 
 
   try {
     await db.insert(whatsappSessionsTable).values({
+      tenantId,
       sessionKey: key,
       displayName: name,
       status: "connecting",
@@ -219,25 +235,32 @@ router.post("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): 
 
 // ─── Rename a connection ────────────────────────────────────────────────────
 router.post("/whatsapp/sessions/:key/rename", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
   const { displayName } = req.body as { displayName?: string };
   const name = (displayName ?? "").trim();
   if (!name) { res.status(400).json({ error: "Nome obrigatório" }); return; }
-  await db
+  // Só renomeia se a conexão for da loja do usuário (fail closed).
+  const [updated] = await db
     .update(whatsappSessionsTable)
     .set({ displayName: name, updatedAt: new Date() })
-    .where(eq(whatsappSessionsTable.sessionKey, key));
+    .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId)))
+    .returning();
+  if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
   res.json({ ok: true });
 });
 
 // ─── Remove a connection ────────────────────────────────────────────────────
 router.delete("/whatsapp/sessions/:key", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
   if (!VALID_KEY.test(key)) { res.status(400).json({ error: "Conexão inválida" }); return; }
 
-  // Conexão principal: o bridge apaga tudo (logout + credenciais) e volta
-  // zerada aguardando um novo QR. Não mexer nas conversas nem na linha do DB.
+  // Conexão principal (default = loja 1): o bridge apaga tudo (logout +
+  // credenciais) e volta zerada aguardando um novo QR. Não mexer nas conversas
+  // nem na linha do DB. Só a loja 1 pode operar a conexão legada.
   if (key === DEFAULT_SESSION_KEY) {
+    if (tenantId !== 1) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
     try {
       const { ok, data, status } = await fetchFromBridge(`/whatsapp/sessions/${key}`, "DELETE");
       if (!ok) { res.status(status).json(data); return; }
@@ -248,37 +271,54 @@ router.delete("/whatsapp/sessions/:key", requireFeature("whatsapp"), async (req,
     return;
   }
 
+  // Fail closed: só apaga uma conexão que pertença à loja do usuário.
+  const [owned] = await db.select({ id: whatsappSessionsTable.id }).from(whatsappSessionsTable)
+    .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId)))
+    .limit(1);
+  if (!owned) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+
   try {
     const { ok, data, status } = await fetchFromBridge(`/whatsapp/sessions/${key}`, "DELETE");
     if (!ok) { res.status(status).json(data); return; }
   } catch {
     // Bridge offline — still remove the DB row so it won't be restarted.
-    await db.delete(whatsappSessionsTable).where(eq(whatsappSessionsTable.sessionKey, key));
+    await db.delete(whatsappSessionsTable)
+      .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId)));
   }
 
-  // Conversations from this connection keep working through the default one.
-  await db
-    .update(conversationsTable)
-    .set({ sessionKey: DEFAULT_SESSION_KEY })
-    .where(eq(conversationsTable.sessionKey, key));
+  // Reatribuição de conversas: SÓ a loja 1 (legado) pode voltar para a conexão
+  // "default" — para as demais lojas, `default` pertence à loja 1 e reatribuir
+  // enviaria mensagens pelo WhatsApp de outra loja. Nessas, as conversas mantêm
+  // a sessionKey antiga (envios passam a falhar explicitamente até o lojista
+  // conectar outra sessão — nunca vazam por conexão alheia).
+  if (tenantId === 1) {
+    await db
+      .update(conversationsTable)
+      .set({ sessionKey: DEFAULT_SESSION_KEY })
+      .where(and(eq(conversationsTable.sessionKey, key), eq(conversationsTable.tenantId, tenantId)));
+  }
 
   res.json({ ok: true });
 });
 
 // ─── Status (single session; ?session=key, default "default") ──────────────
 router.get("/whatsapp/status", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const raw = req.query["session"];
   if (raw !== undefined && (typeof raw !== "string" || !VALID_KEY.test(raw))) {
     res.status(400).json({ error: "Conexão inválida" });
     return;
   }
   const key = typeof raw === "string" && raw ? raw : DEFAULT_SESSION_KEY;
+  // Fail closed: só consulta conexões da própria loja (default = loja 1).
+  const rows = await getSessionRows(tenantId);
+  const ownsKey = rows.some((r) => r.sessionKey === key) || (key === DEFAULT_SESSION_KEY && tenantId === 1);
+  if (!ownsKey) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
   try {
     const { ok, data } = await fetchFromBridge(`/whatsapp/status?session=${encodeURIComponent(key)}`);
     if (ok) {
       const bridgeState = data as BridgeWAState;
-      await persistSessionState(key, bridgeState);
-      const rows = await getSessionRows();
+      await persistSessionState(tenantId, key, bridgeState);
       const row = rows.find((r) => r.sessionKey === key);
       const result: AdminWAState = {
         ...bridgeState,
@@ -292,24 +332,28 @@ router.get("/whatsapp/status", requireFeature("whatsapp"), async (req, res): Pro
     }
     throw new Error(`Bridge returned non-OK status`);
   } catch {
-    const rows = await getSessionRows();
     res.json(offlineState(rows.find((r) => r.sessionKey === key), key));
   }
 });
 
 // ─── Reset (new QR) ─────────────────────────────────────────────────────────
 router.post("/whatsapp/reset", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { session } = req.body as { session?: string };
   if (session !== undefined && (typeof session !== "string" || !VALID_KEY.test(session))) {
     res.status(400).json({ error: "Conexão inválida" });
     return;
   }
   const key = session ?? DEFAULT_SESSION_KEY;
+  // Fail closed: só reseta conexões da própria loja (default = loja 1).
+  const rows = await getSessionRows(tenantId);
+  const ownsKey = rows.some((r) => r.sessionKey === key) || (key === DEFAULT_SESSION_KEY && tenantId === 1);
+  if (!ownsKey) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
   try {
     const { ok, data, status } = await fetchFromBridge("/whatsapp/reset", "POST", { session: key });
     res.status(status).json(data);
     if (ok) {
-      await persistSessionState(key, {
+      await persistSessionState(tenantId, key, {
         mode: "baileys",
         status: "connecting",
         phoneNumber: null,
@@ -324,6 +368,15 @@ router.post("/whatsapp/reset", requireFeature("whatsapp"), async (req, res): Pro
 });
 
 router.post("/whatsapp/send", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  // Fail closed: só permite enviar por uma conexão da própria loja. Sem session
+  // informada, assume a conexão padrão (default = loja 1).
+  const session = typeof (req.body as { session?: unknown })?.session === "string"
+    ? (req.body as { session: string }).session
+    : DEFAULT_SESSION_KEY;
+  const rows = await getSessionRows(tenantId);
+  const ownsKey = rows.some((r) => r.sessionKey === session) || (session === DEFAULT_SESSION_KEY && tenantId === 1);
+  if (!ownsKey) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
   try {
     const { ok, data, status } = await fetchFromBridge("/whatsapp/send", "POST", req.body);
     res.status(status).json(data);

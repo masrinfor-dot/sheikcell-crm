@@ -1,7 +1,8 @@
-import { pgTable, serial, text, integer, timestamp, jsonb, boolean } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, timestamp, jsonb, boolean, primaryKey } from "drizzle-orm/pg-core";
 
 // Robô de pré-atendimento: configuração única (linha singleton).
 export const botSettingsTable = pgTable("bot_settings", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   enabled: boolean("enabled").notNull().default(false),
   botName: text("bot_name").notNull().default("Assistente"),
@@ -35,7 +36,13 @@ export const botStatesTable = pgTable("bot_states", {
 });
 
 // Contador diário de respostas de IA (controle de custo).
-export const botUsageTable = pgTable("bot_usage", {
-  day: text("day").primaryKey(), // YYYY-MM-DD (America/Sao_Paulo)
-  count: integer("count").notNull().default(0),
-});
+export const botUsageTable = pgTable(
+  "bot_usage",
+  {
+    tenantId: integer("tenant_id").notNull().default(1),
+    day: text("day").notNull(), // YYYY-MM-DD (America/Sao_Paulo)
+    count: integer("count").notNull().default(0),
+  },
+  // Um contador por loja por dia (multi-tenant)
+  (t) => [primaryKey({ columns: [t.tenantId, t.day] })],
+);

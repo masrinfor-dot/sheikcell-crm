@@ -3,6 +3,7 @@ import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
 export const queueEntriesTable = pgTable("queue_entries", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   clientName: text("client_name").notNull(),
   clientContact: text("client_contact"),

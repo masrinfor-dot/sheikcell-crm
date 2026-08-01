@@ -4,6 +4,7 @@ import { usersTable } from "./users";
 // Avaliações de compra de celulares usados (estilo Trocafone): o vendedor
 // descreve o aparelho e o estado, a IA pesquisa preços e sugere valor.
 export const tradeInEvaluationsTable = pgTable("trade_in_evaluations", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   userId: integer("user_id").references(() => usersTable.id, { onDelete: "set null" }),
   device: text("device").notNull(),            // ex.: "iPhone 13 128GB" (texto composto p/ IA e exibição)

@@ -1,3 +1,4 @@
+- [Multi-loja (tenant) architecture](multi-tenant.md) — SaaS tenancy: every query tenant-filtered (fail closed), requireTenant helper, broadcast needs tenantId, superadmin role above admin
 - [Chat module architecture](chat-module.md) — Central de Atendimento is SSE-based; frontend uses api.chat.* methods; no OpenAPI codegen, all in api.ts
 - [AttendantDashboard Fragment quirk](attendant-fragment.md) — queue tab uses `<>...</>` Fragment wrapper; inserting new tabs before "queue" is safe, but the Fragment must stay intact
 - [Routing keyword matching gotcha](routing-keywords.md) — autoRouter uses substring match + accent normalization; "nao liga" ≠ "nao esta ligando"; use "ligando" not "nao liga" for that pattern

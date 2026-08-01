@@ -480,7 +480,26 @@ export type ChatMessage = {
   createdAt: string;
 };
 
+export type TenantSummary = {
+  id: number;
+  name: string;
+  isActive: boolean;
+  createdAt: string;
+  userCount: number;
+  conversationCount: number;
+  whatsappCount: number;
+  admins: { id: number; name: string; email: string; isActive: boolean }[];
+};
 export const api = {
+  superadmin: {
+    listTenants: () => req<{ tenants: TenantSummary[] }>("/superadmin/tenants"),
+    createTenant: (data: { name: string; adminName?: string; adminEmail?: string; adminPassword?: string }) =>
+      req<{ tenant: TenantSummary }>("/superadmin/tenants", { method: "POST", body: JSON.stringify(data) }),
+    updateTenant: (id: number, data: { name?: string; isActive?: boolean }) =>
+      req<{ tenant: TenantSummary }>(`/superadmin/tenants/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    upsertTenantAdmin: (id: number, data: { name?: string; email: string; password: string }) =>
+      req<{ admin: { id: number; name: string; email: string } | null }>(`/superadmin/tenants/${id}/admin`, { method: "POST", body: JSON.stringify(data) }),
+  },
   auth: {
     login: (email: string, password: string) =>
       req<{ user: User }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),

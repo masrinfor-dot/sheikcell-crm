@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db, trainingsTable, trainingCompletionsTable, usersTable } from "@workspace/db";
 import { eq, desc, and, inArray } from "drizzle-orm";
-import { requireAuth, requireAdminOrSupervisor } from "../middlewares/auth";
+import { requireAuth, requireAdminOrSupervisor, requireTenant, tenantIdOf } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
@@ -53,8 +53,9 @@ function stripAnswers(t: typeof trainingsTable.$inferSelect) {
 }
 
 // ── Pendências (compartilhado com o bloqueio do sistema) ───────────────────
-export async function getPendingTrainings(uid: number, role: string) {
-  const all = await db.select().from(trainingsTable).where(eq(trainingsTable.active, true));
+export async function getPendingTrainings(uid: number, role: string, tenantId: number) {
+  const all = await db.select().from(trainingsTable)
+    .where(and(eq(trainingsTable.active, true), eq(trainingsTable.tenantId, tenantId)));
   const target = all.filter((t) => (t.targetRoles as string[]).includes(role));
   if (target.length === 0) return [];
   const done = await db.select({ trainingId: trainingCompletionsTable.trainingId })
@@ -87,13 +88,16 @@ export async function enforceMandatoryTrainings(
   const uid = req.session?.userId;
   if (!uid) { next(); return; }
   if (GATE_ALLOWLIST.some((r) => r.test(req.path))) { next(); return; }
+  // Sem loja na sessão (superadmin/sessão antiga): não há treinamento a exigir.
+  const tenantId = tenantIdOf(req);
+  if (tenantId == null) { next(); return; }
   try {
     const cached = blockCache.get(uid);
     let blocked: boolean;
     if (cached && cached.until > Date.now()) {
       blocked = cached.blocked;
     } else {
-      const pending = await getPendingTrainings(uid, req.session.userRole ?? "");
+      const pending = await getPendingTrainings(uid, req.session.userRole ?? "", tenantId);
       blocked = pending.some((p) => p.mandatory);
       blockCache.set(uid, { until: Date.now() + BLOCK_CACHE_MS, blocked });
     }
@@ -108,14 +112,17 @@ export async function enforceMandatoryTrainings(
 }
 
 router.get("/trainings/pending", requireAuth, async (req, res): Promise<void> => {
-  res.json(await getPendingTrainings(req.session.userId!, req.session.userRole ?? ""));
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  res.json(await getPendingTrainings(req.session.userId!, req.session.userRole ?? "", tenantId));
 });
 
 // Lista para consulta (todos veem os treinamentos da sua função + status).
 router.get("/trainings", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const role = req.session.userRole ?? "";
   const isManager = role === "admin" || role === "supervisor";
-  const all = await db.select().from(trainingsTable).orderBy(desc(trainingsTable.createdAt));
+  const all = await db.select().from(trainingsTable)
+    .where(eq(trainingsTable.tenantId, tenantId)).orderBy(desc(trainingsTable.createdAt));
   const visible = isManager ? all : all.filter((t) => t.active && (t.targetRoles as string[]).includes(role));
   const done = await db.select({ trainingId: trainingCompletionsTable.trainingId, quizScore: trainingCompletionsTable.quizScore })
     .from(trainingCompletionsTable)
@@ -130,9 +137,11 @@ router.get("/trainings", requireAuth, async (req, res): Promise<void> => {
 
 // Concluir treinamento (texto/vídeo: direto; quiz: corrige e exige nota mínima).
 router.post("/trainings/:id/complete", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const [t] = await db.select().from(trainingsTable).where(eq(trainingsTable.id, id));
+  const [t] = await db.select().from(trainingsTable)
+    .where(and(eq(trainingsTable.id, id), eq(trainingsTable.tenantId, tenantId)));
   if (!t || !t.active) { res.status(404).json({ error: "Treinamento não encontrado" }); return; }
   if (!(t.targetRoles as string[]).includes(req.session.userRole ?? "")) {
     res.status(403).json({ error: "Este treinamento não é para a sua função" }); return;
@@ -163,7 +172,7 @@ router.post("/trainings/:id/complete", requireAuth, async (req, res): Promise<vo
 
   try {
     await db.insert(trainingCompletionsTable).values({
-      trainingId: id, userId: req.session.userId!, quizScore, answers,
+      tenantId, trainingId: id, userId: req.session.userId!, quizScore, answers,
     });
   } catch (err) {
     if ((err as { code?: string })?.code === "23505") {
@@ -178,6 +187,7 @@ router.post("/trainings/:id/complete", requireAuth, async (req, res): Promise<vo
 
 // ── Gestão (admin ou supervisor) ───────────────────────────────────────────
 router.post("/trainings", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { title, description, type, content, quiz, targetRoles, mandatory, active } = req.body ?? {};
   const tt = typeof title === "string" ? title.trim().slice(0, 150) : "";
   if (!tt) { res.status(400).json({ error: "Informe o título" }); return; }
@@ -200,6 +210,7 @@ router.post("/trainings", requireAdminOrSupervisor, async (req, res): Promise<vo
     }
   }
   const [created] = await db.insert(trainingsTable).values({
+    tenantId,
     title: tt,
     description: typeof description === "string" ? description.trim().slice(0, 500) || null : null,
     type: ty, content: ct, quiz: qz, targetRoles: roles,
@@ -211,6 +222,7 @@ router.post("/trainings", requireAdminOrSupervisor, async (req, res): Promise<vo
 });
 
 router.patch("/trainings/:id", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   const { title, description, type, content, quiz, targetRoles, mandatory, active } = req.body ?? {};
@@ -223,7 +235,8 @@ router.patch("/trainings/:id", requireAdminOrSupervisor, async (req, res): Promi
   if (description !== undefined) update.description = typeof description === "string" ? description.trim().slice(0, 500) || null : null;
 
   // Valida o registro FINAL (tipo + conteúdo + quiz coerentes entre si).
-  const [existing] = await db.select().from(trainingsTable).where(eq(trainingsTable.id, id));
+  const [existing] = await db.select().from(trainingsTable)
+    .where(and(eq(trainingsTable.id, id), eq(trainingsTable.tenantId, tenantId)));
   if (!existing) { res.status(404).json({ error: "Treinamento não encontrado" }); return; }
   const finalType = type !== undefined && VALID_TYPES.includes(type) ? type : existing.type;
   update.type = finalType;
@@ -252,24 +265,32 @@ router.patch("/trainings/:id", requireAdminOrSupervisor, async (req, res): Promi
   }
   if (mandatory !== undefined) update.mandatory = !!mandatory;
   if (active !== undefined) update.active = !!active;
-  const [updated] = await db.update(trainingsTable).set(update).where(eq(trainingsTable.id, id)).returning();
+  const [updated] = await db.update(trainingsTable).set(update)
+    .where(and(eq(trainingsTable.id, id), eq(trainingsTable.tenantId, tenantId))).returning();
   if (!updated) { res.status(404).json({ error: "Treinamento não encontrado" }); return; }
   blockCache.clear();
   res.json(updated);
 });
 
 router.delete("/trainings/:id", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  await db.delete(trainingsTable).where(eq(trainingsTable.id, id));
+  await db.delete(trainingsTable)
+    .where(and(eq(trainingsTable.id, id), eq(trainingsTable.tenantId, tenantId)));
   blockCache.clear();
   res.json({ ok: true });
 });
 
 // Quem concluiu (admin/supervisor).
 router.get("/trainings/:id/completions", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  // Filho (conclusões) escopa pelo pai: confirma que o treinamento é da loja.
+  const [parent] = await db.select({ id: trainingsTable.id }).from(trainingsTable)
+    .where(and(eq(trainingsTable.id, id), eq(trainingsTable.tenantId, tenantId)));
+  if (!parent) { res.status(404).json({ error: "Treinamento não encontrado" }); return; }
   const rows = await db
     .select({
       id: trainingCompletionsTable.id,

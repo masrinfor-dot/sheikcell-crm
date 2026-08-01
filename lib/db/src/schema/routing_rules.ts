@@ -2,6 +2,7 @@ import { pgTable, serial, text, integer, boolean, timestamp } from "drizzle-orm/
 import { sectorsTable } from "./sectors";
 
 export const routingRulesTable = pgTable("routing_rules", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   sectorId: integer("sector_id").notNull().references(() => sectorsTable.id),
   name: text("name").notNull(),

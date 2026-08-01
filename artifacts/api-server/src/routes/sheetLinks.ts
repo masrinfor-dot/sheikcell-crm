@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db, sheetLinksTable } from "@workspace/db";
-import { eq, asc } from "drizzle-orm";
-import { requireAuth, requireAdmin } from "../middlewares/auth";
+import { eq, and, asc } from "drizzle-orm";
+import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
@@ -19,26 +19,30 @@ function normalizeUrl(raw: string): string | null {
 }
 
 // Toda a equipe vê as planilhas/formulários.
-router.get("/sheet-links", requireAuth, async (_req, res): Promise<void> => {
+router.get("/sheet-links", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rows = await db.select().from(sheetLinksTable)
+    .where(eq(sheetLinksTable.tenantId, tenantId))
     .orderBy(asc(sheetLinksTable.position), asc(sheetLinksTable.id));
   res.json(rows);
 });
 
 // Só o admin gerencia.
 router.post("/sheet-links", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { name, url } = req.body as { name?: string; url?: string };
   const cleanName = (name ?? "").trim();
   const cleanUrl = normalizeUrl(url ?? "");
   if (!cleanName) { res.status(400).json({ error: "Nome é obrigatório" }); return; }
   if (!cleanUrl) { res.status(400).json({ error: "Link inválido — cole o endereço da planilha ou formulário" }); return; }
   const [inserted] = await db.insert(sheetLinksTable)
-    .values({ name: cleanName.slice(0, 80), url: cleanUrl })
+    .values({ tenantId, name: cleanName.slice(0, 80), url: cleanUrl })
     .returning();
   res.status(201).json(inserted);
 });
 
 router.patch("/sheet-links/:id", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   const { name, url } = req.body as { name?: string; url?: string };
@@ -55,15 +59,17 @@ router.patch("/sheet-links/:id", requireAdmin, async (req, res): Promise<void> =
   }
   if (Object.keys(update).length === 0) { res.status(400).json({ error: "Nada para atualizar" }); return; }
   const [updated] = await db.update(sheetLinksTable).set(update)
-    .where(eq(sheetLinksTable.id, id)).returning();
+    .where(and(eq(sheetLinksTable.id, id), eq(sheetLinksTable.tenantId, tenantId))).returning();
   if (!updated) { res.status(404).json({ error: "Link não encontrado" }); return; }
   res.json(updated);
 });
 
 router.delete("/sheet-links/:id", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  await db.delete(sheetLinksTable).where(eq(sheetLinksTable.id, id));
+  await db.delete(sheetLinksTable)
+    .where(and(eq(sheetLinksTable.id, id), eq(sheetLinksTable.tenantId, tenantId)));
   res.json({ ok: true });
 });
 

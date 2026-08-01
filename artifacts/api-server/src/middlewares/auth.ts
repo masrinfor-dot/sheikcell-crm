@@ -23,17 +23,103 @@ export function isWithinAccessHours(ah: AccessHours | null | undefined): boolean
   return start < end ? now >= start && now <= end : now >= start || now <= end;
 }
 
+// ── Multi-loja (tenant) ─────────────────────────────────────────────────────
+// Cache curto de lojas suspensas para bloquear uso sem custo de DB por request.
+const suspendedCache = { at: 0, ids: new Set<number>() };
+export async function isTenantSuspended(tenantId: number): Promise<boolean> {
+  const now = Date.now();
+  if (now - suspendedCache.at > 30_000) {
+    try {
+      const { db, tenantsTable } = await import("@workspace/db");
+      const { eq } = await import("drizzle-orm");
+      const rows = await db.select({ id: tenantsTable.id }).from(tenantsTable).where(eq(tenantsTable.isActive, false));
+      suspendedCache.ids = new Set(rows.map((r) => r.id));
+      suspendedCache.at = now;
+    } catch {
+      // FAIL CLOSED: se a consulta falhou e o cache nunca foi populado ou está
+      // velho demais (> 5 min), trata como suspensa — melhor bloquear uma loja
+      // ativa durante uma falha de banco do que deixar uma suspensa operar.
+      if (suspendedCache.at === 0 || now - suspendedCache.at > 300_000) return true;
+      // Cache recente (< 5 min): usa o retrato anterior.
+    }
+  }
+  return suspendedCache.ids.has(tenantId);
+}
+export function invalidateTenantCache(): void { suspendedCache.at = 0; }
+
+/**
+ * Loja (tenant) da sessão. Fail closed: sessão sem tenant (ex.: superadmin ou
+ * sessão antiga de antes do multi-loja) NÃO acessa rotas de dados — retorna
+ * null e o chamador deve responder 401/403.
+ */
+export function tenantIdOf(req: Request): number | null {
+  const t = req.session?.tenantId;
+  return typeof t === "number" && Number.isFinite(t) ? t : null;
+}
+
+/** Exige uma sessão de usuário de loja; injeta o tenantId ou responde 403. */
+export function requireTenant(req: Request, res: Response): number | null {
+  const t = tenantIdOf(req);
+  if (t == null) {
+    res.status(403).json({ error: "Sessão sem loja. Faça login novamente." });
+    return null;
+  }
+  return t;
+}
+
+export function requireSuperadmin(req: Request, res: Response, next: NextFunction): void {
+  if (!req.session?.userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  if (req.session.userRole !== "superadmin") {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+  next();
+}
+
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
   if (!req.session?.userId) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
+  // Loja suspensa: bloqueia tudo (fail closed) — exceto superadmin (sem loja)
+  const tid = req.session.tenantId;
+  if (typeof tid === "number") {
+    void isTenantSuspended(tid).then((suspended) => {
+      if (suspended) {
+        res.status(403).json({ error: "Loja suspensa. Fale com o administrador do sistema." });
+        return;
+      }
+      afterTenantCheck(req, res, next);
+    });
+    return;
+  }
+  afterTenantCheck(req, res, next);
+}
+
+function afterTenantCheck(req: Request, res: Response, next: NextFunction): void {
   // Vendedor fora do horário de acesso: bloqueia até a próxima janela
   if (req.session.userRole === "vendedor" && !isWithinAccessHours(req.session.accessHours)) {
     res.status(403).json({ error: "Fora do horário de acesso. Fale com o administrador." });
     return;
   }
   next();
+}
+
+// Bloqueia a request se a loja da sessão estiver suspensa (fail closed).
+// Compartilhado por todos os middlewares autenticados.
+function blockIfTenantSuspended(req: Request, res: Response, next: NextFunction): void {
+  const tid = req.session.tenantId;
+  if (typeof tid !== "number") { next(); return; }
+  void isTenantSuspended(tid).then((suspended) => {
+    if (suspended) {
+      res.status(403).json({ error: "Loja suspensa. Fale com o administrador do sistema." });
+      return;
+    }
+    next();
+  });
 }
 
 export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
@@ -45,7 +131,7 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction): v
     res.status(403).json({ error: "Forbidden" });
     return;
   }
-  next();
+  blockIfTenantSuspended(req, res, next);
 }
 
 /**
@@ -56,6 +142,11 @@ export function requireFeature(feature: string) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     if (!req.session?.userId) {
       res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    const tid = req.session.tenantId;
+    if (typeof tid === "number" && (await isTenantSuspended(tid))) {
+      res.status(403).json({ error: "Loja suspensa. Fale com o administrador do sistema." });
       return;
     }
     if (req.session.userRole === "admin") { next(); return; }
@@ -79,10 +170,10 @@ export function requireAdminOrSupervisor(req: Request, res: Response, next: Next
     res.status(403).json({ error: "Forbidden" });
     return;
   }
-  next();
+  blockIfTenantSuspended(req, res, next);
 }
 
-/** Returns true if the role has global visibility (not sector-scoped) */
+/** Returns true if the role has global visibility WITHIN its tenant (not sector-scoped) */
 export function isGlobalRole(role: string | undefined): boolean {
   return role === "admin" || role === "supervisor";
 }

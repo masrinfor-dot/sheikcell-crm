@@ -1,9 +1,10 @@
-import { pgTable, serial, text, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, timestamp, jsonb, integer } from "drizzle-orm/pg-core";
 
 // Processo seletivo de RH configurável pelo admin.
 // rh_settings: linha única com o token do link público e as etapas
 // (pré-entrevista, teste de perfil, prova escrita, vídeo) editáveis.
 export const rhSettingsTable = pgTable("rh_settings", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   publicToken: text("public_token").notNull(),
   // [{ id, title, description, type: 'form'|'video', enabled,
@@ -13,6 +14,7 @@ export const rhSettingsTable = pgTable("rh_settings", {
 });
 
 export const rhCandidatesTable = pgTable("rh_candidates", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
   phone: text("phone").notNull(),

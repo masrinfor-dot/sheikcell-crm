@@ -3,6 +3,7 @@ import { sectorsTable } from "./sectors";
 import { usersTable } from "./users";
 
 export const crmContactsTable = pgTable("crm_contacts", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
   contact: text("contact"),       // phone / WhatsApp number
@@ -29,6 +30,7 @@ export const crmContactsTable = pgTable("crm_contacts", {
 // Global definitions of custom fields the user can create to personalize the
 // data captured for every CRM contact (e.g. "CPF", "Aniversário", "Modelo do aparelho").
 export const crmCustomFieldsTable = pgTable("crm_custom_fields", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   name: text("name").notNull(),                          // label shown in the UI
   type: text("type").notNull().default("text"),          // text | number | date | select | textarea
@@ -39,6 +41,7 @@ export const crmCustomFieldsTable = pgTable("crm_custom_fields", {
 });
 
 export const crmPurchasesTable = pgTable("crm_purchases", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   contactId: integer("contact_id").notNull().references(() => crmContactsTable.id),
   description: text("description").notNull(),
@@ -50,6 +53,7 @@ export const crmPurchasesTable = pgTable("crm_purchases", {
 });
 
 export const crmInternalNotesTable = pgTable("crm_internal_notes", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   contactId: integer("contact_id").notNull().references(() => crmContactsTable.id),
   content: text("content").notNull(),

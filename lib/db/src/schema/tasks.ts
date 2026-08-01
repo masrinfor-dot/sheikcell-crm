@@ -4,6 +4,7 @@ import { usersTable } from "./users";
 
 // Trello-style team task board for organizing atendimento work across the team.
 export const tasksTable = pgTable("tasks", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   title: text("title").notNull(),
   description: text("description"),
@@ -21,6 +22,7 @@ export const tasksTable = pgTable("tasks", {
 
 // Chat da tarefa: comentários para esclarecer dúvidas e complementar informações.
 export const taskCommentsTable = pgTable("task_comments", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   taskId: integer("task_id").notNull().references(() => tasksTable.id, { onDelete: "cascade" }),
   authorId: integer("author_id").references(() => usersTable.id, { onDelete: "set null" }),
@@ -30,6 +32,7 @@ export const taskCommentsTable = pgTable("task_comments", {
 
 // Subtarefas (checklist estilo Kerika/Trello) dentro de uma tarefa.
 export const taskSubtasksTable = pgTable("task_subtasks", {
+  tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   taskId: integer("task_id").notNull().references(() => tasksTable.id, { onDelete: "cascade" }),
   title: text("title").notNull(),

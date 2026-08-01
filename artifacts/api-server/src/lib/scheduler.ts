@@ -64,7 +64,12 @@ export async function deliverScheduledMessages(): Promise<void> {
               convName: rConv.name,
               content: item.content,
               sendAt: item.sendAt,
-            }, rConv.sectorId, false, item.createdById != null ? [item.createdById] : null);
+            }, {
+              tenantId: rConv.tenantId,
+              sectorId: rConv.sectorId,
+              isPotential: false,
+              restrictedTo: item.createdById != null ? [item.createdById] : null,
+            });
           }
           continue;
         }
@@ -78,6 +83,7 @@ export async function deliverScheduledMessages(): Promise<void> {
         }
 
         const [msg] = await db.insert(messagesTable).values({
+          tenantId: conv.tenantId,
           conversationId: conv.id,
           content: item.content,
           direction: "outbound",
@@ -93,8 +99,8 @@ export async function deliverScheduledMessages(): Promise<void> {
           updatedAt: new Date(),
         }).where(eq(conversationsTable.id, conv.id));
 
-        broadcast("message", { conversationId: conv.id, message: msg }, conv.sectorId,
-          isPotentialConversation(conv), await restrictedRecipients(conv));
+        broadcast("message", { conversationId: conv.id, message: msg },
+          { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
 
         // Encaminha ao WhatsApp (mesma rota do envio manual)
         let delivered = true;
@@ -119,8 +125,8 @@ export async function deliverScheduledMessages(): Promise<void> {
             const [failedMsg] = await db.update(messagesTable).set({ status: "failed" })
               .where(eq(messagesTable.id, msg.id)).returning();
             if (failedMsg) {
-              broadcast("message_updated", { conversationId: conv.id, message: failedMsg }, conv.sectorId,
-                isPotentialConversation(conv), await restrictedRecipients(conv));
+              broadcast("message_updated", { conversationId: conv.id, message: failedMsg },
+                { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
             }
             // Aviso direcionado ao autor: o envio agendado falhou (ex.: WhatsApp
             // despareado). Sem isso, a falha só apareceria abrindo a conversa.
@@ -131,7 +137,12 @@ export async function deliverScheduledMessages(): Promise<void> {
               convName: conv.name,
               content: item.content,
               sendAt: item.sendAt,
-            }, conv.sectorId, false, item.createdById != null ? [item.createdById] : null);
+            }, {
+              tenantId: conv.tenantId,
+              sectorId: conv.sectorId,
+              isPotential: false,
+              restrictedTo: item.createdById != null ? [item.createdById] : null,
+            });
           }
         }
 

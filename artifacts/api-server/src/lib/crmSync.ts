@@ -26,6 +26,7 @@ export function crmStageForConversation(conv: {
  * throws (a CRM desync must not break claim/transfer flows).
  */
 export async function syncCrmAttendant(conv: {
+  tenantId: number;
   phone: string | null;
   sectorId: number | null;
   assigneeId: number | null;
@@ -40,8 +41,10 @@ export async function syncCrmAttendant(conv: {
     const sectorCondition = conv.sectorId != null
       ? eq(crmContactsTable.sectorId, conv.sectorId)
       : isNull(crmContactsTable.sectorId);
+    // Multi-loja: só sincroniza com o contato do CRM da MESMA loja.
     const [existing] = await db.select().from(crmContactsTable)
       .where(and(
+        eq(crmContactsTable.tenantId, conv.tenantId),
         eq(crmContactsTable.isArchived, false),
         eq(crmContactsTable.phone, normalizedPhone),
         sectorCondition,
@@ -64,7 +67,7 @@ export async function syncCrmAttendant(conv: {
     const sector = updated.sectorId
       ? (await db.select().from(sectorsTable).where(eq(sectorsTable.id, updated.sectorId)).limit(1))[0] ?? null
       : null;
-    broadcast("crm_contact_updated", { ...updated, attendant, sector }, updated.sectorId, false);
+    broadcast("crm_contact_updated", { ...updated, attendant, sector }, { tenantId: updated.tenantId, sectorId: updated.sectorId, isPotential: false });
   } catch (err) {
     logger.warn({ err, phone: conv.phone, sectorId: conv.sectorId }, "CRM attendant sync failed");
   }
@@ -81,6 +84,7 @@ export async function syncCrmAttendant(conv: {
  * message ingestion or manual conversation creation.
  */
 export async function ensureCrmContactForConversation(conv: {
+  tenantId: number;
   phone: string | null;
   name: string;
   sectorId: number | null;
@@ -99,8 +103,10 @@ export async function ensureCrmContactForConversation(conv: {
       ? eq(crmContactsTable.sectorId, conv.sectorId)
       : isNull(crmContactsTable.sectorId);
 
+    // Multi-loja: busca/cria o contato do CRM sempre dentro da loja da conversa.
     const [existing] = await db.select().from(crmContactsTable)
       .where(and(
+        eq(crmContactsTable.tenantId, conv.tenantId),
         eq(crmContactsTable.isArchived, false),
         eq(crmContactsTable.phone, normalizedPhone),
         sectorCondition,
@@ -124,6 +130,7 @@ export async function ensureCrmContactForConversation(conv: {
         .where(eq(crmContactsTable.id, existing.id));
     } else {
       await db.insert(crmContactsTable).values({
+        tenantId: conv.tenantId,
         name: conv.name,
         contact: conv.phone,
         phone: normalizedPhone,
