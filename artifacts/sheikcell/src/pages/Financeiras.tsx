@@ -3,35 +3,27 @@ import { api, type PartnerLink } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
-  Landmark, Plus, X, Trash2, Pencil, RefreshCw, ExternalLink, Globe,
+  Landmark, Plus, X, Trash2, Pencil, ExternalLink, Globe,
 } from "lucide-react";
 
-// Aba "Financeiras": links das financeiras parceiras abertos dentro do
-// sistema, como um navegador. Alguns sites bloqueiam ser exibidos dentro de
-// outros sistemas — nesses casos oferecemos abrir em nova aba.
+// Aba "Financeiras": atalhos das financeiras parceiras. Os sites de bancos e
+// financeiras BLOQUEIAM ser exibidos dentro de outros sistemas
+// (X-Frame-Options) — por isso a antiga tela embutida ficava em branco.
+// Agora cada card abre o site direto em uma NOVA ABA do navegador.
 export default function Financeiras() {
   const { user } = useAuth();
   const { toast } = useToast();
   const canManage = user?.role === "admin" || user?.role === "supervisor";
 
   const [links, setLinks] = useState<PartnerLink[]>([]);
-  const [activeId, setActiveId] = useState<number | null>(null);
-  const [iframeKey, setIframeKey] = useState(0);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<PartnerLink | null>(null);
   const [form, setForm] = useState({ name: "", url: "" });
   const [saving, setSaving] = useState(false);
 
-  const fetchLinks = () => {
-    api.partnerLinks.list().then((rows) => {
-      setLinks(rows);
-      setActiveId((cur) => (cur && rows.some((r) => r.id === cur) ? cur : (rows[0]?.id ?? null)));
-    }).catch(() => {});
-  };
-
-  useEffect(() => { fetchLinks(); }, []);
-
-  const active = links.find((l) => l.id === activeId) ?? null;
+  useEffect(() => {
+    api.partnerLinks.list().then(setLinks).catch(() => {});
+  }, []);
 
   const openForm = (l?: PartnerLink) => {
     setEditing(l ?? null);
@@ -46,11 +38,9 @@ export default function Financeiras() {
       if (editing) {
         const upd = await api.partnerLinks.update(editing.id, form);
         setLinks((prev) => prev.map((l) => (l.id === upd.id ? upd : l)));
-        if (activeId === upd.id) setIframeKey((k) => k + 1);
       } else {
         const created = await api.partnerLinks.create(form);
         setLinks((prev) => [...prev, created]);
-        setActiveId(created.id);
       }
       setShowForm(false);
       toast({ title: editing ? "Financeira atualizada" : "Financeira adicionada" });
@@ -66,99 +56,75 @@ export default function Financeiras() {
     try {
       await api.partnerLinks.remove(l.id);
       setLinks((prev) => prev.filter((x) => x.id !== l.id));
-      if (activeId === l.id) setActiveId(null);
       toast({ title: "Financeira removida" });
     } catch {
       toast({ title: "Erro ao remover", variant: "destructive" });
     }
   };
 
+  const hostOf = (url: string) => {
+    try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return url; }
+  };
+
   return (
-    <div className="flex flex-col h-[calc(100dvh-8rem)] md:h-[calc(100vh-6rem)]">
-      {/* Barra de financeiras */}
-      <div className="flex items-center gap-2 px-3 py-2 bg-white border border-border rounded-t-2xl overflow-x-auto">
-        <Landmark className="w-4 h-4 text-primary shrink-0" />
-        <div className="flex items-center gap-1.5 flex-1 min-w-0 overflow-x-auto">
-          {links.length === 0 && (
-            <span className="text-xs text-muted-foreground">Nenhuma financeira cadastrada ainda.</span>
-          )}
-          {links.map((l) => (
-            <div key={l.id} className="group/link relative shrink-0">
-              <button
-                onClick={() => { setActiveId(l.id); setIframeKey((k) => k + 1); }}
-                data-testid={`partner-link-${l.id}`}
-                className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition whitespace-nowrap ${
-                  activeId === l.id
-                    ? "bg-primary text-white border-primary"
-                    : "bg-white text-muted-foreground border-border hover:bg-secondary"
-                } ${canManage ? "pr-9" : ""}`}
-              >
-                {l.name}
-              </button>
-              {canManage && (
-                <span className="absolute right-1.5 top-1/2 -translate-y-1/2 hidden group-hover/link:flex items-center gap-0.5">
-                  <button onClick={() => openForm(l)} title="Editar">
-                    <Pencil className={`w-3 h-3 ${activeId === l.id ? "text-white/80" : "text-muted-foreground"}`} />
-                  </button>
-                  <button onClick={() => handleDelete(l)} title="Remover">
-                    <Trash2 className={`w-3 h-3 ${activeId === l.id ? "text-white/80" : "text-red-400"}`} />
-                  </button>
-                </span>
-              )}
-            </div>
-          ))}
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2">
+          <Landmark className="w-5 h-5 text-primary" />
+          <h2 className="font-bold text-lg">Financeiras parceiras</h2>
         </div>
-        {active && (
-          <>
-            <button onClick={() => setIframeKey((k) => k + 1)} title="Recarregar página"
-              className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground transition shrink-0">
-              <RefreshCw className="w-3.5 h-3.5" />
-            </button>
-            <a href={active.url} target="_blank" rel="noopener noreferrer" title="Abrir em nova aba"
-              className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground transition shrink-0">
-              <ExternalLink className="w-3.5 h-3.5" />
-            </a>
-          </>
-        )}
         {canManage && (
           <button onClick={() => openForm()} data-testid="button-add-partner-link"
-            className="flex items-center gap-1 px-2.5 py-1.5 rounded-full bg-primary text-white text-xs font-semibold shrink-0">
+            className="flex items-center gap-1 px-3 py-2 rounded-xl bg-primary text-white text-xs font-semibold">
             <Plus className="w-3.5 h-3.5" /> Adicionar
           </button>
         )}
       </div>
 
-      {/* Navegador embutido */}
-      <div className="flex-1 bg-white border border-t-0 border-border rounded-b-2xl overflow-hidden relative">
-        {!active ? (
-          <div className="h-full flex flex-col items-center justify-center text-muted-foreground p-6 text-center">
-            <Globe className="w-10 h-10 mb-3 opacity-30" />
-            <p className="text-sm font-semibold">Nenhuma financeira selecionada</p>
-            <p className="text-xs mt-1 max-w-sm">
-              {canManage
-                ? 'Clique em "Adicionar" para cadastrar o link de uma financeira parceira. Ela abre aqui dentro, como um navegador.'
-                : "Peça ao administrador para cadastrar os links das financeiras parceiras."}
-            </p>
-          </div>
-        ) : (
-          <>
-            <iframe
-              key={`${active.id}-${iframeKey}`}
-              src={active.url}
-              title={active.name}
-              className="w-full h-full border-0"
-              sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads"
-              referrerPolicy="no-referrer-when-downgrade"
-            />
-            <div className="absolute bottom-2 left-1/2 -translate-x-1/2 bg-black/70 text-white text-[10px] px-3 py-1 rounded-full pointer-events-auto">
-              Página em branco? Este site bloqueia abrir dentro de sistemas —{" "}
-              <a href={active.url} target="_blank" rel="noopener noreferrer" className="underline font-semibold">
-                abrir em nova aba
+      <p className="text-xs text-muted-foreground">
+        💡 Os sites das financeiras não permitem abrir dentro de outros sistemas — por isso cada
+        card abre o site em uma <strong>nova aba</strong> do navegador, já pronto para usar.
+      </p>
+
+      {links.length === 0 ? (
+        <div className="shk-card p-10 flex flex-col items-center justify-center text-muted-foreground text-center">
+          <Globe className="w-10 h-10 mb-3 opacity-30" />
+          <p className="text-sm font-semibold">Nenhuma financeira cadastrada ainda</p>
+          <p className="text-xs mt-1 max-w-sm">
+            {canManage
+              ? 'Clique em "Adicionar" para cadastrar o link de uma financeira parceira.'
+              : "Peça ao administrador para cadastrar os links das financeiras parceiras."}
+          </p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {links.map((l) => (
+            <div key={l.id} className="shk-card p-4 flex flex-col gap-3 group/link" data-testid={`partner-link-${l.id}`}>
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="font-bold text-sm truncate">{l.name}</p>
+                  <p className="text-[11px] text-muted-foreground truncate">{hostOf(l.url)}</p>
+                </div>
+                {canManage && (
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button onClick={() => openForm(l)} title="Editar" className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground">
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                    <button onClick={() => handleDelete(l)} title="Remover" className="p-1.5 rounded-lg hover:bg-red-50 text-red-400">
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+              </div>
+              <a href={l.url} target="_blank" rel="noopener noreferrer"
+                data-testid={`button-open-partner-${l.id}`}
+                className="flex items-center justify-center gap-1.5 w-full py-2.5 rounded-xl bg-primary text-white text-xs font-semibold hover:opacity-90 transition">
+                <ExternalLink className="w-3.5 h-3.5" /> Abrir em nova aba
               </a>
             </div>
-          </>
-        )}
-      </div>
+          ))}
+        </div>
+      )}
 
       {/* Modal adicionar/editar */}
       {showForm && (
