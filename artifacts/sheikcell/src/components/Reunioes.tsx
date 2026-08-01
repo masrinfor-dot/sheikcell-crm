@@ -31,6 +31,10 @@ export default function Reunioes({ onDocumentCreated }: { onDocumentCreated: (do
   const streamsRef = useRef<MediaStream[]>([]);
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  // Dona da gravação: fixada ao APERTAR gravar, para não se perder se o
+  // usuário fechar/trocar de sala enquanto a transcrição roda.
+  const recMeetingRef = useRef<MeetingItem | null>(null);
 
   const canManage = user?.role === "admin" || user?.role === "supervisor";
 
@@ -70,6 +74,7 @@ export default function Reunioes({ onDocumentCreated }: { onDocumentCreated: (do
       const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamsRef.current.push(mic);
       const ctx = new AudioContext();
+      audioCtxRef.current = ctx;
       const dest = ctx.createMediaStreamDestination();
       ctx.createMediaStreamSource(mic).connect(dest);
       // Tenta capturar também o áudio da aba (vozes dos outros participantes).
@@ -92,6 +97,7 @@ export default function Reunioes({ onDocumentCreated }: { onDocumentCreated: (do
       rec.onstop = () => void handleRecordingReady();
       rec.start(1000);
       recorderRef.current = rec;
+      recMeetingRef.current = openMeeting;
       setRecording(true);
       setRecSeconds(0);
       timerRef.current = setInterval(() => setRecSeconds((s) => s + 1), 1000);
@@ -107,15 +113,18 @@ export default function Reunioes({ onDocumentCreated }: { onDocumentCreated: (do
     const rec = recorderRef.current;
     if (rec && rec.state !== "inactive") rec.stop(); // onstop → handleRecordingReady
     stopAllTracks();
+    audioCtxRef.current?.close().catch(() => {});
+    audioCtxRef.current = null;
   };
 
   const handleRecordingReady = async () => {
-    const meeting = openMeeting;
+    const meeting = recMeetingRef.current;
+    recMeetingRef.current = null;
     const blob = new Blob(chunksRef.current, { type: "audio/webm" });
     chunksRef.current = [];
     recorderRef.current = null;
     if (!meeting || blob.size < 2000) { toast({ title: "Gravação muito curta", variant: "destructive" }); return; }
-    if (blob.size > 40 * 1024 * 1024) { toast({ title: "Gravação muito grande (máx. 40MB)", variant: "destructive" }); return; }
+    if (blob.size > 20 * 1024 * 1024) { toast({ title: "Gravação muito grande (máx. 20MB / ~1h30)", variant: "destructive" }); return; }
     setProcessing(true);
     try {
       const base64 = await new Promise<string>((resolve, reject) => {
@@ -270,8 +279,9 @@ export default function Reunioes({ onDocumentCreated }: { onDocumentCreated: (do
                 </button>
               )}
               <button onClick={() => { if (recording) stopRecording(); setOpenMeeting(null); }}
-                data-testid="button-close-meeting" disabled={processing}
-                className="p-1.5 rounded-lg text-white hover:bg-white/10 transition disabled:opacity-50">
+                data-testid="button-close-meeting"
+                title={processing ? "Pode fechar — aviso quando a transcrição terminar" : "Fechar"}
+                className="p-1.5 rounded-lg text-white hover:bg-white/10 transition">
                 <X className="w-5 h-5" />
               </button>
             </div>

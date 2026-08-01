@@ -15,16 +15,21 @@ const router: IRouter = Router();
 // Gravações de reunião ficam junto dos documentos, em subpasta própria.
 const REC_DIR = path.join(DOCS_DIR, "meeting-recordings");
 
-// Áudio comprimido (opus ~32kbps): 40MB dá bem mais de 2h de reunião.
-const MAX_RECORDING = 40 * 1024 * 1024;
+// Áudio comprimido (opus ~32kbps): 20MB dá ~1h30 de reunião. Precisa caber no
+// limite global do express.json (30MB) já contando a expansão do base64 (~33%).
+const MAX_RECORDING = 20 * 1024 * 1024;
 
 const REC_MIME: Record<string, string> = {
   "audio/webm": "webm",
   "audio/ogg": "ogg",
-  "audio/mp4": "m4a",
-  "audio/mpeg": "mp3",
-  "audio/wav": "wav",
 };
+
+// Assinatura (magic bytes) precisa bater com o tipo declarado.
+function looksLikeAudio(buf: Buffer, mime: string): boolean {
+  if (mime === "audio/webm") return buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3; // EBML
+  if (mime === "audio/ogg") return buf.toString("ascii", 0, 4) === "OggS";
+  return false;
+}
 
 type DocKind = "ata" | "resumo" | "tarefas";
 const DOC_PROMPTS: Record<DocKind, { label: string; prompt: string }> = {
@@ -93,6 +98,9 @@ router.post("/meetings/:id/recording", requireAuth, async (req, res): Promise<vo
   const meeting = await getMeeting(id, tenantId);
   if (!meeting) { res.status(404).json({ error: "Reunião não encontrada" }); return; }
   if (inFlight.has(id)) { res.status(409).json({ error: "Essa gravação já está sendo processada" }); return; }
+  // Reunião já transcrita não aceita outra gravação (evita pagar Whisper de
+  // novo por engano/abuso). Para regravar, crie uma nova reunião.
+  if (meeting.status === "transcrita") { res.status(409).json({ error: "Essa reunião já foi transcrita. Crie uma nova reunião para gravar de novo." }); return; }
 
   const mime = typeof req.body?.mimeType === "string" ? req.body.mimeType.split(";")[0].trim() : "";
   const ext = REC_MIME[mime];
@@ -101,12 +109,15 @@ router.post("/meetings/:id/recording", requireAuth, async (req, res): Promise<vo
   if (typeof data !== "string" || !data) { res.status(400).json({ error: "Gravação vazia" }); return; }
   const buf = Buffer.from(data, "base64");
   if (buf.length === 0) { res.status(400).json({ error: "Gravação vazia" }); return; }
-  if (buf.length > MAX_RECORDING) { res.status(400).json({ error: "Gravação muito grande (máximo 40MB). Grave em partes menores." }); return; }
+  if (buf.length > MAX_RECORDING) { res.status(400).json({ error: "Gravação muito grande (máximo 20MB / ~1h30). Grave em partes menores." }); return; }
+  if (!looksLikeAudio(buf, mime)) { res.status(400).json({ error: "O arquivo enviado não parece uma gravação de áudio válida" }); return; }
 
   inFlight.add(id);
   try {
-    await mkdir(REC_DIR, { recursive: true });
-    const storedName = `${randomUUID()}.${ext}`;
+    // Pasta separada por loja: gravações de lojas diferentes não se misturam.
+    const tenantDir = path.join(REC_DIR, String(tenantId));
+    await mkdir(tenantDir, { recursive: true });
+    const storedName = `${tenantId}/${randomUUID()}.${ext}`;
     await writeFile(path.join(REC_DIR, storedName), buf);
     await db.update(meetingsTable).set({
       recordingName: storedName, recordingBytes: buf.length,
@@ -186,8 +197,9 @@ router.delete("/meetings/:id", requireAdminOrSupervisor, async (req, res): Promi
   if (!meeting) { res.status(404).json({ error: "Reunião não encontrada" }); return; }
   await db.delete(meetingsTable).where(eq(meetingsTable.id, id));
   if (meeting.recordingName) {
-    const fp = path.join(REC_DIR, path.basename(meeting.recordingName));
-    if (existsSync(fp)) await unlink(fp).catch(() => {});
+    // recordingName é "<tenantId>/<uuid>.<ext>"; garante que fica dentro de REC_DIR.
+    const fp = path.resolve(REC_DIR, meeting.recordingName);
+    if (fp.startsWith(REC_DIR + path.sep) && existsSync(fp)) await unlink(fp).catch(() => {});
   }
   res.json({ ok: true });
 });
