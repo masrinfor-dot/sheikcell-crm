@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { api, type CrmContact, type Sector, type CrmCustomField, type CrmCustomFieldType } from "@/lib/api";
+import { api, type CrmContact, type Sector, type CrmCustomField, type CrmCustomFieldType, type Store } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import CrmContactDetail from "@/components/CrmContactDetail";
 import {
-  Plus, X, Phone, Tag, StickyNote, RefreshCw, Archive,
+  Plus, X, Phone, Tag, StickyNote, RefreshCw, Archive, MapPin,
   ChevronRight, ChevronLeft, Crown, Star, UserPlus, UserMinus,
   Search, Filter, ExternalLink, ShoppingBag, SlidersHorizontal, Trash2, GripVertical,
 } from "lucide-react";
@@ -139,14 +139,21 @@ function ContactCard({
         </div>
       </div>
 
-      {contact.sector && (
-        <div>
-          <span
-            className="text-xs px-2 py-0.5 rounded-full font-medium text-white"
-            style={{ backgroundColor: contact.sector.color }}
-          >
-            {contact.sector.name}
-          </span>
+      {(contact.sector || contact.serviceStore) && (
+        <div className="flex flex-wrap items-center gap-1">
+          {contact.sector && (
+            <span
+              className="text-xs px-2 py-0.5 rounded-full font-medium text-white"
+              style={{ backgroundColor: contact.sector.color }}
+            >
+              {contact.sector.name}
+            </span>
+          )}
+          {contact.serviceStore && (
+            <span className="text-xs px-2 py-0.5 rounded-full bg-secondary text-muted-foreground flex items-center gap-0.5" data-testid={`crm-card-store-${contact.id}`}>
+              <MapPin className="w-2.5 h-2.5" />{contact.serviceStore}
+            </span>
+          )}
         </div>
       )}
 
@@ -182,6 +189,8 @@ export default function CrmBoard() {
   const { toast } = useToast();
   const [contacts, setContacts] = useState<CrmContact[]>([]);
   const [sectors, setSectors] = useState<Sector[]>([]);
+  const [stores, setStores] = useState<Store[]>([]);
+  const [filterStore, setFilterStore] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editTarget, setEditTarget] = useState<CrmContact | null>(null);
@@ -219,6 +228,7 @@ export default function CrmBoard() {
     setLoading(true);
     fetchContacts();
     api.sectors.list().then(setSectors).catch(() => {});
+    api.stores.list(true).then(setStores).catch(() => {});
   }, [fetchContacts]);
 
   useEffect(() => { fetchFinalizadas(); }, [fetchFinalizadas]);
@@ -376,7 +386,13 @@ export default function CrmBoard() {
   const vipCount = contacts.filter((c) => c.profile === "VIP").length;
   const totalRevenue = contacts.reduce((sum, c) => sum + parseFloat(c.totalPurchases ?? "0"), 0);
 
-  const byStatus = (status: Status) => contacts.filter((c) => c.status === status);
+  // Filtro por loja de atendimento é aplicado no cliente: a lista já está em
+  // memória e assim o filtro também vale para cartões vindos via SSE.
+  const visibleContacts = filterStore
+    ? contacts.filter((c) => (c.serviceStore ?? "") === filterStore)
+    : contacts;
+
+  const byStatus = (status: Status) => visibleContacts.filter((c) => c.status === status);
 
   return (
     <div className="space-y-4">
@@ -443,6 +459,13 @@ export default function CrmBoard() {
             <option value="">Todos os perfis</option>
             {(["VIP", "Regular", "Novo", "Inativo"] as const).map((p) => (
               <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
+          <select value={filterStore} onChange={(e) => setFilterStore(e.target.value)}
+            className="px-2 py-2 rounded-xl border border-border text-xs" data-testid="crm-filter-store">
+            <option value="">Todas as lojas</option>
+            {stores.map((s) => (
+              <option key={s.id} value={s.name}>{s.name}</option>
             ))}
           </select>
         </div>

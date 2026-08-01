@@ -826,7 +826,7 @@ export default function AdminDashboard() {
                 <table className="w-full text-sm">
                   <thead className="bg-secondary/50">
                     <tr>
-                      {["Nome", "Email", "Setor", "Perfil", "Status", ""].map((h, i) => (
+                      {["Nome", "Email", "Setor", "Loja", "Perfil", "Status", ""].map((h, i) => (
                         <th key={i} className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground">{h}</th>
                       ))}
                     </tr>
@@ -837,6 +837,7 @@ export default function AdminDashboard() {
                         <td className="px-4 py-3 font-medium">{u.name}</td>
                         <td className="px-4 py-3 text-muted-foreground">{u.email}</td>
                         <td className="px-4 py-3 text-muted-foreground">{u.sector?.name ?? "—"}</td>
+                        <td className="px-4 py-3 text-muted-foreground" data-testid={`user-store-${u.id}`}>{u.storeName || "—"}</td>
                         <td className="px-4 py-3">
                           <span className={
                             u.role === "admin" ? "shk-badge-progress" :
