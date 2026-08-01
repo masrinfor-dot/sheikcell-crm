@@ -10,20 +10,28 @@ import {
 // 1) Aparelho (marca → modelo → memória → cor)  2) Condições  3) Oferta.
 type Question = { key: string; label: string; options: string[] };
 
-// Perguntas personalizadas pela marca: só iPhone tem "saúde da bateria" e
-// Face ID/iCloud; Android pergunta leitor de digital e conta Google.
+// Perguntas baseadas nos critérios de condições do aparelho (padrão do
+// mercado de trade-in), personalizadas pela marca: só iPhone tem saúde da
+// bateria em %, Face ID/iCloud e aviso de peça não genuína.
 function questionsFor(brand: string): Question[] {
   const isApple = /apple|iphone/i.test(brand);
   return [
-    { key: "Liga e funciona", label: "O aparelho liga e funciona normalmente?", options: ["Sim, funciona tudo", "Liga, mas tem defeito", "Não liga"] },
-    { key: "Tela", label: "Como está a tela?", options: ["Perfeita", "Riscos leves", "Trincada / quebrada", "Não acende"] },
-    { key: "Carcaça / traseira", label: "Como está a carcaça (laterais e traseira)?", options: ["Perfeita", "Marcas de uso", "Amassada / trincada"] },
+    { key: "Liga", label: "O aparelho liga? (tela acende, sistema inicia e o toque na tela funciona)", options: ["Sim", "Não liga"] },
+    { key: "Ligações", label: "Faz e recebe ligações pela rede móvel? (chip/operadora — não vale WhatsApp)", options: ["Sim", "Não faz ligações"] },
+    { key: "Wi-Fi e Bluetooth", label: "Wi-Fi e Bluetooth funcionam normalmente? (conecta, navega e recebe arquivos)", options: ["Sim", "Não funciona"] },
+    { key: "Marcas de uso", label: "Tem marcas de uso?", options: ["Sem marcas de uso", "Quase imperceptíveis", "Marcas visíveis"] },
+    { key: "Carcaça / traseira", label: "Traseira ou laterais trincadas, rachadas, descascando, com peças faltando ou riscos?", options: ["Não", "Sim, com avarias"] },
+    { key: "Tela", label: "Tela quebrada, trincada, riscada ou com mancha/burn-in (tela fantasma, pixel queimado, LCD vazando)?", options: ["Não", "Sim, com avarias"] },
     isApple
-      ? { key: "Saúde da bateria", label: "Qual a saúde da bateria (Ajustes → Bateria)?", options: ["Acima de 85%", "Entre 75% e 85%", "Abaixo de 75%", "Ruim / estufada"] }
+      ? { key: "Biometria", label: "Face ID / Touch ID funciona e cadastra nova biometria?", options: ["Funciona", "Não funciona", "Não tem"] }
+      : { key: "Biometria", label: "Leitor de digital / desbloqueio facial funciona e cadastra nova biometria?", options: ["Funciona", "Não funciona", "Não tem"] },
+    { key: "Câmeras", label: "As câmeras (frontal e traseira) abrem e registram fotos normalmente?", options: ["Sem problemas", "Com problema"] },
+    isApple
+      ? { key: "Saúde da bateria", label: "Qual o nível de saúde da bateria (Ajustes → Bateria)?", options: ["Superior a 90%", "Entre 80% e 90%", "Inferior a 80%"] }
       : { key: "Bateria", label: "Como está a bateria?", options: ["Segura bem a carga", "Descarrega rápido", "Ruim / estufada"] },
-    isApple
-      ? { key: "Face ID", label: "O Face ID funciona?", options: ["Funciona", "Não funciona", "Não tem (Touch ID funciona)"] }
-      : { key: "Biometria", label: "Leitor de digital / desbloqueio facial funciona?", options: ["Funciona", "Não funciona", "Não tem"] },
+    ...(isApple
+      ? [{ key: "Peça não genuína", label: "Aparece mensagem de \"peça não genuína ou desconhecida\" (Ajustes → Bateria)?", options: ["Não", "Sim, aparece"] }]
+      : []),
     { key: "Acessórios", label: "Acompanha acessórios?", options: ["Caixa e carregador originais", "Só carregador", "Sem acessórios"] },
     isApple
       ? { key: "Conta desvinculada", label: "iCloud (Buscar iPhone) já desvinculado?", options: ["Sim", "Ainda não"] }
@@ -45,7 +53,7 @@ const MODELS_BY_BRAND: Record<string, string[]> = {
 const MEMORIES = ["16GB", "32GB", "64GB", "128GB", "256GB", "512GB", "1TB"];
 
 // Respostas que indicam parte sem funcionar — a loja NÃO avalia (bloqueia).
-const BLOCKED_ANSWERS = ["Liga, mas tem defeito", "Não liga", "Não acende", "Não funciona"];
+const BLOCKED_ANSWERS = ["Não liga", "Não faz ligações", "Não funciona", "Com problema"];
 
 const MARGIN_TABLES: { table: 1 | 2 | 3; key: keyof TradeInMargins; label: string }[] = [
   { table: 1, key: "t1", label: "Margem maior" },

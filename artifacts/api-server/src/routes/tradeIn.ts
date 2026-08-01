@@ -84,7 +84,7 @@ router.patch("/trade-in/margins", requireAdmin, async (req, res): Promise<void> 
 });
 
 // Respostas que indicam parte sem funcionar: a loja NÃO avalia esses aparelhos.
-const BLOCKED_ANSWERS = ["Liga, mas tem defeito", "Não liga", "Não acende", "Não funciona"];
+const BLOCKED_ANSWERS = ["Não liga", "Não faz ligações", "Não funciona", "Com problema"];
 
 // Avaliação com IA: pesquisa preços atuais na web e sugere valor de compra.
 router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
