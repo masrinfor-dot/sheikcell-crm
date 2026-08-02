@@ -51,6 +51,18 @@ router.get("/superadmin/saas/overview", async (_req, res): Promise<void> => {
     db.select({ n: sql<number>`COUNT(*)` })
       .from(saasContractsTable).where(sql`${saasContractsTable.createdAt} >= ${monthStart}::date`),
   ]);
+  // Contratos ativos (lojas não canceladas) com renovação neste mês —
+  // consulta separada para não mexer no destructuring posicional acima.
+  const [renewMonth] = await db
+    .select({ n: sql<number>`COUNT(*)` })
+    .from(saasContractsTable)
+    .innerJoin(tenantsTable, eq(saasContractsTable.tenantId, tenantsTable.id))
+    .where(and(
+      eq(saasContractsTable.isActive, true),
+      sql`${tenantsTable.saasStatus} <> 'cancelado'`,
+      sql`${saasContractsTable.renewalDate} IS NOT NULL`,
+      sql`to_char(${saasContractsTable.renewalDate}, 'YYYY-MM') = ${today.slice(0, 7)}`,
+    ));
   res.json({
     mrrCents: Number(mrr?.v ?? 0),
     paidMonthCents: Number(paidMonth?.v ?? 0),
@@ -62,6 +74,7 @@ router.get("/superadmin/saas/overview", async (_req, res): Promise<void> => {
     pendingCount: Number(pending?.n ?? 0),
     openTickets: Number(openTickets?.n ?? 0),
     newContractsMonth: Number(newContractsMonth?.n ?? 0),
+    renewalsMonthCount: Number(renewMonth?.n ?? 0),
   });
 });
 

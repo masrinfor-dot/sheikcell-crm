@@ -563,6 +563,7 @@ export type SaasOverview = {
   pendingCount: number;
   openTickets: number;
   newContractsMonth: number;
+  renewalsMonthCount: number;
 };
 
 export type TenantSummary = {

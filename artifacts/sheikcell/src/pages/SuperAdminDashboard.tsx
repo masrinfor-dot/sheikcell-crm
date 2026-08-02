@@ -39,6 +39,29 @@ const fmtDate = (d: string | null | undefined): string => {
   return `${day}/${m}/${y}`;
 };
 
+// Dias até a renovação (data no formato "YYYY-MM-DD"); null se sem data.
+const daysUntil = (d: string | null | undefined): number | null => {
+  if (!d) return null;
+  const target = new Date(d.slice(0, 10) + "T00:00:00");
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((target.getTime() - today.getTime()) / 86400000);
+};
+
+// Badge "Renova em X dias" para contratos que renovam nos próximos 30 dias
+// (ou já venceram). Contratos distantes não recebem destaque.
+const renewalBadge = (renewalDate: string | null | undefined) => {
+  const days = daysUntil(renewalDate);
+  if (days === null || days > 30) return null;
+  if (days < 0) return <Badge variant="destructive">Renovação vencida há {-days} dia{-days === 1 ? "" : "s"}</Badge>;
+  if (days === 0) return <Badge variant="destructive">Renova hoje</Badge>;
+  return (
+    <Badge variant="outline" className="border-amber-500 text-amber-600">
+      Renova em {days} dia{days === 1 ? "" : "s"}
+    </Badge>
+  );
+};
+
 type Tab = "lojistas" | "financeiro" | "contratos" | "suporte";
 
 const TABS: { id: Tab; label: string; icon: typeof Building2 }[] = [
@@ -231,6 +254,7 @@ export default function SuperAdminDashboard() {
                     { label: "Recebido neste mês", value: brl(overview.paidMonthCents) },
                     { label: "Em atraso", value: brl(overview.overdueCents), sub: `${overview.overdueCount} mensalidade(s)`, red: overview.overdueCount > 0 },
                     { label: "Recebido no total", value: brl(overview.paidTotalCents) },
+                    { label: "Contratos renovando no mês", value: String(overview.renewalsMonthCount ?? 0), sub: "renovação neste mês", red: (overview.renewalsMonthCount ?? 0) > 0 },
                   ].map((s) => (
                     <Card key={s.label}>
                       <CardContent className="pt-4">
@@ -327,6 +351,7 @@ export default function SuperAdminDashboard() {
                         <div>
                           <p className="font-medium text-sm flex items-center gap-2">
                             {t.name} {statusBadge(t)}
+                            {c?.isActive !== false && renewalBadge(c?.renewalDate)}
                           </p>
                           {c ? (
                             <p className="text-xs text-muted-foreground">
