@@ -302,6 +302,12 @@ export type SectorSummary = {
   busyAttendants: number;
 };
 
+export type DashboardAttention = {
+  waitingTooLong: Array<{ id: number; name: string; sectorName: string | null; waitingMinutes: number | null }>;
+  overdueTasks: Array<{ id: number; title: string; assigneeName: string | null; daysOverdue: number | null }>;
+  avgServiceSeconds: number | null;
+};
+
 export type CrmContact = {
   id: number;
   name: string;
@@ -1169,6 +1175,7 @@ export const api = {
   },
   admin: {
     summary: () => req<SectorSummary[]>("/admin/summary"),
+    dashboardAttention: () => req<DashboardAttention>("/admin/dashboard-attention"),
     logs: (params?: { limit?: number; sectorId?: number; attendantId?: number; days?: number; outcome?: string; reason?: string; search?: string }) => {
       const qs = new URLSearchParams();
       if (params?.limit) qs.set("limit", String(params.limit));

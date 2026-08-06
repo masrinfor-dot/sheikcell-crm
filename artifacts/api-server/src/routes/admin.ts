@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
 import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, conversationParticipantsTable, tasksTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable, accessLogsTable } from "@workspace/db";
-import { eq, sql, desc, and, gte, isNull, isNotNull, notInArray, inArray, or, ilike } from "drizzle-orm";
+import { eq, sql, desc, asc, and, gte, lt, isNull, isNotNull, notInArray, inArray, or, ilike } from "drizzle-orm";
 import { requireAdmin, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
 import { sanitizePermissions } from "../lib/permissions";
 import { getPresence } from "../lib/sseEmitter";
@@ -115,6 +115,88 @@ router.get("/admin/summary", requireAdminOrSupervisor, async (req, res): Promise
   );
 
   res.json(summary);
+});
+
+// ─── "Precisa de atenção agora" — resumo pra Visão Geral ────────────────────
+// Agrega, num único round-trip, o que hoje só aparece entrando em cada aba:
+// clientes esperando resposta há muito tempo, tarefas atrasadas e o tempo
+// médio de atendimento do dia. Limitado a 5 itens por lista — é um resumo
+// pra abrir a aba certa, não uma listagem completa.
+router.get("/admin/dashboard-attention", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+
+  const todaySP = new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
+  const startOfDay = new Date(`${todaySP}T00:00:00-03:00`);
+
+  // Mesmo limiar padrão do alarme "sem resposta" da Central de Atendimento
+  // (ChatCenter.tsx, alertMinutes) — aqui fixo, só pra sinalizar na Visão Geral.
+  const WAIT_THRESHOLD_MIN = 5;
+  const waitThreshold = new Date(Date.now() - WAIT_THRESHOLD_MIN * 60_000);
+
+  const waitingRows = await db
+    .select({
+      id: conversationsTable.id,
+      name: conversationsTable.name,
+      sectorName: sectorsTable.name,
+      lastMessageAt: conversationsTable.lastMessageAt,
+    })
+    .from(conversationsTable)
+    .leftJoin(sectorsTable, eq(conversationsTable.sectorId, sectorsTable.id))
+    .where(and(
+      eq(conversationsTable.tenantId, tenantId),
+      eq(conversationsTable.isArchived, false),
+      notInArray(conversationsTable.status, ["resolved", "archived"]),
+      eq(conversationsTable.lastMessageDirection, "inbound"),
+      isNotNull(conversationsTable.lastMessageAt),
+      lt(conversationsTable.lastMessageAt, waitThreshold),
+    ))
+    .orderBy(asc(conversationsTable.lastMessageAt))
+    .limit(5);
+
+  const overdueRows = await db
+    .select({
+      id: tasksTable.id,
+      title: tasksTable.title,
+      dueDate: tasksTable.dueDate,
+      assigneeName: usersTable.name,
+    })
+    .from(tasksTable)
+    .leftJoin(usersTable, eq(tasksTable.assigneeId, usersTable.id))
+    .where(and(
+      eq(tasksTable.tenantId, tenantId),
+      eq(tasksTable.isArchived, false),
+      sql`${tasksTable.status} <> 'done'`,
+      isNotNull(tasksTable.dueDate),
+      lt(tasksTable.dueDate, new Date()),
+    ))
+    .orderBy(asc(tasksTable.dueDate))
+    .limit(5);
+
+  const [avgRow] = await db
+    .select({ avgSeconds: sql<number | null>`avg(${attendanceLogsTable.serviceTimeSeconds})::int` })
+    .from(attendanceLogsTable)
+    .where(and(
+      eq(attendanceLogsTable.tenantId, tenantId),
+      gte(attendanceLogsTable.createdAt, startOfDay),
+      isNotNull(attendanceLogsTable.serviceTimeSeconds),
+    ));
+
+  const now = Date.now();
+  res.json({
+    waitingTooLong: waitingRows.map((c) => ({
+      id: c.id,
+      name: c.name,
+      sectorName: c.sectorName,
+      waitingMinutes: c.lastMessageAt ? Math.floor((now - c.lastMessageAt.getTime()) / 60_000) : null,
+    })),
+    overdueTasks: overdueRows.map((t) => ({
+      id: t.id,
+      title: t.title,
+      assigneeName: t.assigneeName,
+      daysOverdue: t.dueDate ? Math.floor((now - t.dueDate.getTime()) / 86_400_000) : null,
+    })),
+    avgServiceSeconds: avgRow?.avgSeconds ?? null,
+  });
 });
 
 // Recent attendance logs

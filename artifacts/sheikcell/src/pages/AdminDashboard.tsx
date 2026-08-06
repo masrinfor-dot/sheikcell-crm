@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, PERMISSION_KEYS, PERMISSION_LABELS, type SectorSummary, type AttendanceLog, type Sector, type QuickReply, type Store } from "@/lib/api";
+import { api, PERMISSION_KEYS, PERMISSION_LABELS, type SectorSummary, type AttendanceLog, type Sector, type QuickReply, type Store, type DashboardAttention, type InternalConversation } from "@/lib/api";
 import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
@@ -33,6 +33,7 @@ import {
   Smartphone, LogOut, LayoutDashboard, ClipboardList,
   Settings, Users, RefreshCw, Plus, X, Clock, CheckCircle,
   PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, Table2, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck,
+  AlertTriangle, WifiOff,
   FolderArchive, Headphones, ShoppingBag, BarChart3, SlidersHorizontal, Palette, ChevronDown, Banknote, Wrench,
 } from "lucide-react";
 import Resultados from "./Resultados";
@@ -109,6 +110,11 @@ export default function AdminDashboard() {
   const [waSessions, setWaSessions] = useState<WASession[] | null>(null);
   const [waLoading, setWaLoading] = useState(false);
   const [newConnName, setNewConnName] = useState("");
+  // Visão Geral "viva": o que precisa de atenção agora, prévia do chat interno
+  // e saldo bancário — tudo que hoje só aparece entrando em cada aba.
+  const [attention, setAttention] = useState<DashboardAttention | null>(null);
+  const [internalPreview, setInternalPreview] = useState<InternalConversation[]>([]);
+  const [financeBankSnapshot, setFinanceBankSnapshot] = useState<{ totalCents: number; pendingCount: number } | null>(null);
 
   // Modals
   const [showAddUser, setShowAddUser] = useState(false);
@@ -137,6 +143,9 @@ export default function AdminDashboard() {
       setSummary(s);
       setLogs(l);
     } catch { /* silent */ } finally { setLoading(false); }
+    // Independente do resto: se essa consulta falhar (ex.: supervisor sem
+    // acesso a alguma tabela), o resto da Visão Geral segue funcionando.
+    api.admin.dashboardAttention().then(setAttention).catch(() => {});
   }, []);
 
   const fetchLogs = useCallback(async (f: typeof logFilters) => {
@@ -222,6 +231,24 @@ export default function AdminDashboard() {
     const iv = setInterval(fetchWAStatus, 2500);
     return () => clearInterval(iv);
   }, [tab, fetchWAStatus]);
+
+  // Prévia do chat interno e saldo bancário na Visão Geral: só busca quando a
+  // aba está aberta (dados leves, mas sem motivo pra puxar isso sempre).
+  // O saldo bancário é melhor esforço — quem não tem acesso ao módulo
+  // (Financeiro Bancário é adminOnly) simplesmente não vê o card.
+  useEffect(() => {
+    if (tab !== "dashboard") return;
+    let cancelled = false;
+    api.internalChat.conversations()
+      .then((list) => { if (!cancelled) setInternalPreview(list.filter((c) => c.unreadCount > 0)); })
+      .catch(() => {});
+    if (user?.role === "admin") {
+      Promise.all([api.financeBank.dashboard(), api.financeBank.metrics()])
+        .then(([d, m]) => { if (!cancelled) setFinanceBankSnapshot({ totalCents: d.totalCents, pendingCount: m.totals.pendingCount }); })
+        .catch(() => {});
+    }
+    return () => { cancelled = true; };
+  }, [tab, user?.role]);
 
   const handleWARefresh = async () => {
     setWaLoading(true);
@@ -468,11 +495,12 @@ export default function AdminDashboard() {
         {/* === DASHBOARD TAB === */}
         {tab === "dashboard" && (
           <div className="space-y-6">
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
               {[
                 { label: "Aguardando", value: totalWaiting, icon: Clock, color: "text-amber-600", bg: "bg-amber-50" },
                 { label: "Em Atendimento", value: totalInProgress, icon: PhoneCall, color: "text-blue-600", bg: "bg-blue-50" },
                 { label: "Finalizados Hoje", value: totalDone, icon: TrendingUp, color: "text-green-600", bg: "bg-green-50" },
+                { label: "Tempo Médio", value: formatDuration(attention?.avgServiceSeconds ?? null), icon: Clock, color: "text-foreground", bg: "bg-secondary/60" },
               ].map(({ label, value, icon: Icon, color, bg }) => (
                 <div key={label} className={`shk-card p-5 text-center ${bg}`}>
                   <Icon className={`w-6 h-6 mx-auto mb-1 ${color}`} />
@@ -481,6 +509,111 @@ export default function AdminDashboard() {
                 </div>
               ))}
             </div>
+
+            {(() => {
+              const waitingTooLong = attention?.waitingTooLong ?? [];
+              const overdueTasks = attention?.overdueTasks ?? [];
+              const attentionCount = waitingTooLong.length + overdueTasks.length;
+              const disconnectedWA = (waSessions ?? []).filter((s) => s.status === "disconnected" || s.status === "unconfigured");
+              return (
+                <div className="grid lg:grid-cols-3 gap-4 items-start">
+                  <div className="lg:col-span-2 shk-card p-5">
+                    <div className="flex items-center justify-between mb-3">
+                      <h2 className="font-bold text-foreground flex items-center gap-2">
+                        <AlertTriangle className="w-4 h-4 text-amber-600" />Precisa de atenção agora
+                      </h2>
+                      {attentionCount > 0 && (
+                        <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">{attentionCount} {attentionCount === 1 ? "item" : "itens"}</span>
+                      )}
+                    </div>
+                    {attentionCount === 0 && disconnectedWA.length === 0 ? (
+                      <p className="text-sm text-muted-foreground py-4 text-center">Tudo em dia — nenhum cliente esperando, nenhuma tarefa atrasada. 🎉</p>
+                    ) : (
+                      <div className="divide-y divide-border">
+                        {waitingTooLong.map((c) => (
+                          <button key={`w-${c.id}`} onClick={() => setTab("chat")} data-testid={`attention-waiting-${c.id}`}
+                            className="w-full flex items-center gap-3 py-2.5 text-left hover:bg-secondary/40 rounded-lg px-2 -mx-2 transition">
+                            <div className="w-8 h-8 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center shrink-0"><Clock className="w-4 h-4" /></div>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-semibold truncate">{c.name} <span className="font-normal text-muted-foreground">sem resposta{c.waitingMinutes != null ? ` há ${c.waitingMinutes} min` : ""}</span></p>
+                              <p className="text-xs text-muted-foreground truncate">{c.sectorName ?? "Sem setor"}</p>
+                            </div>
+                          </button>
+                        ))}
+                        {overdueTasks.map((t) => (
+                          <button key={`t-${t.id}`} onClick={() => setTab("tarefas")} data-testid={`attention-task-${t.id}`}
+                            className="w-full flex items-center gap-3 py-2.5 text-left hover:bg-secondary/40 rounded-lg px-2 -mx-2 transition">
+                            <div className="w-8 h-8 rounded-full bg-red-100 text-red-600 flex items-center justify-center shrink-0"><ListTodo className="w-4 h-4" /></div>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-semibold truncate">{t.title}</p>
+                              <p className="text-xs text-muted-foreground truncate">
+                                {t.assigneeName ?? "Sem responsável"} · atrasada {t.daysOverdue != null && t.daysOverdue > 0 ? `há ${t.daysOverdue}d` : "hoje"}
+                              </p>
+                            </div>
+                          </button>
+                        ))}
+                        {disconnectedWA.map((s) => (
+                          <button key={`wa-${s.sessionKey}`} onClick={() => setTab("whatsapp")} data-testid={`attention-wa-${s.sessionKey}`}
+                            className="w-full flex items-center gap-3 py-2.5 text-left hover:bg-secondary/40 rounded-lg px-2 -mx-2 transition">
+                            <div className="w-8 h-8 rounded-full bg-red-100 text-red-600 flex items-center justify-center shrink-0"><WifiOff className="w-4 h-4" /></div>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-semibold truncate">{s.displayName ?? (s.sessionKey === "default" ? "Principal" : s.sessionKey)} desconectado</p>
+                              <p className="text-xs text-muted-foreground truncate">Reconectar para não perder mensagens</p>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex flex-col gap-4">
+                    <div className="shk-card p-5">
+                      <div className="flex items-center justify-between mb-3">
+                        <h2 className="font-bold text-foreground flex items-center gap-2 text-sm">
+                          <MessagesSquare className="w-4 h-4 text-primary" />Chat Interno
+                        </h2>
+                        {internalChatUnread > 0 && <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-600">{internalChatUnread}</span>}
+                      </div>
+                      {internalPreview.length === 0 ? (
+                        <p className="text-xs text-muted-foreground py-2">Nenhuma mensagem não lida.</p>
+                      ) : (
+                        <div className="space-y-1">
+                          {internalPreview.slice(0, 4).map((c) => (
+                            <button key={c.id} onClick={() => setTab("equipe")} data-testid={`internal-preview-${c.id}`}
+                              className="w-full flex items-center gap-2 py-1.5 text-left hover:bg-secondary/40 rounded-lg px-2 -mx-2 transition">
+                              <div className="min-w-0 flex-1">
+                                <p className="text-xs font-semibold truncate">{c.name}</p>
+                                <p className="text-[11px] text-muted-foreground truncate">{c.lastMessage ?? ""}</p>
+                              </div>
+                              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-red-500 text-white shrink-0">{c.unreadCount}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {financeBankSnapshot && (
+                      <div className="shk-card p-5">
+                        <h2 className="font-bold text-foreground flex items-center gap-2 text-sm mb-3">
+                          <Banknote className="w-4 h-4 text-green-600" />Financeiro Bancário
+                        </h2>
+                        <div className="flex items-baseline justify-between">
+                          <span className="text-xs text-muted-foreground">Saldo conhecido</span>
+                          <span className="text-lg font-extrabold text-foreground">{(financeBankSnapshot.totalCents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}</span>
+                        </div>
+                        {financeBankSnapshot.pendingCount > 0 && (
+                          <button onClick={() => setTab("financeiro-bancario")} data-testid="attention-finance-pending"
+                            className="w-full flex items-center justify-between mt-2 pt-2 border-t border-border text-left hover:opacity-80 transition">
+                            <span className="text-xs text-muted-foreground">Pendentes de conciliação</span>
+                            <span className="text-xs font-bold text-amber-600">{financeBankSnapshot.pendingCount}</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
 
             <div>
               <div className="flex items-center justify-between mb-3">
