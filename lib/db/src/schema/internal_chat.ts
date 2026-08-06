@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, timestamp, primaryKey, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, timestamp, primaryKey, uniqueIndex, boolean, foreignKey } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { usersTable } from "./users";
 
@@ -33,11 +33,31 @@ export const internalConversationMembersTable = pgTable(
   (t) => [primaryKey({ columns: [t.conversationId, t.userId] })],
 );
 
-export const internalMessagesTable = pgTable("internal_messages", {
-  tenantId: integer("tenant_id").notNull().default(1),
-  id: serial("id").primaryKey(),
-  conversationId: integer("conversation_id").notNull().references(() => internalConversationsTable.id, { onDelete: "cascade" }),
-  senderId: integer("sender_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }),
-  content: text("content").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const internalMessagesTable = pgTable(
+  "internal_messages",
+  {
+    tenantId: integer("tenant_id").notNull().default(1),
+    id: serial("id").primaryKey(),
+    conversationId: integer("conversation_id").notNull().references(() => internalConversationsTable.id, { onDelete: "cascade" }),
+    senderId: integer("sender_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }),
+    content: text("content").notNull(),
+    type: text("type").notNull().default("text"), // text | image | audio | doc
+    mediaUrl: text("media_url"),
+    // Transcrição do áudio (Whisper) — preenchida sob demanda, como no chat de clientes.
+    transcript: text("transcript"),
+    // Encaminhada de outra conversa: o conteúdo/mídia já vem copiado (mensagem
+    // independente), então a origem pode ser apagada sem quebrar o encaminhamento.
+    forwarded: boolean("forwarded").notNull().default(false),
+    // Responder mensagem (como o WhatsApp): aponta para a mensagem citada, sempre
+    // na MESMA conversa (ver validação na rota). Coluna simples + FK via
+    // foreignKey() abaixo (em vez de .references() em linha) para evitar
+    // referência circular de tipos (a tabela citaria a si mesma na sua própria definição).
+    replyToId: integer("reply_to_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // "set null" em vez de cascade: apagar a mensagem original não deve apagar
+    // quem a citou, só perder a referência.
+    foreignKey({ columns: [t.replyToId], foreignColumns: [t.id], name: "internal_messages_reply_to_id_fk" }).onDelete("set null"),
+  ],
+);

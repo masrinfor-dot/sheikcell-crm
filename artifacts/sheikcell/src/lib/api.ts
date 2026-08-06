@@ -1,6 +1,18 @@
 const BASE = "/api";
 export const API_BASE = BASE;
 
+// Erro de API com o `code` opcional do corpo da resposta preservado (além da
+// mensagem) — usado, por ex., para o front detectar REAUTH_REQUIRED e abrir o
+// modal de confirmação de senha em vez de tratar como erro genérico.
+export class ApiError extends Error {
+  code?: string;
+  constructor(message: string, code?: string) {
+    super(message);
+    this.name = "ApiError";
+    this.code = code;
+  }
+}
+
 async function req<T>(path: string, opts?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     credentials: "include",
@@ -9,7 +21,7 @@ async function req<T>(path: string, opts?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error((err as { error?: string }).error ?? res.statusText);
+    throw new ApiError((err as { error?: string }).error ?? res.statusText, (err as { code?: string }).code);
   }
   if (res.status === 204) return undefined as unknown as T;
   return res.json() as Promise<T>;
@@ -126,12 +138,53 @@ export type MeetingItem = {
   creatorName: string | null;
 };
 
+// ─── Financeiro bancário (conciliação — ver plano da Fase 1) ────────────────
+export type FinanceBankProviderInfo = { provider: string; isBank: boolean; isAcquirer: boolean; configured: boolean };
+export type FinanceBankAccount = {
+  id: number; storeId: number; storeName: string; provider: string; kind: "conta" | "maquininha";
+  label: string; status: "nao_configurado" | "conectado" | "erro" | "desconectado";
+  lastSyncAt: string | null; isActive: boolean; createdAt: string;
+};
+export type FinanceBankTransaction = {
+  id: number; bankAccountId: number; accountLabel: string; storeId: number;
+  postedAt: string; amountCents: number; type: "credit" | "debit"; description: string | null;
+  reconciliationStatus: "pending" | "matched" | "ignored";
+};
+export type FinanceBankSale = {
+  id: number; bankAccountId: number; storeId: number; externalSaleId: string; soldAt: string;
+  grossAmountCents: number; feeAmountCents: number; netAmountCents: number; installments: number;
+  cardBrand: string | null; paymentMethod: "credito" | "debito" | "pix";
+  authorizationCode: string | null; nsu: string | null; repasseStatus: "pending" | "repassado";
+};
+export type ReconciliationMatchRow = {
+  id: number; bankTransactionId: number; matchedType: "acquirer_sale" | "acquirer_repasse" | "manual";
+  matchedRecordId: number | null; ruleId: number | null; matchedBy: string;
+  status: "auto" | "manual_confirmed" | "rejected"; createdAt: string;
+};
+export type FinanceBankDashboard = {
+  accounts: { accountId: number; label: string; provider: string; storeId: number; storeName: string; lastSyncAt: string | null; balanceCents: number }[];
+  totalCents: number;
+};
+export type FinanceBankMetrics = {
+  totals: { creditCents: number; debitCents: number; netCents: number; pendingCount: number; matchedCount: number; reconciliationRatePct: number };
+  cashFlowByDay: { date: string; creditCents: number; debitCents: number }[];
+  byStore: { storeId: number; storeName: string; netCents: number }[];
+  byProvider: { provider: string; netCents: number }[];
+  salesByPaymentMethod: { paymentMethod: "credito" | "debito" | "pix"; count: number; grossCents: number }[];
+};
+
 export type InternalMessage = {
   id: number;
   conversationId: number;
   senderId: number;
   senderName: string;
   content: string;
+  type: "text" | "image" | "audio" | "doc";
+  mediaUrl: string | null;
+  transcript: string | null;
+  forwarded: boolean;
+  replyToId: number | null;
+  replyTo: { id: number; senderName: string; content: string; type: "text" | "image" | "audio" | "doc" } | null;
   createdAt: string;
 };
 
@@ -340,6 +393,35 @@ export type TaskSubtask = {
   id: number; taskId: number; title: string; isDone: boolean; position: number; createdAt: string;
 };
 
+// ── Quadro de Sistema (Dev) ── problemas/atualizações/implementações do
+// próprio sheikcell-crm, com responsável e prazo. Aba admin liberável via adminAccess.
+export type SystemBoardType = "problema" | "atualizacao" | "implementacao";
+export type SystemBoardStatus = "aberto" | "andamento" | "concluido";
+
+export type SystemBoardItem = {
+  id: number;
+  type: SystemBoardType;
+  title: string;
+  description: string | null;
+  status: SystemBoardStatus;
+  priority: TaskPriority;
+  responsibleId: number | null;
+  createdById: number | null;
+  dueDate: string | null;
+  position: number;
+  isArchived: boolean;
+  createdAt: string;
+  updatedAt: string;
+  responsible: { id: number; name: string } | null;
+  createdBy: { id: number; name: string } | null;
+  commentCount?: number;
+};
+
+export type SystemBoardComment = {
+  id: number; itemId: number; authorId: number | null;
+  authorName: string | null; content: string; createdAt: string;
+};
+
 export type QuizQuestion = { id: string; label: string; options: string[]; correct?: number };
 export type Training = {
   id: number; title: string; description: string | null;
@@ -411,9 +493,16 @@ export type PartnerLink = {
   id: number; name: string; url: string; position: number; createdAt: string;
 };
 
+export type Branding = {
+  companyName: string | null;
+  logoDataUrl: string | null;
+  primaryColor: string | null;
+};
+
 export type AppSettings = {
   alertUnansweredEnabled: boolean;
   alertUnansweredMinutes: number;
+  branding: Branding;
 };
 
 export type TaskReportBucket = {
@@ -755,14 +844,34 @@ export const api = {
     createGroup: (name: string, memberIds: number[]) =>
       req<InternalConversation>("/internal-chat/conversations/group", { method: "POST", body: JSON.stringify({ name, memberIds }) }),
     messages: (id: number) => req<InternalMessage[]>(`/internal-chat/conversations/${id}/messages`),
-    send: (id: number, content: string) =>
-      req<InternalMessage>(`/internal-chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
+    send: (id: number, content: string, replyToId?: number) =>
+      req<InternalMessage>(`/internal-chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content, replyToId }) }),
     markRead: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}/read`, { method: "POST" }),
     deleteGroup: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}`, { method: "DELETE" }),
     groupMembers: (id: number) => req<{ id: number; name: string; role: string }[]>(`/internal-chat/conversations/${id}/members`),
     updateGroup: (id: number, data: { name?: string; memberIds?: number[] }) =>
       req<InternalConversation & { members?: { id: number; name: string }[] }>(
         `/internal-chat/conversations/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    sendMedia: (id: number, file: File, caption?: string, replyToId?: number): Promise<InternalMessage> => {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = reader.result as string;
+          const base64 = dataUrl.split(",")[1];
+          req<InternalMessage>(`/internal-chat/conversations/${id}/media`, {
+            method: "POST",
+            body: JSON.stringify({ base64, mimetype: file.type, filename: file.name, caption, replyToId }),
+          }).then(resolve).catch(reject);
+        };
+        reader.onerror = () => reject(new Error("Falha ao ler arquivo"));
+        reader.readAsDataURL(file);
+      });
+    },
+    transcribe: (messageId: number) =>
+      req<{ transcript: string }>(`/internal-chat/messages/${messageId}/transcribe`, { method: "POST" }),
+    forward: (messageId: number, conversationIds: number[]) =>
+      req<{ ok: boolean; sent: { conversationId: number; message: InternalMessage }[] }>(
+        `/internal-chat/messages/${messageId}/forward`, { method: "POST", body: JSON.stringify({ conversationIds }) }),
   },
   routing: {
     rules: () => req<RoutingRule[]>("/routing/rules"),
@@ -935,6 +1044,10 @@ export const api = {
     get: () => req<AppSettings>("/settings"),
     update: (data: Partial<AppSettings>) =>
       req<AppSettings>("/settings", { method: "PATCH", body: JSON.stringify(data) }),
+    branding: {
+      update: (data: Partial<Branding>) =>
+        req<Branding>("/settings/branding", { method: "PATCH", body: JSON.stringify(data) }),
+    },
   },
   tasks: {
     list: () => req<Task[]>("/tasks"),
@@ -960,12 +1073,69 @@ export const api = {
       req<{ ok: boolean }>(`/tasks/${id}/subtasks/${subId}`, { method: "DELETE" }),
     remove: (id: number) => req<{ ok: boolean }>(`/tasks/${id}`, { method: "DELETE" }),
   },
+  systemBoard: {
+    list: () => req<SystemBoardItem[]>("/system-board"),
+    create: (data: {
+      type: SystemBoardType; title: string; description?: string; status?: SystemBoardStatus;
+      priority?: TaskPriority; responsibleId?: number | null; dueDate?: string | null;
+    }) => req<SystemBoardItem>("/system-board", { method: "POST", body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<{
+      type: SystemBoardType; title: string; description: string; status: SystemBoardStatus;
+      priority: TaskPriority; responsibleId: number | null; dueDate: string | null;
+      position: number; isArchived: boolean;
+    }>) => req<SystemBoardItem>(`/system-board/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    comments: (id: number) => req<SystemBoardComment[]>(`/system-board/${id}/comments`),
+    addComment: (id: number, content: string) =>
+      req<SystemBoardComment>(`/system-board/${id}/comments`, { method: "POST", body: JSON.stringify({ content }) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/system-board/${id}`, { method: "DELETE" }),
+  },
   documents: {
     list: () => req<DocumentItem[]>("/documents"),
     create: (data: { title: string; category: string; description?: string; fileName: string; mimeType: string; data: string }) =>
       req<DocumentItem>("/documents", { method: "POST", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/documents/${id}`, { method: "DELETE" }),
     fileUrl: (id: number) => `/api/documents/${id}/file`,
+  },
+  financeBank: {
+    providers: () => req<FinanceBankProviderInfo[]>("/finance-bank/providers"),
+    accounts: () => req<FinanceBankAccount[]>("/finance-bank/accounts"),
+    createAccount: (data: { storeId: number; provider: string; kind: "conta" | "maquininha"; label: string }) =>
+      req<FinanceBankAccount>("/finance-bank/accounts", { method: "POST", body: JSON.stringify(data) }),
+    updateAccount: (id: number, data: Partial<{ label: string; isActive: boolean }>) =>
+      req<FinanceBankAccount>(`/finance-bank/accounts/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    removeAccount: (id: number, confirmPassword?: string) =>
+      req<{ ok: boolean }>(`/finance-bank/accounts/${id}`, { method: "DELETE", body: JSON.stringify({ confirmPassword }) }),
+    saveCredentials: (id: number, secret: string, confirmPassword?: string) =>
+      req<{ ok: boolean }>(`/finance-bank/accounts/${id}/credentials`, { method: "POST", body: JSON.stringify({ secret, confirmPassword }) }),
+    transactions: (params?: { accountId?: number; storeId?: number; status?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.accountId) qs.set("accountId", String(params.accountId));
+      if (params?.storeId) qs.set("storeId", String(params.storeId));
+      if (params?.status) qs.set("status", params.status);
+      return req<FinanceBankTransaction[]>(`/finance-bank/transactions?${qs.toString()}`);
+    },
+    sales: (params?: { accountId?: number; storeId?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.accountId) qs.set("accountId", String(params.accountId));
+      if (params?.storeId) qs.set("storeId", String(params.storeId));
+      return req<FinanceBankSale[]>(`/finance-bank/sales?${qs.toString()}`);
+    },
+    reconcile: (storeId?: number) =>
+      req<{ evaluated: number; matched: number; pending: number }>("/finance-bank/reconcile", { method: "POST", body: JSON.stringify({ storeId }) }),
+    matches: (status?: string) =>
+      req<ReconciliationMatchRow[]>(`/finance-bank/reconciliation-matches${status ? `?status=${status}` : ""}`),
+    confirmMatch: (id: number, confirmPassword?: string) =>
+      req<ReconciliationMatchRow>(`/finance-bank/reconciliation-matches/${id}/confirm`, { method: "POST", body: JSON.stringify({ confirmPassword }) }),
+    rejectMatch: (id: number) => req<{ ok: boolean }>(`/finance-bank/reconciliation-matches/${id}/reject`, { method: "POST" }),
+    dashboard: (storeId?: number) => req<FinanceBankDashboard>(`/finance-bank/dashboard${storeId ? `?storeId=${storeId}` : ""}`),
+    metrics: (params?: { storeId?: number; provider?: string; from?: string; to?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.storeId) qs.set("storeId", String(params.storeId));
+      if (params?.provider) qs.set("provider", params.provider);
+      if (params?.from) qs.set("from", params.from);
+      if (params?.to) qs.set("to", params.to);
+      return req<FinanceBankMetrics>(`/finance-bank/metrics?${qs.toString()}`);
+    },
   },
   meetings: {
     list: () => req<MeetingItem[]>("/meetings"),

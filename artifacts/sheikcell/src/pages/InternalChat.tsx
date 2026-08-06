@@ -2,8 +2,100 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
 import { api, can, type InternalConversation, type InternalMessage } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
-import { Users, Send, Plus, X, Search, MessagesSquare, ChevronLeft, SquareKanban, ClipboardPlus, Trash2, Pencil } from "lucide-react";
+import {
+  Users, Send, Plus, X, Search, MessagesSquare, ChevronLeft, SquareKanban, ClipboardPlus, Trash2, Pencil,
+  Paperclip, Mic, Square, Reply, Forward, FileText, Volume2, Loader2,
+} from "lucide-react";
 import TaskBoard from "./TaskBoard";
+
+// Rótulos/emoji fixos de mensagens de mídia sem legenda (ver POST .../media
+// no servidor) — usados para não exibir o placeholder como se fosse texto.
+const MEDIA_PLACEHOLDERS = new Set(["📷 Foto", "🎤 Áudio"]);
+// Mesmo limite do endpoint POST .../media no servidor — valida no cliente
+// antes de ler o arquivo em base64, evitando esperar por um erro do servidor.
+const MEDIA_MAX_BYTES = 20 * 1024 * 1024;
+function isMediaPlaceholder(s: string): boolean {
+  return MEDIA_PLACEHOLDERS.has(s) || s.startsWith("📄 ");
+}
+function extractCaption(content: string): string {
+  const nl = content.indexOf("\n");
+  if (nl === -1) return isMediaPlaceholder(content) ? "" : content;
+  const first = content.slice(0, nl);
+  return isMediaPlaceholder(first) ? content.slice(nl + 1) : content;
+}
+
+// Prévia de uma linha da mensagem citada (na barra "respondendo a" e dentro do
+// balão da resposta) — texto puro, ou rótulo do tipo de mídia + legenda se houver.
+function replyPreviewText(r: { type: InternalMessage["type"]; content: string }): string {
+  if (r.type === "text") return r.content;
+  const label = r.type === "image" ? "📷 Foto" : r.type === "audio" ? "🎤 Áudio" : r.content.split("\n")[0]!;
+  const caption = extractCaption(r.content);
+  return caption ? `${label} · ${caption}` : label;
+}
+
+/** Áudio com botão de transcrição (Whisper) — mesmo padrão do ChatCenter. */
+function InternalAudioBubble({ msg, onTranscribed }: { msg: InternalMessage; onTranscribed: (id: number, transcript: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const handleTranscribe = async () => {
+    if (busy || msg.transcript) return;
+    setBusy(true); setErr(null);
+    try {
+      const r = await api.internalChat.transcribe(msg.id);
+      onTranscribed(msg.id, r.transcript);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Falha ao transcrever");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mb-1">
+      <div className="flex items-center gap-2 bg-black/5 rounded-xl px-3 py-2 min-w-[200px]">
+        <Volume2 className="w-4 h-4 shrink-0" />
+        <audio controls className="flex-1 h-8 max-w-[200px]" style={{ minWidth: 0 }}>
+          <source src={msg.mediaUrl ?? undefined} />
+        </audio>
+      </div>
+      {msg.transcript ? (
+        <p className="text-xs mt-1 bg-black/5 rounded-lg px-2.5 py-1.5 whitespace-pre-wrap" data-testid={`text-transcript-${msg.id}`}>
+          📝 {msg.transcript}
+        </p>
+      ) : (
+        <button onClick={handleTranscribe} disabled={busy} data-testid={`button-transcribe-${msg.id}`}
+          className="text-[11px] font-semibold underline mt-0.5 disabled:opacity-60 opacity-90">
+          {busy ? "Transcrevendo…" : "📝 Transcrever áudio"}
+        </button>
+      )}
+      {err && <p className="text-[11px] text-red-600 mt-0.5">{err}</p>}
+    </div>
+  );
+}
+
+function InternalMediaContent({ msg, onTranscribed }: { msg: InternalMessage; onTranscribed: (id: number, transcript: string) => void }) {
+  if (!msg.mediaUrl) return null;
+  if (msg.type === "audio") return <InternalAudioBubble msg={msg} onTranscribed={onTranscribed} />;
+  if (msg.type === "image") {
+    return (
+      <a href={msg.mediaUrl} target="_blank" rel="noopener noreferrer" className="block mb-1">
+        <img src={msg.mediaUrl} alt="Foto" className="max-w-full rounded-xl object-cover max-h-64 cursor-pointer hover:opacity-90 transition" />
+      </a>
+    );
+  }
+  if (msg.type === "doc") {
+    const filename = msg.mediaUrl.split("/").pop() ?? "documento";
+    return (
+      <a href={msg.mediaUrl} target="_blank" rel="noopener noreferrer" download
+        className="flex items-center gap-2 mb-1 bg-black/5 rounded-xl px-3 py-2 hover:bg-black/10 transition">
+        <FileText className="w-5 h-5 shrink-0" />
+        <span className="text-xs break-all">{filename}</span>
+      </a>
+    );
+  }
+  return null;
+}
 
 const roleLabel: Record<string, string> = {
   admin: "Administrador",
@@ -84,10 +176,33 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
   const [taskAssignee, setTaskAssignee] = useState<string>("");
   const [taskDue, setTaskDue] = useState("");
   const [creatingTask, setCreatingTask] = useState(false);
+  // Envio de mídia (foto/documento/áudio) e gravação de áudio. Todo anexo
+  // (escolhido no seletor de arquivo ou gravado no microfone) passa por um
+  // preview com legenda opcional antes de ser efetivamente enviado.
+  const [sendingMedia, setSendingMedia] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [recordSecs, setRecordSecs] = useState(0);
+  const [pendingAttachment, setPendingAttachment] = useState<{ file: File; kind: "image" | "doc" | "audio"; previewUrl: string | null } | null>(null);
+  const [attachCaption, setAttachCaption] = useState("");
+  // Encaminhar mensagem: modal com a lista de conversas para escolher destino(s).
+  const [forwardMsg, setForwardMsg] = useState<InternalMessage | null>(null);
+  const [forwardTargets, setForwardTargets] = useState<number[]>([]);
+  const [forwarding, setForwarding] = useState(false);
+  // Responder mensagem (estilo WhatsApp): mensagem citada mostrada acima do
+  // composer até ser enviada (ou cancelada); highlightedMsgId é o realce
+  // temporário ao pular para a mensagem original clicando na citação.
+  const [replyTarget, setReplyTarget] = useState<InternalMessage | null>(null);
+  const [highlightedMsgId, setHighlightedMsgId] = useState<number | null>(null);
 
   const activeIdRef = useRef<number | null>(null);
   activeIdRef.current = activeId;
   const bottomRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recordChunksRef = useRef<Blob[]>([]);
+  const recordSendRef = useRef(false);
+  const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const active = conversations.find((c) => c.id === activeId) ?? null;
 
@@ -145,6 +260,15 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Campo de mensagem multi-linha: cresce junto com o texto (até o limite
+  // visual de max-h-32, quando passa a rolar em vez de crescer mais).
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [draft]);
 
   // Real-time updates.
   useEffect(() => {
@@ -206,6 +330,13 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
       setConversations((prev) => prev.map((c) => c.id === payload.id
         ? { ...c, name: payload.name, memberNames: payload.members.filter((m) => m.id !== user?.id).map((m) => m.name) }
         : c));
+    });
+    // Transcrição de áudio pronta (pode ter sido pedida por outro membro da conversa).
+    es.addEventListener("internal_message_updated", (e) => {
+      const payload = JSON.parse((e as MessageEvent).data) as { conversationId: number; messageId: number; transcript: string };
+      if (activeIdRef.current === payload.conversationId) {
+        setMessages((prev) => prev.map((m) => (m.id === payload.messageId ? { ...m, transcript: payload.transcript } : m)));
+      }
     });
     es.addEventListener("resync", () => {
       reconcileAfterReconnect();
@@ -352,14 +483,153 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
     setDraft("");
     setMentionQuery(null);
     try {
-      const msg = await api.internalChat.send(activeId, content);
+      const msg = await api.internalChat.send(activeId, content, replyTarget?.id);
       setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
       setConversations((prev) => prev.map((c) => (c.id === activeId ? { ...c, lastMessage: msg.content, lastMessageAt: msg.createdAt } : c)));
+      setReplyTarget(null);
     } catch (err) {
       setDraft(content);
       toast({ title: "Erro", description: err instanceof Error ? err.message : "Falha ao enviar", variant: "destructive" });
     } finally {
       setSending(false);
+    }
+  };
+
+  // ── Envio de mídia (foto/documento/áudio) com preview antes de enviar ──
+  // Arquivo escolhido no seletor: monta o preview (imagem/áudio tocável, ou
+  // ícone+nome para documento) em vez de enviar direto.
+  const pickAttachment = (file: File) => {
+    if (file.size > MEDIA_MAX_BYTES) {
+      toast({ title: "Arquivo muito grande", description: "O tamanho máximo é 20 MB.", variant: "destructive" });
+      return;
+    }
+    const kind: "image" | "doc" | "audio" = file.type.startsWith("image/") ? "image" : file.type.startsWith("audio/") ? "audio" : "doc";
+    const previewUrl = kind === "doc" ? null : URL.createObjectURL(file);
+    setPendingAttachment({ file, kind, previewUrl });
+    setAttachCaption("");
+  };
+
+  const cancelAttachment = () => {
+    if (pendingAttachment?.previewUrl) URL.revokeObjectURL(pendingAttachment.previewUrl);
+    setPendingAttachment(null);
+    setAttachCaption("");
+  };
+
+  const confirmSendAttachment = async () => {
+    if (!pendingAttachment || activeId == null || sendingMedia) return;
+    setSendingMedia(true);
+    try {
+      const msg = await api.internalChat.sendMedia(activeId, pendingAttachment.file, attachCaption.trim() || undefined, replyTarget?.id);
+      setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
+      setConversations((prev) => prev.map((c) => (c.id === activeId ? { ...c, lastMessage: msg.content, lastMessageAt: msg.createdAt } : c)));
+      if (pendingAttachment.previewUrl) URL.revokeObjectURL(pendingAttachment.previewUrl);
+      setPendingAttachment(null);
+      setAttachCaption("");
+      setReplyTarget(null);
+    } catch (err) {
+      toast({ title: "Erro ao enviar arquivo", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSendingMedia(false);
+    }
+  };
+
+  // ── Gravação de nota de voz (microfone) — mesmo padrão do ChatCenter ──
+  const stopRecordTimer = () => {
+    if (recordTimerRef.current) { clearInterval(recordTimerRef.current); recordTimerRef.current = null; }
+  };
+
+  const handleStartRecording = async () => {
+    if (activeId == null || recording || sendingMedia) return;
+    if (typeof window !== "undefined" && !window.isSecureContext) {
+      toast({ title: "Microfone bloqueado: o site precisa abrir com https://", variant: "destructive" });
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      toast({ title: "Gravação de áudio não suportada neste navegador", variant: "destructive" });
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm"
+        : MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "";
+      const rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      recordChunksRef.current = [];
+      recordSendRef.current = false;
+      rec.ondataavailable = (e) => { if (e.data.size > 0) recordChunksRef.current.push(e.data); };
+      rec.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop());
+        stopRecordTimer();
+        setRecording(false);
+        setRecordSecs(0);
+        const chunks = recordChunksRef.current;
+        recordChunksRef.current = [];
+        // "Cancelar" durante a gravação: descarta sem passar pelo preview.
+        if (!recordSendRef.current || chunks.length === 0) return;
+        const type = (rec.mimeType || "audio/webm").split(";")[0];
+        const ext = type === "audio/mp4" ? "m4a" : "weba";
+        const file = new File([new Blob(chunks, { type })], `nota-de-voz.${ext}`, { type: rec.mimeType || "audio/webm" });
+        // Ao invés de enviar direto, cai no mesmo preview usado por
+        // foto/documento — usuário ouve antes de confirmar o envio.
+        setPendingAttachment({ file, kind: "audio", previewUrl: URL.createObjectURL(file) });
+        setAttachCaption("");
+      };
+      recorderRef.current = rec;
+      rec.start();
+      setRecording(true);
+      setRecordSecs(0);
+      recordTimerRef.current = setInterval(() => setRecordSecs((s) => s + 1), 1000);
+    } catch (err) {
+      const name = err instanceof DOMException ? err.name : "";
+      toast({
+        title: name === "NotFoundError" ? "Nenhum microfone encontrado neste aparelho" : "Permissão do microfone negada",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleStopRecording = (send: boolean) => {
+    recordSendRef.current = send;
+    recorderRef.current?.stop();
+  };
+
+  const recordTimeLabel = `${Math.floor(recordSecs / 60)}:${String(recordSecs % 60).padStart(2, "0")}`;
+
+  // ── Responder mensagem (estilo WhatsApp) ──
+  const openReply = (m: InternalMessage) => setReplyTarget(m);
+  const cancelReply = () => setReplyTarget(null);
+
+  // Clique na citação dentro do balão: pula até a mensagem original (mesma
+  // conversa, já carregada) e dá um realce temporário para achar na hora.
+  const scrollToMessage = (id: number) => {
+    document.getElementById(`internal-msg-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    setHighlightedMsgId(id);
+    setTimeout(() => setHighlightedMsgId((cur) => (cur === id ? null : cur)), 1500);
+  };
+
+  const onTranscribed = (id: number, transcript: string) => {
+    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, transcript } : m)));
+  };
+
+  // ── Encaminhar mensagem ──
+  const openForward = (m: InternalMessage) => {
+    setForwardMsg(m);
+    setForwardTargets([]);
+  };
+
+  const submitForward = async () => {
+    if (!forwardMsg || forwardTargets.length === 0 || forwarding) return;
+    setForwarding(true);
+    try {
+      await api.internalChat.forward(forwardMsg.id, forwardTargets);
+      // Se um dos destinos é a conversa aberta, a própria mensagem chega via SSE.
+      toast({ title: `Mensagem encaminhada para ${forwardTargets.length} conversa${forwardTargets.length > 1 ? "s" : ""}! ↪️` });
+      setForwardMsg(null);
+    } catch (err) {
+      toast({ title: "Erro ao encaminhar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setForwarding(false);
     }
   };
 
@@ -371,13 +641,15 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
             <div className="flex items-center gap-2 font-semibold text-sm">
               <MessagesSquare className="w-4 h-4 text-primary" /> Chat Interno
             </div>
-            <button
-              onClick={openNew}
-              data-testid="button-new-internal-chat"
-              className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:bg-primary/10 rounded-md px-2 py-1"
-            >
-              <Plus className="w-3.5 h-3.5" /> Novo
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={openNew}
+                data-testid="button-new-internal-chat"
+                className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:bg-primary/10 rounded-md px-2 py-1"
+              >
+                <Plus className="w-3.5 h-3.5" /> Novo
+              </button>
+            </div>
           </div>
           <div className="flex-1 overflow-y-auto">
             {conversations.length === 0 && (
@@ -477,46 +749,102 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
                 )}
                 {messages.map((m) => {
                   const mine = m.senderId === user?.id;
-                  return (
-                    <div key={m.id} className={`group flex items-center gap-1 ${mine ? "justify-end" : "justify-start"}`}>
-                      {mine && can(user, "tarefas") && (
+                  const caption = m.type !== "text" ? extractCaption(m.content) : "";
+                  const toolbar = (
+                    <div className="opacity-0 group-hover:opacity-100 transition flex items-center gap-0.5 shrink-0">
+                      {can(user, "tarefas") && (
                         <button
                           onClick={() => openTaskFromMsg(m)}
                           data-testid={`button-task-from-msg-${m.id}`}
                           title="Criar tarefa desta mensagem"
-                          className="opacity-0 group-hover:opacity-100 transition p-1.5 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10 shrink-0"
+                          className="p-1.5 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10"
                         >
                           <ClipboardPlus className="w-3.5 h-3.5" />
                         </button>
                       )}
+                      <button
+                        onClick={() => openForward(m)}
+                        data-testid={`button-forward-msg-${m.id}`}
+                        title="Encaminhar mensagem"
+                        className="p-1.5 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10"
+                      >
+                        <Forward className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() => openReply(m)}
+                        data-testid={`button-reply-msg-${m.id}`}
+                        title="Responder mensagem"
+                        className="p-1.5 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10"
+                      >
+                        <Reply className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  );
+                  return (
+                    <div
+                      key={m.id}
+                      id={`internal-msg-${m.id}`}
+                      className={`group flex items-center gap-1 rounded-lg transition-colors duration-500 ${mine ? "justify-end" : "justify-start"} ${
+                        highlightedMsgId === m.id ? "bg-amber-200/60" : ""
+                      }`}
+                    >
+                      {mine && toolbar}
                       <div className={`max-w-[75%] rounded-2xl px-3.5 py-2 ${
                         mine ? "bg-primary text-white rounded-br-sm" : "bg-card border rounded-bl-sm"
                       }`}>
                         {!mine && active.kind !== "direct" && (
                           <div className="text-[11px] font-semibold text-primary mb-0.5">{m.senderName}</div>
                         )}
-                        <div className="text-sm whitespace-pre-wrap break-words">{renderWithMentions(m.content, teamNames, user?.name, mine)}</div>
-                        <div className={`text-[10px] mt-0.5 text-right ${mine ? "text-white/70" : "text-muted-foreground"}`}>
+                        {m.forwarded && (
+                          <div className={`flex items-center gap-1 text-[10px] italic mb-0.5 ${mine ? "text-white/70" : "text-muted-foreground"}`}>
+                            <Forward className="w-3 h-3" /> Encaminhada
+                          </div>
+                        )}
+                        {m.replyTo && (
+                          <button
+                            onClick={() => scrollToMessage(m.replyTo!.id)}
+                            data-testid={`button-jump-reply-${m.id}`}
+                            className={`block w-full text-left mb-1 rounded-lg px-2 py-1 border-l-4 truncate ${
+                              mine ? "bg-white/15 border-white/50" : "bg-black/5 border-primary/50"
+                            }`}
+                          >
+                            <div className={`text-[11px] font-semibold ${mine ? "text-white/90" : "text-primary"}`}>{m.replyTo.senderName}</div>
+                            <div className={`text-xs truncate ${mine ? "text-white/80" : "text-muted-foreground"}`}>{replyPreviewText(m.replyTo)}</div>
+                          </button>
+                        )}
+                        {m.type !== "text" && <InternalMediaContent msg={m} onTranscribed={onTranscribed} />}
+                        {(m.type === "text" || caption) && (
+                          <div className="text-sm whitespace-pre-wrap break-words">
+                            {renderWithMentions(m.type === "text" ? m.content : caption, teamNames, user?.name, mine)}
+                          </div>
+                        )}
+                        <div className={`flex items-center justify-end gap-1 text-[10px] mt-0.5 ${mine ? "text-white/70" : "text-muted-foreground"}`}>
                           {timeLabel(m.createdAt)}
                         </div>
                       </div>
-                      {!mine && can(user, "tarefas") && (
-                        <button
-                          onClick={() => openTaskFromMsg(m)}
-                          data-testid={`button-task-from-msg-${m.id}`}
-                          title="Criar tarefa desta mensagem"
-                          className="opacity-0 group-hover:opacity-100 transition p-1.5 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10 shrink-0"
-                        >
-                          <ClipboardPlus className="w-3.5 h-3.5" />
-                        </button>
-                      )}
+                      {!mine && toolbar}
                     </div>
                   );
                 })}
                 <div ref={bottomRef} />
               </div>
 
-              <div className="relative p-3 border-t flex items-end gap-2 shrink-0">
+              <div className="border-t shrink-0">
+                {/* Barra "respondendo a": aparece acima do composer até enviar ou cancelar
+                    a citação; vale tanto para o próximo texto quanto para o próximo anexo. */}
+                {replyTarget && (
+                  <div className="flex items-center gap-2 px-3 pt-2" data-testid="reply-preview-bar">
+                    <div className="flex-1 min-w-0 bg-muted/40 border-l-4 border-primary/60 rounded-lg px-2.5 py-1.5">
+                      <div className="text-[11px] font-semibold text-primary">Respondendo a {replyTarget.senderName}</div>
+                      <div className="text-xs text-muted-foreground truncate">{replyPreviewText(replyTarget)}</div>
+                    </div>
+                    <button onClick={cancelReply} data-testid="button-cancel-reply" title="Cancelar resposta"
+                      className="p-1.5 rounded-md text-muted-foreground hover:bg-muted/60 shrink-0">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+              <div className="relative p-3 flex items-end gap-2">
                 {/* Sugestões de @menção */}
                 {mentionOptions.length > 0 && (
                   <div className="absolute bottom-full left-3 mb-1 z-30 bg-card border rounded-xl shadow-lg overflow-hidden min-w-[200px]" data-testid="mention-suggestions">
@@ -534,30 +862,133 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
                     ))}
                   </div>
                 )}
-                <textarea
-                  value={draft}
-                  onChange={(e) => { setDraft(e.target.value); updateMentionState(e.target.value); }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      if (mentionOptions.length > 0) { insertMention(mentionOptions[0].name); return; }
-                      handleSend();
-                    }
-                    if (e.key === "Escape") setMentionQuery(null);
+                {pendingAttachment ? (
+                  <div className="flex-1 flex items-center gap-2 rounded-lg border px-3 py-2 bg-muted/30" data-testid="attachment-preview">
+                    {pendingAttachment.kind === "image" && pendingAttachment.previewUrl && (
+                      <img src={pendingAttachment.previewUrl} alt="Preview" className="w-11 h-11 rounded-lg object-cover shrink-0" />
+                    )}
+                    {pendingAttachment.kind === "audio" && pendingAttachment.previewUrl && (
+                      <audio controls src={pendingAttachment.previewUrl} className="h-8 max-w-[170px] shrink-0" />
+                    )}
+                    {pendingAttachment.kind === "doc" && (
+                      <div className="flex items-center gap-1.5 shrink-0 max-w-[140px]">
+                        <FileText className="w-5 h-5 shrink-0 text-muted-foreground" />
+                        <span className="text-xs truncate">{pendingAttachment.file.name}</span>
+                      </div>
+                    )}
+                    <input
+                      value={attachCaption}
+                      onChange={(e) => setAttachCaption(e.target.value)}
+                      placeholder="Adicionar legenda (opcional)"
+                      data-testid="input-attachment-caption"
+                      className="flex-1 min-w-0 bg-transparent text-sm focus:outline-none"
+                    />
+                  </div>
+                ) : recording ? (
+                  <div className="flex-1 flex items-center gap-2 rounded-lg border px-3 py-2 bg-red-50" data-testid="recording-indicator">
+                    <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse shrink-0" />
+                    <span className="text-sm text-red-700 font-medium flex-1">Gravando áudio... {recordTimeLabel}</span>
+                    <button onClick={() => handleStopRecording(false)} data-testid="button-cancel-recording"
+                      title="Cancelar" className="p-1.5 rounded-md text-red-600 hover:bg-red-100">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                ) : (
+                  <textarea
+                    ref={textareaRef}
+                    value={draft}
+                    onChange={(e) => { setDraft(e.target.value); updateMentionState(e.target.value); }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && mentionOptions.length > 0) {
+                        e.preventDefault();
+                        insertMention(mentionOptions[0].name);
+                        return;
+                      }
+                      // Enter e Shift+Enter só quebram linha (comportamento padrão do
+                      // textarea); enviar é só pelo botão ou Ctrl/Cmd+Enter.
+                      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                        e.preventDefault();
+                        handleSend();
+                        return;
+                      }
+                      if (e.key === "Escape") setMentionQuery(null);
+                    }}
+                    placeholder="Escreva uma mensagem... (Enter quebra linha, Ctrl+Enter envia)"
+                    title="Enter quebra linha. Envie pelo botão ou com Ctrl+Enter."
+                    rows={1}
+                    data-testid="input-internal-message"
+                    className="flex-1 resize-none rounded-lg border px-3 py-2 text-sm max-h-32 overflow-y-auto focus:outline-none focus:ring-2 focus:ring-primary/40"
+                  />
+                )}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/gif,image/webp,audio/mpeg,audio/mp4,audio/ogg,audio/wav,audio/webm,audio/aac,application/pdf,application/msword,.docx,.xls,.xlsx"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    e.target.value = "";
+                    if (f) pickAttachment(f);
                   }}
-                  placeholder="Escreva uma mensagem..."
-                  rows={1}
-                  data-testid="input-internal-message"
-                  className="flex-1 resize-none rounded-lg border px-3 py-2 text-sm max-h-32 focus:outline-none focus:ring-2 focus:ring-primary/40"
                 />
-                <button
-                  onClick={handleSend}
-                  disabled={!draft.trim() || sending}
-                  data-testid="button-send-internal"
-                  className="shrink-0 w-10 h-10 rounded-lg bg-primary text-white flex items-center justify-center disabled:opacity-40 hover:bg-primary/90"
-                >
-                  <Send className="w-4 h-4" />
-                </button>
+                {pendingAttachment ? (
+                  <>
+                    <button
+                      onClick={cancelAttachment}
+                      disabled={sendingMedia}
+                      data-testid="button-cancel-attachment"
+                      title="Cancelar"
+                      className="shrink-0 w-10 h-10 rounded-lg border flex items-center justify-center text-muted-foreground hover:bg-muted/60 disabled:opacity-40"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={confirmSendAttachment}
+                      disabled={sendingMedia}
+                      data-testid="button-send-attachment"
+                      className="shrink-0 w-10 h-10 rounded-lg bg-primary text-white flex items-center justify-center disabled:opacity-40 hover:bg-primary/90"
+                    >
+                      {sendingMedia ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    {!recording && (
+                      <button
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={sendingMedia}
+                        data-testid="button-attach-internal"
+                        title="Anexar foto, áudio ou documento"
+                        className="shrink-0 w-10 h-10 rounded-lg border flex items-center justify-center text-muted-foreground hover:bg-muted/60 disabled:opacity-40"
+                      >
+                        {sendingMedia ? <Loader2 className="w-4 h-4 animate-spin" /> : <Paperclip className="w-4 h-4" />}
+                      </button>
+                    )}
+                    {draft.trim() ? (
+                      <button
+                        onClick={handleSend}
+                        disabled={sending}
+                        data-testid="button-send-internal"
+                        className="shrink-0 w-10 h-10 rounded-lg bg-primary text-white flex items-center justify-center disabled:opacity-40 hover:bg-primary/90"
+                      >
+                        <Send className="w-4 h-4" />
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => (recording ? handleStopRecording(true) : handleStartRecording())}
+                        disabled={sendingMedia}
+                        data-testid="button-record-internal"
+                        title={recording ? "Parar gravação" : "Gravar áudio"}
+                        className={`shrink-0 w-10 h-10 rounded-lg flex items-center justify-center disabled:opacity-40 ${
+                          recording ? "bg-red-500 text-white hover:bg-red-600" : "bg-primary text-white hover:bg-primary/90"
+                        }`}
+                      >
+                        {recording ? <Square className="w-4 h-4" fill="currentColor" /> : <Mic className="w-4 h-4" />}
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
               </div>
             </>
           ) : (
@@ -606,6 +1037,55 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
       </div>
     </div>
   );
+
+  // Modal: encaminhar mensagem — escolher uma ou mais conversas de destino.
+  const forwardModal = forwardMsg && (
+    <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setForwardMsg(null)}>
+      <div className="bg-card rounded-xl w-full max-w-sm shadow-xl border overflow-hidden mx-3" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-4 py-3 border-b">
+          <span className="font-semibold text-sm flex items-center gap-2"><Forward className="w-4 h-4 text-primary" /> Encaminhar mensagem</span>
+          <button onClick={() => setForwardMsg(null)} data-testid="button-close-forward-modal" className="p-1 rounded hover:bg-muted/60"><X className="w-4 h-4" /></button>
+        </div>
+        <div className="px-4 pt-3">
+          <div className="text-xs bg-muted/40 border rounded-lg px-3 py-2 text-muted-foreground line-clamp-3">
+            {forwardMsg.type === "text" ? `"${forwardMsg.content}"` : forwardMsg.content.split("\n")[0]} — {forwardMsg.senderName}
+          </div>
+        </div>
+        <div className="max-h-72 overflow-y-auto mt-2">
+          {conversations.map((c) => {
+            const selected = forwardTargets.includes(c.id);
+            return (
+              <button
+                key={c.id}
+                onClick={() => setForwardTargets((prev) => selected ? prev.filter((id) => id !== c.id) : [...prev, c.id])}
+                data-testid={`forward-target-${c.id}`}
+                className={`w-full text-left px-4 py-2.5 flex items-center gap-3 border-b border-border/50 transition ${selected ? "bg-primary/10" : "hover:bg-muted/50"}`}
+              >
+                <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold shrink-0 ${
+                  c.kind === "general" ? "bg-amber-500 text-white" : c.kind === "group" ? "bg-violet-500 text-white" : "bg-primary text-white"
+                }`}>
+                  {c.kind !== "direct" ? <Users className="w-4 h-4" /> : initials(c.name)}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium truncate">{c.name}</div>
+                </div>
+                <div className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${selected ? "bg-primary border-primary" : "border-border"}`}>
+                  {selected && <span className="text-white text-[10px] leading-none">✓</span>}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+        <div className="p-3 border-t">
+          <button onClick={submitForward} disabled={forwardTargets.length === 0 || forwarding} data-testid="button-submit-forward"
+            className="w-full py-2.5 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition disabled:opacity-50">
+            {forwarding ? "Encaminhando..." : `Encaminhar${forwardTargets.length > 0 ? ` (${forwardTargets.length})` : ""}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
 
   const newModal = showNew && (
           <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowNew(false)}>
@@ -800,7 +1280,7 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
         ) : (
           <div className="flex flex-col h-full min-h-0">{listPanel}</div>
         )}
-        {newModal}{editModal}{taskModal}
+        {newModal}{editModal}{taskModal}{forwardModal}
       </div>
     );
   }
@@ -821,7 +1301,7 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
             <section className={`flex-1 flex-col min-w-0 ${active ? "flex" : "hidden md:flex"}`}>{threadPanel}</section>
           </div>
         )}
-        {newModal}{editModal}{taskModal}
+        {newModal}{editModal}{taskModal}{forwardModal}
       </div>
     </div>
   );

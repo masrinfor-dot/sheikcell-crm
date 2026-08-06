@@ -63,6 +63,17 @@ export const conversationPinsTable = pgTable(
   (t) => [primaryKey({ columns: [t.conversationId, t.userId] })],
 );
 
+// Mensagens fixadas — compartilhado (como o "fixar" do WhatsApp): qualquer
+// participante fixa/desafixa e todo mundo na conversa vê o destaque no topo.
+// Diferente de conversationPinsTable acima, que é por usuário.
+export const messagePinsTable = pgTable("message_pins", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  conversationId: integer("conversation_id").notNull().references(() => conversationsTable.id, { onDelete: "cascade" }),
+  messageId: integer("message_id").notNull().references(() => messagesTable.id, { onDelete: "cascade" }).primaryKey(),
+  pinnedBy: integer("pinned_by").notNull().references(() => usersTable.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const messagesTable = pgTable(
   "messages",
   {

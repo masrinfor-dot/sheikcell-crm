@@ -28,6 +28,9 @@ import storesRouter from "./stores";
 import resultsRouter from "./results";
 import superadminRouter from "./superadmin";
 import superadminSaasRouter from "./superadminSaas";
+import financeBankRouter from "./financeBank";
+import financeBankWebhookRouter from "./financeBankWebhook";
+import systemBoardRouter from "./systemBoard";
 
 const router: IRouter = Router();
 router.use(healthRouter);
@@ -62,5 +65,8 @@ router.use(documentsRouter);
 router.use(meetingsRouter);
 router.use(storesRouter);
 router.use(resultsRouter);
+router.use(financeBankRouter);
+router.use(financeBankWebhookRouter);
+router.use(systemBoardRouter);
 
 export default router;

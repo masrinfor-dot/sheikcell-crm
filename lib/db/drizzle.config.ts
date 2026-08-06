@@ -6,7 +6,10 @@ if (!process.env.DATABASE_URL) {
 }
 
 export default defineConfig({
-  schema: path.join(__dirname, "./src/schema/index.ts"),
+  // drizzle-kit trata o valor como glob: no Windows, path.join gera barras
+  // invertidas que o glob interpreta como escape e o schema "some". Normaliza
+  // para barras normais, que funcionam em qualquer SO.
+  schema: path.join(__dirname, "./src/schema/index.ts").split(path.sep).join("/"),
   dialect: "postgresql",
   dbCredentials: {
     url: process.env.DATABASE_URL,

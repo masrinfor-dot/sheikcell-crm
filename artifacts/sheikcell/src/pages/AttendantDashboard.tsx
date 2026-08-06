@@ -13,6 +13,7 @@ import Peliculas from "./Peliculas";
 import Avaliacao from "./Avaliacao";
 import ChecklistGate from "@/components/ChecklistGate";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
+import BrandLogo from "@/components/BrandLogo";
 import Financeiro from "./Financeiro";
 import Sorteios from "./Sorteios";
 import Robo from "./Robo";
@@ -23,7 +24,7 @@ import Treinamentos from "./Treinamentos";
 import Planilhas from "./Planilhas";
 import Documentos from "./Documentos";
 import {
-  Smartphone, LogOut, KeyRound, Clock, PhoneCall, CheckCircle,
+  LogOut, KeyRound, Clock, PhoneCall, CheckCircle,
   ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, Shield, BadgeDollarSign, GraduationCap, Table2, Gift, Bot, UserSearch, ClipboardList, TrendingUp,
   FolderArchive,
 } from "lucide-react";
@@ -179,12 +180,7 @@ export default function AttendantDashboard() {
       {/* Navbar */}
       <nav className="bg-white border-b border-border sticky top-0 z-20">
         <div className="max-w-3xl mx-auto px-4 h-14 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-xl bg-primary flex items-center justify-center">
-              <Smartphone className="w-4 h-4 text-white" />
-            </div>
-            <span className="font-extrabold text-foreground text-sm">Sheikcell</span>
-          </div>
+          <BrandLogo />
           <div className="flex items-center gap-3">
             <div className="hidden sm:flex items-center gap-1.5">
               {sectorInfo && (

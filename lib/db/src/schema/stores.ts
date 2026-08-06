@@ -10,4 +10,13 @@ export const storesTable = pgTable("stores", {
   name: text("name").notNull(),
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  // Identidade fiscal da loja — cada loja da rede pode ser um CNPJ/regime
+  // tributário diferente (necessário para o módulo financeiro bancário: cada
+  // conta/maquininha pertence a uma loja com sua própria identidade fiscal).
+  cnpj: text("cnpj"),
+  fiscalRegime: text("fiscal_regime"), // simples | presumido | real
+  address: text("address"),
+  city: text("city"),
+  state: text("state"), // UF, 2 letras
+  zipCode: text("zip_code"),
 });

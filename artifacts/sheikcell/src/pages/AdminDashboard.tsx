@@ -18,21 +18,37 @@ import RH from "./RH";
 import Sorteios from "./Sorteios";
 import Robo from "./Robo";
 import Financeiro from "./Financeiro";
+import FinanceiroBancario from "./FinanceiroBancario";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
 import ChecklistGate from "@/components/ChecklistGate";
 import TrainingGate from "@/components/TrainingGate";
 import InternalChat from "./InternalChat";
 import DistribuicaoPanel from "./DistribuicaoPanel";
 import TaskBoard from "./TaskBoard";
+import SystemBoard from "./SystemBoard";
+import ConfiguracoesAparencia from "./ConfiguracoesAparencia";
+import BrandLogo from "@/components/BrandLogo";
 import {
   Smartphone, LogOut, LayoutDashboard, ClipboardList,
   Settings, Users, RefreshCw, Plus, X, Clock, CheckCircle,
   PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, Table2, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck,
-  FolderArchive,
+  FolderArchive, Headphones, ShoppingBag, BarChart3, SlidersHorizontal, Palette, ChevronDown, Banknote, Wrench,
 } from "lucide-react";
 import Resultados from "./Resultados";
 
-type Tab = "dashboard" | "resultados" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "questionarios" | "treinamentos" | "planilhas" | "documentos" | "rh" | "sorteios" | "robo" | "financeiro" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies";
+type Tab = "dashboard" | "resultados" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "questionarios" | "treinamentos" | "planilhas" | "documentos" | "rh" | "sorteios" | "robo" | "financeiro" | "financeiro-bancario" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "sistema";
+
+// Categorias colapsáveis do menu lateral — cada aba pertence a um único grupo.
+type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabIds: Tab[] };
+const TAB_GROUPS: TabGroup[] = [
+  { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["dashboard", "chat", "equipe", "distribuicao", "crm"] },
+  { key: "vendas", label: "Vendas e Serviços", icon: ShoppingBag, tabIds: ["peliculas", "avaliacao", "financeiras"] },
+  { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["resultados", "tarefas", "planilhas", "documentos", "history"] },
+  { key: "pessoas", label: "Pessoas", icon: Users, tabIds: ["rh", "treinamentos", "questionarios", "sorteios", "users"] },
+  { key: "administracao", label: "Administração", icon: Settings, tabIds: ["financeiro", "financeiro-bancario", "sectors", "quickreplies", "whatsapp", "robo"] },
+  { key: "configuracoes", label: "Configurações", icon: SlidersHorizontal, tabIds: ["aparencia"] },
+  { key: "sistema", label: "Sistema (Dev)", icon: Wrench, tabIds: ["sistema"] },
+];
 
 type WASession = {
   sessionKey: string;
@@ -288,6 +304,18 @@ export default function AdminDashboard() {
   const isSupervisor = user?.role === "supervisor";
   const [showMoreNav, setShowMoreNav] = useState(false);
 
+  // Categorias do menu lateral colapsadas pelo admin — lembradas no navegador.
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>(() => {
+    try {
+      const raw = localStorage.getItem("sheikcell:sidebar-collapsed");
+      return raw ? JSON.parse(raw) as Record<string, boolean> : {};
+    } catch { return {}; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("sheikcell:sidebar-collapsed", JSON.stringify(collapsedGroups)); } catch { /* silent */ }
+  }, [collapsedGroups]);
+  const toggleGroup = (key: string) => setCollapsedGroups((prev) => ({ ...prev, [key]: !prev[key] }));
+
   // ── Mensagens rápidas (aba de configuração) ──
   const [quickReplies, setQuickReplies] = useState<QuickReply[]>([]);
   const [qrForm, setQrForm] = useState<{ id: number | null; title: string; content: string; sectorId: string } | null>(null);
@@ -332,6 +360,7 @@ export default function AdminDashboard() {
     { id: "distribuicao" as Tab, label: "Distribuição", icon: GitFork, adminOnly: false },
     { id: "crm" as Tab, label: "CRM", icon: Kanban, adminOnly: false },
     { id: "financeiro" as Tab, label: "Financeiro", icon: BadgeDollarSign, adminOnly: true },
+    { id: "financeiro-bancario" as Tab, label: "Financeiro Bancário", icon: Banknote, adminOnly: true },
     { id: "financeiras" as Tab, label: "Financeiras", icon: Landmark, adminOnly: false },
     { id: "peliculas" as Tab, label: "Películas", icon: ShieldCheck, adminOnly: false },
     { id: "avaliacao" as Tab, label: "Avaliação de Usados", icon: BadgeDollarSign, adminOnly: false },
@@ -347,6 +376,8 @@ export default function AdminDashboard() {
     { id: "sectors" as Tab, label: "Setores", icon: Settings, adminOnly: true },
     { id: "quickreplies" as Tab, label: "Msgs Rápidas", icon: Zap, adminOnly: true },
     { id: "whatsapp" as Tab, label: "WhatsApp", icon: PhoneCall, adminOnly: true },
+    { id: "aparencia" as Tab, label: "Aparência", icon: Palette, adminOnly: true },
+    { id: "sistema" as Tab, label: "Sistema (Dev)", icon: Wrench, adminOnly: true },
   ];
   // Aba de admin aparece para admin OU para quem recebeu a função no cadastro
   const granted = user?.adminAccess ?? [];
@@ -360,15 +391,7 @@ export default function AdminDashboard() {
       {/* Navbar */}
       <nav className="bg-white border-b border-border sticky top-0 z-20">
         <div className="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-xl bg-primary flex items-center justify-center">
-              <Smartphone className="w-4 h-4 text-white" />
-            </div>
-            <span className="font-extrabold text-foreground text-sm">Sheikcell</span>
-            <span className="text-xs text-muted-foreground ml-1 hidden sm:block">
-              {isAdmin ? "— Administrador" : isSupervisor ? "— Supervisor" : ""}
-            </span>
-          </div>
+          <BrandLogo subtitle={isAdmin ? "— Administrador" : isSupervisor ? "— Supervisor" : undefined} />
           <div className="flex items-center gap-3">
             <span className="text-xs text-muted-foreground hidden sm:block">{user?.name}</span>
             <button onClick={() => setShowChangePassword(true)} data-testid="button-change-password"
@@ -392,16 +415,38 @@ export default function AdminDashboard() {
       {/* Left sidebar + content */}
       <div className="flex">
         {/* Sidebar tabs */}
-        <aside className="hidden md:block w-52 shrink-0 border-r border-border bg-white sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3">
-          <div className="flex flex-col gap-1">
-            {tabs.map(({ id, label, icon: Icon }) => (
-              <button key={id} onClick={() => setTab(id)} data-testid={`tab-${id}`}
-                className={`flex items-center gap-2 w-full px-3 py-2.5 rounded-lg text-xs font-semibold text-left transition-colors ${
-                  tab === id ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
-                }`}>
-                <Icon className="w-4 h-4 shrink-0" />{label}
-              </button>
-            ))}
+        <aside className="hidden md:block w-56 shrink-0 border-r border-border bg-white sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3">
+          <div className="flex flex-col gap-3">
+            {TAB_GROUPS.map((group) => {
+              // Segue a ordem definida em group.tabIds (não a ordem de allTabs).
+              const groupTabs = group.tabIds
+                .map((id) => tabs.find((t) => t.id === id))
+                .filter((t): t is typeof tabs[number] => !!t);
+              if (groupTabs.length === 0) return null;
+              const collapsed = !!collapsedGroups[group.key];
+              return (
+                <div key={group.key}>
+                  <button onClick={() => toggleGroup(group.key)} data-testid={`group-toggle-${group.key}`}
+                    className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wide text-muted-foreground hover:text-foreground transition">
+                    <group.icon className="w-3.5 h-3.5 shrink-0" />
+                    <span className="flex-1 text-left truncate">{group.label}</span>
+                    <ChevronDown className={`w-3.5 h-3.5 shrink-0 transition-transform ${collapsed ? "-rotate-90" : ""}`} />
+                  </button>
+                  {!collapsed && (
+                    <div className="flex flex-col gap-1 mt-1">
+                      {groupTabs.map(({ id, label, icon: Icon }) => (
+                        <button key={id} onClick={() => setTab(id)} data-testid={`tab-${id}`}
+                          className={`flex items-center gap-2 w-full pl-6 pr-3 py-2 rounded-lg text-xs font-semibold text-left transition-colors ${
+                            tab === id ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                          }`}>
+                          <Icon className="w-4 h-4 shrink-0" />{label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </aside>
 
@@ -511,6 +556,11 @@ export default function AdminDashboard() {
         {tab === "robo" && <Robo />}
 
         {tab === "financeiro" && <Financeiro />}
+        {tab === "financeiro-bancario" && <FinanceiroBancario />}
+
+        {tab === "aparencia" && <ConfiguracoesAparencia />}
+
+        {tab === "sistema" && <SystemBoard />}
 
         {/* === WHATSAPP TAB === */}
         {tab === "whatsapp" && (
@@ -1328,7 +1378,7 @@ export default function AdminDashboard() {
                 <div>
                   <label className="text-xs font-medium mb-1 block">Funções de admin liberadas (opcional)</label>
                   <div className="flex flex-wrap gap-1.5">
-                    {([["financeiro","Financeiro"],["sorteios","Sorteios"],["robo","Robô"],["rh","RH"],["questionarios","Questionários"],["whatsapp","WhatsApp"]] as const).map(([key, label]) => (
+                    {([["financeiro","Financeiro"],["sorteios","Sorteios"],["robo","Robô"],["rh","RH"],["questionarios","Questionários"],["whatsapp","WhatsApp"],["sistema","Sistema (Dev)"]] as const).map(([key, label]) => (
                       <button type="button" key={key} data-testid={`toggle-admin-access-${key}`}
                         onClick={() => setUserForm({ ...userForm, adminAccess: userForm.adminAccess.includes(key) ? userForm.adminAccess.filter((k) => k !== key) : [...userForm.adminAccess, key] })}
                         className={`px-2 py-1 rounded-lg border text-[11px] font-medium transition ${userForm.adminAccess.includes(key) ? "bg-primary text-white border-primary" : "border-border text-muted-foreground hover:bg-secondary"}`}>

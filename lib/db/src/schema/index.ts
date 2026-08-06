@@ -30,3 +30,6 @@ export * from "./scheduled_messages";
 export * from "./chat_notifications";
 export * from "./tenants";
 export * from "./saas";
+export * from "./financeBank";
+export * from "./financeAudit";
+export * from "./system_board";

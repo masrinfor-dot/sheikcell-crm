@@ -283,5 +283,12 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("./saasBilling").then((m) => m.runMonthlyBilling()).catch(() => {});
   }, 60 * 60_000);
+  // Sincronização das contas PagBank conectadas: extrato/vendas/repasses novos
+  // + conciliação automática. 5 min (rede de segurança — o webhook cobre o
+  // tempo real quando disponível). Roda uma vez logo no boot também.
+  void import("./financeBank/pollJob").then((m) => m.pollPagBankAccounts()).catch(() => {});
+  setInterval(() => {
+    void import("./financeBank/pollJob").then((m) => m.pollPagBankAccounts()).catch(() => {});
+  }, 5 * 60_000);
   logger.info("Agendador de mensagens iniciado (tick 30s)");
 }

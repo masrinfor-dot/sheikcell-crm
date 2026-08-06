@@ -1,6 +1,7 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import { db, internalConversationsTable, internalConversationMembersTable, internalMessagesTable, usersTable } from "@workspace/db";
 import { eq, and, asc, inArray, sql, ne } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { requireAuth, requireAdmin, requireTenant, isTenantSuspended } from "../middlewares/auth";
 import {
   sseEmitter,
@@ -9,6 +10,11 @@ import {
   reconnectInternalStrategy,
   type BufferedInternalEvent,
 } from "../lib/sseEmitter";
+import { createReadStream, existsSync, statSync } from "fs";
+import { mkdir, writeFile } from "fs/promises";
+import { randomUUID } from "crypto";
+import path from "path";
+import { MEDIA_DIR } from "../lib/whatsappInbound";
 
 const router: IRouter = Router();
 
@@ -334,6 +340,29 @@ router.post("/internal-chat/conversations/direct", requireAuth, async (req, res)
   });
 });
 
+// Resolve o preview de "responder mensagem": só aceita citar uma mensagem da
+// MESMA conversa (evita vazar conteúdo de outra conversa/loja via replyToId
+// arbitrário) — se o id não existir ali, a resposta segue sem citação.
+async function resolveReplyTo(
+  replyToId: number | undefined,
+  convId: number,
+  tenantId: number,
+): Promise<{ replyToId: number | null; replyTo: { id: number; senderName: string; content: string; type: string } | null }> {
+  if (replyToId == null) return { replyToId: null, replyTo: null };
+  const [row] = await db
+    .select({ id: internalMessagesTable.id, senderName: usersTable.name, content: internalMessagesTable.content, type: internalMessagesTable.type })
+    .from(internalMessagesTable)
+    .innerJoin(usersTable, eq(internalMessagesTable.senderId, usersTable.id))
+    .where(and(
+      eq(internalMessagesTable.id, replyToId),
+      eq(internalMessagesTable.conversationId, convId),
+      eq(internalMessagesTable.tenantId, tenantId),
+    ))
+    .limit(1);
+  if (!row) return { replyToId: null, replyTo: null };
+  return { replyToId: row.id, replyTo: row };
+}
+
 // Verify the current user may access a conversation; returns the conv or null.
 // Sempre restrito à loja (tenant): conversas de outra loja retornam null.
 async function getAccessibleConversation(convId: number, userId: number, tenantId: number) {
@@ -365,6 +394,9 @@ router.get("/internal-chat/conversations/:id/messages", requireAuth, async (req,
   const conv = await getAccessibleConversation(convId, userId, tenantId);
   if (!conv) { res.status(403).json({ error: "Acesso negado" }); return; }
 
+  const repliedMsg = alias(internalMessagesTable, "repliedMsg");
+  const repliedSender = alias(usersTable, "repliedSender");
+
   const rows = await db
     .select({
       id: internalMessagesTable.id,
@@ -372,10 +404,20 @@ router.get("/internal-chat/conversations/:id/messages", requireAuth, async (req,
       senderId: internalMessagesTable.senderId,
       senderName: usersTable.name,
       content: internalMessagesTable.content,
+      type: internalMessagesTable.type,
+      mediaUrl: internalMessagesTable.mediaUrl,
+      transcript: internalMessagesTable.transcript,
+      forwarded: internalMessagesTable.forwarded,
       createdAt: internalMessagesTable.createdAt,
+      replyToId: internalMessagesTable.replyToId,
+      replyToSenderName: repliedSender.name,
+      replyToContent: repliedMsg.content,
+      replyToType: repliedMsg.type,
     })
     .from(internalMessagesTable)
     .innerJoin(usersTable, eq(internalMessagesTable.senderId, usersTable.id))
+    .leftJoin(repliedMsg, eq(internalMessagesTable.replyToId, repliedMsg.id))
+    .leftJoin(repliedSender, eq(repliedMsg.senderId, repliedSender.id))
     .where(eq(internalMessagesTable.conversationId, convId))
     .orderBy(asc(internalMessagesTable.createdAt))
     .limit(500);
@@ -389,7 +431,10 @@ router.get("/internal-chat/conversations/:id/messages", requireAuth, async (req,
       eq(internalConversationMembersTable.userId, userId),
     ));
 
-  res.json(rows);
+  res.json(rows.map(({ replyToSenderName, replyToContent, replyToType, ...m }) => ({
+    ...m,
+    replyTo: m.replyToId != null ? { id: m.replyToId, senderName: replyToSenderName, content: replyToContent, type: replyToType } : null,
+  })));
 });
 
 // ─── Send a message ────────────────────────────────────────────────────────
@@ -399,16 +444,18 @@ router.post("/internal-chat/conversations/:id/messages", requireAuth, async (req
   const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
   if (Number.isNaN(convId)) { res.status(400).json({ error: "Conversa inválida" }); return; }
 
-  const { content } = req.body as { content?: string };
+  const { content, replyToId: replyToIdRaw } = req.body as { content?: string; replyToId?: number };
   const text = (content ?? "").trim();
   if (!text) { res.status(400).json({ error: "Mensagem vazia" }); return; }
 
   const conv = await getAccessibleConversation(convId, userId, tenantId);
   if (!conv) { res.status(403).json({ error: "Acesso negado" }); return; }
 
+  const { replyToId, replyTo } = await resolveReplyTo(replyToIdRaw, convId, tenantId);
+
   const [inserted] = await db
     .insert(internalMessagesTable)
-    .values({ tenantId, conversationId: convId, senderId: userId, content: text })
+    .values({ tenantId, conversationId: convId, senderId: userId, content: text, replyToId })
     .returning();
 
   await db
@@ -432,6 +479,12 @@ router.post("/internal-chat/conversations/:id/messages", requireAuth, async (req
     senderId: userId,
     senderName: sender?.name ?? "",
     content: text,
+    type: "text" as const,
+    mediaUrl: null,
+    transcript: null,
+    forwarded: false,
+    replyToId,
+    replyTo,
     createdAt: inserted!.createdAt,
   };
 
@@ -439,6 +492,216 @@ router.post("/internal-chat/conversations/:id/messages", requireAuth, async (req
   broadcastInternal("internal_message", { conversationId: convId, kind: conv.kind, message }, tenantId, recipients);
 
   res.json(message);
+});
+
+// ─── Enviar mídia (foto, áudio ou documento) ───────────────────────────────
+// Mesmo padrão do chat de clientes (base64 no corpo, validado por assinatura
+// do arquivo — ver POST /chat/conversations/:id/media): sem multer, o front
+// já manda o arquivo lido como data URL.
+const MEDIA_MIME_TO_EXT: Record<string, string> = {
+  "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp",
+  "audio/ogg": "ogg", "audio/mpeg": "mp3", "audio/mp4": "m4a",
+  "audio/webm": "weba", "audio/aac": "aac", "audio/wav": "wav",
+  "application/pdf": "pdf",
+  "application/msword": "doc",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+  "application/vnd.ms-excel": "xls",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+};
+const MEDIA_MAX_BYTES = 20 * 1024 * 1024;
+
+router.post("/internal-chat/conversations/:id/media", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const userId = req.session.userId!;
+  const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
+  if (Number.isNaN(convId)) { res.status(400).json({ error: "Conversa inválida" }); return; }
+
+  const { base64, mimetype: rawMimetype, filename, caption, replyToId: replyToIdRaw } = req.body as {
+    base64?: string; mimetype?: string; filename?: string; caption?: string; replyToId?: number;
+  };
+  if (!base64 || !rawMimetype) { res.status(400).json({ error: "base64 e mimetype são obrigatórios" }); return; }
+  const mimetype = rawMimetype.split(";")[0].trim().toLowerCase();
+  const ext = MEDIA_MIME_TO_EXT[mimetype];
+  if (!ext) { res.status(400).json({ error: "Tipo de arquivo não suportado" }); return; }
+
+  const conv = await getAccessibleConversation(convId, userId, tenantId);
+  if (!conv) { res.status(403).json({ error: "Acesso negado" }); return; }
+
+  const { replyToId, replyTo } = await resolveReplyTo(replyToIdRaw, convId, tenantId);
+
+  const buf = Buffer.from(base64, "base64");
+  if (buf.byteLength === 0 || buf.byteLength > MEDIA_MAX_BYTES) {
+    res.status(400).json({ error: "Arquivo inválido ou muito grande (máximo 20 MB)" });
+    return;
+  }
+
+  await mkdir(MEDIA_DIR, { recursive: true });
+  const savedFilename = `${randomUUID()}.${ext}`;
+  await writeFile(path.join(MEDIA_DIR, savedFilename), buf);
+  const mediaUrl = `/api/internal-chat/media/${savedFilename}`;
+
+  const isImage = mimetype.startsWith("image/");
+  const isAudio = mimetype.startsWith("audio/");
+  const msgType: "image" | "audio" | "doc" = isImage ? "image" : isAudio ? "audio" : "doc";
+  const baseContent = isImage ? "📷 Foto" : isAudio ? "🎤 Áudio" : `📄 ${filename ?? "Documento"}`;
+  const text = caption ? `${baseContent}\n${caption}` : baseContent;
+
+  const [inserted] = await db
+    .insert(internalMessagesTable)
+    .values({ tenantId, conversationId: convId, senderId: userId, content: text, type: msgType, mediaUrl, replyToId })
+    .returning();
+
+  await db.update(internalConversationsTable)
+    .set({ lastMessage: text, lastMessageAt: inserted!.createdAt })
+    .where(eq(internalConversationsTable.id, convId));
+  await db.update(internalConversationMembersTable)
+    .set({ lastReadAt: inserted!.createdAt })
+    .where(and(eq(internalConversationMembersTable.conversationId, convId), eq(internalConversationMembersTable.userId, userId)));
+
+  const [sender] = await db.select({ name: usersTable.name }).from(usersTable).where(eq(usersTable.id, userId)).limit(1);
+  const message = {
+    id: inserted!.id, conversationId: convId, senderId: userId, senderName: sender?.name ?? "",
+    content: text, type: msgType, mediaUrl, transcript: null, forwarded: false,
+    replyToId, replyTo,
+    createdAt: inserted!.createdAt,
+  };
+
+  const recipients = await recipientsFor(conv);
+  broadcastInternal("internal_message", { conversationId: convId, kind: conv.kind, message }, tenantId, recipients);
+
+  res.json(message);
+});
+
+// ─── Servir mídia salva (com controle de acesso pela conversa dona) ───────
+router.get("/internal-chat/media/:filename", requireAuth, async (req: Request, res: Response): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const userId = req.session.userId!;
+  const filename = path.basename(req.params.filename as string);
+  const filepath = path.join(MEDIA_DIR, filename);
+  if (!existsSync(filepath)) { res.status(404).json({ error: "Mídia não encontrada" }); return; }
+
+  const mediaUrl = `/api/internal-chat/media/${filename}`;
+  const [owningMsg] = await db.select({ conversationId: internalMessagesTable.conversationId })
+    .from(internalMessagesTable).where(eq(internalMessagesTable.mediaUrl, mediaUrl)).limit(1);
+  if (!owningMsg) { res.status(403).json({ error: "Acesso negado" }); return; }
+
+  const conv = await getAccessibleConversation(owningMsg.conversationId, userId, tenantId);
+  if (!conv) { res.status(403).json({ error: "Acesso negado" }); return; }
+
+  const ext = path.extname(filename).slice(1).toLowerCase();
+  const mimeMap: Record<string, string> = {
+    jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp",
+    ogg: "audio/ogg", mp3: "audio/mpeg", m4a: "audio/mp4", weba: "audio/webm", aac: "audio/aac", wav: "audio/wav",
+    pdf: "application/pdf", doc: "application/msword",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xls: "application/vnd.ms-excel",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  };
+  res.setHeader("Content-Type", mimeMap[ext] ?? "application/octet-stream");
+  res.setHeader("Cache-Control", "private, max-age=86400");
+
+  const { size } = statSync(filepath);
+  res.setHeader("Accept-Ranges", "bytes");
+  const range = req.headers.range;
+  if (range) {
+    const m = /^bytes=(\d*)-(\d*)$/.exec(range);
+    if (m) {
+      const start = m[1] ? parseInt(m[1], 10) : 0;
+      const end = m[2] ? Math.min(parseInt(m[2], 10), size - 1) : size - 1;
+      if (start >= size || start > end) { res.status(416).setHeader("Content-Range", `bytes */${size}`).end(); return; }
+      res.status(206);
+      res.setHeader("Content-Range", `bytes ${start}-${end}/${size}`);
+      res.setHeader("Content-Length", String(end - start + 1));
+      createReadStream(filepath, { start, end }).pipe(res);
+      return;
+    }
+  }
+  res.setHeader("Content-Length", String(size));
+  createReadStream(filepath).pipe(res);
+});
+
+// ─── Transcrever áudio (Whisper) ───────────────────────────────────────────
+router.post("/internal-chat/messages/:id/transcribe", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const userId = req.session.userId!;
+  const msgId = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
+  if (Number.isNaN(msgId)) { res.status(400).json({ error: "Mensagem inválida" }); return; }
+
+  const [msg] = await db.select().from(internalMessagesTable)
+    .where(and(eq(internalMessagesTable.id, msgId), eq(internalMessagesTable.tenantId, tenantId))).limit(1);
+  if (!msg) { res.status(404).json({ error: "Mensagem não encontrada" }); return; }
+  const conv = await getAccessibleConversation(msg.conversationId, userId, tenantId);
+  if (!conv) { res.status(403).json({ error: "Acesso negado" }); return; }
+
+  try {
+    // Import dinâmico: o cliente OpenAI lança erro já na carga do módulo se
+    // OPENAI_API_KEY não estiver configurada — isso não pode derrubar o
+    // servidor inteiro no boot (mesmo padrão de lib/transcribe.ts).
+    const { transcribeInternalMessage } = await import("../lib/internalTranscribe");
+    const transcript = await transcribeInternalMessage(msgId);
+    const recipients = await recipientsFor(conv);
+    broadcastInternal("internal_message_updated", { conversationId: conv.id, messageId: msgId, transcript }, tenantId, recipients);
+    res.json({ transcript });
+  } catch (err) {
+    res.status(422).json({ error: err instanceof Error ? err.message : "Falha ao transcrever" });
+  }
+});
+
+// ─── Encaminhar mensagem para outra(s) conversa(s) ─────────────────────────
+// A mensagem encaminhada é uma cópia independente (conteúdo/mídia), então
+// continua existindo mesmo que a original seja apagada depois.
+router.post("/internal-chat/messages/:id/forward", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const userId = req.session.userId!;
+  const msgId = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
+  if (Number.isNaN(msgId)) { res.status(400).json({ error: "Mensagem inválida" }); return; }
+
+  const { conversationIds } = req.body as { conversationIds?: number[] };
+  const targets = Array.isArray(conversationIds)
+    ? [...new Set(conversationIds.map(Number).filter((n) => Number.isInteger(n) && n > 0))]
+    : [];
+  if (targets.length === 0) { res.status(400).json({ error: "Escolha ao menos uma conversa de destino" }); return; }
+
+  const [source] = await db.select().from(internalMessagesTable)
+    .where(and(eq(internalMessagesTable.id, msgId), eq(internalMessagesTable.tenantId, tenantId))).limit(1);
+  if (!source) { res.status(404).json({ error: "Mensagem não encontrada" }); return; }
+  if (!(await getAccessibleConversation(source.conversationId, userId, tenantId))) {
+    res.status(403).json({ error: "Acesso negado" });
+    return;
+  }
+
+  const [sender] = await db.select({ name: usersTable.name }).from(usersTable).where(eq(usersTable.id, userId)).limit(1);
+  const sent: { conversationId: number; message: unknown }[] = [];
+
+  for (const convId of targets) {
+    const conv = await getAccessibleConversation(convId, userId, tenantId);
+    if (!conv) continue; // ignora destinos sem acesso, silenciosamente
+
+    const [inserted] = await db.insert(internalMessagesTable).values({
+      tenantId, conversationId: convId, senderId: userId,
+      content: source.content, type: source.type, mediaUrl: source.mediaUrl,
+      forwarded: true,
+    }).returning();
+
+    await db.update(internalConversationsTable)
+      .set({ lastMessage: source.content, lastMessageAt: inserted!.createdAt })
+      .where(eq(internalConversationsTable.id, convId));
+    await db.update(internalConversationMembersTable)
+      .set({ lastReadAt: inserted!.createdAt })
+      .where(and(eq(internalConversationMembersTable.conversationId, convId), eq(internalConversationMembersTable.userId, userId)));
+
+    const message = {
+      id: inserted!.id, conversationId: convId, senderId: userId, senderName: sender?.name ?? "",
+      content: source.content, type: source.type, mediaUrl: source.mediaUrl, transcript: source.transcript,
+      forwarded: true, replyToId: null, replyTo: null, createdAt: inserted!.createdAt,
+    };
+    const recipients = await recipientsFor(conv);
+    broadcastInternal("internal_message", { conversationId: convId, kind: conv.kind, message }, tenantId, recipients);
+    sent.push({ conversationId: convId, message });
+  }
+
+  if (sent.length === 0) { res.status(403).json({ error: "Nenhum destino acessível" }); return; }
+  res.json({ ok: true, sent });
 });
 
 // ─── Excluir grupo ──────────────────────────────────────────────────────────
