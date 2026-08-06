@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, timestamp, boolean, primaryKey, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, timestamp, boolean, primaryKey, uniqueIndex, jsonb } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { sectorsTable } from "./sectors";
 import { usersTable } from "./users";
@@ -90,6 +90,13 @@ export const messagesTable = pgTable(
     transcript: text("transcript"),
     externalId: text("external_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // Preenchido quando o cliente edita a mensagem original no WhatsApp
+    // (o conteúdo já foi sobrescrito com o texto novo).
+    editedAt: timestamp("edited_at", { withTimezone: true }),
+    // Reações de emoji do WhatsApp (cliente reagindo a esta mensagem).
+    // Uma entrada por remetente — reenviar com o mesmo emoji atualiza, texto
+    // vazio remove (comportamento nativo do WhatsApp).
+    reactions: jsonb("reactions").$type<Array<{ emoji: string; senderName: string | null }>>().notNull().default([]),
   },
   // Garante no banco que a MESMA mensagem recebida (mesmo ID do WhatsApp)
   // nunca é gravada duas vezes, mesmo com webhooks simultâneos.

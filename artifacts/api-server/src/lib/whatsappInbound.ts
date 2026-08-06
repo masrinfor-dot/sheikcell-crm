@@ -53,11 +53,16 @@ export interface InboundWAMessageContent {
   contactMessage?: { displayName?: string; vcard?: string };
   contactsArrayMessage?: { displayName?: string; contacts?: Array<{ displayName?: string; vcard?: string }> };
   locationMessage?: { degreesLatitude?: number; degreesLongitude?: number; name?: string; address?: string };
+  liveLocationMessage?: { degreesLatitude?: number; degreesLongitude?: number; caption?: string };
   stickerMessage?: object;
   pollCreationMessage?: { name?: string; options?: Array<{ optionName?: string }> };
   pollCreationMessageV2?: { name?: string; options?: Array<{ optionName?: string }> };
   pollCreationMessageV3?: { name?: string; options?: Array<{ optionName?: string }> };
   ptvMessage?: { caption?: string };
+  buttonsResponseMessage?: { selectedDisplayText?: string; selectedButtonId?: string };
+  listResponseMessage?: { title?: string; singleSelectReply?: { selectedRowId?: string } };
+  templateButtonReplyMessage?: { selectedDisplayText?: string };
+  interactiveResponseMessage?: { body?: { text?: string } };
   // Wrappers used by disappearing/view-once chats — the real content is nested.
   ephemeralMessage?: { message?: InboundWAMessageContent };
   viewOnceMessage?: { message?: InboundWAMessageContent };
@@ -75,8 +80,11 @@ export interface InboundWAPayload {
     messageTimestamp?: number;
     mediaBase64?: string;
     mediaMimeType?: string;
-    mediaType?: "image" | "video" | "audio" | "doc";
+    mediaType?: "image" | "video" | "audio" | "doc" | "sticker";
     avatarUrl?: string;
+    // Reação/edição a uma mensagem já existente — atualiza em vez de criar.
+    reaction?: { targetId: string; emoji: string };
+    edit?: { targetId: string; message?: InboundWAMessageContent };
   };
   phone?: string;
   text?: { message?: string };
@@ -412,6 +420,37 @@ async function tryConsumeSurveyReply(input: {
   return true;
 }
 
+async function broadcastMessageUpdated(updated: typeof messagesTable.$inferSelect): Promise<void> {
+  const [conv] = await db.select().from(conversationsTable)
+    .where(eq(conversationsTable.id, updated.conversationId)).limit(1);
+  if (!conv) return;
+  broadcast("message_updated", { conversationId: conv.id, message: updated }, {
+    tenantId: conv.tenantId, sectorId: conv.sectorId,
+    isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv),
+  });
+}
+
+async function applyReaction(targetId: string, emoji: string, senderName: string): Promise<void> {
+  const [target] = await db.select().from(messagesTable)
+    .where(eq(messagesTable.externalId, targetId)).limit(1);
+  if (!target) return;
+  const current = (target.reactions ?? []).filter((r) => r.senderName !== senderName);
+  const next = emoji ? [...current, { emoji, senderName }] : current;
+  const [updated] = await db.update(messagesTable).set({ reactions: next })
+    .where(eq(messagesTable.id, target.id)).returning();
+  if (updated) await broadcastMessageUpdated(updated);
+}
+
+async function applyEdit(targetId: string, newContent: string): Promise<void> {
+  const [target] = await db.select().from(messagesTable)
+    .where(eq(messagesTable.externalId, targetId)).limit(1);
+  if (!target) return;
+  const [updated] = await db.update(messagesTable)
+    .set({ content: newContent, editedAt: new Date() })
+    .where(eq(messagesTable.id, target.id)).returning();
+  if (updated) await broadcastMessageUpdated(updated);
+}
+
 export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   const fromMe = body.data?.key?.fromMe ?? body.fromMe ?? false;
   if (fromMe) return;
@@ -427,6 +466,23 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   const pushName = body.data?.pushName ?? body.senderName ?? phone;
   // Nome da conversa: nome do grupo (subject) para grupos; nome do contato para 1:1.
   const convName = isGroup ? (body.data?.groupSubject || "Grupo do WhatsApp") : pushName;
+
+  // Reação a uma mensagem existente: atualiza a lista de reações da
+  // mensagem-alvo em vez de criar uma mensagem nova. Emoji vazio = reação
+  // removida (comportamento nativo do WhatsApp).
+  if (body.data?.reaction) {
+    await applyReaction(body.data.reaction.targetId, body.data.reaction.emoji, pushName);
+    return;
+  }
+
+  // Edição de mensagem: sobrescreve o conteúdo da mensagem original e marca
+  // o horário da edição (exibida como "editado" na Central).
+  if (body.data?.edit) {
+    const edited = body.data.edit.message;
+    const newText = edited?.conversation ?? edited?.extendedTextMessage?.text ?? "";
+    if (newText) await applyEdit(body.data.edit.targetId, newText);
+    return;
+  }
 
   const mediaType = body.data?.mediaType ?? null;
   const mediaBase64 = body.data?.mediaBase64 ?? null;
@@ -478,7 +534,27 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     const label = [name, address].filter(Boolean).join(" — ");
     const link = lat != null && lng != null ? `https://maps.google.com/?q=${lat},${lng}` : "";
     locationText = `📍 Localização${label ? `: ${label}` : ""}${link ? `\n${link}` : ""}`;
+  } else if (msgContent?.liveLocationMessage) {
+    const { degreesLatitude: lat, degreesLongitude: lng, caption } = msgContent.liveLocationMessage;
+    const link = lat != null && lng != null ? `https://maps.google.com/?q=${lat},${lng}` : "";
+    locationText = `📍 Localização em tempo real compartilhada${caption ? `: ${caption}` : ""}${link ? `\n${link}` : ""}`;
   }
+
+  // Respostas de botão/lista/template/fluxo interativo (WhatsApp Business).
+  const interactiveText =
+    (msgContent?.buttonsResponseMessage?.selectedDisplayText
+      ? `🔘 ${msgContent.buttonsResponseMessage.selectedDisplayText}`
+      : null) ??
+    (msgContent?.listResponseMessage?.title
+      ? `🔘 ${msgContent.listResponseMessage.title}`
+      : null) ??
+    (msgContent?.templateButtonReplyMessage?.selectedDisplayText
+      ? `🔘 ${msgContent.templateButtonReplyMessage.selectedDisplayText}`
+      : null) ??
+    (msgContent?.interactiveResponseMessage?.body?.text
+      ? `🔘 ${msgContent.interactiveResponseMessage.body.text}`
+      : null) ??
+    "";
 
   const externalId = body.data?.key?.id ?? body.messageId ?? null;
 
@@ -511,17 +587,28 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     ? `📊 Enquete: ${poll.name ?? ""}${(poll.options ?? []).length ? `\n${(poll.options ?? []).map((o) => `• ${o.optionName ?? ""}`).join("\n")}` : ""}`.trim()
     : "";
 
+  // Fallback genérico para qualquer tipo realmente não mapeado: em vez de um
+  // texto sem informação nenhuma, mostra pelo menos o nome do campo bruto do
+  // WhatsApp recebido (ajuda a diagnosticar e já é mais útil que um erro).
+  const NOISE_KEYS = new Set(["messageContextInfo", "senderKeyDistributionMessage"]);
+  const rawKeys = msgContent
+    ? Object.keys(msgContent).filter((k) => !NOISE_KEYS.has(k) && (msgContent as Record<string, unknown>)[k] != null)
+    : [];
+  const unknownKind = rawKeys[0];
+
   const displayContent =
     text ||
     contactText ||
     locationText ||
     pollText ||
+    interactiveText ||
     (mediaType === "image" ? "📷 Foto"
       : mediaType === "video" ? "🎥 Vídeo"
       : mediaType === "audio" ? "🎵 Áudio"
       : mediaType === "doc" ? `📄 ${docFileName ?? "Documento"}`
-      : msgContent?.stickerMessage ? "🙂 Figurinha"
-      : "(mensagem não suportada)");
+      : mediaType === "sticker" ? "🙂 Figurinha"
+      : unknownKind ? `⚠️ Tipo de mensagem não suportado (${unknownKind})`
+      : "⚠️ Tipo de mensagem não suportado");
 
   const sessionKey =
     typeof body.sessionKey === "string" && /^[a-z0-9][a-z0-9_-]{0,39}$/.test(body.sessionKey)

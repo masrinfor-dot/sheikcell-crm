@@ -601,6 +601,8 @@ export type ChatMessage = {
   transcript: string | null;
   externalId: string | null;
   createdAt: string;
+  editedAt?: string | null;
+  reactions?: Array<{ emoji: string; senderName: string | null }>;
 };
 
 export type SaasContract = {

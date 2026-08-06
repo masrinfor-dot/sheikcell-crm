@@ -9,6 +9,7 @@
 import makeWASocket, {
   DisconnectReason,
   downloadMediaMessage,
+  proto,
   type WASocket,
   type WAMessage,
 } from "@whiskeysockets/baileys";
@@ -227,25 +228,40 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
   const msg = m.message;
   if (!msg) return;
 
-  // Eventos SEM conteúdo visível (reação, edição/apagar, voto em enquete,
-  // recibos, chaves de criptografia) não viram mensagem — antes chegavam na
-  // Central como "(mensagem não suportada)" em cima de qualquer reação. 🙅
-  {
+  // Reação e edição de mensagem atualizam a mensagem original em vez de
+  // criar uma nova — tratadas à parte do filtro de "invisíveis" abaixo.
+  const isReaction = !!msg.reactionMessage;
+  const isEdit = msg.protocolMessage?.type === proto.Message.ProtocolMessage.Type.MESSAGE_EDIT;
+
+  if (!isReaction && !isEdit) {
+    // Eventos SEM conteúdo visível (apagar, voto em enquete, recibos, chaves
+    // de criptografia) não viram mensagem — antes chegavam na Central como
+    // "(mensagem não suportada)" em cima de qualquer reação. 🙅
     const keys = Object.keys(msg).filter((k) => k !== "messageContextInfo" && k !== "senderKeyDistributionMessage");
     const INVISIBLE = new Set(["reactionMessage", "protocolMessage", "pollUpdateMessage", "keepInChatMessage", "pinInChatMessage"]);
     if (keys.length === 0 || keys.every((k) => INVISIBLE.has(k))) return;
   }
+
+  const reaction = isReaction && msg.reactionMessage?.key?.id
+    ? { targetId: msg.reactionMessage.key.id, emoji: msg.reactionMessage.text ?? "" }
+    : undefined;
+  const edit = isEdit && msg.protocolMessage?.key?.id
+    ? { targetId: msg.protocolMessage.key.id, message: msg.protocolMessage.editedMessage ?? undefined }
+    : undefined;
 
   // Mídia pode vir embrulhada (mensagem temporária / visualização única).
   const inner = msg.ephemeralMessage?.message ?? msg.viewOnceMessage?.message ?? msg.viewOnceMessageV2?.message ?? msg;
 
   let mediaBase64: string | undefined;
   let mediaMimeType: string | undefined;
-  let mediaType: "image" | "video" | "audio" | "doc" | undefined;
+  let mediaType: "image" | "video" | "audio" | "doc" | "sticker" | undefined;
 
   if (inner.imageMessage) {
     mediaType = "image";
     mediaMimeType = inner.imageMessage.mimetype ?? "image/jpeg";
+  } else if (inner.stickerMessage) {
+    mediaType = "sticker";
+    mediaMimeType = inner.stickerMessage.mimetype ?? "image/webp";
   } else if (inner.videoMessage) {
     mediaType = "video";
     mediaMimeType = inner.videoMessage.mimetype ?? "video/mp4";
@@ -298,6 +314,8 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
       mediaMimeType,
       mediaType,
       avatarUrl,
+      reaction,
+      edit,
     },
   };
 

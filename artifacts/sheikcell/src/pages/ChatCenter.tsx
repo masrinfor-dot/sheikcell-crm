@@ -288,6 +288,17 @@ function MediaContentRest({ msg }: { msg: ChatMessage }) {
     );
   }
 
+  if (msg.type === "sticker") {
+    return (
+      <img
+        src={msg.mediaUrl}
+        alt="Figurinha"
+        className="w-32 h-32 object-contain mb-1"
+        onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+      />
+    );
+  }
+
   if (msg.type === "video") {
     return (
       <video
@@ -341,7 +352,7 @@ function extractMediaCaption(content: string): string {
 // ─── Message bubble ─────────────────────────────────────────────────────────
 function MsgBubble({ msg }: { msg: ChatMessage }) {
   const out = msg.direction === "outbound";
-  const isMedia = msg.type === "image" || msg.type === "video" || msg.type === "audio" || msg.type === "doc";
+  const isMedia = msg.type === "image" || msg.type === "video" || msg.type === "audio" || msg.type === "doc" || msg.type === "sticker";
   const mediaCaption = isMedia ? extractMediaCaption(msg.content) : "";
   const showCaption = isMedia && msg.mediaUrl && mediaCaption.length > 0;
 
@@ -364,12 +375,23 @@ function MsgBubble({ msg }: { msg: ChatMessage }) {
             {msg.type === "video" && <Video className="w-4 h-4 shrink-0" />}
             {msg.type === "audio" && <Volume2 className="w-4 h-4 shrink-0" />}
             {msg.type === "doc" && <FileText className="w-4 h-4 shrink-0" />}
+            {msg.type === "sticker" && <Image className="w-4 h-4 shrink-0" />}
             <span>{msg.content}</span>
           </div>
         ) : (
           <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">{msg.content}</p>
         )}
+        {!!msg.reactions?.length && (
+          <div className={`flex flex-wrap gap-1 mt-1 ${out ? "justify-end" : "justify-start"}`}>
+            {msg.reactions.map((r, i) => (
+              <span key={i} className="text-xs bg-black/5 rounded-full px-1.5 py-0.5" title={r.senderName ?? undefined}>
+                {r.emoji}
+              </span>
+            ))}
+          </div>
+        )}
         <div className={`flex items-center gap-1 mt-1 ${out ? "justify-end" : "justify-start"}`}>
+          {msg.editedAt && <span className="text-[11px] text-gray-400 italic">editado</span>}
           <span className="text-xs text-gray-500">{msgTime(msg.createdAt)}</span>
           {out && (
             msg.status === "failed" ? (
