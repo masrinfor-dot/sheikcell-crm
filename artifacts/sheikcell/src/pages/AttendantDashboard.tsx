@@ -4,6 +4,7 @@ import { api, can, type QueueEntry, type Sector } from "@/lib/api";
 import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
+import { useInternalChatNotifier } from "@/hooks/useInternalChatNotifier";
 import CrmBoard from "./CrmBoard";
 import ChatCenter from "./ChatCenter";
 import InternalChat from "./InternalChat";
@@ -68,6 +69,17 @@ export default function AttendantDashboard() {
   const { toast } = useToast();
 
   const [mainTab, setMainTab] = useState<MainTab>("queue");
+  // No desktop (md+) o chat interno fica sempre visível numa coluna lateral
+  // (ver <InternalChat docked /> abaixo), então nunca é "invisível" lá — só
+  // no celular ele soma/some conforme a aba "Equipe" está aberta ou não.
+  const [isDesktop, setIsDesktop] = useState(() => typeof window !== "undefined" && window.matchMedia("(min-width: 768px)").matches);
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 768px)");
+    const h = () => setIsDesktop(mq.matches);
+    mq.addEventListener("change", h);
+    return () => mq.removeEventListener("change", h);
+  }, []);
+  const internalChatUnread = useInternalChatNotifier(user?.id, isDesktop || mainTab === "equipe", can(user, "equipe"));
 
   // Alarme de sem resposta clicado em outra aba → volta para o chat.
   useEffect(() => {
@@ -490,11 +502,18 @@ export default function AttendantDashboard() {
             key={id}
             onClick={() => setMainTab(id)}
             data-testid={`bottomnav-${id}`}
-            className={`flex-1 flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold transition ${
+            className={`relative flex-1 flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold transition ${
               mainTab === id ? "text-primary" : "text-muted-foreground"
             }`}
           >
-            <Icon className="w-5 h-5" />
+            <span className="relative">
+              <Icon className="w-5 h-5" />
+              {id === "equipe" && internalChatUnread > 0 && (
+                <span className="absolute -top-1.5 -right-2.5 min-w-[15px] h-[15px] px-0.5 rounded-full bg-red-500 text-white text-[9px] font-bold leading-none flex items-center justify-center" data-testid="badge-internal-chat-unread-mobile">
+                  {internalChatUnread > 99 ? "99+" : internalChatUnread}
+                </span>
+              )}
+            </span>
             {label}
           </button>
         ))}

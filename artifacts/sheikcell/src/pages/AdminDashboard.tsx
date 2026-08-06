@@ -4,6 +4,7 @@ import { api, PERMISSION_KEYS, PERMISSION_LABELS, type SectorSummary, type Atten
 import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
+import { useInternalChatNotifier } from "@/hooks/useInternalChatNotifier";
 import CrmBoard from "./CrmBoard";
 import ChatCenter from "./ChatCenter";
 import Financeiras from "./Financeiras";
@@ -87,6 +88,7 @@ export default function AdminDashboard() {
   const [showChangePassword, setShowChangePassword] = useState(false);
   const { toast } = useToast();
   const [tab, setTab] = useState<Tab>("dashboard");
+  const internalChatUnread = useInternalChatNotifier(user?.id, tab === "equipe");
 
   // Alarme de sem resposta clicado em outra aba → volta para o chat.
   useEffect(() => {
@@ -440,6 +442,11 @@ export default function AdminDashboard() {
                             tab === id ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
                           }`}>
                           <Icon className="w-4 h-4 shrink-0" />{label}
+                          {id === "equipe" && internalChatUnread > 0 && (
+                            <span className="ml-auto min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center" data-testid="badge-internal-chat-unread">
+                              {internalChatUnread > 99 ? "99+" : internalChatUnread}
+                            </span>
+                          )}
                         </button>
                       ))}
                     </div>
@@ -1490,11 +1497,18 @@ export default function AdminDashboard() {
                   key={id}
                   onClick={() => { setTab(id); setShowMoreNav(false); }}
                   data-testid={`bottomnav-more-${id}`}
-                  className={`flex flex-col items-center justify-center gap-1 py-3 rounded-xl text-[11px] font-semibold transition ${
+                  className={`relative flex flex-col items-center justify-center gap-1 py-3 rounded-xl text-[11px] font-semibold transition ${
                     tab === id ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-secondary"
                   }`}
                 >
-                  <Icon className="w-5 h-5" />
+                  <span className="relative">
+                    <Icon className="w-5 h-5" />
+                    {id === "equipe" && internalChatUnread > 0 && (
+                      <span className="absolute -top-1.5 -right-2.5 min-w-[15px] h-[15px] px-0.5 rounded-full bg-red-500 text-white text-[9px] font-bold leading-none flex items-center justify-center">
+                        {internalChatUnread > 99 ? "99+" : internalChatUnread}
+                      </span>
+                    )}
+                  </span>
                   {label}
                 </button>
               ))}
@@ -1508,11 +1522,18 @@ export default function AdminDashboard() {
             key={id}
             onClick={() => { setTab(id); setShowMoreNav(false); }}
             data-testid={`bottomnav-${id}`}
-            className={`flex-1 flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold transition ${
+            className={`relative flex-1 flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold transition ${
               tab === id && !showMoreNav ? "text-primary" : "text-muted-foreground"
             }`}
           >
-            <Icon className="w-5 h-5" />
+            <span className="relative">
+              <Icon className="w-5 h-5" />
+              {id === "equipe" && internalChatUnread > 0 && (
+                <span className="absolute -top-1.5 -right-2.5 min-w-[15px] h-[15px] px-0.5 rounded-full bg-red-500 text-white text-[9px] font-bold leading-none flex items-center justify-center" data-testid="badge-internal-chat-unread-mobile">
+                  {internalChatUnread > 99 ? "99+" : internalChatUnread}
+                </span>
+              )}
+            </span>
             {label}
           </button>
         ))}

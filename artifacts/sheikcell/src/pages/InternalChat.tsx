@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
 import { api, can, type InternalConversation, type InternalMessage } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
+import { reportInternalChatUnread } from "@/hooks/useInternalChatNotifier";
 import {
   Users, Send, Plus, X, Search, MessagesSquare, ChevronLeft, SquareKanban, ClipboardPlus, Trash2, Pencil,
   Paperclip, Mic, Square, Reply, Forward, FileText, Volume2, Loader2,
@@ -218,6 +219,12 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
   useEffect(() => {
     loadConversations();
   }, [loadConversations]);
+
+  // Mantém o badge do menu (fora deste componente) sincronizado com a lista
+  // real de conversas sempre que ela muda — sem esperar o polling do hook.
+  useEffect(() => {
+    reportInternalChatUnread(conversations.reduce((sum, c) => sum + (c.unreadCount ?? 0), 0));
+  }, [conversations]);
 
   // Equipe carregada já na abertura: usada nas @menções e no "criar tarefa".
   useEffect(() => {
