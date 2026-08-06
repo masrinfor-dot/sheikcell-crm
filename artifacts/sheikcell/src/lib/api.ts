@@ -387,6 +387,7 @@ export type Task = {
 export type TaskComment = {
   id: number; taskId: number; authorId: number | null;
   authorName: string | null; content: string; createdAt: string;
+  mediaUrl?: string | null; mediaType?: string | null;
 };
 
 export type TaskSubtask = {
@@ -603,6 +604,8 @@ export type ChatMessage = {
   createdAt: string;
   editedAt?: string | null;
   reactions?: Array<{ emoji: string; senderName: string | null }>;
+  replyToId?: number | null;
+  replyTo?: { id: number; senderName: string | null; content: string; type: string } | null;
 };
 
 export type SaasContract = {
@@ -767,15 +770,17 @@ export const api = {
       const messages = (await res.json()) as ChatMessage[];
       return { messages, hasMore: res.headers.get("X-Has-More") === "1" };
     },
-    sendMessage: (id: number, content: string) =>
-      req<ChatMessage>(`/chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
+    sendMessage: (id: number, content: string, replyToId?: number) =>
+      req<ChatMessage>(`/chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content, replyToId }) }),
+    sendNote: (id: number, content: string) =>
+      req<ChatMessage>(`/chat/conversations/${id}/notes`, { method: "POST", body: JSON.stringify({ content }) }),
     suggestReply: (id: number) =>
       req<{ suggestion: string }>(`/chat/conversations/${id}/suggest-reply`, { method: "POST" }),
     transcribe: (messageId: number) =>
       req<{ transcript: string }>(`/chat/messages/${messageId}/transcribe`, { method: "POST" }),
     correctText: (text: string) =>
       req<{ corrected: string }>(`/chat/correct-text`, { method: "POST", body: JSON.stringify({ text }) }),
-    sendMedia: (id: number, file: File, caption?: string, opts?: { ptt?: boolean }): Promise<ChatMessage> => {
+    sendMedia: (id: number, file: File, caption?: string, opts?: { ptt?: boolean; replyToId?: number }): Promise<ChatMessage> => {
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => {
@@ -783,7 +788,7 @@ export const api = {
           const base64 = dataUrl.split(",")[1];
           req<ChatMessage>(`/chat/conversations/${id}/media`, {
             method: "POST",
-            body: JSON.stringify({ base64, mimetype: file.type, filename: file.name, caption, ptt: opts?.ptt }),
+            body: JSON.stringify({ base64, mimetype: file.type, filename: file.name, caption, ptt: opts?.ptt, replyToId: opts?.replyToId }),
           }).then(resolve).catch(reject);
         };
         reader.onerror = () => reject(new Error("Falha ao ler arquivo"));
@@ -1064,16 +1069,20 @@ export const api = {
     }>) => req<Task>(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     report: () => req<{ bySector: TaskReportBucket[]; byUser: TaskReportBucket[] }>("/tasks/report"),
     comments: (id: number) => req<TaskComment[]>(`/tasks/${id}/comments`),
-    addComment: (id: number, content: string) =>
-      req<TaskComment>(`/tasks/${id}/comments`, { method: "POST", body: JSON.stringify({ content }) }),
+    addComment: (id: number, content: string, attachment?: { base64: string; mimetype: string }) =>
+      req<TaskComment>(`/tasks/${id}/comments`, { method: "POST", body: JSON.stringify({ content, mediaBase64: attachment?.base64, mediaMimetype: attachment?.mimetype }) }),
     subtasks: (id: number) => req<TaskSubtask[]>(`/tasks/${id}/subtasks`),
     addSubtask: (id: number, title: string) =>
       req<TaskSubtask>(`/tasks/${id}/subtasks`, { method: "POST", body: JSON.stringify({ title }) }),
-    updateSubtask: (id: number, subId: number, data: Partial<{ isDone: boolean; title: string }>) =>
+    updateSubtask: (id: number, subId: number, data: Partial<{ isDone: boolean; title: string; position: number }>) =>
       req<TaskSubtask>(`/tasks/${id}/subtasks/${subId}`, { method: "PATCH", body: JSON.stringify(data) }),
     removeSubtask: (id: number, subId: number) =>
       req<{ ok: boolean }>(`/tasks/${id}/subtasks/${subId}`, { method: "DELETE" }),
     remove: (id: number) => req<{ ok: boolean }>(`/tasks/${id}`, { method: "DELETE" }),
+    notifications: {
+      unread: () => req<{ taskIds: number[] }>("/tasks/notifications/unread"),
+      markRead: (id: number) => req<{ ok: boolean }>(`/tasks/${id}/notifications/read`, { method: "POST" }),
+    },
   },
   systemBoard: {
     list: () => req<SystemBoardItem[]>("/system-board"),

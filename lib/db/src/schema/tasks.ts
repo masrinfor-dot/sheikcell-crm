@@ -27,6 +27,23 @@ export const taskCommentsTable = pgTable("task_comments", {
   taskId: integer("task_id").notNull().references(() => tasksTable.id, { onDelete: "cascade" }),
   authorId: integer("author_id").references(() => usersTable.id, { onDelete: "set null" }),
   content: text("content").notNull(),
+  // Anexo opcional (foto/documento) — arquivo salvo em MEDIA_DIR, mesmo
+  // esquema de URL usado pelos anexos de conversas (GET /chat/media/:filename).
+  mediaUrl: text("media_url"),
+  mediaType: text("media_type"), // image | doc
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+// Aviso de comentário novo para quem está envolvido na tarefa (responsável e
+// criador, exceto quem comentou). Consumido por um badge simples no quadro —
+// não é push em tempo real (isso é uma frente maior, à parte).
+export const taskNotificationsTable = pgTable("task_notifications", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  taskId: integer("task_id").notNull().references(() => tasksTable.id, { onDelete: "cascade" }),
+  commentId: integer("comment_id").notNull().references(() => taskCommentsTable.id, { onDelete: "cascade" }),
+  userId: integer("user_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }),
+  isRead: boolean("is_read").notNull().default(false),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

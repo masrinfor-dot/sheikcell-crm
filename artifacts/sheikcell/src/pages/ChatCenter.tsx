@@ -9,7 +9,7 @@ import {
   Smartphone, Instagram, UserCircle2, Circle,
   ArrowRightLeft, FileText, Volume2, Image, Video, Mic, Users, Paperclip, IdCard,
   Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX, Zap, CalendarClock, AlertTriangle,
-  Pin, PinOff
+  Pin, PinOff, Reply, StickyNote
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 
@@ -350,17 +350,70 @@ function extractMediaCaption(content: string): string {
 }
 
 // ─── Message bubble ─────────────────────────────────────────────────────────
-function MsgBubble({ msg }: { msg: ChatMessage }) {
+function MsgBubble({ msg, onReply, highlighted, onJumpTo }: {
+  msg: ChatMessage;
+  onReply: (m: ChatMessage) => void;
+  highlighted: boolean;
+  onJumpTo: (id: number) => void;
+}) {
   const out = msg.direction === "outbound";
   const isMedia = msg.type === "image" || msg.type === "video" || msg.type === "audio" || msg.type === "doc" || msg.type === "sticker";
   const mediaCaption = isMedia ? extractMediaCaption(msg.content) : "";
   const showCaption = isMedia && msg.mediaUrl && mediaCaption.length > 0;
 
+  // Nota interna: nunca vai pro cliente — estilo bem diferente das mensagens
+  // (centralizada, âmbar) pra nunca confundir uma com a outra.
+  if (msg.type === "note") {
+    return (
+      <div
+        id={`chat-msg-${msg.id}`}
+        className={`flex justify-center mb-1 transition-colors duration-500 rounded-lg ${highlighted ? "bg-amber-200/60" : ""}`}
+      >
+        <div className="max-w-[85%] rounded-xl px-3 py-2 shadow-sm bg-amber-50 border border-amber-300" data-testid={`note-${msg.id}`}>
+          <div className="flex items-center gap-1.5 mb-1">
+            <StickyNote className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+            <span className="text-xs font-semibold text-amber-800">{msg.senderName ?? "Equipe"}</span>
+            <span className="text-[10px] text-amber-700/70">· nota interna</span>
+          </div>
+          <p className="text-sm text-amber-900 whitespace-pre-wrap break-words">{msg.content}</p>
+          <div className="text-right mt-1">
+            <span className="text-[11px] text-amber-700/70">{msgTime(msg.createdAt)}</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const replyButton = (
+    <button
+      onClick={() => onReply(msg)}
+      data-testid={`button-reply-msg-${msg.id}`}
+      title="Responder mensagem"
+      className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-full text-gray-500 hover:text-primary hover:bg-black/5 shrink-0"
+    >
+      <Reply className="w-3.5 h-3.5" />
+    </button>
+  );
+
   return (
-    <div className={`flex ${out ? "justify-end" : "justify-start"} mb-1`}>
+    <div
+      id={`chat-msg-${msg.id}`}
+      className={`group flex items-center gap-1 mb-1 transition-colors duration-500 rounded-lg ${out ? "justify-end" : "justify-start"} ${highlighted ? "bg-amber-200/60" : ""}`}
+    >
+      {out && replyButton}
       <div className={`max-w-[75%] rounded-2xl px-3 py-2 shadow-sm ${out ? "bg-[#dcf8c6] rounded-br-sm" : "bg-white rounded-bl-sm border border-border"}`}>
         {!out && msg.senderName && (
           <p className="text-xs font-semibold text-primary mb-1">{msg.senderName}</p>
+        )}
+        {msg.replyTo && (
+          <button
+            onClick={() => onJumpTo(msg.replyTo!.id)}
+            data-testid={`button-jump-reply-${msg.id}`}
+            className="block w-full text-left mb-1 rounded-lg px-2 py-1 border-l-4 border-primary/50 bg-black/5 truncate"
+          >
+            <div className="text-[11px] font-semibold text-primary">{msg.replyTo.senderName ?? "Cliente"}</div>
+            <div className="text-xs text-gray-600 truncate">{msg.replyTo.content}</div>
+          </button>
         )}
         {isMedia && msg.mediaUrl ? (
           <>
@@ -405,6 +458,7 @@ function MsgBubble({ msg }: { msg: ChatMessage }) {
           )}
         </div>
       </div>
+      {!out && replyButton}
     </div>
   );
 }
@@ -422,6 +476,9 @@ export default function ChatCenter() {
   const [category, setCategory] = useState<Category>("pendentes");
   const [labelFilter, setLabelFilter] = useState("");
   const [msgText, setMsgText] = useState("");
+  const [replyTarget, setReplyTarget] = useState<ChatMessage | null>(null);
+  const [composerMode, setComposerMode] = useState<"message" | "note">("message");
+  const [highlightedMsgId, setHighlightedMsgId] = useState<number | null>(null);
   const [loadingConvs, setLoadingConvs] = useState(true);
   const [loadingMsgs, setLoadingMsgs] = useState(false);
   const [hasMoreOlder, setHasMoreOlder] = useState(false);
@@ -1035,28 +1092,44 @@ export default function ChatCenter() {
   useEffect(() => { setShowParticipantPicker(false); setShowStatusPicker(false); setCrmContactId(null); }, [activeId]);
 
   // ── Send message ──
+  const cancelReply = () => setReplyTarget(null);
+
+  const scrollToMessage = (id: number) => {
+    document.getElementById(`chat-msg-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    setHighlightedMsgId(id);
+    setTimeout(() => setHighlightedMsgId((cur) => (cur === id ? null : cur)), 1500);
+  };
+
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeId || !msgText.trim() || sending) return;
     const text = msgText.trim();
+    const isNote = composerMode === "note";
+    const replyingTo = isNote ? null : replyTarget;
     setMsgText("");
+    setReplyTarget(null);
     setSending(true);
     const optimistic: ChatMessage = {
       id: -Date.now(), conversationId: activeId, content: text,
-      direction: "outbound", type: "text", status: "sent",
+      direction: "outbound", type: isNote ? "note" : "text", status: "sent",
       senderName: user?.name ?? null, mediaUrl: null, transcript: null, externalId: null,
       createdAt: new Date().toISOString(),
+      replyToId: replyingTo?.id ?? null,
+      replyTo: replyingTo ? { id: replyingTo.id, senderName: replyingTo.senderName, content: replyingTo.content, type: replyingTo.type } : null,
     };
     setMessages((prev) => [...prev, optimistic]);
     try {
-      const msg = await api.chat.sendMessage(activeId, text);
+      const msg = isNote
+        ? await api.chat.sendNote(activeId, text)
+        : await api.chat.sendMessage(activeId, text, replyingTo?.id);
       setMessages((prev) => prev.some((m) => m.id === msg.id)
         ? prev.filter((m) => m.id !== optimistic.id)
         : prev.map((m) => m.id === optimistic.id ? msg : m));
     } catch {
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
       setMsgText(text);
-      toast({ title: "Erro ao enviar mensagem", variant: "destructive" });
+      setReplyTarget(replyingTo);
+      toast({ title: isNote ? "Erro ao salvar nota" : "Erro ao enviar mensagem", variant: "destructive" });
     } finally { setSending(false); }
   };
 
@@ -1064,8 +1137,10 @@ export default function ChatCenter() {
   const handleSendFile = async (file: File, fileCaption?: string) => {
     if (!activeId || sending) return;
     const previewUrl = filePreview?.previewUrl ?? null;
+    const replyingTo = replyTarget;
     setFilePreview(null);
     setCaption("");
+    setReplyTarget(null);
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     setSending(true);
     const isImage = file.type.startsWith("image/");
@@ -1078,10 +1153,12 @@ export default function ChatCenter() {
       direction: "outbound", type: isImage ? "image" : isVideo ? "video" : isAudio ? "audio" : "doc", status: "sent",
       senderName: user?.name ?? null, mediaUrl: null, transcript: null, externalId: null,
       createdAt: new Date().toISOString(),
+      replyToId: replyingTo?.id ?? null,
+      replyTo: replyingTo ? { id: replyingTo.id, senderName: replyingTo.senderName, content: replyingTo.content, type: replyingTo.type } : null,
     };
     setMessages((prev) => [...prev, optimistic]);
     try {
-      const msg = await api.chat.sendMedia(activeId, file, fileCaption);
+      const msg = await api.chat.sendMedia(activeId, file, fileCaption, { replyToId: replyingTo?.id });
       setMessages((prev) => prev.some((m) => m.id === msg.id)
         ? prev.filter((m) => m.id !== optimistic.id)
         : prev.map((m) => m.id === optimistic.id ? msg : m));
@@ -2262,11 +2339,33 @@ export default function ChatCenter() {
                     </button>
                   </div>
                 )}
-                {messages.map((msg) => <MsgBubble key={msg.id} msg={msg} />)}
+                {messages.map((msg) => (
+                  <MsgBubble
+                    key={msg.id}
+                    msg={msg}
+                    onReply={setReplyTarget}
+                    highlighted={highlightedMsgId === msg.id}
+                    onJumpTo={scrollToMessage}
+                  />
+                ))}
                 <div ref={msgsEndRef} />
               </>
             )}
           </div>
+
+          {/* Barra "respondendo a": some ao enviar/cancelar, vale pro próximo texto ou anexo. */}
+          {replyTarget && (
+            <div className="flex items-center gap-2 bg-[#f0f2f5] border-t border-border px-3 pt-2" data-testid="reply-preview-bar">
+              <div className="flex-1 min-w-0 bg-white border-l-4 border-primary/60 rounded-lg px-2.5 py-1.5">
+                <div className="text-[11px] font-semibold text-primary">Respondendo a {replyTarget.senderName ?? "Cliente"}</div>
+                <div className="text-xs text-muted-foreground truncate">{replyTarget.content}</div>
+              </div>
+              <button onClick={cancelReply} data-testid="button-cancel-reply" title="Cancelar resposta"
+                className="p-1.5 rounded-md text-muted-foreground hover:bg-black/5 shrink-0">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
 
           {/* Input — bloqueado até alguém iniciar o atendimento (assumir a conversa) */}
           {!activeConv.assignee && activeCategory !== "resolvidas" ? (
@@ -2311,7 +2410,20 @@ export default function ChatCenter() {
               </button>
             </div>
           ) : (
-          <form onSubmit={handleSend} className="bg-[#f0f2f5] border-t border-border px-3 py-2.5 flex items-center gap-2">
+          <>
+          {/* Mensagem (vai pro cliente) x Nota interna (só a equipe vê) */}
+          <div className="flex items-center gap-1 bg-[#f0f2f5] border-t border-border px-3 pt-2">
+            <button type="button" onClick={() => setComposerMode("message")} data-testid="button-composer-mode-message"
+              className={`text-xs font-medium px-2.5 py-1 rounded-full transition ${composerMode === "message" ? "bg-primary text-white" : "bg-white text-muted-foreground border border-border hover:bg-secondary"}`}>
+              Mensagem
+            </button>
+            <button type="button" onClick={() => { setComposerMode("note"); cancelReply(); }} data-testid="button-composer-mode-note"
+              className={`flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-full transition ${composerMode === "note" ? "bg-amber-500 text-white" : "bg-white text-muted-foreground border border-border hover:bg-secondary"}`}>
+              <StickyNote className="w-3 h-3" />
+              Nota interna
+            </button>
+          </div>
+          <form onSubmit={handleSend} className={`border-t border-border px-3 py-2.5 flex items-center gap-2 ${composerMode === "note" ? "bg-amber-50" : "bg-[#f0f2f5]"}`}>
             <input
               ref={fileInputRef}
               type="file"
@@ -2417,7 +2529,7 @@ export default function ChatCenter() {
               ref={inputRef}
               value={msgText}
               onChange={(e) => setMsgText(e.target.value)}
-              placeholder="Digite uma mensagem..."
+              placeholder={composerMode === "note" ? "Escreva uma nota interna (só a equipe vê)..." : "Digite uma mensagem..."}
               spellCheck
               lang="pt-BR"
               data-testid="input-message"
@@ -2427,10 +2539,10 @@ export default function ChatCenter() {
             />
             {msgText.trim() ? (
               <button type="submit" disabled={sending} data-testid="button-send-message"
-                className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white hover:bg-primary/90 disabled:opacity-40 transition shrink-0">
+                className={`w-10 h-10 rounded-full flex items-center justify-center text-white disabled:opacity-40 transition shrink-0 ${composerMode === "note" ? "bg-amber-500 hover:bg-amber-600" : "bg-primary hover:bg-primary/90"}`}>
                 <Send className="w-4 h-4" />
               </button>
-            ) : can(user, "enviar_midia") ? (
+            ) : composerMode === "message" && can(user, "enviar_midia") ? (
               <button type="button" onClick={handleStartRecording} disabled={sending}
                 title="Gravar nota de voz" data-testid="button-record-audio"
                 className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white hover:bg-primary/90 disabled:opacity-40 transition shrink-0">
@@ -2443,6 +2555,7 @@ export default function ChatCenter() {
               </button>
             )}
           </form>
+          </>
           ))}
         </div>
 

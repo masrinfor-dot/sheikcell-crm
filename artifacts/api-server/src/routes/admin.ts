@@ -57,8 +57,11 @@ router.get("/admin/summary", requireAdminOrSupervisor, async (req, res): Promise
   const sectors = await db.select().from(sectorsTable)
     .where(and(eq(sectorsTable.tenantId, tenantId), eq(sectorsTable.isActive, true)));
 
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
+  // Meia-noite de HOJE no horário do Brasil, não no fuso do processo Node
+  // (em produção o container pode rodar em UTC e desalinhar "hoje" perto da
+  // virada do dia).
+  const todaySP = new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
+  const startOfDay = new Date(`${todaySP}T00:00:00-03:00`);
 
   // A Visão Geral espelha a Central de Atendimento (tabela conversations):
   // "aguardando"  = conversas sem responsável ainda abertas (potenciais + pendentes);

@@ -4,6 +4,7 @@ import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
 import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, crmPurchasesTable } from "@workspace/db";
 import { eq, desc, and, or, lt, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { requireAuth, requireAdmin, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
 import { checkPerm, requirePerm } from "../lib/permissions";
 import {
@@ -362,6 +363,28 @@ router.delete("/chat/conversations/:id/pin", requireAuth, async (req, res): Prom
   res.json({ ok: true, pinned: false });
 });
 
+// Resolve o preview de "responder mensagem": só aceita citar uma mensagem da
+// MESMA conversa (evita vazar conteúdo de outra conversa/loja via replyToId
+// arbitrário) — se o id não existir ali, a resposta segue sem citação.
+async function resolveReplyTo(
+  replyToId: number | undefined,
+  convId: number,
+  tenantId: number,
+): Promise<{ replyToId: number | null; replyTo: { id: number; senderName: string | null; content: string; type: string } | null }> {
+  if (replyToId == null) return { replyToId: null, replyTo: null };
+  const [row] = await db
+    .select({ id: messagesTable.id, senderName: messagesTable.senderName, content: messagesTable.content, type: messagesTable.type })
+    .from(messagesTable)
+    .where(and(
+      eq(messagesTable.id, replyToId),
+      eq(messagesTable.conversationId, convId),
+      eq(messagesTable.tenantId, tenantId),
+    ))
+    .limit(1);
+  if (!row) return { replyToId: null, replyTo: null };
+  return { replyToId: row.id, replyTo: row };
+}
+
 // ─── Get messages ──────────────────────────────────────────────────────────
 router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
@@ -406,9 +429,31 @@ router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Pr
     );
   }
 
+  const repliedMsg = alias(messagesTable, "repliedMsg");
+
   const page = await db
-    .select()
+    .select({
+      id: messagesTable.id,
+      tenantId: messagesTable.tenantId,
+      conversationId: messagesTable.conversationId,
+      content: messagesTable.content,
+      direction: messagesTable.direction,
+      type: messagesTable.type,
+      status: messagesTable.status,
+      senderName: messagesTable.senderName,
+      mediaUrl: messagesTable.mediaUrl,
+      transcript: messagesTable.transcript,
+      externalId: messagesTable.externalId,
+      createdAt: messagesTable.createdAt,
+      editedAt: messagesTable.editedAt,
+      reactions: messagesTable.reactions,
+      replyToId: messagesTable.replyToId,
+      replyToSenderName: repliedMsg.senderName,
+      replyToContent: repliedMsg.content,
+      replyToType: repliedMsg.type,
+    })
     .from(messagesTable)
+    .leftJoin(repliedMsg, eq(messagesTable.replyToId, repliedMsg.id))
     .where(cursorFilter
       ? and(eq(messagesTable.conversationId, id), cursorFilter)
       : eq(messagesTable.conversationId, id))
@@ -416,7 +461,10 @@ router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Pr
     .limit(PAGE + 1);
 
   const hasMore = page.length > PAGE;
-  const msgs = (hasMore ? page.slice(0, PAGE) : page).reverse();
+  const msgs = (hasMore ? page.slice(0, PAGE) : page).reverse().map(({ replyToSenderName, replyToContent, replyToType, ...m }) => ({
+    ...m,
+    replyTo: m.replyToId != null ? { id: m.replyToId, senderName: replyToSenderName, content: replyToContent, type: replyToType } : null,
+  }));
 
   // Compat: sem cursor e sem cabeçalho, clientes antigos continuam recebendo o
   // array puro. O cabeçalho X-Has-More indica se existe bloco mais antigo.
@@ -428,12 +476,13 @@ router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Pr
 router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_midia"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
-  const { base64, mimetype: rawMimetype, filename, caption, ptt } = req.body as {
+  const { base64, mimetype: rawMimetype, filename, caption, ptt, replyToId: replyToIdRaw } = req.body as {
     base64?: string;
     mimetype?: string;
     filename?: string;
     caption?: string;
     ptt?: boolean; // nota de voz (gravação do microfone)
+    replyToId?: number;
   };
 
   if (!base64 || !rawMimetype) {
@@ -511,7 +560,9 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
   const baseContent = isImage ? "📷 Foto" : isVideo ? "🎥 Vídeo" : isAudio ? "🎤 Áudio" : `📄 ${displayName}`;
   const content = caption ? `${baseContent}\n${caption}` : baseContent;
 
-  const [msg] = await db.insert(messagesTable).values({
+  const { replyToId, replyTo } = await resolveReplyTo(replyToIdRaw, id, tenantId);
+
+  const [inserted] = await db.insert(messagesTable).values({
     tenantId,
     conversationId: id,
     content,
@@ -520,7 +571,9 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
     status: "sent",
     senderName,
     mediaUrl,
+    replyToId,
   }).returning();
+  const msg = { ...inserted!, replyTo };
 
   await db.update(conversationsTable).set({
     lastMessage: content,
@@ -573,11 +626,12 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
     }
 
     if (!delivered) {
-      const [failedMsg] = await db.update(messagesTable)
+      const [failedRow] = await db.update(messagesTable)
         .set({ status: "failed" })
         .where(eq(messagesTable.id, msg.id))
         .returning();
-      if (failedMsg) {
+      if (failedRow) {
+        const failedMsg = { ...failedRow, replyTo };
         broadcast("message_updated", { conversationId: id, message: failedMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
         res.status(201).json(failedMsg);
         return;
@@ -588,11 +642,41 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
   res.status(201).json(msg);
 });
 
+// ─── Nota interna ──────────────────────────────────────────────────────────
+// Visível só para a equipe, nunca enviada ao WhatsApp do cliente. Por isso não
+// atualiza lastMessage/lastMessageDirection da conversa (não conta como
+// resposta ao cliente para a lógica de "aguardando").
+router.post("/chat/conversations/:id/notes", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const { content } = req.body as { content?: string };
+  if (!content?.trim()) { res.status(400).json({ error: "Nota vazia" }); return; }
+
+  const senderName = req.session.userName ?? "Atendente";
+
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+
+  const [msg] = await db.insert(messagesTable).values({
+    tenantId,
+    conversationId: id,
+    content: content.trim(),
+    direction: "outbound",
+    type: "note",
+    status: "sent",
+    senderName,
+  }).returning();
+
+  broadcast("message", { conversationId: id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  res.status(201).json(msg);
+});
+
 // ─── Send message ──────────────────────────────────────────────────────────
 router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
-  const { content } = req.body as { content?: string };
+  const { content, replyToId: replyToIdRaw } = req.body as { content?: string; replyToId?: number };
   if (!content?.trim()) { res.status(400).json({ error: "Mensagem vazia" }); return; }
 
   const senderName = req.session.userName ?? "Atendente";
@@ -605,7 +689,9 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
     return;
   }
 
-  const [msg] = await db.insert(messagesTable).values({
+  const { replyToId, replyTo } = await resolveReplyTo(replyToIdRaw, id, tenantId);
+
+  const [inserted] = await db.insert(messagesTable).values({
     tenantId,
     conversationId: id,
     content: content.trim(),
@@ -613,7 +699,9 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
     type: "text",
     status: "sent",
     senderName,
+    replyToId,
   }).returning();
+  const msg = { ...inserted!, replyTo };
 
   await db.update(conversationsTable).set({
     lastMessage: content.trim(),
@@ -657,11 +745,12 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
     }
 
     if (!delivered) {
-      const [failedMsg] = await db.update(messagesTable)
+      const [failedRow] = await db.update(messagesTable)
         .set({ status: "failed" })
         .where(eq(messagesTable.id, msg.id))
         .returning();
-      if (failedMsg) {
+      if (failedRow) {
+        const failedMsg = { ...failedRow, replyTo };
         broadcast("message_updated", { conversationId: id, message: failedMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
         res.status(201).json(failedMsg);
         return;
@@ -702,7 +791,11 @@ async function syncResolvedConversation(
   //    cannot be attributed to any sector.
   let attendanceLogId: number | null = null;
   if (effectiveSectorId != null) {
-    const serviceSeconds = Math.round((Date.now() - conv.createdAt.getTime()) / 1000);
+    // Tempo de atendimento conta a partir de quando o vendedor assumiu a
+    // conversa (attendanceStartedAt), não do primeiro contato do cliente —
+    // senão conversas reabertas/tempo em espera inflam a média artificialmente.
+    const serviceStart = conv.attendanceStartedAt ?? conv.createdAt;
+    const serviceSeconds = Math.round((Date.now() - serviceStart.getTime()) / 1000);
     const [log] = await tx.insert(attendanceLogsTable).values({
       tenantId: conv.tenantId,
       queueEntryId: 0, // chat attendances have no queue entry

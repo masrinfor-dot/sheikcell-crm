@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, timestamp, boolean, primaryKey, uniqueIndex, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, timestamp, boolean, primaryKey, uniqueIndex, jsonb, foreignKey } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { sectorsTable } from "./sectors";
 import { usersTable } from "./users";
@@ -97,6 +97,9 @@ export const messagesTable = pgTable(
     // Uma entrada por remetente — reenviar com o mesmo emoji atualiza, texto
     // vazio remove (comportamento nativo do WhatsApp).
     reactions: jsonb("reactions").$type<Array<{ emoji: string; senderName: string | null }>>().notNull().default([]),
+    // Responder mensagem (estilo WhatsApp): aponta a mensagem citada, na MESMA
+    // conversa. FK fora de linha porque a tabela referencia a própria id.
+    replyToId: integer("reply_to_id"),
   },
   // Garante no banco que a MESMA mensagem recebida (mesmo ID do WhatsApp)
   // nunca é gravada duas vezes, mesmo com webhooks simultâneos.
@@ -104,5 +107,6 @@ export const messagesTable = pgTable(
     uniqueIndex("messages_external_id_inbound_uniq")
       .on(t.externalId)
       .where(sql`${t.direction} = 'inbound' AND ${t.externalId} IS NOT NULL`),
+    foreignKey({ columns: [t.replyToId], foreignColumns: [t.id], name: "messages_reply_to_id_fk" }).onDelete("set null"),
   ],
 );

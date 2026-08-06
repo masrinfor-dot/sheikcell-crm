@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { api, type Task, type TaskStatus, type TaskPriority, type Sector, type TaskComment, type TaskSubtask, type TaskReportBucket } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
@@ -6,6 +6,7 @@ import {
   Plus, X, RefreshCw, Trash2, ChevronRight, ChevronLeft,
   User, Calendar, Flag, ListTodo, Pencil, AlertCircle,
   MessageSquare, CheckSquare, Send, BarChart3,
+  ChevronUp, ChevronDown, Paperclip, FileText, Clock,
 } from "lucide-react";
 
 const COLUMNS = [
@@ -55,7 +56,7 @@ function isOverdue(iso: string, status: TaskStatus): boolean {
 }
 
 function TaskCard({
-  task, onMove, onEdit, onDelete, colIdx, canComplete, onOpenDetail,
+  task, onMove, onEdit, onDelete, colIdx, canComplete, onOpenDetail, hasUnread,
 }: {
   task: Task;
   onMove: (id: number, status: TaskStatus) => void;
@@ -64,6 +65,7 @@ function TaskCard({
   colIdx: number;
   canComplete: boolean;
   onOpenDetail: (t: Task) => void;
+  hasUnread: boolean;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const prev = COLUMNS[colIdx - 1];
@@ -147,8 +149,11 @@ function TaskCard({
               <CheckSquare className="w-3 h-3" />{task.subtaskDone}/{task.subtaskTotal}
             </span>
           )}
-          <span className="inline-flex items-center gap-0.5 font-semibold">
+          <span className="relative inline-flex items-center gap-0.5 font-semibold">
             <MessageSquare className="w-3 h-3" />{task.commentCount ?? 0}
+            {hasUnread && (
+              <span className="absolute -top-1 -right-1.5 w-2 h-2 rounded-full bg-red-500" data-testid={`task-unread-${task.id}`} />
+            )}
           </span>
         </button>
       </div>
@@ -199,6 +204,9 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
   const [newSubtask, setNewSubtask] = useState("");
   const [newComment, setNewComment] = useState("");
   const [sendingComment, setSendingComment] = useState(false);
+  const [commentAttachment, setCommentAttachment] = useState<{ file: File; previewUrl: string | null } | null>(null);
+  const [unreadTaskIds, setUnreadTaskIds] = useState<Set<number>>(new Set());
+  const commentFileInputRef = useRef<HTMLInputElement>(null);
   // Relatório por setor/vendedor.
   const [showReport, setShowReport] = useState(false);
   const [report, setReport] = useState<{ bySector: TaskReportBucket[]; byUser: TaskReportBucket[] } | null>(null);
@@ -217,6 +225,7 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
     fetchTasks();
     api.sectors.list().then(setSectors).catch(() => {});
     api.chatUsers().then(setTeam).catch(() => {});
+    api.tasks.notifications.unread().then((r) => setUnreadTaskIds(new Set(r.taskIds))).catch(() => {});
   }, [fetchTasks]);
 
   const openAdd = () => {
@@ -245,6 +254,11 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
     setComments([]);
     setNewSubtask("");
     setNewComment("");
+    setCommentAttachment(null);
+    if (unreadTaskIds.has(t.id)) {
+      setUnreadTaskIds((prev) => { const next = new Set(prev); next.delete(t.id); return next; });
+      api.tasks.notifications.markRead(t.id).catch(() => {});
+    }
     try {
       const [subs, coms] = await Promise.all([api.tasks.subtasks(t.id), api.tasks.comments(t.id)]);
       // Ignora respostas atrasadas de outra tarefa (usuário trocou de cartão).
@@ -296,13 +310,51 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
     } catch { toast({ title: "Erro ao remover subtarefa", variant: "destructive" }); }
   };
 
+  // Reordena trocando a posição com o vizinho (setinhas ↑/↓ em vez de arrastar).
+  const moveSubtask = async (index: number, direction: -1 | 1) => {
+    if (!detailTask) return;
+    const target = index + direction;
+    if (target < 0 || target >= subtasks.length) return;
+    const a = subtasks[index]!;
+    const b = subtasks[target]!;
+    const before = subtasks;
+    const reordered = [...subtasks];
+    reordered[index] = b;
+    reordered[target] = a;
+    setSubtasks(reordered);
+    try {
+      await Promise.all([
+        api.tasks.updateSubtask(detailTask.id, a.id, { position: b.position }),
+        api.tasks.updateSubtask(detailTask.id, b.id, { position: a.position }),
+      ]);
+    } catch {
+      setSubtasks(before);
+      toast({ title: "Erro ao reordenar subtarefa", variant: "destructive" });
+    }
+  };
+
+  const pickCommentAttachment = (file: File) => {
+    const previewUrl = file.type.startsWith("image/") ? URL.createObjectURL(file) : null;
+    setCommentAttachment({ file, previewUrl });
+  };
+
   const addComment = async () => {
-    if (!detailTask || !newComment.trim() || sendingComment) return;
+    if (!detailTask || (!newComment.trim() && !commentAttachment) || sendingComment) return;
     setSendingComment(true);
     try {
-      const c = await api.tasks.addComment(detailTask.id, newComment.trim());
+      const attachment = commentAttachment
+        ? await new Promise<{ base64: string; mimetype: string }>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve({ base64: (reader.result as string).split(",")[1]!, mimetype: commentAttachment.file.type });
+            reader.onerror = () => reject(new Error("Falha ao ler arquivo"));
+            reader.readAsDataURL(commentAttachment.file);
+          })
+        : undefined;
+      const c = await api.tasks.addComment(detailTask.id, newComment.trim(), attachment);
       setComments((prev) => [...prev, c]);
       setNewComment("");
+      if (commentAttachment?.previewUrl) URL.revokeObjectURL(commentAttachment.previewUrl);
+      setCommentAttachment(null);
       bumpCounts(detailTask.id, { commentCount: 1 });
     } catch { toast({ title: "Erro ao comentar", variant: "destructive" }); }
     finally { setSendingComment(false); }
@@ -466,6 +518,7 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
                       colIdx={colIdx}
                       canComplete={t.assigneeId == null || t.assigneeId === user?.id}
                       onOpenDetail={openDetail}
+                      hasUnread={unreadTaskIds.has(t.id)}
                     />
                   ))
                 )}
@@ -485,6 +538,10 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
                 <p className="text-xs text-muted-foreground mt-0.5">
                   {detailTask.assignee ? `Responsável: ${detailTask.assignee.name}` : "Sem responsável"}
                   {detailTask.sector ? ` · ${detailTask.sector.name}` : ""}
+                </p>
+                <p className="text-[11px] text-muted-foreground/80 flex items-center gap-1 mt-0.5">
+                  <Clock className="w-3 h-3 shrink-0" />
+                  Criada por {detailTask.createdBy?.name ?? "—"} em {new Date(detailTask.createdAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
                 </p>
               </div>
               <button onClick={() => setDetailTask(null)}><X className="w-5 h-5 text-muted-foreground shrink-0" /></button>
@@ -508,15 +565,25 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
                 </div>
               )}
               <div className="space-y-1">
-                {subtasks.map((s) => (
+                {subtasks.map((s, i) => (
                   <div key={s.id} className="flex items-center gap-2 group/sub px-1 py-1 rounded-lg hover:bg-secondary/40">
                     <input type="checkbox" checked={s.isDone} onChange={() => toggleSubtask(s)}
                       data-testid={`subtask-check-${s.id}`}
                       className="w-4 h-4 accent-green-600 shrink-0 cursor-pointer" />
                     <span className={`text-xs flex-1 break-words ${s.isDone ? "line-through text-muted-foreground" : ""}`}>{s.title}</span>
-                    <button onClick={() => removeSubtask(s)} className="opacity-0 group-hover/sub:opacity-100 transition">
-                      <Trash2 className="w-3 h-3 text-red-400" />
-                    </button>
+                    <div className="flex items-center opacity-0 group-hover/sub:opacity-100 transition shrink-0">
+                      <button onClick={() => moveSubtask(i, -1)} disabled={i === 0} data-testid={`subtask-up-${s.id}`}
+                        className="p-0.5 text-muted-foreground hover:text-primary disabled:opacity-30 disabled:hover:text-muted-foreground">
+                        <ChevronUp className="w-3.5 h-3.5" />
+                      </button>
+                      <button onClick={() => moveSubtask(i, 1)} disabled={i === subtasks.length - 1} data-testid={`subtask-down-${s.id}`}
+                        className="p-0.5 text-muted-foreground hover:text-primary disabled:opacity-30 disabled:hover:text-muted-foreground">
+                        <ChevronDown className="w-3.5 h-3.5" />
+                      </button>
+                      <button onClick={() => removeSubtask(s)} className="p-0.5 ml-0.5">
+                        <Trash2 className="w-3 h-3 text-red-400" />
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -548,7 +615,19 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
                     <div key={c.id} className={`flex ${mine ? "justify-end" : "justify-start"}`}>
                       <div className={`max-w-[85%] rounded-2xl px-3 py-1.5 ${mine ? "bg-primary text-white rounded-br-sm" : "bg-secondary rounded-bl-sm"}`}>
                         {!mine && <div className="text-[10px] font-bold text-primary">{c.authorName ?? "—"}</div>}
-                        <div className="text-xs whitespace-pre-wrap break-words">{c.content}</div>
+                        {c.mediaUrl && c.mediaType === "image" && (
+                          <a href={c.mediaUrl} target="_blank" rel="noopener noreferrer" className="block mb-1">
+                            <img src={c.mediaUrl} alt="Anexo" className="max-w-full max-h-40 rounded-lg object-cover" />
+                          </a>
+                        )}
+                        {c.mediaUrl && c.mediaType === "doc" && (
+                          <a href={c.mediaUrl} target="_blank" rel="noopener noreferrer" download
+                            className={`flex items-center gap-1.5 mb-1 rounded-lg px-2 py-1 ${mine ? "bg-white/15" : "bg-white"}`}>
+                            <FileText className="w-3.5 h-3.5 shrink-0" />
+                            <span className="text-[11px] truncate">Anexo</span>
+                          </a>
+                        )}
+                        {c.content && <div className="text-xs whitespace-pre-wrap break-words">{c.content}</div>}
                         <div className={`text-[9px] mt-0.5 text-right ${mine ? "text-white/70" : "text-muted-foreground"}`}>
                           {new Date(c.createdAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
                         </div>
@@ -557,12 +636,43 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
                   );
                 })}
               </div>
+              {commentAttachment && (
+                <div className="flex items-center gap-2 mt-2 bg-secondary/50 rounded-lg px-2 py-1.5">
+                  {commentAttachment.previewUrl ? (
+                    <img src={commentAttachment.previewUrl} alt="Anexo" className="w-8 h-8 rounded object-cover shrink-0" />
+                  ) : (
+                    <FileText className="w-4 h-4 text-muted-foreground shrink-0" />
+                  )}
+                  <span className="text-[11px] text-muted-foreground truncate flex-1">{commentAttachment.file.name}</span>
+                  <button onClick={() => {
+                    if (commentAttachment.previewUrl) URL.revokeObjectURL(commentAttachment.previewUrl);
+                    setCommentAttachment(null);
+                  }} data-testid="button-remove-comment-attachment">
+                    <X className="w-3.5 h-3.5 text-muted-foreground" />
+                  </button>
+                </div>
+              )}
               <div className="flex gap-1.5 mt-2">
+                <input
+                  ref={commentFileInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/gif,image/webp,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) pickCommentAttachment(file);
+                    e.target.value = "";
+                  }}
+                />
+                <button type="button" onClick={() => commentFileInputRef.current?.click()} data-testid="button-attach-comment"
+                  className="px-2.5 py-1.5 rounded-xl border border-border text-muted-foreground hover:bg-secondary transition shrink-0">
+                  <Paperclip className="w-3.5 h-3.5" />
+                </button>
                 <input value={newComment} onChange={(e) => setNewComment(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addComment(); } }}
                   placeholder="Escreva um comentário..." data-testid="input-new-comment"
                   className="flex-1 px-3 py-1.5 rounded-xl border border-border text-xs" />
-                <button onClick={addComment} disabled={!newComment.trim() || sendingComment} data-testid="button-add-comment"
+                <button onClick={addComment} disabled={(!newComment.trim() && !commentAttachment) || sendingComment} data-testid="button-add-comment"
                   className="px-3 py-1.5 rounded-xl bg-primary text-white text-xs font-semibold disabled:opacity-40">
                   <Send className="w-3.5 h-3.5" />
                 </button>

@@ -1,9 +1,45 @@
 import { Router, type IRouter } from "express";
-import { db, tasksTable, sectorsTable, usersTable, taskCommentsTable, taskSubtasksTable } from "@workspace/db";
+import { db, tasksTable, sectorsTable, usersTable, taskCommentsTable, taskSubtasksTable, taskNotificationsTable } from "@workspace/db";
 import { eq, and, desc, asc, inArray, sql } from "drizzle-orm";
 import { requireAuth, isGlobalRole, requireTenant } from "../middlewares/auth";
 import { requirePerm } from "../lib/permissions";
+import { MEDIA_DIR } from "../lib/whatsappInbound";
+import { writeFile, mkdir } from "fs/promises";
+import { randomUUID } from "crypto";
+import path from "path";
 import type { Request } from "express";
+
+const ALLOWED_COMMENT_MIMES: Record<string, string> = {
+  "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp",
+  "application/pdf": "pdf",
+  "application/msword": "doc",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+  "application/vnd.ms-excel": "xls",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+};
+
+async function saveCommentAttachment(base64: string, rawMimetype: string): Promise<{ mediaUrl: string; mediaType: "image" | "doc" }> {
+  const mimetype = rawMimetype.split(";")[0]!.trim().toLowerCase();
+  const ext = ALLOWED_COMMENT_MIMES[mimetype];
+  if (!ext) throw new Error("Tipo de arquivo não suportado");
+  const buf = Buffer.from(base64, "base64");
+  if (buf.byteLength > 20 * 1024 * 1024) throw new Error("Arquivo muito grande (máximo 20 MB)");
+  await mkdir(MEDIA_DIR, { recursive: true });
+  const filename = `${randomUUID()}.${ext}`;
+  await writeFile(path.join(MEDIA_DIR, filename), buf);
+  return { mediaUrl: `/api/chat/media/${filename}`, mediaType: mimetype.startsWith("image/") ? "image" : "doc" };
+}
+
+// Avisa responsável e criador (exceto quem comentou) que a tarefa recebeu um
+// comentário novo. Sem push em tempo real — vira um badge no quadro, lido
+// quando a pessoa abre a tarefa.
+async function notifyInvolved(task: typeof tasksTable.$inferSelect, commentId: number, authorId: number | null): Promise<void> {
+  const recipients = new Set([task.assigneeId, task.createdById].filter((id): id is number => id != null && id !== authorId));
+  if (recipients.size === 0) return;
+  await db.insert(taskNotificationsTable).values(
+    [...recipients].map((userId) => ({ tenantId: task.tenantId, taskId: task.id, commentId, userId })),
+  );
+}
 
 const router: IRouter = Router();
 
@@ -160,6 +196,8 @@ router.get("/tasks/:id/comments", requireAuth, async (req, res): Promise<void> =
       authorId: taskCommentsTable.authorId,
       authorName: usersTable.name,
       content: taskCommentsTable.content,
+      mediaUrl: taskCommentsTable.mediaUrl,
+      mediaType: taskCommentsTable.mediaType,
       createdAt: taskCommentsTable.createdAt,
     })
     .from(taskCommentsTable)
@@ -175,15 +213,56 @@ router.post("/tasks/:id/comments", requireAuth, async (req, res): Promise<void> 
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   const existing = await loadTaskWithAccess(id, tenantId, req.session, res);
   if (!existing) return;
-  const { content } = req.body as { content?: string };
+  const { content, mediaBase64, mediaMimetype } = req.body as { content?: string; mediaBase64?: string; mediaMimetype?: string };
   const text = (content ?? "").trim();
-  if (!text) { res.status(400).json({ error: "Comentário vazio" }); return; }
+  if (!text && !mediaBase64) { res.status(400).json({ error: "Comentário vazio" }); return; }
+
+  let mediaUrl: string | null = null;
+  let mediaType: string | null = null;
+  if (mediaBase64 && mediaMimetype) {
+    try {
+      const saved = await saveCommentAttachment(mediaBase64, mediaMimetype);
+      mediaUrl = saved.mediaUrl;
+      mediaType = saved.mediaType;
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : "Falha ao salvar anexo" });
+      return;
+    }
+  }
+
   const [inserted] = await db.insert(taskCommentsTable)
-    .values({ tenantId, taskId: id, authorId: req.session.userId ?? null, content: text.slice(0, 2000) })
+    .values({ tenantId, taskId: id, authorId: req.session.userId ?? null, content: text.slice(0, 2000), mediaUrl, mediaType })
     .returning();
   const [author] = await db.select({ name: usersTable.name }).from(usersTable)
     .where(eq(usersTable.id, req.session.userId!)).limit(1);
+  await notifyInvolved(existing, inserted!.id, req.session.userId ?? null);
   res.status(201).json({ ...inserted, authorName: author?.name ?? null });
+});
+
+// ─── Avisos de comentário novo (badge simples, sem push em tempo real) ──────
+router.get("/tasks/notifications/unread", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rows = await db.selectDistinct({ taskId: taskNotificationsTable.taskId })
+    .from(taskNotificationsTable)
+    .where(and(
+      eq(taskNotificationsTable.tenantId, tenantId),
+      eq(taskNotificationsTable.userId, req.session.userId!),
+      eq(taskNotificationsTable.isRead, false),
+    ));
+  res.json({ taskIds: rows.map((r) => r.taskId) });
+});
+
+router.post("/tasks/:id/notifications/read", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  await db.update(taskNotificationsTable).set({ isRead: true })
+    .where(and(
+      eq(taskNotificationsTable.tenantId, tenantId),
+      eq(taskNotificationsTable.taskId, id),
+      eq(taskNotificationsTable.userId, req.session.userId!),
+    ));
+  res.json({ ok: true });
 });
 
 // ─── Subtarefas (checklist) ─────────────────────────────────────────────────
@@ -223,10 +302,11 @@ router.patch("/tasks/:id/subtasks/:subId", requireAuth, async (req, res): Promis
   if (isNaN(id) || isNaN(subId)) { res.status(400).json({ error: "ID inválido" }); return; }
   const existing = await loadTaskWithAccess(id, tenantId, req.session, res);
   if (!existing) return;
-  const { isDone, title } = req.body as { isDone?: boolean; title?: string };
+  const { isDone, title, position } = req.body as { isDone?: boolean; title?: string; position?: number };
   const update: Record<string, unknown> = {};
   if (isDone !== undefined) update.isDone = isDone;
   if (title !== undefined && title.trim()) update.title = title.trim().slice(0, 300);
+  if (position !== undefined) update.position = position;
   if (Object.keys(update).length === 0) { res.status(400).json({ error: "Nada para atualizar" }); return; }
   const [updated] = await db.update(taskSubtasksTable).set(update)
     .where(sql`${taskSubtasksTable.id} = ${subId} AND ${taskSubtasksTable.taskId} = ${id}`)
