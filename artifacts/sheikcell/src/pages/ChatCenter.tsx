@@ -9,7 +9,7 @@ import {
   Smartphone, Instagram, UserCircle2, Circle,
   ArrowRightLeft, FileText, Volume2, Image, Video, Mic, Users, Paperclip, IdCard,
   Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX, Zap, CalendarClock, AlertTriangle,
-  Pin, PinOff, Reply, StickyNote, Star, StarOff
+  Pin, PinOff, Reply, StickyNote, Star, StarOff, ChevronLeft
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 
@@ -482,7 +482,26 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo }: {
 
 // ─── Main component ─────────────────────────────────────────────────────────
 // hint: Logic changed on both sides. Requires understanding intent of each change.
-export default function ChatCenter() {
+type ChatCenterProps = {
+  // Painel compacto do widget flutuante global (bolha estilo Messenger) —
+  // mesma instância/estado, só troca o JSX final por uma lista+thread
+  // enxutas. Ver bloco `if (docked)` antes do return principal.
+  docked?: boolean;
+  onUnreadChange?: (count: number) => void;
+  onActiveConversationChange?: (id: number | null) => void;
+  // "Expandir" no widget: id da conversa a focar + um contador que muda a
+  // cada pedido (garante reabrir mesmo pedindo a mesma conversa de novo).
+  focusConversationId?: number | null;
+  focusRequestId?: number;
+};
+
+export default function ChatCenter({
+  docked = false,
+  onUnreadChange,
+  onActiveConversationChange,
+  focusConversationId,
+  focusRequestId,
+}: ChatCenterProps = {}) {
   const { user } = useAuth();
   const { toast } = useToast();
 
@@ -728,6 +747,18 @@ export default function ChatCenter() {
 
   const activeConv = convs.find((c) => c.id === activeId) ?? null;
   const unreadNotifications = notifications.reduce((n, x) => n + (x.read ? 0 : 1), 0);
+
+  // ── Ganchos pro widget flutuante global (bolha estilo Messenger) ──
+  useEffect(() => {
+    onUnreadChange?.(convs.reduce((sum, c) => sum + (c.unreadCount ?? 0), 0));
+  }, [convs, onUnreadChange]);
+  useEffect(() => {
+    onActiveConversationChange?.(activeId);
+  }, [activeId, onActiveConversationChange]);
+  useEffect(() => {
+    if (focusConversationId != null) setActiveId(focusConversationId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusRequestId]);
 
   // Variáveis disponíveis nas mensagens rápidas: {{nome}} (contato), {{loja}}
   // (unidade do atendente) e {{atendente}} (quem está enviando). Mantém
@@ -1791,6 +1822,82 @@ export default function ChatCenter() {
   const activeCategory = activeConv ? conversationCategory(activeConv) : null;
 
   const currentLabels = activeConv?.labels ? activeConv.labels.split(",").map((l) => l.trim()).filter(Boolean) : [];
+
+  // ── Painel compacto do widget flutuante (bolha estilo Messenger) ──
+  // JSX próprio, não reaproveita o layout gigante abaixo — só o
+  // estado/handlers já declarados acima (visibleConvs, activeConv,
+  // messages, msgText, handleSend...). Zero risco pra Central completa.
+  if (docked) {
+    const dockedConvs = [...visibleConvs].sort(
+      (a, b) => new Date(b.lastMessageAt ?? 0).getTime() - new Date(a.lastMessageAt ?? 0).getTime(),
+    );
+    return (
+      <div className="flex flex-col h-full min-h-0 bg-card overflow-hidden">
+        {activeConv ? (
+          <>
+            <div className="flex items-center gap-2 px-3 py-2 border-b border-border shrink-0">
+              <button onClick={() => setActiveId(null)} data-testid="button-docked-back" className="p-1 -ml-1 rounded-md hover:bg-muted/50 shrink-0">
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              {activeConv.avatarUrl
+                ? <img src={activeConv.avatarUrl} alt="" className="w-7 h-7 rounded-full object-cover shrink-0" />
+                : <div className="w-7 h-7 rounded-full bg-primary/15 text-primary flex items-center justify-center text-xs font-bold shrink-0">{activeConv.name.charAt(0).toUpperCase()}</div>}
+              <p className="text-sm font-semibold truncate flex-1">{activeConv.name}</p>
+            </div>
+            <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2">
+              {messages.length === 0 ? (
+                <p className="text-xs text-muted-foreground text-center py-6">Sem mensagens ainda</p>
+              ) : messages.map((m) => (
+                <div key={m.id} className={`flex ${m.direction === "outbound" ? "justify-end" : "justify-start"}`}>
+                  <div className={`max-w-[80%] rounded-xl px-2.5 py-1.5 text-xs ${m.direction === "outbound" ? "bg-primary text-primary-foreground" : "bg-secondary text-foreground"}`}>
+                    <p className="whitespace-pre-wrap break-words">{m.type === "text" || m.type === "note" ? m.content : "[mídia — abra em tela cheia pra ver]"}</p>
+                    <p className={`text-[10px] mt-0.5 ${m.direction === "outbound" ? "text-primary-foreground/70" : "text-muted-foreground"}`}>{timeAgo(m.createdAt)}</p>
+                  </div>
+                </div>
+              ))}
+              <div ref={msgsEndRef} />
+            </div>
+            <form onSubmit={handleSend} className="flex items-center gap-2 px-3 py-2 border-t border-border shrink-0">
+              <input value={msgText} onChange={(e) => setMsgText(e.target.value)} placeholder="Mensagem..."
+                data-testid="input-docked-message"
+                className="flex-1 text-sm bg-secondary/50 rounded-full px-3 py-1.5 outline-none" />
+              <button type="submit" disabled={!msgText.trim() || sending} data-testid="button-docked-send"
+                className="p-1.5 rounded-full bg-primary text-primary-foreground disabled:opacity-40 shrink-0">
+                <Send className="w-3.5 h-3.5" />
+              </button>
+            </form>
+          </>
+        ) : (
+          <div className="flex-1 overflow-y-auto">
+            {loadingConvs ? (
+              <p className="text-xs text-muted-foreground text-center py-6">Carregando...</p>
+            ) : dockedConvs.length === 0 ? (
+              <p className="text-xs text-muted-foreground text-center py-6">Nenhuma conversa ainda</p>
+            ) : dockedConvs.map((c) => (
+              <button key={c.id} onClick={() => setActiveId(c.id)} data-testid={`docked-conv-${c.id}`}
+                className="w-full flex items-center gap-2.5 px-3 py-2.5 hover:bg-secondary/50 transition text-left border-b border-border/50">
+                {c.avatarUrl
+                  ? <img src={c.avatarUrl} alt="" className="w-9 h-9 rounded-full object-cover shrink-0" />
+                  : <div className="w-9 h-9 rounded-full bg-primary/15 text-primary flex items-center justify-center text-sm font-bold shrink-0">{c.name.charAt(0).toUpperCase()}</div>}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-1">
+                    <p className="text-sm font-semibold truncate">{c.name}</p>
+                    <span className="text-[10px] text-muted-foreground shrink-0">{timeAgo(c.lastMessageAt)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-1">
+                    <p className="text-xs text-muted-foreground truncate">{c.lastMessage ?? "Sem mensagens"}</p>
+                    {c.unreadCount > 0 && (
+                      <span className="text-[10px] font-bold bg-primary text-primary-foreground rounded-full min-w-[16px] h-4 px-1 flex items-center justify-center shrink-0">{c.unreadCount}</span>
+                    )}
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-[calc(100dvh-7rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-88px)] bg-[#f0f2f5] overflow-hidden rounded-none md:rounded-2xl border-0 md:border border-border shadow-none md:shadow-sm">

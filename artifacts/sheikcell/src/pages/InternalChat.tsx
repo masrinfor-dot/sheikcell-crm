@@ -145,11 +145,20 @@ function timeLabel(iso: string | null): string {
   return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
 }
 
-export default function InternalChat({ docked = false }: { docked?: boolean } = {}) {
+type InternalChatProps = {
+  docked?: boolean;
+  onActiveConversationChange?: (id: number | null) => void;
+  // Só lido na montagem (useState initializer): a tela sempre monta do zero
+  // quando a aba "equipe" é aberta, então isso já basta pra abrir direto na
+  // conversa pedida pelo widget flutuante ("expandir").
+  initialConversationId?: number | null;
+};
+
+export default function InternalChat({ docked = false, onActiveConversationChange, initialConversationId = null }: InternalChatProps = {}) {
   const { user } = useAuth();
   const { toast } = useToast();
   const [conversations, setConversations] = useState<InternalConversation[]>([]);
-  const [activeId, setActiveId] = useState<number | null>(null);
+  const [activeId, setActiveId] = useState<number | null>(initialConversationId);
   const [messages, setMessages] = useState<InternalMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
@@ -206,6 +215,10 @@ export default function InternalChat({ docked = false }: { docked?: boolean } = 
   const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const active = conversations.find((c) => c.id === activeId) ?? null;
+
+  useEffect(() => {
+    onActiveConversationChange?.(activeId);
+  }, [activeId, onActiveConversationChange]);
 
   const loadConversations = useCallback(async () => {
     try {

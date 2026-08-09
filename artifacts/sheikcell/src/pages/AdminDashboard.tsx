@@ -5,6 +5,7 @@ import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
 import { useInternalChatNotifier } from "@/hooks/useInternalChatNotifier";
+import { useChatExpandListener } from "@/lib/chatWidgetBus";
 import CrmBoard from "./CrmBoard";
 import ChatCenter from "./ChatCenter";
 import Financeiras from "./Financeiras";
@@ -99,6 +100,25 @@ export default function AdminDashboard() {
     window.addEventListener("sheikcell:open-chat", h);
     return () => window.removeEventListener("sheikcell:open-chat", h);
   }, []);
+
+  // "Expandir" no widget flutuante global: foca a mesma conversa aqui.
+  const [focusConversationId, setFocusConversationId] = useState<number | null>(null);
+  const [focusRequestId, setFocusRequestId] = useState(0);
+  const [focusInternalConversationId, setFocusInternalConversationId] = useState<number | null>(null);
+  const [focusInternalRequestId, setFocusInternalRequestId] = useState(0);
+  useChatExpandListener(useCallback((req) => {
+    if (req.module === "atendimento") {
+      setTab("chat");
+      setFocusConversationId(req.conversationId);
+      setFocusRequestId(req.requestId);
+    } else {
+      setTab("equipe");
+      setFocusInternalConversationId(req.conversationId);
+      // Força remontar o InternalChat mesmo se a aba "equipe" já estava
+      // aberta (senão o initialConversationId não teria efeito de novo).
+      setFocusInternalRequestId(req.requestId);
+    }
+  }, []));
   const [summary, setSummary] = useState<SectorSummary[]>([]);
   const [logs, setLogs] = useState<AttendanceLog[]>([]);
   // Filtros do histórico de atendimentos
@@ -698,10 +718,12 @@ export default function AdminDashboard() {
         {/* ChatCenter fica SEMPRE montado (escondido nas outras abas) para o
             alarme de mensagem sem resposta tocar e aparecer em qualquer tela. */}
         <div className={tab === "chat" ? "" : "hidden"}>
-          <ChatCenter />
+          <ChatCenter focusConversationId={focusConversationId} focusRequestId={focusRequestId} />
         </div>
 
-        {tab === "equipe" && <InternalChat />}
+        {tab === "equipe" && (
+          <InternalChat key={focusInternalRequestId} initialConversationId={focusInternalConversationId} />
+        )}
 
         {tab === "tarefas" && <TaskBoard />}
 

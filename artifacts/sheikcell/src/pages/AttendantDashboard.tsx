@@ -8,6 +8,7 @@ import { useInternalChatNotifier } from "@/hooks/useInternalChatNotifier";
 import CrmBoard from "./CrmBoard";
 import ChatCenter from "./ChatCenter";
 import InternalChat from "./InternalChat";
+import { useChatExpandListener } from "@/lib/chatWidgetBus";
 import TaskBoard from "./TaskBoard";
 import Financeiras from "./Financeiras";
 import Peliculas from "./Peliculas";
@@ -89,6 +90,25 @@ export default function AttendantDashboard() {
     window.addEventListener("sheikcell:open-chat", h);
     return () => window.removeEventListener("sheikcell:open-chat", h);
   }, []);
+
+  // "Expandir" no widget flutuante global: foca a mesma conversa aqui.
+  const [focusConversationId, setFocusConversationId] = useState<number | null>(null);
+  const [focusRequestId, setFocusRequestId] = useState(0);
+  const [focusInternalConversationId, setFocusInternalConversationId] = useState<number | null>(null);
+  const [focusInternalRequestId, setFocusInternalRequestId] = useState(0);
+  useChatExpandListener(useCallback((req) => {
+    if (req.module === "atendimento") {
+      setMainTab("chat");
+      setFocusConversationId(req.conversationId);
+      setFocusRequestId(req.requestId);
+    } else {
+      setMainTab("equipe");
+      setFocusInternalConversationId(req.conversationId);
+      // Força remontar o InternalChat (no desktop ele fica sempre montado
+      // na coluna lateral, senão o initialConversationId não pegaria de novo).
+      setFocusInternalRequestId(req.requestId);
+    }
+  }, []));
   const [queue, setQueue] = useState<QueueEntry[]>([]);
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [loading, setLoading] = useState(true);
@@ -253,12 +273,12 @@ export default function AttendantDashboard() {
       {/* ChatCenter fica SEMPRE montado (escondido nas outras abas) para o
           alarme de mensagem sem resposta tocar e aparecer em qualquer tela. */}
       <div className={mainTab === "chat" ? "max-w-full px-0 py-0 md:px-4 md:py-4" : "hidden"}>
-        <ChatCenter />
+        <ChatCenter focusConversationId={focusConversationId} focusRequestId={focusRequestId} />
       </div>
 
       {mainTab === "equipe" && (
         <div className="md:hidden h-[calc(100dvh-7rem-env(safe-area-inset-bottom))] flex flex-col bg-card">
-          <InternalChat docked />
+          <InternalChat key={focusInternalRequestId} docked initialConversationId={focusInternalConversationId} />
         </div>
       )}
 
@@ -499,7 +519,7 @@ export default function AttendantDashboard() {
 
         {/* Chat Interno — coluna lateral sempre aberta (somente desktop) */}
         <aside className="hidden md:flex w-[300px] xl:w-[360px] shrink-0 flex-col border-l border-border bg-card sticky top-14 self-start h-[calc(100vh-3.5rem)]">
-          <InternalChat docked />
+          <InternalChat key={focusInternalRequestId} docked initialConversationId={focusInternalConversationId} />
         </aside>
       </div>
 

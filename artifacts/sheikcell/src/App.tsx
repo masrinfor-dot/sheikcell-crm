@@ -10,6 +10,7 @@ import AdminDashboard from "@/pages/AdminDashboard";
 import SuperAdminDashboard from "@/pages/SuperAdminDashboard";
 import NotFound from "@/pages/not-found";
 import Candidatura from "@/pages/Candidatura";
+import GlobalChatWidget from "@/components/GlobalChatWidget";
 
 const queryClient = new QueryClient();
 
@@ -67,6 +68,15 @@ function AppRoutes() {
   );
 }
 
+// Balão de chat flutuante: fica fora do <Switch> de rotas (sobrevive à
+// navegação entre páginas), só aparece autenticado e fora do painel do
+// superadmin (gestão de tenants SaaS, sem contexto de loja).
+function GlobalChatWidgetGate() {
+  const { user } = useAuth();
+  if (!user || user.role === "superadmin") return null;
+  return <GlobalChatWidget />;
+}
+
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
@@ -76,6 +86,7 @@ function App() {
             <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
               <AppRoutes />
             </WouterRouter>
+            <GlobalChatWidgetGate />
             <Toaster />
           </BrandingProvider>
         </AuthProvider>
