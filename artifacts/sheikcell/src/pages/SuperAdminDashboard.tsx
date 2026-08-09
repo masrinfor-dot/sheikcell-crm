@@ -121,9 +121,17 @@ export default function SuperAdminDashboard() {
     setBusy(true);
     try {
       await fn();
-      toast({ title: ok });
+      // `after` costuma fechar um Dialog (Radix desmonta o portal com
+      // animação). Se o toast novo e o reload da lista de lojistas
+      // commitam no mesmo tick que esse unmount, o React tenta remover um
+      // nó que o Radix já tirou da árvore sozinho e quebra com
+      // "Failed to execute 'removeChild'" (tela em branco). Adiar pro
+      // próximo tick deixa o fechamento do Dialog commitar isolado.
       after?.();
-      loadAll();
+      setTimeout(() => {
+        toast({ title: ok });
+        loadAll();
+      }, 0);
     } catch (e) {
       fail("Erro")(e);
     } finally { setBusy(false); }

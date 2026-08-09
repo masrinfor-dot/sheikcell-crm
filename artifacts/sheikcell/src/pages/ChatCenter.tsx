@@ -9,7 +9,7 @@ import {
   Smartphone, Instagram, UserCircle2, Circle,
   ArrowRightLeft, FileText, Volume2, Image, Video, Mic, Users, Paperclip, IdCard,
   Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX, Zap, CalendarClock, AlertTriangle,
-  Pin, PinOff, Reply, StickyNote
+  Pin, PinOff, Reply, StickyNote, Star, StarOff
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 
@@ -40,8 +40,11 @@ const FINALIZE_REASONS = [
 // POTENCIAIS: números novos aguardando triagem (futura inteligência artificial)
 // PENDENTES: já filtrados, aguardando na fila de atendimento
 // ATIVOS: já em atendimento por um vendedor (possuem responsável)
-type Category = "potenciais" | "pendentes" | "ativos" | "resolvidas";
+type Category = "potenciais" | "pendentes" | "ativos" | "resolvidas" | "favoritos";
+// "favoritos" é ortogonal às outras 4 (uma conversa favoritada pode estar em
+// qualquer uma delas) — tratado à parte em conversationCategory()/filteredConvs.
 const CATEGORIES: { id: Category; label: string; help: string; color: string }[] = [
+  { id: "favoritos", label: "Favoritos", help: "Contatos marcados com estrela, de qualquer status", color: "#eab308" },
   { id: "resolvidas", label: "Resolvidas", help: "Atendimentos finalizados", color: "#6b7280" },
   { id: "ativos", label: "Ativos", help: "Em atendimento pelos vendedores", color: "#16a34a" },
   { id: "pendentes", label: "Pendentes", help: "Já filtrados, na fila de atendimento", color: "#f59e0b" },
@@ -158,7 +161,7 @@ function waSessionLabel(key: string, sessions: WaSessionInfo[]): string {
 }
 
 // ─── Conversation list item ─────────────────────────────────────────────────
-function ConvItem({ conv, active, onClick, sessionBadge, overdue }: { conv: Conversation; active: boolean; onClick: () => void; sessionBadge?: string | null; overdue?: boolean }) {
+function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, overdue }: { conv: Conversation; active: boolean; onClick: () => void; onTogglePin: () => void; sessionBadge?: string | null; overdue?: boolean }) {
   return (
     <button
       onClick={onClick}
@@ -172,10 +175,24 @@ function ConvItem({ conv, active, onClick, sessionBadge, overdue }: { conv: Conv
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-1 mb-0.5">
           <span className="font-semibold text-sm text-foreground truncate flex items-center gap-1">
-            {conv.pinned && <Pin className="w-3 h-3 text-primary shrink-0 rotate-45" data-testid={`pin-indicator-${conv.id}`} />}
             {conv.name}
           </span>
-          <span className="text-xs text-muted-foreground shrink-0">{timeAgo(conv.lastMessageAt)}</span>
+          <span className="flex items-center gap-1 shrink-0">
+            <span
+              role="button"
+              tabIndex={0}
+              onClick={(e) => { e.stopPropagation(); onTogglePin(); }}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.stopPropagation(); e.preventDefault(); onTogglePin(); } }}
+              data-testid={`button-favorite-${conv.id}`}
+              title={conv.pinned ? "Remover dos favoritos" : "Favoritar este contato"}
+              className="p-0.5 -m-0.5 rounded hover:bg-amber-100 transition"
+            >
+              {conv.pinned
+                ? <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500" data-testid={`favorite-indicator-${conv.id}`} />
+                : <Star className="w-3.5 h-3.5 text-muted-foreground/50 hover:text-amber-500" />}
+            </span>
+            <span className="text-xs text-muted-foreground">{timeAgo(conv.lastMessageAt)}</span>
+          </span>
         </div>
         <div className="flex items-center justify-between gap-1">
           <p className="text-xs text-muted-foreground truncate flex-1">{conv.lastMessage ?? "Sem mensagens"}</p>
@@ -529,6 +546,9 @@ export default function ChatCenter() {
   const [quickReplies, setQuickReplies] = useState<QuickReply[]>([]);
   const [showQuickReplies, setShowQuickReplies] = useState(false);
   const [quickSearch, setQuickSearch] = useState("");
+  // Preview de mensagem rápida: mostra o texto já com {{nome}}/{{loja}}/{{atendente}}
+  // substituídos antes de jogar no campo de mensagem — evita mandar variável crua.
+  const [quickReplyPreview, setQuickReplyPreview] = useState<string | null>(null);
   // Confirmação explícita ao promover uma conversa PARA FORA de "Potenciais"
   // (vira Pendente ou Ativo) — evita puxar um lead pra fila/atendimento sem querer.
   // Pendente → Ativo (pegar da fila) não passa por aqui: é o fluxo normal.
@@ -708,6 +728,20 @@ export default function ChatCenter() {
 
   const activeConv = convs.find((c) => c.id === activeId) ?? null;
   const unreadNotifications = notifications.reduce((n, x) => n + (x.read ? 0 : 1), 0);
+
+  // Variáveis disponíveis nas mensagens rápidas: {{nome}} (contato), {{loja}}
+  // (unidade do atendente) e {{atendente}} (quem está enviando). Mantém
+  // {cliente}/{vendedor} funcionando como apelido do formato antigo.
+  const quickReplyVars = {
+    nome: activeConv?.name ?? "",
+    loja: user?.storeName ?? "",
+    atendente: user?.name ?? "",
+  };
+  const substituteQuickReplyVars = (text: string): string =>
+    text
+      .replace(/\{\{\s*(nome|loja|atendente)\s*\}\}/gi, (_m, key: string) => quickReplyVars[key.toLowerCase() as keyof typeof quickReplyVars])
+      .replaceAll("{cliente}", quickReplyVars.nome)
+      .replaceAll("{vendedor}", quickReplyVars.atendente);
 
   // Avisos persistidos (retorno vencido / falha de envio agendado): carregados
   // do servidor ao abrir a Central, para que nada se perca se o vendedor
@@ -1315,8 +1349,7 @@ export default function ChatCenter() {
     } catch { toast({ title: "Erro ao enviar para a fila", variant: "destructive" }); }
   };
 
-  // ── Pendente → Ativo (iniciar atendimento: assume a conversa) ──
-  // Fixar/desafixar conversa (só para o próprio usuário) com atualização otimista.
+  // Favoritar/desfavoritar conversa (só para o próprio usuário) com atualização otimista.
   const handleTogglePin = async (conv: Conversation) => {
     const next = !conv.pinned;
     setConvs((prev) => prev.map((c) => (c.id === conv.id ? { ...c, pinned: next } : c)));
@@ -1325,10 +1358,11 @@ export default function ChatCenter() {
       else await api.chat.unpinConversation(conv.id);
     } catch {
       setConvs((prev) => prev.map((c) => (c.id === conv.id ? { ...c, pinned: !next } : c)));
-      toast({ title: "Não foi possível alterar a fixação", variant: "destructive" });
+      toast({ title: "Não foi possível alterar favorito", variant: "destructive" });
     }
   };
 
+  // ── Pendente → Ativo (iniciar atendimento: assume a conversa) ──
   const handleClaim = async (id: number) => {
     try {
       const updated = await api.chat.claimConversation(id);
@@ -1742,14 +1776,17 @@ export default function ChatCenter() {
   );
   const hasAdvancedFilter = !!(filterVendedor || filterSetor || filterNivel);
 
-  const counts: Record<Category, number> = { potenciais: 0, pendentes: 0, ativos: 0, resolvidas: 0 };
+  const counts: Record<Category, number> = { potenciais: 0, pendentes: 0, ativos: 0, resolvidas: 0, favoritos: 0 };
   for (const c of visibleConvs) {
     counts[conversationCategory(c)]++;
+    if (c.pinned) counts.favoritos++;
   }
 
-  // Fixadas primeiro; dentro de cada grupo mantém a ordem por última mensagem.
+  // Favoritos é ortogonal às outras categorias: mostra qualquer conversa
+  // marcada, não importa o status. Fixadas (favoritas) sempre no topo dentro
+  // do grupo; dentro de cada grupo mantém a ordem por última mensagem.
   const filteredConvs = visibleConvs
-    .filter((c) => conversationCategory(c) === category)
+    .filter((c) => category === "favoritos" ? !!c.pinned : conversationCategory(c) === category)
     .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned));
   const activeCategory = activeConv ? conversationCategory(activeConv) : null;
 
@@ -1895,7 +1932,7 @@ export default function ChatCenter() {
           </div>
         </div>
 
-        {/* Category tabs: Potenciais / Pendentes / Ativos */}
+        {/* Category tabs: Favoritos / Potenciais / Pendentes / Ativos / Resolvidas */}
         <div className="flex border-b border-border bg-white">
           {CATEGORIES.filter((cat) =>
             (cat.id !== "potenciais" || can(user, "ver_potenciais")) &&
@@ -2029,6 +2066,7 @@ export default function ChatCenter() {
                 conv={conv}
                 active={conv.id === activeId}
                 onClick={() => setActiveId(conv.id)}
+                onTogglePin={() => void handleTogglePin(conv)}
                 overdue={isOverdue(conv)}
                 sessionBadge={
                   // Só etiqueta quando há mais de um número de atendimento
@@ -2098,14 +2136,14 @@ export default function ChatCenter() {
               </div>
             </div>
             <div className="flex items-center gap-1 shrink-0">
-              {/* Fixar/desafixar conversa no topo da lista (só para você) */}
+              {/* Favoritar/desfavoritar contato — fica marcado só para você, some no topo e na aba Favoritos */}
               <button
                 onClick={() => handleTogglePin(activeConv)}
                 data-testid="button-pin-conv"
-                className={`p-2 rounded-lg border transition ${activeConv.pinned ? "text-primary bg-primary/10 border-primary/30 hover:bg-primary/20" : "text-muted-foreground bg-white border-border hover:bg-secondary"}`}
-                title={activeConv.pinned ? "Desafixar conversa" : "Fixar conversa no topo"}
+                className={`p-2 rounded-lg border transition ${activeConv.pinned ? "text-amber-500 bg-amber-50 border-amber-300 hover:bg-amber-100" : "text-muted-foreground bg-white border-border hover:bg-secondary"}`}
+                title={activeConv.pinned ? "Remover dos favoritos" : "Favoritar este contato"}
               >
-                {activeConv.pinned ? <PinOff className="w-3.5 h-3.5" /> : <Pin className="w-3.5 h-3.5" />}
+                {activeConv.pinned ? <Star className="w-3.5 h-3.5 fill-amber-500" /> : <StarOff className="w-3.5 h-3.5" />}
               </button>
               {/* Excluir atendimento — só admin e só em Potenciais */}
               {user?.role === "admin" && activeCategory === "potenciais" && (
@@ -2521,15 +2559,9 @@ export default function ChatCenter() {
                     .map((q) => (
                     <button key={q.id} type="button" data-testid={`button-quickreply-${q.id}`}
                       onClick={() => {
-                        // Substitui variáveis pelo nome do cliente e do vendedor
-                        const firstName = (activeConv?.name ?? "").split(" ")[0] ?? "";
-                        const content = q.content
-                          .replaceAll("{cliente}", firstName)
-                          .replaceAll("{vendedor}", user?.name?.split(" ")[0] ?? "");
-                        setMsgText((prev) => prev ? `${prev} ${content}` : content);
+                        setQuickReplyPreview(substituteQuickReplyVars(q.content));
                         setShowQuickReplies(false);
                         setQuickSearch("");
-                        inputRef.current?.focus();
                       }}
                       className="w-full text-left px-3 py-2.5 hover:bg-secondary transition">
                       <p className="text-xs font-semibold">{q.title}</p>
@@ -2540,7 +2572,7 @@ export default function ChatCenter() {
                     <p className="px-3 py-4 text-center text-[11px] text-muted-foreground">Nenhuma mensagem encontrada</p>
                   )}
                   <div className="px-3 py-2 border-t border-border text-[10px] text-muted-foreground sticky bottom-0 bg-white">
-                    Dica: use {"{cliente}"} e {"{vendedor}"} nas mensagens — viram o nome real na hora de enviar.
+                    Dica: use {"{{nome}}"}, {"{{loja}}"} e {"{{atendente}}"} nas mensagens — viram o nome real na hora de enviar.
                   </div>
                 </div>
               )}
@@ -2774,6 +2806,56 @@ export default function ChatCenter() {
               >
                 <Send className="w-3.5 h-3.5" />
                 Enviar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Quick reply preview modal: variáveis já substituídas ─────────── */}
+      {quickReplyPreview !== null && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl w-full max-w-sm shadow-xl flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-5 pt-5 pb-3">
+              <h3 className="font-bold text-base">Prévia da mensagem</h3>
+              <button onClick={() => setQuickReplyPreview(null)} className="text-muted-foreground hover:text-foreground transition">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="px-5 pb-3">
+              <p className="text-[11px] text-muted-foreground mb-1.5">
+                Já com {"{{nome}}"}, {"{{loja}}"} e {"{{atendente}}"} substituídos. Pode ajustar antes de inserir.
+              </p>
+              <textarea
+                autoFocus
+                value={quickReplyPreview}
+                onChange={(e) => setQuickReplyPreview(e.target.value)}
+                data-testid="textarea-quickreply-preview"
+                rows={5}
+                className="w-full px-3 py-2 rounded-xl border border-border text-sm outline-none focus:ring-2 focus:ring-primary/20 resize-none"
+              />
+            </div>
+            <div className="flex gap-2 px-5 pb-5">
+              <button
+                type="button"
+                onClick={() => setQuickReplyPreview(null)}
+                data-testid="button-cancel-quickreply-preview"
+                className="flex-1 py-2 rounded-xl border border-border text-sm font-medium text-muted-foreground hover:bg-secondary transition"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                data-testid="button-confirm-quickreply-preview"
+                onClick={() => {
+                  const content = quickReplyPreview;
+                  setMsgText((prev) => prev ? `${prev} ${content}` : content);
+                  setQuickReplyPreview(null);
+                  inputRef.current?.focus();
+                }}
+                className="flex-1 py-2 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition"
+              >
+                Inserir na mensagem
               </button>
             </div>
           </div>

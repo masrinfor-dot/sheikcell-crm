@@ -1194,6 +1194,11 @@ export default function AdminDashboard() {
                   <textarea value={qrForm.content} onChange={(e) => setQrForm({ ...qrForm, content: e.target.value })}
                     placeholder="Texto da mensagem que será inserido no chat" required rows={4} maxLength={2000} data-testid="input-quickreply-content"
                     className="w-full border border-border rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/20 resize-none" />
+                  <p className="text-[11px] text-muted-foreground -mt-1">
+                    Variáveis disponíveis: <code className="bg-secondary px-1 rounded">{"{{nome}}"}</code> (contato),{" "}
+                    <code className="bg-secondary px-1 rounded">{"{{loja}}"}</code> (unidade do atendente) e{" "}
+                    <code className="bg-secondary px-1 rounded">{"{{atendente}}"}</code>. São trocadas pelo valor real ao usar a mensagem no Atendimento.
+                  </p>
                   <select value={qrForm.sectorId} onChange={(e) => setQrForm({ ...qrForm, sectorId: e.target.value })}
                     data-testid="select-quickreply-sector"
                     className="w-full border border-border rounded-xl px-3 py-2 text-sm outline-none bg-white">
