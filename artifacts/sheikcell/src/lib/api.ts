@@ -990,6 +990,13 @@ export const api = {
       if (params?.store) qs.set("store", params.store);
       return req<ResultsSummary>(`/results/summary?${qs.toString()}`);
     },
+    reviews: (params?: { limit?: number; sectorId?: number; attendantId?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.limit) qs.set("limit", String(params.limit));
+      if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      if (params?.attendantId) qs.set("attendantId", String(params.attendantId));
+      return req<{ reviews: SurveyReview[] }>(`/results/reviews?${qs.toString()}`);
+    },
   },
   teamDirectory: {
     list: () => req<TeamContact[]>("/team-directory"),
@@ -1240,4 +1247,15 @@ export type TeamContact = {
   sectorId: number | null;
   sectorName: string | null;
   favorited: boolean;
+};
+
+export type SurveyReview = {
+  id: number; // protocolo do atendimento
+  clientName: string;
+  clientContact: string | null;
+  sectorName: string;
+  attendantName: string | null;
+  satisfactionRating: number;
+  resolutionReason: string | null;
+  createdAt: string;
 };

@@ -1,10 +1,10 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, type ResultsSummary, type Sector, type Store } from "@/lib/api";
+import { api, type ResultsSummary, type Sector, type Store, type SurveyReview } from "@/lib/api";
 import type { SurveySettings } from "@/lib/api";
 import {
   Trophy, Clock, Timer, Users, UserPlus, Repeat, ShoppingBag,
-  TrendingUp, RefreshCw, BadgeDollarSign, Star, Settings, X,
+  TrendingUp, RefreshCw, BadgeDollarSign, Star, Settings, X, Eye,
 } from "lucide-react";
 
 // Períodos pré-definidos do filtro
@@ -74,12 +74,28 @@ export default function Resultados() {
   const [showSurveyCfg, setShowSurveyCfg] = useState(false);
   const [surveyCfg, setSurveyCfg] = useState<SurveySettings | null>(null);
   const [savingCfg, setSavingCfg] = useState(false);
+  // Avaliações individuais dos clientes (uma linha por nota, não só a média).
+  const [showReviews, setShowReviews] = useState(false);
+  const [reviews, setReviews] = useState<SurveyReview[] | null>(null);
+  const [loadingReviews, setLoadingReviews] = useState(false);
 
   const openSurveyCfg = async () => {
     setShowSurveyCfg(true);
     if (!surveyCfg) {
       try { setSurveyCfg(await api.surveySettings.get()); } catch { /* silent */ }
     }
+  };
+
+  const openReviews = async () => {
+    setShowReviews(true);
+    setLoadingReviews(true);
+    try {
+      const { reviews: rows } = await api.results.reviews({
+        sectorId: isGlobal && sectorId ? sectorId : undefined,
+        attendantId: attendantId || undefined,
+      });
+      setReviews(rows);
+    } catch { setReviews([]); } finally { setLoadingReviews(false); }
   };
 
   const saveSurveyCfg = async () => {
@@ -172,6 +188,12 @@ export default function Resultados() {
               <option value={0}>Todos os vendedores</option>
               {attendants.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
             </select>
+          )}
+          {isGlobal && (
+            <button onClick={openReviews} data-testid="button-view-reviews" title="Ver avaliações dos clientes"
+              className="px-3 py-1.5 rounded-xl border border-border text-xs bg-white flex items-center gap-1.5 hover:bg-secondary">
+              <Eye className="w-3.5 h-3.5" /> Avaliações
+            </button>
           )}
           {isGlobal && (
             <button onClick={openSurveyCfg} data-testid="button-survey-settings" title="Configurar pesquisa de satisfação"
@@ -283,6 +305,50 @@ export default function Resultados() {
                   className="w-full py-2.5 rounded-xl bg-primary text-white font-semibold text-sm disabled:opacity-50">
                   {savingCfg ? "Salvando..." : "Salvar"}
                 </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Ver avaliações dos clientes: uma linha por nota recebida */}
+      {showReviews && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setShowReviews(false)}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl max-h-[85vh] overflow-y-auto p-5 space-y-3" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-base flex items-center gap-2"><Eye className="w-4 h-4 text-primary" /> Avaliações dos clientes</h3>
+              <button onClick={() => setShowReviews(false)} className="p-1 rounded-lg hover:bg-muted"><X className="w-4 h-4" /></button>
+            </div>
+            {loadingReviews ? (
+              <div className="text-sm text-muted-foreground py-6 text-center">Carregando...</div>
+            ) : !reviews || reviews.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-8 text-center">Nenhuma avaliação ainda.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-muted-foreground border-b border-border">
+                      <th className="text-left py-2 pr-2 font-semibold">Protocolo</th>
+                      <th className="text-left py-2 pr-2 font-semibold">Cliente</th>
+                      <th className="text-left py-2 pr-2 font-semibold">Atendente</th>
+                      <th className="text-left py-2 pr-2 font-semibold">Setor</th>
+                      <th className="text-right py-2 pr-2 font-semibold">Nota</th>
+                      <th className="text-right py-2 font-semibold">Data</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {reviews.map((r) => (
+                      <tr key={r.id} className="border-b border-border/50 last:border-0" data-testid={`review-row-${r.id}`}>
+                        <td className="py-2 pr-2 text-muted-foreground">#{r.id}</td>
+                        <td className="py-2 pr-2 font-semibold text-foreground">{r.clientName}</td>
+                        <td className="py-2 pr-2">{r.attendantName ?? "—"}</td>
+                        <td className="py-2 pr-2">{r.sectorName}</td>
+                        <td className="py-2 pr-2 text-right font-bold text-yellow-600">{r.satisfactionRating} ⭐</td>
+                        <td className="py-2 text-right text-muted-foreground">{new Date(r.createdAt).toLocaleDateString("pt-BR")}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
           </div>

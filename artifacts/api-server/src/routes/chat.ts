@@ -1037,7 +1037,7 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
         .where(and(eq(conversationsTable.id, updated.id), eq(conversationsTable.tenantId, tenantId)));
       const delivered = await sendOutboundText(
         updated.id,
-        buildSurveyMessage(surveyCfg),
+        buildSurveyMessage(surveyCfg, resolvedLogId),
         "Pesquisa de satisfação",
       );
       if (!delivered) {

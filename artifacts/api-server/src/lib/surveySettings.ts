@@ -44,14 +44,19 @@ export function surveyScaleMin(s: SurveySettings): number {
 }
 
 // Mensagem final enviada ao cliente (usa a personalizada quando existir).
-export function buildSurveyMessage(s: SurveySettings): string {
+// `protocol` reforça o número do atendimento (id do attendance_log) — o
+// cliente pode citar esse número se precisar falar de novo sobre o mesmo caso.
+export function buildSurveyMessage(s: SurveySettings, protocol?: number): string {
   const min = surveyScaleMin(s);
   const base = s.message.trim()
     ? s.message.trim()
     : `Seu atendimento foi finalizado. ✅\n\nDe ${min} a ${s.scaleMax}, que nota você dá para este atendimento? (${s.scaleMax} = excelente)\n\nResponda apenas com o número. Obrigado! 🙏`;
-  return s.raffleInvite
+  const withRaffle = s.raffleInvite
     ? `${base}\n\n🎁 Respondendo, você participa do nosso sorteio!`
     : base;
+  return protocol != null
+    ? `📋 Protocolo do atendimento: #${protocol}\n\n${withRaffle}`
+    : withRaffle;
 }
 
 // Agradecimento após a nota (usa o personalizado quando existir; {nota} vira a nota).

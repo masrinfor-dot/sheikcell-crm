@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db, usersTable, attendanceLogsTable } from "@workspace/db";
-import { and, eq, gte, lte, isNotNull, inArray, sql } from "drizzle-orm";
-import { requireAuth, requireTenant } from "../middlewares/auth";
+import { and, eq, gte, lte, isNotNull, inArray, sql, desc } from "drizzle-orm";
+import { requireAuth, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
@@ -214,6 +214,46 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
     leadsPorMes,
     satisfacaoPorSetor,
   });
+});
+
+// ── Avaliações individuais dos clientes (pesquisa de satisfação) ────────────
+// GET /results/reviews?limit=&sectorId=&attendantId=
+// Lista cada nota recebida (não só a média) — protocolo = attendance_logs.id,
+// o mesmo número reforçado na mensagem da pesquisa enviada ao cliente.
+router.get("/results/reviews", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const userId = req.session.userId!;
+  const [me] = await db
+    .select({ role: usersTable.role, sectorId: usersTable.sectorId })
+    .from(usersTable).where(and(eq(usersTable.id, userId), eq(usersTable.tenantId, tenantId)));
+  if (!me) { res.status(401).json({ error: "Unauthorized" }); return; }
+
+  const limit = Math.min(Math.max(parseInt(String(req.query["limit"] ?? "100"), 10) || 100, 1), 500);
+  const sectorId = req.query["sectorId"] ? parseInt(String(req.query["sectorId"]), 10) || null : null;
+  const attendantId = req.query["attendantId"] ? parseInt(String(req.query["attendantId"]), 10) || null : null;
+
+  const conditions = [eq(attendanceLogsTable.tenantId, tenantId), isNotNull(attendanceLogsTable.satisfactionRating)];
+  // Supervisor de setor: só vê avaliações do próprio setor (mesma regra do /summary).
+  if (me.role === "supervisor" && me.sectorId != null) conditions.push(eq(attendanceLogsTable.sectorId, me.sectorId));
+  if (sectorId != null) conditions.push(eq(attendanceLogsTable.sectorId, sectorId));
+  if (attendantId != null) conditions.push(eq(attendanceLogsTable.attendantId, attendantId));
+
+  const rows = await db.select({
+    id: attendanceLogsTable.id,
+    clientName: attendanceLogsTable.clientName,
+    clientContact: attendanceLogsTable.clientContact,
+    sectorName: attendanceLogsTable.sectorName,
+    attendantName: attendanceLogsTable.attendantName,
+    satisfactionRating: attendanceLogsTable.satisfactionRating,
+    resolutionReason: attendanceLogsTable.resolutionReason,
+    createdAt: attendanceLogsTable.createdAt,
+  })
+    .from(attendanceLogsTable)
+    .where(and(...conditions))
+    .orderBy(desc(attendanceLogsTable.createdAt))
+    .limit(limit);
+
+  res.json({ reviews: rows });
 });
 
 export default router;
