@@ -1,5 +1,6 @@
-import { pgTable, serial, text, integer, boolean, timestamp, date, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, boolean, timestamp, date, uniqueIndex, index } from "drizzle-orm/pg-core";
 import { tenantsTable } from "./tenants";
+import { usersTable } from "./users";
 
 // Tabelas do "negócio SaaS" do dono do sistema (superadmin). Nada aqui é
 // visível para as lojas — só o superadmin acessa via rotas /superadmin/*.
@@ -44,17 +45,49 @@ export const saasInvoicesTable = pgTable(
   (t) => [uniqueIndex("saas_invoices_tenant_month_unique").on(t.tenantId, t.billingMonth)],
 );
 
-// Chamados de manutenção/suporte por lojista.
+// Chamados de suporte por lojista — a loja abre/conversa, o superadmin
+// (ou um técnico) triagem e responde.
 export const saasTicketsTable = pgTable("saas_tickets", {
   id: serial("id").primaryKey(),
   tenantId: integer("tenant_id").notNull().references(() => tenantsTable.id),
   title: text("title").notNull(),
   description: text("description"),
-  // aberto | em_andamento | resolvido
+  // aberto | em_analise | em_andamento | resolvido | fechado
   status: text("status").notNull().default("aberto"),
+  // baixa | normal | alta | urgente
+  priority: text("priority").notNull().default("normal"),
+  // bug | duvida | melhoria
+  category: text("category").notNull().default("duvida"),
+  // Quem na loja abriu (null quando o superadmin cria manualmente em nome
+  // da loja, fluxo antigo que continua existindo).
+  openedByUserId: integer("opened_by_user_id").references(() => usersTable.id),
+  // Loja específica dentro de uma rede multi-loja (users.storeName livre).
+  storeName: text("store_name"),
+  // 1ª resposta do superadmin/técnico — indicador de SLA na listagem sem
+  // precisar buscar as mensagens de todo mundo.
+  firstRespondedAt: timestamp("first_responded_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   resolvedAt: timestamp("resolved_at", { withTimezone: true }),
 });
+
+// Timeline de mensagens de um chamado — não se mistura com as conversas de
+// WhatsApp/chat interno, é o histórico próprio do chamado.
+export const saasTicketMessagesTable = pgTable(
+  "saas_ticket_messages",
+  {
+    id: serial("id").primaryKey(),
+    ticketId: integer("ticket_id").notNull().references(() => saasTicketsTable.id, { onDelete: "cascade" }),
+    // tenant | superadmin
+    authorType: text("author_type").notNull(),
+    authorUserId: integer("author_user_id").references(() => usersTable.id),
+    authorName: text("author_name").notNull(),
+    content: text("content"),
+    mediaUrl: text("media_url"),
+    mediaType: text("media_type"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("saas_ticket_messages_ticket_idx").on(t.ticketId)],
+);
 
 // Configurações do painel do dono (ex.: modelo base do contrato de aluguel).
 export const saasSettingsTable = pgTable("saas_settings", {
@@ -66,3 +99,4 @@ export const saasSettingsTable = pgTable("saas_settings", {
 export type SaasContract = typeof saasContractsTable.$inferSelect;
 export type SaasInvoice = typeof saasInvoicesTable.$inferSelect;
 export type SaasTicket = typeof saasTicketsTable.$inferSelect;
+export type SaasTicketMessage = typeof saasTicketMessagesTable.$inferSelect;

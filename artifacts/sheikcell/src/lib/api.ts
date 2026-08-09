@@ -27,6 +27,21 @@ async function req<T>(path: string, opts?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// Lê um File como base64 (mesmo padrão do chat.sendMedia/internalChat.sendMedia)
+// pra anexos que não precisam de preview de progresso — usado nos chamados.
+function readAsAttachment(file?: File): Promise<{ base64: string; mimetype: string } | undefined> {
+  if (!file) return Promise.resolve(undefined);
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      resolve({ base64: dataUrl.split(",")[1]!, mimetype: file.type });
+    };
+    reader.onerror = () => reject(new Error("Falha ao ler arquivo"));
+    reader.readAsDataURL(file);
+  });
+}
+
 export type VendedorPermissions = Record<string, boolean> | null;
 
 // Chaves de permissão individuais do vendedor (null/ausente = liberado).
@@ -650,15 +665,36 @@ export type SaasInvoice = {
   createdAt: string;
 };
 
+export type TicketStatus = "aberto" | "em_analise" | "em_andamento" | "resolvido" | "fechado";
+export type TicketCategory = "bug" | "duvida" | "melhoria";
+export type TicketPriority = "baixa" | "normal" | "alta" | "urgente";
+
 export type SaasTicket = {
   id: number;
   tenantId: number;
-  tenantName: string;
+  tenantName?: string;
   title: string;
   description: string | null;
-  status: "aberto" | "em_andamento" | "resolvido";
+  status: TicketStatus;
+  priority: TicketPriority;
+  category: TicketCategory;
+  openedByUserId: number | null;
+  storeName: string | null;
+  firstRespondedAt: string | null;
   createdAt: string;
   resolvedAt: string | null;
+};
+
+export type TicketMessage = {
+  id: number;
+  ticketId: number;
+  authorType: "tenant" | "superadmin";
+  authorUserId: number | null;
+  authorName: string;
+  content: string | null;
+  mediaUrl: string | null;
+  mediaType: string | null;
+  createdAt: string;
 };
 
 export type SaasOverview = {
@@ -721,11 +757,32 @@ export const api = {
       req<{ invoice: SaasInvoice }>(`/superadmin/saas/invoices/${id}`, { method: "PATCH", body: JSON.stringify({ status }) }),
     deleteInvoice: (id: number) =>
       req<{ ok: boolean }>(`/superadmin/saas/invoices/${id}`, { method: "DELETE" }),
-    listTickets: () => req<{ tickets: SaasTicket[] }>("/superadmin/saas/tickets"),
+    listTickets: (params?: { status?: TicketStatus; priority?: TicketPriority; category?: TicketCategory; tenantId?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.status) qs.set("status", params.status);
+      if (params?.priority) qs.set("priority", params.priority);
+      if (params?.category) qs.set("category", params.category);
+      if (params?.tenantId) qs.set("tenantId", String(params.tenantId));
+      const q = qs.toString();
+      return req<{ tickets: SaasTicket[] }>(`/superadmin/saas/tickets${q ? `?${q}` : ""}`);
+    },
     createTicket: (data: { tenantId: number; title: string; description?: string }) =>
       req<{ ticket: SaasTicket }>("/superadmin/saas/tickets", { method: "POST", body: JSON.stringify(data) }),
-    updateTicket: (id: number, data: { status?: "aberto" | "em_andamento" | "resolvido"; title?: string; description?: string }) =>
+    updateTicket: (id: number, data: { status?: TicketStatus; priority?: TicketPriority; category?: TicketCategory; title?: string; description?: string }) =>
       req<{ ticket: SaasTicket }>(`/superadmin/saas/tickets/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    ticketMessages: (id: number) => req<{ messages: TicketMessage[] }>(`/superadmin/saas/tickets/${id}/messages`),
+    replyTicket: (id: number, content: string) =>
+      req<{ message: TicketMessage }>(`/superadmin/saas/tickets/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
+  },
+  tickets: {
+    list: () => req<{ tickets: SaasTicket[] }>("/tickets"),
+    create: (data: { title: string; description?: string; category?: TicketCategory; priority?: TicketPriority }, file?: File): Promise<{ ticket: SaasTicket }> =>
+      readAsAttachment(file).then((attachment) =>
+        req<{ ticket: SaasTicket }>("/tickets", { method: "POST", body: JSON.stringify({ ...data, attachment }) })),
+    messages: (id: number) => req<{ ticket: SaasTicket; messages: TicketMessage[] }>(`/tickets/${id}/messages`),
+    reply: (id: number, content: string, file?: File): Promise<{ message: TicketMessage }> =>
+      readAsAttachment(file).then((attachment) =>
+        req<{ message: TicketMessage }>(`/tickets/${id}/messages`, { method: "POST", body: JSON.stringify({ content, attachment }) })),
   },
   auth: {
     login: (email: string, password: string) =>

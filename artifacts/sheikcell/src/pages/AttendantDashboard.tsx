@@ -28,12 +28,13 @@ import Documentos from "./Documentos";
 import {
   LogOut, KeyRound, Clock, PhoneCall, CheckCircle,
   ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, Shield, BadgeDollarSign, GraduationCap, Table2, Gift, Bot, UserSearch, ClipboardList, TrendingUp,
-  FolderArchive, BookUser,
+  FolderArchive, BookUser, LifeBuoy,
 } from "lucide-react";
 import Resultados from "./Resultados";
 import TeamDirectory from "./TeamDirectory";
+import Suporte from "./Suporte";
 
-type MainTab = "queue" | "resultados" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "peliculas" | "avaliacao" | "treinamentos" | "planilhas" | "documentos" | "financeiro" | "sorteios" | "robo" | "rh" | "questionarios" | "diretorio";
+type MainTab = "queue" | "resultados" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "peliculas" | "avaliacao" | "treinamentos" | "planilhas" | "documentos" | "financeiro" | "sorteios" | "robo" | "rh" | "questionarios" | "diretorio" | "suporte";
 
 // Abas de admin que podem ser liberadas para vendedores no cadastro (adminAccess)
 const GRANTED_TABS: { id: MainTab; label: string; icon: typeof PhoneCall }[] = [
@@ -57,6 +58,7 @@ const MAIN_TABS = [
   { id: "planilhas" as MainTab, label: "Planilhas", icon: Table2 },
   { id: "documentos" as MainTab, label: "Documentos", icon: FolderArchive },
   { id: "diretorio" as MainTab, label: "Diretório", icon: BookUser },
+  { id: "suporte" as MainTab, label: "Suporte", icon: LifeBuoy },
 ] as const;
 
 function formatWait(createdAt: string): string {
@@ -328,6 +330,12 @@ export default function AttendantDashboard() {
       {mainTab === "diretorio" && (
         <div className="max-w-5xl mx-auto px-4 py-6">
           <TeamDirectory />
+        </div>
+      )}
+
+      {mainTab === "suporte" && (
+        <div className="max-w-5xl mx-auto px-4 py-6">
+          <Suporte />
         </div>
       )}
 

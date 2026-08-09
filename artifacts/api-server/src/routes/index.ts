@@ -32,6 +32,7 @@ import financeBankRouter from "./financeBank";
 import financeBankWebhookRouter from "./financeBankWebhook";
 import systemBoardRouter from "./systemBoard";
 import teamDirectoryRouter from "./teamDirectory";
+import ticketsRouter from "./tickets";
 
 const router: IRouter = Router();
 router.use(healthRouter);
@@ -70,5 +71,6 @@ router.use(financeBankRouter);
 router.use(financeBankWebhookRouter);
 router.use(systemBoardRouter);
 router.use(teamDirectoryRouter);
+router.use(ticketsRouter);
 
 export default router;

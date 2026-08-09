@@ -6,6 +6,10 @@ import {
   type SaasContract,
   type SaasInvoice,
   type SaasTicket,
+  type TicketMessage,
+  type TicketStatus,
+  type TicketPriority,
+  type TicketCategory,
   type SaasOverview,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -24,6 +28,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   Building2, LogOut, Plus, Users, MessageSquare, Smartphone, KeyRound, Ban,
   CheckCircle2, DollarSign, FileText, Wrench, Pencil, AlertTriangle, Trash2,
+  Bug, HelpCircle, Sparkles, Clock, Send,
 } from "lucide-react";
 
 // Painel do superadmin (dono do sistema): lojistas, financeiro do SaaS
@@ -62,6 +67,43 @@ const renewalBadge = (renewalDate: string | null | undefined) => {
   );
 };
 
+const fmtDateTime = (d: string): string => {
+  const dt = new Date(d);
+  return `${fmtDate(d)} ${dt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}`;
+};
+
+const TICKET_STATUS_META: Record<TicketStatus, { label: string; className: string }> = {
+  aberto: { label: "Aberto", className: "bg-blue-100 text-blue-700 hover:bg-blue-100" },
+  em_analise: { label: "Em análise", className: "bg-violet-100 text-violet-700 hover:bg-violet-100" },
+  em_andamento: { label: "Em andamento", className: "bg-amber-100 text-amber-700 hover:bg-amber-100" },
+  resolvido: { label: "Resolvido", className: "bg-emerald-100 text-emerald-700 hover:bg-emerald-100" },
+  fechado: { label: "Fechado", className: "bg-gray-100 text-gray-600 hover:bg-gray-100" },
+};
+const TICKET_PRIORITY_META: Record<TicketPriority, { label: string; className: string }> = {
+  baixa: { label: "Baixa", className: "text-gray-500 border-gray-300" },
+  normal: { label: "Normal", className: "text-blue-600 border-blue-300" },
+  alta: { label: "Alta", className: "text-amber-600 border-amber-300" },
+  urgente: { label: "Urgente", className: "text-red-600 border-red-400 font-semibold" },
+};
+const TICKET_CATEGORY_META: Record<TicketCategory, { label: string; icon: typeof Bug }> = {
+  bug: { label: "Bug", icon: Bug },
+  duvida: { label: "Dúvida", icon: HelpCircle },
+  melhoria: { label: "Melhoria", icon: Sparkles },
+};
+
+// Indicador de SLA: quanto tempo em aberto sem 1ª resposta do técnico.
+// Verde < 2h, âmbar 2–8h, vermelho > 8h. Já respondido = neutro.
+function slaBadge(tk: SaasTicket) {
+  if (tk.status === "resolvido" || tk.status === "fechado") return null;
+  if (tk.firstRespondedAt) {
+    return <Badge variant="outline" className="text-muted-foreground border-border"><Clock className="w-3 h-3 mr-1" /> Respondido</Badge>;
+  }
+  const hours = (Date.now() - new Date(tk.createdAt).getTime()) / 3600000;
+  const className = hours > 8 ? "bg-red-100 text-red-700 hover:bg-red-100" : hours > 2 ? "bg-amber-100 text-amber-700 hover:bg-amber-100" : "bg-emerald-100 text-emerald-700 hover:bg-emerald-100";
+  const label = hours < 1 ? "aguardando há minutos" : `aguardando há ${Math.floor(hours)}h`;
+  return <Badge className={className}><Clock className="w-3 h-3 mr-1" /> {label}</Badge>;
+}
+
 type Tab = "lojistas" | "financeiro" | "contratos" | "suporte";
 
 const TABS: { id: Tab; label: string; icon: typeof Building2 }[] = [
@@ -93,6 +135,13 @@ export default function SuperAdminDashboard() {
   const [ticketOpen, setTicketOpen] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
 
+  // Suporte: filtros da lista + chamado aberto em detalhe (timeline + resposta).
+  const [ticketFilters, setTicketFilters] = useState<{ status: string; priority: string; category: string; tenantId: string }>({ status: "", priority: "", category: "", tenantId: "" });
+  const [ticketDetail, setTicketDetail] = useState<SaasTicket | null>(null);
+  const [ticketMessages, setTicketMessages] = useState<TicketMessage[]>([]);
+  const [ticketReply, setTicketReply] = useState("");
+  const [sendingReply, setSendingReply] = useState(false);
+
   const [form, setForm] = useState({ name: "", adminName: "", adminEmail: "", adminPassword: "" });
   const [adminForm, setAdminForm] = useState({ name: "", email: "", password: "" });
   const [contactForm, setContactForm] = useState({ contactName: "", contactPhone: "", contactEmail: "" });
@@ -109,13 +158,62 @@ export default function SuperAdminDashboard() {
       api.superadmin.saasOverview().then(setOverview),
       api.superadmin.listInvoices().then((r) => setInvoices(r.invoices)),
       api.superadmin.listContracts().then((r) => setContracts(r.contracts)),
-      api.superadmin.listTickets().then((r) => setTickets(r.tickets)),
       api.superadmin.getContractTemplate().then((r) => setTemplate(r.template)),
     ])
       .catch(fail("Erro ao carregar dados"))
       .finally(() => setLoading(false));
   }, []);
   useEffect(loadAll, [loadAll]);
+
+  // Lista de chamados: refaz sempre que um filtro muda.
+  const loadTickets = useCallback(() => {
+    api.superadmin.listTickets({
+      status: (ticketFilters.status || undefined) as TicketStatus | undefined,
+      priority: (ticketFilters.priority || undefined) as TicketPriority | undefined,
+      category: (ticketFilters.category || undefined) as TicketCategory | undefined,
+      tenantId: ticketFilters.tenantId ? Number(ticketFilters.tenantId) : undefined,
+    }).then((r) => setTickets(r.tickets)).catch(() => {});
+  }, [ticketFilters]);
+  useEffect(loadTickets, [loadTickets]);
+
+  // Timeline do chamado aberto no detalhe, com polling pra ver resposta da loja.
+  const loadTicketThread = useCallback(() => {
+    if (!ticketDetail) return;
+    api.superadmin.ticketMessages(ticketDetail.id).then((r) => setTicketMessages(r.messages)).catch(() => {});
+  }, [ticketDetail]);
+  useEffect(loadTicketThread, [loadTicketThread]);
+  useEffect(() => {
+    if (!ticketDetail) return;
+    const t = setInterval(loadTicketThread, 10000);
+    return () => clearInterval(t);
+  }, [ticketDetail, loadTicketThread]);
+
+  const sendTicketReply = async () => {
+    if (!ticketDetail || !ticketReply.trim() || sendingReply) return;
+    setSendingReply(true);
+    try {
+      await api.superadmin.replyTicket(ticketDetail.id, ticketReply.trim());
+      setTicketReply("");
+      loadTicketThread();
+      loadTickets();
+      if (!ticketDetail.firstRespondedAt) setTicketDetail({ ...ticketDetail, firstRespondedAt: new Date().toISOString() });
+    } catch (e) {
+      fail("Erro ao responder")(e);
+    } finally {
+      setSendingReply(false);
+    }
+  };
+
+  const updateTicketField = async (data: { status?: TicketStatus; priority?: TicketPriority; category?: TicketCategory }) => {
+    if (!ticketDetail) return;
+    try {
+      const { ticket } = await api.superadmin.updateTicket(ticketDetail.id, data);
+      setTicketDetail(ticket);
+      loadTickets();
+    } catch (e) {
+      fail("Erro ao atualizar")(e);
+    }
+  };
 
   const run = async (fn: () => Promise<unknown>, ok: string, after?: () => void) => {
     setBusy(true);
@@ -392,50 +490,65 @@ export default function SuperAdminDashboard() {
             {/* ------------------------------------------------- SUPORTE */}
             {tab === "suporte" && (
               <>
-                <div className="flex justify-end">
+                <div className="flex justify-between items-center flex-wrap gap-2">
+                  <div className="flex gap-2 flex-wrap">
+                    <Select value={ticketFilters.status || "all"} onValueChange={(v) => setTicketFilters({ ...ticketFilters, status: v === "all" ? "" : v })}>
+                      <SelectTrigger className="w-[160px]" data-testid="filter-ticket-status"><SelectValue placeholder="Situação" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">Todas as situações</SelectItem>
+                        {(Object.keys(TICKET_STATUS_META) as TicketStatus[]).map((s) => <SelectItem key={s} value={s}>{TICKET_STATUS_META[s].label}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                    <Select value={ticketFilters.priority || "all"} onValueChange={(v) => setTicketFilters({ ...ticketFilters, priority: v === "all" ? "" : v })}>
+                      <SelectTrigger className="w-[140px]" data-testid="filter-ticket-priority"><SelectValue placeholder="Prioridade" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">Toda prioridade</SelectItem>
+                        {(Object.keys(TICKET_PRIORITY_META) as TicketPriority[]).map((p) => <SelectItem key={p} value={p}>{TICKET_PRIORITY_META[p].label}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                    <Select value={ticketFilters.category || "all"} onValueChange={(v) => setTicketFilters({ ...ticketFilters, category: v === "all" ? "" : v })}>
+                      <SelectTrigger className="w-[140px]" data-testid="filter-ticket-category"><SelectValue placeholder="Categoria" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">Toda categoria</SelectItem>
+                        {(Object.keys(TICKET_CATEGORY_META) as TicketCategory[]).map((c) => <SelectItem key={c} value={c}>{TICKET_CATEGORY_META[c].label}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                    <Select value={ticketFilters.tenantId || "all"} onValueChange={(v) => setTicketFilters({ ...ticketFilters, tenantId: v === "all" ? "" : v })}>
+                      <SelectTrigger className="w-[180px]" data-testid="filter-ticket-tenant"><SelectValue placeholder="Loja" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">Todas as lojas</SelectItem>
+                        {tenants.map((t) => <SelectItem key={t.id} value={String(t.id)}>{t.name}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </div>
                   <Button size="sm" onClick={() => setTicketOpen(true)} data-testid="button-create-ticket">
                     <Plus className="w-4 h-4 mr-1" /> Novo chamado
                   </Button>
                 </div>
                 {tickets.length === 0 ? (
-                  <p className="text-muted-foreground text-sm">Nenhum chamado registrado.</p>
+                  <p className="text-muted-foreground text-sm">Nenhum chamado encontrado.</p>
                 ) : (
-                  tickets.map((tk) => (
-                    <Card key={tk.id} data-testid={`card-ticket-${tk.id}`}>
-                      <CardContent className="py-3 flex items-center justify-between flex-wrap gap-2">
-                        <div>
-                          <p className="font-medium text-sm flex items-center gap-2">
-                            {tk.title}
-                            {tk.status === "aberto" && <Badge variant="destructive">Aberto</Badge>}
-                            {tk.status === "em_andamento" && <Badge variant="outline">Em andamento</Badge>}
-                            {tk.status === "resolvido" && <Badge variant="secondary" className="text-green-700">Resolvido</Badge>}
-                          </p>
-                          <p className="text-xs text-muted-foreground">
-                            {tk.tenantName} · aberto em {fmtDate(tk.createdAt)}
-                            {tk.resolvedAt && ` · resolvido em ${fmtDate(tk.resolvedAt)}`}
-                          </p>
-                          {tk.description && <p className="text-xs mt-1">{tk.description}</p>}
-                        </div>
-                        <div className="flex gap-2">
-                          {tk.status === "aberto" && (
-                            <Button size="sm" variant="outline" onClick={() => run(() => api.superadmin.updateTicket(tk.id, { status: "em_andamento" }), "Chamado em andamento")}>
-                              Iniciar
-                            </Button>
-                          )}
-                          {tk.status !== "resolvido" && (
-                            <Button size="sm" onClick={() => run(() => api.superadmin.updateTicket(tk.id, { status: "resolvido" }), "Chamado resolvido")} data-testid={`button-resolve-${tk.id}`}>
-                              <CheckCircle2 className="w-4 h-4 mr-1" /> Resolver
-                            </Button>
-                          )}
-                          {tk.status === "resolvido" && (
-                            <Button size="sm" variant="ghost" onClick={() => run(() => api.superadmin.updateTicket(tk.id, { status: "aberto" }), "Chamado reaberto")}>
-                              Reabrir
-                            </Button>
-                          )}
-                        </div>
-                      </CardContent>
-                    </Card>
-                  ))
+                  tickets.map((tk) => {
+                    const CategoryIcon = TICKET_CATEGORY_META[tk.category].icon;
+                    return (
+                      <Card key={tk.id} data-testid={`card-ticket-${tk.id}`} className="cursor-pointer hover:bg-muted/30" onClick={() => setTicketDetail(tk)}>
+                        <CardContent className="py-3 flex items-center justify-between flex-wrap gap-2">
+                          <div className="min-w-0">
+                            <p className="font-medium text-sm flex items-center gap-2 flex-wrap">
+                              {tk.title}
+                              <Badge className={TICKET_STATUS_META[tk.status].className}>{TICKET_STATUS_META[tk.status].label}</Badge>
+                              <Badge variant="outline" className={TICKET_PRIORITY_META[tk.priority].className}>{TICKET_PRIORITY_META[tk.priority].label}</Badge>
+                              {slaBadge(tk)}
+                            </p>
+                            <p className="text-xs text-muted-foreground flex items-center gap-1 mt-0.5">
+                              <CategoryIcon className="w-3 h-3" /> {TICKET_CATEGORY_META[tk.category].label} · {tk.tenantName}{tk.storeName ? ` (${tk.storeName})` : ""} · aberto em {fmtDateTime(tk.createdAt)}
+                            </p>
+                          </div>
+                          <Button size="sm" variant="outline" data-testid={`button-open-ticket-${tk.id}`}>Ver conversa</Button>
+                        </CardContent>
+                      </Card>
+                    );
+                  })
                 )}
               </>
             )}
@@ -697,6 +810,87 @@ export default function SuperAdminDashboard() {
               Abrir chamado
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Detalhe do chamado: timeline + resposta + situação/prioridade/categoria */}
+      <Dialog open={!!ticketDetail} onOpenChange={(open) => { if (!open) { setTicketDetail(null); setTicketMessages([]); setTicketReply(""); } }}>
+        <DialogContent className="max-w-2xl">
+          {ticketDetail && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2 flex-wrap pr-6">
+                  {ticketDetail.title}
+                  {slaBadge(ticketDetail)}
+                </DialogTitle>
+                <p className="text-xs text-muted-foreground">
+                  {ticketDetail.tenantName}{ticketDetail.storeName ? ` (${ticketDetail.storeName})` : ""} · aberto em {fmtDateTime(ticketDetail.createdAt)}
+                </p>
+              </DialogHeader>
+
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <Label className="text-xs">Situação</Label>
+                  <Select value={ticketDetail.status} onValueChange={(v) => updateTicketField({ status: v as TicketStatus })}>
+                    <SelectTrigger data-testid="select-ticket-status"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {(Object.keys(TICKET_STATUS_META) as TicketStatus[]).map((s) => <SelectItem key={s} value={s}>{TICKET_STATUS_META[s].label}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label className="text-xs">Prioridade</Label>
+                  <Select value={ticketDetail.priority} onValueChange={(v) => updateTicketField({ priority: v as TicketPriority })}>
+                    <SelectTrigger data-testid="select-ticket-priority"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {(Object.keys(TICKET_PRIORITY_META) as TicketPriority[]).map((p) => <SelectItem key={p} value={p}>{TICKET_PRIORITY_META[p].label}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label className="text-xs">Categoria</Label>
+                  <Select value={ticketDetail.category} onValueChange={(v) => updateTicketField({ category: v as TicketCategory })}>
+                    <SelectTrigger data-testid="select-ticket-category"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {(Object.keys(TICKET_CATEGORY_META) as TicketCategory[]).map((c) => <SelectItem key={c} value={c}>{TICKET_CATEGORY_META[c].label}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <div className="border rounded-lg max-h-80 overflow-y-auto p-3 space-y-2 bg-muted/20">
+                {ticketMessages.length === 0 ? (
+                  <p className="text-xs text-muted-foreground text-center py-6">Nenhuma mensagem ainda.</p>
+                ) : ticketMessages.map((m) => (
+                  <div key={m.id} className={`flex ${m.authorType === "superadmin" ? "justify-end" : "justify-start"}`}>
+                    <div className={`max-w-[75%] rounded-xl px-3 py-2 text-sm ${m.authorType === "superadmin" ? "bg-primary text-primary-foreground" : "bg-white border"}`}>
+                      {m.authorType === "tenant" && <p className="text-[11px] font-semibold mb-0.5 opacity-70">{m.authorName}</p>}
+                      {m.content && <p className="whitespace-pre-wrap break-words">{m.content}</p>}
+                      {m.mediaUrl && (
+                        m.mediaType?.startsWith("image/") ? (
+                          <img src={m.mediaUrl} alt="Anexo" className="mt-1 rounded-lg max-w-full max-h-56 object-contain" />
+                        ) : m.mediaType?.startsWith("video/") ? (
+                          <video src={m.mediaUrl} controls className="mt-1 rounded-lg max-w-full max-h-56" />
+                        ) : (
+                          <a href={m.mediaUrl} target="_blank" rel="noreferrer" className="mt-1 text-xs underline block">📎 Ver anexo</a>
+                        )
+                      )}
+                      <p className={`text-[10px] mt-1 ${m.authorType === "superadmin" ? "text-primary-foreground/70" : "text-muted-foreground"}`}>{fmtDateTime(m.createdAt)}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <Input value={ticketReply} onChange={(e) => setTicketReply(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") sendTicketReply(); }}
+                  placeholder="Responder pra loja..." data-testid="input-ticket-reply" />
+                <Button onClick={sendTicketReply} disabled={!ticketReply.trim() || sendingReply} data-testid="button-send-ticket-reply">
+                  <Send className="w-4 h-4" />
+                </Button>
+              </div>
+            </>
+          )}
         </DialogContent>
       </Dialog>
     </div>

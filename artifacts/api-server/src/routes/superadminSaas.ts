@@ -5,9 +5,10 @@ import {
   saasContractsTable,
   saasInvoicesTable,
   saasTicketsTable,
+  saasTicketMessagesTable,
   saasSettingsTable,
 } from "@workspace/db";
-import { eq, and, desc, sql, lt } from "drizzle-orm";
+import { eq, and, asc, desc, sql, lt } from "drizzle-orm";
 import { requireSuperadmin } from "../middlewares/auth";
 import { generateInvoicesForMonth } from "../lib/saasBilling";
 
@@ -268,11 +269,23 @@ router.delete("/superadmin/saas/invoices/:id", async (req, res): Promise<void> =
 });
 
 // ------------------------------------------------------- Chamados / suporte
-router.get("/superadmin/saas/tickets", async (_req, res): Promise<void> => {
+const VALID_STATUSES = ["aberto", "em_analise", "em_andamento", "resolvido", "fechado"];
+const VALID_CATEGORIES = ["bug", "duvida", "melhoria"];
+const VALID_PRIORITIES = ["baixa", "normal", "alta", "urgente"];
+
+router.get("/superadmin/saas/tickets", async (req, res): Promise<void> => {
+  const { status, priority, category, tenantId } = req.query as Record<string, string | undefined>;
+  const conditions = [];
+  if (status && VALID_STATUSES.includes(status)) conditions.push(eq(saasTicketsTable.status, status));
+  if (priority && VALID_PRIORITIES.includes(priority)) conditions.push(eq(saasTicketsTable.priority, priority));
+  if (category && VALID_CATEGORIES.includes(category)) conditions.push(eq(saasTicketsTable.category, category));
+  if (tenantId && Number.isFinite(Number(tenantId))) conditions.push(eq(saasTicketsTable.tenantId, Number(tenantId)));
+
   const rows = await db
     .select({ ticket: saasTicketsTable, tenantName: tenantsTable.name })
     .from(saasTicketsTable)
     .innerJoin(tenantsTable, eq(saasTicketsTable.tenantId, tenantsTable.id))
+    .where(conditions.length ? and(...conditions) : undefined)
     .orderBy(desc(saasTicketsTable.createdAt));
   res.json({ tickets: rows.map((r) => ({ ...r.ticket, tenantName: r.tenantName })) });
 });
@@ -294,13 +307,23 @@ router.post("/superadmin/saas/tickets", async (req, res): Promise<void> => {
 
 router.patch("/superadmin/saas/tickets/:id", async (req, res): Promise<void> => {
   const id = Number(req.params.id);
-  const { status, title, description } = req.body as { status?: string; title?: string; description?: string };
+  const { status, priority, category, title, description } = req.body as {
+    status?: string; priority?: string; category?: string; title?: string; description?: string;
+  };
   if (!Number.isFinite(id)) { res.status(400).json({ error: "Chamado inválido" }); return; }
   const updates: Record<string, unknown> = {};
   if (status) {
-    if (!["aberto", "em_andamento", "resolvido"].includes(status)) { res.status(400).json({ error: "Situação inválida" }); return; }
+    if (!VALID_STATUSES.includes(status)) { res.status(400).json({ error: "Situação inválida" }); return; }
     updates["status"] = status;
-    updates["resolvedAt"] = status === "resolvido" ? new Date() : null;
+    updates["resolvedAt"] = status === "resolvido" || status === "fechado" ? new Date() : null;
+  }
+  if (priority) {
+    if (!VALID_PRIORITIES.includes(priority)) { res.status(400).json({ error: "Prioridade inválida" }); return; }
+    updates["priority"] = priority;
+  }
+  if (category) {
+    if (!VALID_CATEGORIES.includes(category)) { res.status(400).json({ error: "Categoria inválida" }); return; }
+    updates["category"] = category;
   }
   if (typeof title === "string" && title.trim()) updates["title"] = title.trim();
   if (typeof description === "string") updates["description"] = description.trim() || null;
@@ -308,6 +331,37 @@ router.patch("/superadmin/saas/tickets/:id", async (req, res): Promise<void> => 
   const [ticket] = await db.update(saasTicketsTable).set(updates).where(eq(saasTicketsTable.id, id)).returning();
   if (!ticket) { res.status(404).json({ error: "Chamado não encontrado" }); return; }
   res.json({ ticket });
+});
+
+// ── Timeline de mensagens (lado superadmin — vê qualquer chamado) ─────────
+router.get("/superadmin/saas/tickets/:id/messages", async (req, res): Promise<void> => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "Chamado inválido" }); return; }
+  const rows = await db.select().from(saasTicketMessagesTable)
+    .where(eq(saasTicketMessagesTable.ticketId, id)).orderBy(asc(saasTicketMessagesTable.createdAt));
+  res.json({ messages: rows });
+});
+
+router.post("/superadmin/saas/tickets/:id/messages", async (req, res): Promise<void> => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "Chamado inválido" }); return; }
+  const [ticket] = await db.select().from(saasTicketsTable).where(eq(saasTicketsTable.id, id)).limit(1);
+  if (!ticket) { res.status(404).json({ error: "Chamado não encontrado" }); return; }
+
+  const { content } = req.body as { content?: string };
+  if (!content?.trim()) { res.status(400).json({ error: "Escreva uma mensagem" }); return; }
+
+  const [message] = await db.insert(saasTicketMessagesTable).values({
+    ticketId: id, authorType: "superadmin", authorUserId: null,
+    authorName: req.session.userName ?? "Suporte Sheikcell", content: content.trim(),
+  }).returning();
+
+  // 1ª resposta do técnico/superadmin: alimenta o indicador de SLA na lista.
+  if (!ticket.firstRespondedAt) {
+    await db.update(saasTicketsTable).set({ firstRespondedAt: message!.createdAt }).where(eq(saasTicketsTable.id, id));
+  }
+
+  res.status(201).json({ message });
 });
 
 export default router;

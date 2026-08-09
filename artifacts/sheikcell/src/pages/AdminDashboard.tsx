@@ -18,6 +18,7 @@ import Documentos from "./Documentos";
 import EquipeOnline from "@/components/EquipeOnline";
 import RH from "./RH";
 import TeamDirectory from "./TeamDirectory";
+import Suporte from "./Suporte";
 import Sorteios from "./Sorteios";
 import Robo from "./Robo";
 import Financeiro from "./Financeiro";
@@ -37,18 +38,18 @@ import {
   PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, Table2, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck,
   AlertTriangle, WifiOff,
   FolderArchive, Headphones, ShoppingBag, BarChart3, SlidersHorizontal, Palette, ChevronDown, Banknote, Wrench,
-  ArrowRight, Filter, BookUser,
+  ArrowRight, Filter, BookUser, LifeBuoy,
 } from "lucide-react";
 import Resultados from "./Resultados";
 
-type Tab = "dashboard" | "resultados" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "questionarios" | "treinamentos" | "planilhas" | "documentos" | "rh" | "sorteios" | "robo" | "financeiro" | "financeiro-bancario" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "sistema" | "diretorio";
+type Tab = "dashboard" | "resultados" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "questionarios" | "treinamentos" | "planilhas" | "documentos" | "rh" | "sorteios" | "robo" | "financeiro" | "financeiro-bancario" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "sistema" | "diretorio" | "suporte";
 
 // Categorias colapsáveis do menu lateral — cada aba pertence a um único grupo.
 type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabIds: Tab[] };
 const TAB_GROUPS: TabGroup[] = [
   { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["dashboard", "chat", "equipe", "distribuicao", "crm"] },
   { key: "vendas", label: "Vendas e Serviços", icon: ShoppingBag, tabIds: ["peliculas", "avaliacao", "financeiras"] },
-  { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["resultados", "tarefas", "planilhas", "documentos", "history"] },
+  { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["resultados", "tarefas", "planilhas", "documentos", "history", "suporte"] },
   { key: "pessoas", label: "Pessoas", icon: Users, tabIds: ["diretorio", "rh", "treinamentos", "questionarios", "sorteios", "users"] },
   { key: "administracao", label: "Administração", icon: Settings, tabIds: ["financeiro", "financeiro-bancario", "sectors", "quickreplies", "whatsapp", "robo"] },
   { key: "configuracoes", label: "Configurações", icon: SlidersHorizontal, tabIds: ["aparencia"] },
@@ -421,6 +422,7 @@ export default function AdminDashboard() {
     { id: "planilhas" as Tab, label: "Planilhas", icon: Table2, adminOnly: false },
     { id: "documentos" as Tab, label: "Documentos", icon: FolderArchive, adminOnly: false },
     { id: "diretorio" as Tab, label: "Diretório", icon: BookUser, adminOnly: false },
+    { id: "suporte" as Tab, label: "Suporte", icon: LifeBuoy, adminOnly: false },
     { id: "rh" as Tab, label: "RH", icon: UserSearch, adminOnly: true },
     { id: "sorteios" as Tab, label: "Sorteios", icon: Gift, adminOnly: true },
     { id: "robo" as Tab, label: "Robô", icon: Bot, adminOnly: true },
@@ -745,6 +747,8 @@ export default function AdminDashboard() {
         {tab === "documentos" && <Documentos />}
 
         {tab === "diretorio" && <TeamDirectory />}
+
+        {tab === "suporte" && <Suporte />}
 
         {tab === "rh" && <RH />}
 
