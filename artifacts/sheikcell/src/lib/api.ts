@@ -307,6 +307,7 @@ export type DashboardAttention = {
   waitingTooLong: Array<{ id: number; name: string; sectorName: string | null; waitingMinutes: number | null }>;
   overdueTasks: Array<{ id: number; title: string; assigneeName: string | null; daysOverdue: number | null }>;
   avgServiceSeconds: number | null;
+  funnel: { potential: number; active: number };
 };
 
 export type CrmContact = {
@@ -510,7 +511,14 @@ export type Branding = {
 export type AppSettings = {
   alertUnansweredEnabled: boolean;
   alertUnansweredMinutes: number;
+  outboundHourlyLimit: number;
+  outboundDailyLimit: number;
   branding: Branding;
+};
+
+export type OutboundUsage = {
+  hourly: { used: number; limit: number };
+  daily: { used: number; limit: number };
 };
 
 export type TaskReportBucket = {
@@ -806,7 +814,9 @@ export const api = {
       req<Conversation>(`/chat/conversations/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     deleteConversation: (id: number) =>
       req<{ ok: boolean }>(`/chat/conversations/${id}`, { method: "DELETE" }),
-    createConversation: (data: { phone: string; name: string; channel?: string; sectorId?: number }) =>
+    outboundUsage: (assigneeId?: number) =>
+      req<OutboundUsage>(`/chat/outbound-usage${assigneeId ? `?assigneeId=${assigneeId}` : ""}`),
+    createConversation: (data: { phone: string; name: string; channel?: string; sectorId?: number; assigneeId?: number }) =>
       req<Conversation>("/chat/conversations", { method: "POST", body: JSON.stringify(data) }),
     claimConversation: (id: number) =>
       req<Conversation>(`/chat/conversations/${id}/claim`, { method: "POST" }),

@@ -181,6 +181,25 @@ router.get("/admin/dashboard-attention", requireAdminOrSupervisor, async (req, r
       isNotNull(attendanceLogsTable.serviceTimeSeconds),
     ));
 
+  // Qualidade do funil bot → humano: quantos leads ainda estão só com o bot
+  // (Potencial, espelha conversationCategory() do ChatCenter.tsx) contra
+  // quantos já viraram atendimento humano de fato (Ativo). "Pendente" (na
+  // fila, sem responsável ainda) fica de fora — não é nem lead cru nem
+  // atendimento humano confirmado.
+  const notFinished = and(
+    eq(conversationsTable.tenantId, tenantId),
+    eq(conversationsTable.isArchived, false),
+    notInArray(conversationsTable.status, ["resolved", "archived"]),
+  )!;
+  const [potentialRow] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(conversationsTable)
+    .where(and(notFinished, isNull(conversationsTable.assigneeId), sql`${conversationsTable.status} <> 'pending'`));
+  const [activeRow] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(conversationsTable)
+    .where(and(notFinished, isNotNull(conversationsTable.assigneeId)));
+
   const now = Date.now();
   res.json({
     waitingTooLong: waitingRows.map((c) => ({
@@ -196,6 +215,10 @@ router.get("/admin/dashboard-attention", requireAdminOrSupervisor, async (req, r
       daysOverdue: t.dueDate ? Math.floor((now - t.dueDate.getTime()) / 86_400_000) : null,
     })),
     avgServiceSeconds: avgRow?.avgSeconds ?? null,
+    funnel: {
+      potential: Number(potentialRow?.count ?? 0),
+      active: Number(activeRow?.count ?? 0),
+    },
   });
 });
 

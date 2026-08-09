@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { api, can, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType } from "@/lib/api";
+import { api, can, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -510,6 +510,9 @@ export default function ChatCenter() {
   const [cfgMinutes, setCfgMinutes] = useState(5);
   const [cfgEnabled, setCfgEnabled] = useState(true);
   const [savingAlertCfg, setSavingAlertCfg] = useState(false);
+  // Trava anti-disparo em massa do Atendimento ativo (mesmo modal de config).
+  const [cfgOutboundHourly, setCfgOutboundHourly] = useState(10);
+  const [cfgOutboundDaily, setCfgOutboundDaily] = useState(40);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const alertedRef = useRef<Set<number>>(new Set());
   // Finalizar atendimento: modal para capturar o motivo da finalização.
@@ -526,13 +529,20 @@ export default function ChatCenter() {
   const [quickReplies, setQuickReplies] = useState<QuickReply[]>([]);
   const [showQuickReplies, setShowQuickReplies] = useState(false);
   const [quickSearch, setQuickSearch] = useState("");
+  // Confirmação explícita ao promover uma conversa PARA FORA de "Potenciais"
+  // (vira Pendente ou Ativo) — evita puxar um lead pra fila/atendimento sem querer.
+  // Pendente → Ativo (pegar da fila) não passa por aqui: é o fluxo normal.
+  const [promoteConfirm, setPromoteConfirm] = useState<{ id: number; name: string; to: "pendentes" | "ativos" } | null>(null);
   // Agendamentos: mensagem programada ou lembrete de retorno (vira tarefa no quadro)
   const [showSchedule, setShowSchedule] = useState(false);
   const [schedules, setSchedules] = useState<ScheduledMessage[]>([]);
   const [schedForm, setSchedForm] = useState<{ kind: "mensagem" | "retorno"; content: string; sendAt: string }>({ kind: "mensagem", content: "", sendAt: "" });
   const [schedSaving, setSchedSaving] = useState(false);
   const [waSessions, setWaSessions] = useState<WaSessionInfo[]>([]);
-  const [newForm, setNewForm] = useState({ name: "", phone: "", channel: "whatsapp", sectorId: "" });
+  const [newForm, setNewForm] = useState({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "" });
+  // Uso atual da trava anti-disparo em massa (Atendimento ativo), consultado
+  // ao abrir o modal de Nova Conversa — mostra o risco ANTES de tentar criar.
+  const [outboundUsage, setOutboundUsage] = useState<OutboundUsage | null>(null);
 
   const [filePreview, setFilePreview] = useState<{ file: File; previewUrl: string | null } | null>(null);
   const [caption, setCaption] = useState("");
@@ -1058,7 +1068,10 @@ export default function ChatCenter() {
   useEffect(() => {
     api.sectors.list().then(setSectors).catch(() => {});
     api.chatUsers().then(setChatUsers).catch(() => {});
-    api.settings.get().then((s) => { setAlertEnabled(s.alertUnansweredEnabled); setAlertMinutes(s.alertUnansweredMinutes); }).catch(() => {});
+    api.settings.get().then((s) => {
+      setAlertEnabled(s.alertUnansweredEnabled); setAlertMinutes(s.alertUnansweredMinutes);
+      setCfgOutboundHourly(s.outboundHourlyLimit); setCfgOutboundDaily(s.outboundDailyLimit);
+    }).catch(() => {});
     api.chat.quickReplies.list().then(setQuickReplies).catch(() => {});
     api.chat.labels.list().then(setLabels).catch(() => {});
     api.chat.waSessions().then(setWaSessions).catch(() => {});
@@ -1604,6 +1617,17 @@ export default function ChatCenter() {
     } catch { toast({ title: "Erro ao salvar etiqueta", variant: "destructive" }); }
   };
 
+  // Mostra o uso da trava anti-disparo em massa assim que dá pra saber quem
+  // vai ser o responsável (self para vendedor; escolhido para admin/supervisor).
+  useEffect(() => {
+    if (!showNewConv || newForm.channel !== "whatsapp") { setOutboundUsage(null); return; }
+    const effectiveAssignee = newForm.assigneeId ? Number(newForm.assigneeId) : (user?.role === "vendedor" ? user.id : null);
+    if (effectiveAssignee == null) { setOutboundUsage(null); return; }
+    let cancelled = false;
+    api.chat.outboundUsage(effectiveAssignee).then((u) => { if (!cancelled) setOutboundUsage(u); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [showNewConv, newForm.channel, newForm.assigneeId, user]);
+
   // ── Create conversation ──
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1611,13 +1635,26 @@ export default function ChatCenter() {
       const conv = await api.chat.createConversation({
         phone: newForm.phone, name: newForm.name, channel: newForm.channel,
         sectorId: newForm.sectorId ? Number(newForm.sectorId) : undefined,
+        assigneeId: newForm.assigneeId ? Number(newForm.assigneeId) : undefined,
       });
-      setConvs((prev) => [conv, ...prev]);
+      // O insert no backend não devolve o objeto assignee (só assigneeId) —
+      // preenche localmente com o que já temos em chatUsers pra não ficar
+      // preso na tela de "Iniciar atendimento" quando já tem responsável.
+      const assignee = conv.assigneeId != null
+        ? (conv.assigneeId === user?.id ? { id: user.id, name: user.name } : chatUsers.find((u) => u.id === conv.assigneeId))
+        : null;
+      const convWithAssignee = { ...conv, assignee: assignee ?? conv.assignee ?? null };
+      // O broadcast "conversation_new" chega pelo SSE ANTES dessa resposta do
+      // POST resolver (o servidor dispara o evento antes de responder) — sem
+      // checar duplicata aqui, a conversa aparecia duas vezes na lista.
+      setConvs((prev) => prev.some((c) => c.id === convWithAssignee.id)
+        ? prev.map((c) => c.id === convWithAssignee.id ? convWithAssignee : c)
+        : [convWithAssignee, ...prev]);
       setActiveId(conv.id);
       // Abre a aba onde a conversa realmente caiu (vendedor: já sai em Ativos).
       setCategory(conversationCategory(conv));
       setShowNewConv(false);
-      setNewForm({ name: "", phone: "", channel: "whatsapp", sectorId: "" });
+      setNewForm({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "" });
     } catch (err: unknown) {
       toast({ title: "Erro", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     }
@@ -2132,7 +2169,13 @@ export default function ChatCenter() {
                     {["open", "pending", "resolved"].filter((s) => s !== "resolved" || can(user, "finalizar")).map((s) => (
                       <button key={s} onClick={() => {
                         if (s === "resolved") handleFinalize(activeConv.id);
-                        else if (s === "pending") handleMoveToQueue(activeConv.id);
+                        else if (s === "pending") {
+                          if (activeCategory === "potenciais") {
+                            setPromoteConfirm({ id: activeConv.id, name: activeConv.name, to: "pendentes" });
+                          } else {
+                            handleMoveToQueue(activeConv.id);
+                          }
+                        }
                         else handleStatus(s);
                         setShowStatusPicker(false);
                       }}
@@ -2371,7 +2414,13 @@ export default function ChatCenter() {
           {!activeConv.assignee && activeCategory !== "resolvidas" ? (
             <div className="bg-[#f0f2f5] border-t border-border px-3 py-3 flex flex-col items-center gap-1.5">
               <button
-                onClick={() => handleClaim(activeConv.id)}
+                onClick={() => {
+                  if (activeCategory === "potenciais") {
+                    setPromoteConfirm({ id: activeConv.id, name: activeConv.name, to: "ativos" });
+                  } else {
+                    handleClaim(activeConv.id);
+                  }
+                }}
                 data-testid="button-start-attendance"
                 className="flex items-center gap-2 px-6 py-2.5 rounded-full text-white text-sm font-semibold transition hover:opacity-90"
                 style={{ backgroundColor: "#16a34a" }}
@@ -2731,6 +2780,45 @@ export default function ChatCenter() {
         </div>
       )}
 
+      {/* ── Confirmação de promoção: Potencial → Pendente/Ativo ──────────── */}
+      {promoteConfirm && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl w-full max-w-sm shadow-xl p-5">
+            <h3 className="font-bold text-base mb-1.5">
+              {promoteConfirm.to === "ativos" ? "Assumir este atendimento?" : "Enviar para a fila de atendimento?"}
+            </h3>
+            <p className="text-sm text-muted-foreground mb-5">
+              {promoteConfirm.to === "ativos"
+                ? <><strong>{promoteConfirm.name}</strong> ainda é um Potencial (só falou com o bot). Ao confirmar, você vira o responsável e a conversa sai da triagem direto para Ativos.</>
+                : <><strong>{promoteConfirm.name}</strong> ainda é um Potencial (só falou com o bot). Ao confirmar, ela entra na fila de atendimento (Pendentes), pronta pra qualquer vendedor assumir.</>}
+            </p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setPromoteConfirm(null)}
+                data-testid="button-cancel-promote"
+                className="flex-1 py-2 rounded-xl border border-border text-sm font-medium text-muted-foreground hover:bg-secondary transition"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                data-testid="button-confirm-promote"
+                onClick={() => {
+                  const { id, to } = promoteConfirm;
+                  setPromoteConfirm(null);
+                  if (to === "ativos") void handleClaim(id);
+                  else void handleMoveToQueue(id);
+                }}
+                className="flex-1 py-2 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition"
+              >
+                {promoteConfirm.to === "ativos" ? "Assumir atendimento" : "Enviar para a fila"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── CRM contact panel (opened from a conversation) ─────────────── */}
       {crmContactId !== null && (
         <CrmContactDetail
@@ -2844,7 +2932,7 @@ export default function ChatCenter() {
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowAlertCfg(false)}>
           <div className="bg-white rounded-2xl w-full max-w-sm p-6 shadow-xl space-y-4" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between">
-              <h3 className="font-bold">⏰ Alerta de sem resposta</h3>
+              <h3 className="font-bold">⏰ Configurações do Atendimento</h3>
               <button onClick={() => setShowAlertCfg(false)}><X className="w-5 h-5 text-muted-foreground" /></button>
             </div>
             <label className="flex items-center gap-2 text-sm font-medium">
@@ -2859,6 +2947,31 @@ export default function ChatCenter() {
                 className="w-full px-3 py-2 rounded-xl border border-border text-sm mt-1" />
               <p className="text-xs text-muted-foreground mt-1">Vale para toda a equipe. Cada área tem um toque diferente (Potenciais, Pendentes e Ativos) e o alarme fica na tela repetindo até responder ou silenciar.</p>
             </div>
+            <div className="pt-2 border-t border-border">
+              <label className="text-sm font-semibold flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                Limite do Atendimento ativo (WhatsApp)
+              </label>
+              <p className="text-xs text-muted-foreground mt-0.5 mb-2">
+                Trava anti-disparo em massa: quantas conversas cada atendente pode INICIAR (não responder) por WhatsApp. Passou do limite, só amanhã/na próxima hora.
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs text-muted-foreground">Por hora</label>
+                  <input type="number" min={1} max={200} value={cfgOutboundHourly}
+                    onChange={(e) => setCfgOutboundHourly(Number(e.target.value))}
+                    data-testid="input-outbound-hourly-limit"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm mt-1" />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground">Por dia</label>
+                  <input type="number" min={1} max={1000} value={cfgOutboundDaily}
+                    onChange={(e) => setCfgOutboundDaily(Number(e.target.value))}
+                    data-testid="input-outbound-daily-limit"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm mt-1" />
+                </div>
+              </div>
+            </div>
             <button
               onClick={async () => {
                 const mins = Math.round(cfgMinutes);
@@ -2866,13 +2979,28 @@ export default function ChatCenter() {
                   toast({ title: "Tempo inválido", description: "Use entre 1 e 120 minutos.", variant: "destructive" });
                   return;
                 }
+                const hourly = Math.round(cfgOutboundHourly);
+                const daily = Math.round(cfgOutboundDaily);
+                if (!Number.isFinite(hourly) || hourly < 1 || hourly > 200) {
+                  toast({ title: "Limite por hora inválido", description: "Use entre 1 e 200.", variant: "destructive" });
+                  return;
+                }
+                if (!Number.isFinite(daily) || daily < 1 || daily > 1000) {
+                  toast({ title: "Limite por dia inválido", description: "Use entre 1 e 1000.", variant: "destructive" });
+                  return;
+                }
                 setSavingAlertCfg(true);
                 try {
-                  const s = await api.settings.update({ alertUnansweredEnabled: cfgEnabled, alertUnansweredMinutes: mins });
+                  const s = await api.settings.update({
+                    alertUnansweredEnabled: cfgEnabled, alertUnansweredMinutes: mins,
+                    outboundHourlyLimit: hourly, outboundDailyLimit: daily,
+                  });
                   setAlertEnabled(s.alertUnansweredEnabled);
                   setAlertMinutes(s.alertUnansweredMinutes);
+                  setCfgOutboundHourly(s.outboundHourlyLimit);
+                  setCfgOutboundDaily(s.outboundDailyLimit);
                   setShowAlertCfg(false);
-                  toast({ title: "Alerta salvo! ✅", description: s.alertUnansweredEnabled ? `Avisa após ${s.alertUnansweredMinutes} min sem resposta.` : "Alerta desligado para toda a equipe." });
+                  toast({ title: "Configurações salvas! ✅", description: s.alertUnansweredEnabled ? `Avisa após ${s.alertUnansweredMinutes} min sem resposta.` : "Alerta desligado para toda a equipe." });
                 } catch (err) {
                   toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
                 } finally {
@@ -2926,11 +3054,43 @@ export default function ChatCenter() {
                   {sectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
               </div>
+              <div>
+                <label className="text-xs font-medium mb-1 block">Atendente responsável</label>
+                {user?.role === "vendedor" ? (
+                  <div className="w-full px-3 py-2 rounded-xl border border-border text-sm bg-secondary/40 text-muted-foreground">
+                    Você ({user.name}) — atendimento ativo já sai como seu
+                  </div>
+                ) : (
+                  <select value={newForm.assigneeId} onChange={(e) => setNewForm({ ...newForm, assigneeId: e.target.value })}
+                    data-testid="select-new-conv-assignee"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                    <option value="">— Deixar na fila (sem responsável) —</option>
+                    {chatUsers.filter((u) => u.role !== "admin" && u.role !== "supervisor" && u.role !== "superadmin").map((u) => (
+                      <option key={u.id} value={u.id}>{u.name}</option>
+                    ))}
+                  </select>
+                )}
+              </div>
+              {newForm.channel === "whatsapp" && (newForm.assigneeId || user?.role === "vendedor") && (
+                <div className={`rounded-xl border p-3 text-xs space-y-1 ${outboundUsage && (outboundUsage.hourly.used >= outboundUsage.hourly.limit || outboundUsage.daily.used >= outboundUsage.daily.limit) ? "bg-red-50 border-red-200 text-red-700" : "bg-amber-50 border-amber-200 text-amber-800"}`}>
+                  <p className="font-semibold flex items-center gap-1.5">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                    Atendimento ativo por WhatsApp (Baileys, sem API oficial da Meta)
+                  </p>
+                  <p>Iniciar conversa com quem não fala com a loja tem risco real de o número ser bloqueado por uso indevido. Use com moderação.</p>
+                  {outboundUsage && (
+                    <p className="font-medium pt-1 border-t border-current/20">
+                      Uso desse atendente: {outboundUsage.hourly.used}/{outboundUsage.hourly.limit} nesta hora · {outboundUsage.daily.used}/{outboundUsage.daily.limit} hoje
+                    </p>
+                  )}
+                </div>
+              )}
               <div className="flex gap-2 pt-1">
                 <button type="button" onClick={() => setShowNewConv(false)}
                   className="flex-1 py-2 rounded-xl border border-border text-sm font-medium text-muted-foreground hover:bg-secondary transition">Cancelar</button>
                 <button type="submit" data-testid="button-confirm-new-conv"
-                  className="flex-1 py-2 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition">Criar</button>
+                  disabled={!!outboundUsage && (outboundUsage.hourly.used >= outboundUsage.hourly.limit || outboundUsage.daily.used >= outboundUsage.daily.limit)}
+                  className="flex-1 py-2 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition disabled:opacity-50 disabled:cursor-not-allowed">Criar</button>
               </div>
             </form>
           </div>

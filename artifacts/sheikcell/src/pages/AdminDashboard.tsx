@@ -36,7 +36,7 @@ import {
   PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, Table2, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck,
   AlertTriangle, WifiOff,
   FolderArchive, Headphones, ShoppingBag, BarChart3, SlidersHorizontal, Palette, ChevronDown, Banknote, Wrench,
-  BookUser,
+  ArrowRight, Filter, BookUser,
 } from "lucide-react";
 import Resultados from "./Resultados";
 
@@ -595,6 +595,35 @@ export default function AdminDashboard() {
                         </div>
                       )}
                     </div>
+
+                    {(() => {
+                      const funnel = attention?.funnel;
+                      const total = funnel ? funnel.potential + funnel.active : 0;
+                      const conversionRate = funnel && total > 0 ? Math.round((funnel.active / total) * 100) : null;
+                      return (
+                        <button onClick={() => setTab("chat")} data-testid="attention-funnel" className="shk-card p-5 text-left hover:bg-secondary/20 transition">
+                          <h2 className="font-bold text-foreground flex items-center gap-2 text-sm mb-3">
+                            <Filter className="w-4 h-4 text-violet-600" />Qualidade do funil
+                          </h2>
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="text-center flex-1">
+                              <div className="text-2xl font-extrabold text-violet-600">{loading ? "—" : funnel?.potential ?? 0}</div>
+                              <div className="text-[11px] text-muted-foreground">Potencial<br />(só bot)</div>
+                            </div>
+                            <ArrowRight className="w-4 h-4 text-muted-foreground shrink-0" />
+                            <div className="text-center flex-1">
+                              <div className="text-2xl font-extrabold text-blue-600">{loading ? "—" : funnel?.active ?? 0}</div>
+                              <div className="text-[11px] text-muted-foreground">Ativo<br />(humano)</div>
+                            </div>
+                          </div>
+                          {conversionRate !== null && (
+                            <p className="text-xs text-muted-foreground text-center mt-3 pt-2 border-t border-border">
+                              {conversionRate}% dos contatos em aberto já viraram atendimento humano
+                            </p>
+                          )}
+                        </button>
+                      );
+                    })()}
 
                     {financeBankSnapshot && (
                       <div className="shk-card p-5">

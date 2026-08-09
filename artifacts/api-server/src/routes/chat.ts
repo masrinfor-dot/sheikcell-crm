@@ -2,8 +2,8 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
-import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, crmPurchasesTable } from "@workspace/db";
-import { eq, desc, and, or, lt, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
+import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, crmPurchasesTable, appSettingsTable } from "@workspace/db";
+import { eq, desc, and, or, lt, gte, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { requireAuth, requireAdmin, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
 import { checkPerm, requirePerm } from "../lib/permissions";
@@ -1198,11 +1198,46 @@ router.delete("/chat/conversations/:id", requireAdmin, async (req, res): Promise
   res.json({ ok: true });
 });
 
+// ─── Uso atual da trava anti-disparo em massa (Atendimento ativo) ─────────
+// Deixa o front avisar ANTES de tentar criar ("você já usou 8/10 essa hora"),
+// em vez de só descobrir o limite quando a criação é recusada com 429.
+router.get("/chat/outbound-usage", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const requested = parseInt(String(req.query["assigneeId"] ?? ""), 10);
+  const userRole = req.session.userRole!;
+  // Vendedor só vê o próprio uso; admin/supervisor pode consultar qualquer
+  // atendente da loja (pra decidir por quem vai criar o atendimento ativo).
+  const assigneeId = userRole === "vendedor" || !Number.isFinite(requested)
+    ? req.session.userId!
+    : requested;
+
+  const settingsRows = await db.select().from(appSettingsTable)
+    .where(and(eq(appSettingsTable.tenantId, tenantId), inArray(appSettingsTable.key, ["outbound_hourly_limit", "outbound_daily_limit"])));
+  const settingsMap = Object.fromEntries(settingsRows.map((r) => [r.key, r.value]));
+  const hourlyLimit = Math.max(1, parseInt(settingsMap["outbound_hourly_limit"] ?? "10", 10) || 10);
+  const dailyLimit = Math.max(1, parseInt(settingsMap["outbound_daily_limit"] ?? "40", 10) || 40);
+  const hourAgo = new Date(Date.now() - 60 * 60_000);
+  const dayAgo = new Date(Date.now() - 24 * 60 * 60_000);
+  const countSince = async (since: Date) => {
+    const [row] = await db.select({ count: sql<number>`count(*)` })
+      .from(conversationsTable)
+      .where(and(
+        eq(conversationsTable.tenantId, tenantId),
+        eq(conversationsTable.assigneeId, assigneeId),
+        eq(conversationsTable.channel, "whatsapp"),
+        gte(conversationsTable.createdAt, since),
+      ));
+    return Number(row?.count ?? 0);
+  };
+  const [hourlyUsed, dailyUsed] = await Promise.all([countSince(hourAgo), countSince(dayAgo)]);
+  res.json({ hourly: { used: hourlyUsed, limit: hourlyLimit }, daily: { used: dailyUsed, limit: dailyLimit } });
+});
+
 // ─── Create conversation manually ─────────────────────────────────────────
 router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { phone, name, channel, sectorId } = req.body as {
-    phone?: string; name?: string; channel?: string; sectorId?: number;
+  const { phone, name, channel, sectorId, assigneeId: requestedAssigneeId } = req.body as {
+    phone?: string; name?: string; channel?: string; sectorId?: number; assigneeId?: number;
   };
   if (!phone || !name) { res.status(400).json({ error: "Telefone e nome obrigatórios" }); return; }
 
@@ -1271,17 +1306,64 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
     ? (sectorId ?? userSectorId ?? 1)
     : (userSectorId ?? 1);
 
-  // Vendedor que cria um atendimento já fica como responsável — sem isso a
-  // conversa nasce como "Potencial" sem dono e ele precisaria assumi-la (o que
-  // falha se não tiver a permissão ver_potenciais).
+  // Atendente responsável: vendedor sempre vira o próprio dono (não escolhe
+  // outro). Admin/supervisor pode indicar quem vai tocar esse "atendimento
+  // ativo" — precisa existir, estar ativo e ser da mesma loja.
+  let targetAssigneeId: number | null = null;
+  if (userRole === "vendedor") {
+    targetAssigneeId = req.session.userId!;
+  } else if (requestedAssigneeId != null) {
+    const [target] = await db.select({ id: usersTable.id })
+      .from(usersTable)
+      .where(and(eq(usersTable.id, requestedAssigneeId), eq(usersTable.tenantId, tenantId), eq(usersTable.isActive, true)))
+      .limit(1);
+    if (!target) { res.status(400).json({ error: "Atendente responsável inválido" }); return; }
+    targetAssigneeId = target.id;
+  }
+
+  // Trava anti-disparo em massa: só se aplica a "atendimento ativo" de
+  // verdade — canal WhatsApp (Baileys, sem API oficial da Meta = risco real
+  // de ban) E já nasce com responsável (vai mandar mensagem na hora).
+  // Conversa criada sem responsável (admin joga na fila) não conta: ninguém
+  // mandou mensagem pra esse número ainda.
+  if ((channel ?? "manual") === "whatsapp" && targetAssigneeId != null) {
+    const settingsRows = await db.select().from(appSettingsTable)
+      .where(and(eq(appSettingsTable.tenantId, tenantId), inArray(appSettingsTable.key, ["outbound_hourly_limit", "outbound_daily_limit"])));
+    const settingsMap = Object.fromEntries(settingsRows.map((r) => [r.key, r.value]));
+    const hourlyLimit = Math.max(1, parseInt(settingsMap["outbound_hourly_limit"] ?? "10", 10) || 10);
+    const dailyLimit = Math.max(1, parseInt(settingsMap["outbound_daily_limit"] ?? "40", 10) || 40);
+    const hourAgo = new Date(Date.now() - 60 * 60_000);
+    const dayAgo = new Date(Date.now() - 24 * 60 * 60_000);
+    const countSince = async (since: Date) => {
+      const [row] = await db.select({ count: sql<number>`count(*)` })
+        .from(conversationsTable)
+        .where(and(
+          eq(conversationsTable.tenantId, tenantId),
+          eq(conversationsTable.assigneeId, targetAssigneeId!),
+          eq(conversationsTable.channel, "whatsapp"),
+          gte(conversationsTable.createdAt, since),
+        ));
+      return Number(row?.count ?? 0);
+    };
+    const [hourlyUsed, dailyUsed] = await Promise.all([countSince(hourAgo), countSince(dayAgo)]);
+    if (hourlyUsed >= hourlyLimit) {
+      res.status(429).json({ error: `Limite de ${hourlyLimit} atendimentos ativos por hora atingido para este atendente. Aguarde ou peça ao admin para ajustar o limite em Configurações.` });
+      return;
+    }
+    if (dailyUsed >= dailyLimit) {
+      res.status(429).json({ error: `Limite de ${dailyLimit} atendimentos ativos por dia atingido para este atendente. Aguarde amanhã ou peça ao admin para ajustar o limite em Configurações.` });
+      return;
+    }
+  }
+
   const [conv] = await db.insert(conversationsTable).values({
     tenantId,
     phone, name,
     channel: channel ?? "manual",
     sectorId: effectiveSectorId,
     status: "open",
-    assigneeId: userRole === "vendedor" ? req.session.userId! : null,
-    attendanceStartedAt: userRole === "vendedor" ? new Date() : null,
+    assigneeId: targetAssigneeId,
+    attendanceStartedAt: targetAssigneeId != null ? new Date() : null,
     lastMessageAt: new Date(),
   }).returning();
 

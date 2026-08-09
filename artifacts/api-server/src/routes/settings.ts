@@ -14,6 +14,10 @@ const DEFAULTS: Record<string, string> = {
   branding_company_name: "",
   branding_logo: "",
   branding_primary_color: "",
+  // Trava anti-disparo em massa do "Atendimento ativo" (outbound via Baileys —
+  // sem API oficial da Meta, número real sob risco de ban por uso indevido).
+  outbound_hourly_limit: "10",
+  outbound_daily_limit: "40",
 };
 
 function brandingOf(map: Record<string, string>) {
@@ -34,6 +38,8 @@ router.get("/settings", requireAuth, async (req, res): Promise<void> => {
   res.json({
     alertUnansweredEnabled: map.alert_unanswered_enabled === "true",
     alertUnansweredMinutes: Math.max(1, parseInt(map.alert_unanswered_minutes, 10) || 5),
+    outboundHourlyLimit: Math.max(1, parseInt(map.outbound_hourly_limit, 10) || 10),
+    outboundDailyLimit: Math.max(1, parseInt(map.outbound_daily_limit, 10) || 40),
     branding: brandingOf(map),
   });
 });
@@ -41,9 +47,11 @@ router.get("/settings", requireAuth, async (req, res): Promise<void> => {
 // Só admin/supervisor alteram.
 router.patch("/settings", requireAdminOrSupervisor, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { alertUnansweredEnabled, alertUnansweredMinutes } = req.body as {
+  const { alertUnansweredEnabled, alertUnansweredMinutes, outboundHourlyLimit, outboundDailyLimit } = req.body as {
     alertUnansweredEnabled?: boolean;
     alertUnansweredMinutes?: number;
+    outboundHourlyLimit?: number;
+    outboundDailyLimit?: number;
   };
   const updates: [string, string][] = [];
   if (alertUnansweredEnabled !== undefined) {
@@ -56,6 +64,22 @@ router.patch("/settings", requireAdminOrSupervisor, async (req, res): Promise<vo
       return;
     }
     updates.push(["alert_unanswered_minutes", String(m)]);
+  }
+  if (outboundHourlyLimit !== undefined) {
+    const h = Math.round(Number(outboundHourlyLimit));
+    if (!Number.isFinite(h) || h < 1 || h > 200) {
+      res.status(400).json({ error: "Limite por hora deve ser entre 1 e 200" });
+      return;
+    }
+    updates.push(["outbound_hourly_limit", String(h)]);
+  }
+  if (outboundDailyLimit !== undefined) {
+    const d = Math.round(Number(outboundDailyLimit));
+    if (!Number.isFinite(d) || d < 1 || d > 1000) {
+      res.status(400).json({ error: "Limite por dia deve ser entre 1 e 1000" });
+      return;
+    }
+    updates.push(["outbound_daily_limit", String(d)]);
   }
   if (updates.length === 0) { res.status(400).json({ error: "Nada para atualizar" }); return; }
   for (const [key, value] of updates) {
@@ -70,6 +94,8 @@ router.patch("/settings", requireAdminOrSupervisor, async (req, res): Promise<vo
   res.json({
     alertUnansweredEnabled: map.alert_unanswered_enabled === "true",
     alertUnansweredMinutes: Math.max(1, parseInt(map.alert_unanswered_minutes, 10) || 5),
+    outboundHourlyLimit: Math.max(1, parseInt(map.outbound_hourly_limit, 10) || 10),
+    outboundDailyLimit: Math.max(1, parseInt(map.outbound_daily_limit, 10) || 40),
     branding: brandingOf(map),
   });
 });
