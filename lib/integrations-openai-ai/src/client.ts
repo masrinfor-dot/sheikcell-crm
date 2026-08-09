@@ -17,4 +17,11 @@ const baseURL = process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
 export const openai = new OpenAI({
   apiKey,
   ...(baseURL ? { baseURL } : {}),
+  // SDK default é 10 min sem timeout configurado — uma chave inválida/rede
+  // fora do ar deixa a chamada pendurada por muito tempo (ex.: preço base
+  // da Avaliação de Usados nunca resolve e a etapa seguinte não abre).
+  // 25s é generoso pro modelo com busca na web, mas falha rápido o
+  // suficiente pra quem chamou poder cair no fallback/erro tratado.
+  timeout: 25_000,
+  maxRetries: 1,
 });
