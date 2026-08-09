@@ -16,6 +16,7 @@ import Planilhas from "./Planilhas";
 import Documentos from "./Documentos";
 import EquipeOnline from "@/components/EquipeOnline";
 import RH from "./RH";
+import TeamDirectory from "./TeamDirectory";
 import Sorteios from "./Sorteios";
 import Robo from "./Robo";
 import Financeiro from "./Financeiro";
@@ -35,10 +36,11 @@ import {
   PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, Table2, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck,
   AlertTriangle, WifiOff,
   FolderArchive, Headphones, ShoppingBag, BarChart3, SlidersHorizontal, Palette, ChevronDown, Banknote, Wrench,
+  BookUser,
 } from "lucide-react";
 import Resultados from "./Resultados";
 
-type Tab = "dashboard" | "resultados" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "questionarios" | "treinamentos" | "planilhas" | "documentos" | "rh" | "sorteios" | "robo" | "financeiro" | "financeiro-bancario" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "sistema";
+type Tab = "dashboard" | "resultados" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "questionarios" | "treinamentos" | "planilhas" | "documentos" | "rh" | "sorteios" | "robo" | "financeiro" | "financeiro-bancario" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "sistema" | "diretorio";
 
 // Categorias colapsáveis do menu lateral — cada aba pertence a um único grupo.
 type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabIds: Tab[] };
@@ -46,7 +48,7 @@ const TAB_GROUPS: TabGroup[] = [
   { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["dashboard", "chat", "equipe", "distribuicao", "crm"] },
   { key: "vendas", label: "Vendas e Serviços", icon: ShoppingBag, tabIds: ["peliculas", "avaliacao", "financeiras"] },
   { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["resultados", "tarefas", "planilhas", "documentos", "history"] },
-  { key: "pessoas", label: "Pessoas", icon: Users, tabIds: ["rh", "treinamentos", "questionarios", "sorteios", "users"] },
+  { key: "pessoas", label: "Pessoas", icon: Users, tabIds: ["diretorio", "rh", "treinamentos", "questionarios", "sorteios", "users"] },
   { key: "administracao", label: "Administração", icon: Settings, tabIds: ["financeiro", "financeiro-bancario", "sectors", "quickreplies", "whatsapp", "robo"] },
   { key: "configuracoes", label: "Configurações", icon: SlidersHorizontal, tabIds: ["aparencia"] },
   { key: "sistema", label: "Sistema (Dev)", icon: Wrench, tabIds: ["sistema"] },
@@ -67,7 +69,7 @@ type WASession = {
 
 type UserRow = {
   id: number; name: string; email: string; role: string;
-  isActive: boolean; sector: Sector | null; sectorId: number | null; storeName?: string | null; adminAccess?: string[] | null; accessHours?: { start: string; end: string; days: number[] } | null; createdAt: string;
+  isActive: boolean; sector: Sector | null; sectorId: number | null; storeName?: string | null; extension?: string | null; adminAccess?: string[] | null; accessHours?: { start: string; end: string; days: number[] } | null; createdAt: string;
   permissions?: Record<string, boolean> | null;
 };
 
@@ -134,7 +136,7 @@ export default function AdminDashboard() {
   const [deleteTransferTo, setDeleteTransferTo] = useState("");
   const [deletingUser, setDeletingUser] = useState(false);
 
-  const [userForm, setUserForm] = useState<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; adminAccess: string[]; ahEnabled: boolean; ahStart: string; ahEnd: string; ahDays: number[] }>({ name: "", email: "", password: "", role: "vendedor", sectorId: 1, storeName: "", adminAccess: [], ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6] });
+  const [userForm, setUserForm] = useState<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; extension: string; adminAccess: string[]; ahEnabled: boolean; ahStart: string; ahEnd: string; ahDays: number[] }>({ name: "", email: "", password: "", role: "vendedor", sectorId: 1, storeName: "", extension: "", adminAccess: [], ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6] });
   const [sectorForm, setSectorForm] = useState({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true });
 
   const fetchAll = useCallback(async () => {
@@ -267,12 +269,12 @@ export default function AdminDashboard() {
   // ---- User handlers ----
   const openAddUser = () => {
     setEditUser(null);
-    setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorId: sectors[0]?.id ?? 1, storeName: "", adminAccess: [], ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6] });
+    setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorId: sectors[0]?.id ?? 1, storeName: "", extension: "", adminAccess: [], ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6] });
     setShowAddUser(true);
   };
   const openEditUser = (u: UserRow) => {
     setEditUser(u);
-    setUserForm({ name: u.name, email: u.email, password: "", role: u.role, sectorId: u.sectorId ?? 1, storeName: u.storeName ?? "", adminAccess: u.adminAccess ?? [], ahEnabled: !!u.accessHours, ahStart: u.accessHours?.start ?? "08:00", ahEnd: u.accessHours?.end ?? "18:00", ahDays: u.accessHours?.days?.length ? u.accessHours.days : [1, 2, 3, 4, 5, 6] });
+    setUserForm({ name: u.name, email: u.email, password: "", role: u.role, sectorId: u.sectorId ?? 1, storeName: u.storeName ?? "", extension: u.extension ?? "", adminAccess: u.adminAccess ?? [], ahEnabled: !!u.accessHours, ahStart: u.accessHours?.start ?? "08:00", ahEnd: u.accessHours?.end ?? "18:00", ahDays: u.accessHours?.days?.length ? u.accessHours.days : [1, 2, 3, 4, 5, 6] });
     setShowAddUser(true);
   };
   const handleSaveUser = async (e: React.FormEvent) => {
@@ -282,6 +284,7 @@ export default function AdminDashboard() {
         const payload: Parameters<typeof api.admin.users.update>[1] = {
           name: userForm.name, email: userForm.email, role: userForm.role, sectorId: userForm.sectorId,
           storeName: userForm.storeName,
+          extension: userForm.extension,
           adminAccess: userForm.role === "admin" ? null : userForm.adminAccess,
           accessHours: userForm.role === "vendedor" && userForm.ahEnabled
             ? { start: userForm.ahStart, end: userForm.ahEnd, days: userForm.ahDays }
@@ -397,6 +400,7 @@ export default function AdminDashboard() {
     { id: "treinamentos" as Tab, label: "Treinamentos", icon: GraduationCap, adminOnly: false },
     { id: "planilhas" as Tab, label: "Planilhas", icon: Table2, adminOnly: false },
     { id: "documentos" as Tab, label: "Documentos", icon: FolderArchive, adminOnly: false },
+    { id: "diretorio" as Tab, label: "Diretório", icon: BookUser, adminOnly: false },
     { id: "rh" as Tab, label: "RH", icon: UserSearch, adminOnly: true },
     { id: "sorteios" as Tab, label: "Sorteios", icon: Gift, adminOnly: true },
     { id: "robo" as Tab, label: "Robô", icon: Bot, adminOnly: true },
@@ -688,6 +692,8 @@ export default function AdminDashboard() {
 
         {tab === "planilhas" && <Planilhas />}
         {tab === "documentos" && <Documentos />}
+
+        {tab === "diretorio" && <TeamDirectory />}
 
         {tab === "rh" && <RH />}
 
@@ -1543,6 +1549,13 @@ export default function AdminDashboard() {
                   )}
                 </select>
                 <p className="text-[10px] text-muted-foreground mt-1">Cadastre as lojas na aba Setores → Lojas da Rede.</p>
+              </div>
+              <div>
+                <label className="text-xs font-medium mb-1 block">Ramal (opcional)</label>
+                <input value={userForm.extension} onChange={(e) => setUserForm({ ...userForm, extension: e.target.value })}
+                  placeholder="Ex.: 1042" maxLength={20} data-testid="input-user-extension"
+                  className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                <p className="text-[10px] text-muted-foreground mt-1">Aparece no Diretório interno de contatos.</p>
               </div>
               <div className="flex gap-2 pt-1">
                 <button type="button" onClick={() => setShowAddUser(false)}

@@ -244,6 +244,7 @@ router.get("/admin/users", requireAdmin, async (req, res): Promise<void> => {
       role: usersTable.role,
       sectorId: usersTable.sectorId,
       storeName: usersTable.storeName,
+      extension: usersTable.extension,
       adminAccess: usersTable.adminAccess,
       accessHours: usersTable.accessHours,
       isActive: usersTable.isActive,
@@ -291,13 +292,14 @@ function sanitizeAdminAccess(v: unknown): string[] | null {
 
 router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { name, email, password, role, sectorId, storeName, adminAccess, accessHours } = req.body as {
+  const { name, email, password, role, sectorId, storeName, extension, adminAccess, accessHours } = req.body as {
     name?: string;
     email?: string;
     password?: string;
     role?: string;
     sectorId?: number;
     storeName?: string;
+    extension?: string;
     adminAccess?: unknown;
     accessHours?: unknown;
   };
@@ -333,6 +335,7 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
   }
 
   const passwordHash = await bcrypt.hash(password, 10);
+  const cleanExtension = typeof extension === "string" && extension.trim() ? extension.trim().slice(0, 20) : null;
 
   const [user] = await db
     .insert(usersTable)
@@ -341,6 +344,7 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
       name, email: email.toLowerCase(), passwordHash, role: resolvedRole,
       sectorId: sectorId ?? undefined,
       storeName: cleanStore,
+      extension: cleanExtension,
       mustChangePassword: true, // primeiro acesso: obriga trocar a senha
       adminAccess: sanitizeAdminAccess(adminAccess),
       accessHours: resolvedRole === "vendedor" ? sanitizeAccessHours(accessHours) : null,
@@ -362,7 +366,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
     .where(and(eq(usersTable.id, id), eq(usersTable.tenantId, tenantId))).limit(1);
   if (!existingUser) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
 
-  const { name, email, password, role, sectorId, isActive, permissions, storeName, adminAccess, accessHours } = req.body as {
+  const { name, email, password, role, sectorId, isActive, permissions, storeName, extension, adminAccess, accessHours } = req.body as {
     adminAccess?: unknown;
     accessHours?: unknown;
     name?: string;
@@ -373,6 +377,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
     isActive?: boolean;
     permissions?: unknown;
     storeName?: string | null;
+    extension?: string | null;
   };
 
   const updateData: Record<string, unknown> = {};
@@ -405,6 +410,9 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
       }
     }
     updateData.storeName = cleanStore;
+  }
+  if (extension !== undefined) {
+    updateData.extension = typeof extension === "string" && extension.trim() ? extension.trim().slice(0, 20) : null;
   }
   if (isActive !== undefined) updateData.isActive = isActive;
   if (permissions !== undefined) updateData.permissions = sanitizePermissions(permissions);

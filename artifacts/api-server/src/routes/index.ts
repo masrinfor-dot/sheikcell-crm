@@ -31,6 +31,7 @@ import superadminSaasRouter from "./superadminSaas";
 import financeBankRouter from "./financeBank";
 import financeBankWebhookRouter from "./financeBankWebhook";
 import systemBoardRouter from "./systemBoard";
+import teamDirectoryRouter from "./teamDirectory";
 
 const router: IRouter = Router();
 router.use(healthRouter);
@@ -68,5 +69,6 @@ router.use(resultsRouter);
 router.use(financeBankRouter);
 router.use(financeBankWebhookRouter);
 router.use(systemBoardRouter);
+router.use(teamDirectoryRouter);
 
 export default router;

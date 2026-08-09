@@ -27,11 +27,12 @@ import Documentos from "./Documentos";
 import {
   LogOut, KeyRound, Clock, PhoneCall, CheckCircle,
   ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, Shield, BadgeDollarSign, GraduationCap, Table2, Gift, Bot, UserSearch, ClipboardList, TrendingUp,
-  FolderArchive,
+  FolderArchive, BookUser,
 } from "lucide-react";
 import Resultados from "./Resultados";
+import TeamDirectory from "./TeamDirectory";
 
-type MainTab = "queue" | "resultados" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "peliculas" | "avaliacao" | "treinamentos" | "planilhas" | "documentos" | "financeiro" | "sorteios" | "robo" | "rh" | "questionarios";
+type MainTab = "queue" | "resultados" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "peliculas" | "avaliacao" | "treinamentos" | "planilhas" | "documentos" | "financeiro" | "sorteios" | "robo" | "rh" | "questionarios" | "diretorio";
 
 // Abas de admin que podem ser liberadas para vendedores no cadastro (adminAccess)
 const GRANTED_TABS: { id: MainTab; label: string; icon: typeof PhoneCall }[] = [
@@ -54,6 +55,7 @@ const MAIN_TABS = [
   { id: "treinamentos" as MainTab, label: "Treinamentos", icon: GraduationCap },
   { id: "planilhas" as MainTab, label: "Planilhas", icon: Table2 },
   { id: "documentos" as MainTab, label: "Documentos", icon: FolderArchive },
+  { id: "diretorio" as MainTab, label: "Diretório", icon: BookUser },
 ] as const;
 
 function formatWait(createdAt: string): string {
@@ -234,7 +236,7 @@ export default function AttendantDashboard() {
         {/* Sidebar tabs */}
         <aside className="hidden md:block w-52 shrink-0 border-r border-border bg-white sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3">
           <div className="flex flex-col gap-1">
-            {[...MAIN_TABS.filter(({ id }) => id === "queue" || id === "chat" || can(user, id)), ...GRANTED_TABS.filter(({ id }) => id === "sorteios" || user?.adminAccess?.includes(id))].map(({ id, label, icon: Icon }) => (
+            {[...MAIN_TABS.filter(({ id }) => id === "queue" || id === "chat" || id === "diretorio" || can(user, id)), ...GRANTED_TABS.filter(({ id }) => id === "sorteios" || user?.adminAccess?.includes(id))].map(({ id, label, icon: Icon }) => (
               <button key={id} onClick={() => setMainTab(id)}
                 className={`flex items-center gap-2 w-full px-3 py-2.5 rounded-lg text-xs font-semibold text-left transition-colors ${
                   mainTab === id ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
@@ -302,6 +304,12 @@ export default function AttendantDashboard() {
       )}
 
       {mainTab === "documentos" && <Documentos />}
+
+      {mainTab === "diretorio" && (
+        <div className="max-w-5xl mx-auto px-4 py-6">
+          <TeamDirectory />
+        </div>
+      )}
 
       {mainTab === "avaliacao" && (
         <div className="max-w-3xl mx-auto px-4 py-6">
@@ -497,7 +505,7 @@ export default function AttendantDashboard() {
 
       {/* Barra de navegação inferior — somente celular */}
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-white border-t border-border flex items-stretch h-[calc(3.5rem+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)]">
-        {[...MAIN_TABS.filter(({ id }) => id === "queue" || id === "chat" || can(user, id)), ...(can(user, "equipe") ? [{ id: "equipe" as MainTab, label: "Equipe", icon: MessagesSquare }] : []), ...GRANTED_TABS.filter(({ id }) => id === "sorteios" || user?.adminAccess?.includes(id))].map(({ id, label, icon: Icon }) => (
+        {[...MAIN_TABS.filter(({ id }) => id === "queue" || id === "chat" || id === "diretorio" || can(user, id)), ...(can(user, "equipe") ? [{ id: "equipe" as MainTab, label: "Equipe", icon: MessagesSquare }] : []), ...GRANTED_TABS.filter(({ id }) => id === "sorteios" || user?.adminAccess?.includes(id))].map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             onClick={() => setMainTab(id)}

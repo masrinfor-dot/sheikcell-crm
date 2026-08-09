@@ -71,6 +71,7 @@ export type User = {
   role: string;
   sectorId: number | null;
   storeName?: string | null;
+  extension?: string | null;
   mustChangePassword?: boolean;
   adminAccess?: string[] | null;
   accessHours?: { start: string; end: string; days: number[] } | null;
@@ -980,6 +981,11 @@ export const api = {
       return req<ResultsSummary>(`/results/summary?${qs.toString()}`);
     },
   },
+  teamDirectory: {
+    list: () => req<TeamContact[]>("/team-directory"),
+    favorite: (userId: number) => req<{ ok: boolean }>(`/team-directory/${userId}/favorite`, { method: "POST" }),
+    unfavorite: (userId: number) => req<{ ok: boolean }>(`/team-directory/${userId}/favorite`, { method: "DELETE" }),
+  },
   finance: {
     summary: (days: number, sectorId?: number | null, store?: string | null) =>
       req<FinanceSummary>(`/finance/summary?days=${days}${sectorId ? `&sectorId=${sectorId}` : ""}${store ? `&store=${encodeURIComponent(store)}` : ""}`),
@@ -1189,9 +1195,9 @@ export const api = {
     },
     users: {
       list: () => req<(User & { isActive: boolean; createdAt: string })[]>("/admin/users"),
-      create: (data: { name: string; email: string; password: string; role: string; sectorId: number; storeName?: string; adminAccess?: string[] | null; accessHours?: { start: string; end: string; days: number[] } | null }) =>
+      create: (data: { name: string; email: string; password: string; role: string; sectorId: number; storeName?: string; extension?: string; adminAccess?: string[] | null; accessHours?: { start: string; end: string; days: number[] } | null }) =>
         req<User>("/admin/users", { method: "POST", body: JSON.stringify(data) }),
-      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; isActive: boolean; permissions: Record<string, boolean>; adminAccess: string[] | null; accessHours: { start: string; end: string; days: number[] } | null }>) =>
+      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; extension: string; isActive: boolean; permissions: Record<string, boolean>; adminAccess: string[] | null; accessHours: { start: string; end: string; days: number[] } | null }>) =>
         req<User>(`/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number, transferToId: number | null) =>
         req<{ ok: boolean; transferredConversations: number }>(`/admin/users/${id}`, { method: "DELETE", body: JSON.stringify({ transferToId }) }),
@@ -1212,4 +1218,16 @@ export type ResultsSummary = {
   ranking: ResultsRankingRow[];
   leadsPorMes: { mes: string; novos: number }[];
   satisfacaoPorSetor: { sectorId: number; sectorName: string; avgRating: number; ratings: number }[];
+};
+
+export type TeamContact = {
+  id: number;
+  name: string;
+  email: string;
+  role: string;
+  extension: string | null;
+  storeName: string | null;
+  sectorId: number | null;
+  sectorName: string | null;
+  favorited: boolean;
 };

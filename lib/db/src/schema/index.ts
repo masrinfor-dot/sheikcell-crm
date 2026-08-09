@@ -33,3 +33,4 @@ export * from "./saas";
 export * from "./financeBank";
 export * from "./financeAudit";
 export * from "./system_board";
+export * from "./team_favorites";

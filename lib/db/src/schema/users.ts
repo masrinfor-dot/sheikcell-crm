@@ -13,6 +13,8 @@ export const usersTable = pgTable("users", {
   sectorId: integer("sector_id").references(() => sectorsTable.id),
   // Loja da rede a que o vendedor pertence (texto livre; ex.: "Loja Centro")
   storeName: text("store_name"),
+  // Ramal/número interno (opcional) — mostrado no Diretório interno de contatos.
+  extension: text("extension"),
   // Obriga trocar a senha no próximo login (primeiro acesso ou senha resetada pelo admin)
   mustChangePassword: boolean("must_change_password").notNull().default(false),
   // Funções de admin liberadas para não-admins (ex.: ["financeiro","sorteios"])
