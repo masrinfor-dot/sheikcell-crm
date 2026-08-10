@@ -3,6 +3,9 @@ import { useAuth } from "@/lib/auth";
 import { api, can, type InternalConversation, type InternalMessage } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { reportInternalChatUnread } from "@/hooks/useInternalChatNotifier";
+import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
+
+const INTERNAL_CHAT_EVENTS_URL = "/api/internal-chat/events";
 import {
   Users, Send, Plus, X, Search, MessagesSquare, ChevronLeft, SquareKanban, ClipboardPlus, Trash2, Pencil,
   Paperclip, Mic, Square, Reply, Forward, FileText, Volume2, Loader2,
@@ -292,8 +295,8 @@ export default function InternalChat({ docked = false, onActiveConversationChang
 
   // Real-time updates.
   useEffect(() => {
-    const es = new EventSource("/api/internal-chat/events", { withCredentials: true });
-    es.addEventListener("internal_message", (e) => {
+    const es = acquireSharedEventSource(INTERNAL_CHAT_EVENTS_URL);
+    const onInternalMessage = (e: Event) => {
       const payload = JSON.parse((e as MessageEvent).data) as {
         conversationId: number;
         kind: "direct" | "general";
@@ -324,50 +327,62 @@ export default function InternalChat({ docked = false, onActiveConversationChang
           };
         });
       });
-    });
+    };
+    es.addEventListener("internal_message", onInternalMessage);
     // When the reconnection gap is larger than the server's replay buffer (or
     // the server restarted), the server asks the client to resync. Reconcile the
     // conversation list (authoritative unread counts) and the open conversation's
     // messages so nothing sent during the outage is lost.
     // Novo grupo criado por um colega: aparece na lista em tempo real.
-    es.addEventListener("internal_conversation_new", (e) => {
+    const onConversationNew = (e: Event) => {
       const conv = JSON.parse((e as MessageEvent).data) as InternalConversation & { members?: { id: number; name: string }[] };
       // Quando o servidor manda a lista de membros (ex.: fui adicionado a um
       // grupo existente), monta o "Você, Fulano..." excluindo a si mesmo.
       if (conv.members) conv.memberNames = conv.members.filter((m) => m.id !== user?.id).map((m) => m.name);
       setConversations((prev) => (prev.some((c) => c.id === conv.id) ? prev : [...prev, conv]));
-    });
+    };
+    es.addEventListener("internal_conversation_new", onConversationNew);
     // Grupo excluído por um admin/supervisor (ou fui removido dele): some da
     // lista na hora.
-    es.addEventListener("internal_conversation_removed", (e) => {
+    const onConversationRemoved = (e: Event) => {
       const { id } = JSON.parse((e as MessageEvent).data) as { id: number };
       setConversations((prev) => prev.filter((c) => c.id !== id));
       setActiveId((cur) => (cur === id ? null : cur));
-    });
+    };
+    es.addEventListener("internal_conversation_removed", onConversationRemoved);
     // Grupo editado (renomeado / participantes mudaram): atualiza em tempo real.
-    es.addEventListener("internal_conversation_updated", (e) => {
+    const onConversationUpdated = (e: Event) => {
       const payload = JSON.parse((e as MessageEvent).data) as { id: number; name: string; members: { id: number; name: string }[] };
       setConversations((prev) => prev.map((c) => c.id === payload.id
         ? { ...c, name: payload.name, memberNames: payload.members.filter((m) => m.id !== user?.id).map((m) => m.name) }
         : c));
-    });
+    };
+    es.addEventListener("internal_conversation_updated", onConversationUpdated);
     // Transcrição de áudio pronta (pode ter sido pedida por outro membro da conversa).
-    es.addEventListener("internal_message_updated", (e) => {
+    const onMessageUpdated = (e: Event) => {
       const payload = JSON.parse((e as MessageEvent).data) as { conversationId: number; messageId: number; transcript: string };
       if (activeIdRef.current === payload.conversationId) {
         setMessages((prev) => prev.map((m) => (m.id === payload.messageId ? { ...m, transcript: payload.transcript } : m)));
       }
-    });
-    es.addEventListener("resync", () => {
-      reconcileAfterReconnect();
-    });
+    };
+    es.addEventListener("internal_message_updated", onMessageUpdated);
+    const onResync = () => { reconcileAfterReconnect(); };
+    es.addEventListener("resync", onResync);
     // After a within-buffer reconnect, the server replays missed messages (which
     // flow through the handler above and bump unread counters approximately) and
     // then emits this sentinel. Reconcile so the badges match the backend exactly.
-    es.addEventListener("internal_reconnect", () => {
-      reconcileAfterReconnect();
-    });
-    return () => es.close();
+    const onInternalReconnect = () => { reconcileAfterReconnect(); };
+    es.addEventListener("internal_reconnect", onInternalReconnect);
+    return () => {
+      es.removeEventListener("internal_message", onInternalMessage);
+      es.removeEventListener("internal_conversation_new", onConversationNew);
+      es.removeEventListener("internal_conversation_removed", onConversationRemoved);
+      es.removeEventListener("internal_conversation_updated", onConversationUpdated);
+      es.removeEventListener("internal_message_updated", onMessageUpdated);
+      es.removeEventListener("resync", onResync);
+      es.removeEventListener("internal_reconnect", onInternalReconnect);
+      releaseSharedEventSource(INTERNAL_CHAT_EVENTS_URL);
+    };
   }, [user?.id, loadConversations, reconcileAfterReconnect]);
 
   const openNew = async () => {

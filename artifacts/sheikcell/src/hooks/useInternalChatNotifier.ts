@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
+
+const INTERNAL_CHAT_EVENTS_URL = "/api/internal-chat/events";
 
 // Store simples (fora do React) para o total de não lidas do chat interno —
 // assim o InternalChat.tsx (quando montado) e o badge do menu (sempre
@@ -92,8 +95,8 @@ export function useInternalChatNotifier(userId: number | undefined, chatVisible:
     refreshUnread();
     const poll = setInterval(refreshUnread, 20000);
 
-    const es = new EventSource("/api/internal-chat/events", { withCredentials: true });
-    es.addEventListener("internal_message", (e) => {
+    const es = acquireSharedEventSource(INTERNAL_CHAT_EVENTS_URL);
+    const onInternalMessage = (e: Event) => {
       const payload = JSON.parse((e as MessageEvent).data) as {
         message: { senderId: number; senderName: string; content: string };
       };
@@ -105,14 +108,18 @@ export function useInternalChatNotifier(userId: number | undefined, chatVisible:
         playBlip();
         notifyDesktop(`${payload.message.senderName}: ${payload.message.content.slice(0, 120)}`);
       }
-    });
+    };
+    es.addEventListener("internal_message", onInternalMessage);
     es.addEventListener("resync", refreshUnread);
     es.addEventListener("internal_reconnect", refreshUnread);
 
     return () => {
       cancelled = true;
       clearInterval(poll);
-      es.close();
+      es.removeEventListener("internal_message", onInternalMessage);
+      es.removeEventListener("resync", refreshUnread);
+      es.removeEventListener("internal_reconnect", refreshUnread);
+      releaseSharedEventSource(INTERNAL_CHAT_EVENTS_URL);
     };
   }, [userId, enabled]);
 

@@ -3,6 +3,9 @@ import { api, type CrmContact, type Sector, type CrmCustomField, type CrmCustomF
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import CrmContactDetail from "@/components/CrmContactDetail";
+import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
+
+const CHAT_EVENTS_URL = "/api/chat/events";
 import {
   Plus, X, Phone, Tag, StickyNote, RefreshCw, Archive, MapPin,
   ChevronRight, ChevronLeft, Crown, Star, UserPlus, UserMinus,
@@ -245,7 +248,7 @@ export default function CrmBoard() {
   useEffect(() => { fetchFinalizadasRef.current = fetchFinalizadas; }, [fetchFinalizadas]);
 
   useEffect(() => {
-    const es = new EventSource("/api/chat/events", { withCredentials: true });
+    const es = acquireSharedEventSource(CHAT_EVENTS_URL);
 
     // While a search is active the server-side match spans many fields, so we
     // can't reliably decide client-side whether a changed row still matches.
@@ -270,33 +273,41 @@ export default function CrmBoard() {
       });
     };
 
-    es.addEventListener("crm_contact_created", (e) => {
+    const onContactCreated = (e: Event) => {
       try { upsert(JSON.parse((e as MessageEvent).data) as CrmContact); } catch { /* ignore */ }
-    });
-    es.addEventListener("crm_contact_updated", (e) => {
+    };
+    const onContactUpdated = (e: Event) => {
       try { upsert(JSON.parse((e as MessageEvent).data) as CrmContact); } catch { /* ignore */ }
-    });
-    es.addEventListener("crm_contact_deleted", (e) => {
+    };
+    const onContactDeleted = (e: Event) => {
       try {
         const { id } = JSON.parse((e as MessageEvent).data) as { id: number };
         setContacts((prev) => prev.filter((x) => x.id !== id));
       } catch { /* ignore */ }
-    });
+    };
+    es.addEventListener("crm_contact_created", onContactCreated);
+    es.addEventListener("crm_contact_updated", onContactUpdated);
+    es.addEventListener("crm_contact_deleted", onContactDeleted);
 
     // Keep the "Conversas finalizadas" counter live: conversation status
     // changes (resolve/reopen) arrive as conversation_updated. Debounce the
     // recount to avoid bursts.
     let finalizadasTimer: ReturnType<typeof setTimeout> | null = null;
-    es.addEventListener("conversation_updated", () => {
+    const onConversationUpdated = () => {
       if (finalizadasTimer) return;
       finalizadasTimer = setTimeout(() => {
         finalizadasTimer = null;
         fetchFinalizadasRef.current();
       }, 500);
-    });
+    };
+    es.addEventListener("conversation_updated", onConversationUpdated);
 
     return () => {
-      es.close();
+      es.removeEventListener("crm_contact_created", onContactCreated);
+      es.removeEventListener("crm_contact_updated", onContactUpdated);
+      es.removeEventListener("crm_contact_deleted", onContactDeleted);
+      es.removeEventListener("conversation_updated", onConversationUpdated);
+      releaseSharedEventSource(CHAT_EVENTS_URL);
       if (searchRefetchTimer.current) { clearTimeout(searchRefetchTimer.current); searchRefetchTimer.current = null; }
       if (finalizadasTimer) { clearTimeout(finalizadasTimer); finalizadasTimer = null; }
     };

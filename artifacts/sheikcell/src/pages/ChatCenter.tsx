@@ -12,6 +12,9 @@ import {
   Pin, PinOff, Reply, StickyNote, Star, StarOff, ChevronLeft
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
+import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
+
+const CHAT_EVENTS_URL = "/api/chat/events";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 // Cores sugeridas para novas etiquetas
@@ -911,7 +914,7 @@ export default function ChatCenter({
 
   // ── SSE real-time ──
   useEffect(() => {
-    const es = new EventSource("/api/chat/events", { withCredentials: true });
+    const es = acquireSharedEventSource(CHAT_EVENTS_URL);
     // Close the initial-load race: a message can arrive after the REST fetch
     // snapshot but before the SSE subscriber is registered server-side, landing
     // in neither the fetch nor the stream. Once the stream is actually open
@@ -919,15 +922,20 @@ export default function ChatCenter({
     // slipped through the gap. A brand-new connection gets no replay, so this
     // never duplicates messages or bell notifications; subsequent reconnects are
     // handled by replay/resync, so the guard keeps this to the very first open.
-    es.addEventListener("open", () => {
+    // A conexão é compartilhada entre instâncias (página + widget flutuante):
+    // se outra já deixou o "open" disparar antes desta montar, faz a mesma
+    // checagem na hora em vez de esperar um evento que não vai repetir.
+    const onOpen = () => {
       if (initialSyncedRef.current) return;
       initialSyncedRef.current = true;
       fetchConvs();
       if (activeId != null) fetchMsgs(activeId);
-    });
-    es.addEventListener("message_updated", (e) => {
+    };
+    if (es.readyState === EventSource.OPEN) onOpen();
+    es.addEventListener("open", onOpen);
+    const onMessageUpdated = (e: Event) => {
       try {
-        const { conversationId, message } = JSON.parse(e.data) as { conversationId: number; message: ChatMessage };
+        const { conversationId, message } = JSON.parse((e as MessageEvent).data) as { conversationId: number; message: ChatMessage };
         if (conversationId === activeId) {
           setMessages((prev) => prev.map((m) => m.id === message.id ? message : m));
         }
@@ -937,11 +945,12 @@ export default function ChatCenter({
             : c
         ));
       } catch { /* ignore malformed event */ }
-    });
+    };
+    es.addEventListener("message_updated", onMessageUpdated);
 
-    es.addEventListener("message", (e) => {
+    const onMessage = (e: Event) => {
       try {
-        const { conversationId, message } = JSON.parse(e.data) as { conversationId: number; message: ChatMessage };
+        const { conversationId, message } = JSON.parse((e as MessageEvent).data) as { conversationId: number; message: ChatMessage };
         if (conversationId === activeId) {
           // Evita duplicar: quem enviou já recebe a mensagem pela resposta do
           // POST, e o SSE também entrega para o próprio remetente. Se a
@@ -998,13 +1007,14 @@ export default function ChatCenter({
           }
         }
       } catch { /* silent */ }
-    });
+    };
+    es.addEventListener("message", onMessage);
     // Agendamentos: hora do retorno ao cliente ("schedule_due") e falha no envio
     // de mensagem agendada ("schedule_failed"). Toast + sino + som/notificação
     // nativa, sem depender de olhar o quadro de Tarefas.
-    const onSchedule = (e: MessageEvent, kind: "retorno" | "failed") => {
+    const onSchedule = (e: Event, kind: "retorno" | "failed") => {
       try {
-        const p = JSON.parse(e.data) as { scheduledId: number; conversationId: number; convName: string; content: string; sendAt: string };
+        const p = JSON.parse((e as MessageEvent).data) as { scheduledId: number; conversationId: number; convName: string; content: string; sendAt: string };
         const notif: MsgNotification = {
           id: `sched-${kind}-${p.scheduledId}`,
           conversationId: p.conversationId,
@@ -1031,11 +1041,13 @@ export default function ChatCenter({
         }
       } catch { /* silent */ }
     };
-    es.addEventListener("schedule_due", (e) => onSchedule(e, "retorno"));
-    es.addEventListener("schedule_failed", (e) => onSchedule(e, "failed"));
-    es.addEventListener("conversation_new", (e) => {
+    const onScheduleDue = (e: Event) => onSchedule(e, "retorno");
+    const onScheduleFailed = (e: Event) => onSchedule(e, "failed");
+    es.addEventListener("schedule_due", onScheduleDue);
+    es.addEventListener("schedule_failed", onScheduleFailed);
+    const onConversationNew = (e: Event) => {
       try {
-        const conv = JSON.parse(e.data) as Conversation;
+        const conv = JSON.parse((e as MessageEvent).data) as Conversation;
         // Regardless of visibility, discard any buffered notices for this conv;
         // if it's out of scope they must not surface, if visible we resolve them now.
         const pending = pendingNotifsRef.current.get(conv.id);
@@ -1065,10 +1077,11 @@ export default function ChatCenter({
           }
         }
       } catch { /* silent */ }
-    });
-    es.addEventListener("conversation_updated", (e) => {
+    };
+    es.addEventListener("conversation_new", onConversationNew);
+    const onConversationUpdated = (e: Event) => {
       try {
-        const conv = JSON.parse(e.data) as Conversation;
+        const conv = JSON.parse((e as MessageEvent).data) as Conversation;
         setConvs((prev) => {
           // O evento traz a linha crua (sem participants); mescla com o estado
           // local para não descartar uma conversa em que sou participante.
@@ -1085,12 +1098,13 @@ export default function ChatCenter({
           return prev.map((c) => c.id === conv.id ? merged : c);
         });
       } catch { /* silent */ }
-    });
+    };
+    es.addEventListener("conversation_updated", onConversationUpdated);
     // Conversa ficou restrita (assumida/finalizada por outro): remove da tela
     // de quem não está na lista de autorizados. Evento leve: só id + keepFor.
-    es.addEventListener("conversation_hidden", (e) => {
+    const onConversationHidden = (e: Event) => {
       try {
-        const { id, keepFor, sectorId } = JSON.parse(e.data) as { id: number; keepFor: number[]; sectorId: number | null };
+        const { id, keepFor, sectorId } = JSON.parse((e as MessageEvent).data) as { id: number; keepFor: number[]; sectorId: number | null };
         if (!user) return;
         if (user.role === "admin") return;
         if (user.role === "supervisor") {
@@ -1102,32 +1116,47 @@ export default function ChatCenter({
         setConvs((prev) => prev.filter((c) => c.id !== id));
         setNotifications((prev) => prev.filter((n) => n.conversationId !== id));
       } catch { /* silent */ }
-    });
+    };
+    es.addEventListener("conversation_hidden", onConversationHidden);
     // Atendimento excluído pelo administrador: some para todos.
-    es.addEventListener("conversation_deleted", (e) => {
+    const onConversationDeleted = (e: Event) => {
       try {
-        const { id } = JSON.parse(e.data) as { id: number };
+        const { id } = JSON.parse((e as MessageEvent).data) as { id: number };
         setConvs((prev) => prev.filter((c) => c.id !== id));
         setNotifications((prev) => prev.filter((n) => n.conversationId !== id));
         setActiveId((cur) => (cur === id ? null : cur));
       } catch { /* silent */ }
-    });
+    };
+    es.addEventListener("conversation_deleted", onConversationDeleted);
     // Participantes mudaram (fui adicionado/removido de uma conversa restrita):
     // a lista do servidor é a fonte da verdade — refetch.
-    es.addEventListener("participants_updated", () => {
-      fetchConvs();
-    });
+    const onParticipantsUpdated = () => { fetchConvs(); };
+    es.addEventListener("participants_updated", onParticipantsUpdated);
     // When the reconnection gap is larger than the server's replay buffer (or
     // the server restarted), the server asks the client to resync. Refetch the
     // conversation list and the open conversation's messages so nothing that
     // arrived during the outage is lost. Missed events within buffer range are
     // replayed automatically and flow through the handlers above, so the bell
     // and lists stay correct without any extra work here.
-    es.addEventListener("resync", () => {
+    const onResync = () => {
       fetchConvs();
       if (activeId != null) fetchMsgs(activeId);
-    });
-    return () => es.close();
+    };
+    es.addEventListener("resync", onResync);
+    return () => {
+      es.removeEventListener("open", onOpen);
+      es.removeEventListener("message_updated", onMessageUpdated);
+      es.removeEventListener("message", onMessage);
+      es.removeEventListener("schedule_due", onScheduleDue);
+      es.removeEventListener("schedule_failed", onScheduleFailed);
+      es.removeEventListener("conversation_new", onConversationNew);
+      es.removeEventListener("conversation_updated", onConversationUpdated);
+      es.removeEventListener("conversation_hidden", onConversationHidden);
+      es.removeEventListener("conversation_deleted", onConversationDeleted);
+      es.removeEventListener("participants_updated", onParticipantsUpdated);
+      es.removeEventListener("resync", onResync);
+      releaseSharedEventSource(CHAT_EVENTS_URL);
+    };
   }, [activeId, user, fetchConvs, fetchMsgs]);
 
   useEffect(() => {

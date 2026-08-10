@@ -6,6 +6,9 @@ import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
 import { useInternalChatNotifier } from "@/hooks/useInternalChatNotifier";
 import { useChatExpandListener } from "@/lib/chatWidgetBus";
+import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
+
+const CHAT_EVENTS_URL = "/api/chat/events";
 import CrmBoard from "./CrmBoard";
 import ChatCenter from "./ChatCenter";
 import Financeiras from "./Financeiras";
@@ -229,7 +232,7 @@ export default function AdminDashboard() {
   // events triggers a single refetch.
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    const es = new EventSource("/api/chat/events", { withCredentials: true });
+    const es = acquireSharedEventSource(CHAT_EVENTS_URL);
     const scheduleRefresh = () => {
       if (refreshTimer.current) return;
       refreshTimer.current = setTimeout(() => {
@@ -243,7 +246,8 @@ export default function AdminDashboard() {
     ];
     for (const ev of events) es.addEventListener(ev, scheduleRefresh);
     return () => {
-      es.close();
+      for (const ev of events) es.removeEventListener(ev, scheduleRefresh);
+      releaseSharedEventSource(CHAT_EVENTS_URL);
       if (refreshTimer.current) { clearTimeout(refreshTimer.current); refreshTimer.current = null; }
     };
   }, [fetchAll]);
