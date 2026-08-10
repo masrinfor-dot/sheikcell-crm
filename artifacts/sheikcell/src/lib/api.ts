@@ -830,6 +830,10 @@ export const api = {
     changePassword: (currentPassword: string, newPassword: string) =>
       req<{ ok: boolean }>("/auth/change-password", { method: "POST", body: JSON.stringify({ currentPassword, newPassword }) }),
     stopImpersonation: () => req<{ ok: boolean }>("/auth/stop-impersonation", { method: "POST" }),
+    forgotPassword: (email: string) =>
+      req<{ ok: boolean; message: string }>("/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) }),
+    resetPassword: (token: string, newPassword: string, confirmNewPassword: string) =>
+      req<{ ok: boolean }>("/auth/reset-password", { method: "POST", body: JSON.stringify({ token, newPassword, confirmNewPassword }) }),
   },
   sectors: {
     list: () => req<Sector[]>("/sectors"),

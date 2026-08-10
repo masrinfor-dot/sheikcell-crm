@@ -10,6 +10,8 @@ import AdminDashboard from "@/pages/AdminDashboard";
 import SuperAdminDashboard from "@/pages/SuperAdminDashboard";
 import NotFound from "@/pages/not-found";
 import Candidatura from "@/pages/Candidatura";
+import ForgotPassword from "@/pages/ForgotPassword";
+import ResetPassword from "@/pages/ResetPassword";
 import GlobalChatWidget from "@/components/GlobalChatWidget";
 
 const queryClient = new QueryClient();
@@ -32,6 +34,12 @@ function AppRoutes() {
     <Switch>
       <Route path="/candidatura/:token">
         <Candidatura />
+      </Route>
+      <Route path="/forgot-password">
+        {user ? <Redirect to="/" /> : <ForgotPassword />}
+      </Route>
+      <Route path="/reset-password/:token">
+        {user ? <Redirect to="/" /> : <ResetPassword />}
       </Route>
       <Route path="/login">
         {user ? <Redirect to="/" /> : <LoginPage />}

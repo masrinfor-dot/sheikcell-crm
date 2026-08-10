@@ -1,8 +1,17 @@
 import { Router, type IRouter, type Request } from "express";
 import bcrypt from "bcryptjs";
-import { db, usersTable, sectorsTable, accessLogsTable, tenantsTable, impersonationLogTable } from "@workspace/db";
+import { randomBytes, createHash } from "node:crypto";
+import { db, usersTable, sectorsTable, accessLogsTable, tenantsTable, impersonationLogTable, passwordResetTokensTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 import { requireAuth, isWithinAccessHours } from "../middlewares/auth";
+import { sendEmail } from "@workspace/integrations-email";
+
+const RESET_TOKEN_TTL_MS = 30 * 60 * 1000; // 30 minutos
+const RESET_TOKEN_MIN_INTERVAL_MS = 60 * 1000; // evita reenviar em cada clique duplo
+
+function hashResetToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
 
 const router: IRouter = Router();
 
@@ -200,6 +209,61 @@ router.post("/auth/stop-impersonation", requireAuth, async (req, res): Promise<v
   req.session.userName = superadmin.name;
   req.session.accessHours = null;
   req.session.impersonatorId = undefined;
+  res.json({ ok: true });
+});
+
+// "Esqueci minha senha": gera um token de uso único (30 min) e manda por
+// e-mail. Resposta é SEMPRE genérica (mesmo se o e-mail não existir na
+// base) pra não permitir enumerar quais e-mails estão cadastrados.
+router.post("/auth/forgot-password", async (req, res): Promise<void> => {
+  const { email } = req.body as { email?: string };
+  const genericResponse = { ok: true, message: "Se o e-mail existir, enviamos um link de redefinição." };
+  if (!email?.trim()) { res.json(genericResponse); return; }
+
+  const [user] = await db.select().from(usersTable).where(eq(usersTable.email, email.trim().toLowerCase()));
+  if (!user || !user.isActive) { res.json(genericResponse); return; }
+
+  // Evita spam em clique duplo: se já existe token válido bem recente, não gera outro nem reenvia.
+  const [recent] = await db.select({ id: passwordResetTokensTable.id })
+    .from(passwordResetTokensTable)
+    .where(sql`${passwordResetTokensTable.userId} = ${user.id} AND ${passwordResetTokensTable.usedAt} IS NULL AND ${passwordResetTokensTable.createdAt} > now() - interval '60 seconds'`);
+  if (recent) { res.json(genericResponse); return; }
+
+  const rawToken = randomBytes(32).toString("hex");
+  const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS);
+  await db.insert(passwordResetTokensTable).values({ userId: user.id, tokenHash: hashResetToken(rawToken), expiresAt });
+
+  const origin = req.get("origin") ?? process.env.APP_URL ?? `${req.protocol}://${req.get("host")}`;
+  const resetLink = `${origin}/reset-password/${rawToken}`;
+  try {
+    await sendEmail({
+      to: user.email,
+      subject: "Redefinição de senha — Sheikcell",
+      html: `<p>Olá, ${user.name}.</p><p>Recebemos uma solicitação para redefinir sua senha. Clique no link abaixo (válido por 30 minutos, uso único):</p><p><a href="${resetLink}">${resetLink}</a></p><p>Se você não pediu isso, pode ignorar este e-mail.</p>`,
+    });
+  } catch (err) {
+    req.log.error({ err }, "Falha ao enviar e-mail de redefinição de senha");
+  }
+  res.json(genericResponse);
+});
+
+router.post("/auth/reset-password", async (req, res): Promise<void> => {
+  const { token, newPassword, confirmNewPassword } = req.body as { token?: string; newPassword?: string; confirmNewPassword?: string };
+  if (!token || !newPassword || !confirmNewPassword) { res.status(400).json({ error: "Preencha todos os campos" }); return; }
+  if (newPassword.length < 6) { res.status(400).json({ error: "A senha precisa ter pelo menos 6 caracteres" }); return; }
+  if (newPassword !== confirmNewPassword) { res.status(400).json({ error: "As senhas não coincidem" }); return; }
+
+  const [row] = await db.select().from(passwordResetTokensTable).where(eq(passwordResetTokensTable.tokenHash, hashResetToken(token)));
+  if (!row || row.usedAt || row.expiresAt.getTime() < Date.now()) {
+    res.status(400).json({ error: "Link inválido ou expirado. Solicite um novo." });
+    return;
+  }
+
+  const passwordHash = await bcrypt.hash(newPassword, 10);
+  await db.transaction(async (tx) => {
+    await tx.update(usersTable).set({ passwordHash, mustChangePassword: false }).where(eq(usersTable.id, row.userId));
+    await tx.update(passwordResetTokensTable).set({ usedAt: new Date() }).where(eq(passwordResetTokensTable.id, row.id));
+  });
   res.json({ ok: true });
 });
 

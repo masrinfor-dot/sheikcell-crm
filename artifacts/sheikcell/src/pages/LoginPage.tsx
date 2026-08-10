@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "wouter";
 import { useAuth } from "@/lib/auth";
 import { Smartphone, Lock, Mail, AlertCircle } from "lucide-react";
 
@@ -94,8 +95,9 @@ export default function LoginPage() {
             </button>
           </form>
           <p className="mt-3 text-center text-[11px] text-muted-foreground">
-            Esqueceu a senha? Peça ao administrador para gerar uma senha temporária —
-            você troca por uma nova no primeiro acesso.
+            <Link href="/forgot-password" data-testid="link-forgot-password" className="text-primary font-semibold hover:underline">
+              Esqueceu a senha?
+            </Link>
           </p>
         </div>
 

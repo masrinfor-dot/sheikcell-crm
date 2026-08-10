@@ -21,6 +21,9 @@
     },
     {
       "path": "../../lib/integrations-openai-ai"
+    },
+    {
+      "path": "../../lib/integrations-email"
     }
   ]
 }
