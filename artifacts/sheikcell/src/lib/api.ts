@@ -92,6 +92,36 @@ export type User = {
   accessHours?: { start: string; end: string; days: number[] } | null;
   sector: Sector | null;
   permissions?: VendedorPermissions;
+  // Módulos opcionais contratados pela loja (teto do tenant — null pro
+  // superadmin, que não pertence a loja nenhuma).
+  enabledModules?: string[] | null;
+  // Presente quando o superadmin está "entrando como" este usuário.
+  impersonatedBy?: { name: string } | null;
+};
+
+// Módulos opcionais que uma loja pode ou não ter contratado — mesma lista
+// de OPTIONAL_MODULES em lib/db/src/schema/tenants.ts (mantenha em sincronia).
+export const OPTIONAL_MODULES = [
+  "peliculas", "avaliacao", "financeiras", "financeiro_bancario", "rh",
+  "treinamentos", "questionarios", "sorteios", "planilhas", "documentos", "robo",
+] as const;
+export type OptionalModule = typeof OPTIONAL_MODULES[number];
+export const MODULE_LABELS: Record<OptionalModule, string> = {
+  peliculas: "Películas",
+  avaliacao: "Avaliação de Usados",
+  financeiras: "Financeiras",
+  financeiro_bancario: "Financeiro Bancário",
+  rh: "RH",
+  treinamentos: "Treinamentos",
+  questionarios: "Questionários",
+  sorteios: "Sorteios",
+  planilhas: "Planilhas",
+  documentos: "Documentos",
+  robo: "Robô",
+};
+export const MODULE_PACKAGES: Record<"basico" | "completo", OptionalModule[]> = {
+  basico: [],
+  completo: [...OPTIONAL_MODULES],
 };
 
 // Tem a permissão? (admin sempre tem; vendedor/supervisor: ausência = liberado)
@@ -719,6 +749,8 @@ export type TenantSummary = {
   contactName: string | null;
   contactPhone: string | null;
   contactEmail: string | null;
+  cpfCnpj: string | null;
+  enabledModules: OptionalModule[];
   overdueCount: number;
   contract: SaasContract | null;
   createdAt: string;
@@ -730,8 +762,14 @@ export type TenantSummary = {
 export const api = {
   superadmin: {
     listTenants: () => req<{ tenants: TenantSummary[] }>("/superadmin/tenants"),
-    createTenant: (data: { name: string; adminName?: string; adminEmail?: string; adminPassword?: string }) =>
+    createTenant: (data: {
+      name: string; adminName?: string; adminEmail?: string; adminPassword?: string;
+      contactName?: string; contactPhone?: string; contactEmail?: string;
+      cpfCnpj?: string; enabledModules?: OptionalModule[];
+    }) =>
       req<{ tenant: TenantSummary }>("/superadmin/tenants", { method: "POST", body: JSON.stringify(data) }),
+    impersonate: (tenantId: number, userId: number) =>
+      req<{ ok: boolean }>(`/superadmin/tenants/${tenantId}/impersonate/${userId}`, { method: "POST" }),
     updateTenant: (id: number, data: {
       name?: string; isActive?: boolean; saasStatus?: "ativo" | "cancelado";
       contactName?: string | null; contactPhone?: string | null; contactEmail?: string | null;
@@ -791,6 +829,7 @@ export const api = {
     me: () => req<{ user: User }>("/auth/me"),
     changePassword: (currentPassword: string, newPassword: string) =>
       req<{ ok: boolean }>("/auth/change-password", { method: "POST", body: JSON.stringify({ currentPassword, newPassword }) }),
+    stopImpersonation: () => req<{ ok: boolean }>("/auth/stop-impersonation", { method: "POST" }),
   },
   sectors: {
     list: () => req<Sector[]>("/sectors"),

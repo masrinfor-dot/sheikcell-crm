@@ -1,4 +1,15 @@
-import { pgTable, serial, text, boolean, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, boolean, timestamp, jsonb, integer } from "drizzle-orm/pg-core";
+import { usersTable } from "./users";
+
+// Módulos opcionais que uma loja pode ou não ter contratado (teto por
+// loja — além do controle de permissão já existente por usuário em
+// users.adminAccess/permissions). Núcleo do CRM (Atendimento, CRM, chat
+// interno, etc.) não entra aqui: é sempre liberado.
+export const OPTIONAL_MODULES = [
+  "peliculas", "avaliacao", "financeiras", "financeiro_bancario", "rh",
+  "treinamentos", "questionarios", "sorteios", "planilhas", "documentos", "robo",
+] as const;
+export type OptionalModule = typeof OPTIONAL_MODULES[number];
 
 // Lojas (tenants) do SaaS — cada lojista que comprou o sistema tem uma "loja"
 // (tenant). Todo dado operacional (usuários, setores, conversas, CRM, WhatsApp
@@ -16,7 +27,24 @@ export const tenantsTable = pgTable("tenants", {
   contactName: text("contact_name"),
   contactPhone: text("contact_phone"),
   contactEmail: text("contact_email"),
+  // CPF (11 dígitos) ou CNPJ (14 dígitos) do responsável — só dígitos,
+  // validado no backend antes de gravar (ver lib/cpfCnpj.ts).
+  cpfCnpj: text("cpf_cnpj"),
+  // Módulos opcionais contratados (ver OPTIONAL_MODULES acima). Novas lojas
+  // nascem com a lista do pacote escolhido no cadastro; lojas de antes
+  // dessa coluna existir foram migradas com todos os módulos habilitados.
+  enabledModules: jsonb("enabled_modules").$type<OptionalModule[]>().notNull().default([...OPTIONAL_MODULES]),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
 export type Tenant = typeof tenantsTable.$inferSelect;
+
+// Histórico de "entrar como": qual superadmin virou qual admin de loja e quando.
+export const impersonationLogTable = pgTable("impersonation_log", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull().references(() => tenantsTable.id),
+  superadminUserId: integer("superadmin_user_id").notNull().references(() => usersTable.id),
+  targetUserId: integer("target_user_id").notNull().references(() => usersTable.id),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  endedAt: timestamp("ended_at", { withTimezone: true }),
+});

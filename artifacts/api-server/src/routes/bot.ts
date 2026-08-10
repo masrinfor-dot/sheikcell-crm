@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db, botSettingsTable, botStatesTable, conversationsTable } from "@workspace/db";
 import { and, eq, sql } from "drizzle-orm";
-import { requireFeature, requireTenant } from "../middlewares/auth";
+import { requireFeature, requireTenant, requireModule } from "../middlewares/auth";
 import { getBotSettings, toEngineSettings, todayUsage, aiClassify } from "../lib/bot";
 import { botStep, type BotStateShape, type BotQuestion } from "../lib/botEngine";
 
@@ -22,13 +22,13 @@ function sanitizeQuestions(v: unknown): BotQuestion[] | null {
   return out;
 }
 
-router.get("/bot/settings", requireFeature("robo"), async (req, res): Promise<void> => {
+router.get("/bot/settings", requireFeature("robo"), requireModule("robo"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const s = await getBotSettings(tenantId);
   res.json({ ...s, usageToday: await todayUsage(tenantId) });
 });
 
-router.put("/bot/settings", requireFeature("robo"), async (req, res): Promise<void> => {
+router.put("/bot/settings", requireFeature("robo"), requireModule("robo"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const existing = await getBotSettings(tenantId);
   const body = (req.body ?? {}) as Record<string, unknown>;
@@ -75,7 +75,7 @@ router.put("/bot/settings", requireFeature("robo"), async (req, res): Promise<vo
 
 // Estatísticas simples: conversas triadas pelo robô (só da loja do usuário).
 // bot_states não tem tenantId — escopamos pela conversa (parent) via join.
-router.get("/bot/stats", requireFeature("robo"), async (req, res): Promise<void> => {
+router.get("/bot/stats", requireFeature("robo"), requireModule("robo"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const [row] = await db.select({
     total: sql<number>`count(*)::int`,
@@ -91,7 +91,7 @@ router.get("/bot/stats", requireFeature("robo"), async (req, res): Promise<void>
 
 const testStates = new Map<number, BotStateShape>();
 
-router.post("/bot/test", requireFeature("robo"), async (req, res): Promise<void> => {
+router.post("/bot/test", requireFeature("robo"), requireModule("robo"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const uid = req.session.userId!;
   const { message, reset } = (req.body ?? {}) as { message?: string; reset?: boolean };

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, PERMISSION_KEYS, PERMISSION_LABELS, type SectorSummary, type AttendanceLog, type Sector, type QuickReply, type Store, type DashboardAttention, type InternalConversation } from "@/lib/api";
+import { api, PERMISSION_KEYS, PERMISSION_LABELS, type SectorSummary, type AttendanceLog, type Sector, type QuickReply, type Store, type DashboardAttention, type InternalConversation, type OptionalModule } from "@/lib/api";
 import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
@@ -413,19 +413,19 @@ export default function AdminDashboard() {
     { id: "distribuicao" as Tab, label: "Distribuição", icon: GitFork, adminOnly: false },
     { id: "crm" as Tab, label: "CRM", icon: Kanban, adminOnly: false },
     { id: "financeiro" as Tab, label: "Financeiro", icon: BadgeDollarSign, adminOnly: true },
-    { id: "financeiro-bancario" as Tab, label: "Financeiro Bancário", icon: Banknote, adminOnly: true },
-    { id: "financeiras" as Tab, label: "Financeiras", icon: Landmark, adminOnly: false },
-    { id: "peliculas" as Tab, label: "Películas", icon: ShieldCheck, adminOnly: false },
-    { id: "avaliacao" as Tab, label: "Avaliação de Usados", icon: BadgeDollarSign, adminOnly: false },
-    { id: "questionarios" as Tab, label: "Questionários", icon: ClipboardList, adminOnly: true },
-    { id: "treinamentos" as Tab, label: "Treinamentos", icon: GraduationCap, adminOnly: false },
-    { id: "planilhas" as Tab, label: "Planilhas", icon: Table2, adminOnly: false },
-    { id: "documentos" as Tab, label: "Documentos", icon: FolderArchive, adminOnly: false },
+    { id: "financeiro-bancario" as Tab, label: "Financeiro Bancário", icon: Banknote, adminOnly: true, module: "financeiro_bancario" as OptionalModule },
+    { id: "financeiras" as Tab, label: "Financeiras", icon: Landmark, adminOnly: false, module: "financeiras" as OptionalModule },
+    { id: "peliculas" as Tab, label: "Películas", icon: ShieldCheck, adminOnly: false, module: "peliculas" as OptionalModule },
+    { id: "avaliacao" as Tab, label: "Avaliação de Usados", icon: BadgeDollarSign, adminOnly: false, module: "avaliacao" as OptionalModule },
+    { id: "questionarios" as Tab, label: "Questionários", icon: ClipboardList, adminOnly: true, module: "questionarios" as OptionalModule },
+    { id: "treinamentos" as Tab, label: "Treinamentos", icon: GraduationCap, adminOnly: false, module: "treinamentos" as OptionalModule },
+    { id: "planilhas" as Tab, label: "Planilhas", icon: Table2, adminOnly: false, module: "planilhas" as OptionalModule },
+    { id: "documentos" as Tab, label: "Documentos", icon: FolderArchive, adminOnly: false, module: "documentos" as OptionalModule },
     { id: "diretorio" as Tab, label: "Diretório", icon: BookUser, adminOnly: false },
     { id: "suporte" as Tab, label: "Suporte", icon: LifeBuoy, adminOnly: false },
-    { id: "rh" as Tab, label: "RH", icon: UserSearch, adminOnly: true },
-    { id: "sorteios" as Tab, label: "Sorteios", icon: Gift, adminOnly: true },
-    { id: "robo" as Tab, label: "Robô", icon: Bot, adminOnly: true },
+    { id: "rh" as Tab, label: "RH", icon: UserSearch, adminOnly: true, module: "rh" as OptionalModule },
+    { id: "sorteios" as Tab, label: "Sorteios", icon: Gift, adminOnly: true, module: "sorteios" as OptionalModule },
+    { id: "robo" as Tab, label: "Robô", icon: Bot, adminOnly: true, module: "robo" as OptionalModule },
     { id: "history" as Tab, label: "Histórico", icon: ClipboardList, adminOnly: false },
     { id: "users" as Tab, label: "Usuários", icon: Users, adminOnly: true },
     { id: "sectors" as Tab, label: "Setores", icon: Settings, adminOnly: true },
@@ -436,7 +436,12 @@ export default function AdminDashboard() {
   ];
   // Aba de admin aparece para admin OU para quem recebeu a função no cadastro
   const granted = user?.adminAccess ?? [];
-  const tabs = allTabs.filter((t) => !t.adminOnly || isAdmin || granted.includes(t.id));
+  // Módulo opcional não contratado pela loja: some do menu (e a API já
+  // bloqueia direto, ver requireModule no backend).
+  const enabledModules = user?.enabledModules ?? null;
+  const tabs = allTabs.filter((t) =>
+    (!t.adminOnly || isAdmin || granted.includes(t.id)) &&
+    (!t.module || enabledModules == null || enabledModules.includes(t.module)));
   // Celular: 4 abas principais + "Mais" (painel com o restante)
   const mobilePrimaryTabs = tabs.slice(0, 4);
   const mobileMoreTabs = tabs.slice(4);
@@ -460,6 +465,18 @@ export default function AdminDashboard() {
           </div>
         </div>
       </nav>
+      {user?.impersonatedBy && (
+        <div className="bg-amber-500 text-white text-xs sm:text-sm px-4 py-2 flex items-center justify-center gap-3 flex-wrap sticky top-14 z-20">
+          <span>Você (<strong>{user.impersonatedBy.name}</strong>) está atuando como <strong>{user.name}</strong></span>
+          <button
+            onClick={async () => { await api.auth.stopImpersonation(); window.location.href = "/"; }}
+            data-testid="button-stop-impersonation"
+            className="underline font-semibold hover:no-underline"
+          >
+            Voltar ao Painel do Sistema
+          </button>
+        </div>
+      )}
       <ChecklistGate />
       {showChangePassword && (
         <ChangePasswordModal onDone={() => { setShowChangePassword(false); toast({ title: "Senha alterada com sucesso!" }); }}

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, can, type QueueEntry, type Sector } from "@/lib/api";
+import { api, can, type QueueEntry, type Sector, type OptionalModule } from "@/lib/api";
 import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
@@ -37,29 +37,29 @@ import Suporte from "./Suporte";
 type MainTab = "queue" | "resultados" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "peliculas" | "avaliacao" | "treinamentos" | "planilhas" | "documentos" | "financeiro" | "sorteios" | "robo" | "rh" | "questionarios" | "diretorio" | "suporte";
 
 // Abas de admin que podem ser liberadas para vendedores no cadastro (adminAccess)
-const GRANTED_TABS: { id: MainTab; label: string; icon: typeof PhoneCall }[] = [
+const GRANTED_TABS: { id: MainTab; label: string; icon: typeof PhoneCall; module?: OptionalModule }[] = [
   { id: "financeiro", label: "Financeiro", icon: BadgeDollarSign },
-  { id: "sorteios", label: "Sorteios", icon: Gift },
-  { id: "robo", label: "Robô", icon: Bot },
-  { id: "rh", label: "RH", icon: UserSearch },
-  { id: "questionarios", label: "Questionários", icon: ClipboardList },
+  { id: "sorteios", label: "Sorteios", icon: Gift, module: "sorteios" },
+  { id: "robo", label: "Robô", icon: Bot, module: "robo" },
+  { id: "rh", label: "RH", icon: UserSearch, module: "rh" },
+  { id: "questionarios", label: "Questionários", icon: ClipboardList, module: "questionarios" },
 ];
 
-const MAIN_TABS = [
+const MAIN_TABS: { id: MainTab; label: string; icon: typeof PhoneCall; module?: OptionalModule }[] = [
   { id: "queue" as MainTab, label: "Fila", icon: PhoneCall },
   { id: "chat" as MainTab, label: "Atendimento", icon: MessageCircle },
   { id: "tarefas" as MainTab, label: "Tarefas", icon: ListTodo },
   { id: "resultados" as MainTab, label: "Resultados", icon: TrendingUp },
   { id: "crm" as MainTab, label: "CRM", icon: Kanban },
-  { id: "financeiras" as MainTab, label: "Financeiras", icon: Landmark },
-  { id: "peliculas" as MainTab, label: "Películas", icon: Shield },
-  { id: "avaliacao" as MainTab, label: "Avaliação", icon: BadgeDollarSign },
-  { id: "treinamentos" as MainTab, label: "Treinamentos", icon: GraduationCap },
-  { id: "planilhas" as MainTab, label: "Planilhas", icon: Table2 },
-  { id: "documentos" as MainTab, label: "Documentos", icon: FolderArchive },
+  { id: "financeiras" as MainTab, label: "Financeiras", icon: Landmark, module: "financeiras" },
+  { id: "peliculas" as MainTab, label: "Películas", icon: Shield, module: "peliculas" },
+  { id: "avaliacao" as MainTab, label: "Avaliação", icon: BadgeDollarSign, module: "avaliacao" },
+  { id: "treinamentos" as MainTab, label: "Treinamentos", icon: GraduationCap, module: "treinamentos" },
+  { id: "planilhas" as MainTab, label: "Planilhas", icon: Table2, module: "planilhas" },
+  { id: "documentos" as MainTab, label: "Documentos", icon: FolderArchive, module: "documentos" },
   { id: "diretorio" as MainTab, label: "Diretório", icon: BookUser },
   { id: "suporte" as MainTab, label: "Suporte", icon: LifeBuoy },
-] as const;
+];
 
 function formatWait(createdAt: string): string {
   const diff = Math.floor((Date.now() - new Date(createdAt).getTime()) / 1000);
@@ -121,6 +121,8 @@ export default function AttendantDashboard() {
 
   const sectorId = user?.sectorId ?? 0;
   const sectorInfo = user?.sector;
+  const enabledModules = user?.enabledModules ?? null;
+  const moduleOk = (m: OptionalModule | undefined) => !m || enabledModules == null || enabledModules.includes(m);
 
   const fetchQueue = useCallback(async () => {
     try {
@@ -248,6 +250,19 @@ export default function AttendantDashboard() {
         </div>
       </nav>
 
+      {user?.impersonatedBy && (
+        <div className="bg-amber-500 text-white text-xs sm:text-sm px-4 py-2 flex items-center justify-center gap-3 flex-wrap sticky top-14 z-20">
+          <span>Você (<strong>{user.impersonatedBy.name}</strong>) está atuando como <strong>{user.name}</strong></span>
+          <button
+            onClick={async () => { await api.auth.stopImpersonation(); window.location.href = "/"; }}
+            data-testid="button-stop-impersonation"
+            className="underline font-semibold hover:no-underline"
+          >
+            Voltar ao Painel do Sistema
+          </button>
+        </div>
+      )}
+
       {showChangePassword && (
         <ChangePasswordModal onDone={() => { setShowChangePassword(false); toast({ title: "Senha alterada com sucesso!" }); }}
           onClose={() => setShowChangePassword(false)} />
@@ -258,7 +273,7 @@ export default function AttendantDashboard() {
         {/* Sidebar tabs */}
         <aside className="hidden md:block w-52 shrink-0 border-r border-border bg-white sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3">
           <div className="flex flex-col gap-1">
-            {[...MAIN_TABS.filter(({ id }) => id === "queue" || id === "chat" || id === "diretorio" || can(user, id)), ...GRANTED_TABS.filter(({ id }) => id === "sorteios" || user?.adminAccess?.includes(id))].map(({ id, label, icon: Icon }) => (
+            {[...MAIN_TABS.filter(({ id, module }) => (id === "queue" || id === "chat" || id === "diretorio" || can(user, id)) && moduleOk(module)), ...GRANTED_TABS.filter(({ id, module }) => (id === "sorteios" || user?.adminAccess?.includes(id)) && moduleOk(module))].map(({ id, label, icon: Icon }) => (
               <button key={id} onClick={() => setMainTab(id)}
                 className={`flex items-center gap-2 w-full px-3 py-2.5 rounded-lg text-xs font-semibold text-left transition-colors ${
                   mainTab === id ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
@@ -533,7 +548,7 @@ export default function AttendantDashboard() {
 
       {/* Barra de navegação inferior — somente celular */}
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-white border-t border-border flex items-stretch h-[calc(3.5rem+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)]">
-        {[...MAIN_TABS.filter(({ id }) => id === "queue" || id === "chat" || id === "diretorio" || can(user, id)), ...(can(user, "equipe") ? [{ id: "equipe" as MainTab, label: "Equipe", icon: MessagesSquare }] : []), ...GRANTED_TABS.filter(({ id }) => id === "sorteios" || user?.adminAccess?.includes(id))].map(({ id, label, icon: Icon }) => (
+        {[...MAIN_TABS.filter(({ id, module }) => (id === "queue" || id === "chat" || id === "diretorio" || can(user, id)) && moduleOk(module)), ...(can(user, "equipe") ? [{ id: "equipe" as MainTab, label: "Equipe", icon: MessagesSquare }] : []), ...GRANTED_TABS.filter(({ id, module }) => (id === "sorteios" || user?.adminAccess?.includes(id)) && moduleOk(module))].map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             onClick={() => setMainTab(id)}

@@ -11,6 +11,10 @@ import {
   type TicketPriority,
   type TicketCategory,
   type SaasOverview,
+  type OptionalModule,
+  OPTIONAL_MODULES,
+  MODULE_LABELS,
+  MODULE_PACKAGES,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,7 +32,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   Building2, LogOut, Plus, Users, MessageSquare, Smartphone, KeyRound, Ban,
   CheckCircle2, DollarSign, FileText, Wrench, Pencil, AlertTriangle, Trash2,
-  Bug, HelpCircle, Sparkles, Clock, Send,
+  Bug, HelpCircle, Sparkles, Clock, Send, LogIn,
 } from "lucide-react";
 
 // Painel do superadmin (dono do sistema): lojistas, financeiro do SaaS
@@ -128,6 +132,7 @@ export default function SuperAdminDashboard() {
 
   // Diálogos
   const [createOpen, setCreateOpen] = useState(false);
+  const [impersonateFor, setImpersonateFor] = useState<TenantSummary | null>(null);
   const [adminFor, setAdminFor] = useState<TenantSummary | null>(null);
   const [contactFor, setContactFor] = useState<TenantSummary | null>(null);
   const [contractFor, setContractFor] = useState<TenantSummary | null>(null);
@@ -142,7 +147,14 @@ export default function SuperAdminDashboard() {
   const [ticketReply, setTicketReply] = useState("");
   const [sendingReply, setSendingReply] = useState(false);
 
-  const [form, setForm] = useState({ name: "", adminName: "", adminEmail: "", adminPassword: "" });
+  const [form, setForm] = useState<{
+    name: string; contactName: string; cpfCnpj: string; contactEmail: string; contactPhone: string;
+    enabledModules: OptionalModule[]; adminName: string; adminEmail: string; adminPassword: string;
+  }>({
+    name: "", contactName: "", cpfCnpj: "", contactEmail: "", contactPhone: "",
+    enabledModules: [], adminName: "", adminEmail: "", adminPassword: "",
+  });
+  const emptyForm = { name: "", contactName: "", cpfCnpj: "", contactEmail: "", contactPhone: "", enabledModules: [] as OptionalModule[], adminName: "", adminEmail: "", adminPassword: "" };
   const [adminForm, setAdminForm] = useState({ name: "", email: "", password: "" });
   const [contactForm, setContactForm] = useState({ contactName: "", contactPhone: "", contactEmail: "" });
   const [contractForm, setContractForm] = useState({ plan: "Mensal", monthlyValue: "", startDate: "", renewalDate: "", notes: "" });
@@ -235,6 +247,24 @@ export default function SuperAdminDashboard() {
     } finally { setBusy(false); }
   };
 
+  // "Entrar como": se só tem 1 admin ativo, entra direto; com mais de um,
+  // abre um seletor. A sessão já muda no backend — recarrega a página
+  // inteira pra o AuthProvider buscar a identidade nova do zero.
+  const doImpersonate = async (tenantId: number, userId: number) => {
+    try {
+      await api.superadmin.impersonate(tenantId, userId);
+      window.location.href = "/";
+    } catch (e) {
+      fail("Erro ao entrar como este admin")(e);
+    }
+  };
+  const openImpersonate = (t: TenantSummary) => {
+    const activeAdmins = t.admins.filter((a) => a.isActive);
+    if (activeAdmins.length === 0) return;
+    if (activeAdmins.length === 1) { void doImpersonate(t.id, activeAdmins[0]!.id); return; }
+    setImpersonateFor(t);
+  };
+
   const statusBadge = (t: TenantSummary) => {
     if (t.saasStatus === "cancelado") return <Badge variant="outline" className="text-muted-foreground">Cancelado</Badge>;
     if (t.saasStatus === "inadimplente") return <Badge variant="destructive">Inadimplente</Badge>;
@@ -307,6 +337,11 @@ export default function SuperAdminDashboard() {
                         </Button>
                         <Button size="sm" variant="outline" onClick={() => { setAdminFor(t); setAdminForm({ name: "", email: t.admins[0]?.email ?? "", password: "" }); }} data-testid={`button-admin-${t.id}`}>
                           <KeyRound className="w-4 h-4 mr-1" /> Admin
+                        </Button>
+                        <Button size="sm" variant="outline" disabled={!t.admins.some((a) => a.isActive)}
+                          title={!t.admins.some((a) => a.isActive) ? "Cadastre um admin ativo primeiro" : undefined}
+                          onClick={() => openImpersonate(t)} data-testid={`button-impersonate-${t.id}`}>
+                          <LogIn className="w-4 h-4 mr-1" /> Entrar como
                         </Button>
                         <Button size="sm" variant={t.isActive ? "destructive" : "default"}
                           onClick={() => run(() => api.superadmin.updateTenant(t.id, { isActive: !t.isActive }), t.isActive ? "Loja suspensa" : "Loja reativada")}
@@ -558,14 +593,62 @@ export default function SuperAdminDashboard() {
 
       {/* Nova loja */}
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
           <DialogHeader><DialogTitle>Nova loja (lojista)</DialogTitle></DialogHeader>
           <div className="space-y-3">
             <div>
               <Label>Nome da loja</Label>
               <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Ex.: Celulares do João" data-testid="input-tenant-name" />
             </div>
-            <p className="text-xs text-muted-foreground">Opcional: já criar o admin da loja (ele será obrigado a trocar a senha no primeiro acesso).</p>
+            <div>
+              <Label>Nome completo / Razão social</Label>
+              <Input value={form.contactName} onChange={(e) => setForm({ ...form, contactName: e.target.value })} data-testid="input-tenant-contact-name" />
+            </div>
+            <div>
+              <Label>CPF ou CNPJ</Label>
+              <Input value={form.cpfCnpj} onChange={(e) => setForm({ ...form, cpfCnpj: e.target.value })} placeholder="Só números ou com máscara" data-testid="input-tenant-cpf-cnpj" />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <Label>E-mail de contato</Label>
+                <Input type="email" value={form.contactEmail} onChange={(e) => setForm({ ...form, contactEmail: e.target.value })} data-testid="input-tenant-contact-email" />
+              </div>
+              <div>
+                <Label>Telefone</Label>
+                <Input value={form.contactPhone} onChange={(e) => setForm({ ...form, contactPhone: e.target.value })} data-testid="input-tenant-contact-phone" />
+              </div>
+            </div>
+
+            <div className="pt-2 border-t">
+              <Label>Pacote de módulos</Label>
+              <div className="flex gap-2 mt-1 mb-2">
+                <Button type="button" size="sm" variant={form.enabledModules.length === 0 ? "default" : "outline"}
+                  onClick={() => setForm({ ...form, enabledModules: [...MODULE_PACKAGES.basico] })} data-testid="button-package-basico">
+                  Básico
+                </Button>
+                <Button type="button" size="sm" variant={form.enabledModules.length === OPTIONAL_MODULES.length ? "default" : "outline"}
+                  onClick={() => setForm({ ...form, enabledModules: [...MODULE_PACKAGES.completo] })} data-testid="button-package-completo">
+                  Completo
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground mb-2">Ajuste fino — marque/desmarque módulos individuais:</p>
+              <div className="grid grid-cols-2 gap-1.5">
+                {OPTIONAL_MODULES.map((m) => (
+                  <label key={m} className="flex items-center gap-1.5 text-sm">
+                    <input type="checkbox" checked={form.enabledModules.includes(m)} data-testid={`checkbox-module-${m}`}
+                      onChange={(e) => setForm({
+                        ...form,
+                        enabledModules: e.target.checked
+                          ? [...form.enabledModules, m]
+                          : form.enabledModules.filter((x) => x !== m),
+                      })} />
+                    {MODULE_LABELS[m]}
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <p className="text-xs text-muted-foreground pt-2 border-t">Opcional: já criar o admin da loja (ele será obrigado a trocar a senha no primeiro acesso).</p>
             <div>
               <Label>Nome do admin</Label>
               <Input value={form.adminName} onChange={(e) => setForm({ ...form, adminName: e.target.value })} data-testid="input-admin-name" />
@@ -584,13 +667,33 @@ export default function SuperAdminDashboard() {
             <Button disabled={busy || !form.name.trim()} data-testid="button-save-tenant"
               onClick={() => run(() => api.superadmin.createTenant({
                 name: form.name.trim(),
+                contactName: form.contactName.trim() || undefined,
+                contactEmail: form.contactEmail.trim() || undefined,
+                contactPhone: form.contactPhone.trim() || undefined,
+                cpfCnpj: form.cpfCnpj.trim() || undefined,
+                enabledModules: form.enabledModules,
                 adminName: form.adminName.trim() || undefined,
                 adminEmail: form.adminEmail.trim() || undefined,
                 adminPassword: form.adminPassword || undefined,
-              }), "Loja criada", () => { setCreateOpen(false); setForm({ name: "", adminName: "", adminEmail: "", adminPassword: "" }); })}>
+              }), "Loja criada", () => { setCreateOpen(false); setForm(emptyForm); })}>
               Criar loja
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Escolher qual admin, quando a loja tem mais de um ativo */}
+      <Dialog open={!!impersonateFor} onOpenChange={(o) => { if (!o) setImpersonateFor(null); }}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Entrar como qual admin de {impersonateFor?.name}?</DialogTitle></DialogHeader>
+          <div className="space-y-2">
+            {impersonateFor?.admins.filter((a) => a.isActive).map((a) => (
+              <Button key={a.id} variant="outline" className="w-full justify-start"
+                onClick={() => doImpersonate(impersonateFor.id, a.id)} data-testid={`button-impersonate-as-${a.id}`}>
+                {a.name} ({a.email})
+              </Button>
+            ))}
+          </div>
         </DialogContent>
       </Dialog>
 

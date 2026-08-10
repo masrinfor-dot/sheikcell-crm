@@ -1,13 +1,14 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import { db, documentsTable, usersTable } from "@workspace/db";
 import { eq, and, desc } from "drizzle-orm";
-import { requireAuth, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
+import { requireAuth, requireAdminOrSupervisor, requireTenant, requireModule } from "../middlewares/auth";
 import path from "path";
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
 import { mkdir, writeFile, unlink } from "fs/promises";
 
 const router: IRouter = Router();
+router.use("/documents", requireModule("documentos"));
 
 // Documentos ficam separados das mídias do WhatsApp.
 export const DOCS_DIR = path.resolve(process.cwd(), "documents");

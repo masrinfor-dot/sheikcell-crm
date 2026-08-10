@@ -2,10 +2,11 @@ import { createHmac } from "node:crypto";
 import { Router, type IRouter } from "express";
 import { and, desc, eq, gte, inArray, or, sql } from "drizzle-orm";
 import { db, rafflesTable, raffleDrawsTable, conversationsTable, usersTable, attendanceLogsTable } from "@workspace/db";
-import { requireAuth, requireTenant } from "../middlewares/auth";
+import { requireAuth, requireTenant, requireModule } from "../middlewares/auth";
 import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
+router.use("/raffles", requireModule("sorteios"));
 
 type Winner = { phone: string; name: string; conversationId: number; sent: boolean; error?: string };
 

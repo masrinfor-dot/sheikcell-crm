@@ -11,6 +11,10 @@ declare module "express-session" {
     userName: string | undefined;
     // Horário de acesso do vendedor (null/undefined = sem restrição)
     accessHours: { start: string; end: string; days: number[] } | null | undefined;
+    // "Entrar como": id do superadmin original, guardado enquanto a sessão
+    // está atuando como um admin de loja. Presente = mostra a faixa de
+    // impersonação no front e libera POST /auth/stop-impersonation.
+    impersonatorId: number | undefined;
   }
 }
 

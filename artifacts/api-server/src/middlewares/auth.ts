@@ -198,6 +198,41 @@ export function requireFeature(feature: string) {
   };
 }
 
+// ── Módulos opcionais contratados pela loja (teto por tenant) ──────────────
+// Cache curto por tenant (mesmo padrão de isTenantSuspended acima) — evita
+// bater no banco a cada request de um módulo opcional.
+const enabledModulesCache = new Map<number, { at: number; modules: Set<string> }>();
+async function getEnabledModules(tenantId: number): Promise<Set<string>> {
+  const cached = enabledModulesCache.get(tenantId);
+  const now = Date.now();
+  if (cached && now - cached.at < 30_000) return cached.modules;
+  const { db, tenantsTable } = await import("@workspace/db");
+  const { eq } = await import("drizzle-orm");
+  const [row] = await db.select({ enabledModules: tenantsTable.enabledModules })
+    .from(tenantsTable).where(eq(tenantsTable.id, tenantId));
+  const modules = new Set<string>(row?.enabledModules ?? []);
+  enabledModulesCache.set(tenantId, { at: now, modules });
+  return modules;
+}
+
+/** Exige que a loja da sessão tenha o módulo opcional contratado (fail closed). */
+export function requireModule(moduleKey: string) {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const tid = tenantIdOf(req);
+    if (tid == null) { res.status(403).json({ error: "Forbidden" }); return; }
+    try {
+      const modules = await getEnabledModules(tid);
+      if (!modules.has(moduleKey)) {
+        res.status(403).json({ error: "Módulo não contratado para esta loja." });
+        return;
+      }
+      next();
+    } catch {
+      res.status(403).json({ error: "Forbidden" });
+    }
+  };
+}
+
 export function requireAdminOrSupervisor(req: Request, res: Response, next: NextFunction): void {
   if (!req.session?.userId) {
     res.status(401).json({ error: "Unauthorized" });

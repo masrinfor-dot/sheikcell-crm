@@ -1,13 +1,14 @@
 import { Router, type IRouter } from "express";
 import { db, tradeInEvaluationsTable, usersTable, appSettingsTable } from "@workspace/db";
 import { eq, and, desc } from "drizzle-orm";
-import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
+import { requireAuth, requireAdmin, requireTenant, requireModule } from "../middlewares/auth";
 import { requirePerm } from "../lib/permissions";
 import {
   QUESTIONS_KEY, DEFAULT_QUESTIONS, sanitizeQuestions, validateTradeInAnswers, type QuestionsConfig,
 } from "../lib/tradeInQuestions";
 
 const router: IRouter = Router();
+router.use("/trade-in", requireModule("avaliacao"));
 
 // Anti-abuso: 1 avaliação por vez por usuário + intervalo mínimo entre chamadas.
 const COOLDOWN_MS = 15000;

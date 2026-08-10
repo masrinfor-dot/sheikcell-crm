@@ -1,9 +1,10 @@
 import { Router, type IRouter } from "express";
 import { db, partnerLinksTable } from "@workspace/db";
 import { eq, and, asc } from "drizzle-orm";
-import { requireAuth, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
+import { requireAuth, requireAdminOrSupervisor, requireTenant, requireModule } from "../middlewares/auth";
 
 const router: IRouter = Router();
+router.use("/partner-links", requireModule("financeiras"));
 
 function normalizeUrl(raw: string): string | null {
   let u = raw.trim();

@@ -2,7 +2,7 @@ import { Router, type IRouter } from "express";
 import { randomBytes } from "crypto";
 import { db, rhSettingsTable, rhCandidatesTable } from "@workspace/db";
 import { eq, and, desc } from "drizzle-orm";
-import { requireFeature, requireTenant } from "../middlewares/auth";
+import { requireFeature, requireTenant, requireModule } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
@@ -187,13 +187,13 @@ router.post("/rh/public/:token/apply", async (req, res): Promise<void> => {
 
 // ── Admin ──────────────────────────────────────────────────────────────────
 
-router.get("/rh/settings", requireFeature("rh"), async (req, res): Promise<void> => {
+router.get("/rh/settings", requireFeature("rh"), requireModule("rh"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const s = await getSettings(tenantId);
   res.json({ publicToken: s.publicToken, stages: s.stages });
 });
 
-router.put("/rh/settings", requireFeature("rh"), async (req, res): Promise<void> => {
+router.put("/rh/settings", requireFeature("rh"), requireModule("rh"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const stages = sanitizeStages((req.body ?? {}).stages);
   if (!stages) {
@@ -206,7 +206,7 @@ router.put("/rh/settings", requireFeature("rh"), async (req, res): Promise<void>
   res.json({ ok: true });
 });
 
-router.post("/rh/settings/regenerate-token", requireFeature("rh"), async (req, res): Promise<void> => {
+router.post("/rh/settings/regenerate-token", requireFeature("rh"), requireModule("rh"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const s = await getSettings(tenantId);
   const publicToken = randomBytes(16).toString("hex");
@@ -215,7 +215,7 @@ router.post("/rh/settings/regenerate-token", requireFeature("rh"), async (req, r
   res.json({ publicToken });
 });
 
-router.get("/rh/candidates", requireFeature("rh"), async (req, res): Promise<void> => {
+router.get("/rh/candidates", requireFeature("rh"), requireModule("rh"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rows = await db.select({
     id: rhCandidatesTable.id,
@@ -234,7 +234,7 @@ router.get("/rh/candidates", requireFeature("rh"), async (req, res): Promise<voi
   res.json(rows.map((r) => ({ ...r, hasVideo: !!r.hasVideo })));
 });
 
-router.get("/rh/candidates/:id/video", requireFeature("rh"), async (req, res): Promise<void> => {
+router.get("/rh/candidates/:id/video", requireFeature("rh"), requireModule("rh"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
@@ -250,7 +250,7 @@ router.get("/rh/candidates/:id/video", requireFeature("rh"), async (req, res): P
   res.send(buf);
 });
 
-router.patch("/rh/candidates/:id", requireFeature("rh"), async (req, res): Promise<void> => {
+router.patch("/rh/candidates/:id", requireFeature("rh"), requireModule("rh"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
@@ -269,7 +269,7 @@ router.patch("/rh/candidates/:id", requireFeature("rh"), async (req, res): Promi
   res.json(updated);
 });
 
-router.delete("/rh/candidates/:id", requireFeature("rh"), async (req, res): Promise<void> => {
+router.delete("/rh/candidates/:id", requireFeature("rh"), requireModule("rh"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }

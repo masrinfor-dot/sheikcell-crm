@@ -2,9 +2,10 @@ import { Router, type IRouter } from "express";
 import { db, filmCompatTable, appSettingsTable } from "@workspace/db";
 import { eq, and, asc } from "drizzle-orm";
 import * as XLSX from "xlsx";
-import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
+import { requireAuth, requireAdmin, requireTenant, requireModule } from "../middlewares/auth";
 
 const router: IRouter = Router();
+router.use("/film-compat", requireModule("peliculas"));
 
 // Linhas cruas da planilha → registros válidos (mesmas regras do import xlsx).
 function parseCompatRows(rows: unknown[][]): { clean: { film: string; models: string; notes: string | null }[]; errors: string[] } {

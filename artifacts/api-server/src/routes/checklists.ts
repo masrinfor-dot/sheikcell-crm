@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db, checklistsTable, checklistResponsesTable, usersTable } from "@workspace/db";
 import { eq, desc, and, inArray } from "drizzle-orm";
-import { requireAuth, requireFeature, requireTenant, tenantIdOf } from "../middlewares/auth";
+import { requireAuth, requireFeature, requireTenant, requireModule, tenantIdOf } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
@@ -199,14 +199,14 @@ router.post("/checklists/:id/respond", requireAuth, async (req, res): Promise<vo
 });
 
 // ── Administração (admin) ──────────────────────────────────────────────────
-router.get("/checklists", requireFeature("questionarios"), async (req, res): Promise<void> => {
+router.get("/checklists", requireFeature("questionarios"), requireModule("questionarios"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rows = await db.select().from(checklistsTable)
     .where(eq(checklistsTable.tenantId, tenantId)).orderBy(desc(checklistsTable.createdAt));
   res.json(rows);
 });
 
-router.post("/checklists", requireFeature("questionarios"), async (req, res): Promise<void> => {
+router.post("/checklists", requireFeature("questionarios"), requireModule("questionarios"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { title, description, questions, targetRoles, recurrence, dayOfWeek, startDate, mandatory, active } = req.body ?? {};
   const t = typeof title === "string" ? title.trim().slice(0, 150) : "";
@@ -229,7 +229,7 @@ router.post("/checklists", requireFeature("questionarios"), async (req, res): Pr
   res.status(201).json(created);
 });
 
-router.patch("/checklists/:id", requireFeature("questionarios"), async (req, res): Promise<void> => {
+router.patch("/checklists/:id", requireFeature("questionarios"), requireModule("questionarios"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
@@ -263,7 +263,7 @@ router.patch("/checklists/:id", requireFeature("questionarios"), async (req, res
   res.json(updated);
 });
 
-router.delete("/checklists/:id", requireFeature("questionarios"), async (req, res): Promise<void> => {
+router.delete("/checklists/:id", requireFeature("questionarios"), requireModule("questionarios"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
@@ -274,7 +274,7 @@ router.delete("/checklists/:id", requireFeature("questionarios"), async (req, re
 });
 
 // Respostas de um questionário (admin).
-router.get("/checklists/:id/responses", requireFeature("questionarios"), async (req, res): Promise<void> => {
+router.get("/checklists/:id/responses", requireFeature("questionarios"), requireModule("questionarios"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }

@@ -1,8 +1,15 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { db, tenantsTable, usersTable, sectorsTable, conversationsTable, whatsappSessionsTable, saasContractsTable, saasInvoicesTable } from "@workspace/db";
+import { db, tenantsTable, usersTable, sectorsTable, conversationsTable, whatsappSessionsTable, saasContractsTable, saasInvoicesTable, impersonationLogTable, OPTIONAL_MODULES, type OptionalModule } from "@workspace/db";
 import { eq, and, count, desc, lt } from "drizzle-orm";
 import { requireSuperadmin, invalidateTenantCache } from "../middlewares/auth";
+import { validateCpfCnpj } from "../lib/cpfCnpj";
+
+function sanitizeModules(v: unknown): OptionalModule[] {
+  if (!Array.isArray(v)) return [];
+  const valid = new Set<string>(OPTIONAL_MODULES);
+  return v.filter((m): m is OptionalModule => typeof m === "string" && valid.has(m));
+}
 
 // Painel do superadmin (dono do sistema): cria/suspende lojas (tenants) e
 // gerencia o admin de cada loja. Todas as rotas exigem role "superadmin".
@@ -50,10 +57,23 @@ router.get("/superadmin/tenants", async (_req, res): Promise<void> => {
 
 // Cria loja (e opcionalmente já o admin dela)
 router.post("/superadmin/tenants", async (req, res): Promise<void> => {
-  const { name, adminName, adminEmail, adminPassword } = req.body as {
+  const {
+    name, adminName, adminEmail, adminPassword,
+    contactName, contactPhone, contactEmail, cpfCnpj, enabledModules,
+  } = req.body as {
     name?: string; adminName?: string; adminEmail?: string; adminPassword?: string;
+    contactName?: string; contactPhone?: string; contactEmail?: string;
+    cpfCnpj?: string; enabledModules?: unknown;
   };
   if (!name?.trim()) { res.status(400).json({ error: "Informe o nome da loja" }); return; }
+
+  let cleanCpfCnpj: string | null = null;
+  if (cpfCnpj?.trim()) {
+    const check = validateCpfCnpj(cpfCnpj);
+    if (!check.valid) { res.status(400).json({ error: "CPF ou CNPJ inválido" }); return; }
+    cleanCpfCnpj = check.digits;
+  }
+  const modules = sanitizeModules(enabledModules);
 
   // Valida TUDO antes de gravar qualquer coisa (nada de loja órfã se o
   // admin for inválido) e cria loja+setor+admin numa transação única.
@@ -70,7 +90,14 @@ router.post("/superadmin/tenants", async (req, res): Promise<void> => {
 
   try {
     const result = await db.transaction(async (tx) => {
-      const [tenant] = await tx.insert(tenantsTable).values({ name: name.trim() }).returning();
+      const [tenant] = await tx.insert(tenantsTable).values({
+        name: name.trim(),
+        contactName: contactName?.trim() || null,
+        contactPhone: contactPhone?.trim() || null,
+        contactEmail: contactEmail?.trim() || null,
+        cpfCnpj: cleanCpfCnpj,
+        enabledModules: modules,
+      }).returning();
       if (!tenant) throw new Error("Falha ao criar loja");
       let admin = null;
       if (wantsAdmin) {
@@ -189,6 +216,30 @@ router.post("/superadmin/tenants/:id/admin", async (req, res): Promise<void> => 
     isActive: true,
   }).returning();
   res.status(201).json({ admin: u ? { id: u.id, name: u.name, email: u.email } : null });
+});
+
+// "Entrar como": o superadmin assume a sessão de um admin ativo da loja,
+// pra ver/usar o painel dela exatamente como ela vê. Guarda o próprio id
+// pra dar pra voltar (POST /auth/stop-impersonation) e registra no log.
+router.post("/superadmin/tenants/:tenantId/impersonate/:userId", async (req, res): Promise<void> => {
+  const tenantId = Number(req.params.tenantId);
+  const userId = Number(req.params.userId);
+  if (!Number.isFinite(tenantId) || !Number.isFinite(userId)) { res.status(400).json({ error: "Loja ou usuário inválido" }); return; }
+  const [target] = await db.select().from(usersTable)
+    .where(and(eq(usersTable.id, userId), eq(usersTable.tenantId, tenantId), eq(usersTable.role, "admin")));
+  if (!target || !target.isActive) { res.status(404).json({ error: "Admin não encontrado ou inativo nesta loja" }); return; }
+
+  const superadminId = req.session.userId!;
+  await db.insert(impersonationLogTable).values({ tenantId, superadminUserId: superadminId, targetUserId: target.id });
+
+  req.session.impersonatorId = superadminId;
+  req.session.userId = target.id;
+  req.session.userRole = target.role;
+  req.session.tenantId = target.tenantId;
+  req.session.userSectorId = target.sectorId ?? undefined;
+  req.session.userName = target.name;
+  req.session.accessHours = null;
+  res.json({ ok: true });
 });
 
 export default router;

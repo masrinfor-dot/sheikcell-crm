@@ -4,7 +4,7 @@ import {
   acquirerSalesTable, reconciliationMatchesTable, storesTable, usersTable,
 } from "@workspace/db";
 import { eq, and, desc, gte, lte, sql, type SQL } from "drizzle-orm";
-import { requireAdmin, requireAdminOrSupervisor, requireFeature, requireTenant, requireReauth, isGlobalRole, verifyPassword } from "../middlewares/auth";
+import { requireAdmin, requireAdminOrSupervisor, requireFeature, requireTenant, requireReauth, requireModule, isGlobalRole, verifyPassword } from "../middlewares/auth";
 import { encryptSecret } from "../lib/crypto";
 import { listProviders, ALL_PROVIDERS } from "../lib/financeBank/adapters/registry.ts";
 import { runReconciliation } from "../lib/financeBank/reconciliation.ts";
@@ -12,6 +12,7 @@ import { computeMetrics, type MetricsTransaction, type MetricsSale } from "../li
 import { logFinanceAudit } from "../lib/financeBank/audit.ts";
 
 const router: IRouter = Router();
+router.use("/finance-bank", requireModule("financeiro_bancario"));
 const FEATURE = "financeiro-bancario";
 
 async function getOwnedStore(storeId: number, tenantId: number) {
