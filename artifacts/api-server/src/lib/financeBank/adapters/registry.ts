@@ -56,13 +56,36 @@ export function getAcquirerAdapter(provider: string): AcquirerAdapter | null {
   return acquirerAdapters.get(provider as Provider) ?? null;
 }
 
-// Para a tela de cadastro de contas: lista todos os provedores conhecidos e se
-// já têm integração real implementada (hoje só o PagBank) ou ainda são stub.
-export function listProviders(): { provider: Provider; isBank: boolean; isAcquirer: boolean; configured: boolean }[] {
+// Como cada provedor é conectado (levantamento com o usuário, ver plano):
+// oauth = login no banco + autoriza, sem ver a chave (só PagBank/Mercado Pago
+// oferecem isso de verdade); certificate = client_id/secret + certificado
+// digital gerado pelo próprio titular (bancos tradicionais via Open
+// Finance/API própria); api_key = token colado manualmente (o que já existia).
+const AUTH_METHOD: Record<Provider, "oauth" | "certificate" | "api_key"> = {
+  pagbank: "oauth", mercado_pago: "oauth",
+  inter: "certificate", itau: "certificate", bradesco: "certificate", sicoob: "certificate", sicredi: "certificate",
+  asaas: "api_key", cappta: "api_key", rede: "api_key", nubank: "api_key",
+};
+
+// Avisos exibidos na tela quando não há confirmação de API pública de
+// terceiros pra aquele provedor — o campo manual continua disponível (pode
+// haver algum outro token/canal), só deixa claro que não é uma conexão
+// automática confirmada.
+const PROVIDER_NOTE: Partial<Record<Provider, string>> = {
+  nubank: "O Nubank não oferece API própria para conexão de terceiros — só via Open Finance regulado ou um agregador (ex.: Pluggy). Sem isso, não há conexão automática confirmada.",
+  cappta: "Não encontramos confirmação pública de conexão automática para a Cappta — vale confirmar direto com o suporte deles antes de depender desse token.",
+};
+
+// Para a tela de cadastro de contas: lista todos os provedores conhecidos, se
+// já têm integração real implementada (hoje só o PagBank) ou ainda são stub,
+// e como se conecta (oauth/certificate/api_key) + aviso quando aplicável.
+export function listProviders(): { provider: Provider; isBank: boolean; isAcquirer: boolean; configured: boolean; authMethod: "oauth" | "certificate" | "api_key"; note: string | null }[] {
   return ALL_PROVIDERS.map((provider) => ({
     provider,
     isBank: BANK_PROVIDERS.includes(provider),
     isAcquirer: ACQUIRER_PROVIDERS.includes(provider),
     configured: provider === "pagbank",
+    authMethod: AUTH_METHOD[provider],
+    note: PROVIDER_NOTE[provider] ?? null,
   }));
 }

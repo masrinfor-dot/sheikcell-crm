@@ -7,7 +7,7 @@ import { useToast } from "@/hooks/use-toast";
 import ReauthModal from "@/components/ReauthModal";
 import {
   Banknote, Plus, X, RefreshCw, CheckCircle2, XCircle, KeyRound, Landmark, CreditCard, ListChecks, LayoutGrid,
-  ArrowDownCircle, ArrowUpCircle, PieChart as PieChartIcon,
+  ArrowDownCircle, ArrowUpCircle, PieChart as PieChartIcon, ExternalLink, Upload, AlertTriangle,
 } from "lucide-react";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceLine,
@@ -89,6 +89,15 @@ function formatDate(iso: string | null): string {
   return new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve((reader.result as string).split(",")[1]!);
+    reader.onerror = () => reject(new Error("Falha ao ler arquivo"));
+    reader.readAsDataURL(file);
+  });
+}
+
 type SubTab = "dashboard" | "accounts" | "transactions" | "sales" | "reconciliation";
 
 export default function FinanceiroBancario() {
@@ -125,6 +134,12 @@ export default function FinanceiroBancario() {
   const [credentialAccount, setCredentialAccount] = useState<FinanceBankAccount | null>(null);
   const [fSecret, setFSecret] = useState("");
   const [savingCredential, setSavingCredential] = useState(false);
+  const [fCertFile, setFCertFile] = useState<File | null>(null);
+  const [fCertPassword, setFCertPassword] = useState("");
+  const [fClientId, setFClientId] = useState("");
+  const [fClientSecret, setFClientSecret] = useState("");
+  const [savingCertificate, setSavingCertificate] = useState(false);
+  const [connectingOAuth, setConnectingOAuth] = useState(false);
 
   // Reautenticação (ações sensíveis): guarda a MESMA ação pendente, agora
   // recebendo a senha, para reenviar exatamente a mesma requisição — sem
@@ -230,6 +245,10 @@ export default function FinanceiroBancario() {
   const openCredential = (account: FinanceBankAccount) => {
     setCredentialAccount(account);
     setFSecret("");
+    setFCertFile(null);
+    setFCertPassword("");
+    setFClientId("");
+    setFClientSecret("");
   };
 
   const handleSaveCredential = async () => {
@@ -251,6 +270,66 @@ export default function FinanceiroBancario() {
       setSavingCredential(false);
     }
   };
+
+  const handleSaveCertificate = async () => {
+    if (!credentialAccount || savingCertificate) return;
+    if (!fCertFile) { toast({ title: "Selecione o arquivo do certificado", variant: "destructive" }); return; }
+    if (!fClientId.trim() || !fClientSecret.trim()) { toast({ title: "Informe Client ID e Client Secret", variant: "destructive" }); return; }
+    const accountId = credentialAccount.id;
+    setSavingCertificate(true);
+    try {
+      const base64 = await readFileAsBase64(fCertFile);
+      await runWithReauth(async (confirmPassword) => {
+        await api.financeBank.saveCertificate(accountId, {
+          fileName: fCertFile.name, mimeType: fCertFile.type, data: base64,
+          certPassword: fCertPassword || undefined, clientId: fClientId.trim(), clientSecret: fClientSecret.trim(),
+          confirmPassword,
+        });
+        setAccounts((prev) => prev.map((a) => (a.id === accountId ? { ...a, status: "conectado" } : a)));
+        setCredentialAccount(null);
+        toast({ title: "Certificado salvo e criptografado! 🔒" });
+      });
+    } catch (err) {
+      toast({ title: "Erro ao salvar certificado", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSavingCertificate(false);
+    }
+  };
+
+  const handleConnectOAuth = async () => {
+    if (!credentialAccount || connectingOAuth) return;
+    const accountId = credentialAccount.id;
+    const provider = credentialAccount.provider;
+    setConnectingOAuth(true);
+    try {
+      await runWithReauth(async (confirmPassword) => {
+        const { url } = await api.financeBank.oauthStart(provider, accountId, confirmPassword);
+        window.location.href = url;
+      });
+    } catch (err) {
+      toast({ title: "Erro ao conectar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setConnectingOAuth(false);
+    }
+  };
+
+  // Volta do redirect OAuth (backend manda ?financeiro-bancario=oauth_success|oauth_error).
+  useEffect(() => {
+    const qs = new URLSearchParams(window.location.search);
+    const result = qs.get("financeiro-bancario");
+    if (!result) return;
+    if (result === "oauth_success") {
+      toast({ title: "Conta conectada! 🔒" });
+      loadAll();
+    } else if (result === "oauth_error") {
+      const reason = qs.get("reason");
+      toast({ title: "Não foi possível conectar", description: reason ?? undefined, variant: "destructive" });
+    }
+    qs.delete("financeiro-bancario"); qs.delete("reason");
+    const rest = qs.toString();
+    window.history.replaceState(null, "", window.location.pathname + (rest ? `?${rest}` : ""));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleReconcile = async () => {
     if (reconciling) return;
@@ -284,6 +363,8 @@ export default function FinanceiroBancario() {
       setTransactions(t);
     } catch { toast({ title: "Erro ao rejeitar", variant: "destructive" }); }
   };
+
+  const credentialProviderInfo = credentialAccount ? providers.find((p) => p.provider === credentialAccount.provider) : undefined;
 
   const subTabs: { id: SubTab; label: string; icon: typeof LayoutGrid }[] = [
     { id: "dashboard", label: "Visão Geral", icon: LayoutGrid },
@@ -697,23 +778,87 @@ export default function FinanceiroBancario() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-3" onClick={() => setCredentialAccount(null)}>
           <div className="bg-card rounded-xl w-full max-w-md shadow-xl border overflow-hidden" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-4 py-3 border-b">
-              <span className="font-semibold text-sm flex items-center gap-2"><KeyRound className="w-4 h-4 text-primary" /> Credencial — {credentialAccount.label}</span>
+              <span className="font-semibold text-sm flex items-center gap-2"><KeyRound className="w-4 h-4 text-primary" /> Conectar — {credentialAccount.label}</span>
               <button onClick={() => setCredentialAccount(null)} className="p-1 rounded hover:bg-muted/60"><X className="w-4 h-4" /></button>
             </div>
             <div className="p-4 space-y-3">
-              <p className="text-xs text-muted-foreground">
-                Cole o token/API key da conta no {PROVIDER_LABELS[credentialAccount.provider] ?? credentialAccount.provider}.
-                Fica criptografado no banco — ninguém consegue ler o valor depois de salvo.
-              </p>
-              <div>
-                <label className="text-xs font-semibold text-muted-foreground">Token / API Key</label>
-                <input type="password" value={fSecret} onChange={(e) => setFSecret(e.target.value)} data-testid="input-account-secret"
-                  className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
-              </div>
-              <button onClick={handleSaveCredential} disabled={savingCredential} data-testid="button-save-credential"
-                className="w-full py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition">
-                {savingCredential ? "Salvando..." : "Salvar credencial"}
-              </button>
+              {credentialProviderInfo?.note && (
+                <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <p className="text-xs text-amber-800">{credentialProviderInfo.note}</p>
+                </div>
+              )}
+
+              {credentialProviderInfo?.authMethod === "oauth" && (
+                <>
+                  <p className="text-xs text-muted-foreground">
+                    Você será redirecionado para fazer login no {PROVIDER_LABELS[credentialAccount.provider] ?? credentialAccount.provider} e autorizar
+                    o acesso — sem precisar colar nenhuma chave aqui.
+                  </p>
+                  <button onClick={handleConnectOAuth} disabled={connectingOAuth} data-testid="button-connect-oauth"
+                    className="w-full py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition flex items-center justify-center gap-1.5">
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    {connectingOAuth ? "Redirecionando..." : `Conectar com ${PROVIDER_LABELS[credentialAccount.provider] ?? credentialAccount.provider}`}
+                  </button>
+                </>
+              )}
+
+              {credentialProviderInfo?.authMethod === "certificate" && (
+                <>
+                  <p className="text-xs text-muted-foreground">
+                    O {PROVIDER_LABELS[credentialAccount.provider] ?? credentialAccount.provider} exige um certificado digital gerado por você na área
+                    logada do banco, junto com Client ID e Client Secret. Tudo fica criptografado no banco.
+                  </p>
+                  <div>
+                    <label className="text-xs font-semibold text-muted-foreground">Certificado (.pfx, .p12, .cer, .crt ou .pem)</label>
+                    <label className="mt-1 flex items-center gap-2 border border-dashed rounded-lg px-3 py-2.5 text-sm cursor-pointer hover:bg-secondary/50 transition">
+                      <Upload className="w-4 h-4 text-muted-foreground shrink-0" />
+                      <span className="truncate">{fCertFile ? fCertFile.name : "Selecionar arquivo..."}</span>
+                      <input type="file" accept=".pfx,.p12,.cer,.crt,.pem" className="hidden" data-testid="input-cert-file"
+                        onChange={(e) => setFCertFile(e.target.files?.[0] ?? null)} />
+                    </label>
+                  </div>
+                  <div>
+                    <label className="text-xs font-semibold text-muted-foreground">Senha do certificado (se houver)</label>
+                    <input type="password" value={fCertPassword} onChange={(e) => setFCertPassword(e.target.value)} data-testid="input-cert-password"
+                      className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-xs font-semibold text-muted-foreground">Client ID</label>
+                      <input value={fClientId} onChange={(e) => setFClientId(e.target.value)} data-testid="input-cert-client-id"
+                        className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
+                    </div>
+                    <div>
+                      <label className="text-xs font-semibold text-muted-foreground">Client Secret</label>
+                      <input type="password" value={fClientSecret} onChange={(e) => setFClientSecret(e.target.value)} data-testid="input-cert-client-secret"
+                        className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
+                    </div>
+                  </div>
+                  <button onClick={handleSaveCertificate} disabled={savingCertificate} data-testid="button-save-certificate"
+                    className="w-full py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition">
+                    {savingCertificate ? "Enviando..." : "Enviar certificado"}
+                  </button>
+                </>
+              )}
+
+              {(!credentialProviderInfo || credentialProviderInfo.authMethod === "api_key") && (
+                <>
+                  <p className="text-xs text-muted-foreground">
+                    Cole o token/API key da conta no {PROVIDER_LABELS[credentialAccount.provider] ?? credentialAccount.provider}.
+                    Fica criptografado no banco — ninguém consegue ler o valor depois de salvo.
+                  </p>
+                  <div>
+                    <label className="text-xs font-semibold text-muted-foreground">Token / API Key</label>
+                    <input type="password" value={fSecret} onChange={(e) => setFSecret(e.target.value)} data-testid="input-account-secret"
+                      className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
+                  </div>
+                  <button onClick={handleSaveCredential} disabled={savingCredential} data-testid="button-save-credential"
+                    className="w-full py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition">
+                    {savingCredential ? "Salvando..." : "Salvar credencial"}
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>

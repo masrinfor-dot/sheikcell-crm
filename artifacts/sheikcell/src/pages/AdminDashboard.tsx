@@ -96,6 +96,12 @@ export default function AdminDashboard() {
   const [showChangePassword, setShowChangePassword] = useState(false);
   const { toast } = useToast();
   const [tab, setTab] = useState<Tab>("dashboard");
+  // Volta do redirect OAuth do Financeiro Bancário (?financeiro-bancario=...):
+  // a página não é roteada por URL (abas em estado), então precisa abrir a
+  // aba certa na mão pra FinanceiroBancario.tsx conseguir ler o parâmetro.
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).has("financeiro-bancario")) setTab("financeiro-bancario");
+  }, []);
   const internalChatUnread = useInternalChatNotifier(user?.id, tab === "equipe");
 
   // Alarme de sem resposta clicado em outra aba → volta para o chat.

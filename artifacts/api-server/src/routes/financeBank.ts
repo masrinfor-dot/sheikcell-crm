@@ -1,15 +1,17 @@
 import { Router, type IRouter, type Request } from "express";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   db, bankAccountsTable, bankIntegrationCredentialsTable, bankTransactionsTable,
   acquirerSalesTable, reconciliationMatchesTable, storesTable, usersTable,
 } from "@workspace/db";
 import { eq, and, desc, gte, lte, sql, type SQL } from "drizzle-orm";
-import { requireAdmin, requireAdminOrSupervisor, requireFeature, requireTenant, requireReauth, requireModule, isGlobalRole, verifyPassword } from "../middlewares/auth";
-import { encryptSecret } from "../lib/crypto";
+import { requireAdmin, requireAdminOrSupervisor, requireAuth, requireFeature, requireTenant, requireReauth, requireModule, isGlobalRole, verifyPassword } from "../middlewares/auth";
+import { encryptSecret, type EncryptedSecret } from "../lib/crypto";
 import { listProviders, ALL_PROVIDERS } from "../lib/financeBank/adapters/registry.ts";
 import { runReconciliation } from "../lib/financeBank/reconciliation.ts";
 import { computeMetrics, type MetricsTransaction, type MetricsSale } from "../lib/financeBank/metrics.ts";
 import { logFinanceAudit } from "../lib/financeBank/audit.ts";
+import { isOAuthProvider, authorizeUrl, exchangeCode } from "../lib/oauthProviders.ts";
 
 const router: IRouter = Router();
 router.use("/finance-bank", requireModule("financeiro_bancario"));
@@ -122,27 +124,155 @@ router.delete("/finance-bank/accounts/:id", requireAdmin, requireReauth, async (
 });
 
 // ─── Credenciais de integração (criptografadas antes de gravar) ────────────
+// Compartilhado pelos 3 jeitos de conectar uma conta (token colado, callback
+// OAuth, upload de certificado) — sempre criptografa, grava e marca a conta
+// como conectada do mesmo jeito, só o payload/authType muda por chamador.
+async function saveCredential(
+  req: Request, tenantId: number, accountId: number, provider: string,
+  authType: "oauth" | "api_key" | "certificate", secretPlaintext: string, expiresAt: Date | null,
+): Promise<void> {
+  const encrypted: EncryptedSecret = encryptSecret(secretPlaintext);
+  await db.insert(bankIntegrationCredentialsTable).values({
+    tenantId, bankAccountId: accountId, provider, authType,
+    encryptedPayload: encrypted.ciphertext, iv: encrypted.iv, authTag: encrypted.authTag, keyVersion: encrypted.keyVersion,
+    expiresAt: expiresAt ?? undefined, status: "ativo",
+  });
+  await db.update(bankAccountsTable).set({ status: "conectado", updatedAt: new Date() })
+    .where(eq(bankAccountsTable.id, accountId));
+  // Nunca logar o segredo em si — só que uma credencial foi trocada, quando e por quem.
+  await logFinanceAudit(req, tenantId, "credential.save", "bank_integration_credential", accountId, { provider, authType });
+}
+
 router.post("/finance-bank/accounts/:id/credentials", requireAdmin, requireReauth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
   const account = await getOwnedAccount(id, tenantId);
   if (!account) { res.status(404).json({ error: "Conta não encontrada" }); return; }
 
-  const { secret, authType } = req.body as { secret?: string; authType?: string };
+  const { secret } = req.body as { secret?: string };
   if (typeof secret !== "string" || !secret.trim()) { res.status(400).json({ error: "Informe o token/credencial" }); return; }
 
-  const encrypted = encryptSecret(secret.trim());
-  await db.insert(bankIntegrationCredentialsTable).values({
-    tenantId, bankAccountId: id, provider: account.provider,
-    authType: authType === "oauth" ? "oauth" : "api_key",
-    encryptedPayload: encrypted.ciphertext, iv: encrypted.iv, authTag: encrypted.authTag, keyVersion: encrypted.keyVersion,
-    status: "ativo",
-  });
-  await db.update(bankAccountsTable).set({ status: "conectado", updatedAt: new Date() })
-    .where(eq(bankAccountsTable.id, id));
-  // Nunca logar o segredo em si — só que uma credencial foi trocada, quando e por quem.
-  await logFinanceAudit(req, tenantId, "credential.save", "bank_integration_credential", id, { provider: account.provider, authType: authType === "oauth" ? "oauth" : "api_key" });
+  await saveCredential(req, tenantId, id, account.provider, "api_key", secret.trim(), null);
   res.status(201).json({ ok: true });
+});
+
+// ─── Certificado digital (Inter, Itaú, Bradesco, Sicoob, Sicredi) ───────────
+// Esses bancos não têm login-e-autoriza — o próprio titular gera um
+// certificado (.pfx/.cer/.pem) + client_id/secret na área logada do banco.
+// Guardamos tudo (certificado em base64 + credenciais) num único JSON
+// criptografado — não vai pro disco, é pequeno o bastante pra caber
+// direto na coluna já usada pelos outros dois tipos de credencial.
+const CERT_EXTENSIONS = [".pfx", ".p12", ".cer", ".crt", ".pem"];
+const CERT_MAX_BYTES = 2 * 1024 * 1024; // certificado é pequeno (KBs)
+
+router.post("/finance-bank/accounts/:id/certificate", requireAdmin, requireReauth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
+  const account = await getOwnedAccount(id, tenantId);
+  if (!account) { res.status(404).json({ error: "Conta não encontrada" }); return; }
+
+  const { fileName, mimeType, data, certPassword, clientId, clientSecret } = req.body as {
+    fileName?: string; mimeType?: string; data?: string; certPassword?: string; clientId?: string; clientSecret?: string;
+  };
+  if (!fileName || !CERT_EXTENSIONS.some((ext) => fileName.toLowerCase().endsWith(ext))) {
+    res.status(400).json({ error: "Envie um arquivo .pfx, .p12, .cer, .crt ou .pem" }); return;
+  }
+  if (typeof data !== "string" || !data) { res.status(400).json({ error: "Arquivo vazio" }); return; }
+  if (!clientId?.trim() || !clientSecret?.trim()) { res.status(400).json({ error: "Informe Client ID e Client Secret" }); return; }
+  const bytes = Buffer.from(data, "base64").byteLength;
+  if (bytes > CERT_MAX_BYTES) { res.status(400).json({ error: "Arquivo muito grande (máx. 2MB)" }); return; }
+
+  const bundle = JSON.stringify({
+    certBase64: data, certFileName: fileName, certMimeType: mimeType ?? "application/octet-stream",
+    certPassword: certPassword ?? null, clientId: clientId.trim(), clientSecret: clientSecret.trim(),
+  });
+  await saveCredential(req, tenantId, id, account.provider, "certificate", bundle, null);
+  res.status(201).json({ ok: true });
+});
+
+// ─── OAuth (PagBank, Mercado Pago): "Conectar" sem nunca ver a chave ────────
+// state assinado (HMAC) em vez de guardar numa tabela — cabe tudo que o
+// callback precisa (accountId/tenantId) no próprio state, verificado por
+// assinatura + validade (10 min), sem round-trip extra no banco.
+const STATE_TTL_MS = 10 * 60 * 1000;
+
+function stateSecret(): string {
+  return process.env["FINANCE_OAUTH_STATE_SECRET"] || process.env["SESSION_SECRET"] || "sheikcell-dev-only-secret";
+}
+
+function signOAuthState(payload: { accountId: number; tenantId: number; provider: string; nonce: string; iat: number }): string {
+  const json = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const sig = createHmac("sha256", stateSecret()).update(json).digest("base64url");
+  return `${json}.${sig}`;
+}
+
+function verifyOAuthState(state: string): { accountId: number; tenantId: number; provider: string; iat: number } | null {
+  const [json, sig] = state.split(".");
+  if (!json || !sig) return null;
+  const expected = createHmac("sha256", stateSecret()).update(json).digest("base64url");
+  const sigBuf = Buffer.from(sig);
+  const expBuf = Buffer.from(expected);
+  if (sigBuf.length !== expBuf.length || !timingSafeEqual(sigBuf, expBuf)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(json, "base64url").toString("utf8")) as { accountId: number; tenantId: number; provider: string; iat: number };
+    if (Date.now() - payload.iat > STATE_TTL_MS) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function appOrigin(req: Request): string {
+  return process.env["APP_URL"] || `${req.protocol}://${req.get("host")}`;
+}
+
+// POST (não GET) de propósito: precisa de requireReauth (senha no corpo — uma
+// senha NUNCA deve ir em query string de URL), então devolve a URL de
+// autorização pronta em JSON; o front navega (window.location.href) depois.
+router.post("/finance-bank/oauth/:provider/start", requireAdmin, requireReauth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const provider = req.params.provider as string;
+  if (!isOAuthProvider(provider)) { res.status(400).json({ error: "Provedor não suporta conexão OAuth" }); return; }
+  const { accountId } = req.body as { accountId?: number };
+  const account = accountId != null ? await getOwnedAccount(accountId, tenantId) : null;
+  if (!account) { res.status(404).json({ error: "Conta não encontrada" }); return; }
+  if (account.provider !== provider) { res.status(400).json({ error: "Conta não corresponde ao provedor" }); return; }
+
+  const state = signOAuthState({ accountId: accountId!, tenantId, provider, nonce: randomBytes(8).toString("hex"), iat: Date.now() });
+  const redirectUri = `${appOrigin(req)}/api/finance-bank/oauth/${provider}/callback`;
+  try {
+    res.json({ url: authorizeUrl(provider, redirectUri, state) });
+  } catch (err) {
+    req.log.error({ err }, "Falha ao montar URL de autorização OAuth");
+    res.status(500).json({ error: "Conexão OAuth não configurada para este provedor ainda" });
+  }
+});
+
+router.get("/finance-bank/oauth/:provider/callback", requireAuth, async (req, res): Promise<void> => {
+  const provider = req.params.provider as string;
+  const { code, state } = req.query as { code?: string; state?: string };
+  const back = (qs: string) => res.redirect(`${appOrigin(req)}/?financeiro-bancario=${qs}`);
+  if (!isOAuthProvider(provider) || !code || !state) { back("oauth_error&reason=parametros_invalidos"); return; }
+
+  const decoded = verifyOAuthState(state);
+  if (!decoded || decoded.provider !== provider || decoded.tenantId !== req.session.tenantId) {
+    back("oauth_error&reason=state_invalido"); return;
+  }
+  const account = await getOwnedAccount(decoded.accountId, decoded.tenantId);
+  if (!account) { back("oauth_error&reason=conta_nao_encontrada"); return; }
+
+  try {
+    const redirectUri = `${appOrigin(req)}/api/finance-bank/oauth/${provider}/callback`;
+    const token = await exchangeCode(provider, code, redirectUri);
+    const expiresAt = token.expiresInSeconds ? new Date(Date.now() + token.expiresInSeconds * 1000) : null;
+    const bundle = JSON.stringify({ accessToken: token.accessToken, refreshToken: token.refreshToken, tokenType: "bearer" });
+    await saveCredential(req, decoded.tenantId, decoded.accountId, provider, "oauth", bundle, expiresAt);
+    back("oauth_success");
+  } catch (err) {
+    req.log.error({ err }, "Falha ao trocar código OAuth por access token");
+    await logFinanceAudit(req, decoded.tenantId, "credential.save", "bank_integration_credential", decoded.accountId, { provider, authType: "oauth", failed: true });
+    back("oauth_error&reason=troca_de_token_falhou");
+  }
 });
 
 // ─── Extrato (transações) ───────────────────────────────────────────────────

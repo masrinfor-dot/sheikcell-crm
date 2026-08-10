@@ -185,7 +185,10 @@ export type MeetingItem = {
 };
 
 // ─── Financeiro bancário (conciliação — ver plano da Fase 1) ────────────────
-export type FinanceBankProviderInfo = { provider: string; isBank: boolean; isAcquirer: boolean; configured: boolean };
+export type FinanceBankProviderInfo = {
+  provider: string; isBank: boolean; isAcquirer: boolean; configured: boolean;
+  authMethod: "oauth" | "certificate" | "api_key"; note: string | null;
+};
 export type FinanceBankAccount = {
   id: number; storeId: number; storeName: string; provider: string; kind: "conta" | "maquininha";
   label: string; status: "nao_configurado" | "conectado" | "erro" | "desconectado";
@@ -1247,6 +1250,10 @@ export const api = {
       req<{ ok: boolean }>(`/finance-bank/accounts/${id}`, { method: "DELETE", body: JSON.stringify({ confirmPassword }) }),
     saveCredentials: (id: number, secret: string, confirmPassword?: string) =>
       req<{ ok: boolean }>(`/finance-bank/accounts/${id}/credentials`, { method: "POST", body: JSON.stringify({ secret, confirmPassword }) }),
+    saveCertificate: (id: number, data: { fileName: string; mimeType: string; data: string; certPassword?: string; clientId: string; clientSecret: string; confirmPassword?: string }) =>
+      req<{ ok: boolean }>(`/finance-bank/accounts/${id}/certificate`, { method: "POST", body: JSON.stringify(data) }),
+    oauthStart: (provider: string, accountId: number, confirmPassword?: string) =>
+      req<{ url: string }>(`/finance-bank/oauth/${provider}/start`, { method: "POST", body: JSON.stringify({ accountId, confirmPassword }) }),
     transactions: (params?: { accountId?: number; storeId?: number; status?: string }) => {
       const qs = new URLSearchParams();
       if (params?.accountId) qs.set("accountId", String(params.accountId));
