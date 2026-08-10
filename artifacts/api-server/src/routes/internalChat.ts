@@ -85,9 +85,26 @@ router.get("/internal-chat/events", requireAuth, (req: Request, res: Response): 
     res.write(`data: ${JSON.stringify(ev.data)}\n\n`);
   };
 
+  // sseEmitter.emit() chama TODOS os streams internos abertos no processo (de
+  // qualquer conversa, qualquer loja — o filtro por loja/destinatário roda
+  // dentro de allowed()), na mesma call stack de quem disparou o evento (ex.:
+  // o POST /messages de OUTRO usuário enviando em OUTRA conversa). Se este
+  // stream em particular estiver numa conexão morta/travada, res.write() pode
+  // lançar; sem o try/catch isso derruba o emit inteiro, e o erro sobe até o
+  // handler alheio que chamou broadcastInternal — como não há middleware de
+  // erro nem express-async-errors, o Express 5 responde 500 pra ELE, mesmo a
+  // mensagem dele já tendo sido salva no banco. Quanto mais gente conectada
+  // (grupos grandes = mais participantes = mais streams simultâneos), maior a
+  // chance de UM estar nesse estado numa hora aleatória. Isolando aqui: uma
+  // conexão ruim só se remove a si mesma, nunca derruba o envio de outro.
   const send = (payload: BufferedInternalEvent) => {
     if (!allowed(payload)) return;
-    writeEvent(payload);
+    try {
+      writeEvent(payload);
+    } catch {
+      sseEmitter.off("internal", send);
+      res.destroy();
+    }
   };
 
   // ── Reconnect recovery ──
@@ -254,8 +271,8 @@ router.post("/internal-chat/conversations/group", requireAdmin, async (req, res)
     .values({ tenantId, kind: "group", name: cleanName })
     .returning();
   await db.insert(internalConversationMembersTable).values([
-    { conversationId: created!.id, userId },
-    ...valid.map((v) => ({ conversationId: created!.id, userId: v.id })),
+    { tenantId, conversationId: created!.id, userId },
+    ...valid.map((v) => ({ tenantId, conversationId: created!.id, userId: v.id })),
   ]).onConflictDoNothing();
 
   const conv = {

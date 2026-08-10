@@ -87,9 +87,22 @@ router.get("/chat/events", requireAuth, async (req: Request, res: Response): Pro
     res.write(`data: ${JSON.stringify(ev.data)}\n\n`);
   };
 
+  // sseEmitter.emit() chama todo stream aberto no processo (o filtro de
+  // escopo roda dentro de allowed()) na mesma call stack de quem disparou o
+  // broadcast — inclusive o POST de mensagem de outro usuário/conversa. Se
+  // ESTE stream estiver numa conexão morta, res.write() pode lançar; sem
+  // try/catch isso derruba o emit inteiro e o erro sobe para o handler alheio
+  // (sem middleware de erro nem express-async-errors, o Express 5 responde
+  // 500 pra ele, mesmo a mensagem dele já salva no banco). Isolado aqui: uma
+  // conexão ruim só se remove a si mesma.
   const send = (payload: BufferedEvent) => {
     if (!allowed(payload)) return;
-    writeEvent(payload);
+    try {
+      writeEvent(payload);
+    } catch {
+      sseEmitter.off("broadcast", send);
+      res.destroy();
+    }
   };
 
   // ── Reconnect recovery ──
