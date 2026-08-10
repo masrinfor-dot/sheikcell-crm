@@ -280,12 +280,15 @@ async function upsertConversation(
 }
 
 // ── Pesquisa de satisfação: primeira resposta após a pesquisa ────────────────
-// Se a conversa está aguardando a nota (pendingSurveyLogId), a PRIMEIRA
-// mensagem do cliente consome a pesquisa: nota 1–5 (texto, até 48h) é gravada
-// no attendance_log e a conversa NÃO reabre; qualquer outra resposta apenas
-// encerra a espera e retorna false para seguir o fluxo normal (reabertura,
-// robô etc.). Compartilhado pelos dois caminhos de entrada (Baileys e Meta).
-// Retorna true quando a mensagem foi totalmente tratada aqui.
+// Se a conversa está aguardando a nota (pendingSurveyLogId) e a resposta
+// chega DENTRO do prazo configurado, ela é SEMPRE tratada como resposta da
+// pesquisa — nota extraída quando possível ("5", "5 estrelas, adorei!"),
+// senão gravada como feedback sem nota — e a conversa NUNCA reabre nem
+// rebaixa o estágio no funil por causa disso (é só um feedback pós-
+// atendimento, não uma nova interação). Só quando o prazo já expirou é que a
+// resposta segue o fluxo normal (reabertura, robô etc.) — aí sim é uma nova
+// interação de verdade. Compartilhado pelos dois caminhos de entrada
+// (Baileys e Meta). Retorna true quando a mensagem foi totalmente tratada aqui.
 async function tryConsumeSurveyReply(input: {
   tenantId: number;
   phone: string;
@@ -348,7 +351,11 @@ async function tryConsumeSurveyReply(input: {
     const windowHours = conv.surveyWindowHours ?? surveyCfg.windowHours;
     const rewardText = conv.surveyRewardText
       ?? (surveyCfg.rewardEnabled && surveyCfg.rewardText.trim() ? surveyCfg.rewardText.trim() : null);
-    const numMatch = /^\s*(10|[0-9])\s*(?:⭐|estrelas?)?\s*$/iu.exec(text ?? "");
+    // Extrai a nota mesmo quando vem junto de texto ("5 estrelas, adorei!",
+    // "nota 5", "5 ⭐") — só exige que seja a única sequência de dígitos de
+    // um texto curto, pra não confundir com outro número que aparecesse
+    // solto numa mensagem longa sem relação com a pesquisa.
+    const numMatch = msgType === "text" && text.length <= 60 ? /\b(10|[0-9])\b/u.exec(text) : null;
     const num = numMatch ? parseInt(numMatch[1]!, 10) : null;
     const inScale = num != null && num >= scaleMin && num <= scaleMax;
     const sentAt = conv.surveySentAt?.getTime() ?? 0;
@@ -360,12 +367,19 @@ async function tryConsumeSurveyReply(input: {
       .set({ pendingSurveyLogId: null, surveySentAt: null, surveyScaleMax: null, surveyWindowHours: null, surveyRewardText: null, surveyReminderSentAt: null })
       .where(eq(conversationsTable.id, conv.id));
 
-    if (!(msgType === "text" && inScale && fresh)) return null;
+    // Fora do prazo: não é mais resposta de pesquisa, é uma interação nova de
+    // verdade — segue o fluxo normal (pode reabrir, é o comportamento certo
+    // aqui). DENTRO do prazo, qualquer formato de resposta (nota, texto
+    // livre, áudio, figurinha) é tratado como feedback e NUNCA reabre a
+    // conversa nem rebaixa o estágio no funil — só extrai a nota quando dá.
+    if (!fresh) return null;
 
-    const rating = num!;
-    await tx.update(attendanceLogsTable)
-      .set({ satisfactionRating: rating })
-      .where(eq(attendanceLogsTable.id, surveyLogId));
+    const rating = inScale ? num : null;
+    if (rating != null) {
+      await tx.update(attendanceLogsTable)
+        .set({ satisfactionRating: rating })
+        .where(eq(attendanceLogsTable.id, surveyLogId));
+    }
 
     // Grava a resposta como mensagem da conversa (sem reabrir o atendimento).
     // Conflito de externalId = reentrega duplicada: mantém a nota, sem
@@ -375,7 +389,7 @@ async function tryConsumeSurveyReply(input: {
       conversationId: conv.id,
       content: displayContent,
       direction: "inbound",
-      type: "text",
+      type: msgType,
       status: "delivered",
       senderName: pushName,
       externalId,
@@ -392,7 +406,7 @@ async function tryConsumeSurveyReply(input: {
   });
 
   if (!outcome) return false;
-  if (outcome.duplicate || outcome.rating == null) return true;
+  if (outcome.duplicate) return true;
 
   if (outcome.msg) {
     broadcast(
@@ -406,16 +420,22 @@ async function tryConsumeSurveyReply(input: {
       },
     );
     // Agradece pelo mesmo caminho anti-ban do bridge (melhor esforço) e, se
-    // configurado, entrega a recompensa (cupom/voucher) a quem respondeu.
+    // configurado, entrega a recompensa (cupom/voucher) a quem respondeu com
+    // uma nota. Resposta sem nota extraível (texto livre, áudio, figurinha)
+    // ainda é feedback válido — só não dá pra render a recompensa "por nota".
     const { sendOutboundText } = await import("./outbound");
-    const reward = "rewardText" in outcome && outcome.rewardText
-      ? `\n\n🎁 ${outcome.rewardText}`
-      : "";
-    void sendOutboundText(
-      outcome.conv.id,
-      `${buildThankYouMessage(cfg.thankYouMessage, outcome.rating)}${reward}`,
-      "Pesquisa de satisfação",
-    ).catch(() => {});
+    if (outcome.rating != null) {
+      const reward = "rewardText" in outcome && outcome.rewardText
+        ? `\n\n🎁 ${outcome.rewardText}`
+        : "";
+      void sendOutboundText(
+        outcome.conv.id,
+        `${buildThankYouMessage(cfg.thankYouMessage, outcome.rating)}${reward}`,
+        "Pesquisa de satisfação",
+      ).catch(() => {});
+    } else {
+      void sendOutboundText(outcome.conv.id, "Obrigado pelo seu feedback! 🙏", "Pesquisa de satisfação").catch(() => {});
+    }
   }
   return true;
 }
