@@ -1,5 +1,6 @@
 import { db, conversationsTable, messagesTable, sectorsTable, attendanceLogsTable, whatsappSessionsTable } from "@workspace/db";
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, desc, sql, inArray } from "drizzle-orm";
+import { normalizePhone, phoneVariants } from "./phone";
 import { broadcast } from "./sseEmitter";
 import { isPotentialConversation, restrictedRecipients } from "./conversationScope";
 import { classifyText } from "./autoRouter";
@@ -204,6 +205,17 @@ async function upsertConversation(
   // Grupos: mantém o nome da conversa sincronizado com o nome do grupo.
   syncName: boolean = false,
 ) {
+  // Grupos: o "telefone" é o próprio JID (já único/canônico) — não passa por
+  // normalização de número de pessoa física.
+  const isGroupJid = phone.includes("@g.us");
+  // Forma canônica pra GRAVAR (converge o histórico aos poucos) e todas as
+  // variações plausíveis pra COMPARAR contra conversas antigas que podem ter
+  // sido salvas com/sem DDI ou com/sem o 9º dígito — sem isso, o mesmo
+  // cliente cria uma conversa nova toda vez que o WhatsApp entrega o JID
+  // num formato ligeiramente diferente do que já está salvo.
+  const storedPhone = isGroupJid ? phone : normalizePhone(phone);
+  const matchCandidates = isGroupJid ? [phone] : phoneVariants(phone);
+
   // Same customer talking to two different WhatsApp numbers = two separate
   // conversations, so replies always go out through the number the customer
   // contacted. Multi-loja: sempre escopado pela loja (tenant) da sessão.
@@ -212,7 +224,7 @@ async function upsertConversation(
     .from(conversationsTable)
     .where(and(
       eq(conversationsTable.tenantId, tenantId),
-      eq(conversationsTable.phone, phone),
+      inArray(conversationsTable.phone, matchCandidates),
       eq(conversationsTable.sessionKey, sessionKey),
       eq(conversationsTable.isArchived, false),
     ))
@@ -232,7 +244,7 @@ async function upsertConversation(
       .insert(conversationsTable)
       .values({
         tenantId,
-        phone,
+        phone: storedPhone,
         name: pushName,
         avatarUrl: avatarUrl ?? null,
         channel: "whatsapp",
@@ -265,6 +277,10 @@ async function upsertConversation(
         ...(reopen ? { status: "open", assigneeId: null, attendanceStartedAt: null } : {}),
         ...(avatarUrl && avatarUrl !== conv.avatarUrl ? { avatarUrl } : {}),
         ...(syncName && pushName && pushName !== conv.name ? { name: pushName } : {}),
+        // Convergência gradual: se a conversa foi achada via variante (número
+        // salvo antigo, sem DDI ou sem o 9º dígito), atualiza pra forma
+        // canônica agora que veio uma mensagem nova.
+        ...(!isGroupJid && conv.phone !== storedPhone ? { phone: storedPhone } : {}),
       })
       .where(eq(conversationsTable.id, conv.id))
       .returning();

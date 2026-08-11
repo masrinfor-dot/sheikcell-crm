@@ -19,6 +19,7 @@ import {
 import { isPotentialConversation, isRestrictedConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES } from "../lib/conversationScope";
 import { ensureCrmContactForConversation, syncCrmAttendant } from "../lib/crmSync";
 import { sendOutboundText } from "../lib/outbound";
+import { normalizePhone, phoneVariants } from "../lib/phone";
 import { getSurveySettings, buildSurveyMessage } from "../lib/surveySettings";
 
 // Sinaliza que a pesquisa está desligada nas configurações (não é erro).
@@ -321,19 +322,24 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
   }
 
   // Nível do cliente no CRM (Novo/Regular/VIP) para os filtros da central.
-  const normPhones = [...new Set(rows.map((c) => (c.phone ?? "").replace(/\D/g, "")).filter(Boolean))];
-  const crmRows = normPhones.length > 0
+  // Casa por todas as variações plausíveis do número (com/sem DDI, com/sem o
+  // 9º dígito) — contato do CRM salvo num formato antigo não pode "sumir"
+  // da central só porque a conversa chegou num formato diferente.
+  const normPhones = [...new Set(rows.map((c) => normalizePhone(c.phone)).filter(Boolean))];
+  const phoneVariantSet = [...new Set(normPhones.flatMap((p) => phoneVariants(p)))];
+  const crmRows = phoneVariantSet.length > 0
     ? await db
         .select({ phone: crmContactsTable.phone, sectorId: crmContactsTable.sectorId, profile: crmContactsTable.profile })
         .from(crmContactsTable)
-        .where(and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.isArchived, false), inArray(crmContactsTable.phone, normPhones)))
+        .where(and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.isArchived, false), inArray(crmContactsTable.phone, phoneVariantSet)))
     : [];
   const crmProfileMap: Record<string, string> = {};
   for (const r of crmRows) {
     if (!r.phone) continue;
+    const canonical = normalizePhone(r.phone);
     // Prioriza o contato do mesmo setor; telefone sozinho fica como fallback.
-    crmProfileMap[`${r.phone}|${r.sectorId ?? ""}`] = r.profile;
-    if (!(r.phone in crmProfileMap)) crmProfileMap[r.phone] = r.profile;
+    crmProfileMap[`${canonical}|${r.sectorId ?? ""}`] = r.profile;
+    if (!(canonical in crmProfileMap)) crmProfileMap[canonical] = r.profile;
   }
 
   // Conversas fixadas pelo usuário logado (fixar é individual).
@@ -346,7 +352,7 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
   const pinnedSet = new Set(myPins.map((p) => p.conversationId));
 
   const enriched = rows.map((c) => {
-    const np = (c.phone ?? "").replace(/\D/g, "");
+    const np = normalizePhone(c.phone);
     return {
       ...c,
       sector: c.sectorId ? (sectorMap[c.sectorId] ?? null) : null,
@@ -849,20 +855,24 @@ async function syncResolvedConversation(
   // 2) CRM contact — link the conversation to a CRM record (find-or-create by
   //    phone). The lookup is scoped to the conversation's effective sector so we
   //    never read or mutate a same-phone contact that belongs to another sector.
-  const normalizedPhone = (conv.phone ?? "").replace(/\D/g, "");
+  const normalizedPhone = normalizePhone(conv.phone);
+  const phoneVariantsForFinalize = phoneVariants(conv.phone);
   // Grupos/comunidades não entram no CRM (não são um cliente com telefone).
   if (normalizedPhone && !(conv.phone ?? "").includes("@g.us")) {
     const sectorCondition = effectiveSectorId != null
       ? eq(crmContactsTable.sectorId, effectiveSectorId)
       : isNull(crmContactsTable.sectorId);
     const [existing] = await tx.select().from(crmContactsTable)
-      .where(and(eq(crmContactsTable.tenantId, conv.tenantId), eq(crmContactsTable.isArchived, false), eq(crmContactsTable.phone, normalizedPhone), sectorCondition))
+      .where(and(eq(crmContactsTable.tenantId, conv.tenantId), eq(crmContactsTable.isArchived, false), inArray(crmContactsTable.phone, phoneVariantsForFinalize), sectorCondition))
       .limit(1);
     let contactId: number | null = null;
     if (existing) {
       contactId = existing.id;
       await tx.update(crmContactsTable)
-        .set({ updatedAt: new Date() })
+        .set({
+          updatedAt: new Date(),
+          ...(existing.phone !== normalizedPhone ? { phone: normalizedPhone } : {}),
+        })
         .where(eq(crmContactsTable.id, existing.id));
     } else {
       const [created] = await tx.insert(crmContactsTable).values({
@@ -1283,11 +1293,12 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
   }
 
   // Bloqueia atendimento duplicado: se já existe conversa EM ANDAMENTO (não
-  // finalizada/arquivada) para esse número, não cria outra. Compara só os
-  // dígitos e também com/sem DDI 55, pois o número salvo pode ter formato
-  // diferente do digitado.
+  // finalizada/arquivada) para esse número, não cria outra. Compara contra
+  // todas as variações plausíveis (com/sem DDI, com/sem o 9º dígito), pois o
+  // número salvo pode ter formato diferente do digitado.
   const digits = phone.replace(/\D/g, "");
-  if (digits) {
+  const dupCandidates = phoneVariants(phone);
+  if (digits && dupCandidates.length > 0) {
     const [dup] = await db.select({
       id: conversationsTable.id,
       name: conversationsTable.name,
@@ -1298,7 +1309,7 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
       .where(and(
         eq(conversationsTable.tenantId, tenantId),
         notInArray(conversationsTable.status, ["resolved", "archived"]),
-        sql`regexp_replace(${conversationsTable.phone}, '\\D', '', 'g') IN (${digits}, ${`55${digits}`}, ${digits.startsWith("55") ? digits.slice(2) : digits})`,
+        inArray(conversationsTable.phone, dupCandidates),
       ))
       .limit(1);
     if (dup) {
@@ -1399,7 +1410,7 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
 
   const [conv] = await db.insert(conversationsTable).values({
     tenantId,
-    phone, name,
+    phone: normalizePhone(phone) || phone, name,
     channel: channel ?? "manual",
     sectorId: effectiveSectorId,
     status: "open",
@@ -1906,14 +1917,14 @@ router.post("/chat/conversations/:id/suggest-reply", requireAuth, requirePerm("u
 
   // Resolve the linked CRM contact (find by normalized phone, scoped to the
   // conversation's sector — same rule used by the CRM sync helpers).
-  const normalizedPhone = (conv.phone ?? "").replace(/\D/g, "");
+  const suggestPhoneVariants = phoneVariants(conv.phone);
   let contact: typeof crmContactsTable.$inferSelect | undefined;
-  if (normalizedPhone && !(conv.phone ?? "").includes("@g.us")) {
+  if (suggestPhoneVariants.length > 0 && !(conv.phone ?? "").includes("@g.us")) {
     const sectorCondition = conv.sectorId != null
       ? eq(crmContactsTable.sectorId, conv.sectorId)
       : isNull(crmContactsTable.sectorId);
     [contact] = await db.select().from(crmContactsTable)
-      .where(and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.isArchived, false), eq(crmContactsTable.phone, normalizedPhone), sectorCondition))
+      .where(and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.isArchived, false), inArray(crmContactsTable.phone, suggestPhoneVariants), sectorCondition))
       .limit(1);
   }
 

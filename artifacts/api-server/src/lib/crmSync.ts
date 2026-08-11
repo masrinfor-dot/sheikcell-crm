@@ -1,7 +1,8 @@
 import { db, crmContactsTable, usersTable, sectorsTable } from "@workspace/db";
-import { eq, and, isNull } from "drizzle-orm";
+import { eq, and, isNull, inArray } from "drizzle-orm";
 import { logger } from "./logger";
 import { broadcast } from "./sseEmitter";
+import { normalizePhone, phoneVariants } from "./phone";
 
 // Coluna do quadro CRM correspondente ao estado da conversa no atendimento.
 // Espelha as categorias do ChatCenter: sem responsável e aberta = Potencial;
@@ -35,18 +36,20 @@ export async function syncCrmAttendant(conv: {
 }): Promise<void> {
   try {
     if ((conv.phone ?? "").includes("@g.us")) return;
-    const normalizedPhone = (conv.phone ?? "").replace(/\D/g, "");
-    if (!normalizedPhone) return;
+    const variants = phoneVariants(conv.phone);
+    if (variants.length === 0) return;
 
     const sectorCondition = conv.sectorId != null
       ? eq(crmContactsTable.sectorId, conv.sectorId)
       : isNull(crmContactsTable.sectorId);
-    // Multi-loja: só sincroniza com o contato do CRM da MESMA loja.
+    // Multi-loja: só sincroniza com o contato do CRM da MESMA loja. Compara
+    // por todas as variações plausíveis do número (com/sem DDI, com/sem o 9º
+    // dígito) pra não perder o contato salvo num formato antigo.
     const [existing] = await db.select().from(crmContactsTable)
       .where(and(
         eq(crmContactsTable.tenantId, conv.tenantId),
         eq(crmContactsTable.isArchived, false),
-        eq(crmContactsTable.phone, normalizedPhone),
+        inArray(crmContactsTable.phone, variants),
         sectorCondition,
       ))
       .limit(1);
@@ -96,19 +99,23 @@ export async function ensureCrmContactForConversation(conv: {
   try {
     // Grupos/comunidades do WhatsApp não são clientes — não entram no CRM.
     if ((conv.phone ?? "").includes("@g.us")) return;
-    const normalizedPhone = (conv.phone ?? "").replace(/\D/g, "");
-    if (!normalizedPhone) return;
+    const normalizedPhone = normalizePhone(conv.phone);
+    const variants = phoneVariants(conv.phone);
+    if (!normalizedPhone || variants.length === 0) return;
 
     const sectorCondition = conv.sectorId != null
       ? eq(crmContactsTable.sectorId, conv.sectorId)
       : isNull(crmContactsTable.sectorId);
 
     // Multi-loja: busca/cria o contato do CRM sempre dentro da loja da conversa.
+    // Compara por todas as variações plausíveis (com/sem DDI, com/sem o 9º
+    // dígito) — sem isso, o mesmo cliente ganha um contato de CRM novo toda
+    // vez que o número chega formatado diferente do que já está salvo.
     const [existing] = await db.select().from(crmContactsTable)
       .where(and(
         eq(crmContactsTable.tenantId, conv.tenantId),
         eq(crmContactsTable.isArchived, false),
-        eq(crmContactsTable.phone, normalizedPhone),
+        inArray(crmContactsTable.phone, variants),
         sectorCondition,
       ))
       .limit(1);
@@ -126,6 +133,8 @@ export async function ensureCrmContactForConversation(conv: {
           // reflete no cartão do CRM sem apagar um atendente já definido.
           ...(conv.assigneeId != null ? { attendantId: conv.assigneeId } : {}),
           ...(stage != null ? { status: stage } : {}),
+          // Convergência gradual pra forma canônica (ver comentário acima).
+          ...(existing.phone !== normalizedPhone ? { phone: normalizedPhone } : {}),
         })
         .where(eq(crmContactsTable.id, existing.id));
     } else {

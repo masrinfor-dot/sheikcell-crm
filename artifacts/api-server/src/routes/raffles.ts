@@ -4,6 +4,7 @@ import { and, desc, eq, gte, inArray, or, sql } from "drizzle-orm";
 import { db, rafflesTable, raffleDrawsTable, conversationsTable, usersTable, attendanceLogsTable } from "@workspace/db";
 import { requireAuth, requireTenant, requireModule } from "../middlewares/auth";
 import { logger } from "../lib/logger";
+import { normalizePhone } from "../lib/phone";
 
 const router: IRouter = Router();
 router.use("/raffles", requireModule("sorteios"));
@@ -125,12 +126,12 @@ async function eligibleClients(raffle: Raffle): Promise<{ phone: string; name: s
       const logs = await db.select({ contact: attendanceLogsTable.clientContact })
         .from(attendanceLogsTable).where(and(...logWhere));
       for (const l of logs) {
-        const key = (l.contact ?? "").replace(/\D/g, "");
+        const key = normalizePhone(l.contact);
         if (key) okPhones.add(key);
       }
     }
     rows = rows.filter((r) => {
-      const key = r.phone.replace(/\D/g, "");
+      const key = normalizePhone(r.phone);
       if (okPhones.has(key)) return true;
       if (wantProspec && r.status !== "resolved" && r.status !== "archived") return true;
       return false;
@@ -152,16 +153,16 @@ async function eligibleClients(raffle: Raffle): Promise<{ phone: string; name: s
       .from(attendanceLogsTable).where(and(...surveyWhere));
     const ratedPhones = new Set<string>();
     for (const l of rated) {
-      const key = (l.contact ?? "").replace(/\D/g, "");
+      const key = normalizePhone(l.contact);
       if (key) ratedPhones.add(key);
     }
-    rows = rows.filter((r) => ratedPhones.has(r.phone.replace(/\D/g, "")));
+    rows = rows.filter((r) => ratedPhones.has(normalizePhone(r.phone)));
   }
 
   // Cada cliente (telefone) entra UMA vez — fica com a conversa mais recente.
   const byPhone = new Map<string, { phone: string; name: string; conversationId: number; at: number }>();
   for (const r of rows) {
-    const key = r.phone.replace(/\D/g, "");
+    const key = normalizePhone(r.phone);
     if (!key) continue;
     const at = r.updatedAt ? new Date(r.updatedAt).getTime() : 0;
     const cur = byPhone.get(key);
@@ -175,9 +176,9 @@ async function eligibleClients(raffle: Raffle): Promise<{ phone: string; name: s
       .from(raffleDrawsTable).where(eq(raffleDrawsTable.raffleId, raffle.id));
     const won = new Set<string>();
     for (const d of draws) {
-      for (const w of (d.winners as Winner[] | null) ?? []) won.add(String(w.phone).replace(/\D/g, ""));
+      for (const w of (d.winners as Winner[] | null) ?? []) won.add(normalizePhone(String(w.phone)));
     }
-    list = list.filter((c) => !won.has(c.phone.replace(/\D/g, "")));
+    list = list.filter((c) => !won.has(normalizePhone(c.phone)));
   }
 
   return list.map(({ phone, name, conversationId }) => ({ phone, name, conversationId }));

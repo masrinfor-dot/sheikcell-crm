@@ -1,10 +1,11 @@
 import { Router, type IRouter } from "express";
 import { db, crmContactsTable, crmPurchasesTable, crmInternalNotesTable, crmCustomFieldsTable, sectorsTable, usersTable, attendanceLogsTable } from "@workspace/db";
-import { eq, and, desc, asc, ilike, or } from "drizzle-orm";
+import { eq, and, desc, asc, ilike, or, inArray } from "drizzle-orm";
 import { requireAuth, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
 import { requirePerm } from "../lib/permissions";
 import { isValidStoreName } from "./stores";
 import { broadcast } from "../lib/sseEmitter";
+import { normalizePhone, phoneVariants } from "../lib/phone";
 import type { Request } from "express";
 
 const router: IRouter = Router();
@@ -129,14 +130,16 @@ router.post("/crm/auto-register", requireAuth, async (req, res): Promise<void> =
   // Sector-scoped roles are pinned to their own sector; they cannot specify a different one.
   const effectiveSectorId = isGlobalRole(userRole) ? (sectorId ?? null) : userSectorId;
 
-  const normalizedPhone = (phone ?? contact ?? "").replace(/\D/g, "");
+  const normalizedPhone = normalizePhone(phone ?? contact);
+  const variants = phoneVariants(phone ?? contact);
   let existing: typeof crmContactsTable.$inferSelect | undefined;
-  if (normalizedPhone) {
+  if (variants.length > 0) {
     // Scope the lookup to the caller's sector for sector-scoped roles so they
-    // cannot probe for contacts in other sectors via phone number.
+    // cannot probe for contacts in other sectors via phone number. Compara
+    // por todas as variações plausíveis (com/sem DDI, com/sem o 9º dígito).
     const phoneConditions = isGlobalRole(userRole)
-      ? and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.isArchived, false), eq(crmContactsTable.phone, normalizedPhone))
-      : and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.isArchived, false), eq(crmContactsTable.phone, normalizedPhone), eq(crmContactsTable.sectorId, effectiveSectorId!));
+      ? and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.isArchived, false), inArray(crmContactsTable.phone, variants))
+      : and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.isArchived, false), inArray(crmContactsTable.phone, variants), eq(crmContactsTable.sectorId, effectiveSectorId!));
     const rows = await db.select().from(crmContactsTable).where(phoneConditions);
     existing = rows[0];
   }
@@ -322,7 +325,7 @@ router.post("/crm", requireAuth, async (req, res): Promise<void> => {
   }
   const [created] = await db.insert(crmContactsTable).values({
     tenantId,
-    name, contact, phone, email,
+    name, contact, phone: phone ? normalizePhone(phone) : phone, email,
     sectorId: effectiveSectorId,
     attendantId: attendantId ?? null,
     status: status ?? "potential",
@@ -367,7 +370,7 @@ router.patch("/crm/:id", requireAuth, async (req, res): Promise<void> => {
   const update: Record<string, unknown> = { updatedAt: new Date() };
   if (name !== undefined) update.name = name;
   if (contact !== undefined) update.contact = contact;
-  if (phone !== undefined) update.phone = phone;
+  if (phone !== undefined) update.phone = phone ? normalizePhone(phone) : phone;
   if (email !== undefined) update.email = email;
   // Only admins may reassign a contact to a different sector.
   if (sectorId !== undefined && userRole === "admin") update.sectorId = sectorId;
