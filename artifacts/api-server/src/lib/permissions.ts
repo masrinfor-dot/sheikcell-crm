@@ -16,10 +16,8 @@ export const PERMISSION_KEYS = [
   // Abas do painel (visibilidade controlada pelo admin)
   "equipe",           // chat interno Equipe
   "financeiras",      // aba Financeiras (links de bancos)
-  "peliculas",        // aba Películas (compatibilidade)
   "avaliacao",        // aba Avaliação (trade-in)
   "treinamentos",     // aba Treinamentos
-  "planilhas",        // aba Planilhas
 ] as const;
 export type PermissionKey = (typeof PERMISSION_KEYS)[number];
 

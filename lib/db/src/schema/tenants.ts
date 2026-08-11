@@ -6,8 +6,8 @@ import { usersTable } from "./users";
 // users.adminAccess/permissions). Núcleo do CRM (Atendimento, CRM, chat
 // interno, etc.) não entra aqui: é sempre liberado.
 export const OPTIONAL_MODULES = [
-  "peliculas", "avaliacao", "financeiras", "financeiro_bancario", "rh",
-  "treinamentos", "questionarios", "sorteios", "planilhas", "documentos", "robo",
+  "avaliacao", "financeiras", "rh",
+  "treinamentos", "questionarios", "sorteios", "documentos", "robo",
 ] as const;
 export type OptionalModule = typeof OPTIONAL_MODULES[number];
 

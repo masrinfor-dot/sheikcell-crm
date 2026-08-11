@@ -12,11 +12,9 @@ const CHAT_EVENTS_URL = "/api/chat/events";
 import CrmBoard from "./CrmBoard";
 import ChatCenter from "./ChatCenter";
 import Financeiras from "./Financeiras";
-import Peliculas from "./Peliculas";
 import Avaliacao from "./Avaliacao";
 import Questionarios from "./Questionarios";
 import Treinamentos from "./Treinamentos";
-import Planilhas from "./Planilhas";
 import Documentos from "./Documentos";
 import EquipeOnline from "@/components/EquipeOnline";
 import RH from "./RH";
@@ -25,12 +23,10 @@ import Suporte from "./Suporte";
 import Sorteios from "./Sorteios";
 import Robo from "./Robo";
 import Financeiro from "./Financeiro";
-import FinanceiroBancario from "./FinanceiroBancario";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
 import ChecklistGate from "@/components/ChecklistGate";
 import TrainingGate from "@/components/TrainingGate";
 import InternalChat from "./InternalChat";
-import DistribuicaoPanel from "./DistribuicaoPanel";
 import TaskBoard from "./TaskBoard";
 import SystemBoard from "./SystemBoard";
 import ConfiguracoesAparencia from "./ConfiguracoesAparencia";
@@ -38,23 +34,23 @@ import BrandLogo from "@/components/BrandLogo";
 import {
   Smartphone, LogOut, LayoutDashboard, ClipboardList,
   Settings, Users, RefreshCw, Plus, X, Clock, CheckCircle,
-  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, GitFork, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, Table2, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck,
+  PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck,
   AlertTriangle, WifiOff,
-  FolderArchive, Headphones, ShoppingBag, BarChart3, SlidersHorizontal, Palette, ChevronDown, Banknote, Wrench,
+  FolderArchive, Headphones, ShoppingBag, BarChart3, SlidersHorizontal, Palette, ChevronDown, Wrench,
   ArrowRight, Filter, BookUser, LifeBuoy,
 } from "lucide-react";
 import Resultados from "./Resultados";
 
-type Tab = "dashboard" | "resultados" | "chat" | "equipe" | "tarefas" | "financeiras" | "peliculas" | "avaliacao" | "questionarios" | "treinamentos" | "planilhas" | "documentos" | "rh" | "sorteios" | "robo" | "financeiro" | "financeiro-bancario" | "distribuicao" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "sistema" | "diretorio" | "suporte";
+type Tab = "dashboard" | "resultados" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "questionarios" | "treinamentos" | "documentos" | "rh" | "sorteios" | "robo" | "financeiro" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "sistema" | "diretorio" | "suporte";
 
 // Categorias colapsáveis do menu lateral — cada aba pertence a um único grupo.
 type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabIds: Tab[] };
 const TAB_GROUPS: TabGroup[] = [
-  { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["dashboard", "chat", "equipe", "distribuicao", "crm"] },
-  { key: "vendas", label: "Vendas e Serviços", icon: ShoppingBag, tabIds: ["peliculas", "avaliacao", "financeiras"] },
-  { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["resultados", "tarefas", "planilhas", "documentos", "history", "suporte"] },
+  { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["dashboard", "chat", "equipe", "crm"] },
+  { key: "vendas", label: "Vendas e Serviços", icon: ShoppingBag, tabIds: ["avaliacao", "financeiras"] },
+  { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["resultados", "tarefas", "documentos", "history", "suporte"] },
   { key: "pessoas", label: "Pessoas", icon: Users, tabIds: ["diretorio", "rh", "treinamentos", "questionarios", "sorteios", "users"] },
-  { key: "administracao", label: "Administração", icon: Settings, tabIds: ["financeiro", "financeiro-bancario", "sectors", "quickreplies", "whatsapp", "robo"] },
+  { key: "administracao", label: "Administração", icon: Settings, tabIds: ["financeiro", "sectors", "quickreplies", "whatsapp", "robo"] },
   { key: "configuracoes", label: "Configurações", icon: SlidersHorizontal, tabIds: ["aparencia"] },
   { key: "sistema", label: "Sistema (Dev)", icon: Wrench, tabIds: ["sistema"] },
 ];
@@ -96,12 +92,6 @@ export default function AdminDashboard() {
   const [showChangePassword, setShowChangePassword] = useState(false);
   const { toast } = useToast();
   const [tab, setTab] = useState<Tab>("dashboard");
-  // Volta do redirect OAuth do Financeiro Bancário (?financeiro-bancario=...):
-  // a página não é roteada por URL (abas em estado), então precisa abrir a
-  // aba certa na mão pra FinanceiroBancario.tsx conseguir ler o parâmetro.
-  useEffect(() => {
-    if (new URLSearchParams(window.location.search).has("financeiro-bancario")) setTab("financeiro-bancario");
-  }, []);
   const internalChatUnread = useInternalChatNotifier(user?.id, tab === "equipe");
 
   // Alarme de sem resposta clicado em outra aba → volta para o chat.
@@ -142,11 +132,10 @@ export default function AdminDashboard() {
   const [waSessions, setWaSessions] = useState<WASession[] | null>(null);
   const [waLoading, setWaLoading] = useState(false);
   const [newConnName, setNewConnName] = useState("");
-  // Visão Geral "viva": o que precisa de atenção agora, prévia do chat interno
-  // e saldo bancário — tudo que hoje só aparece entrando em cada aba.
+  // Visão Geral "viva": o que precisa de atenção agora e prévia do chat
+  // interno — tudo que hoje só aparece entrando em cada aba.
   const [attention, setAttention] = useState<DashboardAttention | null>(null);
   const [internalPreview, setInternalPreview] = useState<InternalConversation[]>([]);
-  const [financeBankSnapshot, setFinanceBankSnapshot] = useState<{ totalCents: number; pendingCount: number } | null>(null);
 
   // Modals
   const [showAddUser, setShowAddUser] = useState(false);
@@ -275,11 +264,6 @@ export default function AdminDashboard() {
     api.internalChat.conversations()
       .then((list) => { if (!cancelled) setInternalPreview(list.filter((c) => c.unreadCount > 0)); })
       .catch(() => {});
-    if (user?.role === "admin") {
-      Promise.all([api.financeBank.dashboard(), api.financeBank.metrics()])
-        .then(([d, m]) => { if (!cancelled) setFinanceBankSnapshot({ totalCents: d.totalCents, pendingCount: m.totals.pendingCount }); })
-        .catch(() => {});
-    }
     return () => { cancelled = true; };
   }, [tab, user?.role]);
 
@@ -420,16 +404,12 @@ export default function AdminDashboard() {
     { id: "chat" as Tab, label: "Atendimento", icon: MessageCircle, adminOnly: false },
     { id: "equipe" as Tab, label: "Chat Interno", icon: MessagesSquare, adminOnly: false },
     { id: "tarefas" as Tab, label: "Tarefas", icon: ListTodo, adminOnly: false },
-    { id: "distribuicao" as Tab, label: "Distribuição", icon: GitFork, adminOnly: false },
     { id: "crm" as Tab, label: "CRM", icon: Kanban, adminOnly: false },
     { id: "financeiro" as Tab, label: "Financeiro", icon: BadgeDollarSign, adminOnly: true },
-    { id: "financeiro-bancario" as Tab, label: "Financeiro Bancário", icon: Banknote, adminOnly: true, module: "financeiro_bancario" as OptionalModule },
     { id: "financeiras" as Tab, label: "Financeiras", icon: Landmark, adminOnly: false, module: "financeiras" as OptionalModule },
-    { id: "peliculas" as Tab, label: "Películas", icon: ShieldCheck, adminOnly: false, module: "peliculas" as OptionalModule },
     { id: "avaliacao" as Tab, label: "Avaliação de Usados", icon: BadgeDollarSign, adminOnly: false, module: "avaliacao" as OptionalModule },
     { id: "questionarios" as Tab, label: "Questionários", icon: ClipboardList, adminOnly: true, module: "questionarios" as OptionalModule },
     { id: "treinamentos" as Tab, label: "Treinamentos", icon: GraduationCap, adminOnly: false, module: "treinamentos" as OptionalModule },
-    { id: "planilhas" as Tab, label: "Planilhas", icon: Table2, adminOnly: false, module: "planilhas" as OptionalModule },
     { id: "documentos" as Tab, label: "Documentos", icon: FolderArchive, adminOnly: false, module: "documentos" as OptionalModule },
     { id: "diretorio" as Tab, label: "Diretório", icon: BookUser, adminOnly: false },
     { id: "suporte" as Tab, label: "Suporte", icon: LifeBuoy, adminOnly: false },
@@ -674,24 +654,6 @@ export default function AdminDashboard() {
                       );
                     })()}
 
-                    {financeBankSnapshot && (
-                      <div className="shk-card p-5">
-                        <h2 className="font-bold text-foreground flex items-center gap-2 text-sm mb-3">
-                          <Banknote className="w-4 h-4 text-green-600" />Financeiro Bancário
-                        </h2>
-                        <div className="flex items-baseline justify-between">
-                          <span className="text-xs text-muted-foreground">Saldo conhecido</span>
-                          <span className="text-lg font-extrabold text-foreground">{(financeBankSnapshot.totalCents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}</span>
-                        </div>
-                        {financeBankSnapshot.pendingCount > 0 && (
-                          <button onClick={() => setTab("financeiro-bancario")} data-testid="attention-finance-pending"
-                            className="w-full flex items-center justify-between mt-2 pt-2 border-t border-border text-left hover:opacity-80 transition">
-                            <span className="text-xs text-muted-foreground">Pendentes de conciliação</span>
-                            <span className="text-xs font-bold text-amber-600">{financeBankSnapshot.pendingCount}</span>
-                          </button>
-                        )}
-                      </div>
-                    )}
                   </div>
                 </div>
               );
@@ -756,13 +718,9 @@ export default function AdminDashboard() {
 
         {tab === "tarefas" && <TaskBoard />}
 
-        {tab === "distribuicao" && <DistribuicaoPanel />}
-
         {tab === "crm" && <CrmBoard />}
 
         {tab === "financeiras" && <Financeiras />}
-
-        {tab === "peliculas" && <Peliculas />}
 
         {tab === "avaliacao" && <Avaliacao />}
 
@@ -770,7 +728,6 @@ export default function AdminDashboard() {
 
         {tab === "treinamentos" && <Treinamentos />}
 
-        {tab === "planilhas" && <Planilhas />}
         {tab === "documentos" && <Documentos />}
 
         {tab === "diretorio" && <TeamDirectory />}
@@ -784,7 +741,6 @@ export default function AdminDashboard() {
         {tab === "robo" && <Robo />}
 
         {tab === "financeiro" && <Financeiro />}
-        {tab === "financeiro-bancario" && <FinanceiroBancario />}
 
         {tab === "aparencia" && <ConfiguracoesAparencia />}
 

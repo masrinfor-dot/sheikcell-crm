@@ -56,10 +56,8 @@ export const PERMISSION_KEYS = [
   "enviar_midia",
   "equipe",
   "financeiras",
-  "peliculas",
   "avaliacao",
   "treinamentos",
-  "planilhas",
 ] as const;
 
 export const PERMISSION_LABELS: Record<string, string> = {
@@ -73,10 +71,8 @@ export const PERMISSION_LABELS: Record<string, string> = {
   enviar_midia: "Enviar fotos, áudios e arquivos",
   equipe: "Aba Equipe (chat interno)",
   financeiras: "Aba Financeiras (bancos)",
-  peliculas: "Aba Películas",
   avaliacao: "Aba Avaliação (aparelho usado)",
   treinamentos: "Aba Treinamentos",
-  planilhas: "Aba Planilhas",
 };
 
 export type User = {
@@ -102,20 +98,17 @@ export type User = {
 // Módulos opcionais que uma loja pode ou não ter contratado — mesma lista
 // de OPTIONAL_MODULES em lib/db/src/schema/tenants.ts (mantenha em sincronia).
 export const OPTIONAL_MODULES = [
-  "peliculas", "avaliacao", "financeiras", "financeiro_bancario", "rh",
-  "treinamentos", "questionarios", "sorteios", "planilhas", "documentos", "robo",
+  "avaliacao", "financeiras", "rh",
+  "treinamentos", "questionarios", "sorteios", "documentos", "robo",
 ] as const;
 export type OptionalModule = typeof OPTIONAL_MODULES[number];
 export const MODULE_LABELS: Record<OptionalModule, string> = {
-  peliculas: "Películas",
   avaliacao: "Avaliação de Usados",
   financeiras: "Financeiras",
-  financeiro_bancario: "Financeiro Bancário",
   rh: "RH",
   treinamentos: "Treinamentos",
   questionarios: "Questionários",
   sorteios: "Sorteios",
-  planilhas: "Planilhas",
   documentos: "Documentos",
   robo: "Robô",
 };
@@ -182,44 +175,6 @@ export type MeetingItem = {
   createdAt: string;
   endedAt: string | null;
   creatorName: string | null;
-};
-
-// ─── Financeiro bancário (conciliação — ver plano da Fase 1) ────────────────
-export type FinanceBankProviderInfo = {
-  provider: string; isBank: boolean; isAcquirer: boolean; configured: boolean;
-  authMethod: "oauth" | "certificate" | "api_key"; note: string | null;
-};
-export type FinanceBankAccount = {
-  id: number; storeId: number; storeName: string; provider: string; kind: "conta" | "maquininha";
-  label: string; status: "nao_configurado" | "conectado" | "erro" | "desconectado";
-  lastSyncAt: string | null; isActive: boolean; createdAt: string;
-};
-export type FinanceBankTransaction = {
-  id: number; bankAccountId: number; accountLabel: string; storeId: number;
-  postedAt: string; amountCents: number; type: "credit" | "debit"; description: string | null;
-  reconciliationStatus: "pending" | "matched" | "ignored";
-};
-export type FinanceBankSale = {
-  id: number; bankAccountId: number; storeId: number; externalSaleId: string; soldAt: string;
-  grossAmountCents: number; feeAmountCents: number; netAmountCents: number; installments: number;
-  cardBrand: string | null; paymentMethod: "credito" | "debito" | "pix";
-  authorizationCode: string | null; nsu: string | null; repasseStatus: "pending" | "repassado";
-};
-export type ReconciliationMatchRow = {
-  id: number; bankTransactionId: number; matchedType: "acquirer_sale" | "acquirer_repasse" | "manual";
-  matchedRecordId: number | null; ruleId: number | null; matchedBy: string;
-  status: "auto" | "manual_confirmed" | "rejected"; createdAt: string;
-};
-export type FinanceBankDashboard = {
-  accounts: { accountId: number; label: string; provider: string; storeId: number; storeName: string; lastSyncAt: string | null; balanceCents: number }[];
-  totalCents: number;
-};
-export type FinanceBankMetrics = {
-  totals: { creditCents: number; debitCents: number; netCents: number; pendingCount: number; matchedCount: number; reconciliationRatePct: number };
-  cashFlowByDay: { date: string; creditCents: number; debitCents: number }[];
-  byStore: { storeId: number; storeName: string; netCents: number }[];
-  byProvider: { provider: string; netCents: number }[];
-  salesByPaymentMethod: { paymentMethod: "credito" | "debito" | "pix"; count: number; grossCents: number }[];
 };
 
 export type InternalMessage = {
@@ -524,11 +479,6 @@ export type TradeInQuestionOption = { label: string; blocks: boolean };
 export type TradeInQuestion = { key: string; label: string; options: TradeInQuestionOption[] };
 export type TradeInQuestionsConfig = { apple: TradeInQuestion[]; android: TradeInQuestion[] };
 
-export type FilmCompat = {
-  id: number; film: string; models: string; notes: string | null;
-  createdAt: string; updatedAt: string;
-};
-
 export type RhQuestion = { id: string; label: string; type: "text" | "longtext" | "options"; options?: string[] };
 export type RhStage = { id: string; title: string; description: string; type: "form" | "video"; enabled: boolean; questions: RhQuestion[] };
 export type RhCandidate = {
@@ -537,13 +487,6 @@ export type RhCandidate = {
   answers: Record<string, Record<string, string>>;
   stagesSnapshot: RhStage[] | null;
   notes: string | null; hasVideo: boolean; createdAt: string;
-};
-
-export type SheetLink = {
-  id: number; name: string; url: string; position: number; createdAt: string;
-  // null nas duas = liberada para toda a equipe
-  allowedSectorIds: number[] | null;
-  allowedUserIds: number[] | null;
 };
 
 export type PartnerLink = {
@@ -635,22 +578,6 @@ export type ChatLabel = {
   sortOrder: number;
   isActive: boolean;
   createdAt: string;
-};
-
-export type RoutingRule = {
-  id: number;
-  sectorId: number;
-  name: string;
-  keywords: string;
-  priority: number;
-  isActive: boolean;
-  createdAt: string;
-};
-
-export type ClassifyResult = {
-  sectorId: number | null;
-  ruleName: string | null;
-  matchedKeyword: string | null;
 };
 
 export type ChatMessage = {
@@ -1000,15 +927,6 @@ export const api = {
       req<{ ok: boolean; sent: { conversationId: number; message: InternalMessage }[] }>(
         `/internal-chat/messages/${messageId}/forward`, { method: "POST", body: JSON.stringify({ conversationIds }) }),
   },
-  routing: {
-    rules: () => req<RoutingRule[]>("/routing/rules"),
-    create: (data: { sectorId: number; name: string; keywords: string; priority?: number }) =>
-      req<RoutingRule>("/routing/rules", { method: "POST", body: JSON.stringify(data) }),
-    update: (id: number, data: Partial<{ name: string; keywords: string; priority: number; isActive: boolean; sectorId: number }>) =>
-      req<RoutingRule>(`/routing/rules/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
-    remove: (id: number) => req<{ ok: boolean }>(`/routing/rules/${id}`, { method: "DELETE" }),
-    classify: (text: string) => req<ClassifyResult>("/routing/classify", { method: "POST", body: JSON.stringify({ text }) }),
-  },
   crm: {
     list: (params?: { profile?: string; status?: string; search?: string }) => {
       const qs = new URLSearchParams();
@@ -1132,20 +1050,6 @@ export const api = {
     resend: (id: number, drawId: number, phone: string) =>
       req<{ draw: RaffleDraw; sent: boolean }>(`/raffles/${id}/draws/${drawId}/resend`, { method: "POST", body: JSON.stringify({ phone }) }),
   },
-  filmCompat: {
-    import: (fileData: string, mode: "replace" | "append") =>
-      req<{ ok: boolean; imported: number; skipped: number; errors: string[]; mode: string }>(
-        "/film-compat/import", { method: "POST", body: JSON.stringify({ fileData, mode }) }),
-    list: () => req<FilmCompat[]>("/film-compat"),
-    getSheet: () => req<{ url: string }>("/film-compat/sheet"),
-    saveSheet: (url: string) => req<{ url: string }>("/film-compat/sheet", { method: "PUT", body: JSON.stringify({ url }) }),
-    syncSheet: () => req<{ ok: boolean; imported: number }>("/film-compat/sheet/sync", { method: "POST" }),
-    create: (data: { film: string; models: string; notes?: string }) =>
-      req<FilmCompat>("/film-compat", { method: "POST", body: JSON.stringify(data) }),
-    update: (id: number, data: Partial<{ film: string; models: string; notes: string }>) =>
-      req<FilmCompat>(`/film-compat/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
-    remove: (id: number) => req<{ ok: boolean }>(`/film-compat/${id}`, { method: "DELETE" }),
-  },
   rh: {
     publicProcess: (token: string) => req<{ stages: RhStage[] }>(`/rh/public/${token}`),
     publicApply: (token: string, data: {
@@ -1160,16 +1064,6 @@ export const api = {
     updateCandidate: (id: number, data: { status?: string; notes?: string }) =>
       req<Pick<RhCandidate, "id" | "status" | "notes">>(`/rh/candidates/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     removeCandidate: (id: number) => req<{ ok: boolean }>(`/rh/candidates/${id}`, { method: "DELETE" }),
-  },
-  sheetLinks: {
-    list: () => req<SheetLink[]>("/sheet-links"),
-    create: (data: { name: string; url: string; allowedSectorIds?: number[] | null; allowedUserIds?: number[] | null }) =>
-      req<SheetLink>("/sheet-links", { method: "POST", body: JSON.stringify(data) }),
-    update: (id: number, data: Partial<{ name: string; url: string; allowedSectorIds: number[] | null; allowedUserIds: number[] | null }>) =>
-      req<SheetLink>(`/sheet-links/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
-    remove: (id: number) => req<{ ok: boolean }>(`/sheet-links/${id}`, { method: "DELETE" }),
-    reorder: (ids: number[]) =>
-      req<{ ok: boolean }>("/sheet-links/reorder", { method: "POST", body: JSON.stringify({ ids }) }),
   },
   partnerLinks: {
     list: () => req<PartnerLink[]>("/partner-links"),
@@ -1238,51 +1132,6 @@ export const api = {
       req<DocumentItem>("/documents", { method: "POST", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/documents/${id}`, { method: "DELETE" }),
     fileUrl: (id: number) => `/api/documents/${id}/file`,
-  },
-  financeBank: {
-    providers: () => req<FinanceBankProviderInfo[]>("/finance-bank/providers"),
-    accounts: () => req<FinanceBankAccount[]>("/finance-bank/accounts"),
-    createAccount: (data: { storeId: number; provider: string; kind: "conta" | "maquininha"; label: string }) =>
-      req<FinanceBankAccount>("/finance-bank/accounts", { method: "POST", body: JSON.stringify(data) }),
-    updateAccount: (id: number, data: Partial<{ label: string; isActive: boolean }>) =>
-      req<FinanceBankAccount>(`/finance-bank/accounts/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
-    removeAccount: (id: number, confirmPassword?: string) =>
-      req<{ ok: boolean }>(`/finance-bank/accounts/${id}`, { method: "DELETE", body: JSON.stringify({ confirmPassword }) }),
-    saveCredentials: (id: number, secret: string, confirmPassword?: string) =>
-      req<{ ok: boolean }>(`/finance-bank/accounts/${id}/credentials`, { method: "POST", body: JSON.stringify({ secret, confirmPassword }) }),
-    saveCertificate: (id: number, data: { fileName: string; mimeType: string; data: string; certPassword?: string; clientId: string; clientSecret: string; confirmPassword?: string }) =>
-      req<{ ok: boolean }>(`/finance-bank/accounts/${id}/certificate`, { method: "POST", body: JSON.stringify(data) }),
-    oauthStart: (provider: string, accountId: number, confirmPassword?: string) =>
-      req<{ url: string }>(`/finance-bank/oauth/${provider}/start`, { method: "POST", body: JSON.stringify({ accountId, confirmPassword }) }),
-    transactions: (params?: { accountId?: number; storeId?: number; status?: string }) => {
-      const qs = new URLSearchParams();
-      if (params?.accountId) qs.set("accountId", String(params.accountId));
-      if (params?.storeId) qs.set("storeId", String(params.storeId));
-      if (params?.status) qs.set("status", params.status);
-      return req<FinanceBankTransaction[]>(`/finance-bank/transactions?${qs.toString()}`);
-    },
-    sales: (params?: { accountId?: number; storeId?: number }) => {
-      const qs = new URLSearchParams();
-      if (params?.accountId) qs.set("accountId", String(params.accountId));
-      if (params?.storeId) qs.set("storeId", String(params.storeId));
-      return req<FinanceBankSale[]>(`/finance-bank/sales?${qs.toString()}`);
-    },
-    reconcile: (storeId?: number) =>
-      req<{ evaluated: number; matched: number; pending: number }>("/finance-bank/reconcile", { method: "POST", body: JSON.stringify({ storeId }) }),
-    matches: (status?: string) =>
-      req<ReconciliationMatchRow[]>(`/finance-bank/reconciliation-matches${status ? `?status=${status}` : ""}`),
-    confirmMatch: (id: number, confirmPassword?: string) =>
-      req<ReconciliationMatchRow>(`/finance-bank/reconciliation-matches/${id}/confirm`, { method: "POST", body: JSON.stringify({ confirmPassword }) }),
-    rejectMatch: (id: number) => req<{ ok: boolean }>(`/finance-bank/reconciliation-matches/${id}/reject`, { method: "POST" }),
-    dashboard: (storeId?: number) => req<FinanceBankDashboard>(`/finance-bank/dashboard${storeId ? `?storeId=${storeId}` : ""}`),
-    metrics: (params?: { storeId?: number; provider?: string; from?: string; to?: string }) => {
-      const qs = new URLSearchParams();
-      if (params?.storeId) qs.set("storeId", String(params.storeId));
-      if (params?.provider) qs.set("provider", params.provider);
-      if (params?.from) qs.set("from", params.from);
-      if (params?.to) qs.set("to", params.to);
-      return req<FinanceBankMetrics>(`/finance-bank/metrics?${qs.toString()}`);
-    },
   },
   meetings: {
     list: () => req<MeetingItem[]>("/meetings"),

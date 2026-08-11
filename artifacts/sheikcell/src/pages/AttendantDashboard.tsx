@@ -11,7 +11,6 @@ import InternalChat from "./InternalChat";
 import { useChatExpandListener } from "@/lib/chatWidgetBus";
 import TaskBoard from "./TaskBoard";
 import Financeiras from "./Financeiras";
-import Peliculas from "./Peliculas";
 import Avaliacao from "./Avaliacao";
 import ChecklistGate from "@/components/ChecklistGate";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
@@ -23,18 +22,17 @@ import RH from "./RH";
 import Questionarios from "./Questionarios";
 import TrainingGate from "@/components/TrainingGate";
 import Treinamentos from "./Treinamentos";
-import Planilhas from "./Planilhas";
 import Documentos from "./Documentos";
 import {
   LogOut, KeyRound, Clock, PhoneCall, CheckCircle,
-  ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, Shield, BadgeDollarSign, GraduationCap, Table2, Gift, Bot, UserSearch, ClipboardList, TrendingUp,
+  ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, BadgeDollarSign, GraduationCap, Gift, Bot, UserSearch, ClipboardList, TrendingUp,
   FolderArchive, BookUser, LifeBuoy,
 } from "lucide-react";
 import Resultados from "./Resultados";
 import TeamDirectory from "./TeamDirectory";
 import Suporte from "./Suporte";
 
-type MainTab = "queue" | "resultados" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "peliculas" | "avaliacao" | "treinamentos" | "planilhas" | "documentos" | "financeiro" | "sorteios" | "robo" | "rh" | "questionarios" | "diretorio" | "suporte";
+type MainTab = "queue" | "resultados" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "avaliacao" | "treinamentos" | "documentos" | "financeiro" | "sorteios" | "robo" | "rh" | "questionarios" | "diretorio" | "suporte";
 
 // Abas de admin que podem ser liberadas para vendedores no cadastro (adminAccess)
 const GRANTED_TABS: { id: MainTab; label: string; icon: typeof PhoneCall; module?: OptionalModule }[] = [
@@ -52,10 +50,8 @@ const MAIN_TABS: { id: MainTab; label: string; icon: typeof PhoneCall; module?: 
   { id: "resultados" as MainTab, label: "Resultados", icon: TrendingUp },
   { id: "crm" as MainTab, label: "CRM", icon: Kanban },
   { id: "financeiras" as MainTab, label: "Financeiras", icon: Landmark, module: "financeiras" },
-  { id: "peliculas" as MainTab, label: "Películas", icon: Shield, module: "peliculas" },
   { id: "avaliacao" as MainTab, label: "Avaliação", icon: BadgeDollarSign, module: "avaliacao" },
   { id: "treinamentos" as MainTab, label: "Treinamentos", icon: GraduationCap, module: "treinamentos" },
-  { id: "planilhas" as MainTab, label: "Planilhas", icon: Table2, module: "planilhas" },
   { id: "documentos" as MainTab, label: "Documentos", icon: FolderArchive, module: "documentos" },
   { id: "diretorio" as MainTab, label: "Diretório", icon: BookUser },
   { id: "suporte" as MainTab, label: "Suporte", icon: LifeBuoy },
@@ -334,12 +330,6 @@ export default function AttendantDashboard() {
         </div>
       )}
 
-      {mainTab === "planilhas" && (
-        <div className="max-w-5xl mx-auto px-4 py-6">
-          <Planilhas />
-        </div>
-      )}
-
       {mainTab === "documentos" && <Documentos />}
 
       {mainTab === "diretorio" && (
@@ -360,11 +350,6 @@ export default function AttendantDashboard() {
         </div>
       )}
 
-      {mainTab === "peliculas" && (
-        <div className="max-w-3xl mx-auto px-4 py-6">
-          <Peliculas />
-        </div>
-      )}
 
       {mainTab === "financeiras" && (
         <div className="max-w-6xl mx-auto px-2 md:px-4 py-3 md:py-4">

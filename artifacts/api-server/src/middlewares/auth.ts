@@ -134,43 +134,6 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction): v
   blockIfTenantSuspended(req, res, next);
 }
 
-// ── Reautenticação por senha (ações sensíveis do financeiro bancário) ──────
-// Sem infraestrutura de 2FA (TOTP/SMS) no sistema — reaproveita o mesmo
-// padrão de bcrypt.compare já usado em POST /auth/change-password, só como
-// confirmação extra antes de uma ação de alto risco, não como troca de senha.
-
-/** Núcleo da checagem: confere a senha atual do usuário logado. Exportado à
- * parte de requireReauth para rotas que só exigem reautenticar
- * condicionalmente (ex.: valor da transação acima de um limite). */
-export async function verifyPassword(userId: number, password: string): Promise<boolean> {
-  if (!password) return false;
-  const { db, usersTable } = await import("@workspace/db");
-  const { eq } = await import("drizzle-orm");
-  const bcrypt = (await import("bcryptjs")).default;
-  const [user] = await db.select({ passwordHash: usersTable.passwordHash }).from(usersTable).where(eq(usersTable.id, userId));
-  if (!user) return false;
-  return bcrypt.compare(password, user.passwordHash);
-}
-
-/**
- * Exige `confirmPassword` no corpo da requisição, validado contra a senha
- * atual do usuário da sessão. Encadear DEPOIS de requireAdmin (ou
- * equivalente) — este middleware não checa role, só reautentica quem já
- * passou pelo controle de acesso normal. Toda tentativa (sucesso ou falha)
- * vira uma linha em finance_audit_log, incluindo qual rota foi alvo.
- */
-export async function requireReauth(req: Request, res: Response, next: NextFunction): Promise<void> {
-  if (!req.session?.userId) { res.status(401).json({ error: "Unauthorized" }); return; }
-  const { confirmPassword } = req.body as { confirmPassword?: string };
-  const tenantId = tenantIdOf(req) ?? 1;
-  const entityId = Number(req.params.id) || 0;
-  const valid = typeof confirmPassword === "string" && (await verifyPassword(req.session.userId, confirmPassword));
-  const { logFinanceAudit } = await import("../lib/financeBank/audit.ts");
-  await logFinanceAudit(req, tenantId, valid ? "reauth.success" : "reauth.failed", "reauth", entityId, { path: req.path });
-  if (!valid) { res.status(401).json({ error: "Confirme sua senha para continuar", code: "REAUTH_REQUIRED" }); return; }
-  next();
-}
-
 /**
  * Admin OU usuário com a função de admin liberada no cadastro (adminAccess).
  * Permite dar a vendedores/supervisores acesso a abas específicas de admin.
