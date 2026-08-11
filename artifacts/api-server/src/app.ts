@@ -1,4 +1,4 @@
-import express, { type Express } from "express";
+import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
 import session from "express-session";
@@ -97,5 +97,20 @@ app.use("/api", async (req, _res, next) => {
 });
 
 app.use("/api", router);
+
+// Sem isto, qualquer exceção não tratada numa rota (Express 5 encaminha
+// rejeição de handler async automaticamente pra cá) cai no handler padrão do
+// Express — sem corpo JSON, então o front (que espera { error }) só recebe
+// res.statusText genérico ("Internal Server Error"), escondendo o motivo
+// real. Loga o erro completo (stack incluso) no servidor e devolve a
+// mensagem pro cliente — não é rota pública sensível a vazamento de detalhe
+// de schema, é o painel interno da própria loja, e sem essa mensagem a
+// única forma de descobrir o que quebrou é reproduzir manualmente.
+app.use((err: unknown, req: Request, res: Response, _next: NextFunction): void => {
+  req.log.error({ err }, "Erro não tratado na rota");
+  if (res.headersSent) return;
+  const message = err instanceof Error ? err.message : "Erro interno do servidor";
+  res.status(500).json({ error: message });
+});
 
 export default app;
