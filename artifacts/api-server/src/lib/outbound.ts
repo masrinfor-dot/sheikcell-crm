@@ -32,7 +32,7 @@ export async function sendOutboundText(conversationId: number, content: string, 
   }).where(eq(conversationsTable.id, conv.id));
 
   broadcast("message", { conversationId: conv.id, message: msg },
-    { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+    { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
 
   let delivered = true;
   if (conv.channel === "whatsapp") {
@@ -57,7 +57,7 @@ export async function sendOutboundText(conversationId: number, content: string, 
         .where(eq(messagesTable.id, msg.id)).returning();
       if (failedMsg) {
         broadcast("message_updated", { conversationId: conv.id, message: failedMsg },
-          { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+          { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
       }
     }
   }

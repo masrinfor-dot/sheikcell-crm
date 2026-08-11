@@ -66,7 +66,8 @@ router.get("/chat/events", requireAuth, async (req: Request, res: Response): Pro
   //   supervisor só se o setor bater (supervisor sem setor = global);
   //   vendedor só se estiver na lista.
   // - Demais eventos: potenciais chegam a todos; o resto é escopado por setor.
-  const allowed = (ev: { tenantId: number; sectorId: number | null; isPotential?: boolean; restrictedTo?: number[] | null }): boolean => {
+  const allowedSessionKeys = req.session.allowedSessionKeys;
+  const allowed = (ev: { tenantId: number; sectorId: number | null; isPotential?: boolean; restrictedTo?: number[] | null; sessionKey?: string | null }): boolean => {
     // Fronteira de loja em primeiro lugar: só entrega eventos da MESMA loja.
     // Sem loja na sessão (superadmin / sessão antiga) = não recebe nada.
     if (sessionTenantId == null || ev.tenantId !== sessionTenantId) return false;
@@ -76,6 +77,9 @@ router.get("/chat/events", requireAuth, async (req: Request, res: Response): Pro
       if (userSectorId == null || ev.sectorId === userSectorId) return true;
       return ev.restrictedTo == null && ev.isPotential === true;
     }
+    // Vendedor com restrição de linha de WhatsApp: evento ligado a uma
+    // conversa fora das linhas liberadas nunca chega, seja lá o que mais for.
+    if (allowedSessionKeys != null && ev.sessionKey != null && !allowedSessionKeys.includes(ev.sessionKey)) return false;
     if (ev.restrictedTo != null) return ev.restrictedTo.includes(userId);
     if (ev.isPotential && canSeePotenciais) return true;
     return ev.sectorId != null && ev.sectorId === userSectorId;
@@ -175,7 +179,7 @@ async function enrichConversation(conv: typeof conversationsTable.$inferSelect) 
  *   (leads novos sem dono) visíveis a qualquer vendedor.
  */
 async function canAccessConversation(
-  conv: Pick<typeof conversationsTable.$inferSelect, "id" | "sectorId" | "assigneeId" | "status" | "isArchived">,
+  conv: Pick<typeof conversationsTable.$inferSelect, "id" | "sectorId" | "assigneeId" | "status" | "isArchived" | "sessionKey">,
   req: Request,
 ): Promise<boolean> {
   const userRole = req.session.userRole!;
@@ -187,6 +191,10 @@ async function canAccessConversation(
     if (userSectorId == null || conv.sectorId === userSectorId) return true;
     return isPotentialConversation(conv);
   }
+  // Vendedor com restrição de linha de WhatsApp (allowedSessionKeys): fora
+  // das linhas liberadas, nem potencial nem conversa do próprio setor conta.
+  const allowedSessionKeys = req.session.allowedSessionKeys;
+  if (allowedSessionKeys != null && !allowedSessionKeys.includes(conv.sessionKey)) return false;
   if (isRestrictedConversation(conv)) {
     if (conv.assigneeId === userId) return true;
     const [p] = await db.select({ userId: conversationParticipantsTable.userId })
@@ -244,6 +252,16 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
     // - conversas do próprio setor NÃO restritas (ex.: pendentes);
     // - conversas restritas apenas quando é o responsável ou participante.
     const userId = req.session.userId!;
+    // Restrição por linha de WhatsApp (allowedSessionKeys): aplicada ANTES de
+    // qualquer outro escopo — fora das linhas liberadas, nem potencial conta.
+    const userAllowedSessionKeys = req.session.allowedSessionKeys;
+    if (userAllowedSessionKeys != null) {
+      conditions.push(
+        userAllowedSessionKeys.length
+          ? inArray(conversationsTable.sessionKey, userAllowedSessionKeys)
+          : sql`FALSE`,
+      );
+    }
     // Permissão "ver_potenciais" desligada: o vendedor não vê os leads novos
     // de outros setores (só o escopo do próprio setor).
     const potencial = (await checkPerm(req, "ver_potenciais"))
@@ -595,7 +613,7 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, id));
 
-  broadcast("message", { conversationId: id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  broadcast("message", { conversationId: id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
 
   // Forward to WhatsApp bridge
   if (conv.channel === "whatsapp" && conv.phone) {
@@ -645,7 +663,7 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
         .returning();
       if (failedRow) {
         const failedMsg = { ...failedRow, replyTo };
-        broadcast("message_updated", { conversationId: id, message: failedMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+        broadcast("message_updated", { conversationId: id, message: failedMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
         res.status(201).json(failedMsg);
         return;
       }
@@ -681,7 +699,7 @@ router.post("/chat/conversations/:id/notes", requireAuth, async (req, res): Prom
     senderName,
   }).returning();
 
-  broadcast("message", { conversationId: id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  broadcast("message", { conversationId: id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
   res.status(201).json(msg);
 });
 
@@ -723,7 +741,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, id));
 
-  broadcast("message", { conversationId: id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  broadcast("message", { conversationId: id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
 
   // Forward to WhatsApp bridge (now uses Meta Cloud API) if this is a WhatsApp conversation
   if (conv.channel === "whatsapp" && conv.phone) {
@@ -764,7 +782,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
         .returning();
       if (failedRow) {
         const failedMsg = { ...failedRow, replyTo };
-        broadcast("message_updated", { conversationId: id, message: failedMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+        broadcast("message_updated", { conversationId: id, message: failedMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
         res.status(201).json(failedMsg);
         return;
       }
@@ -1081,18 +1099,18 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
   if (updated.assigneeId !== conv.assigneeId || updated.status !== conv.status || updated.isArchived !== conv.isArchived) {
     await syncCrmAttendant(updated);
   }
-  broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, isPotential: wasPotential || isPotentialConversation(updated), restrictedTo: recipients });
+  broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey, isPotential: wasPotential || isPotentialConversation(updated), restrictedTo: recipients });
   // Transição para RESTRITA (ganhou responsável ou foi finalizada): quem via a
   // conversa antes (setor/potencial) e não está na lista de autorizados precisa
   // removê-la da tela. O evento leva só o id + quem pode mantê-la (sem conteúdo).
   if (recipients != null && !isRestrictedConversation(conv)) {
-    broadcast("conversation_hidden", { id: updated.id, keepFor: recipients, sectorId: updated.sectorId }, { tenantId: updated.tenantId, sectorId: conv.sectorId, isPotential: wasPotential });
+    broadcast("conversation_hidden", { id: updated.id, keepFor: recipients, sectorId: updated.sectorId }, { tenantId: updated.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: wasPotential });
   }
   // On a sector transfer the broadcast above targets the NEW sector, so the
   // ORIGIN sector's vendedores would otherwise never learn the conversation
   // left. Notify them explicitly so they drop it from their list.
   if (isSectorTransfer && conv.sectorId != null && conv.sectorId !== updated.sectorId) {
-    broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: conv.sectorId, isPotential: false });
+    broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: false });
   }
   res.json(updated);
 });
@@ -1158,11 +1176,11 @@ router.post("/chat/conversations/:id/claim", requireAuth, async (req, res): Prom
 
   const claimRecipients = await restrictedRecipients(updated);
   await syncCrmAttendant(updated);
-  broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, isPotential: wasPotential, restrictedTo: claimRecipients });
+  broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey, isPotential: wasPotential, restrictedTo: claimRecipients });
   // A conversa ficou restrita ao vendedor que assumiu: avisa quem a via antes
   // (potencial cross-sector ou fila do setor) para removê-la da lista.
   if (claimRecipients != null) {
-    broadcast("conversation_hidden", { id: updated.id, keepFor: claimRecipients, sectorId: updated.sectorId }, { tenantId: updated.tenantId, sectorId: conv.sectorId, isPotential: wasPotential });
+    broadcast("conversation_hidden", { id: updated.id, keepFor: claimRecipients, sectorId: updated.sectorId }, { tenantId: updated.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: wasPotential });
   }
   res.json(updated);
 });
@@ -1207,7 +1225,7 @@ router.delete("/chat/conversations/:id", requireAdmin, async (req, res): Promise
   });
 
   // Potenciais são visíveis a todos DA LOJA — o evento de remoção também precisa ser.
-  broadcast("conversation_deleted", { id }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: true });
+  broadcast("conversation_deleted", { id }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: true });
   res.json({ ok: true });
 });
 
@@ -1253,6 +1271,16 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
     phone?: string; name?: string; channel?: string; sectorId?: number; assigneeId?: number;
   };
   if (!phone || !name) { res.status(400).json({ error: "Telefone e nome obrigatórios" }); return; }
+
+  // Atendimento criado manualmente sempre nasce na linha "default" (a criação
+  // manual não deixa escolher linha ainda). Vendedor restrito a outras linhas
+  // ficaria trancado fora da conversa que ele mesmo acabou de criar — barra
+  // antes, com uma mensagem clara, em vez de deixar um atendimento órfão.
+  const allowedSessionKeys = req.session.allowedSessionKeys;
+  if (allowedSessionKeys != null && !allowedSessionKeys.includes("default")) {
+    res.status(403).json({ error: "Você não tem acesso à linha de WhatsApp usada para criar atendimentos manuais. Fale com o administrador." });
+    return;
+  }
 
   // Bloqueia atendimento duplicado: se já existe conversa EM ANDAMENTO (não
   // finalizada/arquivada) para esse número, não cria outra. Compara só os
@@ -1380,7 +1408,7 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
     lastMessageAt: new Date(),
   }).returning();
 
-  broadcast("conversation_new", conv, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  broadcast("conversation_new", conv, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
   // Keep the CRM in sync with atendimentos: register the customer immediately.
   await ensureCrmContactForConversation(conv);
   res.status(201).json(conv);
@@ -1648,13 +1676,13 @@ router.post("/chat/conversations/:id/participants", requireAuth, async (req, res
       .set({ status: "pending", updatedAt: new Date() })
       .where(and(eq(conversationsTable.id, convId), eq(conversationsTable.tenantId, tenantId)))
       .returning();
-    broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, isPotential: wasPotential });
-    broadcast("participants_updated", { conversationId: convId }, { tenantId: updated.tenantId, sectorId: updated.sectorId, isPotential: false });
+    broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey, isPotential: wasPotential });
+    broadcast("participants_updated", { conversationId: convId }, { tenantId: updated.tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey, isPotential: false });
     res.status(201).json({ ok: true, conversation: updated });
     return;
   }
 
-  broadcast("participants_updated", { conversationId: convId }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  broadcast("participants_updated", { conversationId: convId }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
   res.status(201).json({ ok: true });
 });
 
@@ -1675,9 +1703,9 @@ router.delete("/chat/conversations/:id/participants/:userId", requireAuth, async
   // O participante removido também precisa receber o evento (para tirar a
   // conversa da tela dele), então entra na lista junto dos que permanecem.
   const removeRecipients = await restrictedRecipients(conv);
-  broadcast("participants_updated", { conversationId: convId }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: removeRecipients ? [...new Set([...removeRecipients, userId])] : null });
+  broadcast("participants_updated", { conversationId: convId }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: removeRecipients ? [...new Set([...removeRecipients, userId])] : null });
   if (removeRecipients != null) {
-    broadcast("conversation_hidden", { id: convId, keepFor: removeRecipients, sectorId: conv.sectorId }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: false, restrictedTo: [...new Set([...removeRecipients, userId])] });
+    broadcast("conversation_hidden", { id: convId, keepFor: removeRecipients, sectorId: conv.sectorId }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: false, restrictedTo: [...new Set([...removeRecipients, userId])] });
   }
   res.json({ ok: true });
 });
@@ -1698,7 +1726,7 @@ router.post("/chat/messages/:id/transcribe", requireAuth, async (req: Request, r
   try {
     const { transcribeMessage } = await import("../lib/transcribe");
     const transcript = await transcribeMessage(msgId);
-    broadcast("message_updated", { conversationId: conv.id, message: { ...msg, transcript } }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+    broadcast("message_updated", { conversationId: conv.id, message: { ...msg, transcript } }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
     res.json({ transcript });
   } catch (err) {
     res.status(422).json({ error: err instanceof Error ? err.message : "Falha ao transcrever" });

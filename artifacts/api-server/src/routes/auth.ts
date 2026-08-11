@@ -98,6 +98,7 @@ router.post("/auth/login", async (req, res): Promise<void> => {
   req.session.tenantId = user.role === "superadmin" ? undefined : user.tenantId;
   req.session.userSectorId = user.sectorId ?? undefined;
   req.session.userName = user.name;
+  req.session.allowedSessionKeys = user.role === "vendedor" ? (user.allowedSessionKeys ?? null) : null;
   // Login "de verdade" encerra qualquer impersonação que sobrou na sessão.
   req.session.impersonatorId = undefined;
 

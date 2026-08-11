@@ -23,6 +23,10 @@ export const usersTable = pgTable("users", {
   // null = sem restrição. days: 0=domingo ... 6=sábado
   accessHours: jsonb("access_hours").$type<{ start: string; end: string; days: number[] } | null>(),
   isActive: boolean("is_active").notNull().default(true),
+  // Linhas de WhatsApp (session_key de whatsapp_sessions) que este vendedor
+  // pode ver/responder. null = sem restrição (todas as linhas da loja).
+  // Só tem efeito para role "vendedor".
+  allowedSessionKeys: jsonb("allowed_session_keys").$type<string[] | null>(),
   // Permissões individuais do vendedor (null = todas liberadas). Chaves:
   // ver_potenciais, transferir, finalizar, criar_atendimento, usar_ia,
   // crm, tarefas, enviar_midia — todas boolean. Admin/supervisor ignoram isto.

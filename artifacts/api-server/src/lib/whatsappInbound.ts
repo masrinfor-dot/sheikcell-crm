@@ -245,7 +245,7 @@ async function upsertConversation(
         unreadCount: 1,
       })
       .returning();
-    broadcast("conversation_new", conv, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+    broadcast("conversation_new", conv, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
     // Keep the CRM in sync with atendimentos: register the customer as soon as
     // the conversation starts, not only when it is resolved.
     await ensureCrmContactForConversation(conv);
@@ -270,7 +270,7 @@ async function upsertConversation(
       .returning();
     if (updated) conv = updated;
     if (reopen && updated) {
-      broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, isPotential: isPotentialConversation(updated), restrictedTo: await restrictedRecipients(updated) });
+      broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey, isPotential: isPotentialConversation(updated), restrictedTo: await restrictedRecipients(updated) });
       // Cliente voltou: cartão do CRM volta para "Potenciais" e perde o atendente.
       await syncCrmAttendant(updated);
     }
@@ -415,6 +415,7 @@ async function tryConsumeSurveyReply(input: {
       {
         tenantId: outcome.conv.tenantId,
         sectorId: outcome.conv.sectorId,
+        sessionKey: outcome.conv.sessionKey,
         isPotential: isPotentialConversation(outcome.conv),
         restrictedTo: await restrictedRecipients(outcome.conv),
       },
@@ -445,7 +446,7 @@ async function broadcastMessageUpdated(updated: typeof messagesTable.$inferSelec
     .where(eq(conversationsTable.id, updated.conversationId)).limit(1);
   if (!conv) return;
   broadcast("message_updated", { conversationId: conv.id, message: updated }, {
-    tenantId: conv.tenantId, sectorId: conv.sectorId,
+    tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey,
     isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv),
   });
 }
@@ -675,7 +676,7 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
 
   // Conflito = mensagem duplicada chegando em paralelo; não notifica de novo.
   if (!msg) return;
-  broadcast("message", { conversationId: conv.id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  broadcast("message", { conversationId: conv.id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
 
   // Robô de pré-atendimento (assíncrono: nunca atrasa nem derruba o webhook)
   if (msgType === "text") {
@@ -707,7 +708,7 @@ async function transcribeAndBot(conv: typeof conversationsTable.$inferSelect, me
     if (!freshConv) return;
     const [updated] = await db.select().from(messagesTable).where(eq(messagesTable.id, messageId)).limit(1);
     if (updated) {
-      broadcast("message_updated", { conversationId: freshConv.id, message: updated }, { tenantId: freshConv.tenantId, sectorId: freshConv.sectorId, isPotential: isPotentialConversation(freshConv), restrictedTo: await restrictedRecipients(freshConv) });
+      broadcast("message_updated", { conversationId: freshConv.id, message: updated }, { tenantId: freshConv.tenantId, sectorId: freshConv.sectorId, sessionKey: freshConv.sessionKey, isPotential: isPotentialConversation(freshConv), restrictedTo: await restrictedRecipients(freshConv) });
     }
     // Recheca a elegibilidade com o estado atual antes do robô falar.
     if (await bot.botWouldHandle(freshConv)) {
@@ -834,7 +835,7 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
 
         // Conflito = mensagem duplicada chegando em paralelo; não notifica de novo.
         if (!saved) continue;
-        broadcast("message", { conversationId: conv.id, message: saved }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+        broadcast("message", { conversationId: conv.id, message: saved }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
 
         // Robô de pré-atendimento (assíncrono)
         if (saved.type === "text") {

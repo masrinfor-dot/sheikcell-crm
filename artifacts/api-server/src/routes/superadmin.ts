@@ -239,6 +239,7 @@ router.post("/superadmin/tenants/:tenantId/impersonate/:userId", async (req, res
   req.session.userSectorId = target.sectorId ?? undefined;
   req.session.userName = target.name;
   req.session.accessHours = null;
+  req.session.allowedSessionKeys = null;
   res.json({ ok: true });
 });
 

@@ -231,6 +231,7 @@ async function sendWhatsAppText(conversationId: number, content: string, tenantI
   broadcast("message", { conversationId: conv.id, message: msg }, {
     tenantId: conv.tenantId,
     sectorId: conv.sectorId,
+    sessionKey: conv.sessionKey,
     isPotential: isPotentialConversation(conv),
     restrictedTo: await restrictedRecipients(conv),
   });
@@ -259,6 +260,7 @@ async function sendWhatsAppText(conversationId: number, content: string, tenantI
       broadcast("message_updated", { conversationId: conv.id, message: failedMsg }, {
         tenantId: conv.tenantId,
         sectorId: conv.sectorId,
+        sessionKey: conv.sessionKey,
         isPotential: isPotentialConversation(conv),
         restrictedTo: await restrictedRecipients(conv),
       });

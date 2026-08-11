@@ -103,6 +103,7 @@ async function changeSector(conversationId: number, sectorId: number): Promise<v
   broadcast("conversation_updated", next, {
     tenantId: next.tenantId,
     sectorId: next.sectorId,
+    sessionKey: next.sessionKey,
     isPotential: isPotentialConversation(conv) || isPotentialConversation(next),
     restrictedTo: await restrictedRecipients(next),
   });
@@ -288,7 +289,7 @@ async function handle(conv: Conv, text: string): Promise<void> {
       senderName: settings.botName,
     }).returning();
     broadcast("message", { conversationId: conv.id, message: sysMsg },
-      { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+      { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
     return;
   }
 

@@ -70,7 +70,7 @@ type WASession = {
 
 type UserRow = {
   id: number; name: string; email: string; role: string;
-  isActive: boolean; sector: Sector | null; sectorId: number | null; storeName?: string | null; extension?: string | null; adminAccess?: string[] | null; accessHours?: { start: string; end: string; days: number[] } | null; createdAt: string;
+  isActive: boolean; sector: Sector | null; sectorId: number | null; storeName?: string | null; extension?: string | null; adminAccess?: string[] | null; accessHours?: { start: string; end: string; days: number[] } | null; allowedSessionKeys?: string[] | null; createdAt: string;
   permissions?: Record<string, boolean> | null;
 };
 
@@ -155,7 +155,7 @@ export default function AdminDashboard() {
   const [deleteTransferTo, setDeleteTransferTo] = useState("");
   const [deletingUser, setDeletingUser] = useState(false);
 
-  const [userForm, setUserForm] = useState<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; extension: string; adminAccess: string[]; ahEnabled: boolean; ahStart: string; ahEnd: string; ahDays: number[] }>({ name: "", email: "", password: "", role: "vendedor", sectorId: 1, storeName: "", extension: "", adminAccess: [], ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6] });
+  const [userForm, setUserForm] = useState<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; extension: string; adminAccess: string[]; ahEnabled: boolean; ahStart: string; ahEnd: string; ahDays: number[]; waEnabled: boolean; waKeys: string[] }>({ name: "", email: "", password: "", role: "vendedor", sectorId: 1, storeName: "", extension: "", adminAccess: [], ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [] });
   const [sectorForm, setSectorForm] = useState({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true });
 
   const fetchAll = useCallback(async () => {
@@ -284,12 +284,12 @@ export default function AdminDashboard() {
   // ---- User handlers ----
   const openAddUser = () => {
     setEditUser(null);
-    setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorId: sectors[0]?.id ?? 1, storeName: "", extension: "", adminAccess: [], ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6] });
+    setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorId: sectors[0]?.id ?? 1, storeName: "", extension: "", adminAccess: [], ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [] });
     setShowAddUser(true);
   };
   const openEditUser = (u: UserRow) => {
     setEditUser(u);
-    setUserForm({ name: u.name, email: u.email, password: "", role: u.role, sectorId: u.sectorId ?? 1, storeName: u.storeName ?? "", extension: u.extension ?? "", adminAccess: u.adminAccess ?? [], ahEnabled: !!u.accessHours, ahStart: u.accessHours?.start ?? "08:00", ahEnd: u.accessHours?.end ?? "18:00", ahDays: u.accessHours?.days?.length ? u.accessHours.days : [1, 2, 3, 4, 5, 6] });
+    setUserForm({ name: u.name, email: u.email, password: "", role: u.role, sectorId: u.sectorId ?? 1, storeName: u.storeName ?? "", extension: u.extension ?? "", adminAccess: u.adminAccess ?? [], ahEnabled: !!u.accessHours, ahStart: u.accessHours?.start ?? "08:00", ahEnd: u.accessHours?.end ?? "18:00", ahDays: u.accessHours?.days?.length ? u.accessHours.days : [1, 2, 3, 4, 5, 6], waEnabled: !!u.allowedSessionKeys, waKeys: u.allowedSessionKeys ?? [] });
     setShowAddUser(true);
   };
   const handleSaveUser = async (e: React.FormEvent) => {
@@ -304,12 +304,21 @@ export default function AdminDashboard() {
           accessHours: userForm.role === "vendedor" && userForm.ahEnabled
             ? { start: userForm.ahStart, end: userForm.ahEnd, days: userForm.ahDays }
             : null,
+          allowedSessionKeys: userForm.role === "vendedor" && userForm.waEnabled ? userForm.waKeys : null,
         };
         if (userForm.password) payload.password = userForm.password;
         await api.admin.users.update(editUser.id, payload);
         toast({ title: "Atendente atualizado!" });
       } else {
-        await api.admin.users.create({ ...userForm });
+        await api.admin.users.create({
+          name: userForm.name, email: userForm.email, password: userForm.password, role: userForm.role, sectorId: userForm.sectorId,
+          storeName: userForm.storeName, extension: userForm.extension,
+          adminAccess: userForm.role === "admin" ? null : userForm.adminAccess,
+          accessHours: userForm.role === "vendedor" && userForm.ahEnabled
+            ? { start: userForm.ahStart, end: userForm.ahEnd, days: userForm.ahDays }
+            : null,
+          allowedSessionKeys: userForm.role === "vendedor" && userForm.waEnabled ? userForm.waKeys : null,
+        });
         toast({ title: "Atendente criado!" });
       }
       setShowAddUser(false);
@@ -1559,6 +1568,29 @@ export default function AdminDashboard() {
                         ))}
                       </div>
                       <p className="text-[10px] text-muted-foreground">Fora desse horário o vendedor não consegue entrar nem usar o sistema (horário de Brasília).</p>
+                    </div>
+                  )}
+                </div>
+              )}
+              {userForm.role === "vendedor" && waSessions && waSessions.length > 1 && (
+                <div>
+                  <label className="flex items-center gap-2 text-xs font-medium mb-1">
+                    <input type="checkbox" checked={userForm.waEnabled} data-testid="toggle-wa-restriction"
+                      onChange={(e) => setUserForm({ ...userForm, waEnabled: e.target.checked })} />
+                    Restringir a linhas de WhatsApp específicas
+                  </label>
+                  {userForm.waEnabled && (
+                    <div className="space-y-2 mt-1.5 p-2.5 rounded-xl bg-secondary/50 border border-border">
+                      <div className="flex flex-wrap gap-1.5">
+                        {waSessions.map((s) => (
+                          <button type="button" key={s.sessionKey} data-testid={`toggle-wa-session-${s.sessionKey}`}
+                            onClick={() => setUserForm({ ...userForm, waKeys: userForm.waKeys.includes(s.sessionKey) ? userForm.waKeys.filter((k) => k !== s.sessionKey) : [...userForm.waKeys, s.sessionKey] })}
+                            className={`px-2 py-1 rounded-lg border text-[11px] font-medium transition ${userForm.waKeys.includes(s.sessionKey) ? "bg-primary text-white border-primary" : "border-border text-muted-foreground bg-white hover:bg-secondary"}`}>
+                            {s.displayName || s.sessionKey}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-[10px] text-muted-foreground">Esse vendedor só vê e responde conversas dessas linhas de WhatsApp. Nenhuma marcada = não vê conversa nenhuma.</p>
                     </div>
                   )}
                 </div>

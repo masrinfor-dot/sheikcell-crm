@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, conversationParticipantsTable, tasksTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable, accessLogsTable } from "@workspace/db";
+import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, conversationParticipantsTable, tasksTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable, accessLogsTable, whatsappSessionsTable } from "@workspace/db";
 import { eq, sql, desc, asc, and, gte, lt, isNull, isNotNull, notInArray, inArray, or, ilike } from "drizzle-orm";
 import { requireAdmin, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
 import { sanitizePermissions } from "../lib/permissions";
@@ -270,6 +270,7 @@ router.get("/admin/users", requireAdmin, async (req, res): Promise<void> => {
       extension: usersTable.extension,
       adminAccess: usersTable.adminAccess,
       accessHours: usersTable.accessHours,
+      allowedSessionKeys: usersTable.allowedSessionKeys,
       isActive: usersTable.isActive,
       permissions: usersTable.permissions,
       createdAt: usersTable.createdAt,
@@ -313,9 +314,29 @@ function sanitizeAdminAccess(v: unknown): string[] | null {
   return out.length ? [...new Set(out)] : null;
 }
 
+// Linhas de WhatsApp (session_key) reais da loja, pra validar o que o
+// formulário manda — nunca aceita uma chave inventada/de outra loja.
+const DEFAULT_SESSION_KEY = "default";
+async function validSessionKeysFor(tenantId: number): Promise<Set<string>> {
+  const rows = await db.select({ sessionKey: whatsappSessionsTable.sessionKey })
+    .from(whatsappSessionsTable).where(eq(whatsappSessionsTable.tenantId, tenantId));
+  const keys = new Set(rows.map((r) => r.sessionKey));
+  if (tenantId === 1) keys.add(DEFAULT_SESSION_KEY); // "default" legada da loja 1
+  return keys;
+}
+
+// v === undefined: campo não enviado (não mexe). v === null ou []: sem
+// restrição. Array com linhas reais: restringe a essas. Linha desconhecida é
+// descartada silenciosamente (nunca guarda uma chave que não existe mais).
+function sanitizeAllowedSessionKeys(v: unknown, validKeys: Set<string>): string[] | null {
+  if (!Array.isArray(v)) return null;
+  const out = v.map((x) => String(x)).filter((x) => validKeys.has(x));
+  return out.length ? [...new Set(out)] : null;
+}
+
 router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { name, email, password, role, sectorId, storeName, extension, adminAccess, accessHours } = req.body as {
+  const { name, email, password, role, sectorId, storeName, extension, adminAccess, accessHours, allowedSessionKeys } = req.body as {
     name?: string;
     email?: string;
     password?: string;
@@ -325,6 +346,7 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
     extension?: string;
     adminAccess?: unknown;
     accessHours?: unknown;
+    allowedSessionKeys?: unknown;
   };
 
   if (!name || !email || !password) {
@@ -371,6 +393,9 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
       mustChangePassword: true, // primeiro acesso: obriga trocar a senha
       adminAccess: sanitizeAdminAccess(adminAccess),
       accessHours: resolvedRole === "vendedor" ? sanitizeAccessHours(accessHours) : null,
+      allowedSessionKeys: resolvedRole === "vendedor"
+        ? sanitizeAllowedSessionKeys(allowedSessionKeys, await validSessionKeysFor(tenantId))
+        : null,
     })
     .returning();
 
@@ -389,9 +414,10 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
     .where(and(eq(usersTable.id, id), eq(usersTable.tenantId, tenantId))).limit(1);
   if (!existingUser) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
 
-  const { name, email, password, role, sectorId, isActive, permissions, storeName, extension, adminAccess, accessHours } = req.body as {
+  const { name, email, password, role, sectorId, isActive, permissions, storeName, extension, adminAccess, accessHours, allowedSessionKeys } = req.body as {
     adminAccess?: unknown;
     accessHours?: unknown;
+    allowedSessionKeys?: unknown;
     name?: string;
     email?: string;
     password?: string;
@@ -422,6 +448,9 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   }
   if (adminAccess !== undefined) updateData.adminAccess = sanitizeAdminAccess(adminAccess);
   if (accessHours !== undefined) updateData.accessHours = sanitizeAccessHours(accessHours);
+  if (allowedSessionKeys !== undefined) {
+    updateData.allowedSessionKeys = sanitizeAllowedSessionKeys(allowedSessionKeys, await validSessionKeysFor(tenantId));
+  }
   if (storeName !== undefined) {
     const cleanStore = typeof storeName === "string" && storeName.trim() ? storeName.trim().slice(0, 120) : null;
     if (cleanStore) {

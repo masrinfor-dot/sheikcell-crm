@@ -118,7 +118,7 @@ export async function deliverScheduledMessages(): Promise<void> {
         }).where(eq(conversationsTable.id, conv.id));
 
         broadcast("message", { conversationId: conv.id, message: msg },
-          { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+          { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
 
         // Encaminha ao WhatsApp (mesma rota do envio manual)
         let delivered = true;
@@ -144,7 +144,7 @@ export async function deliverScheduledMessages(): Promise<void> {
               .where(eq(messagesTable.id, msg.id)).returning();
             if (failedMsg) {
               broadcast("message_updated", { conversationId: conv.id, message: failedMsg },
-                { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+                { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
             }
             // Aviso direcionado ao autor: o envio agendado falhou (ex.: WhatsApp
             // despareado). Sem isso, a falha só apareceria abrindo a conversa.

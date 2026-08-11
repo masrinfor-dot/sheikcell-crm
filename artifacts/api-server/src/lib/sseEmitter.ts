@@ -46,6 +46,10 @@ export interface BufferedEvent {
   // podem receber o evento (responsável + participantes). null = escopo normal
   // por setor/potencial. Admin sempre recebe; supervisor recebe se o setor bate.
   restrictedTo: number[] | null;
+  // Linha de WhatsApp (session_key) dona da conversa. null = evento não
+  // ligado a uma conversa (não filtrado por linha). Vendedor com
+  // allowedSessionKeys restrito só recebe eventos cuja linha está liberada.
+  sessionKey: string | null;
 }
 
 const MAX_BUFFERED_EVENTS = 1000;
@@ -92,6 +96,7 @@ export function broadcast(
     sectorId?: number | null;
     isPotential?: boolean;
     restrictedTo?: number[] | null;
+    sessionKey?: string | null;
   },
 ): void {
   lastEventId += 1;
@@ -103,6 +108,7 @@ export function broadcast(
     sectorId: scope.sectorId ?? null,
     isPotential: scope.isPotential ?? false,
     restrictedTo: scope.restrictedTo ?? null,
+    sessionKey: scope.sessionKey ?? null,
   };
   eventBuffer.push(payload);
   if (eventBuffer.length > MAX_BUFFERED_EVENTS) {
