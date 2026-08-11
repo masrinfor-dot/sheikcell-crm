@@ -71,19 +71,46 @@ BEGIN
   END LOOP;
 END $$;
 
--- 3a) app_settings: PK passa de (key) para (tenant_id, key) — configurações
--- por loja. Só migra se a PK antiga (1 coluna) ainda existir.
+-- 3a) app_settings: PK precisa ser (tenant_id, key) — configurações por loja.
+-- Bug corrigido aqui: a versão anterior só agia quando pk_cols = 1 (PK antiga
+-- de 1 coluna), tratando pk_cols = 0 (SEM NENHUMA PK — visto em produção,
+-- causa do "Erro ao salvar" ao mexer em Configurações do Atendimento, com
+-- ON CONFLICT (tenant_id, key) falhando por não achar a constraint) como se
+-- já estivesse migrado. Agora cobre os três estados possíveis: sem PK nenhuma,
+-- PK antiga de 1 coluna, ou já migrada — e por ser idempotente, também
+-- AUTO-CORRIGE se a constraint sumir de novo por qualquer outro motivo.
 DO $$
-DECLARE pk_cols int;
+DECLARE pk_name text;
+DECLARE pk_is_composite boolean;
 BEGIN
-  SELECT count(*) INTO pk_cols
-    FROM information_schema.key_column_usage k
-    JOIN information_schema.table_constraints c
-      ON c.constraint_name = k.constraint_name AND c.table_name = k.table_name
+  SELECT c.constraint_name INTO pk_name
+    FROM information_schema.table_constraints c
    WHERE c.table_name = 'app_settings' AND c.constraint_type = 'PRIMARY KEY';
-  IF pk_cols = 1 THEN
-    ALTER TABLE app_settings DROP CONSTRAINT app_settings_pkey;
+
+  SELECT count(*) = 2 INTO pk_is_composite
+    FROM information_schema.key_column_usage k
+   WHERE k.table_name = 'app_settings' AND k.constraint_name = pk_name
+     AND k.column_name IN ('tenant_id', 'key');
+
+  IF pk_name IS NOT NULL AND NOT pk_is_composite THEN
+    EXECUTE format('ALTER TABLE app_settings DROP CONSTRAINT %I', pk_name);
+    pk_name := NULL;
+  END IF;
+
+  IF pk_name IS NULL THEN
     ALTER TABLE app_settings ADD PRIMARY KEY (tenant_id, key);
+  END IF;
+
+  -- Trava de segurança: se por qualquer motivo ainda não ficou correta,
+  -- derruba o boot em vez de seguir em silêncio (mesma filosofia fail-loud
+  -- do restante da migração) — é exatamente esse silêncio que manteve
+  -- produção sem PK nenhuma por quem sabe quanto tempo sem ninguém notar.
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'app_settings'::regclass AND contype = 'p'
+      AND pg_get_constraintdef(oid) = 'PRIMARY KEY (tenant_id, key)'
+  ) THEN
+    RAISE EXCEPTION 'app_settings sem PRIMARY KEY (tenant_id, key) após a migração 0001 — investigar antes de seguir';
   END IF;
 END $$;
 
