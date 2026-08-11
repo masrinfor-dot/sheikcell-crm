@@ -351,6 +351,59 @@ function MediaContentRest({ msg }: { msg: ChatMessage }) {
   return null;
 }
 
+// ─── Shared contact card ─────────────────────────────────────────────────
+// O backend grava contato compartilhado do WhatsApp como texto formatado
+// ("👤 Contato compartilhado: Nome — Telefone", ou uma lista com o prefixo
+// "👤 Contatos compartilhados:\n") pra manter busca/prévia/notificação
+// funcionando sem mudar o schema — aqui só reconstituímos os campos pra
+// desenhar o cartão.
+type SharedContact = { name: string; phone: string | null };
+const CONTACT_SINGLE_PREFIX = "👤 Contato compartilhado: ";
+const CONTACT_MULTI_PREFIX = "👤 Contatos compartilhados:\n";
+
+function parseContactLine(line: string): SharedContact {
+  const idx = line.lastIndexOf(" — ");
+  return idx === -1
+    ? { name: line.trim(), phone: null }
+    : { name: line.slice(0, idx).trim(), phone: line.slice(idx + 3).trim() || null };
+}
+
+function parseSharedContacts(content: string): SharedContact[] | null {
+  if (content.startsWith(CONTACT_MULTI_PREFIX)) {
+    const lines = content.slice(CONTACT_MULTI_PREFIX.length).split("\n").map((l) => l.trim()).filter(Boolean);
+    return lines.length ? lines.map(parseContactLine) : null;
+  }
+  if (content.startsWith(CONTACT_SINGLE_PREFIX)) {
+    return [parseContactLine(content.slice(CONTACT_SINGLE_PREFIX.length))];
+  }
+  return null;
+}
+
+function ContactCard({ contact, onStart }: { contact: SharedContact; onStart?: (c: SharedContact) => void }) {
+  return (
+    <div className="flex items-center gap-2.5 bg-black/5 rounded-xl px-3 py-2.5 min-w-[220px] max-w-full mb-1">
+      <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+        <UserCircle2 className="w-6 h-6 text-primary" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold text-gray-800 truncate">{contact.name}</p>
+        {contact.phone && <p className="text-xs text-gray-500 truncate">{contact.phone}</p>}
+      </div>
+      {contact.phone && onStart && (
+        <button
+          type="button"
+          onClick={() => onStart(contact)}
+          title="Iniciar atendimento com este contato"
+          data-testid={`button-start-shared-contact-${contact.phone}`}
+          className="shrink-0 p-2 rounded-full text-primary hover:bg-primary/10 transition"
+        >
+          <MessageCircle className="w-4 h-4" />
+        </button>
+      )}
+    </div>
+  );
+}
+
 // Known placeholder labels that are not captions
 const MEDIA_PLACEHOLDERS = new Set(["📷 Foto", "🎵 Áudio", "🎥 Vídeo", "🎤 Áudio"]);
 function isMediaPlaceholder(s: string) {
@@ -370,16 +423,18 @@ function extractMediaCaption(content: string): string {
 }
 
 // ─── Message bubble ─────────────────────────────────────────────────────────
-function MsgBubble({ msg, onReply, highlighted, onJumpTo }: {
+function MsgBubble({ msg, onReply, highlighted, onJumpTo, onStartContact }: {
   msg: ChatMessage;
   onReply: (m: ChatMessage) => void;
   highlighted: boolean;
   onJumpTo: (id: number) => void;
+  onStartContact?: (c: SharedContact) => void;
 }) {
   const out = msg.direction === "outbound";
   const isMedia = msg.type === "image" || msg.type === "video" || msg.type === "audio" || msg.type === "doc" || msg.type === "sticker";
   const mediaCaption = isMedia ? extractMediaCaption(msg.content) : "";
   const showCaption = isMedia && msg.mediaUrl && mediaCaption.length > 0;
+  const sharedContacts = msg.type === "contact" ? parseSharedContacts(msg.content) : null;
 
   // Nota interna: nunca vai pro cliente — estilo bem diferente das mensagens
   // (centralizada, âmbar) pra nunca confundir uma com a outra.
@@ -435,7 +490,13 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo }: {
             <div className="text-xs text-gray-600 truncate">{msg.replyTo.content}</div>
           </button>
         )}
-        {isMedia && msg.mediaUrl ? (
+        {sharedContacts ? (
+          <>
+            {sharedContacts.map((c, i) => (
+              <ContactCard key={i} contact={c} onStart={onStartContact} />
+            ))}
+          </>
+        ) : isMedia && msg.mediaUrl ? (
           <>
             <MediaContent msg={msg} />
             {showCaption && (
@@ -1699,6 +1760,13 @@ export default function ChatCenter({
     } finally { setCorrecting(false); }
   };
 
+  // Cartão de contato compartilhado: pré-preenche "Novo atendimento" com o
+  // nome/telefone do contato em vez de deixar o vendedor digitar de novo.
+  const handleStartContact = (c: SharedContact) => {
+    setNewForm({ name: c.name, phone: c.phone ?? "", channel: "whatsapp", sectorId: "", assigneeId: "" });
+    setShowNewConv(true);
+  };
+
   // ── Toggle label ──
   const handleLabel = async (label: string) => {
     if (!activeConv) return;
@@ -2563,6 +2631,7 @@ export default function ChatCenter({
                     onReply={setReplyTarget}
                     highlighted={highlightedMsgId === msg.id}
                     onJumpTo={scrollToMessage}
+                    onStartContact={can(user, "criar_atendimento") ? handleStartContact : undefined}
                   />
                 ))}
                 <div ref={msgsEndRef} />

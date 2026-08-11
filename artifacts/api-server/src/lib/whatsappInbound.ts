@@ -599,7 +599,9 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     }
   }
 
-  const msgType: string = mediaType ?? "text";
+  // Contato compartilhado vira um tipo próprio ("contact") pra renderizar
+  // como cartão no front, em vez de cair no balão de texto genérico.
+  const msgType: string = mediaType ?? (contactText ? "contact" : "text");
   const docFileName = msgContent?.documentMessage?.fileName ?? null;
 
   // Enquete: mostra a pergunta e as opções.
