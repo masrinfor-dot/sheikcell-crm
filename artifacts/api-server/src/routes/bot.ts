@@ -113,7 +113,9 @@ router.post("/bot/test", requireFeature("robo"), requireModule("robo"), async (r
     return;
   }
   if (step.kind === "triage_done") {
-    const { summary } = await aiClassify(tenantId, settings, step.answers);
+    // Modo teste: sem conversa real, então sem ferramenta de roteamento
+    // (nada pra mudar de setor de verdade) — conversationId null desliga isso.
+    const { summary } = await aiClassify(tenantId, null, settings, step.answers);
     res.json({ replies: [...step.replies, `— [interno] Resumo para o vendedor: ${summary}`], simulated: true });
     return;
   }
