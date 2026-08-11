@@ -1,0 +1,54 @@
+name: Testes
+
+# Roda a suíte de testes (inclui os testes de isolamento entre lojas) em todo
+# push e pull request — uma falha de isolamento nunca deve passar despercebida.
+on:
+  push:
+    branches: [main, producao]
+  pull_request: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sheikcell
+          POSTGRES_PASSWORD: sheikcell123
+          POSTGRES_DB: sheikcell
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://sheikcell:sheikcell123@localhost:5432/sheikcell
+      SESSION_SECRET: ci-test-secret
+      OPENAI_API_KEY: sk-fake-ci-test
+      WHATSAPP_BRIDGE_URL: http://localhost:3002
+      NODE_ENV: development
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Instala dependências
+        run: pnpm install --frozen-lockfile
+
+      - name: Aplica o schema no banco de teste (--force: banco novo/vazio, nunca deve esperar confirmação interativa)
+        run: pnpm --filter @workspace/db run push-force
+        env:
+          DATABASE_URL: postgres://sheikcell:sheikcell123@localhost:5432/sheikcell
+
+      - name: Roda os testes do api-server (inclui isolamento entre lojas)
+        run: pnpm --filter @workspace/api-server run test
