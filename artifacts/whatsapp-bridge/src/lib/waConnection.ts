@@ -249,8 +249,10 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
     ? { targetId: msg.protocolMessage.key.id, message: msg.protocolMessage.editedMessage ?? undefined }
     : undefined;
 
-  // Mídia pode vir embrulhada (mensagem temporária / visualização única).
-  const inner = msg.ephemeralMessage?.message ?? msg.viewOnceMessage?.message ?? msg.viewOnceMessageV2?.message ?? msg;
+  // Mídia pode vir embrulhada (mensagem temporária / visualização única /
+  // documento com legenda — documentWithCaptionMessage embrulha um
+  // documentMessage comum do mesmo jeito que os outros wrappers abaixo).
+  const inner = msg.ephemeralMessage?.message ?? msg.viewOnceMessage?.message ?? msg.viewOnceMessageV2?.message ?? msg.documentWithCaptionMessage?.message ?? msg;
 
   let mediaBase64: string | undefined;
   let mediaMimeType: string | undefined;

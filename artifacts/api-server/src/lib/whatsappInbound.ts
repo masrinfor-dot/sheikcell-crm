@@ -51,6 +51,9 @@ export interface InboundWAMessageContent {
   videoMessage?: { caption?: string };
   audioMessage?: { caption?: string };
   documentMessage?: { caption?: string; fileName?: string };
+  // Documento enviado com legenda/texto junto — embrulha um documentMessage
+  // comum (mesmo padrão dos wrappers de ephemeral/view-once abaixo).
+  documentWithCaptionMessage?: { message?: InboundWAMessageContent };
   contactMessage?: { displayName?: string; vcard?: string };
   contactsArrayMessage?: { displayName?: string; contacts?: Array<{ displayName?: string; vcard?: string }> };
   locationMessage?: { degreesLatitude?: number; degreesLongitude?: number; name?: string; address?: string };
@@ -531,6 +534,7 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     rawMsg?.ephemeralMessage?.message ??
     rawMsg?.viewOnceMessage?.message ??
     rawMsg?.viewOnceMessageV2?.message ??
+    rawMsg?.documentWithCaptionMessage?.message ??
     rawMsg;
 
   const text =
