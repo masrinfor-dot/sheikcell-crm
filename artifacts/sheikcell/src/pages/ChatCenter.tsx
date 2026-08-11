@@ -1276,6 +1276,9 @@ export default function ChatCenter({
     const replyingTo = isNote ? null : replyTarget;
     setMsgText("");
     setReplyTarget(null);
+    // Mantém o foco no campo pra continuar digitando na hora — sem isso, quem
+    // envia clicando no botão (em vez de Enter) perde o foco pro botão.
+    inputRef.current?.focus();
     setSending(true);
     const optimistic: ChatMessage = {
       id: -Date.now(), conversationId: activeId, content: text,
@@ -1955,7 +1958,7 @@ export default function ChatCenter({
               <div ref={msgsEndRef} />
             </div>
             <form onSubmit={handleSend} className="flex items-center gap-2 px-3 py-2 border-t border-border shrink-0">
-              <input value={msgText} onChange={(e) => setMsgText(e.target.value)} placeholder="Mensagem..."
+              <input ref={inputRef} value={msgText} onChange={(e) => setMsgText(e.target.value)} placeholder="Mensagem..."
                 data-testid="input-docked-message"
                 className="flex-1 text-sm bg-secondary/50 rounded-full px-3 py-1.5 outline-none" />
               <button type="submit" disabled={!msgText.trim() || sending} data-testid="button-docked-send"
@@ -2820,7 +2823,6 @@ export default function ChatCenter({
               lang="pt-BR"
               data-testid="input-message"
               className="flex-1 bg-white rounded-full px-4 py-2 text-sm border border-border outline-none focus:ring-2 focus:ring-primary/20"
-              disabled={sending}
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(e); } }}
             />
             {msgText.trim() ? (

@@ -517,6 +517,9 @@ export default function InternalChat({ docked = false, onActiveConversationChang
     setSending(true);
     setDraft("");
     setMentionQuery(null);
+    // Mantém o foco no campo pra continuar digitando na hora — sem isso, quem
+    // envia clicando no botão (em vez de Ctrl+Enter) perde o foco pro botão.
+    textareaRef.current?.focus();
     try {
       const msg = await api.internalChat.send(activeId, content, replyTarget?.id);
       setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
