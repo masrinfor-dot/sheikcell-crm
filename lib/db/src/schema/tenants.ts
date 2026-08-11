@@ -34,6 +34,10 @@ export const tenantsTable = pgTable("tenants", {
   // nascem com a lista do pacote escolhido no cadastro; lojas de antes
   // dessa coluna existir foram migradas com todos os módulos habilitados.
   enabledModules: jsonb("enabled_modules").$type<OptionalModule[]>().notNull().default([...OPTIONAL_MODULES]),
+  // Admin excluiu a sala "Equipe (Geral)" do chat interno de propósito — sem
+  // isso, ensureGeneralRoom() recriaria uma nova (vazia) no próximo GET
+  // /internal-chat/conversations de qualquer membro da equipe.
+  internalChatGeneralDisabled: boolean("internal_chat_general_disabled").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

@@ -1,5 +1,5 @@
 import { Router, type IRouter, type Request, type Response } from "express";
-import { db, internalConversationsTable, internalConversationMembersTable, internalMessagesTable, usersTable } from "@workspace/db";
+import { db, internalConversationsTable, internalConversationMembersTable, internalMessagesTable, usersTable, tenantsTable } from "@workspace/db";
 import { eq, and, asc, inArray, sql, ne } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { requireAuth, requireAdmin, requireTenant, isTenantSuspended } from "../middlewares/auth";
@@ -23,13 +23,19 @@ const GENERAL_ROOM_NAME = "Equipe (Geral)";
 // Ensure the single general/team room DA LOJA (tenant) exists and return its id.
 // O índice único parcial é (tenant_id, kind) para kind='general', logo cada
 // loja tem exatamente uma sala geral.
-async function ensureGeneralRoom(tenantId: number): Promise<number> {
+// null = a loja excluiu a sala geral de propósito (tenants.internal_chat_general_disabled) — não recria.
+async function ensureGeneralRoom(tenantId: number): Promise<number | null> {
   const [existing] = await db
     .select({ id: internalConversationsTable.id })
     .from(internalConversationsTable)
     .where(and(eq(internalConversationsTable.tenantId, tenantId), eq(internalConversationsTable.kind, "general")))
     .limit(1);
   if (existing) return existing.id;
+
+  const [tenant] = await db.select({ disabled: tenantsTable.internalChatGeneralDisabled })
+    .from(tenantsTable).where(eq(tenantsTable.id, tenantId)).limit(1);
+  if (tenant?.disabled) return null;
+
   // Conflict-safe: a partial unique index on (tenant_id, kind='general')
   // guarantees a single row per tenant, so concurrent first accesses converge.
   await db
@@ -153,7 +159,7 @@ router.get("/internal-chat/conversations", requireAuth, async (req, res): Promis
   const userId = req.session.userId!;
 
   const generalId = await ensureGeneralRoom(tenantId);
-  await ensureMembership(generalId, userId, tenantId);
+  if (generalId != null) await ensureMembership(generalId, userId, tenantId);
 
   const memberships = await db
     .select({
@@ -744,6 +750,30 @@ router.delete("/internal-chat/conversations/:id", requireAdmin, async (req, res)
     .returning({ id: internalConversationsTable.id }); // cascade apaga membros e mensagens
   if (deleted.length === 0) { res.status(404).json({ error: "Grupo não encontrado" }); return; }
   broadcastInternal("internal_conversation_removed", { id: convId }, tenantId, recipients);
+  res.json({ ok: true });
+});
+
+// ─── Excluir a sala "Equipe (Geral)" ────────────────────────────────────────
+// Diferente de um grupo comum: marca a loja como "sala geral desativada"
+// ANTES de apagar, senão ensureGeneralRoom() recriaria uma nova (vazia) no
+// próximo GET /internal-chat/conversations de qualquer membro da equipe.
+// Só admin — perde o histórico de mensagens pra sempre, sem "desfazer".
+router.delete("/internal-chat/general", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+
+  const [conv] = await db.select().from(internalConversationsTable)
+    .where(and(eq(internalConversationsTable.tenantId, tenantId), eq(internalConversationsTable.kind, "general"))).limit(1);
+  if (!conv) { res.status(404).json({ error: "Sala geral não encontrada" }); return; }
+
+  await db.update(tenantsTable).set({ internalChatGeneralDisabled: true }).where(eq(tenantsTable.id, tenantId));
+
+  const recipients = await recipientsFor(conv); // null = todo mundo (era a sala geral)
+  const deleted = await db
+    .delete(internalConversationsTable)
+    .where(and(eq(internalConversationsTable.id, conv.id), eq(internalConversationsTable.tenantId, tenantId), eq(internalConversationsTable.kind, "general")))
+    .returning({ id: internalConversationsTable.id }); // cascade apaga membros e mensagens
+  if (deleted.length === 0) { res.status(404).json({ error: "Sala geral não encontrada" }); return; }
+  broadcastInternal("internal_conversation_removed", { id: conv.id }, tenantId, recipients);
   res.json({ ok: true });
 });
 

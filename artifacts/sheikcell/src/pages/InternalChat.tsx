@@ -776,6 +776,25 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                     <Trash2 className="w-4 h-4" />
                   </button>
                 )}
+                {active.kind === "general" && user?.role === "admin" && (
+                  <button
+                    onClick={async () => {
+                      if (!confirm(`Excluir "${active.name}" para SEMPRE? Todo o histórico de mensagens da equipe inteira será apagado e não pode ser desfeito. A sala não será recriada automaticamente.`)) return;
+                      try {
+                        await api.internalChat.deleteGeneral();
+                        setConversations((prev) => prev.filter((c) => c.id !== active.id));
+                        setActiveId(null);
+                      } catch (err) {
+                        alert(err instanceof Error ? err.message : "Erro ao excluir a sala geral");
+                      }
+                    }}
+                    data-testid="button-delete-general"
+                    title="Excluir sala geral (permanente)"
+                    className="ml-auto p-2 rounded-lg text-red-600 hover:bg-red-50 transition shrink-0"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
               </header>
 
               <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3 bg-muted/10">
