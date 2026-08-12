@@ -1,0 +1,20 @@
+-- Normaliza o valor legado de role "attendant" para "vendedor" de vez.
+--
+-- Esse valor só existe em contas criadas antes da renomeação de roles (ver
+-- .agents/memory/roles.md). A correção original foi feita via SQL manual
+-- direto em produção (sem migration versionada), então nunca chegou a
+-- outros ambientes — e pode reaparecer se algum backup anterior a essa
+-- correção for restaurado.
+--
+-- Sem essa normalização, contas com role="attendant" ficam com vários
+-- recursos exclusivos de vendedor quebrados silenciosamente: qualquer
+-- comparação estrita `role === "vendedor"` (formulário de restrição de
+-- linha de WhatsApp, horário de acesso, autoatribuição de atendimento
+-- criado manualmente, restrição de transferência entre vendedores, fila ao
+-- ser adicionado como participante, listas de vendedores em Resultados e
+-- Sorteios) nunca bate — a seção/comportamento correspondente some sem
+-- erro nenhum, em vez de falhar visivelmente.
+--
+-- Idempotente: após a primeira execução não sobra nenhuma linha com
+-- role='attendant', então reexecutar no boot é sempre um no-op seguro.
+UPDATE users SET role = 'vendedor' WHERE role = 'attendant';
