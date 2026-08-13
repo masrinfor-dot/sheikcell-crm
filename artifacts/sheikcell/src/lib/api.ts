@@ -6,10 +6,15 @@ export const API_BASE = BASE;
 // modal de confirmação de senha em vez de tratar como erro genérico.
 export class ApiError extends Error {
   code?: string;
-  constructor(message: string, code?: string) {
+  // Presente quando POST /chat/conversations responde 409 (já existe uma
+  // conversa aberta com esse número) — deixa quem chamou abrir a conversa
+  // existente em vez de só mostrar o erro.
+  conversationId?: number;
+  constructor(message: string, code?: string, conversationId?: number) {
     super(message);
     this.name = "ApiError";
     this.code = code;
+    this.conversationId = conversationId;
   }
 }
 
@@ -21,7 +26,11 @@ async function req<T>(path: string, opts?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new ApiError((err as { error?: string }).error ?? res.statusText, (err as { code?: string }).code);
+    throw new ApiError(
+      (err as { error?: string }).error ?? res.statusText,
+      (err as { code?: string }).code,
+      (err as { conversationId?: number }).conversationId,
+    );
   }
   if (res.status === 204) return undefined as unknown as T;
   return res.json() as Promise<T>;
@@ -599,6 +608,11 @@ export type ChatMessage = {
   type: string;
   status: string;
   senderName: string | null;
+  // Telefone de quem enviou DENTRO de uma conversa de grupo (participante),
+  // diferente do "phone" da conversa (que é o JID do grupo em si). Só
+  // preenchido pra mensagens de grupo — permite abrir uma conversa 1:1 com
+  // aquele participante direto a partir do balão.
+  senderPhone?: string | null;
   mediaUrl: string | null;
   transcript: string | null;
   externalId: string | null;

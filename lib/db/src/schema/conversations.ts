@@ -87,6 +87,11 @@ export const messagesTable = pgTable(
     type: text("type").notNull().default("text"),
     status: text("status").notNull().default("sent"), // sent | delivered | read | failed
     senderName: text("sender_name"),
+    // Telefone de quem mandou DENTRO de um grupo do WhatsApp (participante),
+    // extraído do key.participant do Baileys — diferente do "phone" da
+    // conversa (que é o JID do grupo). Permite abrir uma conversa 1:1 com
+    // aquele participante a partir do balão. Sempre null fora de grupo.
+    senderPhone: text("sender_phone"),
     mediaUrl: text("media_url"),
     // Transcrição do áudio (Whisper) — preenchida sob demanda ou pelo robô.
     transcript: text("transcript"),

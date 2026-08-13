@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { api, can, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage } from "@/lib/api";
+import { api, can, ApiError, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -538,12 +538,13 @@ function IconTextCard({ icon: Icon, content }: { icon: typeof CreditCard; conten
 }
 
 // ─── Message bubble ─────────────────────────────────────────────────────────
-function MsgBubble({ msg, onReply, highlighted, onJumpTo, onStartContact }: {
+function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConversation }: {
   msg: ChatMessage;
   onReply: (m: ChatMessage) => void;
   highlighted: boolean;
   onJumpTo: (id: number) => void;
-  onStartContact?: (c: SharedContact) => void;
+  isGroup: boolean;
+  onStartConversation?: (c: { name: string; phone: string | null }) => void;
 }) {
   const out = msg.direction === "outbound";
   const isMedia = msg.type === "image" || msg.type === "video" || msg.type === "audio" || msg.type === "doc" || msg.type === "sticker";
@@ -593,7 +594,18 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo, onStartContact }: {
       {out && replyButton}
       <div className={`max-w-[75%] rounded-2xl px-3 py-2 shadow-sm ${out ? "bg-[#dcf8c6] rounded-br-sm" : "bg-white rounded-bl-sm border border-border"}`}>
         {!out && msg.senderName && (
-          <p className="text-xs font-semibold text-primary mb-1">{msg.senderName}</p>
+          isGroup && msg.senderPhone && onStartConversation ? (
+            <button
+              onClick={() => onStartConversation({ name: msg.senderName!, phone: msg.senderPhone! })}
+              data-testid={`button-start-participant-${msg.id}`}
+              title="Iniciar conversa individual com este participante"
+              className="text-xs font-semibold text-primary mb-1 hover:underline"
+            >
+              {msg.senderName}
+            </button>
+          ) : (
+            <p className="text-xs font-semibold text-primary mb-1">{msg.senderName}</p>
+          )
         )}
         {msg.replyTo && (
           <button
@@ -613,7 +625,7 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo, onStartContact }: {
         ) : sharedContacts ? (
           <>
             {sharedContacts.map((c, i) => (
-              <ContactCard key={i} contact={c} onStart={onStartContact} />
+              <ContactCard key={i} contact={c} onStart={onStartConversation} />
             ))}
           </>
         ) : msg.type === "poll" ? (
@@ -1893,11 +1905,36 @@ export default function ChatCenter({
     } finally { setCorrecting(false); }
   };
 
-  // Cartão de contato compartilhado: pré-preenche "Novo atendimento" com o
-  // nome/telefone do contato em vez de deixar o vendedor digitar de novo.
-  const handleStartContact = (c: SharedContact) => {
-    setNewForm({ name: c.name, phone: c.phone ?? "", channel: "whatsapp", sectorId: "", assigneeId: "" });
-    setShowNewConv(true);
+  // Abre (ou cria, se não existir) uma conversa individual com um número —
+  // usado pelo cartão de contato compartilhado e pelo nome clicável de quem
+  // mandou uma mensagem dentro de um grupo. Se já existe uma conversa aberta
+  // com esse número, o backend responde 409 com o id dela — só abre.
+  const startConversationWith = async ({ name, phone }: { name: string; phone: string | null }) => {
+    if (!phone) { toast({ title: "Número não disponível para este contato", variant: "destructive" }); return; }
+    try {
+      const conv = await api.chat.createConversation({ phone, name, channel: "whatsapp" });
+      // O insert no backend não devolve o objeto assignee (só assigneeId) —
+      // preenche localmente com o que já temos em chatUsers pra não ficar
+      // preso na tela de "Iniciar atendimento" quando já tem responsável.
+      const assignee = conv.assigneeId != null
+        ? (conv.assigneeId === user?.id ? { id: user.id, name: user.name } : chatUsers.find((u) => u.id === conv.assigneeId))
+        : null;
+      const convWithAssignee = { ...conv, assignee: assignee ?? conv.assignee ?? null };
+      setConvs((prev) => prev.some((c) => c.id === convWithAssignee.id)
+        ? prev.map((c) => c.id === convWithAssignee.id ? convWithAssignee : c)
+        : [convWithAssignee, ...prev]);
+      setActiveId(conv.id);
+      setCategory(conversationCategory(conv));
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.conversationId != null) {
+        // Já existe uma conversa aberta com esse número — só abre ela.
+        setActiveId(err.conversationId);
+        const existing = convs.find((c) => c.id === err.conversationId);
+        if (existing) setCategory(conversationCategory(existing));
+        return;
+      }
+      toast({ title: "Erro ao iniciar conversa", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
   };
 
   // ── Toggle label ──
@@ -2764,7 +2801,8 @@ export default function ChatCenter({
                     onReply={setReplyTarget}
                     highlighted={highlightedMsgId === msg.id}
                     onJumpTo={scrollToMessage}
-                    onStartContact={can(user, "criar_atendimento") ? handleStartContact : undefined}
+                    isGroup={!!activeConv && isGroupConv(activeConv)}
+                    onStartConversation={can(user, "criar_atendimento") ? startConversationWith : undefined}
                   />
                 ))}
                 <div ref={msgsEndRef} />

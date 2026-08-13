@@ -94,7 +94,9 @@ export interface InboundWAPayload {
   event?: string;
   sessionKey?: string;
   data?: {
-    key?: { remoteJid?: string; fromMe?: boolean; id?: string };
+    // participant: JID de quem mandou DENTRO de um grupo (diferente do
+    // remoteJid, que é o JID do grupo) — só presente em mensagens de grupo.
+    key?: { remoteJid?: string; fromMe?: boolean; id?: string; participant?: string };
     message?: InboundWAMessageContent;
     pushName?: string;
     groupSubject?: string;
@@ -536,6 +538,14 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   const pushName = body.data?.pushName ?? body.senderName ?? phone;
   // Nome da conversa: nome do grupo (subject) para grupos; nome do contato para 1:1.
   const convName = isGroup ? (body.data?.groupSubject || "Grupo do WhatsApp") : pushName;
+  // Telefone de quem mandou DENTRO do grupo (participante) — permite abrir
+  // uma conversa 1:1 com ele a partir da Central. Se vier como "@lid" sem
+  // resolução (a ponte não conseguiu mapear pro telefone real), não é um
+  // número utilizável — descarta em vez de gravar um JID inválido.
+  const participantJid = isGroup ? body.data?.key?.participant : undefined;
+  const senderPhone = participantJid && !participantJid.endsWith("@lid")
+    ? participantJid.replace("@s.whatsapp.net", "").replace("@c.us", "")
+    : null;
 
   // Reação a uma mensagem existente: atualiza a lista de reações da
   // mensagem-alvo em vez de criar uma mensagem nova. Emoji vazio = reação
@@ -783,6 +793,7 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
       type: msgType,
       status: "delivered",
       senderName: pushName,
+      senderPhone,
       externalId,
       mediaUrl,
     })

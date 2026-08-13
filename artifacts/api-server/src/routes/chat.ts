@@ -478,6 +478,7 @@ router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Pr
       type: messagesTable.type,
       status: messagesTable.status,
       senderName: messagesTable.senderName,
+      senderPhone: messagesTable.senderPhone,
       mediaUrl: messagesTable.mediaUrl,
       transcript: messagesTable.transcript,
       externalId: messagesTable.externalId,

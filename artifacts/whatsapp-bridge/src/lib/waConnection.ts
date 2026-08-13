@@ -225,6 +225,28 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
       logger.warn({ remoteJid, sessionKey: s.key }, "Inbound LID sem mapeamento para telefone — usando @lid");
     }
   }
+  // Mensagem de grupo: captura o JID de quem mandou DENTRO do grupo
+  // (diferente do remoteJid, que é o JID do grupo) — permite abrir uma
+  // conversa individual com esse participante a partir da Central. Mesma
+  // resolução de @lid feita acima para o remoteJid.
+  let participant = isGroup ? (m.key?.participant ?? undefined) : undefined;
+  if (participant?.endsWith("@lid")) {
+    const alt = m.key?.participantAlt;
+    if (alt?.endsWith("@s.whatsapp.net")) {
+      participant = alt;
+    } else {
+      try {
+        const mapping = (s.sock as unknown as {
+          signalRepository?: { lidMapping?: { getPNForLID?: (lid: string) => Promise<string | null> } };
+        })?.signalRepository?.lidMapping;
+        const pn = await mapping?.getPNForLID?.(participant);
+        if (pn && pn.endsWith("@s.whatsapp.net")) participant = pn;
+      } catch {
+        // mantém o @lid — o front trata graciosamente (não dá pra abrir 1:1)
+      }
+    }
+  }
+
   const msg = m.message;
   if (!msg) return;
 
@@ -310,7 +332,7 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
     sessionKey: s.key,
     isGroupMsg: isGroup,
     data: {
-      key: { remoteJid, fromMe: false, id: m.key?.id ?? undefined },
+      key: { remoteJid, fromMe: false, id: m.key?.id ?? undefined, participant },
       message: msg,
       pushName: m.pushName ?? undefined,
       groupSubject,
