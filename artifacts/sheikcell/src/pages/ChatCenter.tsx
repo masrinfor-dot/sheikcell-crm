@@ -9,7 +9,8 @@ import {
   Smartphone, Instagram, UserCircle2, Circle,
   ArrowRightLeft, FileText, Volume2, Image, Video, Mic, Users, Paperclip, IdCard,
   Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX, Zap, CalendarClock, AlertTriangle,
-  Pin, PinOff, Reply, StickyNote, Star, StarOff, ChevronLeft
+  Pin, PinOff, Reply, StickyNote, Star, StarOff, ChevronLeft,
+  MapPin, ShoppingBag, CreditCard, BarChart3, Ban, UserPlus, ExternalLink
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -422,6 +423,120 @@ function extractMediaCaption(content: string): string {
   return isMediaPlaceholder(content) ? "" : content.trim();
 }
 
+// ─── Poll card ───────────────────────────────────────────────────────────
+// Backend grava enquete como texto formatado ("📊 Enquete: Pergunta\n•
+// opção 1\n• opção 2") pra manter busca/prévia funcionando — aqui só
+// reconstituímos os campos pra desenhar o cartão.
+const POLL_PREFIX = "📊 Enquete: ";
+function parsePoll(content: string): { question: string; options: string[] } | null {
+  if (!content.startsWith(POLL_PREFIX)) return null;
+  const lines = content.slice(POLL_PREFIX.length).split("\n");
+  const question = lines[0]?.trim() ?? "";
+  const options = lines.slice(1)
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith("• "))
+    .map((l) => l.slice(2).trim());
+  return { question, options };
+}
+
+function PollCard({ content }: { content: string }) {
+  const poll = parsePoll(content);
+  if (!poll) return <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">{content}</p>;
+  return (
+    <div className="min-w-[220px] max-w-full mb-1">
+      <div className="flex items-center gap-1.5 mb-1.5">
+        <BarChart3 className="w-4 h-4 text-primary shrink-0" />
+        <p className="text-sm font-semibold text-gray-800">{poll.question}</p>
+      </div>
+      {poll.options.length > 0 && (
+        <div className="flex flex-col gap-1">
+          {poll.options.map((o, i) => (
+            <div key={i} className="flex items-center gap-2 bg-black/5 rounded-lg px-2.5 py-1.5">
+              <Circle className="w-3 h-3 text-gray-400 shrink-0" />
+              <span className="text-sm text-gray-700">{o}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Location card ───────────────────────────────────────────────────────
+function parseLocation(content: string): { label: string; link: string | null } {
+  const nl = content.indexOf("\n");
+  const firstLine = nl === -1 ? content : content.slice(0, nl);
+  const link = nl === -1 ? null : content.slice(nl + 1).trim() || null;
+  const label = firstLine.replace(/^📍\s*/, "").replace(/^Localização(\s*em tempo real compartilhada)?:?\s*/, "").trim();
+  return { label, link };
+}
+
+function LocationCard({ content }: { content: string }) {
+  const { label, link } = parseLocation(content);
+  return (
+    <a
+      href={link ?? undefined}
+      target={link ? "_blank" : undefined}
+      rel={link ? "noopener noreferrer" : undefined}
+      className={`flex items-center gap-2.5 bg-black/5 rounded-xl px-3 py-2.5 min-w-[220px] max-w-full mb-1 ${link ? "hover:bg-black/10 transition" : ""}`}
+    >
+      <div className="w-9 h-9 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+        <MapPin className="w-5 h-5 text-primary" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold text-gray-800">{label || "Localização compartilhada"}</p>
+        {link && <p className="text-xs text-primary flex items-center gap-0.5">Abrir no mapa <ExternalLink className="w-3 h-3" /></p>}
+      </div>
+    </a>
+  );
+}
+
+// ─── Catalog product card ────────────────────────────────────────────────
+function parseProduct(content: string): { title: string; description: string; url: string | null } {
+  const lines = content.split("\n").filter((l) => l.trim().length > 0);
+  const title = (lines[0] ?? "").replace(/^🛍️\s*/, "").trim();
+  const rest = lines.slice(1);
+  const last = rest[rest.length - 1] ?? "";
+  const hasUrl = /^https?:\/\//.test(last.trim());
+  const url = hasUrl ? last.trim() : null;
+  const description = (hasUrl ? rest.slice(0, -1) : rest).join("\n").trim();
+  return { title, description, url };
+}
+
+function ProductCard({ content }: { content: string }) {
+  const { title, description, url } = parseProduct(content);
+  return (
+    <div className="min-w-[220px] max-w-full mb-1 bg-black/5 rounded-xl px-3 py-2.5">
+      <div className="flex items-center gap-2">
+        <div className="w-9 h-9 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+          <ShoppingBag className="w-5 h-5 text-primary" />
+        </div>
+        <p className="text-sm font-semibold text-gray-800">{title}</p>
+      </div>
+      {description && <p className="text-xs text-gray-600 mt-1.5 whitespace-pre-wrap break-words">{description}</p>}
+      {url && (
+        <a href={url} target="_blank" rel="noopener noreferrer" className="text-xs text-primary flex items-center gap-0.5 mt-1.5">
+          Ver produto <ExternalLink className="w-3 h-3" />
+        </a>
+      )}
+    </div>
+  );
+}
+
+// ─── Simple icon+text cards (pagamento, convite de grupo) ────────────────
+// Conteúdo já vem totalmente descritivo do backend — só precisa de um
+// cartão visual em vez do balão de texto genérico.
+function IconTextCard({ icon: Icon, content }: { icon: typeof CreditCard; content: string }) {
+  return (
+    <div className="flex items-center gap-2.5 bg-black/5 rounded-xl px-3 py-2.5 min-w-[200px] max-w-full mb-1">
+      <div className="w-9 h-9 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+        <Icon className="w-5 h-5 text-primary" />
+      </div>
+      <p className="text-sm text-gray-800 whitespace-pre-wrap break-words flex-1">{content}</p>
+    </div>
+  );
+}
+
 // ─── Message bubble ─────────────────────────────────────────────────────────
 function MsgBubble({ msg, onReply, highlighted, onJumpTo, onStartContact }: {
   msg: ChatMessage;
@@ -490,12 +605,27 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo, onStartContact }: {
             <div className="text-xs text-gray-600 truncate">{msg.replyTo.content}</div>
           </button>
         )}
-        {sharedContacts ? (
+        {msg.deletedAt ? (
+          <div className="flex items-center gap-1.5 text-sm text-gray-400 italic">
+            <Ban className="w-3.5 h-3.5 shrink-0" />
+            <span>Esta mensagem foi apagada</span>
+          </div>
+        ) : sharedContacts ? (
           <>
             {sharedContacts.map((c, i) => (
               <ContactCard key={i} contact={c} onStart={onStartContact} />
             ))}
           </>
+        ) : msg.type === "poll" ? (
+          <PollCard content={msg.content} />
+        ) : msg.type === "location" ? (
+          <LocationCard content={msg.content} />
+        ) : msg.type === "product" ? (
+          <ProductCard content={msg.content} />
+        ) : msg.type === "payment" ? (
+          <IconTextCard icon={CreditCard} content={msg.content} />
+        ) : msg.type === "group_invite" ? (
+          <IconTextCard icon={UserPlus} content={msg.content} />
         ) : isMedia && msg.mediaUrl ? (
           <>
             <MediaContent msg={msg} />

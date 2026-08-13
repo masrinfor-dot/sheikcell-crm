@@ -228,14 +228,15 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
   const msg = m.message;
   if (!msg) return;
 
-  // Reação e edição de mensagem atualizam a mensagem original em vez de
+  // Reação, edição e apagar (revoke) atualizam a mensagem original em vez de
   // criar uma nova — tratadas à parte do filtro de "invisíveis" abaixo.
   const isReaction = !!msg.reactionMessage;
   const isEdit = msg.protocolMessage?.type === proto.Message.ProtocolMessage.Type.MESSAGE_EDIT;
+  const isRevoke = msg.protocolMessage?.type === proto.Message.ProtocolMessage.Type.REVOKE;
 
-  if (!isReaction && !isEdit) {
-    // Eventos SEM conteúdo visível (apagar, voto em enquete, recibos, chaves
-    // de criptografia) não viram mensagem — antes chegavam na Central como
+  if (!isReaction && !isEdit && !isRevoke) {
+    // Eventos SEM conteúdo visível (voto em enquete, recibos, chaves de
+    // criptografia) não viram mensagem — antes chegavam na Central como
     // "(mensagem não suportada)" em cima de qualquer reação. 🙅
     const keys = Object.keys(msg).filter((k) => k !== "messageContextInfo" && k !== "senderKeyDistributionMessage");
     const INVISIBLE = new Set(["reactionMessage", "protocolMessage", "pollUpdateMessage", "keepInChatMessage", "pinInChatMessage"]);
@@ -247,6 +248,9 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
     : undefined;
   const edit = isEdit && msg.protocolMessage?.key?.id
     ? { targetId: msg.protocolMessage.key.id, message: msg.protocolMessage.editedMessage ?? undefined }
+    : undefined;
+  const revoke = isRevoke && msg.protocolMessage?.key?.id
+    ? { targetId: msg.protocolMessage.key.id }
     : undefined;
 
   // Mídia pode vir embrulhada (mensagem temporária / visualização única /
@@ -318,6 +322,7 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
       avatarUrl,
       reaction,
       edit,
+      revoke,
     },
   };
 

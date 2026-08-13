@@ -593,6 +593,7 @@ export type ChatMessage = {
   externalId: string | null;
   createdAt: string;
   editedAt?: string | null;
+  deletedAt?: string | null;
   reactions?: Array<{ emoji: string; senderName: string | null }>;
   replyToId?: number | null;
   replyTo?: { id: number; senderName: string | null; content: string; type: string } | null;

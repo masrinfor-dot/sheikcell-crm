@@ -9,6 +9,7 @@ import { getSurveySettings, SURVEY_DEFAULTS, surveyScaleMin, buildThankYouMessag
 import { writeFile, mkdir } from "fs/promises";
 import { randomUUID } from "crypto";
 import path from "path";
+import { logger } from "./logger";
 
 export const MEDIA_DIR = path.resolve(process.cwd(), "media");
 
@@ -67,6 +68,22 @@ export interface InboundWAMessageContent {
   listResponseMessage?: { title?: string; singleSelectReply?: { selectedRowId?: string } };
   templateButtonReplyMessage?: { selectedDisplayText?: string };
   interactiveResponseMessage?: { body?: { text?: string } };
+  // Convite de grupo.
+  groupInviteMessage?: { groupJid?: string; groupName?: string; inviteCode?: string };
+  // Produto de catálogo compartilhado (loja do WhatsApp Business).
+  productMessage?: {
+    product?: { title?: string; description?: string; currencyCode?: string; priceAmount1000?: number; url?: string };
+    businessOwnerJid?: string;
+    body?: string;
+    footer?: string;
+  };
+  // Pagamentos via WhatsApp (Meta Pay / P2P) — raros no Brasil, mas melhor
+  // mostrar um resumo do que cair no fallback de "não suportado".
+  paymentInviteMessage?: object;
+  sendPaymentMessage?: object;
+  requestPaymentMessage?: { currencyCodeIso4217?: string; amount1000?: number };
+  declinePaymentRequestMessage?: object;
+  cancelPaymentRequestMessage?: object;
   // Wrappers used by disappearing/view-once chats — the real content is nested.
   ephemeralMessage?: { message?: InboundWAMessageContent };
   viewOnceMessage?: { message?: InboundWAMessageContent };
@@ -86,9 +103,10 @@ export interface InboundWAPayload {
     mediaMimeType?: string;
     mediaType?: "image" | "video" | "audio" | "doc" | "sticker";
     avatarUrl?: string;
-    // Reação/edição a uma mensagem já existente — atualiza em vez de criar.
+    // Reação/edição/apagar a uma mensagem já existente — atualiza em vez de criar.
     reaction?: { targetId: string; emoji: string };
     edit?: { targetId: string; message?: InboundWAMessageContent };
+    revoke?: { targetId: string };
   };
   phone?: string;
   text?: { message?: string };
@@ -491,6 +509,18 @@ async function applyEdit(targetId: string, newContent: string): Promise<void> {
   if (updated) await broadcastMessageUpdated(updated);
 }
 
+const DELETED_MESSAGE_PLACEHOLDER = "🚫 Esta mensagem foi apagada";
+
+async function applyRevoke(targetId: string): Promise<void> {
+  const [target] = await db.select().from(messagesTable)
+    .where(eq(messagesTable.externalId, targetId)).limit(1);
+  if (!target) return;
+  const [updated] = await db.update(messagesTable)
+    .set({ content: DELETED_MESSAGE_PLACEHOLDER, deletedAt: new Date(), mediaUrl: null })
+    .where(eq(messagesTable.id, target.id)).returning();
+  if (updated) await broadcastMessageUpdated(updated);
+}
+
 export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   const fromMe = body.data?.key?.fromMe ?? body.fromMe ?? false;
   if (fromMe) return;
@@ -521,6 +551,13 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     const edited = body.data.edit.message;
     const newText = edited?.conversation ?? edited?.extendedTextMessage?.text ?? "";
     if (newText) await applyEdit(body.data.edit.targetId, newText);
+    return;
+  }
+
+  // Cliente apagou a mensagem original ("apagar para todos") — sobrescreve o
+  // conteúdo com um placeholder em vez de deixar sumir sem explicação.
+  if (body.data?.revoke) {
+    await applyRevoke(body.data.revoke.targetId);
     return;
   }
 
@@ -581,6 +618,44 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     locationText = `📍 Localização em tempo real compartilhada${caption ? `: ${caption}` : ""}${link ? `\n${link}` : ""}`;
   }
 
+  // Produto de catálogo compartilhado.
+  let productText = "";
+  if (msgContent?.productMessage) {
+    const p = msgContent.productMessage.product;
+    const price = p?.priceAmount1000 != null
+      ? (p.priceAmount1000 / 1000).toLocaleString("pt-BR", { style: "currency", currency: p.currencyCode || "BRL" })
+      : null;
+    const title = p?.title ?? msgContent.productMessage.body ?? "Produto";
+    productText = [
+      `🛍️ ${title}${price ? ` — ${price}` : ""}`,
+      p?.description ?? "",
+      p?.url ?? "",
+    ].filter(Boolean).join("\n");
+  }
+
+  // Pagamentos via WhatsApp (envio, solicitação, convite, recusa, cancelamento).
+  let paymentText = "";
+  if (msgContent?.sendPaymentMessage) {
+    paymentText = "💳 Pagamento enviado";
+  } else if (msgContent?.requestPaymentMessage) {
+    const rp = msgContent.requestPaymentMessage;
+    const amount = rp.amount1000 != null
+      ? (rp.amount1000 / 1000).toLocaleString("pt-BR", { style: "currency", currency: rp.currencyCodeIso4217 || "BRL" })
+      : null;
+    paymentText = `💳 Solicitação de pagamento${amount ? `: ${amount}` : ""}`;
+  } else if (msgContent?.paymentInviteMessage) {
+    paymentText = "💳 Convite para configurar pagamentos no WhatsApp";
+  } else if (msgContent?.declinePaymentRequestMessage) {
+    paymentText = "💳 Solicitação de pagamento recusada";
+  } else if (msgContent?.cancelPaymentRequestMessage) {
+    paymentText = "💳 Solicitação de pagamento cancelada";
+  }
+
+  // Convite de grupo.
+  const groupInviteText = msgContent?.groupInviteMessage
+    ? `📨 Convite para o grupo "${msgContent.groupInviteMessage.groupName ?? "WhatsApp"}"`
+    : "";
+
   // Respostas de botão/lista/template/fluxo interativo (WhatsApp Business).
   const interactiveText =
     (msgContent?.buttonsResponseMessage?.selectedDisplayText
@@ -619,9 +694,6 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     }
   }
 
-  // Contato compartilhado vira um tipo próprio ("contact") pra renderizar
-  // como cartão no front, em vez de cair no balão de texto genérico.
-  const msgType: string = mediaType ?? (contactText ? "contact" : "text");
   const docFileName = msgContent?.documentMessage?.fileName ?? null;
 
   // Enquete: mostra a pergunta e as opções.
@@ -633,17 +705,38 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   // Fallback genérico para qualquer tipo realmente não mapeado: em vez de um
   // texto sem informação nenhuma, mostra pelo menos o nome do campo bruto do
   // WhatsApp recebido (ajuda a diagnosticar e já é mais útil que um erro).
+  // Também loga o objeto bruto inteiro, pra identificar o tipo exato sem
+  // precisar que o usuário mande print da tela.
   const NOISE_KEYS = new Set(["messageContextInfo", "senderKeyDistributionMessage"]);
   const rawKeys = msgContent
     ? Object.keys(msgContent).filter((k) => !NOISE_KEYS.has(k) && (msgContent as Record<string, unknown>)[k] != null)
     : [];
   const unknownKind = rawKeys[0];
+  if (!mediaType && !text && !contactText && !locationText && !pollText && !productText && !paymentText && !groupInviteText && !interactiveText) {
+    logger.warn({ rawKeys, msgContent }, "Tipo de mensagem WhatsApp não mapeado — caiu no fallback");
+  }
+
+  // Contato compartilhado, localização, enquete, produto de catálogo,
+  // pagamento e convite de grupo viram tipos próprios pra renderizar como
+  // cartão no front, em vez de cair no balão de texto genérico.
+  const msgType: string = mediaType
+    ?? (text ? "text"
+      : contactText ? "contact"
+      : locationText ? "location"
+      : pollText ? "poll"
+      : productText ? "product"
+      : paymentText ? "payment"
+      : groupInviteText ? "group_invite"
+      : "text");
 
   const displayContent =
     text ||
     contactText ||
     locationText ||
     pollText ||
+    productText ||
+    paymentText ||
+    groupInviteText ||
     interactiveText ||
     (mediaType === "image" ? "📷 Foto"
       : mediaType === "video" ? "🎥 Vídeo"

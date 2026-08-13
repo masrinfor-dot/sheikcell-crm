@@ -483,6 +483,7 @@ router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Pr
       externalId: messagesTable.externalId,
       createdAt: messagesTable.createdAt,
       editedAt: messagesTable.editedAt,
+      deletedAt: messagesTable.deletedAt,
       reactions: messagesTable.reactions,
       replyToId: messagesTable.replyToId,
       replyToSenderName: repliedMsg.senderName,

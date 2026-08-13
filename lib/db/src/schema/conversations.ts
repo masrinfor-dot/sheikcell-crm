@@ -82,7 +82,9 @@ export const messagesTable = pgTable(
     conversationId: integer("conversation_id").notNull().references(() => conversationsTable.id),
     content: text("content").notNull(),
     direction: text("direction").notNull().default("inbound"), // inbound | outbound
-    type: text("type").notNull().default("text"), // text | image | audio | doc | system
+    // text | image | audio | video | doc | sticker | contact | location | poll
+    // | product | payment | group_invite | note | system
+    type: text("type").notNull().default("text"),
     status: text("status").notNull().default("sent"), // sent | delivered | read | failed
     senderName: text("sender_name"),
     mediaUrl: text("media_url"),
@@ -93,6 +95,10 @@ export const messagesTable = pgTable(
     // Preenchido quando o cliente edita a mensagem original no WhatsApp
     // (o conteúdo já foi sobrescrito com o texto novo).
     editedAt: timestamp("edited_at", { withTimezone: true }),
+    // Preenchido quando o cliente apaga a mensagem original no WhatsApp
+    // ("apagar para todos" — protocolMessage REVOKE). O conteúdo é
+    // sobrescrito com um texto de placeholder, como no WhatsApp oficial.
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
     // Reações de emoji do WhatsApp (cliente reagindo a esta mensagem).
     // Uma entrada por remetente — reenviar com o mesmo emoji atualiza, texto
     // vazio remove (comportamento nativo do WhatsApp).
