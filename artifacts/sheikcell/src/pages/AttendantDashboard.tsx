@@ -36,7 +36,7 @@ type MainTab = "queue" | "resultados" | "chat" | "crm" | "tarefas" | "equipe" | 
 
 // Abas de admin que podem ser liberadas para vendedores no cadastro (adminAccess)
 const GRANTED_TABS: { id: MainTab; label: string; icon: typeof PhoneCall; module?: OptionalModule }[] = [
-  { id: "financeiro", label: "Financeiro", icon: BadgeDollarSign },
+  { id: "financeiro", label: "Financeiro", icon: BadgeDollarSign, module: "financeiro" },
   { id: "sorteios", label: "Sorteios", icon: Gift, module: "sorteios" },
   { id: "robo", label: "Robô", icon: Bot, module: "robo" },
   { id: "rh", label: "RH", icon: UserSearch, module: "rh" },
@@ -44,16 +44,16 @@ const GRANTED_TABS: { id: MainTab; label: string; icon: typeof PhoneCall; module
 ];
 
 const MAIN_TABS: { id: MainTab; label: string; icon: typeof PhoneCall; module?: OptionalModule }[] = [
-  { id: "queue" as MainTab, label: "Fila", icon: PhoneCall },
-  { id: "chat" as MainTab, label: "Atendimento", icon: MessageCircle },
-  { id: "tarefas" as MainTab, label: "Tarefas", icon: ListTodo },
-  { id: "resultados" as MainTab, label: "Resultados", icon: TrendingUp },
-  { id: "crm" as MainTab, label: "CRM", icon: Kanban },
+  { id: "queue" as MainTab, label: "Fila", icon: PhoneCall, module: "chat" },
+  { id: "chat" as MainTab, label: "Atendimento", icon: MessageCircle, module: "chat" },
+  { id: "tarefas" as MainTab, label: "Tarefas", icon: ListTodo, module: "tarefas" },
+  { id: "resultados" as MainTab, label: "Resultados", icon: TrendingUp, module: "resultados" },
+  { id: "crm" as MainTab, label: "CRM", icon: Kanban, module: "crm" },
   { id: "financeiras" as MainTab, label: "Financeiras", icon: Landmark, module: "financeiras" },
   { id: "avaliacao" as MainTab, label: "Avaliação", icon: BadgeDollarSign, module: "avaliacao" },
   { id: "treinamentos" as MainTab, label: "Treinamentos", icon: GraduationCap, module: "treinamentos" },
   { id: "documentos" as MainTab, label: "Documentos", icon: FolderArchive, module: "documentos" },
-  { id: "diretorio" as MainTab, label: "Diretório", icon: BookUser },
+  { id: "diretorio" as MainTab, label: "Diretório", icon: BookUser, module: "diretorio" },
   { id: "suporte" as MainTab, label: "Suporte", icon: LifeBuoy },
 ];
 
@@ -70,6 +70,8 @@ export default function AttendantDashboard() {
   const { toast } = useToast();
 
   const [mainTab, setMainTab] = useState<MainTab>("queue");
+  const enabledModules = user?.enabledModules ?? null;
+  const moduleOk = (m: OptionalModule | undefined) => !m || enabledModules == null || enabledModules.includes(m);
   // No desktop (md+) o chat interno fica sempre visível numa coluna lateral
   // (ver <InternalChat docked /> abaixo), então nunca é "invisível" lá — só
   // no celular ele soma/some conforme a aba "Equipe" está aberta ou não.
@@ -80,7 +82,7 @@ export default function AttendantDashboard() {
     mq.addEventListener("change", h);
     return () => mq.removeEventListener("change", h);
   }, []);
-  const internalChatUnread = useInternalChatNotifier(user?.id, isDesktop || mainTab === "equipe", can(user, "equipe"));
+  const internalChatUnread = useInternalChatNotifier(user?.id, isDesktop || mainTab === "equipe", can(user, "equipe") && moduleOk("equipe"));
 
   // Alarme de sem resposta clicado em outra aba → volta para o chat.
   useEffect(() => {
@@ -117,8 +119,6 @@ export default function AttendantDashboard() {
 
   const sectorId = user?.sectorId ?? 0;
   const sectorInfo = user?.sector;
-  const enabledModules = user?.enabledModules ?? null;
-  const moduleOk = (m: OptionalModule | undefined) => !m || enabledModules == null || enabledModules.includes(m);
 
   const fetchQueue = useCallback(async () => {
     try {
@@ -289,7 +289,7 @@ export default function AttendantDashboard() {
         <ChatCenter focusConversationId={focusConversationId} focusRequestId={focusRequestId} />
       </div>
 
-      {mainTab === "equipe" && (
+      {mainTab === "equipe" && moduleOk("equipe") && (
         <div className="md:hidden h-[calc(100dvh-7rem-env(safe-area-inset-bottom))] flex flex-col bg-card">
           <InternalChat key={focusInternalRequestId} docked initialConversationId={focusInternalConversationId} />
         </div>
@@ -526,14 +526,16 @@ export default function AttendantDashboard() {
         </div>
 
         {/* Chat Interno — coluna lateral sempre aberta (somente desktop) */}
-        <aside className="hidden md:flex w-[300px] xl:w-[360px] shrink-0 flex-col border-l border-border bg-card sticky top-14 self-start h-[calc(100vh-3.5rem)]">
-          <InternalChat key={focusInternalRequestId} docked initialConversationId={focusInternalConversationId} />
-        </aside>
+        {moduleOk("equipe") && (
+          <aside className="hidden md:flex w-[300px] xl:w-[360px] shrink-0 flex-col border-l border-border bg-card sticky top-14 self-start h-[calc(100vh-3.5rem)]">
+            <InternalChat key={focusInternalRequestId} docked initialConversationId={focusInternalConversationId} />
+          </aside>
+        )}
       </div>
 
       {/* Barra de navegação inferior — somente celular */}
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-white border-t border-border flex items-stretch h-[calc(3.5rem+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)]">
-        {[...MAIN_TABS.filter(({ id, module }) => (id === "queue" || id === "chat" || id === "diretorio" || can(user, id)) && moduleOk(module)), ...(can(user, "equipe") ? [{ id: "equipe" as MainTab, label: "Equipe", icon: MessagesSquare }] : []), ...GRANTED_TABS.filter(({ id, module }) => (id === "sorteios" || user?.adminAccess?.includes(id)) && moduleOk(module))].map(({ id, label, icon: Icon }) => (
+        {[...MAIN_TABS.filter(({ id, module }) => (id === "queue" || id === "chat" || id === "diretorio" || can(user, id)) && moduleOk(module)), ...(can(user, "equipe") && moduleOk("equipe") ? [{ id: "equipe" as MainTab, label: "Equipe", icon: MessagesSquare }] : []), ...GRANTED_TABS.filter(({ id, module }) => (id === "sorteios" || user?.adminAccess?.includes(id)) && moduleOk(module))].map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             onClick={() => setMainTab(id)}

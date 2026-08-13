@@ -128,14 +128,16 @@ router.post("/superadmin/tenants", async (req, res): Promise<void> => {
 // Renomeia / suspende / reativa loja
 router.patch("/superadmin/tenants/:id", async (req, res): Promise<void> => {
   const id = Number(req.params.id);
-  const { name, isActive, saasStatus, contactName, contactPhone, contactEmail } = req.body as {
+  const { name, isActive, saasStatus, contactName, contactPhone, contactEmail, enabledModules } = req.body as {
     name?: string; isActive?: boolean; saasStatus?: string;
     contactName?: string | null; contactPhone?: string | null; contactEmail?: string | null;
+    enabledModules?: unknown;
   };
   if (!Number.isFinite(id)) { res.status(400).json({ error: "Loja inválida" }); return; }
   const updates: Partial<{
     name: string; isActive: boolean; saasStatus: string;
     contactName: string | null; contactPhone: string | null; contactEmail: string | null;
+    enabledModules: OptionalModule[];
   }> = {};
   if (typeof name === "string" && name.trim()) updates.name = name.trim();
   if (typeof isActive === "boolean") updates.isActive = isActive;
@@ -149,6 +151,7 @@ router.patch("/superadmin/tenants/:id", async (req, res): Promise<void> => {
   if (contactName !== undefined) updates.contactName = contactName?.trim() || null;
   if (contactPhone !== undefined) updates.contactPhone = contactPhone?.trim() || null;
   if (contactEmail !== undefined) updates.contactEmail = contactEmail?.trim() || null;
+  if (enabledModules !== undefined) updates.enabledModules = sanitizeModules(enabledModules);
   if (!Object.keys(updates).length) { res.status(400).json({ error: "Nada para atualizar" }); return; }
   // Tudo numa transação única: cancelar/reativar o lojista também
   // encerra/reativa o contrato dele e, ao cancelar, cancela as mensalidades

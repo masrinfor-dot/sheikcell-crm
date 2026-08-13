@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db, tasksTable, sectorsTable, usersTable, taskCommentsTable, taskSubtasksTable, taskNotificationsTable } from "@workspace/db";
 import { eq, and, desc, asc, inArray, sql } from "drizzle-orm";
-import { requireAuth, isGlobalRole, requireTenant } from "../middlewares/auth";
+import { requireAuth, isGlobalRole, requireTenant, requireModule } from "../middlewares/auth";
 import { requirePerm } from "../lib/permissions";
 import { MEDIA_DIR } from "../lib/whatsappInbound";
 import { writeFile, mkdir } from "fs/promises";
@@ -43,8 +43,9 @@ async function notifyInvolved(task: typeof tasksTable.$inferSelect, commentId: n
 
 const router: IRouter = Router();
 
-// Permissão individual "tarefas": vendedor sem ela não acessa o quadro.
-router.use("/tasks", requirePerm("tarefas"));
+// Permissão individual "tarefas" + módulo contratado pela loja: vendedor sem
+// qualquer um dos dois não acessa o quadro.
+router.use("/tasks", requirePerm("tarefas"), requireModule("tarefas"));
 
 const STATUSES = ["todo", "doing", "done"];
 const PRIORITIES = ["baixa", "media", "alta"];

@@ -1,13 +1,18 @@
 import { pgTable, serial, text, boolean, timestamp, jsonb, integer } from "drizzle-orm/pg-core";
 import { usersTable } from "./users";
 
-// Módulos opcionais que uma loja pode ou não ter contratado (teto por
-// loja — além do controle de permissão já existente por usuário em
-// users.adminAccess/permissions). Núcleo do CRM (Atendimento, CRM, chat
-// interno, etc.) não entra aqui: é sempre liberado.
+// Módulos opcionais que uma loja pode ou não ter contratado (teto por loja —
+// além do controle de permissão já existente por usuário em
+// users.adminAccess/permissions). Inclui tanto os módulos "de negócio"
+// (avaliação, financeiras, RH etc.) quanto os que antes eram núcleo sempre
+// ligado (chat, crm, equipe, financeiro, diretorio, tarefas, resultados,
+// history) — hoje o superadmin monta o plano de cada loja escolhendo
+// qualquer combinação. Só o que é infraestrutura de autoadministração da
+// própria loja (usuários, setores, conexão do WhatsApp, aparência etc.)
+// continua fora daqui, sempre ligado (sem isso o lojista ficaria sem saída).
 export const OPTIONAL_MODULES = [
-  "avaliacao", "financeiras", "rh",
-  "treinamentos", "questionarios", "sorteios", "documentos", "robo",
+  "chat", "crm", "equipe", "financeiro", "diretorio", "tarefas", "resultados", "history",
+  "avaliacao", "financeiras", "rh", "treinamentos", "questionarios", "sorteios", "documentos", "robo",
 ] as const;
 export type OptionalModule = typeof OPTIONAL_MODULES[number];
 

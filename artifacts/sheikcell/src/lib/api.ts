@@ -98,11 +98,19 @@ export type User = {
 // Módulos opcionais que uma loja pode ou não ter contratado — mesma lista
 // de OPTIONAL_MODULES em lib/db/src/schema/tenants.ts (mantenha em sincronia).
 export const OPTIONAL_MODULES = [
-  "avaliacao", "financeiras", "rh",
-  "treinamentos", "questionarios", "sorteios", "documentos", "robo",
+  "chat", "crm", "equipe", "financeiro", "diretorio", "tarefas", "resultados", "history",
+  "avaliacao", "financeiras", "rh", "treinamentos", "questionarios", "sorteios", "documentos", "robo",
 ] as const;
 export type OptionalModule = typeof OPTIONAL_MODULES[number];
 export const MODULE_LABELS: Record<OptionalModule, string> = {
+  chat: "Atendimento",
+  crm: "CRM",
+  equipe: "Chat Interno",
+  financeiro: "Financeiro",
+  diretorio: "Diretório da Equipe",
+  tarefas: "Tarefas",
+  resultados: "Resultados",
+  history: "Histórico",
   avaliacao: "Avaliação de Usados",
   financeiras: "Financeiras",
   rh: "RH",
@@ -112,8 +120,11 @@ export const MODULE_LABELS: Record<OptionalModule, string> = {
   documentos: "Documentos",
   robo: "Robô",
 };
+// "Básico" = o conjunto padrão do CRM (o que antes era núcleo sempre ligado);
+// "Completo" = básico + todos os módulos de negócio adicionais.
+const BASIC_MODULES: OptionalModule[] = ["chat", "crm", "equipe", "financeiro", "diretorio", "tarefas", "resultados", "history"];
 export const MODULE_PACKAGES: Record<"basico" | "completo", OptionalModule[]> = {
-  basico: [],
+  basico: BASIC_MODULES,
   completo: [...OPTIONAL_MODULES],
 };
 
@@ -704,6 +715,7 @@ export const api = {
     updateTenant: (id: number, data: {
       name?: string; isActive?: boolean; saasStatus?: "ativo" | "cancelado";
       contactName?: string | null; contactPhone?: string | null; contactEmail?: string | null;
+      enabledModules?: OptionalModule[];
     }) =>
       req<{ tenant: TenantSummary }>(`/superadmin/tenants/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     upsertTenantAdmin: (id: number, data: { name?: string; email: string; password: string }) =>

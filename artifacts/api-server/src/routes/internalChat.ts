@@ -2,7 +2,7 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import { db, internalConversationsTable, internalConversationMembersTable, internalMessagesTable, usersTable, tenantsTable } from "@workspace/db";
 import { eq, and, asc, inArray, sql, ne } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { requireAuth, requireAdmin, requireTenant, isTenantSuspended } from "../middlewares/auth";
+import { requireAuth, requireAdmin, requireTenant, isTenantSuspended, requireModule } from "../middlewares/auth";
 import {
   sseEmitter,
   broadcastInternal,
@@ -17,6 +17,9 @@ import path from "path";
 import { MEDIA_DIR } from "../lib/whatsappInbound";
 
 const router: IRouter = Router();
+
+// Módulo "equipe" (Chat Interno) contratado pela loja.
+router.use("/internal-chat", requireModule("equipe"));
 
 const GENERAL_ROOM_NAME = "Equipe (Geral)";
 

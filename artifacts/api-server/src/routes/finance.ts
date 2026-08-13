@@ -1,13 +1,13 @@
 import { Router, type IRouter } from "express";
 import { and, eq, gte, inArray, isNotNull, notInArray, sql } from "drizzle-orm";
 import { db, attendanceLogsTable, conversationsTable, usersTable } from "@workspace/db";
-import { requireFeature, requireTenant } from "../middlewares/auth";
+import { requireFeature, requireTenant, requireModule } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
 // Painel financeiro: vendas e prospecção por vendedor, em um período.
 // GET /finance/summary?days=30&sectorId=3
-router.get("/finance/summary", requireFeature("financeiro"), async (req, res): Promise<void> => {
+router.get("/finance/summary", requireFeature("financeiro"), requireModule("financeiro"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   let days = parseInt(String(req.query.days ?? "30"), 10);
   if (!Number.isFinite(days) || days < 1 || days > 365) days = 30;

@@ -2,7 +2,7 @@ import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
 import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, conversationParticipantsTable, tasksTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable, accessLogsTable, whatsappSessionsTable } from "@workspace/db";
 import { eq, sql, desc, asc, and, gte, lt, isNull, isNotNull, notInArray, inArray, or, ilike } from "drizzle-orm";
-import { requireAdmin, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
+import { requireAdmin, requireAdminOrSupervisor, requireTenant, requireModule } from "../middlewares/auth";
 import { sanitizePermissions } from "../lib/permissions";
 import { getPresence } from "../lib/sseEmitter";
 import { isValidStoreName } from "./stores";
@@ -223,7 +223,7 @@ router.get("/admin/dashboard-attention", requireAdminOrSupervisor, async (req, r
 });
 
 // Recent attendance logs
-router.get("/admin/logs", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+router.get("/admin/logs", requireAdminOrSupervisor, requireModule("history"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "50"), 10) || 50, 1), 500);
   const sectorId = req.query.sectorId ? parseInt(String(req.query.sectorId), 10) : null;

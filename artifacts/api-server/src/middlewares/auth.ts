@@ -45,7 +45,13 @@ export async function isTenantSuspended(tenantId: number): Promise<boolean> {
   }
   return suspendedCache.ids.has(tenantId);
 }
-export function invalidateTenantCache(): void { suspendedCache.at = 0; }
+export function invalidateTenantCache(): void {
+  suspendedCache.at = 0;
+  // Módulos podem ter sido editados nesta mesma chamada (PATCH de loja) —
+  // limpa pra requireModule enxergar a mudança na próxima requisição, em vez
+  // de esperar até 30s de cache velho.
+  enabledModulesCache.clear();
+}
 
 /**
  * Loja (tenant) da sessão. Fail closed: sessão sem tenant (ex.: superadmin ou

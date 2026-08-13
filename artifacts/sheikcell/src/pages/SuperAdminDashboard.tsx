@@ -32,8 +32,42 @@ import { useToast } from "@/hooks/use-toast";
 import {
   Building2, LogOut, Plus, Users, MessageSquare, Smartphone, KeyRound, Ban,
   CheckCircle2, DollarSign, FileText, Wrench, Pencil, AlertTriangle, Trash2,
-  Bug, HelpCircle, Sparkles, Clock, Send, LogIn,
+  Bug, HelpCircle, Sparkles, Clock, Send, LogIn, LayoutGrid,
 } from "lucide-react";
+
+// Compara duas listas de módulos ignorando ordem (usado pra destacar o botão
+// de pacote "Básico"/"Completo" certo conforme a seleção atual).
+const modulesEqual = (a: OptionalModule[], b: OptionalModule[]): boolean =>
+  a.length === b.length && a.every((m) => b.includes(m));
+
+// Grade de módulos contratados por loja — usada tanto no cadastro de loja
+// nova quanto na edição de uma loja já existente.
+function ModulePicker({ value, onChange }: { value: OptionalModule[]; onChange: (v: OptionalModule[]) => void }) {
+  return (
+    <div>
+      <div className="flex gap-2 mt-1 mb-2">
+        <Button type="button" size="sm" variant={modulesEqual(value, MODULE_PACKAGES.basico) ? "default" : "outline"}
+          onClick={() => onChange([...MODULE_PACKAGES.basico])} data-testid="button-package-basico">
+          Básico
+        </Button>
+        <Button type="button" size="sm" variant={modulesEqual(value, MODULE_PACKAGES.completo) ? "default" : "outline"}
+          onClick={() => onChange([...MODULE_PACKAGES.completo])} data-testid="button-package-completo">
+          Completo
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground mb-2">Ajuste fino — marque/desmarque módulos individuais:</p>
+      <div className="grid grid-cols-2 gap-1.5">
+        {OPTIONAL_MODULES.map((m) => (
+          <label key={m} className="flex items-center gap-1.5 text-sm">
+            <input type="checkbox" checked={value.includes(m)} data-testid={`checkbox-module-${m}`}
+              onChange={(e) => onChange(e.target.checked ? [...value, m] : value.filter((x) => x !== m))} />
+            {MODULE_LABELS[m]}
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 // Painel do superadmin (dono do sistema): lojistas, financeiro do SaaS
 // (mensalidades), contratos de aluguel e chamados de suporte.
@@ -152,11 +186,13 @@ export default function SuperAdminDashboard() {
     enabledModules: OptionalModule[]; adminName: string; adminEmail: string; adminPassword: string;
   }>({
     name: "", contactName: "", cpfCnpj: "", contactEmail: "", contactPhone: "",
-    enabledModules: [], adminName: "", adminEmail: "", adminPassword: "",
+    enabledModules: [...MODULE_PACKAGES.basico], adminName: "", adminEmail: "", adminPassword: "",
   });
-  const emptyForm = { name: "", contactName: "", cpfCnpj: "", contactEmail: "", contactPhone: "", enabledModules: [] as OptionalModule[], adminName: "", adminEmail: "", adminPassword: "" };
+  const emptyForm = { name: "", contactName: "", cpfCnpj: "", contactEmail: "", contactPhone: "", enabledModules: [...MODULE_PACKAGES.basico], adminName: "", adminEmail: "", adminPassword: "" };
   const [adminForm, setAdminForm] = useState({ name: "", email: "", password: "" });
   const [contactForm, setContactForm] = useState({ contactName: "", contactPhone: "", contactEmail: "" });
+  const [modulesFor, setModulesFor] = useState<TenantSummary | null>(null);
+  const [modulesForm, setModulesForm] = useState<OptionalModule[]>([]);
   const [contractForm, setContractForm] = useState({ plan: "Mensal", monthlyValue: "", startDate: "", renewalDate: "", notes: "" });
   const [invoiceForm, setInvoiceForm] = useState({ tenantId: "", description: "Mensalidade", amount: "", dueDate: "" });
   const [ticketForm, setTicketForm] = useState({ tenantId: "", title: "", description: "" });
@@ -334,6 +370,12 @@ export default function SuperAdminDashboard() {
                           setContactForm({ contactName: t.contactName ?? "", contactPhone: t.contactPhone ?? "", contactEmail: t.contactEmail ?? "" });
                         }} data-testid={`button-contact-${t.id}`}>
                           <Pencil className="w-4 h-4 mr-1" /> Contato
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => {
+                          setModulesFor(t);
+                          setModulesForm([...t.enabledModules]);
+                        }} data-testid={`button-modules-${t.id}`}>
+                          <LayoutGrid className="w-4 h-4 mr-1" /> Módulos
                         </Button>
                         <Button size="sm" variant="outline" onClick={() => { setAdminFor(t); setAdminForm({ name: "", email: t.admins[0]?.email ?? "", password: "" }); }} data-testid={`button-admin-${t.id}`}>
                           <KeyRound className="w-4 h-4 mr-1" /> Admin
@@ -621,31 +663,7 @@ export default function SuperAdminDashboard() {
 
             <div className="pt-2 border-t">
               <Label>Pacote de módulos</Label>
-              <div className="flex gap-2 mt-1 mb-2">
-                <Button type="button" size="sm" variant={form.enabledModules.length === 0 ? "default" : "outline"}
-                  onClick={() => setForm({ ...form, enabledModules: [...MODULE_PACKAGES.basico] })} data-testid="button-package-basico">
-                  Básico
-                </Button>
-                <Button type="button" size="sm" variant={form.enabledModules.length === OPTIONAL_MODULES.length ? "default" : "outline"}
-                  onClick={() => setForm({ ...form, enabledModules: [...MODULE_PACKAGES.completo] })} data-testid="button-package-completo">
-                  Completo
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground mb-2">Ajuste fino — marque/desmarque módulos individuais:</p>
-              <div className="grid grid-cols-2 gap-1.5">
-                {OPTIONAL_MODULES.map((m) => (
-                  <label key={m} className="flex items-center gap-1.5 text-sm">
-                    <input type="checkbox" checked={form.enabledModules.includes(m)} data-testid={`checkbox-module-${m}`}
-                      onChange={(e) => setForm({
-                        ...form,
-                        enabledModules: e.target.checked
-                          ? [...form.enabledModules, m]
-                          : form.enabledModules.filter((x) => x !== m),
-                      })} />
-                    {MODULE_LABELS[m]}
-                  </label>
-                ))}
-              </div>
+              <ModulePicker value={form.enabledModules} onChange={(enabledModules) => setForm({ ...form, enabledModules })} />
             </div>
 
             <p className="text-xs text-muted-foreground pt-2 border-t">Opcional: já criar o admin da loja (ele será obrigado a trocar a senha no primeiro acesso).</p>
@@ -758,6 +776,23 @@ export default function SuperAdminDashboard() {
                 contactPhone: contactForm.contactPhone,
                 contactEmail: contactForm.contactEmail,
               }), "Contato salvo", () => setContactFor(null))}>
+              Salvar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Módulos da loja */}
+      <Dialog open={!!modulesFor} onOpenChange={(o) => { if (!o) setModulesFor(null); }}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
+          <DialogHeader><DialogTitle>Módulos · {modulesFor?.name}</DialogTitle></DialogHeader>
+          <ModulePicker value={modulesForm} onChange={setModulesForm} />
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setModulesFor(null)}>Cancelar</Button>
+            <Button disabled={busy} data-testid="button-save-modules"
+              onClick={() => modulesFor && run(() => api.superadmin.updateTenant(modulesFor.id, {
+                enabledModules: modulesForm,
+              }), "Módulos atualizados", () => setModulesFor(null))}>
               Salvar
             </Button>
           </DialogFooter>
