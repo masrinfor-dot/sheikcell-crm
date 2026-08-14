@@ -260,8 +260,19 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
     // Eventos SEM conteúdo visível (voto em enquete, recibos, chaves de
     // criptografia) não viram mensagem — antes chegavam na Central como
     // "(mensagem não suportada)" em cima de qualquer reação. 🙅
+    // secretEncryptedMessage: envelope novo do WhatsApp pra editar mensagem/
+    // evento (secretEncType MESSAGE_EDIT/EVENT_EDIT — ver WAProto/index.d.ts,
+    // proto.Message.ISecretEncryptedMessage). O conteúdo vem criptografado
+    // (encPayload/encIv) e o Baileys 7.0.0-rc14 não decripta isso em nenhum
+    // nível mais alto (só o schema bruto do protobuf) — não dá pra mostrar a
+    // edição em si com o que a lib expõe hoje, então fica invisível em vez
+    // de aparecer como "tipo de mensagem não suportado". LIMITAÇÃO A
+    // REVISITAR: se uma versão futura do Baileys passar a decriptar/expor
+    // esse campo (ex.: virar um `editedMessage` de alto nível, do jeito que
+    // já acontece com protocolMessage.MESSAGE_EDIT), vale tratar como edição
+    // de verdade em vez de invisível.
     const keys = Object.keys(msg).filter((k) => k !== "messageContextInfo" && k !== "senderKeyDistributionMessage");
-    const INVISIBLE = new Set(["reactionMessage", "protocolMessage", "pollUpdateMessage", "keepInChatMessage", "pinInChatMessage"]);
+    const INVISIBLE = new Set(["reactionMessage", "protocolMessage", "pollUpdateMessage", "keepInChatMessage", "pinInChatMessage", "secretEncryptedMessage"]);
     if (keys.length === 0 || keys.every((k) => INVISIBLE.has(k))) return;
   }
 
