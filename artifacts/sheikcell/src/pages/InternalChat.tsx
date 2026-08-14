@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, can, type InternalConversation, type InternalMessage } from "@/lib/api";
+import { api, type InternalConversation, type InternalMessage } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { reportInternalChatUnread } from "@/hooks/useInternalChatNotifier";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -809,7 +809,9 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                   const caption = m.type !== "text" ? extractCaption(m.content) : "";
                   const toolbar = (
                     <div className="opacity-0 group-hover:opacity-100 transition flex items-center gap-0.5 shrink-0">
-                      {can(user, "tarefas") && (
+                      {(user?.role === "admin"
+                        || ((user?.enabledModules == null || user.enabledModules.includes("tarefas"))
+                          && user?.moduleAccess != null && "tarefas" in user.moduleAccess)) && (
                         <button
                           onClick={() => openTaskFromMsg(m)}
                           data-testid={`button-task-from-msg-${m.id}`}
@@ -1346,7 +1348,7 @@ export default function InternalChat({ docked = false, onActiveConversationChang
     <div className="max-w-6xl mx-auto px-2 md:px-4 py-2 md:py-4">
       {/* Celular: uma coluna só (lista OU conversa) e altura descontando a
           bottom nav — duas colunas espremidas distorciam tudo. */}
-      <div className="relative flex flex-col h-[calc(100dvh-11rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-180px)] min-h-[380px] md:min-h-[480px] rounded-xl border bg-card overflow-hidden shadow-sm">
+      <div className="relative flex flex-col h-[calc(var(--vvh,100dvh)-11rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-180px)] md:min-h-[480px] rounded-xl border bg-card overflow-hidden shadow-sm">
         {viewTabs}
         {view === "tasks" ? (
           <div className="flex-1 overflow-y-auto p-4">

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, PERMISSION_KEYS, PERMISSION_LABELS, type SectorSummary, type AttendanceLog, type Sector, type QuickReply, type Store, type DashboardAttention, type InternalConversation, type OptionalModule } from "@/lib/api";
+import { api, PERMISSION_KEYS, PERMISSION_LABELS, MODULE_LABELS, USER_GRANTABLE_MODULES, type SectorSummary, type AttendanceLog, type Sector, type QuickReply, type Store, type DashboardAttention, type InternalConversation, type OptionalModule, type UserGrantableModule, type UserModuleAccess } from "@/lib/api";
 import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
@@ -70,7 +70,7 @@ type WASession = {
 
 type UserRow = {
   id: number; name: string; email: string; role: string;
-  isActive: boolean; sector: Sector | null; sectorId: number | null; storeName?: string | null; extension?: string | null; adminAccess?: string[] | null; accessHours?: { start: string; end: string; days: number[] } | null; allowedSessionKeys?: string[] | null; createdAt: string;
+  isActive: boolean; sector: Sector | null; sectorId: number | null; storeName?: string | null; extension?: string | null; adminAccess?: string[] | null; moduleAccess?: UserModuleAccess | null; accessHours?: { start: string; end: string; days: number[] } | null; allowedSessionKeys?: string[] | null; createdAt: string;
   permissions?: Record<string, boolean> | null;
 };
 
@@ -155,7 +155,7 @@ export default function AdminDashboard() {
   const [deleteTransferTo, setDeleteTransferTo] = useState("");
   const [deletingUser, setDeletingUser] = useState(false);
 
-  const [userForm, setUserForm] = useState<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; extension: string; adminAccess: string[]; ahEnabled: boolean; ahStart: string; ahEnd: string; ahDays: number[]; waEnabled: boolean; waKeys: string[] }>({ name: "", email: "", password: "", role: "vendedor", sectorId: 1, storeName: "", extension: "", adminAccess: [], ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [] });
+  const [userForm, setUserForm] = useState<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; extension: string; adminAccess: string[]; moduleAccess: UserModuleAccess; ahEnabled: boolean; ahStart: string; ahEnd: string; ahDays: number[]; waEnabled: boolean; waKeys: string[] }>({ name: "", email: "", password: "", role: "vendedor", sectorId: 1, storeName: "", extension: "", adminAccess: [], moduleAccess: {}, ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [] });
   const [sectorForm, setSectorForm] = useState({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true });
 
   const fetchAll = useCallback(async () => {
@@ -284,12 +284,12 @@ export default function AdminDashboard() {
   // ---- User handlers ----
   const openAddUser = () => {
     setEditUser(null);
-    setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorId: sectors[0]?.id ?? 1, storeName: "", extension: "", adminAccess: [], ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [] });
+    setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorId: sectors[0]?.id ?? 1, storeName: "", extension: "", adminAccess: [], moduleAccess: {}, ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [] });
     setShowAddUser(true);
   };
   const openEditUser = (u: UserRow) => {
     setEditUser(u);
-    setUserForm({ name: u.name, email: u.email, password: "", role: u.role, sectorId: u.sectorId ?? 1, storeName: u.storeName ?? "", extension: u.extension ?? "", adminAccess: u.adminAccess ?? [], ahEnabled: !!u.accessHours, ahStart: u.accessHours?.start ?? "08:00", ahEnd: u.accessHours?.end ?? "18:00", ahDays: u.accessHours?.days?.length ? u.accessHours.days : [1, 2, 3, 4, 5, 6], waEnabled: !!u.allowedSessionKeys, waKeys: u.allowedSessionKeys ?? [] });
+    setUserForm({ name: u.name, email: u.email, password: "", role: u.role, sectorId: u.sectorId ?? 1, storeName: u.storeName ?? "", extension: u.extension ?? "", adminAccess: u.adminAccess ?? [], moduleAccess: u.moduleAccess ?? {}, ahEnabled: !!u.accessHours, ahStart: u.accessHours?.start ?? "08:00", ahEnd: u.accessHours?.end ?? "18:00", ahDays: u.accessHours?.days?.length ? u.accessHours.days : [1, 2, 3, 4, 5, 6], waEnabled: !!u.allowedSessionKeys, waKeys: u.allowedSessionKeys ?? [] });
     setShowAddUser(true);
   };
   const handleSaveUser = async (e: React.FormEvent) => {
@@ -301,6 +301,7 @@ export default function AdminDashboard() {
           storeName: userForm.storeName,
           extension: userForm.extension,
           adminAccess: userForm.role === "admin" ? null : userForm.adminAccess,
+          moduleAccess: userForm.role === "admin" ? null : userForm.moduleAccess,
           accessHours: userForm.role === "vendedor" && userForm.ahEnabled
             ? { start: userForm.ahStart, end: userForm.ahEnd, days: userForm.ahDays }
             : null,
@@ -314,6 +315,7 @@ export default function AdminDashboard() {
           name: userForm.name, email: userForm.email, password: userForm.password, role: userForm.role, sectorId: userForm.sectorId,
           storeName: userForm.storeName, extension: userForm.extension,
           adminAccess: userForm.role === "admin" ? null : userForm.adminAccess,
+          moduleAccess: userForm.role === "admin" ? null : userForm.moduleAccess,
           accessHours: userForm.role === "vendedor" && userForm.ahEnabled
             ? { start: userForm.ahStart, end: userForm.ahEnd, days: userForm.ahDays }
             : null,
@@ -438,9 +440,15 @@ export default function AdminDashboard() {
   // Módulo opcional não contratado pela loja: some do menu (e a API já
   // bloqueia direto, ver requireModule no backend).
   const enabledModules = user?.enabledModules ?? null;
+  // Módulo restrito por USUÁRIO (admin sempre vê tudo; Atendimento nunca
+  // entra nessa granularidade — ver lib/moduleAccess.ts no backend).
+  const userModuleAccess = user?.moduleAccess ?? null;
+  const moduleGranted = (m: OptionalModule | undefined): boolean =>
+    !m || m === "chat" || isAdmin || (userModuleAccess != null && m in userModuleAccess);
   const tabs = allTabs.filter((t) =>
     (!t.adminOnly || isAdmin || granted.includes(t.id)) &&
-    (!t.module || enabledModules == null || enabledModules.includes(t.module)));
+    (!t.module || enabledModules == null || enabledModules.includes(t.module)) &&
+    moduleGranted(t.module));
   // Celular: 4 abas principais + "Mais" (painel com o restante)
   const mobilePrimaryTabs = tabs.slice(0, 4);
   const mobileMoreTabs = tabs.slice(4);
@@ -1597,17 +1605,41 @@ export default function AdminDashboard() {
               )}
               {userForm.role !== "admin" && (
                 <div>
-                  <label className="text-xs font-medium mb-1 block">Funções de admin liberadas (opcional)</label>
-                  <div className="flex flex-wrap gap-1.5">
-                    {([["financeiro","Financeiro"],["sorteios","Sorteios"],["robo","Robô"],["rh","RH"],["questionarios","Questionários"],["whatsapp","WhatsApp"],["sistema","Sistema (Dev)"]] as const).map(([key, label]) => (
-                      <button type="button" key={key} data-testid={`toggle-admin-access-${key}`}
-                        onClick={() => setUserForm({ ...userForm, adminAccess: userForm.adminAccess.includes(key) ? userForm.adminAccess.filter((k) => k !== key) : [...userForm.adminAccess, key] })}
-                        className={`px-2 py-1 rounded-lg border text-[11px] font-medium transition ${userForm.adminAccess.includes(key) ? "bg-primary text-white border-primary" : "border-border text-muted-foreground hover:bg-secondary"}`}>
-                        {label}
-                      </button>
-                    ))}
+                  <label className="flex items-center gap-2 text-xs font-medium">
+                    <input type="checkbox" checked={userForm.adminAccess.includes("whatsapp")} data-testid="toggle-admin-access-whatsapp"
+                      onChange={(e) => setUserForm({ ...userForm, adminAccess: e.target.checked ? ["whatsapp"] : [] })} />
+                    Gerenciar conexão do WhatsApp
+                  </label>
+                </div>
+              )}
+              {userForm.role !== "admin" && (
+                <div>
+                  <label className="text-xs font-medium mb-1 block">Módulos e nível de acesso</label>
+                  <p className="text-[10px] text-muted-foreground mb-2">Só os módulos que a loja já contratou aparecem aqui. Sem marcar, o usuário não vê a aba.</p>
+                  <div className="space-y-1">
+                    {USER_GRANTABLE_MODULES.filter((m) => user?.enabledModules == null || user.enabledModules.includes(m)).map((m) => {
+                      const level = userForm.moduleAccess[m];
+                      const setLevel = (v: "view" | "edit" | undefined) => {
+                        const next = { ...userForm.moduleAccess };
+                        if (v) next[m] = v; else delete next[m];
+                        setUserForm({ ...userForm, moduleAccess: next });
+                      };
+                      return (
+                        <div key={m} className="flex items-center justify-between gap-2 py-1">
+                          <span className="text-xs text-foreground">{MODULE_LABELS[m]}</span>
+                          <div className="flex gap-1 shrink-0">
+                            {([[undefined, "Sem acesso"], ["view", "Visualizar"], ["edit", "Ver + editar"]] as const).map(([v, label]) => (
+                              <button type="button" key={label} data-testid={`module-access-${m}-${v ?? "none"}`}
+                                onClick={() => setLevel(v)}
+                                className={`px-2 py-1 rounded-lg border text-[11px] font-medium transition ${(level ?? undefined) === v ? "bg-primary text-white border-primary" : "border-border text-muted-foreground bg-white hover:bg-secondary"}`}>
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
-                  <p className="text-[10px] text-muted-foreground mt-1">A aba escolhida aparece para esse usuário com acesso total à função.</p>
                 </div>
               )}
               <div>

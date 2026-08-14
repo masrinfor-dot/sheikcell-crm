@@ -53,20 +53,15 @@ function readAsAttachment(file?: File): Promise<{ base64: string; mimetype: stri
 
 export type VendedorPermissions = Record<string, boolean> | null;
 
-// Chaves de permissão individuais do vendedor (null/ausente = liberado).
+// Chaves de permissão de AÇÃO do vendedor (null/ausente = liberado).
+// Visibilidade de módulo/aba não entra mais aqui — ver moduleAccess no User.
 export const PERMISSION_KEYS = [
   "ver_potenciais",
   "transferir",
   "finalizar",
   "criar_atendimento",
   "usar_ia",
-  "crm",
-  "tarefas",
   "enviar_midia",
-  "equipe",
-  "financeiras",
-  "avaliacao",
-  "treinamentos",
 ] as const;
 
 export const PERMISSION_LABELS: Record<string, string> = {
@@ -75,13 +70,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   finalizar: "Finalizar atendimentos",
   criar_atendimento: "Criar novo atendimento manualmente",
   usar_ia: "Usar sugestão de resposta com IA",
-  crm: "Acessar o CRM",
-  tarefas: "Acessar o quadro de Tarefas",
   enviar_midia: "Enviar fotos, áudios e arquivos",
-  equipe: "Aba Equipe (chat interno)",
-  financeiras: "Aba Financeiras (bancos)",
-  avaliacao: "Aba Avaliação (aparelho usado)",
-  treinamentos: "Aba Treinamentos",
 };
 
 export type User = {
@@ -94,6 +83,10 @@ export type User = {
   extension?: string | null;
   mustChangePassword?: boolean;
   adminAccess?: string[] | null;
+  // Módulos da loja que este vendedor/supervisor pode ver (e em que nível —
+  // "view"/"edit" dão o mesmo acesso completo por enquanto). Ausência de
+  // chave = sem acesso àquele módulo. Nunca inclui "chat" (Atendimento).
+  moduleAccess?: UserModuleAccess | null;
   accessHours?: { start: string; end: string; days: number[] } | null;
   sector: Sector | null;
   permissions?: VendedorPermissions;
@@ -111,6 +104,15 @@ export const OPTIONAL_MODULES = [
   "avaliacao", "financeiras", "rh", "treinamentos", "questionarios", "sorteios", "documentos", "robo",
 ] as const;
 export type OptionalModule = typeof OPTIONAL_MODULES[number];
+
+// Módulos que dá pra restringir por USUÁRIO (vendedor/supervisor) — todos
+// menos "chat": Atendimento é sempre liberado pra todo mundo da loja, sem
+// essa granularidade (mesma decisão do backend, ver lib/moduleAccess.ts).
+export type UserGrantableModule = Exclude<OptionalModule, "chat">;
+export const USER_GRANTABLE_MODULES = OPTIONAL_MODULES.filter((m): m is UserGrantableModule => m !== "chat");
+export type ModuleAccessLevel = "view" | "edit";
+export type UserModuleAccess = Partial<Record<UserGrantableModule, ModuleAccessLevel>>;
+
 export const MODULE_LABELS: Record<OptionalModule, string> = {
   chat: "Atendimento",
   crm: "CRM",
@@ -1196,9 +1198,9 @@ export const api = {
     },
     users: {
       list: () => req<(User & { isActive: boolean; createdAt: string })[]>("/admin/users"),
-      create: (data: { name: string; email: string; password: string; role: string; sectorId: number; storeName?: string; extension?: string; adminAccess?: string[] | null; accessHours?: { start: string; end: string; days: number[] } | null; allowedSessionKeys?: string[] | null }) =>
+      create: (data: { name: string; email: string; password: string; role: string; sectorId: number; storeName?: string; extension?: string; adminAccess?: string[] | null; moduleAccess?: UserModuleAccess | null; accessHours?: { start: string; end: string; days: number[] } | null; allowedSessionKeys?: string[] | null }) =>
         req<User>("/admin/users", { method: "POST", body: JSON.stringify(data) }),
-      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; extension: string; isActive: boolean; permissions: Record<string, boolean>; adminAccess: string[] | null; accessHours: { start: string; end: string; days: number[] } | null; allowedSessionKeys: string[] | null }>) =>
+      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; extension: string; isActive: boolean; permissions: Record<string, boolean>; adminAccess: string[] | null; moduleAccess: UserModuleAccess | null; accessHours: { start: string; end: string; days: number[] } | null; allowedSessionKeys: string[] | null }>) =>
         req<User>(`/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number, transferToId: number | null) =>
         req<{ ok: boolean; transferredConversations: number }>(`/admin/users/${id}`, { method: "DELETE", body: JSON.stringify({ transferToId }) }),

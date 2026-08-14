@@ -1,7 +1,8 @@
 import { Router, type IRouter } from "express";
 import { db, trainingsTable, trainingCompletionsTable, usersTable } from "@workspace/db";
 import { eq, desc, and, inArray } from "drizzle-orm";
-import { requireAuth, requireAdminOrSupervisor, requireTenant, requireModule, tenantIdOf } from "../middlewares/auth";
+import { requireAuth, requireAdminOrSupervisor, requireTenant, tenantIdOf } from "../middlewares/auth";
+import { requireModuleAccess } from "../lib/moduleAccess";
 
 const router: IRouter = Router();
 
@@ -117,7 +118,7 @@ router.get("/trainings/pending", requireAuth, async (req, res): Promise<void> =>
 });
 
 // Lista para consulta (todos veem os treinamentos da sua função + status).
-router.get("/trainings", requireAuth, requireModule("treinamentos"), async (req, res): Promise<void> => {
+router.get("/trainings", requireAuth, requireModuleAccess("treinamentos"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const role = req.session.userRole ?? "";
   const isManager = role === "admin" || role === "supervisor";
@@ -186,7 +187,7 @@ router.post("/trainings/:id/complete", requireAuth, async (req, res): Promise<vo
 });
 
 // ── Gestão (admin ou supervisor) ───────────────────────────────────────────
-router.post("/trainings", requireAdminOrSupervisor, requireModule("treinamentos"), async (req, res): Promise<void> => {
+router.post("/trainings", requireAdminOrSupervisor, requireModuleAccess("treinamentos"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { title, description, type, content, quiz, targetRoles, mandatory, active } = req.body ?? {};
   const tt = typeof title === "string" ? title.trim().slice(0, 150) : "";
@@ -221,7 +222,7 @@ router.post("/trainings", requireAdminOrSupervisor, requireModule("treinamentos"
   res.status(201).json(created);
 });
 
-router.patch("/trainings/:id", requireAdminOrSupervisor, requireModule("treinamentos"), async (req, res): Promise<void> => {
+router.patch("/trainings/:id", requireAdminOrSupervisor, requireModuleAccess("treinamentos"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
@@ -272,7 +273,7 @@ router.patch("/trainings/:id", requireAdminOrSupervisor, requireModule("treiname
   res.json(updated);
 });
 
-router.delete("/trainings/:id", requireAdminOrSupervisor, requireModule("treinamentos"), async (req, res): Promise<void> => {
+router.delete("/trainings/:id", requireAdminOrSupervisor, requireModuleAccess("treinamentos"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
@@ -283,7 +284,7 @@ router.delete("/trainings/:id", requireAdminOrSupervisor, requireModule("treinam
 });
 
 // Quem concluiu (admin/supervisor).
-router.get("/trainings/:id/completions", requireAdminOrSupervisor, requireModule("treinamentos"), async (req, res): Promise<void> => {
+router.get("/trainings/:id/completions", requireAdminOrSupervisor, requireModuleAccess("treinamentos"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }

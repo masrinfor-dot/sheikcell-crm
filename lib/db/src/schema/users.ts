@@ -2,6 +2,7 @@ import { pgTable, serial, integer, text, timestamp, boolean, jsonb } from "drizz
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 import { sectorsTable } from "./sectors";
+import type { OptionalModule } from "./tenants";
 
 export const usersTable = pgTable("users", {
   tenantId: integer("tenant_id").notNull().default(1),
@@ -17,8 +18,18 @@ export const usersTable = pgTable("users", {
   extension: text("extension"),
   // Obriga trocar a senha no próximo login (primeiro acesso ou senha resetada pelo admin)
   mustChangePassword: boolean("must_change_password").notNull().default(false),
-  // Funções de admin liberadas para não-admins (ex.: ["financeiro","sorteios"])
+  // Função de admin liberada pra não-admin gerenciar a conexão do WhatsApp
+  // (única coisa que sobrou aqui — os demais módulos migraram pra
+  // moduleAccess abaixo). Mantido como array por compatibilidade com dados
+  // antigos, mas hoje só aceita ["whatsapp"].
   adminAccess: jsonb("admin_access").$type<string[] | null>(),
+  // Módulos da loja que este vendedor/supervisor pode ver, e em que nível
+  // (por enquanto "view" e "edit" dão o mesmo acesso completo à tela — o
+  // bloqueio real de escrita em nível "view" é uma fase futura). Nunca
+  // inclui "chat" (Atendimento é sempre liberado pra todo mundo da loja).
+  // null/chave ausente = SEM acesso àquele módulo (fail closed) — admin
+  // ignora isto (sempre tem edit em tudo).
+  moduleAccess: jsonb("module_access").$type<Partial<Record<Exclude<OptionalModule, "chat">, "view" | "edit">> | null>(),
   // Horário de acesso (só vendedor): fora dele o login/uso é bloqueado.
   // null = sem restrição. days: 0=domingo ... 6=sábado
   accessHours: jsonb("access_hours").$type<{ start: string; end: string; days: number[] } | null>(),
@@ -27,9 +38,10 @@ export const usersTable = pgTable("users", {
   // pode ver/responder. null = sem restrição (todas as linhas da loja).
   // Só tem efeito para role "vendedor".
   allowedSessionKeys: jsonb("allowed_session_keys").$type<string[] | null>(),
-  // Permissões individuais do vendedor (null = todas liberadas). Chaves:
-  // ver_potenciais, transferir, finalizar, criar_atendimento, usar_ia,
-  // crm, tarefas, enviar_midia — todas boolean. Admin/supervisor ignoram isto.
+  // Permissões de AÇÃO do vendedor (null = todas liberadas — fail open).
+  // Chaves: ver_potenciais, transferir, finalizar, criar_atendimento,
+  // usar_ia, enviar_midia — todas boolean. Visibilidade de módulo/aba não
+  // entra mais aqui, ver moduleAccess acima. Admin ignora isto.
   permissions: jsonb("permissions").$type<Record<string, boolean> | null>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),

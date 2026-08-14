@@ -1,11 +1,12 @@
 import { Router, type IRouter } from "express";
 import { db, usersTable, attendanceLogsTable } from "@workspace/db";
 import { and, eq, gte, lte, isNotNull, inArray, sql, desc } from "drizzle-orm";
-import { requireAuth, requireAdminOrSupervisor, requireTenant, requireModule } from "../middlewares/auth";
+import { requireAuth, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
+import { requireModuleAccess } from "../lib/moduleAccess";
 
 const router: IRouter = Router();
 
-router.use("/results", requireModule("resultados"));
+router.use("/results", requireModuleAccess("resultados"));
 
 // ── Painel de Resultados ─────────────────────────────────────────────────────
 // GET /results/summary?from=ISO&to=ISO&sectorId=&attendantId=

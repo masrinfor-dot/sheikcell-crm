@@ -44,8 +44,9 @@ export default function Sorteios() {
   const { toast } = useToast();
   const { user } = useAuth();
   // Admin (ou quem tem "sorteios" liberado) gerencia tudo; vendedor comum
-  // só cria sorteios entre os próprios clientes.
-  const isManager = user?.role === "admin" || !!user?.adminAccess?.includes("sorteios");
+  // só cria sorteios entre os próprios clientes. Mesma regra do backend
+  // (isRaffleManager em routes/raffles.ts) — nível view já basta aqui.
+  const isManager = user?.role === "admin" || (user?.moduleAccess?.sorteios != null);
   const [raffles, setRaffles] = useState<Raffle[]>([]);
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [vendedores, setVendedores] = useState<User[]>([]);
@@ -66,7 +67,7 @@ export default function Sorteios() {
     Promise.all([
       api.raffles.list(),
       api.sectors.list().catch(() => [] as Sector[]),
-      api.admin.users.list().catch(() => []),
+      api.admin.users.list().catch(() => [] as (User & { isActive: boolean; createdAt: string })[]),
       api.chat.waSessions().catch(() => []),
     ]).then(([r, s, u, w]) => {
       setRaffles(r);

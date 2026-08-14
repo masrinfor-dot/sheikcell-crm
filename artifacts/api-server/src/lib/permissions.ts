@@ -2,22 +2,16 @@ import type { Request, Response, NextFunction } from "express";
 import { db, usersTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 
-// Permissões individuais de vendedor E supervisor. null/ausente = liberado
-// (padrão). Admin sempre tem tudo liberado.
+// Permissões de AÇÃO de vendedor E supervisor (não são módulo/aba — ver
+// lib/moduleAccess.ts pra isso). null/ausente = liberado (padrão). Admin
+// sempre tem tudo liberado.
 export const PERMISSION_KEYS = [
   "ver_potenciais",   // ver e assumir Potenciais (leads novos)
   "transferir",       // transferir conversa para outro setor
   "finalizar",        // finalizar atendimentos
   "criar_atendimento",// criar novo atendimento manualmente
   "usar_ia",          // sugestão de resposta / correção com IA
-  "crm",              // acessar o CRM
-  "tarefas",          // acessar o quadro de Tarefas
   "enviar_midia",     // enviar fotos, áudios e arquivos
-  // Abas do painel (visibilidade controlada pelo admin)
-  "equipe",           // chat interno Equipe
-  "financeiras",      // aba Financeiras (links de bancos)
-  "avaliacao",        // aba Avaliação (trade-in)
-  "treinamentos",     // aba Treinamentos
 ] as const;
 export type PermissionKey = (typeof PERMISSION_KEYS)[number];
 

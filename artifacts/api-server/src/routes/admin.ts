@@ -1,9 +1,10 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, conversationParticipantsTable, tasksTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable, accessLogsTable, whatsappSessionsTable } from "@workspace/db";
+import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, conversationParticipantsTable, tasksTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable, accessLogsTable, whatsappSessionsTable, tenantsTable } from "@workspace/db";
 import { eq, sql, desc, asc, and, gte, lt, isNull, isNotNull, notInArray, inArray, or, ilike } from "drizzle-orm";
-import { requireAdmin, requireAdminOrSupervisor, requireTenant, requireModule } from "../middlewares/auth";
+import { requireAdmin, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
 import { sanitizePermissions } from "../lib/permissions";
+import { requireModuleAccess, sanitizeModuleAccess, type ModuleAccessMap, type UserGrantableModule } from "../lib/moduleAccess";
 import { getPresence } from "../lib/sseEmitter";
 import { isValidStoreName } from "./stores";
 import { syncCrmAttendant } from "../lib/crmSync";
@@ -223,7 +224,7 @@ router.get("/admin/dashboard-attention", requireAdminOrSupervisor, async (req, r
 });
 
 // Recent attendance logs
-router.get("/admin/logs", requireAdminOrSupervisor, requireModule("history"), async (req, res): Promise<void> => {
+router.get("/admin/logs", requireAdminOrSupervisor, requireModuleAccess("history"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "50"), 10) || 50, 1), 500);
   const sectorId = req.query.sectorId ? parseInt(String(req.query.sectorId), 10) : null;
@@ -269,6 +270,7 @@ router.get("/admin/users", requireAdmin, async (req, res): Promise<void> => {
       storeName: usersTable.storeName,
       extension: usersTable.extension,
       adminAccess: usersTable.adminAccess,
+      moduleAccess: usersTable.moduleAccess,
       accessHours: usersTable.accessHours,
       allowedSessionKeys: usersTable.allowedSessionKeys,
       isActive: usersTable.isActive,
@@ -291,8 +293,11 @@ router.get("/admin/users", requireAdmin, async (req, res): Promise<void> => {
   res.json(usersWithSector);
 });
 
-// Funções de admin que podem ser liberadas para não-admins
-const GRANTABLE_FEATURES = ["financeiro", "sorteios", "robo", "rh", "questionarios", "whatsapp"];
+// Funções de admin que podem ser liberadas para não-admins. Só sobrou
+// "whatsapp" (gerenciar a conexão da linha) — financeiro/sorteios/robo/
+// rh/questionarios migraram pra moduleAccess (lib/moduleAccess.ts), que
+// usa o mesmo vocabulário de módulo de tenants.enabled_modules.
+const GRANTABLE_FEATURES = ["whatsapp"];
 
 // Valida o horário de acesso: { start:"08:00", end:"18:00", days:[1..6] } ou null
 function sanitizeAccessHours(v: unknown): { start: string; end: string; days: number[] } | null {
@@ -325,6 +330,23 @@ async function validSessionKeysFor(tenantId: number): Promise<Set<string>> {
   return keys;
 }
 
+// Módulos que a LOJA contratou — nunca aceita conceder pra um usuário um
+// módulo que a loja não tem (mesma cautela de validSessionKeysFor acima).
+async function tenantEnabledModules(tenantId: number): Promise<Set<string>> {
+  const [row] = await db.select({ enabledModules: tenantsTable.enabledModules })
+    .from(tenantsTable).where(eq(tenantsTable.id, tenantId)).limit(1);
+  return new Set(row?.enabledModules ?? []);
+}
+
+function intersectModuleAccess(access: ModuleAccessMap | null, tenantModules: Set<string>): ModuleAccessMap | null {
+  if (!access) return null;
+  const out: ModuleAccessMap = {};
+  for (const [key, level] of Object.entries(access)) {
+    if (tenantModules.has(key)) out[key as UserGrantableModule] = level;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 // v === undefined: campo não enviado (não mexe). v === null ou []: sem
 // restrição. Array com linhas reais: restringe a essas. Linha desconhecida é
 // descartada silenciosamente (nunca guarda uma chave que não existe mais).
@@ -336,7 +358,7 @@ function sanitizeAllowedSessionKeys(v: unknown, validKeys: Set<string>): string[
 
 router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { name, email, password, role, sectorId, storeName, extension, adminAccess, accessHours, allowedSessionKeys } = req.body as {
+  const { name, email, password, role, sectorId, storeName, extension, adminAccess, accessHours, allowedSessionKeys, moduleAccess } = req.body as {
     name?: string;
     email?: string;
     password?: string;
@@ -347,6 +369,7 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
     adminAccess?: unknown;
     accessHours?: unknown;
     allowedSessionKeys?: unknown;
+    moduleAccess?: unknown;
   };
 
   if (!name || !email || !password) {
@@ -396,6 +419,9 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
       allowedSessionKeys: resolvedRole === "vendedor"
         ? sanitizeAllowedSessionKeys(allowedSessionKeys, await validSessionKeysFor(tenantId))
         : null,
+      moduleAccess: resolvedRole !== "admin"
+        ? intersectModuleAccess(sanitizeModuleAccess(moduleAccess), await tenantEnabledModules(tenantId))
+        : null,
     })
     .returning();
 
@@ -414,10 +440,11 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
     .where(and(eq(usersTable.id, id), eq(usersTable.tenantId, tenantId))).limit(1);
   if (!existingUser) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
 
-  const { name, email, password, role, sectorId, isActive, permissions, storeName, extension, adminAccess, accessHours, allowedSessionKeys } = req.body as {
+  const { name, email, password, role, sectorId, isActive, permissions, storeName, extension, adminAccess, accessHours, allowedSessionKeys, moduleAccess } = req.body as {
     adminAccess?: unknown;
     accessHours?: unknown;
     allowedSessionKeys?: unknown;
+    moduleAccess?: unknown;
     name?: string;
     email?: string;
     password?: string;
@@ -447,6 +474,9 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
     updateData.sectorId = sectorId;
   }
   if (adminAccess !== undefined) updateData.adminAccess = sanitizeAdminAccess(adminAccess);
+  if (moduleAccess !== undefined) {
+    updateData.moduleAccess = intersectModuleAccess(sanitizeModuleAccess(moduleAccess), await tenantEnabledModules(tenantId));
+  }
   if (accessHours !== undefined) updateData.accessHours = sanitizeAccessHours(accessHours);
   if (allowedSessionKeys !== undefined) {
     updateData.allowedSessionKeys = sanitizeAllowedSessionKeys(allowedSessionKeys, await validSessionKeysFor(tenantId));

@@ -1,7 +1,6 @@
 import { useCallback, useState } from "react";
 import { MessageCircle, X, Maximize2, Headphones, MessagesSquare } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { can } from "@/lib/api";
 import { useInternalChatNotifier } from "@/hooks/useInternalChatNotifier";
 import { requestChatExpand } from "@/lib/chatWidgetBus";
 import ChatCenter from "@/pages/ChatCenter";
@@ -21,7 +20,9 @@ type WidgetTab = "atendimento" | "equipe";
 // alarme de "sem resposta" funcionar com a aba escondida.
 export default function GlobalChatWidget() {
   const { user } = useAuth();
-  const canEquipe = can(user, "equipe");
+  const canEquipe = user?.role === "admin"
+    || ((user?.enabledModules == null || user.enabledModules.includes("equipe"))
+      && user?.moduleAccess != null && "equipe" in user.moduleAccess);
   const [open, setOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<WidgetTab>("atendimento");
   // Sem permissão de chat interno, o widget só tem a aba Atendimento.

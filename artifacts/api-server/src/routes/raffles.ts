@@ -400,9 +400,12 @@ async function isRaffleManager(req: { session: { userId?: number; userRole?: str
   if (req.session.userRole === "admin") return true;
   const userId = req.session.userId;
   if (!userId) return false;
-  const [u] = await db.select({ adminAccess: usersTable.adminAccess })
+  const [u] = await db.select({ moduleAccess: usersTable.moduleAccess })
     .from(usersTable).where(eq(usersTable.id, userId)).limit(1);
-  return Array.isArray(u?.adminAccess) && (u.adminAccess as string[]).includes("sorteios");
+  // Vendedor comum continua podendo criar sorteio dos próprios clientes
+  // (regra de negócio à parte, ver comentário acima) — só o gerenciamento
+  // de TODOS os sorteios da loja exige acesso explícito ao módulo.
+  return u?.moduleAccess?.sorteios != null;
 }
 
 /** Carrega o sorteio (da loja) e garante que o usuário pode mexer nele. */

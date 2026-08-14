@@ -1,8 +1,8 @@
 import { Router, type IRouter } from "express";
 import { db, crmContactsTable, crmPurchasesTable, crmInternalNotesTable, crmCustomFieldsTable, sectorsTable, usersTable, attendanceLogsTable } from "@workspace/db";
 import { eq, and, desc, asc, ilike, or, inArray } from "drizzle-orm";
-import { requireAuth, requireAdminOrSupervisor, requireTenant, requireModule } from "../middlewares/auth";
-import { requirePerm } from "../lib/permissions";
+import { requireAuth, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
+import { requireModuleAccess } from "../lib/moduleAccess";
 import { isValidStoreName } from "./stores";
 import { broadcast } from "../lib/sseEmitter";
 import { normalizePhone, phoneVariants } from "../lib/phone";
@@ -10,9 +10,8 @@ import type { Request } from "express";
 
 const router: IRouter = Router();
 
-// Permissão individual "crm" + módulo "crm" contratado pela loja: vendedor
-// sem qualquer um dos dois não acessa nenhuma rota do CRM.
-router.use("/crm", requirePerm("crm"), requireModule("crm"));
+// Módulo "crm" contratado pela loja e liberado pro usuário.
+router.use("/crm", requireModuleAccess("crm"));
 
 // ─── helpers ──────────────────────────────────────────────────────────────
 async function enrichContact(c: typeof crmContactsTable.$inferSelect) {

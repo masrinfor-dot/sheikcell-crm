@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, can, type QueueEntry, type Sector, type OptionalModule } from "@/lib/api";
+import { api, type QueueEntry, type Sector, type OptionalModule } from "@/lib/api";
 import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
@@ -34,15 +34,9 @@ import Suporte from "./Suporte";
 
 type MainTab = "queue" | "resultados" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "avaliacao" | "treinamentos" | "documentos" | "financeiro" | "sorteios" | "robo" | "rh" | "questionarios" | "diretorio" | "suporte";
 
-// Abas de admin que podem ser liberadas para vendedores no cadastro (adminAccess)
-const GRANTED_TABS: { id: MainTab; label: string; icon: typeof PhoneCall; module?: OptionalModule }[] = [
-  { id: "financeiro", label: "Financeiro", icon: BadgeDollarSign, module: "financeiro" },
-  { id: "sorteios", label: "Sorteios", icon: Gift, module: "sorteios" },
-  { id: "robo", label: "Robô", icon: Bot, module: "robo" },
-  { id: "rh", label: "RH", icon: UserSearch, module: "rh" },
-  { id: "questionarios", label: "Questionários", icon: ClipboardList, module: "questionarios" },
-];
-
+// Todas as abas que dependem de módulo — visibilidade decidida por
+// moduleGranted() (loja contratou E usuário tem acesso), ver mais abaixo.
+// "Suporte" é a única sem módulo, sempre visível.
 const MAIN_TABS: { id: MainTab; label: string; icon: typeof PhoneCall; module?: OptionalModule }[] = [
   { id: "queue" as MainTab, label: "Fila", icon: PhoneCall, module: "chat" },
   { id: "chat" as MainTab, label: "Atendimento", icon: MessageCircle, module: "chat" },
@@ -54,6 +48,11 @@ const MAIN_TABS: { id: MainTab; label: string; icon: typeof PhoneCall; module?: 
   { id: "treinamentos" as MainTab, label: "Treinamentos", icon: GraduationCap, module: "treinamentos" },
   { id: "documentos" as MainTab, label: "Documentos", icon: FolderArchive, module: "documentos" },
   { id: "diretorio" as MainTab, label: "Diretório", icon: BookUser, module: "diretorio" },
+  { id: "financeiro" as MainTab, label: "Financeiro", icon: BadgeDollarSign, module: "financeiro" },
+  { id: "sorteios" as MainTab, label: "Sorteios", icon: Gift, module: "sorteios" },
+  { id: "robo" as MainTab, label: "Robô", icon: Bot, module: "robo" },
+  { id: "rh" as MainTab, label: "RH", icon: UserSearch, module: "rh" },
+  { id: "questionarios" as MainTab, label: "Questionários", icon: ClipboardList, module: "questionarios" },
   { id: "suporte" as MainTab, label: "Suporte", icon: LifeBuoy },
 ];
 
@@ -71,7 +70,15 @@ export default function AttendantDashboard() {
 
   const [mainTab, setMainTab] = useState<MainTab>("queue");
   const enabledModules = user?.enabledModules ?? null;
-  const moduleOk = (m: OptionalModule | undefined) => !m || enabledModules == null || enabledModules.includes(m);
+  const userModuleAccess = user?.moduleAccess ?? null;
+  // Loja precisa ter contratado o módulo E (exceto Atendimento, nunca
+  // restringido por usuário) o vendedor precisa ter sido liberado nele.
+  const moduleGranted = (m: OptionalModule | undefined): boolean => {
+    if (!m) return true;
+    if (enabledModules != null && !enabledModules.includes(m)) return false;
+    if (m === "chat") return true;
+    return userModuleAccess != null && m in userModuleAccess;
+  };
   // No desktop (md+) o chat interno fica sempre visível numa coluna lateral
   // (ver <InternalChat docked /> abaixo), então nunca é "invisível" lá — só
   // no celular ele soma/some conforme a aba "Equipe" está aberta ou não.
@@ -82,7 +89,7 @@ export default function AttendantDashboard() {
     mq.addEventListener("change", h);
     return () => mq.removeEventListener("change", h);
   }, []);
-  const internalChatUnread = useInternalChatNotifier(user?.id, isDesktop || mainTab === "equipe", can(user, "equipe") && moduleOk("equipe"));
+  const internalChatUnread = useInternalChatNotifier(user?.id, isDesktop || mainTab === "equipe", moduleGranted("equipe"));
 
   // Alarme de sem resposta clicado em outra aba → volta para o chat.
   useEffect(() => {
@@ -269,7 +276,7 @@ export default function AttendantDashboard() {
         {/* Sidebar tabs */}
         <aside className="hidden md:block w-52 shrink-0 border-r border-border bg-white sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3">
           <div className="flex flex-col gap-1">
-            {[...MAIN_TABS.filter(({ id, module }) => (id === "queue" || id === "chat" || id === "diretorio" || can(user, id)) && moduleOk(module)), ...GRANTED_TABS.filter(({ id, module }) => (id === "sorteios" || user?.adminAccess?.includes(id)) && moduleOk(module))].map(({ id, label, icon: Icon }) => (
+            {MAIN_TABS.filter(({ module }) => moduleGranted(module)).map(({ id, label, icon: Icon }) => (
               <button key={id} onClick={() => setMainTab(id)}
                 className={`flex items-center gap-2 w-full px-3 py-2.5 rounded-lg text-xs font-semibold text-left transition-colors ${
                   mainTab === id ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
@@ -289,8 +296,8 @@ export default function AttendantDashboard() {
         <ChatCenter focusConversationId={focusConversationId} focusRequestId={focusRequestId} />
       </div>
 
-      {mainTab === "equipe" && moduleOk("equipe") && (
-        <div className="md:hidden h-[calc(100dvh-7rem-env(safe-area-inset-bottom))] flex flex-col bg-card">
+      {mainTab === "equipe" && moduleGranted("equipe") && (
+        <div className="md:hidden h-[calc(var(--vvh,100dvh)-7rem-env(safe-area-inset-bottom))] flex flex-col bg-card">
           <InternalChat key={focusInternalRequestId} docked initialConversationId={focusInternalConversationId} />
         </div>
       )}
@@ -307,20 +314,20 @@ export default function AttendantDashboard() {
         </div>
       )}
 
-      {/* Abas de admin liberadas no cadastro */}
-      {mainTab === "financeiro" && user?.adminAccess?.includes("financeiro") && (
+      {/* Abas de módulo liberadas por usuário (moduleAccess) */}
+      {mainTab === "financeiro" && moduleGranted("financeiro") && (
         <div className="max-w-6xl mx-auto px-4 py-6"><Financeiro /></div>
       )}
-      {mainTab === "sorteios" && user?.adminAccess?.includes("sorteios") && (
+      {mainTab === "sorteios" && moduleGranted("sorteios") && (
         <div className="max-w-5xl mx-auto px-4 py-6"><Sorteios /></div>
       )}
-      {mainTab === "robo" && user?.adminAccess?.includes("robo") && (
+      {mainTab === "robo" && moduleGranted("robo") && (
         <div className="max-w-6xl mx-auto px-4 py-6"><Robo /></div>
       )}
-      {mainTab === "rh" && user?.adminAccess?.includes("rh") && (
+      {mainTab === "rh" && moduleGranted("rh") && (
         <div className="max-w-6xl mx-auto px-4 py-6"><RH /></div>
       )}
-      {mainTab === "questionarios" && user?.adminAccess?.includes("questionarios") && (
+      {mainTab === "questionarios" && moduleGranted("questionarios") && (
         <div className="max-w-5xl mx-auto px-4 py-6"><Questionarios /></div>
       )}
 
@@ -526,7 +533,7 @@ export default function AttendantDashboard() {
         </div>
 
         {/* Chat Interno — coluna lateral sempre aberta (somente desktop) */}
-        {moduleOk("equipe") && (
+        {moduleGranted("equipe") && (
           <aside className="hidden md:flex w-[300px] xl:w-[360px] shrink-0 flex-col border-l border-border bg-card sticky top-14 self-start h-[calc(100vh-3.5rem)]">
             <InternalChat key={focusInternalRequestId} docked initialConversationId={focusInternalConversationId} />
           </aside>
@@ -535,7 +542,7 @@ export default function AttendantDashboard() {
 
       {/* Barra de navegação inferior — somente celular */}
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-white border-t border-border flex items-stretch h-[calc(3.5rem+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)]">
-        {[...MAIN_TABS.filter(({ id, module }) => (id === "queue" || id === "chat" || id === "diretorio" || can(user, id)) && moduleOk(module)), ...(can(user, "equipe") && moduleOk("equipe") ? [{ id: "equipe" as MainTab, label: "Equipe", icon: MessagesSquare }] : []), ...GRANTED_TABS.filter(({ id, module }) => (id === "sorteios" || user?.adminAccess?.includes(id)) && moduleOk(module))].map(({ id, label, icon: Icon }) => (
+        {[...MAIN_TABS.filter(({ module }) => moduleGranted(module)), ...(moduleGranted("equipe") ? [{ id: "equipe" as MainTab, label: "Equipe", icon: MessagesSquare }] : [])].map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             onClick={() => setMainTab(id)}

@@ -1,11 +1,12 @@
 import { Router, type IRouter } from "express";
 import { db, usersTable, sectorsTable, teamFavoritesTable } from "@workspace/db";
 import { eq, and, asc } from "drizzle-orm";
-import { requireAuth, requireTenant, requireModule } from "../middlewares/auth";
+import { requireAuth, requireTenant } from "../middlewares/auth";
+import { requireModuleAccess } from "../lib/moduleAccess";
 
 const router: IRouter = Router();
 
-router.use("/team-directory", requireModule("diretorio"));
+router.use("/team-directory", requireModuleAccess("diretorio"));
 
 // ── Diretório interno de contatos: colegas da equipe (nome, ramal, setor,
 // avatar por iniciais) — reaproveita os usuários já cadastrados na loja.

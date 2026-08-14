@@ -13,6 +13,7 @@ import Candidatura from "@/pages/Candidatura";
 import ForgotPassword from "@/pages/ForgotPassword";
 import ResetPassword from "@/pages/ResetPassword";
 import GlobalChatWidget from "@/components/GlobalChatWidget";
+import { useVisualViewportVar } from "@/hooks/useVisualViewportVar";
 
 const queryClient = new QueryClient();
 
@@ -86,6 +87,7 @@ function GlobalChatWidgetGate() {
 }
 
 function App() {
+  useVisualViewportVar();
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
