@@ -52,7 +52,7 @@ export default function GlobalChatWidget() {
   return (
     <>
       <div
-        className={`fixed z-40 bottom-24 right-4 md:bottom-24 md:right-6 w-[calc(100vw-2rem)] max-w-[380px] h-[560px] max-h-[70vh] bg-white rounded-2xl shadow-2xl border border-border flex-col overflow-hidden ${open ? "flex" : "hidden"}`}
+        className={`fixed z-40 bottom-24 right-4 md:bottom-24 md:right-6 w-[calc(100vw-2rem)] max-w-[380px] h-[min(560px,calc(var(--vvh,100vh)-8rem))] bg-white rounded-2xl shadow-2xl border border-border flex-col overflow-hidden ${open ? "flex" : "hidden"}`}
         data-testid="panel-global-chat-widget"
       >
         <div className="flex items-center shrink-0 border-b border-border bg-white">
