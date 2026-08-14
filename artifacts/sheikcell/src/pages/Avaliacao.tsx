@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { api, type TradeInEvaluation, type TradeInMargins, type TradeInQuestion, type TradeInQuestionsConfig } from "@/lib/api";
+import { api, canEditModule, type TradeInEvaluation, type TradeInMargins, type TradeInQuestion, type TradeInQuestionsConfig } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -48,6 +48,7 @@ const STEPS = [
 export default function Avaliacao() {
   const { toast } = useToast();
   const { user } = useAuth();
+  const canEdit = canEditModule(user, "avaliacao");
 
   const [step, setStep] = useState(1);
   const [marginTable, setMarginTable] = useState<1 | 2 | 3>(2);
@@ -243,6 +244,13 @@ export default function Avaliacao() {
         </div>
       )}
 
+      {!canEdit ? (
+        <div className="shk-card p-6 text-center text-muted-foreground">
+          <p className="text-sm font-semibold">Você só tem acesso de visualização à Avaliação de Usados.</p>
+          <p className="text-xs mt-1">Peça ao administrador para liberar edição — enquanto isso, consulte o histórico acima.</p>
+        </div>
+      ) : (
+      <>
       {/* Barra de progresso das etapas (estilo Trocafone) */}
       <div className="shk-card p-4">
         <div className="flex items-center">
@@ -478,6 +486,8 @@ export default function Avaliacao() {
               className="text-xs font-semibold text-primary underline">Fazer nova avaliação</button>
           </div>
         </div>
+      )}
+      </>
       )}
 
       {/* Modal: editar perguntas do questionário (só admin) */}

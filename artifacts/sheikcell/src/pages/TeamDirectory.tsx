@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
-import { api, type TeamContact } from "@/lib/api";
+import { api, canEditModule, type TeamContact } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import { Search, Star, Copy, Mail, Hash, Building2, BookUser } from "lucide-react";
 
@@ -24,6 +25,8 @@ function roleLabel(role: string): string {
 
 export default function TeamDirectory() {
   const { toast } = useToast();
+  const { user } = useAuth();
+  const canEdit = canEditModule(user, "diretorio");
   const [contacts, setContacts] = useState<TeamContact[] | null>(null);
   const [search, setSearch] = useState("");
   const [onlyFavorites, setOnlyFavorites] = useState(false);
@@ -94,8 +97,9 @@ export default function TeamDirectory() {
                   <div className="flex items-center justify-between gap-1">
                     <p className="font-semibold text-sm text-foreground truncate">{c.name}</p>
                     <button onClick={() => toggleFavorite(c)} data-testid={`button-directory-favorite-${c.id}`}
-                      title={c.favorited ? "Remover dos favoritos" : "Favoritar"}
-                      className="p-0.5 shrink-0 hover:bg-amber-100 rounded transition">
+                      title={canEdit ? (c.favorited ? "Remover dos favoritos" : "Favoritar") : "Você só tem acesso de visualização ao Diretório"}
+                      disabled={!canEdit}
+                      className="p-0.5 shrink-0 hover:bg-amber-100 rounded transition disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed">
                       <Star className={`w-4 h-4 ${c.favorited ? "text-amber-500 fill-amber-500" : "text-muted-foreground/50"}`} />
                     </button>
                   </div>

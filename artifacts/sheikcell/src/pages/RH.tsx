@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
-import { api, API_BASE, type RhStage, type RhQuestion, type RhCandidate } from "@/lib/api";
+import { api, API_BASE, canEditModule, type RhStage, type RhQuestion, type RhCandidate } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
   Users, Settings2, Copy, RefreshCw, Plus, Trash2, X, CheckCircle, XCircle,
@@ -16,6 +17,8 @@ const STATUS_META: Record<RhCandidate["status"], { label: string; cls: string }>
 // analisa os candidatos que responderam pelo link público.
 export default function RH() {
   const { toast } = useToast();
+  const { user } = useAuth();
+  const canEdit = canEditModule(user, "rh");
   const [view, setView] = useState<"candidatos" | "processo">("candidatos");
   const [token, setToken] = useState("");
   const [stages, setStages] = useState<RhStage[]>([]);
@@ -124,8 +127,9 @@ export default function RH() {
         </div>
         <button onClick={copyLink} data-testid="button-copy-rh-link"
           className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-primary text-white text-xs font-semibold"><Copy className="w-3.5 h-3.5" /> Copiar</button>
-        <button onClick={regenerate} title="Gerar novo link (o antigo para de funcionar)"
-          className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground"><RefreshCw className="w-3.5 h-3.5" /></button>
+        <button onClick={regenerate} disabled={!canEdit}
+          title={canEdit ? "Gerar novo link (o antigo para de funcionar)" : "Você só tem acesso de visualização ao RH"}
+          className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground disabled:opacity-30 disabled:cursor-not-allowed"><RefreshCw className="w-3.5 h-3.5" /></button>
       </div>
 
       {view === "candidatos" ? (
@@ -163,8 +167,14 @@ export default function RH() {
           )}
         </>
       ) : (
-        /* Editor do processo */
-        <div className="space-y-3">
+        /* Editor do processo — some visível pra "view" (mantendo tudo
+           navegável e legível), mas nenhum campo/botão aceita interação. */
+        <fieldset disabled={!canEdit} className="space-y-3 border-0 p-0 m-0">
+          {!canEdit && (
+            <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
+              Você só tem acesso de visualização ao RH — peça ao administrador para liberar edição.
+            </p>
+          )}
           {stages.map((s, si) => (
             <div key={si} className={`shk-card p-4 space-y-3 ${!s.enabled ? "opacity-60" : ""}`}>
               <div className="flex items-center gap-2">
@@ -231,7 +241,7 @@ export default function RH() {
               <Save className="w-3.5 h-3.5" /> {saving ? "Salvando..." : "Salvar processo"}
             </button>
           </div>
-        </div>
+        </fieldset>
       )}
 
       {/* Modal do candidato */}
@@ -245,16 +255,16 @@ export default function RH() {
             <p className="text-xs text-muted-foreground mb-3">{opened.phone}{opened.email ? ` · ${opened.email}` : ""} · {new Date(opened.createdAt).toLocaleString("pt-BR")}</p>
 
             <div className="flex gap-1.5 mb-4">
-              <button onClick={() => setStatus(opened, "aprovado")} data-testid="button-approve-candidate"
-                className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border ${opened.status === "aprovado" ? "bg-green-600 text-white border-green-600" : "bg-white text-green-700 border-green-200"}`}>
+              <button onClick={() => setStatus(opened, "aprovado")} data-testid="button-approve-candidate" disabled={!canEdit}
+                className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border disabled:opacity-40 ${opened.status === "aprovado" ? "bg-green-600 text-white border-green-600" : "bg-white text-green-700 border-green-200"}`}>
                 <CheckCircle className="w-3.5 h-3.5" /> Aprovar
               </button>
-              <button onClick={() => setStatus(opened, "reprovado")}
-                className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border ${opened.status === "reprovado" ? "bg-red-600 text-white border-red-600" : "bg-white text-red-600 border-red-200"}`}>
+              <button onClick={() => setStatus(opened, "reprovado")} disabled={!canEdit}
+                className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border disabled:opacity-40 ${opened.status === "reprovado" ? "bg-red-600 text-white border-red-600" : "bg-white text-red-600 border-red-200"}`}>
                 <XCircle className="w-3.5 h-3.5" /> Reprovar
               </button>
-              <button onClick={() => removeCandidate(opened)}
-                className="ml-auto p-1.5 rounded-lg hover:bg-red-50 text-red-400"><Trash2 className="w-4 h-4" /></button>
+              <button onClick={() => removeCandidate(opened)} disabled={!canEdit}
+                className="ml-auto p-1.5 rounded-lg hover:bg-red-50 text-red-400 disabled:opacity-40"><Trash2 className="w-4 h-4" /></button>
             </div>
 
             <div className="space-y-4 max-h-[50vh] overflow-y-auto pr-1">
@@ -285,10 +295,12 @@ export default function RH() {
               })}
               <div>
                 <p className="text-xs font-bold mb-1.5">Anotações internas</p>
-                <textarea value={notesDraft} onChange={(e) => setNotesDraft(e.target.value)} rows={3}
+                <textarea value={notesDraft} onChange={(e) => setNotesDraft(e.target.value)} rows={3} disabled={!canEdit}
                   placeholder="Suas observações sobre este candidato (só o admin vê)..."
-                  className="w-full px-3 py-2 rounded-xl border border-border text-xs resize-none" />
-                <button onClick={saveNotes} className="mt-1 px-3 py-1.5 rounded-xl bg-primary text-white text-[11px] font-bold">Salvar anotação</button>
+                  className="w-full px-3 py-2 rounded-xl border border-border text-xs resize-none disabled:opacity-60" />
+                {canEdit && (
+                  <button onClick={saveNotes} className="mt-1 px-3 py-1.5 rounded-xl bg-primary text-white text-[11px] font-bold">Salvar anotação</button>
+                )}
               </div>
             </div>
           </div>

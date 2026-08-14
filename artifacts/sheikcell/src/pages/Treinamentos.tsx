@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { api, type Training, type TrainingCompletion, type QuizQuestion } from "@/lib/api";
+import { api, canEditModule, type Training, type TrainingCompletion, type QuizQuestion } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import TrainingViewer from "@/components/TrainingViewer";
@@ -27,7 +27,7 @@ const EMPTY_FORM = {
 export default function Treinamentos() {
   const { user } = useAuth();
   const { toast } = useToast();
-  const canManage = user?.role === "admin" || user?.role === "supervisor";
+  const canManage = (user?.role === "admin" || user?.role === "supervisor") && canEditModule(user, "treinamentos");
 
   const [items, setItems] = useState<Training[]>([]);
   const [loading, setLoading] = useState(true);

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { api, type PartnerLink } from "@/lib/api";
+import { api, canEditModule, type PartnerLink } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -13,7 +13,7 @@ import {
 export default function Financeiras() {
   const { user } = useAuth();
   const { toast } = useToast();
-  const canManage = user?.role === "admin" || user?.role === "supervisor";
+  const canManage = (user?.role === "admin" || user?.role === "supervisor") && canEditModule(user, "financeiras");
 
   const [links, setLinks] = useState<PartnerLink[]>([]);
   const [showForm, setShowForm] = useState(false);

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { api, type CrmContact, type Sector, type CrmCustomField, type CrmCustomFieldType, type Store } from "@/lib/api";
+import { api, canEditModule, type CrmContact, type Sector, type CrmCustomField, type CrmCustomFieldType, type Store } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import CrmContactDetail from "@/components/CrmContactDetail";
@@ -61,7 +61,7 @@ function fmtCurrency(val: string | number) {
 }
 
 function ContactCard({
-  contact, onMove, onEdit, onArchive, onOpen, colIdx,
+  contact, onMove, onEdit, onArchive, onOpen, colIdx, canEdit,
 }: {
   contact: CrmContact;
   onMove: (id: number, status: Status) => void;
@@ -69,6 +69,7 @@ function ContactCard({
   onArchive: (id: number) => void;
   onOpen: (c: CrmContact) => void;
   colIdx: number;
+  canEdit: boolean;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const prev = COLUMNS[colIdx - 1];
@@ -120,22 +121,26 @@ function ContactCard({
                 <button onClick={() => { onOpen(contact); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
                   <ExternalLink className="w-3 h-3" /> Ver perfil completo
                 </button>
-                <button onClick={() => { onEdit(contact); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
-                  <Plus className="w-3 h-3" /> Editar
-                </button>
-                {prev && (
-                  <button onClick={() => { onMove(contact.id, prev.key); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
-                    <ChevronLeft className="w-3 h-3" /> Mover para {prev.label}
-                  </button>
+                {canEdit && (
+                  <>
+                    <button onClick={() => { onEdit(contact); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
+                      <Plus className="w-3 h-3" /> Editar
+                    </button>
+                    {prev && (
+                      <button onClick={() => { onMove(contact.id, prev.key); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
+                        <ChevronLeft className="w-3 h-3" /> Mover para {prev.label}
+                      </button>
+                    )}
+                    {next && (
+                      <button onClick={() => { onMove(contact.id, next.key); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
+                        <ChevronRight className="w-3 h-3" /> Mover para {next.label}
+                      </button>
+                    )}
+                    <button onClick={() => { onArchive(contact.id); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg text-destructive hover:bg-destructive/10 transition">
+                      <Archive className="w-3 h-3" /> Arquivar
+                    </button>
+                  </>
                 )}
-                {next && (
-                  <button onClick={() => { onMove(contact.id, next.key); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
-                    <ChevronRight className="w-3 h-3" /> Mover para {next.label}
-                  </button>
-                )}
-                <button onClick={() => { onArchive(contact.id); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg text-destructive hover:bg-destructive/10 transition">
-                  <Archive className="w-3 h-3" /> Arquivar
-                </button>
               </div>
             )}
           </div>
@@ -206,7 +211,8 @@ export default function CrmBoard() {
   // Conversas finalizadas (atendimentos resolvidos no chat) — o servidor já
   // aplica o escopo por papel/setor, então basta contar o retorno.
   const [finalizadasCount, setFinalizadasCount] = useState(0);
-  const canManageFields = user?.role === "admin" || user?.role === "supervisor";
+  const canEdit = canEditModule(user, "crm");
+  const canManageFields = (user?.role === "admin" || user?.role === "supervisor") && canEdit;
 
   const fetchFinalizadas = useCallback(async () => {
     try {
@@ -414,11 +420,13 @@ export default function CrmBoard() {
           <p className="text-xs text-muted-foreground mt-0.5">Gerencie relacionamentos e histórico de clientes</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <button onClick={handleAutoImport} disabled={autoImporting}
-            className="flex items-center gap-1.5 px-3 py-2 border border-border rounded-xl text-xs font-medium text-muted-foreground hover:bg-secondary transition disabled:opacity-50">
-            <RefreshCw className={`w-3.5 h-3.5 ${autoImporting ? "animate-spin" : ""}`} />
-            {autoImporting ? "Importando…" : "Auto-importar"}
-          </button>
+          {canEdit && (
+            <button onClick={handleAutoImport} disabled={autoImporting}
+              className="flex items-center gap-1.5 px-3 py-2 border border-border rounded-xl text-xs font-medium text-muted-foreground hover:bg-secondary transition disabled:opacity-50">
+              <RefreshCw className={`w-3.5 h-3.5 ${autoImporting ? "animate-spin" : ""}`} />
+              {autoImporting ? "Importando…" : "Auto-importar"}
+            </button>
+          )}
           <button onClick={fetchContacts}
             className="p-2 text-muted-foreground hover:text-foreground rounded-xl hover:bg-secondary transition">
             <RefreshCw className="w-4 h-4" />
@@ -429,10 +437,12 @@ export default function CrmBoard() {
               <SlidersHorizontal className="w-3.5 h-3.5" /> Campos
             </button>
           )}
-          <button onClick={openAdd} data-testid="button-crm-add"
-            className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition">
-            <Plus className="w-3.5 h-3.5" /> Novo Contato
-          </button>
+          {canEdit && (
+            <button onClick={openAdd} data-testid="button-crm-add"
+              className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition">
+              <Plus className="w-3.5 h-3.5" /> Novo Contato
+            </button>
+          )}
         </div>
       </div>
 
@@ -503,9 +513,11 @@ export default function CrmBoard() {
                 ) : cards.length === 0 ? (
                   <div className="text-center py-8 text-xs text-muted-foreground">
                     <p>Nenhum contato aqui</p>
-                    <button onClick={openAdd} className={`mt-2 ${col.text} font-semibold underline underline-offset-2`}>
-                      Adicionar
-                    </button>
+                    {canEdit && (
+                      <button onClick={openAdd} className={`mt-2 ${col.text} font-semibold underline underline-offset-2`}>
+                        Adicionar
+                      </button>
+                    )}
                   </div>
                 ) : (
                   cards.map((c) => (
@@ -513,7 +525,7 @@ export default function CrmBoard() {
                       key={c.id} contact={c} onMove={handleMove}
                       onEdit={openEdit} onArchive={handleArchive}
                       onOpen={(contact) => setDetailId(contact.id)}
-                      colIdx={colIdx}
+                      colIdx={colIdx} canEdit={canEdit}
                     />
                   ))
                 )}

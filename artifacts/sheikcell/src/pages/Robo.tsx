@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
-import { api, type BotSettings, type BotQuestion } from "@/lib/api";
+import { api, canEditModule, type BotSettings, type BotQuestion } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import { Bot, Plus, X, Trash2, Send, RotateCcw, MessageSquareText } from "lucide-react";
 
@@ -8,6 +9,8 @@ const INPUT = "w-full px-3 py-2 rounded-xl border border-border text-sm mt-1";
 // Aba "Robô" (admin): configuração do pré-atendimento com IA + modo teste.
 export default function Robo() {
   const { toast } = useToast();
+  const { user } = useAuth();
+  const canEdit = canEditModule(user, "robo");
   const [s, setS] = useState<BotSettings | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -80,14 +83,21 @@ export default function Robo() {
         </h2>
         <div className="flex items-center gap-2">
           <span className="text-[11px] text-muted-foreground">IA usada hoje: <b>{s.usageToday}</b> / {s.maxPerDay}</span>
-          <button onClick={handleSave} disabled={saving} data-testid="button-save-bot"
-            className="px-4 py-2 rounded-xl bg-primary text-white text-xs font-semibold disabled:opacity-40 transition">
-            {saving ? "Salvando..." : "Salvar"}
-          </button>
+          {canEdit && (
+            <button onClick={handleSave} disabled={saving} data-testid="button-save-bot"
+              className="px-4 py-2 rounded-xl bg-primary text-white text-xs font-semibold disabled:opacity-40 transition">
+              {saving ? "Salvando..." : "Salvar"}
+            </button>
+          )}
         </div>
       </div>
+      {!canEdit && (
+        <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
+          Você só tem acesso de visualização ao Robô — peça ao administrador para liberar edição.
+        </p>
+      )}
 
-      <div className="grid lg:grid-cols-2 gap-4 items-start">
+      <fieldset disabled={!canEdit} className="grid lg:grid-cols-2 gap-4 items-start border-0 p-0 m-0">
         {/* ─── Configuração ─── */}
         <div className="space-y-4">
           <div className="shk-card p-4 space-y-3 text-xs">
@@ -216,7 +226,7 @@ export default function Robo() {
               className="px-3 py-2 rounded-xl bg-primary text-white disabled:opacity-40"><Send className="w-4 h-4" /></button>
           </div>
         </div>
-      </div>
+      </fieldset>
     </div>
   );
 }

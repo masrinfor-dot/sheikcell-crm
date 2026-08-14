@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
-import { api, type Checklist, type ChecklistQuestion, type ChecklistResponse } from "@/lib/api";
+import { api, canEditModule, type Checklist, type ChecklistQuestion, type ChecklistResponse } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
   ClipboardCheck, Plus, X, Trash2, Pencil, Eye, Star, CalendarDays, Users,
@@ -22,6 +23,8 @@ const EMPTY_FORM = {
 // recorrência, funções-alvo e obrigatoriedade; vê as respostas da equipe.
 export default function Questionarios() {
   const { toast } = useToast();
+  const { user } = useAuth();
+  const canEdit = canEditModule(user, "questionarios");
   const [lists, setLists] = useState<Checklist[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -101,11 +104,18 @@ export default function Questionarios() {
         <h2 className="text-lg font-bold flex items-center gap-2">
           <ClipboardCheck className="w-5 h-5 text-primary" /> Questionários da Equipe
         </h2>
-        <button onClick={() => openForm()} data-testid="button-add-checklist"
-          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-primary text-white text-xs font-semibold">
-          <Plus className="w-3.5 h-3.5" /> Novo questionário
-        </button>
+        {canEdit && (
+          <button onClick={() => openForm()} data-testid="button-add-checklist"
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-primary text-white text-xs font-semibold">
+            <Plus className="w-3.5 h-3.5" /> Novo questionário
+          </button>
+        )}
       </div>
+      {!canEdit && (
+        <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
+          Você só tem acesso de visualização a Questionários — peça ao administrador para liberar edição.
+        </p>
+      )}
 
       {loading ? (
         <div className="h-24 rounded-xl bg-secondary/40 animate-pulse" />
@@ -137,10 +147,12 @@ export default function Questionarios() {
               <div className="flex gap-1 shrink-0">
                 <button onClick={() => openResponses(c)} title="Ver respostas" data-testid={`button-responses-${c.id}`}
                   className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground transition"><Eye className="w-3.5 h-3.5" /></button>
-                <button onClick={() => openForm(c)} title="Editar"
+                <button onClick={() => openForm(c)} title={canEdit ? "Editar" : "Ver"}
                   className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground transition"><Pencil className="w-3.5 h-3.5" /></button>
-                <button onClick={() => handleDelete(c)} title="Excluir"
-                  className="p-1.5 rounded-lg hover:bg-red-50 text-red-400 transition"><Trash2 className="w-3.5 h-3.5" /></button>
+                {canEdit && (
+                  <button onClick={() => handleDelete(c)} title="Excluir"
+                    className="p-1.5 rounded-lg hover:bg-red-50 text-red-400 transition"><Trash2 className="w-3.5 h-3.5" /></button>
+                )}
               </div>
             </div>
           ))}
@@ -156,7 +168,7 @@ export default function Questionarios() {
               <button onClick={() => setShowForm(false)}><X className="w-5 h-5 text-muted-foreground" /></button>
             </div>
 
-            <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1">
+            <fieldset disabled={!canEdit} className="space-y-3 max-h-[60vh] overflow-y-auto pr-1 border-0 p-0 m-0">
               <div>
                 <label className="text-xs font-medium mb-1 block">Título</label>
                 <input value={form.title} onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))}
@@ -258,15 +270,19 @@ export default function Questionarios() {
                   <Plus className="w-3.5 h-3.5" /> Adicionar pergunta
                 </button>
               </div>
-            </div>
+            </fieldset>
 
             <div className="flex gap-2 mt-5">
               <button onClick={() => setShowForm(false)}
-                className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold border border-border hover:bg-secondary transition">Cancelar</button>
-              <button onClick={handleSave} disabled={!valid || saving} data-testid="button-save-checklist"
-                className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold bg-primary text-white disabled:opacity-40 transition">
-                {saving ? "Salvando..." : "Salvar"}
+                className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold border border-border hover:bg-secondary transition">
+                {canEdit ? "Cancelar" : "Fechar"}
               </button>
+              {canEdit && (
+                <button onClick={handleSave} disabled={!valid || saving} data-testid="button-save-checklist"
+                  className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold bg-primary text-white disabled:opacity-40 transition">
+                  {saving ? "Salvando..." : "Salvar"}
+                </button>
+              )}
             </div>
           </div>
         </div>

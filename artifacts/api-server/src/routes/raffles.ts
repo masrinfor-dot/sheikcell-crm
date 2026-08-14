@@ -404,8 +404,9 @@ async function isRaffleManager(req: { session: { userId?: number; userRole?: str
     .from(usersTable).where(eq(usersTable.id, userId)).limit(1);
   // Vendedor comum continua podendo criar sorteio dos próprios clientes
   // (regra de negócio à parte, ver comentário acima) — só o gerenciamento
-  // de TODOS os sorteios da loja exige acesso explícito ao módulo.
-  return u?.moduleAccess?.sorteios != null;
+  // de TODOS os sorteios da loja exige acesso de EDIÇÃO explícito ao módulo
+  // (nível "view" deixaria ver a lista mas não editar/apagar de terceiros).
+  return u?.moduleAccess?.sorteios === "edit";
 }
 
 /** Carrega o sorteio (da loja) e garante que o usuário pode mexer nele. */

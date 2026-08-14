@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from "react";
 import {
-  api, type CrmContact, type CrmPurchase, type CrmInternalNote,
+  api, canEditModule, type CrmContact, type CrmPurchase, type CrmInternalNote,
   type AttendanceLog, type Sector, type CrmCustomField, type Store as StoreType,
 } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
   X, Crown, Star, UserPlus, UserMinus, ShoppingBag, MessageSquare,
@@ -62,6 +63,8 @@ interface Props {
 
 export default function CrmContactDetail({ contactId, onClose, onContactUpdated, sectors }: Props) {
   const { toast } = useToast();
+  const { user } = useAuth();
+  const canEdit = canEditModule(user, "crm");
   const [tab, setTab] = useState<Tab>("overview");
   const [contact, setContact] = useState<CrmContact | null>(null);
   const [purchases, setPurchases] = useState<CrmPurchase[]>([]);
@@ -311,7 +314,8 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
                     <button
                       key={key}
                       onClick={() => handleProfileChange(key)}
-                      className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border-2 text-sm font-medium transition ${
+                      disabled={!canEdit}
+                      className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border-2 text-sm font-medium transition disabled:opacity-60 disabled:cursor-not-allowed ${
                         contact.profile === key ? color + " border-current" : "border-border hover:bg-secondary"
                       }`}
                     >
@@ -326,12 +330,14 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Informações</p>
-                  <button
-                    onClick={() => setEditing(!editing)}
-                    className="flex items-center gap-1 text-xs text-primary hover:underline"
-                  >
-                    <Pencil className="w-3 h-3" />{editing ? "Cancelar" : "Editar"}
-                  </button>
+                  {canEdit && (
+                    <button
+                      onClick={() => setEditing(!editing)}
+                      className="flex items-center gap-1 text-xs text-primary hover:underline"
+                    >
+                      <Pencil className="w-3 h-3" />{editing ? "Cancelar" : "Editar"}
+                    </button>
+                  )}
                 </div>
                 {editing ? (
                   <div className="space-y-2.5">
@@ -522,10 +528,12 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
                   <p className="text-sm font-semibold">Histórico de Compras</p>
                   <p className="text-xs text-muted-foreground">Total: {fmtCurrency(totalPurchasesNum)}</p>
                 </div>
-                <button onClick={() => setShowPurchaseForm(!showPurchaseForm)}
-                  className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition">
-                  <Plus className="w-3.5 h-3.5" /> Registrar
-                </button>
+                {canEdit && (
+                  <button onClick={() => setShowPurchaseForm(!showPurchaseForm)}
+                    className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition">
+                    <Plus className="w-3.5 h-3.5" /> Registrar
+                  </button>
+                )}
               </div>
 
               {showPurchaseForm && (
@@ -596,10 +604,12 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
                         </div>
                         {p.notes && <p className="text-xs text-muted-foreground mt-1 italic">{p.notes}</p>}
                       </div>
-                      <button onClick={() => handleDeletePurchase(p.id)}
-                        className="p-1.5 rounded-lg text-destructive hover:bg-destructive/10 transition shrink-0">
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                      {canEdit && (
+                        <button onClick={() => handleDeletePurchase(p.id)}
+                          className="p-1.5 rounded-lg text-destructive hover:bg-destructive/10 transition shrink-0">
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -650,19 +660,21 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
           {tab === "notes" && (
             <div className="p-5 space-y-4">
               <p className="text-sm font-semibold">Observações Internas</p>
-              <form onSubmit={handleAddNote} className="space-y-2">
-                <textarea
-                  value={noteContent}
-                  onChange={(e) => setNoteContent(e.target.value)}
-                  placeholder="Adicionar observação interna (visível apenas para atendentes)…"
-                  rows={3}
-                  className="w-full px-3 py-2 rounded-xl border border-border text-sm resize-none focus:outline-none focus:ring-2 focus:ring-primary/30"
-                />
-                <button type="submit" disabled={noteLoading || !noteContent.trim()}
-                  className="px-4 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition disabled:opacity-50 flex items-center gap-1.5">
-                  <Plus className="w-3.5 h-3.5" />{noteLoading ? "Salvando…" : "Adicionar nota"}
-                </button>
-              </form>
+              {canEdit && (
+                <form onSubmit={handleAddNote} className="space-y-2">
+                  <textarea
+                    value={noteContent}
+                    onChange={(e) => setNoteContent(e.target.value)}
+                    placeholder="Adicionar observação interna (visível apenas para atendentes)…"
+                    rows={3}
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm resize-none focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  />
+                  <button type="submit" disabled={noteLoading || !noteContent.trim()}
+                    className="px-4 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition disabled:opacity-50 flex items-center gap-1.5">
+                    <Plus className="w-3.5 h-3.5" />{noteLoading ? "Salvando…" : "Adicionar nota"}
+                  </button>
+                </form>
+              )}
 
               {notes.length === 0 ? (
                 <div className="text-center py-8 text-muted-foreground">
@@ -678,10 +690,12 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
                         <span className="text-xs text-muted-foreground">
                           {n.authorName ?? "Sistema"} · {fmtDateTime(n.createdAt)}
                         </span>
-                        <button onClick={() => handleDeleteNote(n.id)}
-                          className="p-1 rounded-lg text-destructive hover:bg-destructive/10 transition">
-                          <Trash2 className="w-3 h-3" />
-                        </button>
+                        {canEdit && (
+                          <button onClick={() => handleDeleteNote(n.id)}
+                            className="p-1 rounded-lg text-destructive hover:bg-destructive/10 transition">
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        )}
                       </div>
                     </div>
                   ))}

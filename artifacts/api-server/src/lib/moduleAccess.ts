@@ -44,9 +44,10 @@ export async function checkModuleAccess(req: Request, moduleKey: UserGrantableMo
 /**
  * Exige que a loja tenha o módulo contratado (requireModule) E que o
  * usuário da sessão tenha algum nível de acesso a ele (view ou edit).
- * Substitui requireModule/requireFeature nas rotas de módulo — a
- * granularidade view/edit ainda não bloqueia escrita nesta fase (fica pra
- * uma fase futura), só controla visibilidade.
+ * Além disso, bloqueia ESCRITA de verdade pra quem só tem "view": GET/HEAD
+ * passam com qualquer nível, qualquer outro método (POST/PATCH/PUT/DELETE)
+ * exige "edit". Cobre automaticamente todas as rotas que já usam este
+ * middleware, sem precisar mexer rota por rota.
  */
 export function requireModuleAccess(moduleKey: UserGrantableModule) {
   const tenantGate = requireModule(moduleKey);
@@ -55,6 +56,11 @@ export function requireModuleAccess(moduleKey: UserGrantableModule) {
       const level = await checkModuleAccess(req, moduleKey);
       if (level == null) {
         res.status(403).json({ error: "Você não tem acesso a este módulo. Fale com o administrador." });
+        return;
+      }
+      const isSafeMethod = req.method === "GET" || req.method === "HEAD";
+      if (!isSafeMethod && level !== "edit") {
+        res.status(403).json({ error: "Você só tem acesso de visualização a este módulo. Peça ao administrador para liberar edição." });
         return;
       }
       next();

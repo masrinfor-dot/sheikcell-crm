@@ -146,6 +146,23 @@ export function can(user: User | null, key: string): boolean {
   return user.permissions?.[key] !== false;
 }
 
+// Nível de acesso do usuário a um módulo — admin sempre "edit"; loja sem o
+// módulo contratado ou usuário sem grant explícito = null (sem acesso).
+// Mesma regra do backend (checkModuleAccess em lib/moduleAccess.ts).
+export function moduleLevel(user: User | null, m: UserGrantableModule): ModuleAccessLevel | null {
+  if (!user) return null;
+  if (user.role === "admin") return "edit";
+  if (user.enabledModules != null && !user.enabledModules.includes(m)) return null;
+  return user.moduleAccess?.[m] ?? null;
+}
+
+// Atalho pra gatear botão de criar/editar/excluir: só "edit" pode escrever,
+// "view" (ou sem acesso) só navega e lê. Mesma regra do backend
+// (requireModuleAccess bloqueia POST/PATCH/PUT/DELETE sem nível "edit").
+export function canEditModule(user: User | null, m: UserGrantableModule): boolean {
+  return moduleLevel(user, m) === "edit";
+}
+
 export type InternalConversation = {
   id: number;
   kind: "direct" | "general" | "group";

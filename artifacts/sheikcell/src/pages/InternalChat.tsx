@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, type InternalConversation, type InternalMessage } from "@/lib/api";
+import { api, canEditModule, type InternalConversation, type InternalMessage } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { reportInternalChatUnread } from "@/hooks/useInternalChatNotifier";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -159,6 +159,7 @@ type InternalChatProps = {
 
 export default function InternalChat({ docked = false, onActiveConversationChange, initialConversationId = null }: InternalChatProps = {}) {
   const { user } = useAuth();
+  const canEdit = canEditModule(user, "equipe");
   const { toast } = useToast();
   const [conversations, setConversations] = useState<InternalConversation[]>([]);
   const [activeId, setActiveId] = useState<number | null>(initialConversationId);
@@ -679,15 +680,17 @@ export default function InternalChat({ docked = false, onActiveConversationChang
             <div className="flex items-center gap-2 font-semibold text-sm">
               <MessagesSquare className="w-4 h-4 text-primary" /> Chat Interno
             </div>
-            <div className="flex items-center gap-1">
-              <button
-                onClick={openNew}
-                data-testid="button-new-internal-chat"
-                className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:bg-primary/10 rounded-md px-2 py-1"
-              >
-                <Plus className="w-3.5 h-3.5" /> Novo
-              </button>
-            </div>
+            {canEdit && (
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={openNew}
+                  data-testid="button-new-internal-chat"
+                  className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:bg-primary/10 rounded-md px-2 py-1"
+                >
+                  <Plus className="w-3.5 h-3.5" /> Novo
+                </button>
+              </div>
+            )}
           </div>
           <div className="flex-1 overflow-y-auto">
             {conversations.length === 0 && (
@@ -809,9 +812,7 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                   const caption = m.type !== "text" ? extractCaption(m.content) : "";
                   const toolbar = (
                     <div className="opacity-0 group-hover:opacity-100 transition flex items-center gap-0.5 shrink-0">
-                      {(user?.role === "admin"
-                        || ((user?.enabledModules == null || user.enabledModules.includes("tarefas"))
-                          && user?.moduleAccess != null && "tarefas" in user.moduleAccess)) && (
+                      {canEditModule(user, "tarefas") && (
                         <button
                           onClick={() => openTaskFromMsg(m)}
                           data-testid={`button-task-from-msg-${m.id}`}
@@ -821,22 +822,26 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                           <ClipboardPlus className="w-3.5 h-3.5" />
                         </button>
                       )}
-                      <button
-                        onClick={() => openForward(m)}
-                        data-testid={`button-forward-msg-${m.id}`}
-                        title="Encaminhar mensagem"
-                        className="p-1.5 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10"
-                      >
-                        <Forward className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => openReply(m)}
-                        data-testid={`button-reply-msg-${m.id}`}
-                        title="Responder mensagem"
-                        className="p-1.5 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10"
-                      >
-                        <Reply className="w-3.5 h-3.5" />
-                      </button>
+                      {canEdit && (
+                        <>
+                          <button
+                            onClick={() => openForward(m)}
+                            data-testid={`button-forward-msg-${m.id}`}
+                            title="Encaminhar mensagem"
+                            className="p-1.5 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10"
+                          >
+                            <Forward className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={() => openReply(m)}
+                            data-testid={`button-reply-msg-${m.id}`}
+                            title="Responder mensagem"
+                            className="p-1.5 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10"
+                          >
+                            <Reply className="w-3.5 h-3.5" />
+                          </button>
+                        </>
+                      )}
                     </div>
                   );
                   return (
@@ -888,6 +893,13 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                 <div ref={bottomRef} />
               </div>
 
+              {!canEdit ? (
+                <div className="border-t shrink-0 px-3 py-2.5 text-center">
+                  <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5 inline-block">
+                    Você só tem acesso de visualização ao Chat Interno — peça ao administrador para liberar edição.
+                  </p>
+                </div>
+              ) : (
               <div className="border-t shrink-0">
                 {/* Barra "respondendo a": aparece acima do composer até enviar ou cancelar
                     a citação; vale tanto para o próximo texto quanto para o próximo anexo. */}
@@ -1049,6 +1061,7 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                 )}
               </div>
               </div>
+              )}
             </>
           ) : (
             <div className="flex-1 flex flex-col items-center justify-center text-center px-6 text-muted-foreground">

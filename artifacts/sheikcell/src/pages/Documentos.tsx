@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { api, type DocumentItem } from "@/lib/api";
+import { api, canEditModule, type DocumentItem } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import { FolderArchive, Plus, X, Search, FileText, Image, Download, Trash2, Eye } from "lucide-react";
@@ -34,7 +34,11 @@ export default function Documentos() {
   const [fDesc, setFDesc] = useState("");
   const [fFile, setFFile] = useState<File | null>(null);
 
-  const canManage = user?.role === "admin" || user?.role === "supervisor";
+  // Arquivar/apagar documento sempre foi restrito a admin/supervisor (regra
+  // de produto, não de módulo) — mas supervisor agora também precisa do
+  // nível "edit" em Documentos (senão o backend bloqueia o upload mesmo com
+  // o botão visível).
+  const canManage = (user?.role === "admin" || user?.role === "supervisor") && canEditModule(user, "documentos");
 
   useEffect(() => {
     api.documents.list().then(setDocs).catch(() => {}).finally(() => setLoading(false));

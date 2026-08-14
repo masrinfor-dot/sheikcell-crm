@@ -43,10 +43,10 @@ const emptyForm = (): FormState => ({
 export default function Sorteios() {
   const { toast } = useToast();
   const { user } = useAuth();
-  // Admin (ou quem tem "sorteios" liberado) gerencia tudo; vendedor comum
-  // só cria sorteios entre os próprios clientes. Mesma regra do backend
-  // (isRaffleManager em routes/raffles.ts) — nível view já basta aqui.
-  const isManager = user?.role === "admin" || (user?.moduleAccess?.sorteios != null);
+  // Admin (ou quem tem "sorteios" liberado em nível de edição) gerencia
+  // tudo; vendedor comum só cria sorteios entre os próprios clientes. Mesma
+  // regra do backend (isRaffleManager em routes/raffles.ts).
+  const isManager = user?.role === "admin" || user?.moduleAccess?.sorteios === "edit";
   const [raffles, setRaffles] = useState<Raffle[]>([]);
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [vendedores, setVendedores] = useState<User[]>([]);
