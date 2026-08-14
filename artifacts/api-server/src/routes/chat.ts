@@ -973,6 +973,14 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
   if (labels !== undefined) update.labels = labels;
   if (name !== undefined) update.name = name;
   if (isArchived !== undefined) update.isArchived = isArchived;
+  // Finalizar/arquivar encerra a pendência — zera o contador de não lidas
+  // aqui mesmo, porque o zeramento normal (ao abrir a conversa) só acontece
+  // pro responsável (assignee); sem isso, uma conversa finalizada por
+  // admin/supervisor (ou finalizada sem a última mensagem ter sido aberta)
+  // ficava com unreadCount preso pra sempre, inflando os badges de contagem.
+  if (update.status === "resolved" || update.status === "archived" || update.isArchived === true) {
+    update.unreadCount = 0;
+  }
   // Reatribuir responsável segue exclusivo de admin/supervisor; transferir de
   // setor também é permitido ao vendedor autorizado (permissão "transferir").
   let isSectorTransfer = false;

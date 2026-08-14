@@ -955,8 +955,15 @@ export default function ChatCenter({
   const unreadNotifications = notifications.reduce((n, x) => n + (x.read ? 0 : 1), 0);
 
   // ── Ganchos pro widget flutuante global (bolha estilo Messenger) ──
+  // Resolvidas/arquivadas não contam pro badge — pra admin/supervisor elas
+  // continuam na lista (podem ver o histórico), mas não representam mais
+  // pendência nenhuma. Sem esse filtro, um unreadCount residual que nunca
+  // foi zerado no servidor (ex.: conversa finalizada por quem não era o
+  // responsável) infla o contador pra sempre.
   useEffect(() => {
-    onUnreadChange?.(convs.reduce((sum, c) => sum + (c.unreadCount ?? 0), 0));
+    onUnreadChange?.(
+      convs.reduce((sum, c) => sum + (conversationCategory(c) === "resolvidas" ? 0 : (c.unreadCount ?? 0)), 0),
+    );
   }, [convs, onUnreadChange]);
   useEffect(() => {
     onActiveConversationChange?.(activeId);
