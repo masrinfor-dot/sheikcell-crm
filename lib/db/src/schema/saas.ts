@@ -68,6 +68,10 @@ export const saasTicketsTable = pgTable("saas_tickets", {
   firstRespondedAt: timestamp("first_responded_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  // Explicação da solução aplicada, preenchida ao marcar o chamado como
+  // "resolvido" — fica registrada e visível permanentemente (o chamado
+  // nunca é arquivado/escondido), não é limpa se o status mudar depois.
+  resolutionNote: text("resolution_note"),
 });
 
 // Timeline de mensagens de um chamado — não se mistura com as conversas de

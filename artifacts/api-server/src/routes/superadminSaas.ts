@@ -307,16 +307,26 @@ router.post("/superadmin/saas/tickets", async (req, res): Promise<void> => {
 
 router.patch("/superadmin/saas/tickets/:id", async (req, res): Promise<void> => {
   const id = Number(req.params.id);
-  const { status, priority, category, title, description } = req.body as {
+  const { status, priority, category, title, description, resolutionNote } = req.body as {
     status?: string; priority?: string; category?: string; title?: string; description?: string;
+    resolutionNote?: string;
   };
   if (!Number.isFinite(id)) { res.status(400).json({ error: "Chamado inválido" }); return; }
   const updates: Record<string, unknown> = {};
   if (status) {
     if (!VALID_STATUSES.includes(status)) { res.status(400).json({ error: "Situação inválida" }); return; }
+    // Marcar como resolvido exige registrar a solução aplicada — fica
+    // visível permanentemente no chamado (não é uma mensagem que se perde
+    // na timeline, nem é limpa se o status mudar de novo depois).
+    const hasNote = typeof resolutionNote === "string" && resolutionNote.trim().length > 0;
+    if (status === "resolvido" && !hasNote) {
+      res.status(400).json({ error: "Descreva a solução aplicada para marcar o chamado como resolvido." });
+      return;
+    }
     updates["status"] = status;
     updates["resolvedAt"] = status === "resolvido" || status === "fechado" ? new Date() : null;
   }
+  if (typeof resolutionNote === "string") updates["resolutionNote"] = resolutionNote.trim() || null;
   if (priority) {
     if (!VALID_PRIORITIES.includes(priority)) { res.status(400).json({ error: "Prioridade inválida" }); return; }
     updates["priority"] = priority;

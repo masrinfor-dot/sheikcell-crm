@@ -252,7 +252,7 @@ export default function SuperAdminDashboard() {
     }
   };
 
-  const updateTicketField = async (data: { status?: TicketStatus; priority?: TicketPriority; category?: TicketCategory }) => {
+  const updateTicketField = async (data: { status?: TicketStatus; priority?: TicketPriority; category?: TicketCategory; resolutionNote?: string }) => {
     if (!ticketDetail) return;
     try {
       const { ticket } = await api.superadmin.updateTicket(ticketDetail.id, data);
@@ -261,6 +261,33 @@ export default function SuperAdminDashboard() {
     } catch (e) {
       fail("Erro ao atualizar")(e);
     }
+  };
+
+  // Marcar como "resolvido" exige descrever a solução antes de confirmar —
+  // em vez de disparar o PATCH na hora do Select (como as outras situações),
+  // abre um campo pra escrever, e só salva os dois juntos ao confirmar.
+  // resolvingStatus != null também controla o valor exibido no Select
+  // enquanto o campo está aberto (senão ele voltaria pro status antigo até
+  // confirmar, um piscar de tela confuso).
+  const [resolvingStatus, setResolvingStatus] = useState(false);
+  const [resolutionDraft, setResolutionDraft] = useState("");
+  const handleTicketStatusChange = (v: string) => {
+    if (v === "resolvido") {
+      setResolutionDraft(ticketDetail?.resolutionNote ?? "");
+      setResolvingStatus(true);
+    } else {
+      setResolvingStatus(false);
+      updateTicketField({ status: v as TicketStatus });
+    }
+  };
+  const confirmResolve = async () => {
+    if (!resolutionDraft.trim()) return;
+    await updateTicketField({ status: "resolvido", resolutionNote: resolutionDraft.trim() });
+    setResolvingStatus(false);
+  };
+  const openEditResolution = () => {
+    setResolutionDraft(ticketDetail?.resolutionNote ?? "");
+    setResolvingStatus(true);
   };
 
   const run = async (fn: () => Promise<unknown>, ok: string, after?: () => void) => {
@@ -952,7 +979,7 @@ export default function SuperAdminDashboard() {
       </Dialog>
 
       {/* Detalhe do chamado: timeline + resposta + situação/prioridade/categoria */}
-      <Dialog open={!!ticketDetail} onOpenChange={(open) => { if (!open) { setTicketDetail(null); setTicketMessages([]); setTicketReply(""); } }}>
+      <Dialog open={!!ticketDetail} onOpenChange={(open) => { if (!open) { setTicketDetail(null); setTicketMessages([]); setTicketReply(""); setResolvingStatus(false); setResolutionDraft(""); } }}>
         <DialogContent className="max-w-2xl">
           {ticketDetail && (
             <>
@@ -969,7 +996,7 @@ export default function SuperAdminDashboard() {
               <div className="grid grid-cols-3 gap-2">
                 <div>
                   <Label className="text-xs">Situação</Label>
-                  <Select value={ticketDetail.status} onValueChange={(v) => updateTicketField({ status: v as TicketStatus })}>
+                  <Select value={resolvingStatus ? "resolvido" : ticketDetail.status} onValueChange={handleTicketStatusChange}>
                     <SelectTrigger data-testid="select-ticket-status"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       {(Object.keys(TICKET_STATUS_META) as TicketStatus[]).map((s) => <SelectItem key={s} value={s}>{TICKET_STATUS_META[s].label}</SelectItem>)}
@@ -995,6 +1022,34 @@ export default function SuperAdminDashboard() {
                   </Select>
                 </div>
               </div>
+
+              {resolvingStatus ? (
+                <div className="border border-emerald-200 bg-emerald-50 rounded-lg p-3 space-y-2">
+                  <Label className="text-xs font-semibold text-emerald-800">Qual foi a solução aplicada?</Label>
+                  <Textarea rows={3} value={resolutionDraft} onChange={(e) => setResolutionDraft(e.target.value)}
+                    placeholder="Descreva o que foi feito pra resolver este chamado..." data-testid="input-resolution-note"
+                    className="bg-white" autoFocus />
+                  <div className="flex gap-2 justify-end">
+                    <Button size="sm" variant="outline" onClick={() => setResolvingStatus(false)} data-testid="button-cancel-resolve">
+                      Cancelar
+                    </Button>
+                    <Button size="sm" onClick={confirmResolve} disabled={!resolutionDraft.trim()} data-testid="button-confirm-resolve">
+                      Marcar como resolvido
+                    </Button>
+                  </div>
+                </div>
+              ) : ticketDetail.resolutionNote ? (
+                <div className="border border-emerald-200 bg-emerald-50 rounded-lg p-3">
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <Label className="text-xs font-semibold text-emerald-800">✅ Solução aplicada</Label>
+                    <button onClick={openEditResolution} data-testid="button-edit-resolution"
+                      className="text-[11px] font-semibold text-emerald-700 hover:underline shrink-0">
+                      Editar
+                    </button>
+                  </div>
+                  <p className="text-sm text-emerald-900 whitespace-pre-wrap break-words">{ticketDetail.resolutionNote}</p>
+                </div>
+              ) : null}
 
               <div className="border rounded-lg max-h-80 overflow-y-auto p-3 space-y-2 bg-muted/20">
                 {ticketMessages.length === 0 ? (

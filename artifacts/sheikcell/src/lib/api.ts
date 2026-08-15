@@ -688,6 +688,9 @@ export type SaasTicket = {
   firstRespondedAt: string | null;
   createdAt: string;
   resolvedAt: string | null;
+  // Explicação da solução aplicada — preenchida ao marcar como "resolvido",
+  // fica visível permanentemente (não é limpa se o status mudar depois).
+  resolutionNote: string | null;
 };
 
 export type TicketMessage = {
@@ -782,7 +785,7 @@ export const api = {
     },
     createTicket: (data: { tenantId: number; title: string; description?: string }) =>
       req<{ ticket: SaasTicket }>("/superadmin/saas/tickets", { method: "POST", body: JSON.stringify(data) }),
-    updateTicket: (id: number, data: { status?: TicketStatus; priority?: TicketPriority; category?: TicketCategory; title?: string; description?: string }) =>
+    updateTicket: (id: number, data: { status?: TicketStatus; priority?: TicketPriority; category?: TicketCategory; title?: string; description?: string; resolutionNote?: string }) =>
       req<{ ticket: SaasTicket }>(`/superadmin/saas/tickets/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     ticketMessages: (id: number) => req<{ messages: TicketMessage[] }>(`/superadmin/saas/tickets/${id}/messages`),
     replyTicket: (id: number, content: string) =>
