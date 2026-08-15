@@ -129,6 +129,12 @@ const TICKET_CATEGORY_META: Record<TicketCategory, { label: string; icon: typeof
   melhoria: { label: "Melhoria", icon: Sparkles },
 };
 
+// Sub-abas da lista de chamados: "Ativos" (visão padrão) fica só com quem
+// ainda precisa de atenção; "Histórico" junta resolvido/fechado (com a nota
+// de solução) fora do caminho do dia a dia.
+const ACTIVE_TICKET_STATUSES: TicketStatus[] = ["aberto", "em_analise", "em_andamento"];
+const HISTORY_TICKET_STATUSES: TicketStatus[] = ["resolvido", "fechado"];
+
 // Indicador de SLA: quanto tempo em aberto sem 1ª resposta do técnico.
 // Verde < 2h, âmbar 2–8h, vermelho > 8h. Já respondido = neutro.
 function slaBadge(tk: SaasTicket) {
@@ -175,6 +181,7 @@ export default function SuperAdminDashboard() {
   const [templateOpen, setTemplateOpen] = useState(false);
 
   // Suporte: filtros da lista + chamado aberto em detalhe (timeline + resposta).
+  const [ticketView, setTicketView] = useState<"ativos" | "historico">("ativos");
   const [ticketFilters, setTicketFilters] = useState<{ status: string; priority: string; category: string; tenantId: string }>({ status: "", priority: "", category: "", tenantId: "" });
   const [ticketDetail, setTicketDetail] = useState<SaasTicket | null>(null);
   const [ticketMessages, setTicketMessages] = useState<TicketMessage[]>([]);
@@ -223,6 +230,13 @@ export default function SuperAdminDashboard() {
     }).then((r) => setTickets(r.tickets)).catch(() => {});
   }, [ticketFilters]);
   useEffect(loadTickets, [loadTickets]);
+
+  // O filtro de situação já pode restringir a um status específico; a
+  // sub-aba (Ativos/Histórico) filtra por cima disso, no cliente, pro grupo
+  // de status certo — evita duplicar a query no backend pra algo tão simples.
+  const viewTickets = tickets.filter((tk) =>
+    (ticketView === "ativos" ? ACTIVE_TICKET_STATUSES : HISTORY_TICKET_STATUSES).includes(tk.status)
+  );
 
   // Timeline do chamado aberto no detalhe, com polling pra ver resposta da loja.
   const loadTicketThread = useCallback(() => {
@@ -594,13 +608,22 @@ export default function SuperAdminDashboard() {
             {/* ------------------------------------------------- SUPORTE */}
             {tab === "suporte" && (
               <>
+                <div className="flex gap-2">
+                  {(["ativos", "historico"] as const).map((v) => (
+                    <Button key={v} size="sm" variant={ticketView === v ? "default" : "outline"}
+                      onClick={() => { setTicketView(v); setTicketFilters((f) => ({ ...f, status: "" })); }}
+                      data-testid={`button-ticket-view-${v}`}>
+                      {v === "ativos" ? "Ativos" : "Histórico"}
+                    </Button>
+                  ))}
+                </div>
                 <div className="flex justify-between items-center flex-wrap gap-2">
                   <div className="flex gap-2 flex-wrap">
                     <Select value={ticketFilters.status || "all"} onValueChange={(v) => setTicketFilters({ ...ticketFilters, status: v === "all" ? "" : v })}>
                       <SelectTrigger className="w-[160px]" data-testid="filter-ticket-status"><SelectValue placeholder="Situação" /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="all">Todas as situações</SelectItem>
-                        {(Object.keys(TICKET_STATUS_META) as TicketStatus[]).map((s) => <SelectItem key={s} value={s}>{TICKET_STATUS_META[s].label}</SelectItem>)}
+                        {(ticketView === "ativos" ? ACTIVE_TICKET_STATUSES : HISTORY_TICKET_STATUSES).map((s) => <SelectItem key={s} value={s}>{TICKET_STATUS_META[s].label}</SelectItem>)}
                       </SelectContent>
                     </Select>
                     <Select value={ticketFilters.priority || "all"} onValueChange={(v) => setTicketFilters({ ...ticketFilters, priority: v === "all" ? "" : v })}>
@@ -629,10 +652,12 @@ export default function SuperAdminDashboard() {
                     <Plus className="w-4 h-4 mr-1" /> Novo chamado
                   </Button>
                 </div>
-                {tickets.length === 0 ? (
-                  <p className="text-muted-foreground text-sm">Nenhum chamado encontrado.</p>
+                {viewTickets.length === 0 ? (
+                  <p className="text-muted-foreground text-sm">
+                    {ticketView === "ativos" ? "Nenhum chamado ativo no momento." : "Nenhum chamado no histórico."}
+                  </p>
                 ) : (
-                  tickets.map((tk) => {
+                  viewTickets.map((tk) => {
                     const CategoryIcon = TICKET_CATEGORY_META[tk.category].icon;
                     return (
                       <Card key={tk.id} data-testid={`card-ticket-${tk.id}`} className="cursor-pointer hover:bg-muted/30" onClick={() => setTicketDetail(tk)}>
@@ -645,7 +670,7 @@ export default function SuperAdminDashboard() {
                               {slaBadge(tk)}
                             </p>
                             <p className="text-xs text-muted-foreground flex items-center gap-1 mt-0.5">
-                              <CategoryIcon className="w-3 h-3" /> {TICKET_CATEGORY_META[tk.category].label} · {tk.tenantName}{tk.storeName ? ` (${tk.storeName})` : ""} · aberto em {fmtDateTime(tk.createdAt)}
+                              <CategoryIcon className="w-3 h-3" /> {TICKET_CATEGORY_META[tk.category].label} · {tk.tenantName}{tk.storeName ? ` (${tk.storeName})` : ""}{tk.openedByUserName ? ` · aberto por ${tk.openedByUserName}` : ""} · aberto em {fmtDateTime(tk.createdAt)}
                             </p>
                           </div>
                           <Button size="sm" variant="outline" data-testid={`button-open-ticket-${tk.id}`}>Ver conversa</Button>
@@ -989,7 +1014,7 @@ export default function SuperAdminDashboard() {
                   {slaBadge(ticketDetail)}
                 </DialogTitle>
                 <p className="text-xs text-muted-foreground">
-                  {ticketDetail.tenantName}{ticketDetail.storeName ? ` (${ticketDetail.storeName})` : ""} · aberto em {fmtDateTime(ticketDetail.createdAt)}
+                  {ticketDetail.tenantName}{ticketDetail.storeName ? ` (${ticketDetail.storeName})` : ""}{ticketDetail.openedByUserName ? ` · aberto por ${ticketDetail.openedByUserName}` : ""} · aberto em {fmtDateTime(ticketDetail.createdAt)}
                 </p>
               </DialogHeader>
 

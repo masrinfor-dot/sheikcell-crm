@@ -684,6 +684,9 @@ export type SaasTicket = {
   priority: TicketPriority;
   category: TicketCategory;
   openedByUserId: number | null;
+  // Nome de quem abriu o chamado — só vem preenchido na listagem do
+  // superadmin (join com users); a tela do lojista não usa este campo.
+  openedByUserName?: string | null;
   storeName: string | null;
   firstRespondedAt: string | null;
   createdAt: string;

@@ -7,6 +7,7 @@ import {
   saasTicketsTable,
   saasTicketMessagesTable,
   saasSettingsTable,
+  usersTable,
 } from "@workspace/db";
 import { eq, and, asc, desc, sql, lt } from "drizzle-orm";
 import { requireSuperadmin } from "../middlewares/auth";
@@ -282,12 +283,13 @@ router.get("/superadmin/saas/tickets", async (req, res): Promise<void> => {
   if (tenantId && Number.isFinite(Number(tenantId))) conditions.push(eq(saasTicketsTable.tenantId, Number(tenantId)));
 
   const rows = await db
-    .select({ ticket: saasTicketsTable, tenantName: tenantsTable.name })
+    .select({ ticket: saasTicketsTable, tenantName: tenantsTable.name, openedByUserName: usersTable.name })
     .from(saasTicketsTable)
     .innerJoin(tenantsTable, eq(saasTicketsTable.tenantId, tenantsTable.id))
+    .leftJoin(usersTable, eq(saasTicketsTable.openedByUserId, usersTable.id))
     .where(conditions.length ? and(...conditions) : undefined)
     .orderBy(desc(saasTicketsTable.createdAt));
-  res.json({ tickets: rows.map((r) => ({ ...r.ticket, tenantName: r.tenantName })) });
+  res.json({ tickets: rows.map((r) => ({ ...r.ticket, tenantName: r.tenantName, openedByUserName: r.openedByUserName })) });
 });
 
 router.post("/superadmin/saas/tickets", async (req, res): Promise<void> => {
