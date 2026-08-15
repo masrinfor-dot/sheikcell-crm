@@ -1,6 +1,7 @@
-import { pgTable, serial, text, integer, timestamp, primaryKey, uniqueIndex, boolean, foreignKey } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, timestamp, primaryKey, uniqueIndex, boolean, foreignKey, jsonb } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { usersTable } from "./users";
+import type { MessageMetadata } from "./conversations";
 
 // Internal team chat — communication between admins, supervisors and vendedores.
 // Separate from the customer-facing "conversations" (Central de Atendimento).
@@ -53,6 +54,7 @@ export const internalMessagesTable = pgTable(
     // foreignKey() abaixo (em vez de .references() em linha) para evitar
     // referência circular de tipos (a tabela citaria a si mesma na sua própria definição).
     replyToId: integer("reply_to_id"),
+    metadata: jsonb("metadata").$type<MessageMetadata>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

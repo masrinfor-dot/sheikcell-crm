@@ -51,7 +51,7 @@ export interface InboundWAMessageContent {
   imageMessage?: { caption?: string };
   videoMessage?: { caption?: string };
   audioMessage?: { caption?: string };
-  documentMessage?: { caption?: string; fileName?: string };
+  documentMessage?: { caption?: string; fileName?: string; fileLength?: number | string };
   // Documento enviado com legenda/texto junto — embrulha um documentMessage
   // comum (mesmo padrão dos wrappers de ephemeral/view-once abaixo).
   documentWithCaptionMessage?: { message?: InboundWAMessageContent };
@@ -705,6 +705,10 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   }
 
   const docFileName = msgContent?.documentMessage?.fileName ?? null;
+  const docFileSizeRaw = msgContent?.documentMessage?.fileLength;
+  const docFileSize = typeof docFileSizeRaw === "number" ? docFileSizeRaw
+    : typeof docFileSizeRaw === "string" && Number.isFinite(Number(docFileSizeRaw)) ? Number(docFileSizeRaw)
+    : undefined;
 
   // Enquete: mostra a pergunta e as opções.
   const poll = msgContent?.pollCreationMessage ?? msgContent?.pollCreationMessageV2 ?? msgContent?.pollCreationMessageV3;
@@ -783,6 +787,10 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     isGroup && !!body.data?.groupSubject,
   );
 
+  const metadata = mediaType === "doc" && (docFileName || docFileSize || mediaMimeType)
+    ? { fileName: docFileName ?? undefined, fileSize: docFileSize, mimeType: mediaMimeType ?? undefined }
+    : null;
+
   const [msg] = await db
     .insert(messagesTable)
     .values({
@@ -796,6 +804,7 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
       senderPhone,
       externalId,
       mediaUrl,
+      metadata,
     })
     .onConflictDoNothing()
     .returning();

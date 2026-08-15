@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, canEditModule, type InternalConversation, type InternalMessage } from "@/lib/api";
+import { api, canEditModule, type InternalConversation, type InternalMessage, type MessageMetadata } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { reportInternalChatUnread } from "@/hooks/useInternalChatNotifier";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -9,6 +9,7 @@ const INTERNAL_CHAT_EVENTS_URL = "/api/internal-chat/events";
 import {
   Users, Send, Plus, X, Search, MessagesSquare, ChevronLeft, SquareKanban, ClipboardPlus, Trash2, Pencil,
   Paperclip, Mic, Square, Reply, Forward, FileText, Volume2, Loader2,
+  FileSpreadsheet, FileArchive, File as FileGeneric, Globe,
 } from "lucide-react";
 import TaskBoard from "./TaskBoard";
 
@@ -89,16 +90,63 @@ function InternalMediaContent({ msg, onTranscribed }: { msg: InternalMessage; on
     );
   }
   if (msg.type === "doc") {
-    const filename = msg.mediaUrl.split("/").pop() ?? "documento";
+    const filename = msg.metadata?.fileName ?? msg.mediaUrl.split("/").pop() ?? "documento";
+    const size = formatFileSize(msg.metadata?.fileSize);
     return (
       <a href={msg.mediaUrl} target="_blank" rel="noopener noreferrer" download
         className="flex items-center gap-2 mb-1 bg-black/5 rounded-xl px-3 py-2 hover:bg-black/10 transition">
-        <FileText className="w-5 h-5 shrink-0" />
-        <span className="text-xs break-all">{filename}</span>
+        <DocIcon mimeType={msg.metadata?.mimeType} fileName={filename} />
+        <div className="min-w-0">
+          <p className="text-xs break-all">{filename}</p>
+          {size && <p className="text-[10px] text-muted-foreground">{size}</p>}
+        </div>
       </a>
     );
   }
   return null;
+}
+
+// Nome/tamanho reais vêm de metadata (capturados no envio); sem isso
+// (mensagens antigas) cai no nome de arquivo do mediaUrl, como antes.
+function formatFileSize(bytes?: number): string {
+  if (!bytes || bytes <= 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function DocIcon({ mimeType, fileName }: { mimeType?: string; fileName?: string }) {
+  const ext = (fileName?.split(".").pop() || "").toLowerCase();
+  if (mimeType?.includes("pdf") || ext === "pdf") return <FileText className="w-5 h-5 text-red-500 shrink-0" />;
+  if (mimeType?.includes("word") || ["doc", "docx"].includes(ext)) return <FileText className="w-5 h-5 text-blue-600 shrink-0" />;
+  if (mimeType?.includes("sheet") || mimeType?.includes("excel") || ["xls", "xlsx", "csv"].includes(ext)) return <FileSpreadsheet className="w-5 h-5 text-emerald-600 shrink-0" />;
+  if (mimeType?.includes("zip") || mimeType?.includes("compressed") || ["zip", "rar", "7z"].includes(ext)) return <FileArchive className="w-5 h-5 text-amber-600 shrink-0" />;
+  return <FileGeneric className="w-5 h-5 shrink-0" />;
+}
+
+// Preview de link (OG tags), buscado sob demanda pelo backend — chega de
+// forma assíncrona via SSE, então pode faltar mesmo numa mensagem com link
+// (sem loading spinner, aparece quando chegar).
+function LinkPreviewCard({ preview }: { preview: NonNullable<MessageMetadata["linkPreview"]> }) {
+  let hostname = "";
+  try { hostname = new URL(preview.url).hostname.replace(/^www\./, ""); } catch { /* URL inválida, ignora */ }
+  return (
+    <a href={preview.url} target="_blank" rel="noopener noreferrer"
+      className="block mt-1 rounded-xl border border-black/10 overflow-hidden bg-black/5 hover:bg-black/10 transition max-w-xs">
+      {preview.image && (
+        <img src={preview.image} alt="" className="w-full max-h-40 object-cover"
+          onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+      )}
+      <div className="px-3 py-2">
+        <div className="flex items-center gap-1 text-[10px] text-muted-foreground mb-0.5">
+          <Globe className="w-3 h-3 shrink-0" />
+          <span className="truncate">{preview.siteName || hostname}</span>
+        </div>
+        {preview.title && <p className="text-xs font-semibold line-clamp-2">{preview.title}</p>}
+        {preview.description && <p className="text-[11px] text-muted-foreground line-clamp-2 mt-0.5">{preview.description}</p>}
+      </div>
+    </a>
+  );
 }
 
 const roleLabel: Record<string, string> = {
@@ -359,11 +407,16 @@ export default function InternalChat({ docked = false, onActiveConversationChang
         : c));
     };
     es.addEventListener("internal_conversation_updated", onConversationUpdated);
-    // Transcrição de áudio pronta (pode ter sido pedida por outro membro da conversa).
+    // Transcrição de áudio pronta (pode ter sido pedida por outro membro da
+    // conversa) ou preview de link que chegou depois do envio — ambos vêm
+    // como patch parcial, não a mensagem inteira.
     const onMessageUpdated = (e: Event) => {
-      const payload = JSON.parse((e as MessageEvent).data) as { conversationId: number; messageId: number; transcript: string };
+      const payload = JSON.parse((e as MessageEvent).data) as
+        { conversationId: number; messageId: number; transcript?: string; metadata?: MessageMetadata };
       if (activeIdRef.current === payload.conversationId) {
-        setMessages((prev) => prev.map((m) => (m.id === payload.messageId ? { ...m, transcript: payload.transcript } : m)));
+        setMessages((prev) => prev.map((m) => (m.id === payload.messageId
+          ? { ...m, ...(payload.transcript !== undefined ? { transcript: payload.transcript } : {}), ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}) }
+          : m)));
       }
     };
     es.addEventListener("internal_message_updated", onMessageUpdated);
@@ -882,6 +935,7 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                             {renderWithMentions(m.type === "text" ? m.content : caption, teamNames, user?.name, mine)}
                           </div>
                         )}
+                        {m.type === "text" && m.metadata?.linkPreview && <LinkPreviewCard preview={m.metadata.linkPreview} />}
                         <div className={`flex items-center justify-end gap-1 text-[10px] mt-0.5 ${mine ? "text-white/70" : "text-muted-foreground"}`}>
                           {timeLabel(m.createdAt)}
                         </div>

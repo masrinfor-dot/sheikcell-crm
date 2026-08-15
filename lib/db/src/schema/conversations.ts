@@ -3,6 +3,25 @@ import { sql } from "drizzle-orm";
 import { sectorsTable } from "./sectors";
 import { usersTable } from "./users";
 
+// Extras que não cabem nas colunas fixas de mensagem — hoje cobre nome/tamanho
+// real de documento (o mediaUrl salvo usa nome aleatório) e o preview de link
+// (OG tags) buscado sob demanda pra mensagens de texto com URL. Ambos os usos
+// são opcionais e cacheados aqui pra não precisar refazer o parsing/fetch a
+// cada exibição. Compartilhado com internal_messages (mesma forma, chats
+// diferentes).
+export type MessageMetadata = {
+  fileName?: string;
+  fileSize?: number;
+  mimeType?: string;
+  linkPreview?: {
+    url: string;
+    title?: string;
+    description?: string;
+    image?: string;
+    siteName?: string;
+  } | null;
+};
+
 export const conversationsTable = pgTable("conversations", {
   tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
@@ -111,6 +130,7 @@ export const messagesTable = pgTable(
     // Responder mensagem (estilo WhatsApp): aponta a mensagem citada, na MESMA
     // conversa. FK fora de linha porque a tabela referencia a própria id.
     replyToId: integer("reply_to_id"),
+    metadata: jsonb("metadata").$type<MessageMetadata>(),
   },
   // Garante no banco que a MESMA mensagem recebida (mesmo ID do WhatsApp)
   // nunca é gravada duas vezes, mesmo com webhooks simultâneos.

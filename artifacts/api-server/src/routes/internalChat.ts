@@ -16,6 +16,7 @@ import { mkdir, writeFile } from "fs/promises";
 import { randomUUID } from "crypto";
 import path from "path";
 import { MEDIA_DIR } from "../lib/whatsappInbound";
+import { fetchLinkPreview, firstUrlIn } from "../lib/linkPreview";
 
 const router: IRouter = Router();
 
@@ -518,6 +519,21 @@ router.post("/internal-chat/conversations/:id/messages", requireAuth, async (req
   const recipients = await recipientsFor(conv);
   broadcastInternal("internal_message", { conversationId: convId, kind: conv.kind, message }, tenantId, recipients);
 
+  // Preview de link: fire-and-forget, mesmo padrão do chat de clientes — não
+  // atrasa a resposta, atualiza a mensagem quando o preview chega.
+  const previewUrl = firstUrlIn(text);
+  if (previewUrl) {
+    fetchLinkPreview(previewUrl, userId)
+      .then(async (preview) => {
+        if (!preview) return;
+        await db.update(internalMessagesTable)
+          .set({ metadata: { linkPreview: preview } })
+          .where(eq(internalMessagesTable.id, inserted!.id));
+        broadcastInternal("internal_message_updated", { conversationId: convId, messageId: inserted!.id, metadata: { linkPreview: preview } }, tenantId, recipients);
+      })
+      .catch((err) => req.log.debug({ err }, "link preview: falhou"));
+  }
+
   res.json(message);
 });
 
@@ -573,9 +589,15 @@ router.post("/internal-chat/conversations/:id/media", requireAuth, async (req, r
   const baseContent = isImage ? "📷 Foto" : isAudio ? "🎤 Áudio" : `📄 ${filename ?? "Documento"}`;
   const text = caption ? `${baseContent}\n${caption}` : baseContent;
 
+  // Nome/tamanho reais do documento — o mediaUrl salvo usa nome aleatório
+  // (savedFilename), então sem isso o balão só teria o UUID pra mostrar.
+  const metadata = msgType === "doc" && filename
+    ? { fileName: filename, fileSize: buf.byteLength, mimeType: mimetype }
+    : null;
+
   const [inserted] = await db
     .insert(internalMessagesTable)
-    .values({ tenantId, conversationId: convId, senderId: userId, content: text, type: msgType, mediaUrl, replyToId })
+    .values({ tenantId, conversationId: convId, senderId: userId, content: text, type: msgType, mediaUrl, replyToId, metadata })
     .returning();
 
   await db.update(internalConversationsTable)
@@ -589,7 +611,7 @@ router.post("/internal-chat/conversations/:id/media", requireAuth, async (req, r
   const message = {
     id: inserted!.id, conversationId: convId, senderId: userId, senderName: sender?.name ?? "",
     content: text, type: msgType, mediaUrl, transcript: null, forwarded: false,
-    replyToId, replyTo,
+    replyToId, replyTo, metadata,
     createdAt: inserted!.createdAt,
   };
 

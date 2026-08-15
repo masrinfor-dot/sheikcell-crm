@@ -216,6 +216,22 @@ export type MeetingItem = {
   creatorName: string | null;
 };
 
+// Extras fora das colunas fixas: nome/tamanho real de documento (o mediaUrl
+// salvo usa nome aleatório) e preview de link (OG tags), buscado sob demanda
+// só pra mensagens de texto que a própria equipe escreve.
+export type MessageMetadata = {
+  fileName?: string;
+  fileSize?: number;
+  mimeType?: string;
+  linkPreview?: {
+    url: string;
+    title?: string;
+    description?: string;
+    image?: string;
+    siteName?: string;
+  } | null;
+};
+
 export type InternalMessage = {
   id: number;
   conversationId: number;
@@ -228,6 +244,7 @@ export type InternalMessage = {
   forwarded: boolean;
   replyToId: number | null;
   replyTo: { id: number; senderName: string; content: string; type: "text" | "image" | "audio" | "doc" } | null;
+  metadata?: MessageMetadata | null;
   createdAt: string;
 };
 
@@ -641,6 +658,7 @@ export type ChatMessage = {
   reactions?: Array<{ emoji: string; senderName: string | null }>;
   replyToId?: number | null;
   replyTo?: { id: number; senderName: string | null; content: string; type: string } | null;
+  metadata?: MessageMetadata | null;
 };
 
 export type SaasContract = {

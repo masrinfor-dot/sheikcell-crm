@@ -21,6 +21,7 @@ import { ensureCrmContactForConversation, syncCrmAttendant } from "../lib/crmSyn
 import { sendOutboundText } from "../lib/outbound";
 import { normalizePhone, phoneVariants } from "../lib/phone";
 import { getSurveySettings, buildSurveyMessage } from "../lib/surveySettings";
+import { fetchLinkPreview, firstUrlIn } from "../lib/linkPreview";
 
 // Sinaliza que a pesquisa está desligada nas configurações (não é erro).
 class SurveyDisabled extends Error {}
@@ -601,6 +602,12 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
 
   const { replyToId, replyTo } = await resolveReplyTo(replyToIdRaw, id, tenantId);
 
+  // Nome/tamanho reais do documento — o mediaUrl salvo usa nome aleatório
+  // (savedFilename), então sem isso o balão só teria o UUID pra mostrar.
+  const metadata = msgType === "doc" && filename
+    ? { fileName: filename, fileSize: buf.byteLength, mimeType: mimetype }
+    : null;
+
   const [inserted] = await db.insert(messagesTable).values({
     tenantId,
     conversationId: id,
@@ -611,6 +618,7 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
     senderName,
     mediaUrl,
     replyToId,
+    metadata,
   }).returning();
   const msg = { ...inserted!, replyTo };
 
@@ -741,6 +749,25 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
     replyToId,
   }).returning();
   const msg = { ...inserted!, replyTo };
+
+  // Preview de link: só pra mensagem que o próprio atendente escreveu (não
+  // pra texto recebido do cliente — ver processInboundWA). Fire-and-forget:
+  // não atrasa a resposta nem o envio pro WhatsApp; quando o preview chega,
+  // atualiza a mensagem e manda o mesmo evento usado pra edição/status.
+  const previewUrl = firstUrlIn(content.trim());
+  if (previewUrl) {
+    fetchLinkPreview(previewUrl, req.session.userId!)
+      .then(async (preview) => {
+        if (!preview) return;
+        const [updated] = await db.update(messagesTable)
+          .set({ metadata: { linkPreview: preview } })
+          .where(eq(messagesTable.id, inserted!.id))
+          .returning();
+        if (!updated) return;
+        broadcast("message_updated", { conversationId: id, message: { ...updated, replyTo } }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+      })
+      .catch((err) => req.log.debug({ err }, "link preview: falhou"));
+  }
 
   await db.update(conversationsTable).set({
     lastMessage: content.trim(),

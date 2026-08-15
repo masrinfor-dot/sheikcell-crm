@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { api, can, ApiError, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage } from "@/lib/api";
+import { api, can, ApiError, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -10,7 +10,8 @@ import {
   ArrowRightLeft, FileText, Volume2, Image, Video, Mic, Users, Paperclip, IdCard,
   Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX, Zap, CalendarClock, AlertTriangle,
   Pin, PinOff, Reply, StickyNote, Star, StarOff, ChevronLeft,
-  MapPin, ShoppingBag, CreditCard, BarChart3, Ban, UserPlus, ExternalLink
+  MapPin, ShoppingBag, CreditCard, BarChart3, Ban, UserPlus, ExternalLink,
+  FileSpreadsheet, FileArchive, File as FileGeneric, Globe,
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -334,7 +335,8 @@ function MediaContentRest({ msg }: { msg: ChatMessage }) {
   }
 
   if (msg.type === "doc") {
-    const filename = msg.mediaUrl.split("/").pop() ?? "documento";
+    const filename = msg.metadata?.fileName ?? msg.mediaUrl.split("/").pop() ?? "documento";
+    const size = formatFileSize(msg.metadata?.fileSize);
     return (
       <a
         href={msg.mediaUrl}
@@ -343,13 +345,70 @@ function MediaContentRest({ msg }: { msg: ChatMessage }) {
         download
         className="flex items-center gap-2 mb-1 bg-black/5 rounded-xl px-3 py-2 hover:bg-black/10 transition"
       >
-        <FileText className="w-5 h-5 text-primary shrink-0" />
-        <span className="text-xs text-gray-700 break-all">{filename}</span>
+        <DocIcon mimeType={msg.metadata?.mimeType} fileName={filename} />
+        <div className="min-w-0">
+          <p className="text-xs text-gray-700 break-all">{filename}</p>
+          {size && <p className="text-[10px] text-gray-500">{size}</p>}
+        </div>
       </a>
     );
   }
 
   return null;
+}
+
+// ─── Ícone/tamanho de documento ──────────────────────────────────────────
+// Nome/tamanho reais vêm de metadata (capturados no envio/recebimento); sem
+// isso (mensagens antigas) cai no nome de arquivo do mediaUrl, como antes.
+function formatFileSize(bytes?: number): string {
+  if (!bytes || bytes <= 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function DocIcon({ mimeType, fileName }: { mimeType?: string; fileName?: string }) {
+  const ext = (fileName?.split(".").pop() || "").toLowerCase();
+  if (mimeType?.includes("pdf") || ext === "pdf") return <FileText className="w-5 h-5 text-red-500 shrink-0" />;
+  if (mimeType?.includes("word") || ["doc", "docx"].includes(ext)) return <FileText className="w-5 h-5 text-blue-600 shrink-0" />;
+  if (mimeType?.includes("sheet") || mimeType?.includes("excel") || ["xls", "xlsx", "csv"].includes(ext)) return <FileSpreadsheet className="w-5 h-5 text-emerald-600 shrink-0" />;
+  if (mimeType?.includes("zip") || mimeType?.includes("compressed") || ["zip", "rar", "7z"].includes(ext)) return <FileArchive className="w-5 h-5 text-amber-600 shrink-0" />;
+  return <FileGeneric className="w-5 h-5 text-primary shrink-0" />;
+}
+
+// ─── Preview de link (OG tags) ───────────────────────────────────────────
+// Buscado sob demanda pelo backend só pra mensagens de texto da própria
+// equipe (não pra mensagens recebidas de clientes — ver linkPreview.ts) e
+// chega de forma assíncrona via SSE, então pode não estar presente ainda
+// mesmo numa mensagem que tem link (sem loading spinner, aparece quando chegar).
+function LinkPreviewCard({ preview }: { preview: NonNullable<MessageMetadata["linkPreview"]> }) {
+  let hostname = "";
+  try { hostname = new URL(preview.url).hostname.replace(/^www\./, ""); } catch { /* URL inválida, ignora */ }
+  return (
+    <a
+      href={preview.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="block mt-1 rounded-xl border border-black/10 overflow-hidden bg-black/5 hover:bg-black/10 transition max-w-xs"
+    >
+      {preview.image && (
+        <img
+          src={preview.image}
+          alt=""
+          className="w-full max-h-40 object-cover"
+          onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+        />
+      )}
+      <div className="px-3 py-2">
+        <div className="flex items-center gap-1 text-[10px] text-gray-500 mb-0.5">
+          <Globe className="w-3 h-3 shrink-0" />
+          <span className="truncate">{preview.siteName || hostname}</span>
+        </div>
+        {preview.title && <p className="text-xs font-semibold text-gray-800 line-clamp-2">{preview.title}</p>}
+        {preview.description && <p className="text-[11px] text-gray-600 line-clamp-2 mt-0.5">{preview.description}</p>}
+      </div>
+    </a>
+  );
 }
 
 // ─── Shared contact card ─────────────────────────────────────────────────
@@ -655,7 +714,10 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConver
             <span>{msg.content}</span>
           </div>
         ) : (
-          <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">{msg.content}</p>
+          <>
+            <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">{msg.content}</p>
+            {msg.metadata?.linkPreview && <LinkPreviewCard preview={msg.metadata.linkPreview} />}
+          </>
         )}
         {!!msg.reactions?.length && (
           <div className={`flex flex-wrap gap-1 mt-1 ${out ? "justify-end" : "justify-start"}`}>
