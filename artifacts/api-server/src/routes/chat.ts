@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
-import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, crmPurchasesTable, appSettingsTable } from "@workspace/db";
+import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, attendanceLogsTable, attendanceStartEventsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, crmPurchasesTable, appSettingsTable } from "@workspace/db";
 import { eq, desc, and, or, lt, gte, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { requireAuth, requireAdmin, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
@@ -827,6 +827,27 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
   res.status(201).json(msg);
 });
 
+// Registra o evento de INÍCIO de um atendimento (transição real de "sem
+// responsável" -> "com responsável") — append-only, nunca editado depois.
+// Diferente de conversations.attendanceStartedAt (mutável, zerada em
+// unassign/transferência), isto alimenta "iniciados por dia" em Relatórios
+// de forma confiável mesmo que a conversa seja depois transferida/reaberta.
+async function recordAttendanceStart(
+  executor: typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0],
+  p: { tenantId: number; conversationId: number; attendantId: number; sectorId: number | null },
+): Promise<number | null> {
+  const [attendant] = await executor.select({ storeId: usersTable.storeId }).from(usersTable)
+    .where(eq(usersTable.id, p.attendantId)).limit(1);
+  await executor.insert(attendanceStartEventsTable).values({
+    tenantId: p.tenantId,
+    conversationId: p.conversationId,
+    attendantId: p.attendantId,
+    sectorId: p.sectorId,
+    storeId: attendant?.storeId ?? null,
+  });
+  return attendant?.storeId ?? null;
+}
+
 // ─── Sync a finalized conversation into Visão Geral + CRM ───────────────────
 // When a chat attendance is resolved we record it as an attendance log (so the
 // dashboard "Finalizados"/recent feed counts it the same way as queue
@@ -862,6 +883,22 @@ async function syncResolvedConversation(
     // senão conversas reabertas/tempo em espera inflam a média artificialmente.
     const serviceStart = conv.attendanceStartedAt ?? conv.createdAt;
     const serviceSeconds = Math.round((Date.now() - serviceStart.getTime()) / 1000);
+    // Tempo de PRIMEIRA resposta: mede agilidade inicial (até a primeira
+    // mensagem do atendente depois do início), diferente do tempo total
+    // acima. Reaproveita o histórico de mensagens já existente — sem
+    // precisar de tracking novo em tempo real.
+    const [firstReply] = await tx.select({ createdAt: messagesTable.createdAt })
+      .from(messagesTable)
+      .where(and(
+        eq(messagesTable.conversationId, conv.id),
+        eq(messagesTable.direction, "outbound"),
+        gte(messagesTable.createdAt, serviceStart),
+      ))
+      .orderBy(asc(messagesTable.createdAt))
+      .limit(1);
+    const firstResponseSeconds = firstReply
+      ? Math.max(0, Math.round((firstReply.createdAt.getTime() - serviceStart.getTime()) / 1000))
+      : null;
     const [log] = await tx.insert(attendanceLogsTable).values({
       tenantId: conv.tenantId,
       queueEntryId: 0, // chat attendances have no queue entry
@@ -871,10 +908,12 @@ async function syncResolvedConversation(
       sectorName: sector?.name ?? "Desconhecido",
       attendantId: conv.assigneeId,
       attendantName: attendant?.name ?? null,
+      storeId: conv.storeId ?? attendant?.storeId ?? null,
       channel: conv.channel,
       outcome: "completed",
       resolutionReason: resolutionReason?.trim() || null,
       serviceTimeSeconds: serviceSeconds >= 0 ? serviceSeconds : null,
+      firstResponseSeconds,
       hadSale: sale ? sale.hadSale : null,
       saleAmount: sale?.hadSale ? String(sale.amount) : null,
     }).returning({ id: attendanceLogsTable.id });
@@ -1011,6 +1050,7 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
   // Reatribuir responsável segue exclusivo de admin/supervisor; transferir de
   // setor também é permitido ao vendedor autorizado (permissão "transferir").
   let isSectorTransfer = false;
+  let isGenuineStart = false;
   if (userRole === "admin" || userRole === "supervisor" || userRole === "vendedor") {
     if (sectorId !== undefined && (userRole !== "vendedor" || sectorId !== conv.sectorId)) update.sectorId = sectorId;
     // Vendedor autorizado transfere para outro vendedor (nunca "des-atribui" —
@@ -1045,10 +1085,21 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
     }
     // Data/hora de INÍCIO do atendimento: marcada quando a conversa ganha um
     // responsável (estava sem dono) e limpa quando volta para a fila sem dono.
+    // A loja (storeId) acompanha QUALQUER atendente novo (mesmo reatribuição
+    // direta entre dois atendentes já ativos), mas NÃO é zerada ao perder o
+    // responsável — mantém a última loja conhecida, pra "não resolvidos"
+    // ainda conseguir localizar a loja mesmo sem atendente atual.
     if ("assigneeId" in update) {
       const newAssignee = update.assigneeId as number | null;
-      if (newAssignee != null && conv.assigneeId == null) update.attendanceStartedAt = new Date();
-      if (newAssignee == null) update.attendanceStartedAt = null;
+      if (newAssignee != null) {
+        isGenuineStart = conv.assigneeId == null;
+        if (isGenuineStart) update.attendanceStartedAt = new Date();
+        const [na] = await db.select({ storeId: usersTable.storeId }).from(usersTable)
+          .where(eq(usersTable.id, newAssignee)).limit(1);
+        update.storeId = na?.storeId ?? null;
+      } else {
+        update.attendanceStartedAt = null;
+      }
     }
   }
 
@@ -1064,6 +1115,10 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
 
     const [row] = await tx.update(conversationsTable).set(update)
       .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).returning();
+
+    if (isGenuineStart && row?.assigneeId != null) {
+      await recordAttendanceStart(tx, { tenantId, conversationId: id, attendantId: row.assigneeId, sectorId: row.sectorId });
+    }
 
     if (status === "resolved" && !wasResolved) {
       // Sanitize untrusted client input: only accept a string motive, capped.
@@ -1190,12 +1245,16 @@ router.post("/chat/conversations/:id/claim", requireAuth, async (req, res): Prom
   // own sector so it stays properly scoped to them afterwards.
   const userRole = req.session.userRole!;
   const userSectorId = req.session.userSectorId;
+  const isGenuineStart = conv.assigneeId == null;
+  const [claimant] = await db.select({ storeId: usersTable.storeId }).from(usersTable)
+    .where(eq(usersTable.id, req.session.userId!)).limit(1);
   const claimSet: Partial<typeof conversationsTable.$inferInsert> = {
     assigneeId: req.session.userId,
     status: "pending",
     updatedAt: new Date(),
+    storeId: claimant?.storeId ?? null,
     // Início do atendimento: só marca na primeira vez (re-claim é idempotente).
-    ...(conv.assigneeId == null ? { attendanceStartedAt: new Date() } : {}),
+    ...(isGenuineStart ? { attendanceStartedAt: new Date() } : {}),
   };
   if (userRole !== "admin" && userRole !== "supervisor" && userSectorId && conv.sectorId !== userSectorId) {
     claimSet.sectorId = userSectorId;
@@ -1219,6 +1278,9 @@ router.post("/chat/conversations/:id/claim", requireAuth, async (req, res): Prom
   if (!updated) {
     res.status(409).json({ error: "Conversa já está em atendimento por outro vendedor" });
     return;
+  }
+  if (isGenuineStart) {
+    await recordAttendanceStart(db, { tenantId, conversationId: id, attendantId: req.session.userId!, sectorId: updated.sectorId });
   }
 
   const claimRecipients = await restrictedRecipients(updated);
@@ -1445,6 +1507,13 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
     }
   }
 
+  let targetStoreId: number | null = null;
+  if (targetAssigneeId != null) {
+    const [ta] = await db.select({ storeId: usersTable.storeId }).from(usersTable)
+      .where(eq(usersTable.id, targetAssigneeId)).limit(1);
+    targetStoreId = ta?.storeId ?? null;
+  }
+
   const [conv] = await db.insert(conversationsTable).values({
     tenantId,
     phone: normalizePhone(phone) || phone, name,
@@ -1453,8 +1522,13 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
     status: "open",
     assigneeId: targetAssigneeId,
     attendanceStartedAt: targetAssigneeId != null ? new Date() : null,
+    storeId: targetStoreId,
     lastMessageAt: new Date(),
   }).returning();
+
+  if (targetAssigneeId != null) {
+    await recordAttendanceStart(db, { tenantId, conversationId: conv.id, attendantId: targetAssigneeId, sectorId: conv.sectorId });
+  }
 
   broadcast("conversation_new", conv, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
   // Keep the CRM in sync with atendimentos: register the customer immediately.

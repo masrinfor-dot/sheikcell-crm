@@ -2,6 +2,7 @@ import { pgTable, serial, text, integer, timestamp, boolean, primaryKey, uniqueI
 import { sql } from "drizzle-orm";
 import { sectorsTable } from "./sectors";
 import { usersTable } from "./users";
+import { storesTable } from "./stores";
 
 // Extras que não cabem nas colunas fixas de mensagem — hoje cobre nome/tamanho
 // real de documento (o mediaUrl salvo usa nome aleatório) e o preview de link
@@ -42,6 +43,13 @@ export const conversationsTable = pgTable("conversations", {
   // Momento em que um vendedor assumiu o atendimento (assigneeId saiu de null).
   // Limpo quando a conversa volta para a fila/potenciais (perde o responsável).
   attendanceStartedAt: timestamp("attendance_started_at", { withTimezone: true }),
+  // Loja de quem está (ou esteve por último) com o atendimento — snapshot no
+  // momento da atribuição (mesmo padrão de surveyScaleMax abaixo), nunca um
+  // JOIN ao vivo em users.store_name (texto livre). Ao contrário de
+  // attendanceStartedAt, NÃO é zerado ao perder o responsável — mantém a
+  // última loja conhecida, pra relatório de "não resolvidos" ainda conseguir
+  // localizar a loja mesmo sem atendente atual.
+  storeId: integer("store_id").references(() => storesTable.id),
   // Pesquisa de satisfação: aponta o attendance_log aguardando a nota do
   // cliente (setado quando a pesquisa foi enviada; limpo na primeira resposta).
   pendingSurveyLogId: integer("pending_survey_log_id"),

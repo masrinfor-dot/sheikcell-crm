@@ -20,9 +20,27 @@ export const attendanceLogsTable = pgTable("attendance_logs", {
   saleAmount: numeric("sale_amount"),
   // Pesquisa de satisfação: nota 1–5 dada pelo cliente após finalizar (WhatsApp)
   satisfactionRating: integer("satisfaction_rating"),
+  // Escala em uso quando a nota acima foi respondida (5 ou 10 — configurável
+  // por loja) e a mesma nota já convertida pra 0-100%, pra poder comparar/
+  // agregar lojas com escalas diferentes sem viés. Registros antigos (antes
+  // desta coluna existir) ficam com os dois nulos — a escala usada não dá
+  // pra reconstruir depois (conversations.survey_scale_max é limpo ao
+  // consumir a pesquisa).
+  satisfactionScaleMax: integer("satisfaction_scale_max"),
+  satisfactionPercent: integer("satisfaction_percent"),
   notes: text("notes"),
   waitTimeSeconds: integer("wait_time_seconds"),
   serviceTimeSeconds: integer("service_time_seconds"),
+  // Tempo até a primeira mensagem outbound do atendente após o início do
+  // atendimento — mede agilidade inicial, diferente de serviceTimeSeconds
+  // (duração total do caso). Nulo se não houve nenhuma resposta registrada
+  // (ex.: atendimento finalizado sem o atendente ter escrito nada).
+  firstResponseSeconds: integer("first_response_seconds"),
+  // Loja de quem atendeu — snapshot no momento da finalização (ver
+  // conversations.storeId). Sem FK: esta tabela é um fato histórico
+  // congelado que precisa sobreviver à exclusão da loja/usuário/setor de
+  // origem, mesmo padrão já usado por sectorId/attendantId nesta tabela.
+  storeId: integer("store_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

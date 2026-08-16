@@ -2,6 +2,7 @@ import { pgTable, serial, integer, text, timestamp, boolean, jsonb } from "drizz
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 import { sectorsTable } from "./sectors";
+import { storesTable } from "./stores";
 import type { OptionalModule } from "./tenants";
 
 export const usersTable = pgTable("users", {
@@ -14,6 +15,11 @@ export const usersTable = pgTable("users", {
   sectorId: integer("sector_id").references(() => sectorsTable.id),
   // Loja da rede a que o vendedor pertence (texto livre; ex.: "Loja Centro")
   storeName: text("store_name"),
+  // Mesma loja acima, mas como FK de verdade — mantido lado a lado com
+  // storeName (nunca substituído) pra relatórios poderem agrupar por loja
+  // sem depender de JOIN por nome de texto livre. Populado junto com
+  // storeName sempre que ele é definido/editado (ver rotas de usuário).
+  storeId: integer("store_id").references(() => storesTable.id),
   // Ramal/número interno (opcional) — mostrado no Diretório interno de contatos.
   extension: text("extension"),
   // Obriga trocar a senha no próximo login (primeiro acesso ou senha resetada pelo admin)

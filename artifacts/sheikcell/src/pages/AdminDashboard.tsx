@@ -37,18 +37,19 @@ import {
   PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck,
   AlertTriangle, WifiOff,
   FolderArchive, Headphones, ShoppingBag, BarChart3, SlidersHorizontal, Palette, ChevronDown, Wrench,
-  ArrowRight, Filter, BookUser, LifeBuoy,
+  ArrowRight, Filter, BookUser, LifeBuoy, FileBarChart2,
 } from "lucide-react";
 import Resultados from "./Resultados";
+import Relatorios from "./Relatorios";
 
-type Tab = "dashboard" | "resultados" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "questionarios" | "treinamentos" | "documentos" | "rh" | "sorteios" | "robo" | "financeiro" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "sistema" | "diretorio" | "suporte";
+type Tab = "dashboard" | "resultados" | "relatorios" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "questionarios" | "treinamentos" | "documentos" | "rh" | "sorteios" | "robo" | "financeiro" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "sistema" | "diretorio" | "suporte";
 
 // Categorias colapsáveis do menu lateral — cada aba pertence a um único grupo.
 type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabIds: Tab[] };
 const TAB_GROUPS: TabGroup[] = [
   { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["dashboard", "chat", "equipe", "crm"] },
   { key: "vendas", label: "Vendas e Serviços", icon: ShoppingBag, tabIds: ["avaliacao", "financeiras"] },
-  { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["resultados", "tarefas", "documentos", "history", "suporte"] },
+  { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["resultados", "relatorios", "tarefas", "documentos", "history", "suporte"] },
   { key: "pessoas", label: "Pessoas", icon: Users, tabIds: ["diretorio", "rh", "treinamentos", "questionarios", "sorteios", "users"] },
   { key: "administracao", label: "Administração", icon: Settings, tabIds: ["financeiro", "sectors", "quickreplies", "whatsapp", "robo"] },
   { key: "configuracoes", label: "Configurações", icon: SlidersHorizontal, tabIds: ["aparencia"] },
@@ -412,6 +413,7 @@ export default function AdminDashboard() {
   const allTabs = [
     { id: "dashboard" as Tab, label: "Visão Geral", icon: LayoutDashboard, adminOnly: false },
     { id: "resultados" as Tab, label: "Resultados", icon: TrendingUp, adminOnly: false, module: "resultados" as OptionalModule },
+    { id: "relatorios" as Tab, label: "Relatórios", icon: FileBarChart2, adminOnly: true, module: "relatorios" as OptionalModule },
     { id: "chat" as Tab, label: "Atendimento", icon: MessageCircle, adminOnly: false, module: "chat" as OptionalModule },
     { id: "equipe" as Tab, label: "Chat Interno", icon: MessagesSquare, adminOnly: false, module: "equipe" as OptionalModule },
     { id: "tarefas" as Tab, label: "Tarefas", icon: ListTodo, adminOnly: false, module: "tarefas" as OptionalModule },
@@ -541,6 +543,7 @@ export default function AdminDashboard() {
 
         {/* === RESULTADOS TAB === */}
         {tab === "resultados" && <Resultados />}
+        {tab === "relatorios" && <Relatorios />}
 
         {/* === DASHBOARD TAB === */}
         {tab === "dashboard" && (

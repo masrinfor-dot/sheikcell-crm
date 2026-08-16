@@ -1,10 +1,11 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, type ResultsSummary, type Sector, type Store, type SurveyReview } from "@/lib/api";
+import { api, type ResultsSummary, type Sector, type Store, type SurveyReview, type DailyActivity, type UnresolvedSummary, type SatisfactionBreakdown } from "@/lib/api";
 import type { SurveySettings } from "@/lib/api";
 import {
   Trophy, Clock, Timer, Users, UserPlus, Repeat, ShoppingBag,
   TrendingUp, RefreshCw, BadgeDollarSign, Star, Settings, X, Eye,
+  PlayCircle, CheckCircle2, AlertTriangle, Gauge,
 } from "lucide-react";
 
 // Períodos pré-definidos do filtro
@@ -69,6 +70,10 @@ export default function Resultados() {
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [attendants, setAttendants] = useState<{ id: number; name: string }[]>([]);
   const [data, setData] = useState<ResultsSummary | null>(null);
+  const [activity, setActivity] = useState<DailyActivity | null>(null);
+  const [unresolved, setUnresolved] = useState<UnresolvedSummary | null>(null);
+  const [satisfaction, setSatisfaction] = useState<SatisfactionBreakdown | null>(null);
+  const [showUnresolved, setShowUnresolved] = useState(false);
   const [loading, setLoading] = useState(true);
   // Configurações da pesquisa de satisfação (admin/supervisor)
   const [showSurveyCfg, setShowSurveyCfg] = useState(false);
@@ -124,13 +129,22 @@ export default function Resultados() {
     setLoading(true);
     try {
       const { from, to } = periodRange(period);
-      const d = await api.results.summary({
+      const filters = {
         from, to,
         sectorId: isGlobal && sectorId ? sectorId : undefined,
         attendantId: attendantId || undefined,
         store: isGlobal && store ? store : undefined,
-      });
+      };
+      const [d, a, u, s] = await Promise.all([
+        api.results.summary(filters),
+        api.results.activity(filters),
+        api.results.unresolved(filters),
+        api.results.satisfactionBreakdown(filters),
+      ]);
       setData(d);
+      setActivity(a);
+      setUnresolved(u);
+      setSatisfaction(s);
     } catch { /* silent */ } finally { setLoading(false); }
   }, [period, sectorId, attendantId, store, isGlobal]);
 
@@ -138,10 +152,19 @@ export default function Resultados() {
 
   const t = data?.totals;
   const maxMes = useMemo(() => Math.max(1, ...(data?.leadsPorMes.map((m) => m.novos) ?? [1])), [data]);
+  const totalIniciados = useMemo(() => (activity?.series ?? []).reduce((s, d) => s + d.iniciados, 0), [activity]);
+  const totalFinalizados = useMemo(() => (activity?.series ?? []).reduce((s, d) => s + d.finalizados, 0), [activity]);
 
-  const cards = [
+  const cards: { label: string; value: string; icon: typeof Users; color: string; bg: string; onClick?: () => void }[] = [
     { label: "Atendimentos", value: t ? String(t.atendimentos) : "—", icon: Users, color: "text-blue-600", bg: "bg-blue-50" },
+    { label: "Iniciados", value: activity ? String(totalIniciados) : "—", icon: PlayCircle, color: "text-teal-600", bg: "bg-teal-50" },
+    { label: "Finalizados", value: activity ? String(totalFinalizados) : "—", icon: CheckCircle2, color: "text-emerald-600", bg: "bg-emerald-50" },
+    {
+      label: "Não resolvidos agora", value: unresolved ? String(unresolved.count) : "—", icon: AlertTriangle,
+      color: "text-red-600", bg: "bg-red-50", onClick: () => setShowUnresolved(true),
+    },
     { label: "Tempo médio de atendimento", value: t ? fmtDuration(t.avgServiceSeconds) : "—", icon: Timer, color: "text-indigo-600", bg: "bg-indigo-50" },
+    { label: "Tempo médio de 1ª resposta", value: t ? fmtDuration(t.avgFirstResponseSeconds) : "—", icon: Gauge, color: "text-sky-600", bg: "bg-sky-50" },
     { label: "Tempo médio de espera", value: t ? fmtDuration(t.avgWaitSeconds) : "—", icon: Clock, color: "text-amber-600", bg: "bg-amber-50" },
     { label: "Vendas", value: t ? `${t.vendas} · ${fmtMoney(t.totalVendido)}` : "—", icon: BadgeDollarSign, color: "text-green-600", bg: "bg-green-50" },
     { label: "Novos leads", value: t ? String(t.newLeads) : "—", icon: UserPlus, color: "text-cyan-600", bg: "bg-cyan-50" },
@@ -357,14 +380,57 @@ export default function Resultados() {
 
       {/* Cards de métricas */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-        {cards.map(({ label, value, icon: Icon, color, bg }) => (
-          <div key={label} className={`shk-card p-4 ${bg}`} data-testid={`results-card-${label}`}>
-            <Icon className={`w-5 h-5 mb-1 ${color}`} />
-            <div className={`text-xl font-extrabold ${color}`}>{loading ? "—" : value}</div>
-            <div className="text-[11px] text-muted-foreground font-medium mt-0.5 leading-tight">{label}</div>
-          </div>
-        ))}
+        {cards.map(({ label, value, icon: Icon, color, bg, onClick }) => {
+          const Tag = onClick ? "button" : "div";
+          return (
+            <Tag key={label} onClick={onClick} className={`shk-card p-4 ${bg} text-left ${onClick ? "cursor-pointer hover:opacity-80 transition" : ""}`} data-testid={`results-card-${label}`}>
+              <Icon className={`w-5 h-5 mb-1 ${color}`} />
+              <div className={`text-xl font-extrabold ${color}`}>{loading ? "—" : value}</div>
+              <div className="text-[11px] text-muted-foreground font-medium mt-0.5 leading-tight">{label}</div>
+            </Tag>
+          );
+        })}
       </div>
+
+      {/* Não resolvidos agora: lista dos atendimentos travados */}
+      {showUnresolved && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setShowUnresolved(false)}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl max-h-[85vh] overflow-y-auto p-5 space-y-3" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-base flex items-center gap-2"><AlertTriangle className="w-4 h-4 text-red-600" /> Não resolvidos agora {unresolved ? `(> ${unresolved.thresholdHours}h)` : ""}</h3>
+              <button onClick={() => setShowUnresolved(false)} className="p-1 rounded-lg hover:bg-muted"><X className="w-4 h-4" /></button>
+            </div>
+            {!unresolved || unresolved.items.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-8 text-center">Nenhum atendimento parado no momento. 🎉</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-muted-foreground border-b border-border">
+                      <th className="text-left py-2 pr-2 font-semibold">Cliente</th>
+                      <th className="text-left py-2 pr-2 font-semibold">Setor</th>
+                      <th className="text-left py-2 pr-2 font-semibold">Atendente</th>
+                      <th className="text-left py-2 pr-2 font-semibold">Situação</th>
+                      <th className="text-right py-2 font-semibold">Parado há</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {unresolved.items.map((it) => (
+                      <tr key={it.conversationId} className="border-b border-border/50 last:border-0" data-testid={`unresolved-row-${it.conversationId}`}>
+                        <td className="py-2 pr-2 font-semibold text-foreground">{it.clientName}</td>
+                        <td className="py-2 pr-2">{it.sectorName ?? "—"}</td>
+                        <td className="py-2 pr-2">{it.attendantName ?? "Sem responsável"}</td>
+                        <td className="py-2 pr-2 capitalize">{it.status}</td>
+                        <td className="py-2 text-right font-bold text-red-600">{it.ageHours}h</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="grid lg:grid-cols-2 gap-4">
         {/* Ranking dos vendedores */}
@@ -453,6 +519,65 @@ export default function Resultados() {
                   <span className="text-xs font-bold text-foreground w-8 text-right">{m.novos}</span>
                 </div>
               ))}
+            </div>
+          )}
+        </div>
+
+        {/* Atividade diária: iniciados x finalizados */}
+        <div className="shk-card p-5">
+          <div className="flex items-center gap-2 mb-3">
+            <PlayCircle className="w-4 h-4 text-teal-600" />
+            <h3 className="font-bold text-sm text-foreground">Atividade diária</h3>
+          </div>
+          {!activity || activity.series.length === 0 ? (
+            <p className="text-xs text-muted-foreground py-4 text-center">Sem dados no período.</p>
+          ) : (
+            <div className="space-y-2 max-h-64 overflow-y-auto">
+              {(() => {
+                const maxDia = Math.max(1, ...activity.series.map((d) => Math.max(d.iniciados, d.finalizados)));
+                return activity.series.map((d) => (
+                  <div key={d.dia} className="flex items-center gap-2" data-testid={`activity-day-${d.dia}`}>
+                    <span className="text-[11px] text-muted-foreground w-16 shrink-0">{new Date(d.dia + "T00:00:00").toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })}</span>
+                    <div className="flex-1 space-y-0.5">
+                      <div className="flex items-center gap-1">
+                        <div className="h-2.5 bg-teal-500/80 rounded" style={{ width: `${Math.max(4, Math.round((d.iniciados / maxDia) * 100))}%` }} />
+                        <span className="text-[10px] text-muted-foreground">{d.iniciados} iniciados</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <div className="h-2.5 bg-emerald-500/80 rounded" style={{ width: `${Math.max(4, Math.round((d.finalizados / maxDia) * 100))}%` }} />
+                        <span className="text-[10px] text-muted-foreground">{d.finalizados} finalizados</span>
+                      </div>
+                    </div>
+                  </div>
+                ));
+              })()}
+            </div>
+          )}
+        </div>
+
+        {/* Avaliações por faixa (%) — comparável entre lojas com escalas diferentes */}
+        <div className="shk-card p-5">
+          <div className="flex items-center gap-2 mb-3">
+            <Star className="w-4 h-4 text-yellow-500" />
+            <h3 className="font-bold text-sm text-foreground">Avaliações por faixa</h3>
+          </div>
+          {!satisfaction || satisfaction.ratings === 0 ? (
+            <p className="text-xs text-muted-foreground py-4 text-center">Nenhuma avaliação no período.</p>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-xs text-muted-foreground mb-2">Média geral: <span className="font-bold text-foreground">{satisfaction.avgPercent}%</span> ({satisfaction.ratings} aval.)</p>
+              {(() => {
+                const maxFaixa = Math.max(1, ...satisfaction.buckets.map((b) => b.count));
+                return satisfaction.buckets.map((b) => (
+                  <div key={b.faixa} className="flex items-center gap-2" data-testid={`satisfaction-bucket-${b.faixa}`}>
+                    <span className="text-[11px] text-muted-foreground w-16 shrink-0">{b.faixa}%</span>
+                    <div className="flex-1 h-5 bg-secondary rounded-lg overflow-hidden">
+                      <div className="h-full bg-yellow-400/80 rounded-lg transition-all" style={{ width: `${b.count ? Math.max(4, Math.round((b.count / maxFaixa) * 100)) : 0}%` }} />
+                    </div>
+                    <span className="text-xs font-bold text-foreground w-8 text-right">{b.count}</span>
+                  </div>
+                ));
+              })()}
             </div>
           )}
         </div>

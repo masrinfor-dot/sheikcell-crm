@@ -102,6 +102,7 @@ export type User = {
 export const OPTIONAL_MODULES = [
   "chat", "crm", "equipe", "financeiro", "diretorio", "tarefas", "resultados", "history",
   "avaliacao", "financeiras", "rh", "treinamentos", "questionarios", "sorteios", "documentos", "robo",
+  "relatorios",
 ] as const;
 export type OptionalModule = typeof OPTIONAL_MODULES[number];
 
@@ -130,6 +131,7 @@ export const MODULE_LABELS: Record<OptionalModule, string> = {
   sorteios: "Sorteios",
   documentos: "Documentos",
   robo: "Robô",
+  relatorios: "Relatórios",
 };
 // "Básico" = o conjunto padrão do CRM (o que antes era núcleo sempre ligado);
 // "Completo" = básico + todos os módulos de negócio adicionais.
@@ -1089,6 +1091,49 @@ export const api = {
       if (params?.attendantId) qs.set("attendantId", String(params.attendantId));
       return req<{ reviews: SurveyReview[] }>(`/results/reviews?${qs.toString()}`);
     },
+    activity: (params?: { from?: string; to?: string; sectorId?: number; attendantId?: number; store?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.from) qs.set("from", params.from);
+      if (params?.to) qs.set("to", params.to);
+      if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      if (params?.attendantId) qs.set("attendantId", String(params.attendantId));
+      if (params?.store) qs.set("store", params.store);
+      return req<DailyActivity>(`/results/activity?${qs.toString()}`);
+    },
+    unresolved: (params?: { sectorId?: number; attendantId?: number; store?: string; thresholdHours?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      if (params?.attendantId) qs.set("attendantId", String(params.attendantId));
+      if (params?.store) qs.set("store", params.store);
+      if (params?.thresholdHours) qs.set("thresholdHours", String(params.thresholdHours));
+      return req<UnresolvedSummary>(`/results/unresolved?${qs.toString()}`);
+    },
+    satisfactionBreakdown: (params?: { from?: string; to?: string; sectorId?: number; attendantId?: number; store?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.from) qs.set("from", params.from);
+      if (params?.to) qs.set("to", params.to);
+      if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      if (params?.attendantId) qs.set("attendantId", String(params.attendantId));
+      if (params?.store) qs.set("store", params.store);
+      return req<SatisfactionBreakdown>(`/results/satisfaction-breakdown?${qs.toString()}`);
+    },
+  },
+  relatorios: {
+    vendedores: (params?: { from?: string; to?: string; sectorId?: number; store?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.from) qs.set("from", params.from);
+      if (params?.to) qs.set("to", params.to);
+      if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      if (params?.store) qs.set("store", params.store);
+      return req<{ from: string; to: string; rows: VendorConsolidatedRow[] }>(`/relatorios/vendedores?${qs.toString()}`);
+    },
+    lojas: (params?: { from?: string; to?: string; sectorId?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.from) qs.set("from", params.from);
+      if (params?.to) qs.set("to", params.to);
+      if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      return req<{ from: string; to: string; rows: StoreConsolidatedRow[] }>(`/relatorios/lojas?${qs.toString()}`);
+    },
   },
   teamDirectory: {
     list: () => req<TeamContact[]>("/team-directory"),
@@ -1254,7 +1299,7 @@ export const api = {
 export type ResultsSummary = {
   from: string; to: string; sectorId: number | null; attendantId: number | null;
   totals: {
-    atendimentos: number; avgServiceSeconds: number; avgWaitSeconds: number;
+    atendimentos: number; avgServiceSeconds: number; avgWaitSeconds: number; avgFirstResponseSeconds: number;
     vendas: number; totalVendido: number;
     newLeads: number; recurringLeads: number; repurchaseClients: number;
     avgRating: number; ratings: number;
@@ -1262,6 +1307,38 @@ export type ResultsSummary = {
   ranking: ResultsRankingRow[];
   leadsPorMes: { mes: string; novos: number }[];
   satisfacaoPorSetor: { sectorId: number; sectorName: string; avgRating: number; ratings: number }[];
+};
+
+export type DailyActivity = {
+  from: string; to: string;
+  series: { dia: string; iniciados: number; finalizados: number }[];
+};
+
+export type UnresolvedSummary = {
+  thresholdHours: number;
+  count: number;
+  items: {
+    conversationId: number; clientName: string; sectorName: string | null;
+    attendantName: string | null; status: string; ageHours: number;
+  }[];
+};
+
+export type SatisfactionBreakdown = {
+  avgPercent: number;
+  ratings: number;
+  buckets: { faixa: string; count: number }[];
+};
+
+export type VendorConsolidatedRow = {
+  attendantId: number; name: string; ativo: boolean;
+  atendimentos: number; iniciados: number; finalizados: number; naoResolvidos: number;
+  vendas: number; totalVendido: number; conversao: number; avgSatisfactionPercent: number;
+};
+
+export type StoreConsolidatedRow = {
+  storeId: number | null; name: string;
+  atendimentos: number; iniciados: number; finalizados: number; naoResolvidos: number;
+  vendas: number; totalVendido: number; conversao: number; avgSatisfactionPercent: number;
 };
 
 export type TeamContact = {

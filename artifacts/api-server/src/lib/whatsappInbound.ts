@@ -415,8 +415,13 @@ async function tryConsumeSurveyReply(input: {
 
     const rating = inScale ? num : null;
     if (rating != null) {
+      // Normaliza pra 0-100% usando a escala em vigor nesta pesquisa
+      // (scaleMax/scaleMin) — grava junto da nota bruta (que continua
+      // existindo, sem quebrar telas que já assumem 1-5) pra Relatórios
+      // conseguir comparar lojas com escalas diferentes sem viés.
+      const satisfactionPercent = Math.round(((rating - scaleMin) / (scaleMax - scaleMin)) * 100);
       await tx.update(attendanceLogsTable)
-        .set({ satisfactionRating: rating })
+        .set({ satisfactionRating: rating, satisfactionScaleMax: scaleMax, satisfactionPercent })
         .where(eq(attendanceLogsTable.id, surveyLogId));
     }
 

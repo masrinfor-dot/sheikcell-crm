@@ -14,6 +14,7 @@ export * from "./bot";
 export * from "./sectors";
 export * from "./queue_entries";
 export * from "./attendance_logs";
+export * from "./attendance_start_events";
 export * from "./sessions";
 export * from "./crm_contacts";
 export * from "./conversations";

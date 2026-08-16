@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, conversationParticipantsTable, tasksTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable, accessLogsTable, whatsappSessionsTable, tenantsTable } from "@workspace/db";
+import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, conversationParticipantsTable, tasksTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable, accessLogsTable, whatsappSessionsTable, tenantsTable, storesTable } from "@workspace/db";
 import { eq, sql, desc, asc, and, gte, lt, isNull, isNotNull, notInArray, inArray, or, ilike } from "drizzle-orm";
 import { requireAdmin, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
 import { sanitizePermissions } from "../lib/permissions";
@@ -356,6 +356,18 @@ function sanitizeAllowedSessionKeys(v: unknown, validKeys: Set<string>): string[
   return out.length ? [...new Set(out)] : null;
 }
 
+// Resolve o storeId de verdade (FK) a partir do nome de loja livre já
+// validado por isValidStoreName — mantido lado a lado de storeName (nunca
+// substituído) pra Relatórios poder agrupar por loja sem depender de JOIN
+// por texto. null quando o nome não bate com nenhuma loja cadastrada (ex.:
+// tenant sem lojas cadastradas, onde isValidStoreName aceita qualquer nome).
+async function resolveStoreId(name: string | null, tenantId: number): Promise<number | null> {
+  if (!name) return null;
+  const [store] = await db.select({ id: storesTable.id }).from(storesTable)
+    .where(and(eq(storesTable.tenantId, tenantId), eq(storesTable.name, name))).limit(1);
+  return store?.id ?? null;
+}
+
 router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { name, email, password, role, sectorId, storeName, extension, adminAccess, accessHours, allowedSessionKeys, moduleAccess } = req.body as {
@@ -404,6 +416,7 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
 
   const passwordHash = await bcrypt.hash(password, 10);
   const cleanExtension = typeof extension === "string" && extension.trim() ? extension.trim().slice(0, 20) : null;
+  const cleanStoreId = await resolveStoreId(cleanStore, tenantId);
 
   const [user] = await db
     .insert(usersTable)
@@ -412,6 +425,7 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
       name, email: email.toLowerCase(), passwordHash, role: resolvedRole,
       sectorId: sectorId ?? undefined,
       storeName: cleanStore,
+      storeId: cleanStoreId,
       extension: cleanExtension,
       mustChangePassword: true, // primeiro acesso: obriga trocar a senha
       adminAccess: sanitizeAdminAccess(adminAccess),
@@ -492,6 +506,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
       }
     }
     updateData.storeName = cleanStore;
+    updateData.storeId = await resolveStoreId(cleanStore, tenantId);
   }
   if (extension !== undefined) {
     updateData.extension = typeof extension === "string" && extension.trim() ? extension.trim().slice(0, 20) : null;
