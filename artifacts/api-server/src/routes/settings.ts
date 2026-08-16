@@ -1,7 +1,8 @@
 import { Router, type IRouter } from "express";
-import { db, appSettingsTable } from "@workspace/db";
+import { db, appSettingsTable, tenantAiCredentialsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
+import { encryptSecret } from "../lib/aiCredentialsCrypto";
 
 const router: IRouter = Router();
 
@@ -193,6 +194,61 @@ router.patch("/settings/survey", requireAdminOrSupervisor, async (req, res): Pro
   }
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   res.json(await saveSurveySettings(tenantId, body));
+});
+
+// ── Chave de IA (OpenAI) própria da loja — só admin, é uma credencial sensível ──
+// GET nunca devolve a chave em si, só se existe uma configurada, os últimos
+// 4 caracteres (pra loja reconhecer qual chave é) e se está em uso.
+async function aiCredentialsStatus(tenantId: number) {
+  const [cred] = await db.select({ last4: tenantAiCredentialsTable.last4, useOwnKey: tenantAiCredentialsTable.useOwnKey })
+    .from(tenantAiCredentialsTable).where(eq(tenantAiCredentialsTable.tenantId, tenantId)).limit(1);
+  return { hasKey: !!cred, last4: cred?.last4 ?? null, useOwnKey: cred?.useOwnKey ?? false };
+}
+
+router.get("/settings/ai", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  res.json(await aiCredentialsStatus(tenantId));
+});
+
+router.patch("/settings/ai", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { apiKey, useOwnKey } = req.body as { apiKey?: string; useOwnKey?: boolean };
+
+  if (apiKey !== undefined) {
+    const key = typeof apiKey === "string" ? apiKey.trim() : "";
+    // Só valida o formato (prefixo "sk-" das chaves da OpenAI) — a chave só é
+    // confirmada de verdade na primeira chamada de IA que a loja fizer.
+    if (!/^sk-[A-Za-z0-9_-]{10,}$/.test(key)) {
+      res.status(400).json({ error: "Chave inválida — chaves da OpenAI começam com \"sk-\"" });
+      return;
+    }
+    const enc = encryptSecret(key);
+    const last4 = key.slice(-4);
+    await db.insert(tenantAiCredentialsTable).values({
+      tenantId, encryptedApiKey: enc.ciphertext, iv: enc.iv, authTag: enc.authTag, keyVersion: enc.keyVersion,
+      last4, useOwnKey: true,
+    }).onConflictDoUpdate({
+      target: tenantAiCredentialsTable.tenantId,
+      set: { encryptedApiKey: enc.ciphertext, iv: enc.iv, authTag: enc.authTag, keyVersion: enc.keyVersion, last4, useOwnKey: true, updatedAt: new Date() },
+    });
+  } else if (useOwnKey !== undefined) {
+    const [existing] = await db.select({ tenantId: tenantAiCredentialsTable.tenantId }).from(tenantAiCredentialsTable)
+      .where(eq(tenantAiCredentialsTable.tenantId, tenantId)).limit(1);
+    if (!existing) { res.status(400).json({ error: "Nenhuma chave configurada ainda" }); return; }
+    await db.update(tenantAiCredentialsTable).set({ useOwnKey: !!useOwnKey, updatedAt: new Date() })
+      .where(eq(tenantAiCredentialsTable.tenantId, tenantId));
+  } else {
+    res.status(400).json({ error: "Nada para atualizar" });
+    return;
+  }
+
+  res.json(await aiCredentialsStatus(tenantId));
+});
+
+router.delete("/settings/ai", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  await db.delete(tenantAiCredentialsTable).where(eq(tenantAiCredentialsTable.tenantId, tenantId));
+  res.json(await aiCredentialsStatus(tenantId));
 });
 
 export default router;

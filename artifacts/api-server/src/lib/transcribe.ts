@@ -2,7 +2,8 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { db, messagesTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
-import { openai, toFile } from "@workspace/integrations-openai-ai";
+import { toFile } from "@workspace/integrations-openai-ai";
+import { getOpenAiClientForTenant } from "./aiClient";
 import { MEDIA_DIR } from "./whatsappInbound";
 import { logger } from "./logger";
 
@@ -48,6 +49,7 @@ async function doTranscribe(messageId: number): Promise<string> {
   const ext = filename.split(".").pop()!.toLowerCase();
   const mime = AUDIO_MIME[ext] ?? "audio/ogg";
   const buf = await readFile(path.join(MEDIA_DIR, filename));
+  const openai = await getOpenAiClientForTenant(msg.tenantId);
 
   const r = await openai.audio.transcriptions.create({
     model: "whisper-1",

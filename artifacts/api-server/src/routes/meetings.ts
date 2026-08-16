@@ -6,7 +6,8 @@ import path from "path";
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
 import { mkdir, writeFile, unlink } from "fs/promises";
-import { openai, toFile } from "@workspace/integrations-openai-ai";
+import { toFile } from "@workspace/integrations-openai-ai";
+import { getOpenAiClientForTenant } from "../lib/aiClient";
 import { DOCS_DIR } from "./documents";
 import { logger } from "../lib/logger";
 
@@ -124,8 +125,9 @@ router.post("/meetings/:id/recording", requireAuth, async (req, res): Promise<vo
       status: "gravada", endedAt: new Date(),
     }).where(eq(meetingsTable.id, id));
 
-    // Transcreve com o Whisper (chave OpenAI do usuário).
+    // Transcreve com o Whisper (chave OpenAI da loja, se configurada).
     const file = await toFile(buf, `reuniao.${ext}`, { type: mime });
+    const openai = await getOpenAiClientForTenant(tenantId);
     const result = await openai.audio.transcriptions.create({
       file, model: "whisper-1", language: "pt",
     });
@@ -154,6 +156,7 @@ router.post("/meetings/:id/generate", requireAuth, async (req, res): Promise<voi
   if (!spec) { res.status(400).json({ error: "Tipo de documento inválido" }); return; }
 
   try {
+    const openai = await getOpenAiClientForTenant(tenantId);
     const completion = await openai.chat.completions.create({
       model: "gpt-4o",
       max_tokens: 2500,

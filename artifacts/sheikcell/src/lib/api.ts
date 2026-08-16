@@ -557,6 +557,14 @@ export type Branding = {
   primaryColor: string | null;
 };
 
+// Nunca inclui a chave em si — só o suficiente pra loja reconhecer qual
+// chave está salva (últimos 4 caracteres) e se está em uso.
+export type AiCredentialsStatus = {
+  hasKey: boolean;
+  last4: string | null;
+  useOwnKey: boolean;
+};
+
 export type AppSettings = {
   alertUnansweredEnabled: boolean;
   alertUnansweredMinutes: number;
@@ -1196,6 +1204,12 @@ export const api = {
     branding: {
       update: (data: Partial<Branding>) =>
         req<Branding>("/settings/branding", { method: "PATCH", body: JSON.stringify(data) }),
+    },
+    ai: {
+      get: () => req<AiCredentialsStatus>("/settings/ai"),
+      save: (data: { apiKey?: string; useOwnKey?: boolean }) =>
+        req<AiCredentialsStatus>("/settings/ai", { method: "PATCH", body: JSON.stringify(data) }),
+      remove: () => req<AiCredentialsStatus>("/settings/ai", { method: "DELETE" }),
     },
   },
   tasks: {

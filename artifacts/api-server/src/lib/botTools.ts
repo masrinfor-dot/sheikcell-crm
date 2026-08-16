@@ -44,7 +44,8 @@ export async function runBotAgent(opts: {
   tools: BotTool[];
   ctx: BotToolContext;
 }): Promise<BotAgentResult> {
-  const { openai } = await import("@workspace/integrations-openai-ai");
+  const { getOpenAiClientForTenant } = await import("./aiClient");
+  const openai = await getOpenAiClientForTenant(opts.ctx.tenantId);
   const model = opts.model ?? "gpt-4o";
   const maxTokens = opts.maxTokens ?? 300;
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [

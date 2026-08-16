@@ -149,8 +149,9 @@ const clean = (v: unknown, max: number) => (typeof v === "string"
   : "");
 
 // Chama a IA de preços (com busca na web; cai para estimativa sem web).
-async function askPriceAI(prompt: string): Promise<string> {
-  const { openai } = await import("@workspace/integrations-openai-ai");
+async function askPriceAI(prompt: string, tenantId: number): Promise<string> {
+  const { getOpenAiClientForTenant } = await import("../lib/aiClient");
+  const openai = await getOpenAiClientForTenant(tenantId);
   try {
     const r = await openai.responses.create({
       model: "gpt-4o",
@@ -216,7 +217,7 @@ router.post("/trade-in/base-price", requireAuth, requirePerm("usar_ia"), async (
   ].join("\n");
 
   try {
-    const parsed = extractJson<{ marketPrice?: string; basePrice?: string }>(await askPriceAI(prompt));
+    const parsed = extractJson<{ marketPrice?: string; basePrice?: string }>(await askPriceAI(prompt, tenantId));
     const marketPrice = (parsed?.marketPrice ?? "").toString().slice(0, 200);
     const basePrice = (parsed?.basePrice ?? "").toString().slice(0, 100);
     if (!basePrice) { res.status(502).json({ error: "A IA não retornou um preço base. Tente novamente." }); return; }
@@ -312,7 +313,7 @@ router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (re
   ].join("\n");
 
   try {
-    const parsed = extractJson<{ marketPrice?: string; suggestedPrice?: string; summary?: string }>(await askPriceAI(prompt));
+    const parsed = extractJson<{ marketPrice?: string; suggestedPrice?: string; summary?: string }>(await askPriceAI(prompt, tenantId));
     if (!parsed) {
       res.status(502).json({ error: "A IA não retornou uma avaliação válida. Tente novamente." });
       return;

@@ -121,7 +121,8 @@ router.post("/bot/test", requireModuleAccess("robo"), async (req, res): Promise<
     return;
   }
   // ai_question no teste: responde de verdade com a base de conhecimento
-  const { openai } = await import("@workspace/integrations-openai-ai");
+  const { getOpenAiClientForTenant } = await import("../lib/aiClient");
+  const openai = await getOpenAiClientForTenant(tenantId);
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o",

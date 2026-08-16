@@ -2096,7 +2096,8 @@ router.post("/chat/conversations/:id/suggest-reply", requireAuth, requirePerm("u
   const userPrompt = `Informações do cliente:\n${infoLines.join("\n")}\n\nHistórico recente da conversa:\n${history}\n\nSugira a próxima resposta do atendente ao cliente.`;
 
   try {
-    const { openai } = await import("@workspace/integrations-openai-ai");
+    const { getOpenAiClientForTenant } = await import("../lib/aiClient");
+    const openai = await getOpenAiClientForTenant(tenantId);
     const completion = await openai.chat.completions.create({
       model: "gpt-4o",
       max_tokens: 8192,
@@ -2120,6 +2121,7 @@ router.post("/chat/conversations/:id/suggest-reply", requireAuth, requirePerm("u
 // ── AI text correction ───────────────────────────────────────────────────
 // Corrects spelling/grammar of a drafted message without changing its meaning.
 router.post("/chat/correct-text", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
   if (!text) { res.status(400).json({ error: "Texto vazio" }); return; }
   if (text.length > 4000) { res.status(400).json({ error: "Texto muito longo" }); return; }
@@ -2134,7 +2136,8 @@ router.post("/chat/correct-text", requireAuth, requirePerm("usar_ia"), async (re
   ].join(" ");
 
   try {
-    const { openai } = await import("@workspace/integrations-openai-ai");
+    const { getOpenAiClientForTenant } = await import("../lib/aiClient");
+    const openai = await getOpenAiClientForTenant(tenantId);
     const completion = await openai.chat.completions.create({
       model: "gpt-4o",
       max_tokens: 4096,

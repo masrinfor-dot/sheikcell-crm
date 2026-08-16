@@ -30,6 +30,7 @@ import InternalChat from "./InternalChat";
 import TaskBoard from "./TaskBoard";
 import SystemBoard from "./SystemBoard";
 import ConfiguracoesAparencia from "./ConfiguracoesAparencia";
+import ConfiguracoesIntegracoes from "./ConfiguracoesIntegracoes";
 import BrandLogo from "@/components/BrandLogo";
 import {
   Smartphone, LogOut, LayoutDashboard, ClipboardList,
@@ -37,12 +38,12 @@ import {
   PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck,
   AlertTriangle, WifiOff,
   FolderArchive, Headphones, ShoppingBag, BarChart3, SlidersHorizontal, Palette, ChevronDown, Wrench,
-  ArrowRight, Filter, BookUser, LifeBuoy, FileBarChart2,
+  ArrowRight, Filter, BookUser, LifeBuoy, FileBarChart2, Plug,
 } from "lucide-react";
 import Resultados from "./Resultados";
 import Relatorios from "./Relatorios";
 
-type Tab = "dashboard" | "resultados" | "relatorios" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "questionarios" | "treinamentos" | "documentos" | "rh" | "sorteios" | "robo" | "financeiro" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "sistema" | "diretorio" | "suporte";
+type Tab = "dashboard" | "resultados" | "relatorios" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "questionarios" | "treinamentos" | "documentos" | "rh" | "sorteios" | "robo" | "financeiro" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "integracoes" | "sistema" | "diretorio" | "suporte";
 
 // Categorias colapsáveis do menu lateral — cada aba pertence a um único grupo.
 type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabIds: Tab[] };
@@ -52,7 +53,7 @@ const TAB_GROUPS: TabGroup[] = [
   { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["resultados", "relatorios", "tarefas", "documentos", "history", "suporte"] },
   { key: "pessoas", label: "Pessoas", icon: Users, tabIds: ["diretorio", "rh", "treinamentos", "questionarios", "sorteios", "users"] },
   { key: "administracao", label: "Administração", icon: Settings, tabIds: ["financeiro", "sectors", "quickreplies", "whatsapp", "robo"] },
-  { key: "configuracoes", label: "Configurações", icon: SlidersHorizontal, tabIds: ["aparencia"] },
+  { key: "configuracoes", label: "Configurações", icon: SlidersHorizontal, tabIds: ["aparencia", "integracoes"] },
   { key: "sistema", label: "Sistema (Dev)", icon: Wrench, tabIds: ["sistema"] },
 ];
 
@@ -435,6 +436,7 @@ export default function AdminDashboard() {
     { id: "quickreplies" as Tab, label: "Msgs Rápidas", icon: Zap, adminOnly: true },
     { id: "whatsapp" as Tab, label: "WhatsApp", icon: PhoneCall, adminOnly: true },
     { id: "aparencia" as Tab, label: "Aparência", icon: Palette, adminOnly: true },
+    { id: "integracoes" as Tab, label: "Integrações", icon: Plug, adminOnly: true },
     { id: "sistema" as Tab, label: "Sistema (Dev)", icon: Wrench, adminOnly: true },
   ];
   // Aba de admin aparece para admin OU para quem recebeu a função no cadastro
@@ -763,6 +765,7 @@ export default function AdminDashboard() {
         {tab === "financeiro" && <Financeiro />}
 
         {tab === "aparencia" && <ConfiguracoesAparencia />}
+        {tab === "integracoes" && <ConfiguracoesIntegracoes />}
 
         {tab === "sistema" && <SystemBoard />}
 
