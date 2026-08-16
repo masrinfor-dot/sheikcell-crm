@@ -283,5 +283,12 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("./saasBilling").then((m) => m.runMonthlyBilling()).catch(() => {});
   }, 60 * 60_000);
+  // Fechamento mensal do banco de horas (RH): fecha o mês anterior assim que
+  // vira o mês. Idempotente, então rodar de novo a cada hora é seguro e
+  // cobre o servidor estar fora do ar no dia 1º.
+  void import("./timeBankClosures").then((m) => m.closeMonthlyTimeBanks()).catch(() => {});
+  setInterval(() => {
+    void import("./timeBankClosures").then((m) => m.closeMonthlyTimeBanks()).catch(() => {});
+  }, 60 * 60_000);
   logger.info("Agendador de mensagens iniciado (tick 30s)");
 }

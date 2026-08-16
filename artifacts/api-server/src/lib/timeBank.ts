@@ -102,7 +102,11 @@ export async function computeTimeBank(employeeId: number, tenantId: number, from
   for (const key of dayKeys) {
     const dayEntries = (byDay.get(key) ?? []).slice().sort((a, b) => a.at.getTime() - b.at.getTime());
     let dayExpected = 0;
-    if (shift && shift.weekdays.includes(weekdayOfDayKey(key))) dayExpected = shift.expectedMinutesPerDay;
+    // Escala "flexible" (sem horário fixo) nunca tem expediente esperado —
+    // o banco de horas dela só soma o que foi trabalhado, nunca cobra falta.
+    if (shift && shift.type === "fixed" && shift.weekdays.includes(weekdayOfDayKey(key))) {
+      dayExpected = shift.expectedMinutesPerDay ?? 0;
+    }
     expectedMinutes += dayExpected;
     const { minutes, complete } = computeDayWorked(dayEntries);
     workedMinutes += minutes;
@@ -146,6 +150,29 @@ export function nextPunchKind(todayEntries: TimeClockEntry[], hasBreak: boolean)
   if (last.kind === "break_end") return "out";
   if (last.kind === "out") return null; // já bateu tudo hoje
   return "in";
+}
+
+// Ponto obrigatório só se aplica a escala "fixed" e só nos dias que a escala
+// prevê expediente — escala livre ou dia fora de weekdays nunca exige bater
+// ponto pra liberar o login. Não decide isenção por cargo (ex.: admin) —
+// isso é responsabilidade de quem chama, que tem acesso à sessão.
+export async function employeeNeedsClockInToday(
+  employeeId: number, tenantId: number, shift: { type: string; weekdays: number[] } | null,
+): Promise<boolean> {
+  if (!shift || shift.type !== "fixed") return false;
+  const todayKey = dayKeySaoPaulo(new Date());
+  if (!shift.weekdays.includes(weekdayOfDayKey(todayKey))) return false;
+  const dayStart = new Date(`${todayKey}T00:00:00-03:00`);
+  const dayEnd = new Date(`${todayKey}T23:59:59-03:00`);
+  const [hasIn] = await db.select({ id: timeClockEntriesTable.id }).from(timeClockEntriesTable)
+    .where(and(
+      eq(timeClockEntriesTable.employeeId, employeeId),
+      eq(timeClockEntriesTable.tenantId, tenantId),
+      eq(timeClockEntriesTable.kind, "in"),
+      gte(timeClockEntriesTable.at, dayStart),
+      lte(timeClockEntriesTable.at, dayEnd),
+    )).limit(1);
+  return !hasIn;
 }
 
 export { dayKeySaoPaulo };

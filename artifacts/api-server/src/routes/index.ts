@@ -16,7 +16,7 @@ import tradeInRouter from "./tradeIn";
 import checklistsRouter, { enforceMandatoryChecklists } from "./checklists";
 import trainingsRouter, { enforceMandatoryTrainings } from "./trainings";
 import rhRouter from "./rh";
-import rhDpRouter from "./rhDp";
+import rhDpRouter, { enforceMandatoryClockIn } from "./rhDp";
 import rafflesRouter from "./raffles";
 import botRouter from "./bot";
 import financeRouter from "./finance";
@@ -39,6 +39,7 @@ router.use(superadminSaasRouter);
 // Trava o sistema (423) enquanto houver questionário/treinamento obrigatório pendente.
 router.use(enforceMandatoryChecklists);
 router.use(enforceMandatoryTrainings);
+router.use(enforceMandatoryClockIn);
 router.use(sectorsRouter);
 router.use(queueRouter);
 router.use(adminRouter);

@@ -2,14 +2,14 @@ import { useState, useEffect } from "react";
 import {
   api, API_BASE, canEditModule,
   type RhStage, type RhQuestion, type RhCandidate,
-  type Employee, type WorkShift, type TimeClockEntry, type TimeBankResult, type TimeBankSummaryRow, type LeaveRecord,
+  type Employee, type WorkShift, type TimeClockEntry, type TimeBankResult, type TimeBankSummaryRow, type LeaveRecord, type TimeBankClosure,
   type Store, type User,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
   Users, Settings2, Copy, RefreshCw, Plus, Trash2, X, CheckCircle, XCircle,
-  Video, ChevronDown, ChevronUp, Save, Link2, UserSquare2, CalendarClock, Clock, Wallet, Pencil,
+  Video, ChevronDown, ChevronUp, Save, Link2, UserSquare2, CalendarClock, Clock, Wallet, Pencil, Archive, PlayCircle,
 } from "lucide-react";
 
 const STATUS_META: Record<RhCandidate["status"], { label: string; cls: string }> = {
@@ -51,7 +51,7 @@ export default function RH() {
   const { user } = useAuth();
   const canEdit = canEditModule(user, "rh");
   const [group, setGroup] = useState<"recrutamento" | "dp">("recrutamento");
-  const [dpView, setDpView] = useState<"colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos">("colaboradores");
+  const [dpView, setDpView] = useState<"colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos" | "fechamentos">("colaboradores");
 
   return (
     <div className="space-y-4">
@@ -80,6 +80,7 @@ export default function RH() {
               { key: "ponto", label: "Ponto", icon: Clock },
               { key: "banco-horas", label: "Banco de horas", icon: Wallet },
               { key: "afastamentos", label: "Afastamentos", icon: CalendarClock },
+              { key: "fechamentos", label: "Fechamentos", icon: Archive },
             ] as const).map(({ key, label, icon: Icon }) => (
               <button key={key} onClick={() => setDpView(key)} data-testid={`button-dp-${key}`}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border ${dpView === key ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
@@ -92,6 +93,7 @@ export default function RH() {
           {dpView === "ponto" && <PontoAdmin canEdit={canEdit} />}
           {dpView === "banco-horas" && <BancoHoras canEdit={canEdit} />}
           {dpView === "afastamentos" && <Afastamentos canEdit={canEdit} />}
+          {dpView === "fechamentos" && <Fechamentos canEdit={canEdit} />}
         </div>
       )}
     </div>
@@ -552,7 +554,7 @@ function Colaboradores({ canEdit }: { canEdit: boolean }) {
                 <select value={editing.shiftId ?? ""} onChange={(ev) => setEditing({ ...editing, shiftId: ev.target.value ? Number(ev.target.value) : null })}
                   className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white">
                   <option value="">—</option>
-                  {shifts.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  {shifts.map((s) => <option key={s.id} value={s.id}>{s.name}{s.type === "flexible" ? " (livre)" : ""}</option>)}
                 </select>
               </label>
               <label className="text-xs col-span-2">
@@ -589,8 +591,6 @@ function Escalas({ canEdit }: { canEdit: boolean }) {
   const load = () => api.rhDp.shifts.list().then(setShifts).catch(() => {});
   useEffect(() => { load(); }, []);
 
-  const hasBreak = editing?.breakStart != null && editing?.breakStart !== "" || editing?.breakEnd != null && editing?.breakEnd !== "";
-
   const toggleWeekday = (d: number) => {
     if (!editing) return;
     const cur = editing.weekdays ?? [1, 2, 3, 4, 5];
@@ -599,7 +599,10 @@ function Escalas({ canEdit }: { canEdit: boolean }) {
 
   const save = async () => {
     if (!editing || saving) return;
-    if (!editing.name?.trim() || !editing.startTime || !editing.endTime) { toast({ title: "Preencha nome, início e fim", variant: "destructive" }); return; }
+    if (!editing.name?.trim()) { toast({ title: "Preencha o nome da escala", variant: "destructive" }); return; }
+    if (editing.type !== "flexible" && (!editing.startTime || !editing.endTime)) {
+      toast({ title: "Preencha início e fim", variant: "destructive" }); return;
+    }
     setSaving(true);
     try {
       if (editing.id) await api.rhDp.shifts.update(editing.id, editing);
@@ -620,7 +623,7 @@ function Escalas({ canEdit }: { canEdit: boolean }) {
   return (
     <div className="space-y-3">
       {canEdit && (
-        <button onClick={() => setEditing({ weekdays: [1, 2, 3, 4, 5] })} data-testid="button-new-shift"
+        <button onClick={() => setEditing({ type: "fixed", weekdays: [1, 2, 3, 4, 5] })} data-testid="button-new-shift"
           className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold">
           <Plus className="w-3.5 h-3.5" /> Nova escala
         </button>
@@ -635,10 +638,17 @@ function Escalas({ canEdit }: { canEdit: boolean }) {
           {shifts.map((s) => (
             <div key={s.id} className="shk-card p-4 flex items-center gap-3" data-testid={`shift-${s.id}`}>
               <div className="flex-1 min-w-0">
-                <p className="font-bold text-sm">{s.name}</p>
-                <p className="text-[11px] text-muted-foreground">
-                  {s.startTime}–{s.endTime}{s.breakStart && s.breakEnd ? ` (intervalo ${s.breakStart}–${s.breakEnd})` : ""} · {formatMinutes(s.expectedMinutesPerDay)}/dia · {s.weekdays.map((d) => WEEKDAY_LABELS[d]).join(", ")}
-                </p>
+                <div className="flex items-center gap-2">
+                  <p className="font-bold text-sm">{s.name}</p>
+                  {s.type === "flexible" && <span className="text-[10px] font-bold border px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 border-blue-100">Livre</span>}
+                </div>
+                {s.type === "flexible" ? (
+                  <p className="text-[11px] text-muted-foreground">Sem horário fixo — sem cobrança de expediente esperado, sem ponto obrigatório.</p>
+                ) : (
+                  <p className="text-[11px] text-muted-foreground">
+                    {s.startTime}–{s.endTime}{s.breakStart && s.breakEnd ? ` (intervalo ${s.breakStart}–${s.breakEnd})` : ""} · {formatMinutes(s.expectedMinutesPerDay ?? 0)}/dia · {s.weekdays.map((d) => WEEKDAY_LABELS[d]).join(", ")}
+                  </p>
+                )}
               </div>
               {canEdit && (
                 <div className="flex gap-1">
@@ -663,39 +673,60 @@ function Escalas({ canEdit }: { canEdit: boolean }) {
               <input value={editing.name ?? ""} onChange={(ev) => setEditing({ ...editing, name: ev.target.value })}
                 placeholder="Comercial 08-18" className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
             </label>
-            <div className="grid grid-cols-2 gap-2">
-              <label className="text-xs">
-                Início
-                <input type="time" value={editing.startTime ?? ""} onChange={(ev) => setEditing({ ...editing, startTime: ev.target.value })}
-                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
-              </label>
-              <label className="text-xs">
-                Fim
-                <input type="time" value={editing.endTime ?? ""} onChange={(ev) => setEditing({ ...editing, endTime: ev.target.value })}
-                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
-              </label>
-              <label className="text-xs">
-                Intervalo início (opcional)
-                <input type="time" value={editing.breakStart ?? ""} onChange={(ev) => setEditing({ ...editing, breakStart: ev.target.value || null })}
-                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
-              </label>
-              <label className="text-xs">
-                Intervalo fim (opcional)
-                <input type="time" value={editing.breakEnd ?? ""} onChange={(ev) => setEditing({ ...editing, breakEnd: ev.target.value || null })}
-                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
-              </label>
-            </div>
             <div>
-              <p className="text-xs mb-1">Dias da semana</p>
-              <div className="flex gap-1 flex-wrap">
-                {WEEKDAY_LABELS.map((label, d) => (
-                  <button key={d} onClick={() => toggleWeekday(d)} type="button"
-                    className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border ${(editing.weekdays ?? []).includes(d) ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
-                    {label}
-                  </button>
-                ))}
+              <p className="text-xs mb-1">Tipo</p>
+              <div className="flex gap-1.5">
+                <button type="button" onClick={() => setEditing({ ...editing, type: "fixed" })} data-testid="button-shift-type-fixed"
+                  className={`flex-1 px-3 py-2 rounded-xl text-xs font-semibold border ${editing.type !== "flexible" ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
+                  Fixa (horário definido)
+                </button>
+                <button type="button" onClick={() => setEditing({ ...editing, type: "flexible" })} data-testid="button-shift-type-flexible"
+                  className={`flex-1 px-3 py-2 rounded-xl text-xs font-semibold border ${editing.type === "flexible" ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
+                  Livre (sem horário)
+                </button>
               </div>
             </div>
+            {editing.type === "flexible" ? (
+              <p className="text-[11px] text-muted-foreground bg-secondary/40 rounded-xl px-3 py-2">
+                Escala livre: o banco de horas só soma o que o colaborador trabalhar, sem expediente esperado e sem exigir bater ponto pra liberar o login.
+              </p>
+            ) : (
+              <>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="text-xs">
+                    Início
+                    <input type="time" value={editing.startTime ?? ""} onChange={(ev) => setEditing({ ...editing, startTime: ev.target.value })}
+                      className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+                  </label>
+                  <label className="text-xs">
+                    Fim
+                    <input type="time" value={editing.endTime ?? ""} onChange={(ev) => setEditing({ ...editing, endTime: ev.target.value })}
+                      className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+                  </label>
+                  <label className="text-xs">
+                    Intervalo início (opcional)
+                    <input type="time" value={editing.breakStart ?? ""} onChange={(ev) => setEditing({ ...editing, breakStart: ev.target.value || null })}
+                      className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+                  </label>
+                  <label className="text-xs">
+                    Intervalo fim (opcional)
+                    <input type="time" value={editing.breakEnd ?? ""} onChange={(ev) => setEditing({ ...editing, breakEnd: ev.target.value || null })}
+                      className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+                  </label>
+                </div>
+                <div>
+                  <p className="text-xs mb-1">Dias da semana</p>
+                  <div className="flex gap-1 flex-wrap">
+                    {WEEKDAY_LABELS.map((label, d) => (
+                      <button key={d} onClick={() => toggleWeekday(d)} type="button"
+                        className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border ${(editing.weekdays ?? []).includes(d) ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
             <button onClick={save} disabled={saving} data-testid="button-save-shift"
               className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
               <Save className="w-3.5 h-3.5" /> {saving ? "Salvando..." : "Salvar"}
@@ -1074,6 +1105,133 @@ function Afastamentos({ canEdit }: { canEdit: boolean }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Fechamentos ──────────────────────────────────────────────────────────
+function previousMonthStr(): string {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit" }).formatToParts(new Date());
+  const y = Number(parts.find((p) => p.type === "year")!.value);
+  const m = Number(parts.find((p) => p.type === "month")!.value);
+  const prevY = m === 1 ? y - 1 : y;
+  const prevM = m === 1 ? 12 : m - 1;
+  return `${prevY}-${String(prevM).padStart(2, "0")}`;
+}
+
+function monthLabel(m: string): string {
+  const [y, mo] = m.split("-").map(Number);
+  return new Date(y!, mo! - 1, 1).toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+}
+
+function Fechamentos({ canEdit }: { canEdit: boolean }) {
+  const { toast } = useToast();
+  const [month, setMonth] = useState(previousMonthStr());
+  const [closures, setClosures] = useState<TimeBankClosure[]>([]);
+  const [allMonths, setAllMonths] = useState<string[]>([]);
+  const [running, setRunning] = useState(false);
+
+  const load = () => api.rhDp.closures.list(month).then(setClosures).catch(() => {});
+  useEffect(() => { load(); }, [month]);
+  useEffect(() => {
+    api.rhDp.closures.list().then((all) => setAllMonths(Array.from(new Set(all.map((c) => c.periodMonth))).sort().reverse())).catch(() => {});
+  }, [closures.length]);
+
+  const runClosure = async () => {
+    if (running) return;
+    setRunning(true);
+    try {
+      const r = await api.rhDp.closures.run(month);
+      toast({ title: r.created > 0 ? `${r.created} colaborador(es) fechado(s) para ${monthLabel(r.month)}` : "Nada novo para fechar (mês já fechado ou sem colaboradores)" });
+      load();
+    } catch (err) {
+      toast({ title: "Erro ao fechar o mês", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setRunning(false); }
+  };
+
+  const removeClosure = async (c: TimeBankClosure) => {
+    if (!window.confirm(`Excluir o fechamento de ${c.employeeName} (${monthLabel(c.periodMonth)})? Você pode rodar "Fechar mês" de novo depois.`)) return;
+    try { await api.rhDp.closures.remove(c.id); load(); } catch { toast({ title: "Erro", variant: "destructive" }); }
+  };
+
+  const totalBalance = closures.reduce((sum, c) => sum + c.balanceMinutes, 0);
+
+  return (
+    <div className="space-y-3">
+      <div className="shk-card p-4 flex flex-wrap gap-2 items-end">
+        <label className="text-xs">
+          Mês
+          <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} max={previousMonthStr()}
+            data-testid="input-closure-month"
+            className="block mt-0.5 px-3 py-1.5 rounded-xl border border-border text-xs" />
+        </label>
+        {allMonths.length > 0 && (
+          <div className="flex gap-1 flex-wrap">
+            {allMonths.slice(0, 6).map((m) => (
+              <button key={m} onClick={() => setMonth(m)}
+                className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border capitalize ${month === m ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
+                {monthLabel(m)}
+              </button>
+            ))}
+          </div>
+        )}
+        {canEdit && (
+          <button onClick={runClosure} disabled={running} data-testid="button-run-closure"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-primary text-white text-xs font-bold ml-auto disabled:opacity-40">
+            <PlayCircle className="w-3.5 h-3.5" /> {running ? "Fechando..." : "Fechar mês"}
+          </button>
+        )}
+      </div>
+
+      {closures.length === 0 ? (
+        <div className="shk-card p-8 text-center text-muted-foreground">
+          <Archive className="w-8 h-8 mx-auto mb-2 opacity-30" />
+          <p className="text-sm font-semibold capitalize">Nenhum fechamento em {monthLabel(month)}</p>
+          <p className="text-xs mt-1">O sistema fecha automaticamente todo início de mês, ou use "Fechar mês" acima.</p>
+        </div>
+      ) : (
+        <div className="shk-card overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-muted-foreground border-b border-border">
+                <th className="text-left py-2 px-3 font-semibold">Colaborador</th>
+                <th className="text-right py-2 px-3 font-semibold">Trabalhado</th>
+                <th className="text-right py-2 px-3 font-semibold">Esperado</th>
+                <th className="text-right py-2 px-3 font-semibold">Ajustes</th>
+                <th className="text-right py-2 px-3 font-semibold">Saldo</th>
+                {canEdit && <th></th>}
+              </tr>
+            </thead>
+            <tbody>
+              {closures.map((c) => (
+                <tr key={c.id} className="border-b border-border/50 last:border-0" data-testid={`closure-${c.id}`}>
+                  <td className="py-2 px-3 font-semibold">{c.employeeName}</td>
+                  <td className="py-2 px-3 text-right">{formatMinutes(c.workedMinutes)}</td>
+                  <td className="py-2 px-3 text-right">{formatMinutes(c.expectedMinutes)}</td>
+                  <td className="py-2 px-3 text-right">{formatMinutes(c.adjustmentMinutes)}</td>
+                  <td className={`py-2 px-3 text-right font-bold ${c.balanceMinutes < 0 ? "text-red-600" : "text-green-700"}`}>{formatMinutes(c.balanceMinutes)}</td>
+                  {canEdit && (
+                    <td className="py-2 px-3 text-right">
+                      <button onClick={() => removeClosure(c)} className="p-1 rounded-lg hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr className="border-t border-border font-bold">
+                <td className="py-2 px-3">Total</td>
+                <td></td><td></td><td></td>
+                <td className={`py-2 px-3 text-right ${totalBalance < 0 ? "text-red-600" : "text-green-700"}`}>{formatMinutes(totalBalance)}</td>
+                {canEdit && <td></td>}
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+      <p className="text-[11px] text-muted-foreground">
+        Fechamento congelado: uma vez gerado, não muda mais mesmo que ajustes ou batidas antigas do período sejam editados depois. Pra corrigir um erro, exclua o fechamento e rode "Fechar mês" de novo.
+      </p>
     </div>
   );
 }

@@ -1,12 +1,13 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import {
   db, employeesTable, workShiftsTable, timeClockEntriesTable, timeBankAdjustmentsTable, leaveRecordsTable,
-  usersTable, storesTable,
+  timeBankClosuresTable, usersTable, storesTable,
 } from "@workspace/db";
 import { eq, and, desc, asc, gte, lte } from "drizzle-orm";
-import { requireAuth, requireTenant } from "../middlewares/auth";
+import { requireAuth, requireTenant, tenantIdOf } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
-import { computeTimeBank, nextPunchKind, dayKeySaoPaulo } from "../lib/timeBank";
+import { computeTimeBank, nextPunchKind, dayKeySaoPaulo, employeeNeedsClockInToday } from "../lib/timeBank";
+import { generateClosuresForMonth, previousMonthKey, currentMonthKey } from "../lib/timeBankClosures";
 
 const router: IRouter = Router();
 
@@ -46,6 +47,59 @@ async function getEmployee(id: number, tenantId: number) {
   return row ?? null;
 }
 
+// ── Ponto obrigatório: bloqueia o uso do sistema até bater a entrada ────────
+// Mesmo padrão de enforceMandatoryChecklists/enforceMandatoryTrainings
+// (checklists.ts/trainings.ts): cache curto por tenant:usuário, allowlist de
+// rotas sempre liberadas, 423 pro resto. Só se aplica a quem tem employee
+// vinculado com escala "fixed" prevendo expediente hoje — ver
+// employeeNeedsClockInToday em lib/timeBank.ts.
+const CLOCK_IN_BLOCK_CACHE_MS = 60000;
+const clockInBlockCache = new Map<string, { until: number; blocked: boolean }>();
+export function invalidateClockInBlock(uid: number): void {
+  for (const k of clockInBlockCache.keys()) if (k.endsWith(`:${uid}`)) clockInBlockCache.delete(k);
+}
+
+export const CLOCK_IN_GATE_ALLOWLIST = [
+  /^\/auth\//,
+  /^\/rh-dp\/me\/clock-status$/, /^\/rh-dp\/me\/punch$/,
+];
+
+export async function enforceMandatoryClockIn(req: Request, res: Response, next: import("express").NextFunction): Promise<void> {
+  const uid = req.session?.userId;
+  if (!uid) { next(); return; }
+  if (CLOCK_IN_GATE_ALLOWLIST.some((r) => r.test(req.path))) { next(); return; }
+  // Admin nunca é obrigado, mesmo com cadastro de RH vinculado.
+  if (req.session.userRole === "admin") { next(); return; }
+  const tenantId = tenantIdOf(req);
+  if (tenantId == null) { next(); return; } // superadmin/sessão sem loja: sem RH a exigir
+  try {
+    const cacheKey = `${tenantId}:${uid}`;
+    const cached = clockInBlockCache.get(cacheKey);
+    let blocked: boolean;
+    if (cached && cached.until > Date.now()) {
+      blocked = cached.blocked;
+    } else {
+      const employee = await getEmployeeForUser(uid, tenantId);
+      if (!employee) {
+        blocked = false;
+      } else {
+        const shift = employee.shiftId
+          ? (await db.select().from(workShiftsTable).where(eq(workShiftsTable.id, employee.shiftId)))[0] ?? null
+          : null;
+        blocked = await employeeNeedsClockInToday(employee.id, tenantId, shift);
+      }
+      clockInBlockCache.set(cacheKey, { until: Date.now() + CLOCK_IN_BLOCK_CACHE_MS, blocked });
+    }
+    if (blocked) {
+      res.status(423).json({ error: "Bata o ponto de entrada para liberar o sistema", code: "CLOCK_IN_REQUIRED" });
+      return;
+    }
+    next();
+  } catch {
+    next(); // falha do banco não pode derrubar o sistema inteiro
+  }
+}
+
 // ── Auto-serviço (qualquer colaborador logado vinculado, sem gate de módulo) ─
 
 router.get("/rh-dp/me", requireAuth, async (req, res): Promise<void> => {
@@ -83,7 +137,21 @@ router.post("/rh-dp/me/punch", requireAuth, async (req, res): Promise<void> => {
   const [created] = await db.insert(timeClockEntriesTable).values({
     tenantId, employeeId: employee.id, kind, source: "self", createdByUserId: req.session.userId,
   }).returning();
+  invalidateClockInBlock(req.session.userId!);
   res.status(201).json(created);
+});
+
+router.get("/rh-dp/me/clock-status", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  // Admin nunca é obrigado a bater ponto, mesmo com cadastro de RH vinculado.
+  if (req.session.userRole === "admin") { res.json({ needsClockIn: false }); return; }
+  const employee = await getEmployeeForUser(req.session.userId!, tenantId);
+  if (!employee) { res.json({ needsClockIn: false }); return; }
+  const shift = employee.shiftId
+    ? (await db.select().from(workShiftsTable).where(eq(workShiftsTable.id, employee.shiftId)))[0] ?? null
+    : null;
+  const needsClockIn = await employeeNeedsClockInToday(employee.id, tenantId, shift);
+  res.json({ needsClockIn });
 });
 
 router.get("/rh-dp/me/time-bank", requireAuth, async (req, res): Promise<void> => {
@@ -264,6 +332,20 @@ router.post("/rh-dp/shifts", requireModuleAccess("rh"), async (req, res): Promis
   const b = (req.body ?? {}) as Record<string, unknown>;
   const name = typeof b.name === "string" ? b.name.trim().slice(0, 80) : "";
   if (!name) { res.status(400).json({ error: "Informe o nome da escala" }); return; }
+  const type = b.type === "flexible" ? "flexible" : "fixed";
+  const weekdays = Array.isArray(b.weekdays) ? b.weekdays.filter((n): n is number => typeof n === "number" && n >= 0 && n <= 6) : [1, 2, 3, 4, 5];
+
+  // Escala livre: sem horário, sem expediente esperado — não exige ponto e
+  // não entra no cálculo de "esperado" do banco de horas.
+  if (type === "flexible") {
+    const [created] = await db.insert(workShiftsTable).values({
+      tenantId, name, type, weekdays,
+      startTime: null, endTime: null, breakStart: null, breakEnd: null, expectedMinutesPerDay: null,
+    }).returning();
+    res.status(201).json(created);
+    return;
+  }
+
   const start = parseHHMM(b.startTime);
   const end = parseHHMM(b.endTime);
   if (start == null || end == null) { res.status(400).json({ error: "Horário de início/fim inválido (use HH:MM)" }); return; }
@@ -273,10 +355,9 @@ router.post("/rh-dp/shifts", requireModuleAccess("rh"), async (req, res): Promis
   if (hasBreak && (breakStart == null || breakEnd == null)) { res.status(400).json({ error: "Horário de intervalo inválido (use HH:MM)" }); return; }
   const expectedMinutesPerDay = computeExpectedMinutes(start, end, breakStart, breakEnd);
   if (expectedMinutesPerDay == null) { res.status(400).json({ error: "Horários da escala inconsistentes (confira início, fim e intervalo)" }); return; }
-  const weekdays = Array.isArray(b.weekdays) ? b.weekdays.filter((n): n is number => typeof n === "number" && n >= 0 && n <= 6) : [1, 2, 3, 4, 5];
 
   const [created] = await db.insert(workShiftsTable).values({
-    tenantId, name,
+    tenantId, name, type,
     startTime: b.startTime as string, endTime: b.endTime as string,
     breakStart: hasBreak ? (b.breakStart as string) : null,
     breakEnd: hasBreak ? (b.breakEnd as string) : null,
@@ -294,23 +375,35 @@ router.patch("/rh-dp/shifts/:id", requireModuleAccess("rh"), async (req, res): P
 
   const b = (req.body ?? {}) as Record<string, unknown>;
   const name = typeof b.name === "string" ? b.name.trim().slice(0, 80) : existing.name;
+  const type = "type" in b ? (b.type === "flexible" ? "flexible" : "fixed") : existing.type;
+  const weekdays = Array.isArray(b.weekdays) ? b.weekdays.filter((n): n is number => typeof n === "number" && n >= 0 && n <= 6) : (existing.weekdays as number[]);
+  if (!name) { res.status(400).json({ error: "Dados da escala inválidos" }); return; }
+
+  if (type === "flexible") {
+    const [updated] = await db.update(workShiftsTable).set({
+      name, type, weekdays,
+      startTime: null, endTime: null, breakStart: null, breakEnd: null, expectedMinutesPerDay: null,
+    }).where(and(eq(workShiftsTable.id, id), eq(workShiftsTable.tenantId, tenantId))).returning();
+    res.json(updated);
+    return;
+  }
+
   const startTimeStr = typeof b.startTime === "string" ? b.startTime : existing.startTime;
   const endTimeStr = typeof b.endTime === "string" ? b.endTime : existing.endTime;
   const breakStartStr = "breakStart" in b ? (b.breakStart as string | null) : existing.breakStart;
   const breakEndStr = "breakEnd" in b ? (b.breakEnd as string | null) : existing.breakEnd;
   const start = parseHHMM(startTimeStr);
   const end = parseHHMM(endTimeStr);
-  if (start == null || end == null || !name) { res.status(400).json({ error: "Dados da escala inválidos" }); return; }
+  if (start == null || end == null) { res.status(400).json({ error: "Dados da escala inválidos" }); return; }
   const hasBreak = breakStartStr != null && breakStartStr !== "" && breakEndStr != null && breakEndStr !== "";
   const breakStart = hasBreak ? parseHHMM(breakStartStr) : null;
   const breakEnd = hasBreak ? parseHHMM(breakEndStr) : null;
   if (hasBreak && (breakStart == null || breakEnd == null)) { res.status(400).json({ error: "Horário de intervalo inválido" }); return; }
   const expectedMinutesPerDay = computeExpectedMinutes(start, end, breakStart, breakEnd);
   if (expectedMinutesPerDay == null) { res.status(400).json({ error: "Horários da escala inconsistentes" }); return; }
-  const weekdays = Array.isArray(b.weekdays) ? b.weekdays.filter((n): n is number => typeof n === "number" && n >= 0 && n <= 6) : (existing.weekdays as number[]);
 
   const [updated] = await db.update(workShiftsTable).set({
-    name, startTime: startTimeStr, endTime: endTimeStr,
+    name, type, startTime: startTimeStr, endTime: endTimeStr,
     breakStart: hasBreak ? breakStartStr : null, breakEnd: hasBreak ? breakEndStr : null,
     weekdays, expectedMinutesPerDay,
   }).where(and(eq(workShiftsTable.id, id), eq(workShiftsTable.tenantId, tenantId))).returning();
@@ -345,6 +438,9 @@ router.post("/rh-dp/employees/:id/punch", requireModuleAccess("rh"), async (req,
   const [created] = await db.insert(timeClockEntriesTable).values({
     tenantId, employeeId, kind: b.kind as PunchKind, at, source: "admin", createdByUserId: req.session.userId,
   }).returning();
+  // Lançamento manual de "entrada" também libera o gate de ponto obrigatório
+  // do colaborador, se ele tiver login vinculado.
+  if (b.kind === "in" && employee.userId != null) invalidateClockInBlock(employee.userId);
   res.status(201).json(created);
 });
 
@@ -496,6 +592,39 @@ router.get("/rh-dp/reports/leaves", requireModuleAccess("rh"), async (req, res):
     ))
     .orderBy(desc(leaveRecordsTable.startDate));
   res.json(rows);
+});
+
+// ── Fechamento mensal do banco de horas ─────────────────────────────────────
+
+router.get("/rh-dp/closures", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const month = typeof req.query.month === "string" ? req.query.month : "";
+  const conditions = [eq(timeBankClosuresTable.tenantId, tenantId)];
+  if (/^\d{4}-\d{2}$/.test(month)) conditions.push(eq(timeBankClosuresTable.periodMonth, month));
+  const rows = await db.select().from(timeBankClosuresTable)
+    .where(and(...conditions))
+    .orderBy(desc(timeBankClosuresTable.periodMonth), asc(timeBankClosuresTable.employeeName));
+  res.json(rows);
+});
+
+router.post("/rh-dp/closures/run", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const b = (req.body ?? {}) as { month?: string };
+  const month = typeof b.month === "string" && /^\d{4}-\d{2}$/.test(b.month) ? b.month : previousMonthKey(new Date());
+  // Só fecha mês já encerrado — nunca o mês corrente (ainda em andamento).
+  if (month >= currentMonthKey(new Date())) {
+    res.status(400).json({ error: "Só é possível fechar meses já encerrados" }); return;
+  }
+  const created = await generateClosuresForMonth(month, tenantId);
+  res.json({ ok: true, month, created });
+});
+
+router.delete("/rh-dp/closures/:id", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  await db.delete(timeBankClosuresTable).where(and(eq(timeBankClosuresTable.id, id), eq(timeBankClosuresTable.tenantId, tenantId)));
+  res.json({ ok: true });
 });
 
 export default router;

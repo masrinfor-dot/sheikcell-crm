@@ -574,12 +574,25 @@ export type Employee = {
 export type WorkShift = {
   id: number;
   name: string;
-  startTime: string;
-  endTime: string;
+  type: "fixed" | "flexible";
+  startTime: string | null;
+  endTime: string | null;
   breakStart: string | null;
   breakEnd: string | null;
   weekdays: number[];
-  expectedMinutesPerDay: number;
+  expectedMinutesPerDay: number | null;
+};
+
+export type TimeBankClosure = {
+  id: number;
+  employeeId: number;
+  employeeName: string;
+  periodMonth: string; // "YYYY-MM"
+  workedMinutes: number;
+  expectedMinutes: number;
+  adjustmentMinutes: number;
+  balanceMinutes: number;
+  closedAt: string;
 };
 
 export type TimeClockEntry = {
@@ -1275,6 +1288,7 @@ export const api = {
       punch: () => req<TimeClockEntry>("/rh-dp/me/punch", { method: "POST" }),
       timeBank: (from?: string, to?: string) =>
         req<TimeBankResult>(`/rh-dp/me/time-bank?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+      clockStatus: () => req<{ needsClockIn: boolean }>("/rh-dp/me/clock-status"),
     },
     employees: {
       list: () => req<Employee[]>("/rh-dp/employees"),
@@ -1310,6 +1324,11 @@ export const api = {
         req<TimeBankSummaryRow[]>(`/rh-dp/reports/time-bank-summary?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
       leaves: (from?: string, to?: string) =>
         req<LeaveRecord[]>(`/rh-dp/reports/leaves?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+    },
+    closures: {
+      list: (month?: string) => req<TimeBankClosure[]>(`/rh-dp/closures?${new URLSearchParams({ ...(month ? { month } : {}) })}`),
+      run: (month?: string) => req<{ ok: boolean; month: string; created: number }>("/rh-dp/closures/run", { method: "POST", body: JSON.stringify({ month }) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/closures/${id}`, { method: "DELETE" }),
     },
   },
   partnerLinks: {

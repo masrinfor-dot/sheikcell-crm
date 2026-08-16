@@ -26,6 +26,7 @@ import Robo from "./Robo";
 import Financeiro from "./Financeiro";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
 import ChecklistGate from "@/components/ChecklistGate";
+import PontoGate from "@/components/PontoGate";
 import TrainingGate from "@/components/TrainingGate";
 import InternalChat from "./InternalChat";
 import TaskBoard from "./TaskBoard";
@@ -490,6 +491,7 @@ export default function AdminDashboard() {
           </button>
         </div>
       )}
+      <PontoGate />
       <ChecklistGate />
       {showChangePassword && (
         <ChangePasswordModal onDone={() => { setShowChangePassword(false); toast({ title: "Senha alterada com sucesso!" }); }}

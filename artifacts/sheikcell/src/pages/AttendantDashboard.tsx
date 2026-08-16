@@ -13,6 +13,7 @@ import TaskBoard from "./TaskBoard";
 import Financeiras from "./Financeiras";
 import Avaliacao from "./Avaliacao";
 import ChecklistGate from "@/components/ChecklistGate";
+import PontoGate from "@/components/PontoGate";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
 import BrandLogo from "@/components/BrandLogo";
 import Financeiro from "./Financeiro";
@@ -218,6 +219,7 @@ export default function AttendantDashboard() {
 
   return (
     <div className="min-h-screen bg-background">
+      <PontoGate />
       <ChecklistGate />
       <TrainingGate />
       {/* Navbar */}
