@@ -1518,164 +1518,183 @@ export default function AdminDashboard() {
 
       {/* ===== USER MODAL ===== */}
       {showAddUser && (
-        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
-          <div className="shk-card w-full max-w-sm p-6">
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="shk-card w-full max-w-lg p-6 my-8 bg-white">
             <div className="flex items-center justify-between mb-4">
               <h3 className="font-bold">{editUser ? "Editar Usuário" : "Novo Usuário"}</h3>
               <button onClick={() => setShowAddUser(false)}><X className="w-5 h-5 text-muted-foreground" /></button>
             </div>
-            <form onSubmit={handleSaveUser} className="space-y-3">
-              <div>
-                <label className="text-xs font-medium mb-1 block">Nome *</label>
-                <input required placeholder="João da Silva" value={userForm.name}
-                  onChange={(e) => setUserForm({ ...userForm, name: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+            <form onSubmit={handleSaveUser} className="space-y-5">
+              {/* Dados básicos */}
+              <div className="space-y-3">
+                <div>
+                  <label className="text-xs font-medium mb-1 block">Nome *</label>
+                  <input required placeholder="João da Silva" value={userForm.name}
+                    onChange={(e) => setUserForm({ ...userForm, name: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                </div>
+                <div>
+                  <label className="text-xs font-medium mb-1 block">Email *</label>
+                  <input required type="email" placeholder="joao@sheikcell.com" value={userForm.email}
+                    onChange={(e) => setUserForm({ ...userForm, email: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                </div>
+                <div>
+                  <label className="text-xs font-medium mb-1 block">{editUser ? "Nova senha (deixe em branco para manter)" : "Senha *"}</label>
+                  <input type="password" placeholder="••••••••" required={!editUser} value={userForm.password}
+                    onChange={(e) => setUserForm({ ...userForm, password: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs font-medium mb-1 block">Perfil</label>
+                    <select value={userForm.role} onChange={(e) => setUserForm({ ...userForm, role: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                      <option value="vendedor">Vendedor</option>
+                      <option value="supervisor">Supervisor</option>
+                      <option value="admin">Administrador</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium mb-1 block">Setor</label>
+                    <select value={userForm.sectorId} onChange={(e) => setUserForm({ ...userForm, sectorId: Number(e.target.value) })}
+                      className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                      {sectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    </select>
+                  </div>
+                </div>
               </div>
-              <div>
-                <label className="text-xs font-medium mb-1 block">Email *</label>
-                <input required type="email" placeholder="joao@sheikcell.com" value={userForm.email}
-                  onChange={(e) => setUserForm({ ...userForm, email: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
-              </div>
-              <div>
-                <label className="text-xs font-medium mb-1 block">{editUser ? "Nova senha (deixe em branco para manter)" : "Senha *"}</label>
-                <input type="password" placeholder="••••••••" required={!editUser} value={userForm.password}
-                  onChange={(e) => setUserForm({ ...userForm, password: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
-              </div>
-              <div>
-                <label className="text-xs font-medium mb-1 block">Perfil</label>
-                <select value={userForm.role} onChange={(e) => setUserForm({ ...userForm, role: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl border border-border text-sm">
-                  <option value="vendedor">Vendedor</option>
-                  <option value="supervisor">Supervisor</option>
-                  <option value="admin">Administrador</option>
-                </select>
-              </div>
-              <div>
-                <label className="text-xs font-medium mb-1 block">Setor</label>
-                <select value={userForm.sectorId} onChange={(e) => setUserForm({ ...userForm, sectorId: Number(e.target.value) })}
-                  className="w-full px-3 py-2 rounded-xl border border-border text-sm">
-                  {sectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
-              </div>
+
+              {/* Acesso e restrições (só vendedor) */}
               {userForm.role === "vendedor" && (
-                <div>
-                  <label className="flex items-center gap-2 text-xs font-medium mb-1">
-                    <input type="checkbox" checked={userForm.ahEnabled} data-testid="toggle-access-hours"
-                      onChange={(e) => setUserForm({ ...userForm, ahEnabled: e.target.checked })} />
-                    Limitar horário de acesso
-                  </label>
-                  {userForm.ahEnabled && (
-                    <div className="space-y-2 mt-1.5 p-2.5 rounded-xl bg-secondary/50 border border-border">
-                      <div className="flex items-center gap-2">
-                        <span className="text-[11px] text-muted-foreground">Das</span>
-                        <input type="time" value={userForm.ahStart} data-testid="input-access-start"
-                          onChange={(e) => setUserForm({ ...userForm, ahStart: e.target.value })}
-                          className="px-2 py-1 rounded-lg border border-border text-xs bg-white" />
-                        <span className="text-[11px] text-muted-foreground">às</span>
-                        <input type="time" value={userForm.ahEnd} data-testid="input-access-end"
-                          onChange={(e) => setUserForm({ ...userForm, ahEnd: e.target.value })}
-                          className="px-2 py-1 rounded-lg border border-border text-xs bg-white" />
+                <div className="space-y-3 pt-4 border-t border-border">
+                  <p className="text-[11px] font-bold uppercase tracking-wide text-muted-foreground">Acesso e restrições</p>
+                  <div>
+                    <label className="flex items-center gap-2 text-xs font-medium mb-1">
+                      <input type="checkbox" checked={userForm.ahEnabled} data-testid="toggle-access-hours"
+                        onChange={(e) => setUserForm({ ...userForm, ahEnabled: e.target.checked })} />
+                      Limitar horário de acesso
+                    </label>
+                    {userForm.ahEnabled && (
+                      <div className="space-y-2 mt-1.5 p-2.5 rounded-xl bg-secondary/50 border border-border">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] text-muted-foreground">Das</span>
+                          <input type="time" value={userForm.ahStart} data-testid="input-access-start"
+                            onChange={(e) => setUserForm({ ...userForm, ahStart: e.target.value })}
+                            className="px-2 py-1 rounded-lg border border-border text-xs bg-white" />
+                          <span className="text-[11px] text-muted-foreground">às</span>
+                          <input type="time" value={userForm.ahEnd} data-testid="input-access-end"
+                            onChange={(e) => setUserForm({ ...userForm, ahEnd: e.target.value })}
+                            className="px-2 py-1 rounded-lg border border-border text-xs bg-white" />
+                        </div>
+                        <div className="flex flex-wrap gap-1">
+                          {(["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"] as const).map((d, i) => (
+                            <button type="button" key={d} data-testid={`toggle-access-day-${i}`}
+                              onClick={() => setUserForm({ ...userForm, ahDays: userForm.ahDays.includes(i) ? userForm.ahDays.filter((x) => x !== i) : [...userForm.ahDays, i] })}
+                              className={`px-2 py-1 rounded-lg border text-[11px] font-medium transition ${userForm.ahDays.includes(i) ? "bg-primary text-white border-primary" : "border-border text-muted-foreground bg-white hover:bg-secondary"}`}>
+                              {d}
+                            </button>
+                          ))}
+                        </div>
+                        <p className="text-[10px] text-muted-foreground">Fora desse horário o vendedor não consegue entrar nem usar o sistema (horário de Brasília).</p>
                       </div>
-                      <div className="flex flex-wrap gap-1">
-                        {(["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"] as const).map((d, i) => (
-                          <button type="button" key={d} data-testid={`toggle-access-day-${i}`}
-                            onClick={() => setUserForm({ ...userForm, ahDays: userForm.ahDays.includes(i) ? userForm.ahDays.filter((x) => x !== i) : [...userForm.ahDays, i] })}
-                            className={`px-2 py-1 rounded-lg border text-[11px] font-medium transition ${userForm.ahDays.includes(i) ? "bg-primary text-white border-primary" : "border-border text-muted-foreground bg-white hover:bg-secondary"}`}>
-                            {d}
-                          </button>
-                        ))}
-                      </div>
-                      <p className="text-[10px] text-muted-foreground">Fora desse horário o vendedor não consegue entrar nem usar o sistema (horário de Brasília).</p>
-                    </div>
-                  )}
-                </div>
-              )}
-              {userForm.role === "vendedor" && waSessions && waSessions.length > 1 && (
-                <div>
-                  <label className="flex items-center gap-2 text-xs font-medium mb-1">
-                    <input type="checkbox" checked={userForm.waEnabled} data-testid="toggle-wa-restriction"
-                      onChange={(e) => setUserForm({ ...userForm, waEnabled: e.target.checked })} />
-                    Restringir a linhas de WhatsApp específicas
-                  </label>
-                  {userForm.waEnabled && (
-                    <div className="space-y-2 mt-1.5 p-2.5 rounded-xl bg-secondary/50 border border-border">
-                      <div className="flex flex-wrap gap-1.5">
-                        {waSessions.map((s) => (
-                          <button type="button" key={s.sessionKey} data-testid={`toggle-wa-session-${s.sessionKey}`}
-                            onClick={() => setUserForm({ ...userForm, waKeys: userForm.waKeys.includes(s.sessionKey) ? userForm.waKeys.filter((k) => k !== s.sessionKey) : [...userForm.waKeys, s.sessionKey] })}
-                            className={`px-2 py-1 rounded-lg border text-[11px] font-medium transition ${userForm.waKeys.includes(s.sessionKey) ? "bg-primary text-white border-primary" : "border-border text-muted-foreground bg-white hover:bg-secondary"}`}>
-                            {s.displayName || s.sessionKey}
-                          </button>
-                        ))}
-                      </div>
-                      <p className="text-[10px] text-muted-foreground">Esse vendedor só vê e responde conversas dessas linhas de WhatsApp. Nenhuma marcada = não vê conversa nenhuma.</p>
-                    </div>
-                  )}
-                </div>
-              )}
-              {userForm.role !== "admin" && (
-                <div>
-                  <label className="flex items-center gap-2 text-xs font-medium">
-                    <input type="checkbox" checked={userForm.adminAccess.includes("whatsapp")} data-testid="toggle-admin-access-whatsapp"
-                      onChange={(e) => setUserForm({ ...userForm, adminAccess: e.target.checked ? ["whatsapp"] : [] })} />
-                    Gerenciar conexão do WhatsApp
-                  </label>
-                </div>
-              )}
-              {userForm.role !== "admin" && (
-                <div>
-                  <label className="text-xs font-medium mb-1 block">Módulos e nível de acesso</label>
-                  <p className="text-[10px] text-muted-foreground mb-2">Só os módulos que a loja já contratou aparecem aqui. Sem marcar, o usuário não vê a aba.</p>
-                  <div className="space-y-1">
-                    {USER_GRANTABLE_MODULES.filter((m) => user?.enabledModules == null || user.enabledModules.includes(m)).map((m) => {
-                      const level = userForm.moduleAccess[m];
-                      const setLevel = (v: "view" | "edit" | undefined) => {
-                        const next = { ...userForm.moduleAccess };
-                        if (v) next[m] = v; else delete next[m];
-                        setUserForm({ ...userForm, moduleAccess: next });
-                      };
-                      return (
-                        <div key={m} className="flex items-center justify-between gap-2 py-1">
-                          <span className="text-xs text-foreground">{MODULE_LABELS[m]}</span>
-                          <div className="flex gap-1 shrink-0">
-                            {([[undefined, "Sem acesso"], ["view", "Visualizar"], ["edit", "Ver + editar"]] as const).map(([v, label]) => (
-                              <button type="button" key={label} data-testid={`module-access-${m}-${v ?? "none"}`}
-                                onClick={() => setLevel(v)}
-                                className={`px-2 py-1 rounded-lg border text-[11px] font-medium transition ${(level ?? undefined) === v ? "bg-primary text-white border-primary" : "border-border text-muted-foreground bg-white hover:bg-secondary"}`}>
-                                {label}
+                    )}
+                  </div>
+                  {waSessions && waSessions.length > 1 && (
+                    <div>
+                      <label className="flex items-center gap-2 text-xs font-medium mb-1">
+                        <input type="checkbox" checked={userForm.waEnabled} data-testid="toggle-wa-restriction"
+                          onChange={(e) => setUserForm({ ...userForm, waEnabled: e.target.checked })} />
+                        Restringir a linhas de WhatsApp específicas
+                      </label>
+                      {userForm.waEnabled && (
+                        <div className="space-y-2 mt-1.5 p-2.5 rounded-xl bg-secondary/50 border border-border">
+                          <div className="flex flex-wrap gap-1.5">
+                            {waSessions.map((s) => (
+                              <button type="button" key={s.sessionKey} data-testid={`toggle-wa-session-${s.sessionKey}`}
+                                onClick={() => setUserForm({ ...userForm, waKeys: userForm.waKeys.includes(s.sessionKey) ? userForm.waKeys.filter((k) => k !== s.sessionKey) : [...userForm.waKeys, s.sessionKey] })}
+                                className={`px-2 py-1 rounded-lg border text-[11px] font-medium transition ${userForm.waKeys.includes(s.sessionKey) ? "bg-primary text-white border-primary" : "border-border text-muted-foreground bg-white hover:bg-secondary"}`}>
+                                {s.displayName || s.sessionKey}
                               </button>
                             ))}
                           </div>
+                          <p className="text-[10px] text-muted-foreground">Esse vendedor só vê e responde conversas dessas linhas de WhatsApp. Nenhuma marcada = não vê conversa nenhuma.</p>
                         </div>
-                      );
-                    })}
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Permissões (não-admin) */}
+              {userForm.role !== "admin" && (
+                <div className="space-y-3 pt-4 border-t border-border">
+                  <p className="text-[11px] font-bold uppercase tracking-wide text-muted-foreground">Permissões</p>
+                  <div>
+                    <label className="flex items-center gap-2 text-xs font-medium">
+                      <input type="checkbox" checked={userForm.adminAccess.includes("whatsapp")} data-testid="toggle-admin-access-whatsapp"
+                        onChange={(e) => setUserForm({ ...userForm, adminAccess: e.target.checked ? ["whatsapp"] : [] })} />
+                      Gerenciar conexão do WhatsApp
+                    </label>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium mb-1 block">Módulos e nível de acesso</label>
+                    <p className="text-[10px] text-muted-foreground mb-2">Só os módulos que a loja já contratou aparecem aqui. Sem marcar, o usuário não vê a aba.</p>
+                    <div className="space-y-1">
+                      {USER_GRANTABLE_MODULES.filter((m) => user?.enabledModules == null || user.enabledModules.includes(m)).map((m) => {
+                        const level = userForm.moduleAccess[m];
+                        const setLevel = (v: "view" | "edit" | undefined) => {
+                          const next = { ...userForm.moduleAccess };
+                          if (v) next[m] = v; else delete next[m];
+                          setUserForm({ ...userForm, moduleAccess: next });
+                        };
+                        return (
+                          <div key={m} className="flex items-center justify-between gap-2 py-1">
+                            <span className="text-xs text-foreground">{MODULE_LABELS[m]}</span>
+                            <div className="flex gap-1 shrink-0">
+                              {([[undefined, "Sem acesso"], ["view", "Visualizar"], ["edit", "Ver + editar"]] as const).map(([v, label]) => (
+                                <button type="button" key={label} data-testid={`module-access-${m}-${v ?? "none"}`}
+                                  onClick={() => setLevel(v)}
+                                  className={`px-2 py-1 rounded-lg border text-[11px] font-medium transition ${(level ?? undefined) === v ? "bg-primary text-white border-primary" : "border-border text-muted-foreground bg-white hover:bg-secondary"}`}>
+                                  {label}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                 </div>
               )}
-              <div>
-                <label className="text-xs font-medium mb-1 block">Loja (para redes de lojas)</label>
-                <select value={userForm.storeName} onChange={(e) => setUserForm({ ...userForm, storeName: e.target.value })}
-                  data-testid="select-user-store"
-                  className="w-full px-3 py-2 rounded-xl border border-border text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary/30">
-                  <option value="">Sem loja</option>
-                  {stores.filter((s) => s.isActive || s.name === userForm.storeName).map((s) => (
-                    <option key={s.id} value={s.name}>{s.name}</option>
-                  ))}
-                  {userForm.storeName && !stores.some((s) => s.name === userForm.storeName) && (
-                    <option value={userForm.storeName}>{userForm.storeName}</option>
-                  )}
-                </select>
-                <p className="text-[10px] text-muted-foreground mt-1">Cadastre as lojas na aba Setores → Lojas da Rede.</p>
+
+              {/* Outras informações */}
+              <div className="space-y-3 pt-4 border-t border-border">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-muted-foreground">Outras informações</p>
+                <div>
+                  <label className="text-xs font-medium mb-1 block">Loja (para redes de lojas)</label>
+                  <select value={userForm.storeName} onChange={(e) => setUserForm({ ...userForm, storeName: e.target.value })}
+                    data-testid="select-user-store"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary/30">
+                    <option value="">Sem loja</option>
+                    {stores.filter((s) => s.isActive || s.name === userForm.storeName).map((s) => (
+                      <option key={s.id} value={s.name}>{s.name}</option>
+                    ))}
+                    {userForm.storeName && !stores.some((s) => s.name === userForm.storeName) && (
+                      <option value={userForm.storeName}>{userForm.storeName}</option>
+                    )}
+                  </select>
+                  <p className="text-[10px] text-muted-foreground mt-1">Cadastre as lojas na aba Setores → Lojas da Rede.</p>
+                </div>
+                <div>
+                  <label className="text-xs font-medium mb-1 block">Ramal (opcional)</label>
+                  <input value={userForm.extension} onChange={(e) => setUserForm({ ...userForm, extension: e.target.value })}
+                    placeholder="Ex.: 1042" maxLength={20} data-testid="input-user-extension"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                  <p className="text-[10px] text-muted-foreground mt-1">Aparece no Diretório interno de contatos.</p>
+                </div>
               </div>
-              <div>
-                <label className="text-xs font-medium mb-1 block">Ramal (opcional)</label>
-                <input value={userForm.extension} onChange={(e) => setUserForm({ ...userForm, extension: e.target.value })}
-                  placeholder="Ex.: 1042" maxLength={20} data-testid="input-user-extension"
-                  className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
-                <p className="text-[10px] text-muted-foreground mt-1">Aparece no Diretório interno de contatos.</p>
-              </div>
+
               <div className="flex gap-2 pt-1">
                 <button type="button" onClick={() => setShowAddUser(false)}
                   className="flex-1 py-2 rounded-xl border border-border text-sm font-medium text-muted-foreground hover:bg-secondary transition">Cancelar</button>

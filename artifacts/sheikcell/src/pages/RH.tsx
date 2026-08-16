@@ -77,7 +77,7 @@ export default function RH() {
             {([
               { key: "colaboradores", label: "Colaboradores", icon: UserSquare2 },
               { key: "escalas", label: "Escalas", icon: CalendarClock },
-              { key: "ponto", label: "Ponto", icon: Clock },
+              { key: "ponto", label: "Registros de Ponto", icon: Clock },
               { key: "banco-horas", label: "Banco de horas", icon: Wallet },
               { key: "afastamentos", label: "Afastamentos", icon: CalendarClock },
               { key: "fechamentos", label: "Fechamentos", icon: Archive },
