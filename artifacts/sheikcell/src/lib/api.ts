@@ -547,6 +547,86 @@ export type RhCandidate = {
   notes: string | null; hasVideo: boolean; createdAt: string;
 };
 
+// ── RH: Departamento Pessoal ────────────────────────────────────────────────
+export type Employee = {
+  id: number;
+  userId: number | null;
+  name: string;
+  birthDate: string | null;
+  phone: string | null;
+  email: string | null;
+  cpf: string | null;
+  rg: string | null;
+  role: string | null;
+  jobFunction: string | null;
+  admissionDate: string | null;
+  contractType: "clt" | "pj" | "estagio" | null;
+  salaryCents: number | null;
+  storeId: number | null;
+  shiftId: number | null;
+  isActive: boolean;
+  createdAt: string;
+  userName?: string | null;
+  storeName?: string | null;
+  shiftName?: string | null;
+};
+
+export type WorkShift = {
+  id: number;
+  name: string;
+  startTime: string;
+  endTime: string;
+  breakStart: string | null;
+  breakEnd: string | null;
+  weekdays: number[];
+  expectedMinutesPerDay: number;
+};
+
+export type TimeClockEntry = {
+  id: number;
+  employeeId: number;
+  employeeName?: string | null;
+  kind: "in" | "break_start" | "break_end" | "out";
+  at: string;
+  source: "self" | "admin";
+};
+
+export type TimeBankDay = {
+  date: string;
+  workedMinutes: number;
+  expectedMinutes: number;
+  complete: boolean;
+  entries: { kind: string; at: string }[];
+};
+
+export type TimeBankResult = {
+  workedMinutes: number;
+  expectedMinutes: number;
+  adjustmentMinutes: number;
+  balanceMinutes: number;
+  days: TimeBankDay[];
+};
+
+export type TimeBankSummaryRow = {
+  employeeId: number;
+  employeeName: string;
+  workedMinutes: number;
+  expectedMinutes: number;
+  adjustmentMinutes: number;
+  balanceMinutes: number;
+};
+
+export type LeaveRecord = {
+  id: number;
+  employeeId: number;
+  employeeName?: string | null;
+  kind: "ferias" | "atestado" | "falta_justificada" | "falta_injustificada" | "outro";
+  startDate: string;
+  endDate: string;
+  notes: string | null;
+  createdAt?: string;
+};
+
 export type PartnerLink = {
   id: number; name: string; url: string; position: number; createdAt: string;
 };
@@ -1188,6 +1268,49 @@ export const api = {
     updateCandidate: (id: number, data: { status?: string; notes?: string }) =>
       req<Pick<RhCandidate, "id" | "status" | "notes">>(`/rh/candidates/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     removeCandidate: (id: number) => req<{ ok: boolean }>(`/rh/candidates/${id}`, { method: "DELETE" }),
+  },
+  rhDp: {
+    me: {
+      get: () => req<Employee>("/rh-dp/me"),
+      punch: () => req<TimeClockEntry>("/rh-dp/me/punch", { method: "POST" }),
+      timeBank: (from?: string, to?: string) =>
+        req<TimeBankResult>(`/rh-dp/me/time-bank?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+    },
+    employees: {
+      list: () => req<Employee[]>("/rh-dp/employees"),
+      create: (data: Partial<Employee>) => req<Employee>("/rh-dp/employees", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<Employee>) => req<Employee>(`/rh-dp/employees/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/employees/${id}`, { method: "DELETE" }),
+      punch: (id: number, data: { kind: TimeClockEntry["kind"]; at?: string }) =>
+        req<TimeClockEntry>(`/rh-dp/employees/${id}/punch`, { method: "POST", body: JSON.stringify(data) }),
+      timeBank: (id: number, from?: string, to?: string) =>
+        req<TimeBankResult>(`/rh-dp/employees/${id}/time-bank?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+      addAdjustment: (id: number, data: { minutes: number; reason: string }) =>
+        req<{ id: number }>(`/rh-dp/employees/${id}/time-bank/adjustments`, { method: "POST", body: JSON.stringify(data) }),
+    },
+    timeClockEntries: {
+      remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/time-clock-entries/${id}`, { method: "DELETE" }),
+    },
+    shifts: {
+      list: () => req<WorkShift[]>("/rh-dp/shifts"),
+      create: (data: Partial<WorkShift>) => req<WorkShift>("/rh-dp/shifts", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<WorkShift>) => req<WorkShift>(`/rh-dp/shifts/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/shifts/${id}`, { method: "DELETE" }),
+    },
+    leaves: {
+      list: () => req<LeaveRecord[]>("/rh-dp/leave-records"),
+      create: (data: { employeeId: number; kind: LeaveRecord["kind"]; startDate: string; endDate: string; notes?: string }) =>
+        req<LeaveRecord>("/rh-dp/leave-records", { method: "POST", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/leave-records/${id}`, { method: "DELETE" }),
+    },
+    reports: {
+      timesheet: (from?: string, to?: string, employeeId?: number) =>
+        req<TimeClockEntry[]>(`/rh-dp/reports/timesheet?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}), ...(employeeId ? { employeeId: String(employeeId) } : {}) })}`),
+      timeBankSummary: (from?: string, to?: string) =>
+        req<TimeBankSummaryRow[]>(`/rh-dp/reports/time-bank-summary?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+      leaves: (from?: string, to?: string) =>
+        req<LeaveRecord[]>(`/rh-dp/reports/leaves?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+    },
   },
   partnerLinks: {
     list: () => req<PartnerLink[]>("/partner-links"),

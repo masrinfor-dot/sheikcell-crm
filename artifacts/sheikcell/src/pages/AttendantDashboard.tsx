@@ -19,6 +19,7 @@ import Financeiro from "./Financeiro";
 import Sorteios from "./Sorteios";
 import Robo from "./Robo";
 import RH from "./RH";
+import MeuPonto from "./MeuPonto";
 import Questionarios from "./Questionarios";
 import TrainingGate from "@/components/TrainingGate";
 import Treinamentos from "./Treinamentos";
@@ -32,7 +33,7 @@ import Resultados from "./Resultados";
 import TeamDirectory from "./TeamDirectory";
 import Suporte from "./Suporte";
 
-type MainTab = "queue" | "resultados" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "avaliacao" | "treinamentos" | "documentos" | "financeiro" | "sorteios" | "robo" | "rh" | "questionarios" | "diretorio" | "suporte";
+type MainTab = "queue" | "resultados" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "avaliacao" | "treinamentos" | "documentos" | "financeiro" | "sorteios" | "robo" | "rh" | "meuponto" | "questionarios" | "diretorio" | "suporte";
 
 // Todas as abas que dependem de módulo — visibilidade decidida por
 // moduleGranted() (loja contratou E usuário tem acesso), ver mais abaixo.
@@ -52,6 +53,7 @@ const MAIN_TABS: { id: MainTab; label: string; icon: typeof PhoneCall; module?: 
   { id: "sorteios" as MainTab, label: "Sorteios", icon: Gift, module: "sorteios" },
   { id: "robo" as MainTab, label: "Robô", icon: Bot, module: "robo" },
   { id: "rh" as MainTab, label: "RH", icon: UserSearch, module: "rh" },
+  { id: "meuponto" as MainTab, label: "Meu Ponto", icon: Clock },
   { id: "questionarios" as MainTab, label: "Questionários", icon: ClipboardList, module: "questionarios" },
   { id: "suporte" as MainTab, label: "Suporte", icon: LifeBuoy },
 ];
@@ -327,6 +329,7 @@ export default function AttendantDashboard() {
       {mainTab === "rh" && moduleGranted("rh") && (
         <div className="max-w-6xl mx-auto px-4 py-6"><RH /></div>
       )}
+      {mainTab === "meuponto" && <MeuPonto />}
       {mainTab === "questionarios" && moduleGranted("questionarios") && (
         <div className="max-w-5xl mx-auto px-4 py-6"><Questionarios /></div>
       )}

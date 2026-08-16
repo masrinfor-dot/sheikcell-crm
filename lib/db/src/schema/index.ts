@@ -9,6 +9,7 @@ export * from "./meetings";
 export * from "./access_logs";
 export * from "./stores";
 export * from "./rh";
+export * from "./rh_dp";
 export * from "./raffles";
 export * from "./bot";
 export * from "./sectors";

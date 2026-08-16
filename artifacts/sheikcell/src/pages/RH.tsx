@@ -1,10 +1,15 @@
 import { useState, useEffect } from "react";
-import { api, API_BASE, canEditModule, type RhStage, type RhQuestion, type RhCandidate } from "@/lib/api";
+import {
+  api, API_BASE, canEditModule,
+  type RhStage, type RhQuestion, type RhCandidate,
+  type Employee, type WorkShift, type TimeClockEntry, type TimeBankResult, type TimeBankSummaryRow, type LeaveRecord,
+  type Store, type User,
+} from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
   Users, Settings2, Copy, RefreshCw, Plus, Trash2, X, CheckCircle, XCircle,
-  Video, ChevronDown, ChevronUp, Save, Link2,
+  Video, ChevronDown, ChevronUp, Save, Link2, UserSquare2, CalendarClock, Clock, Wallet, Pencil,
 } from "lucide-react";
 
 const STATUS_META: Record<RhCandidate["status"], { label: string; cls: string }> = {
@@ -13,12 +18,89 @@ const STATUS_META: Record<RhCandidate["status"], { label: string; cls: string }>
   reprovado: { label: "Reprovado", cls: "bg-red-50 text-red-600 border-red-100" },
 };
 
-// Aba "RH" (admin): personaliza as etapas do processo seletivo e
-// analisa os candidatos que responderam pelo link público.
+const CONTRACT_LABELS: Record<string, string> = { clt: "CLT", pj: "PJ", estagio: "Estágio" };
+const LEAVE_LABELS: Record<string, string> = {
+  ferias: "Férias", atestado: "Atestado", falta_justificada: "Falta justificada",
+  falta_injustificada: "Falta injustificada", outro: "Outro",
+};
+const WEEKDAY_LABELS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
+
+function formatMinutes(mins: number): string {
+  const sign = mins < 0 ? "-" : "";
+  const abs = Math.abs(Math.round(mins));
+  const h = Math.floor(abs / 60);
+  const m = abs % 60;
+  return `${sign}${h}h${m.toString().padStart(2, "0")}`;
+}
+
+// Data civil no fuso America/Sao_Paulo (não UTC) — mesma convenção do
+// backend (ver dayKeySaoPaulo em lib/timeBank.ts), evita desalinhar a janela
+// "hoje"/"este mês" perto da virada de dia.
+function todayStr(): string { return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo" }).format(new Date()); }
+function firstOfMonthStr(): string {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit" }).formatToParts(new Date());
+  const y = parts.find((p) => p.type === "year")!.value;
+  const m = parts.find((p) => p.type === "month")!.value;
+  return `${y}-${m}-01`;
+}
+
+// Aba "RH": Recrutamento (processo seletivo já existente) + Departamento
+// Pessoal (colaboradores, escalas, ponto, banco de horas, afastamentos) —
+// mesmo módulo/permissão (moduleAccess.rh), duas frentes na mesma tela.
 export default function RH() {
-  const { toast } = useToast();
   const { user } = useAuth();
   const canEdit = canEditModule(user, "rh");
+  const [group, setGroup] = useState<"recrutamento" | "dp">("recrutamento");
+  const [dpView, setDpView] = useState<"colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos">("colaboradores");
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <h2 className="text-lg font-bold flex items-center gap-2"><Users className="w-5 h-5 text-primary" /> RH</h2>
+        <div className="flex gap-1.5">
+          <button onClick={() => setGroup("recrutamento")} data-testid="button-rh-group-recrutamento"
+            className={`px-3 py-1.5 rounded-full text-xs font-semibold border ${group === "recrutamento" ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
+            Recrutamento
+          </button>
+          <button onClick={() => setGroup("dp")} data-testid="button-rh-group-dp"
+            className={`px-3 py-1.5 rounded-full text-xs font-semibold border ${group === "dp" ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
+            Departamento Pessoal
+          </button>
+        </div>
+      </div>
+
+      {group === "recrutamento" ? (
+        <Recrutamento canEdit={canEdit} />
+      ) : (
+        <div className="space-y-4">
+          <div className="flex gap-1.5 flex-wrap">
+            {([
+              { key: "colaboradores", label: "Colaboradores", icon: UserSquare2 },
+              { key: "escalas", label: "Escalas", icon: CalendarClock },
+              { key: "ponto", label: "Ponto", icon: Clock },
+              { key: "banco-horas", label: "Banco de horas", icon: Wallet },
+              { key: "afastamentos", label: "Afastamentos", icon: CalendarClock },
+            ] as const).map(({ key, label, icon: Icon }) => (
+              <button key={key} onClick={() => setDpView(key)} data-testid={`button-dp-${key}`}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border ${dpView === key ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
+                <Icon className="w-3.5 h-3.5" /> {label}
+              </button>
+            ))}
+          </div>
+          {dpView === "colaboradores" && <Colaboradores canEdit={canEdit} />}
+          {dpView === "escalas" && <Escalas canEdit={canEdit} />}
+          {dpView === "ponto" && <PontoAdmin canEdit={canEdit} />}
+          {dpView === "banco-horas" && <BancoHoras canEdit={canEdit} />}
+          {dpView === "afastamentos" && <Afastamentos canEdit={canEdit} />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Recrutamento (processo seletivo, já existia) ────────────────────────────
+function Recrutamento({ canEdit }: { canEdit: boolean }) {
+  const { toast } = useToast();
   const [view, setView] = useState<"candidatos" | "processo">("candidatos");
   const [token, setToken] = useState("");
   const [stages, setStages] = useState<RhStage[]>([]);
@@ -104,8 +186,7 @@ export default function RH() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-2 flex-wrap">
-        <h2 className="text-lg font-bold flex items-center gap-2"><Users className="w-5 h-5 text-primary" /> RH — Processo Seletivo</h2>
+      <div className="flex items-center justify-end gap-2 flex-wrap">
         <div className="flex gap-1.5">
           <button onClick={() => setView("candidatos")}
             className={`px-3 py-1.5 rounded-full text-xs font-semibold border ${view === "candidatos" ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
@@ -303,6 +384,693 @@ export default function RH() {
                 )}
               </div>
             </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Colaboradores ────────────────────────────────────────────────────────
+function Colaboradores({ canEdit }: { canEdit: boolean }) {
+  const { toast } = useToast();
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [shifts, setShifts] = useState<WorkShift[]>([]);
+  const [stores, setStores] = useState<Store[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
+  const [editing, setEditing] = useState<Partial<Employee> | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const load = () => api.rhDp.employees.list().then(setEmployees).catch(() => {});
+  useEffect(() => {
+    load();
+    api.rhDp.shifts.list().then(setShifts).catch(() => {});
+    api.stores.list(true).then(setStores).catch(() => {});
+    api.admin.users.list().then(setUsers).catch(() => {});
+  }, []);
+
+  const save = async () => {
+    if (!editing || saving) return;
+    if (!editing.name?.trim()) { toast({ title: "Informe o nome", variant: "destructive" }); return; }
+    setSaving(true);
+    try {
+      if (editing.id) await api.rhDp.employees.update(editing.id, editing);
+      else await api.rhDp.employees.create(editing);
+      setEditing(null);
+      load();
+      toast({ title: "Colaborador salvo!" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setSaving(false); }
+  };
+
+  const remove = async (e: Employee) => {
+    if (!window.confirm(`Excluir o cadastro de ${e.name}? O histórico de ponto dele é mantido.`)) return;
+    try { await api.rhDp.employees.remove(e.id); load(); } catch { toast({ title: "Erro", variant: "destructive" }); }
+  };
+
+  const usersAvailable = users.filter((u) => !employees.some((e) => e.userId === u.id && e.id !== editing?.id));
+
+  return (
+    <div className="space-y-3">
+      {canEdit && (
+        <button onClick={() => setEditing({ isActive: true })} data-testid="button-new-employee"
+          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold">
+          <Plus className="w-3.5 h-3.5" /> Novo colaborador
+        </button>
+      )}
+      {employees.length === 0 ? (
+        <div className="shk-card p-8 text-center text-muted-foreground">
+          <UserSquare2 className="w-8 h-8 mx-auto mb-2 opacity-30" />
+          <p className="text-sm font-semibold">Nenhum colaborador cadastrado</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {employees.map((e) => (
+            <div key={e.id} className={`shk-card p-4 flex items-center gap-3 ${!e.isActive ? "opacity-60" : ""}`} data-testid={`employee-${e.id}`}>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <p className="font-bold text-sm">{e.name}</p>
+                  {!e.isActive && <span className="text-[10px] font-bold border px-2 py-0.5 rounded-full bg-secondary text-muted-foreground">Inativo</span>}
+                  {e.contractType && <span className="text-[10px] font-bold border px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 border-blue-100">{CONTRACT_LABELS[e.contractType]}</span>}
+                  {e.userId && <span className="text-[10px] text-muted-foreground">(login: {e.userName ?? "—"})</span>}
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  {e.role || "Sem cargo"}{e.storeName ? ` · ${e.storeName}` : ""}{e.shiftName ? ` · ${e.shiftName}` : ""}
+                </p>
+              </div>
+              {canEdit && (
+                <div className="flex gap-1">
+                  <button onClick={() => setEditing(e)} className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground"><Pencil className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => remove(e)} className="p-1.5 rounded-lg hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {editing && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="shk-card w-full max-w-lg p-6 my-8 bg-white space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold">{editing.id ? "Editar colaborador" : "Novo colaborador"}</h3>
+              <button onClick={() => setEditing(null)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="col-span-2 text-xs">
+                Nome
+                <input value={editing.name ?? ""} onChange={(ev) => setEditing({ ...editing, name: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" data-testid="input-employee-name" />
+              </label>
+              <label className="text-xs">
+                Cargo
+                <input value={editing.role ?? ""} onChange={(ev) => setEditing({ ...editing, role: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+              <label className="text-xs">
+                Função
+                <input value={editing.jobFunction ?? ""} onChange={(ev) => setEditing({ ...editing, jobFunction: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+              <label className="text-xs">
+                Telefone
+                <input value={editing.phone ?? ""} onChange={(ev) => setEditing({ ...editing, phone: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+              <label className="text-xs">
+                E-mail
+                <input value={editing.email ?? ""} onChange={(ev) => setEditing({ ...editing, email: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+              <label className="text-xs">
+                CPF
+                <input value={editing.cpf ?? ""} onChange={(ev) => setEditing({ ...editing, cpf: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+              <label className="text-xs">
+                RG
+                <input value={editing.rg ?? ""} onChange={(ev) => setEditing({ ...editing, rg: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+              <label className="text-xs">
+                Nascimento
+                <input type="date" value={editing.birthDate ?? ""} onChange={(ev) => setEditing({ ...editing, birthDate: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+              <label className="text-xs">
+                Admissão
+                <input type="date" value={editing.admissionDate ?? ""} onChange={(ev) => setEditing({ ...editing, admissionDate: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+              <label className="text-xs">
+                Contrato
+                <select value={editing.contractType ?? ""} onChange={(ev) => setEditing({ ...editing, contractType: (ev.target.value || null) as Employee["contractType"] })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white">
+                  <option value="">—</option>
+                  <option value="clt">CLT</option>
+                  <option value="pj">PJ</option>
+                  <option value="estagio">Estágio</option>
+                </select>
+              </label>
+              <label className="text-xs">
+                Salário (R$)
+                <input type="number" min={0} value={editing.salaryCents != null ? editing.salaryCents / 100 : ""}
+                  onChange={(ev) => setEditing({ ...editing, salaryCents: ev.target.value ? Math.round(Number(ev.target.value) * 100) : null })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+              <label className="text-xs">
+                Loja
+                <select value={editing.storeId ?? ""} onChange={(ev) => setEditing({ ...editing, storeId: ev.target.value ? Number(ev.target.value) : null })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white">
+                  <option value="">—</option>
+                  {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </label>
+              <label className="text-xs">
+                Escala
+                <select value={editing.shiftId ?? ""} onChange={(ev) => setEditing({ ...editing, shiftId: ev.target.value ? Number(ev.target.value) : null })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white">
+                  <option value="">—</option>
+                  {shifts.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </label>
+              <label className="text-xs col-span-2">
+                Login vinculado (habilita bater ponto pelo próprio usuário)
+                <select value={editing.userId ?? ""} onChange={(ev) => setEditing({ ...editing, userId: ev.target.value ? Number(ev.target.value) : null })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white" data-testid="select-employee-user">
+                  <option value="">Sem login vinculado</option>
+                  {usersAvailable.map((u) => <option key={u.id} value={u.id}>{u.name} ({u.email})</option>)}
+                </select>
+              </label>
+              <label className="flex items-center gap-1.5 text-xs font-medium col-span-2">
+                <input type="checkbox" checked={editing.isActive !== false} onChange={(ev) => setEditing({ ...editing, isActive: ev.target.checked })} />
+                Ativo
+              </label>
+            </div>
+            <button onClick={save} disabled={saving} data-testid="button-save-employee"
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
+              <Save className="w-3.5 h-3.5" /> {saving ? "Salvando..." : "Salvar"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Escalas ──────────────────────────────────────────────────────────────
+function Escalas({ canEdit }: { canEdit: boolean }) {
+  const { toast } = useToast();
+  const [shifts, setShifts] = useState<WorkShift[]>([]);
+  const [editing, setEditing] = useState<Partial<WorkShift> | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const load = () => api.rhDp.shifts.list().then(setShifts).catch(() => {});
+  useEffect(() => { load(); }, []);
+
+  const hasBreak = editing?.breakStart != null && editing?.breakStart !== "" || editing?.breakEnd != null && editing?.breakEnd !== "";
+
+  const toggleWeekday = (d: number) => {
+    if (!editing) return;
+    const cur = editing.weekdays ?? [1, 2, 3, 4, 5];
+    setEditing({ ...editing, weekdays: cur.includes(d) ? cur.filter((x) => x !== d) : [...cur, d].sort() });
+  };
+
+  const save = async () => {
+    if (!editing || saving) return;
+    if (!editing.name?.trim() || !editing.startTime || !editing.endTime) { toast({ title: "Preencha nome, início e fim", variant: "destructive" }); return; }
+    setSaving(true);
+    try {
+      if (editing.id) await api.rhDp.shifts.update(editing.id, editing);
+      else await api.rhDp.shifts.create(editing);
+      setEditing(null);
+      load();
+      toast({ title: "Escala salva!" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setSaving(false); }
+  };
+
+  const remove = async (s: WorkShift) => {
+    if (!window.confirm(`Excluir a escala "${s.name}"? Colaboradores vinculados ficam sem escala.`)) return;
+    try { await api.rhDp.shifts.remove(s.id); load(); } catch { toast({ title: "Erro", variant: "destructive" }); }
+  };
+
+  return (
+    <div className="space-y-3">
+      {canEdit && (
+        <button onClick={() => setEditing({ weekdays: [1, 2, 3, 4, 5] })} data-testid="button-new-shift"
+          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold">
+          <Plus className="w-3.5 h-3.5" /> Nova escala
+        </button>
+      )}
+      {shifts.length === 0 ? (
+        <div className="shk-card p-8 text-center text-muted-foreground">
+          <CalendarClock className="w-8 h-8 mx-auto mb-2 opacity-30" />
+          <p className="text-sm font-semibold">Nenhuma escala cadastrada</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {shifts.map((s) => (
+            <div key={s.id} className="shk-card p-4 flex items-center gap-3" data-testid={`shift-${s.id}`}>
+              <div className="flex-1 min-w-0">
+                <p className="font-bold text-sm">{s.name}</p>
+                <p className="text-[11px] text-muted-foreground">
+                  {s.startTime}–{s.endTime}{s.breakStart && s.breakEnd ? ` (intervalo ${s.breakStart}–${s.breakEnd})` : ""} · {formatMinutes(s.expectedMinutesPerDay)}/dia · {s.weekdays.map((d) => WEEKDAY_LABELS[d]).join(", ")}
+                </p>
+              </div>
+              {canEdit && (
+                <div className="flex gap-1">
+                  <button onClick={() => setEditing(s)} className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground"><Pencil className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => remove(s)} className="p-1.5 rounded-lg hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {editing && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="shk-card w-full max-w-md p-6 my-8 bg-white space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold">{editing.id ? "Editar escala" : "Nova escala"}</h3>
+              <button onClick={() => setEditing(null)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <label className="text-xs block">
+              Nome
+              <input value={editing.name ?? ""} onChange={(ev) => setEditing({ ...editing, name: ev.target.value })}
+                placeholder="Comercial 08-18" className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="text-xs">
+                Início
+                <input type="time" value={editing.startTime ?? ""} onChange={(ev) => setEditing({ ...editing, startTime: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+              <label className="text-xs">
+                Fim
+                <input type="time" value={editing.endTime ?? ""} onChange={(ev) => setEditing({ ...editing, endTime: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+              <label className="text-xs">
+                Intervalo início (opcional)
+                <input type="time" value={editing.breakStart ?? ""} onChange={(ev) => setEditing({ ...editing, breakStart: ev.target.value || null })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+              <label className="text-xs">
+                Intervalo fim (opcional)
+                <input type="time" value={editing.breakEnd ?? ""} onChange={(ev) => setEditing({ ...editing, breakEnd: ev.target.value || null })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+            </div>
+            <div>
+              <p className="text-xs mb-1">Dias da semana</p>
+              <div className="flex gap-1 flex-wrap">
+                {WEEKDAY_LABELS.map((label, d) => (
+                  <button key={d} onClick={() => toggleWeekday(d)} type="button"
+                    className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border ${(editing.weekdays ?? []).includes(d) ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <button onClick={save} disabled={saving} data-testid="button-save-shift"
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
+              <Save className="w-3.5 h-3.5" /> {saving ? "Salvando..." : "Salvar"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Ponto (gestão) ───────────────────────────────────────────────────────
+function PontoAdmin({ canEdit }: { canEdit: boolean }) {
+  const { toast } = useToast();
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [employeeId, setEmployeeId] = useState(0);
+  const [from, setFrom] = useState(firstOfMonthStr());
+  const [to, setTo] = useState(todayStr());
+  const [entries, setEntries] = useState<TimeClockEntry[]>([]);
+  const [manual, setManual] = useState<{ kind: TimeClockEntry["kind"]; at: string } | null>(null);
+
+  useEffect(() => { api.rhDp.employees.list().then(setEmployees).catch(() => {}); }, []);
+
+  const load = () => {
+    api.rhDp.reports.timesheet(`${from}T00:00:00`, `${to}T23:59:59`, employeeId || undefined).then(setEntries).catch(() => {});
+  };
+  useEffect(() => { load(); }, [from, to, employeeId]);
+
+  const removeEntry = async (id: number) => {
+    if (!window.confirm("Excluir esta batida?")) return;
+    try { await api.rhDp.timeClockEntries.remove(id); load(); } catch { toast({ title: "Erro", variant: "destructive" }); }
+  };
+
+  const launchManual = async () => {
+    if (!employeeId || !manual) { toast({ title: "Selecione o colaborador e o tipo de batida", variant: "destructive" }); return; }
+    try {
+      await api.rhDp.employees.punch(employeeId, { kind: manual.kind, at: manual.at ? new Date(manual.at).toISOString() : undefined });
+      setManual(null);
+      load();
+      toast({ title: "Ponto lançado" });
+    } catch (err) {
+      toast({ title: "Erro ao lançar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="shk-card p-4 flex flex-wrap gap-2 items-end">
+        <label className="text-xs">
+          Colaborador
+          <select value={employeeId} onChange={(e) => setEmployeeId(Number(e.target.value))}
+            className="block mt-0.5 px-3 py-1.5 rounded-xl border border-border text-xs bg-white">
+            <option value={0}>Todos</option>
+            {employees.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+          </select>
+        </label>
+        <label className="text-xs">
+          De
+          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="block mt-0.5 px-3 py-1.5 rounded-xl border border-border text-xs" />
+        </label>
+        <label className="text-xs">
+          Até
+          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="block mt-0.5 px-3 py-1.5 rounded-xl border border-border text-xs" />
+        </label>
+        {canEdit && (
+          <button onClick={() => setManual({ kind: "in", at: "" })} data-testid="button-manual-punch"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-primary text-white text-xs font-bold ml-auto">
+            <Plus className="w-3.5 h-3.5" /> Lançar manualmente
+          </button>
+        )}
+      </div>
+
+      {entries.length === 0 ? (
+        <div className="shk-card p-8 text-center text-muted-foreground">
+          <Clock className="w-8 h-8 mx-auto mb-2 opacity-30" />
+          <p className="text-sm font-semibold">Nenhuma batida no período</p>
+        </div>
+      ) : (
+        <div className="shk-card overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-muted-foreground border-b border-border">
+                <th className="text-left py-2 px-3 font-semibold">Colaborador</th>
+                <th className="text-left py-2 px-3 font-semibold">Tipo</th>
+                <th className="text-left py-2 px-3 font-semibold">Quando</th>
+                <th className="text-left py-2 px-3 font-semibold">Origem</th>
+                {canEdit && <th></th>}
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((e) => (
+                <tr key={e.id} className="border-b border-border/50 last:border-0">
+                  <td className="py-2 px-3 font-semibold">{e.employeeName ?? "—"}</td>
+                  <td className="py-2 px-3">{{ in: "Entrada", break_start: "Início intervalo", break_end: "Fim intervalo", out: "Saída" }[e.kind]}</td>
+                  <td className="py-2 px-3">{new Date(e.at).toLocaleString("pt-BR")}</td>
+                  <td className="py-2 px-3">{e.source === "self" ? "Colaborador" : "Manual"}</td>
+                  {canEdit && (
+                    <td className="py-2 px-3 text-right">
+                      <button onClick={() => removeEntry(e.id)} className="p-1 rounded-lg hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {manual && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="shk-card w-full max-w-sm p-6 bg-white space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold">Lançar ponto manualmente</h3>
+              <button onClick={() => setManual(null)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <label className="text-xs block">
+              Tipo
+              <select value={manual.kind} onChange={(e) => setManual({ ...manual, kind: e.target.value as TimeClockEntry["kind"] })}
+                className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white">
+                <option value="in">Entrada</option>
+                <option value="break_start">Início intervalo</option>
+                <option value="break_end">Fim intervalo</option>
+                <option value="out">Saída</option>
+              </select>
+            </label>
+            <label className="text-xs block">
+              Quando (em branco = agora)
+              <input type="datetime-local" value={manual.at} onChange={(e) => setManual({ ...manual, at: e.target.value })}
+                className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+            </label>
+            <button onClick={launchManual} data-testid="button-confirm-manual-punch"
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold">
+              <Save className="w-3.5 h-3.5" /> Lançar
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Banco de horas ───────────────────────────────────────────────────────
+function BancoHoras({ canEdit }: { canEdit: boolean }) {
+  const { toast } = useToast();
+  const [from, setFrom] = useState(firstOfMonthStr());
+  const [to, setTo] = useState(todayStr());
+  const [rows, setRows] = useState<TimeBankSummaryRow[]>([]);
+  const [detail, setDetail] = useState<{ row: TimeBankSummaryRow; result: TimeBankResult } | null>(null);
+  const [adjustment, setAdjustment] = useState<{ minutes: string; reason: string } | null>(null);
+
+  const load = () => api.rhDp.reports.timeBankSummary(`${from}T00:00:00`, `${to}T23:59:59`).then(setRows).catch(() => {});
+  useEffect(() => { load(); }, [from, to]);
+
+  const openDetail = async (row: TimeBankSummaryRow) => {
+    try {
+      const result = await api.rhDp.employees.timeBank(row.employeeId, `${from}T00:00:00`, `${to}T23:59:59`);
+      setDetail({ row, result });
+    } catch { toast({ title: "Erro ao carregar detalhe", variant: "destructive" }); }
+  };
+
+  const saveAdjustment = async () => {
+    if (!detail || !adjustment) return;
+    const minutes = Number(adjustment.minutes);
+    if (!minutes || !adjustment.reason.trim()) { toast({ title: "Informe minutos (≠0) e o motivo", variant: "destructive" }); return; }
+    try {
+      await api.rhDp.employees.addAdjustment(detail.row.employeeId, { minutes, reason: adjustment.reason.trim() });
+      setAdjustment(null);
+      load();
+      openDetail(detail.row);
+      toast({ title: "Ajuste lançado" });
+    } catch (err) {
+      toast({ title: "Erro ao lançar ajuste", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="shk-card p-4 flex flex-wrap gap-2 items-end">
+        <label className="text-xs">
+          De
+          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="block mt-0.5 px-3 py-1.5 rounded-xl border border-border text-xs" />
+        </label>
+        <label className="text-xs">
+          Até
+          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="block mt-0.5 px-3 py-1.5 rounded-xl border border-border text-xs" />
+        </label>
+      </div>
+
+      {rows.length === 0 ? (
+        <div className="shk-card p-8 text-center text-muted-foreground">
+          <Wallet className="w-8 h-8 mx-auto mb-2 opacity-30" />
+          <p className="text-sm font-semibold">Nenhum colaborador ativo</p>
+        </div>
+      ) : (
+        <div className="shk-card overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-muted-foreground border-b border-border">
+                <th className="text-left py-2 px-3 font-semibold">Colaborador</th>
+                <th className="text-right py-2 px-3 font-semibold">Trabalhado</th>
+                <th className="text-right py-2 px-3 font-semibold">Esperado</th>
+                <th className="text-right py-2 px-3 font-semibold">Ajustes</th>
+                <th className="text-right py-2 px-3 font-semibold">Saldo</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.employeeId} onClick={() => openDetail(r)} className="border-b border-border/50 last:border-0 cursor-pointer hover:bg-secondary/30" data-testid={`time-bank-row-${r.employeeId}`}>
+                  <td className="py-2 px-3 font-semibold">{r.employeeName}</td>
+                  <td className="py-2 px-3 text-right">{formatMinutes(r.workedMinutes)}</td>
+                  <td className="py-2 px-3 text-right">{formatMinutes(r.expectedMinutes)}</td>
+                  <td className="py-2 px-3 text-right">{formatMinutes(r.adjustmentMinutes)}</td>
+                  <td className={`py-2 px-3 text-right font-bold ${r.balanceMinutes < 0 ? "text-red-600" : "text-green-700"}`}>{formatMinutes(r.balanceMinutes)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {detail && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="shk-card w-full max-w-lg p-6 my-8 bg-white space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold">{detail.row.employeeName}</h3>
+              <button onClick={() => setDetail(null)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <div className="grid grid-cols-4 gap-2 text-center text-xs">
+              <div className="bg-secondary/40 rounded-xl py-2"><p className="font-bold">{formatMinutes(detail.result.workedMinutes)}</p><p className="text-muted-foreground">Trabalhado</p></div>
+              <div className="bg-secondary/40 rounded-xl py-2"><p className="font-bold">{formatMinutes(detail.result.expectedMinutes)}</p><p className="text-muted-foreground">Esperado</p></div>
+              <div className="bg-secondary/40 rounded-xl py-2"><p className="font-bold">{formatMinutes(detail.result.adjustmentMinutes)}</p><p className="text-muted-foreground">Ajustes</p></div>
+              <div className={`rounded-xl py-2 ${detail.result.balanceMinutes < 0 ? "bg-red-50" : "bg-green-50"}`}>
+                <p className={`font-bold ${detail.result.balanceMinutes < 0 ? "text-red-600" : "text-green-700"}`}>{formatMinutes(detail.result.balanceMinutes)}</p>
+                <p className="text-muted-foreground">Saldo</p>
+              </div>
+            </div>
+            {canEdit && (
+              adjustment ? (
+                <div className="space-y-2 border border-border rounded-xl p-3">
+                  <input type="number" placeholder="Minutos (+ credita, - debita)" value={adjustment.minutes}
+                    onChange={(e) => setAdjustment({ ...adjustment, minutes: e.target.value })}
+                    className="w-full px-3 py-1.5 rounded-xl border border-border text-xs" />
+                  <input placeholder="Motivo" value={adjustment.reason} onChange={(e) => setAdjustment({ ...adjustment, reason: e.target.value })}
+                    className="w-full px-3 py-1.5 rounded-xl border border-border text-xs" />
+                  <div className="flex gap-2">
+                    <button onClick={() => setAdjustment(null)} className="flex-1 px-3 py-1.5 rounded-xl border border-border text-xs font-semibold">Cancelar</button>
+                    <button onClick={saveAdjustment} className="flex-1 px-3 py-1.5 rounded-xl bg-primary text-white text-xs font-bold">Lançar</button>
+                  </div>
+                </div>
+              ) : (
+                <button onClick={() => setAdjustment({ minutes: "", reason: "" })} className="text-[11px] font-semibold text-primary">+ Ajuste manual</button>
+              )
+            )}
+            <div className="max-h-[40vh] overflow-y-auto space-y-1">
+              {detail.result.days.filter((d) => d.entries.length > 0 || d.expectedMinutes > 0).map((d) => (
+                <div key={d.date} className="flex items-center justify-between text-[11px] bg-secondary/30 rounded-lg px-3 py-1.5">
+                  <span>{new Date(`${d.date}T12:00:00`).toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit", month: "2-digit" })}</span>
+                  <span className={!d.complete ? "text-amber-600 font-semibold" : ""}>{!d.complete ? "incompleto" : `${formatMinutes(d.workedMinutes)} / ${formatMinutes(d.expectedMinutes)}`}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Afastamentos ─────────────────────────────────────────────────────────
+function Afastamentos({ canEdit }: { canEdit: boolean }) {
+  const { toast } = useToast();
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [leaves, setLeaves] = useState<LeaveRecord[]>([]);
+  const [creating, setCreating] = useState<{ employeeId: number; kind: LeaveRecord["kind"]; startDate: string; endDate: string; notes: string } | null>(null);
+
+  const load = () => api.rhDp.leaves.list().then(setLeaves).catch(() => {});
+  useEffect(() => {
+    load();
+    api.rhDp.employees.list().then(setEmployees).catch(() => {});
+  }, []);
+
+  const save = async () => {
+    if (!creating) return;
+    if (!creating.employeeId || !creating.startDate || !creating.endDate) { toast({ title: "Preencha colaborador e período", variant: "destructive" }); return; }
+    try {
+      await api.rhDp.leaves.create(creating);
+      setCreating(null);
+      load();
+      toast({ title: "Afastamento lançado" });
+    } catch (err) {
+      toast({ title: "Erro ao lançar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
+  };
+
+  const remove = async (l: LeaveRecord) => {
+    if (!window.confirm("Excluir este afastamento?")) return;
+    try { await api.rhDp.leaves.remove(l.id); load(); } catch { toast({ title: "Erro", variant: "destructive" }); }
+  };
+
+  return (
+    <div className="space-y-3">
+      {canEdit && (
+        <button onClick={() => setCreating({ employeeId: 0, kind: "ferias", startDate: todayStr(), endDate: todayStr(), notes: "" })} data-testid="button-new-leave"
+          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold">
+          <Plus className="w-3.5 h-3.5" /> Lançar afastamento
+        </button>
+      )}
+      {leaves.length === 0 ? (
+        <div className="shk-card p-8 text-center text-muted-foreground">
+          <CalendarClock className="w-8 h-8 mx-auto mb-2 opacity-30" />
+          <p className="text-sm font-semibold">Nenhum afastamento lançado</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {leaves.map((l) => (
+            <div key={l.id} className="shk-card p-4 flex items-center gap-3" data-testid={`leave-${l.id}`}>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <p className="font-bold text-sm">{l.employeeName ?? "—"}</p>
+                  <span className="text-[10px] font-bold border px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border-amber-100">{LEAVE_LABELS[l.kind]}</span>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  {new Date(`${l.startDate}T12:00:00`).toLocaleDateString("pt-BR")} – {new Date(`${l.endDate}T12:00:00`).toLocaleDateString("pt-BR")}
+                  {l.notes ? ` · ${l.notes}` : ""}
+                </p>
+              </div>
+              {canEdit && <button onClick={() => remove(l)} className="p-1.5 rounded-lg hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {creating && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="shk-card w-full max-w-sm p-6 bg-white space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold">Lançar afastamento</h3>
+              <button onClick={() => setCreating(null)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <label className="text-xs block">
+              Colaborador
+              <select value={creating.employeeId} onChange={(e) => setCreating({ ...creating, employeeId: Number(e.target.value) })}
+                className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white">
+                <option value={0}>Selecione</option>
+                {employees.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+              </select>
+            </label>
+            <label className="text-xs block">
+              Tipo
+              <select value={creating.kind} onChange={(e) => setCreating({ ...creating, kind: e.target.value as LeaveRecord["kind"] })}
+                className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white">
+                {Object.entries(LEAVE_LABELS).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+              </select>
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="text-xs">
+                Início
+                <input type="date" value={creating.startDate} onChange={(e) => setCreating({ ...creating, startDate: e.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+              <label className="text-xs">
+                Fim
+                <input type="date" value={creating.endDate} onChange={(e) => setCreating({ ...creating, endDate: e.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+            </div>
+            <label className="text-xs block">
+              Observações
+              <textarea value={creating.notes} onChange={(e) => setCreating({ ...creating, notes: e.target.value })} rows={2}
+                className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm resize-none" />
+            </label>
+            <button onClick={save} data-testid="button-confirm-leave"
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold">
+              <Save className="w-3.5 h-3.5" /> Lançar
+            </button>
           </div>
         </div>
       )}

@@ -18,6 +18,7 @@ import Treinamentos from "./Treinamentos";
 import Documentos from "./Documentos";
 import EquipeOnline from "@/components/EquipeOnline";
 import RH from "./RH";
+import MeuPonto from "./MeuPonto";
 import TeamDirectory from "./TeamDirectory";
 import Suporte from "./Suporte";
 import Sorteios from "./Sorteios";
@@ -43,7 +44,7 @@ import {
 import Resultados from "./Resultados";
 import Relatorios from "./Relatorios";
 
-type Tab = "dashboard" | "resultados" | "relatorios" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "questionarios" | "treinamentos" | "documentos" | "rh" | "sorteios" | "robo" | "financeiro" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "integracoes" | "sistema" | "diretorio" | "suporte";
+type Tab = "dashboard" | "resultados" | "relatorios" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "questionarios" | "treinamentos" | "documentos" | "rh" | "meuponto" | "sorteios" | "robo" | "financeiro" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "integracoes" | "sistema" | "diretorio" | "suporte";
 
 // Categorias colapsáveis do menu lateral — cada aba pertence a um único grupo.
 type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabIds: Tab[] };
@@ -51,7 +52,7 @@ const TAB_GROUPS: TabGroup[] = [
   { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["dashboard", "chat", "equipe", "crm"] },
   { key: "vendas", label: "Vendas e Serviços", icon: ShoppingBag, tabIds: ["avaliacao", "financeiras"] },
   { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["resultados", "relatorios", "tarefas", "documentos", "history", "suporte"] },
-  { key: "pessoas", label: "Pessoas", icon: Users, tabIds: ["diretorio", "rh", "treinamentos", "questionarios", "sorteios", "users"] },
+  { key: "pessoas", label: "Pessoas", icon: Users, tabIds: ["diretorio", "meuponto", "rh", "treinamentos", "questionarios", "sorteios", "users"] },
   { key: "administracao", label: "Administração", icon: Settings, tabIds: ["financeiro", "sectors", "quickreplies", "whatsapp", "robo"] },
   { key: "configuracoes", label: "Configurações", icon: SlidersHorizontal, tabIds: ["aparencia", "integracoes"] },
   { key: "sistema", label: "Sistema (Dev)", icon: Wrench, tabIds: ["sistema"] },
@@ -428,6 +429,7 @@ export default function AdminDashboard() {
     { id: "diretorio" as Tab, label: "Diretório", icon: BookUser, adminOnly: false, module: "diretorio" as OptionalModule },
     { id: "suporte" as Tab, label: "Suporte", icon: LifeBuoy, adminOnly: false },
     { id: "rh" as Tab, label: "RH", icon: UserSearch, adminOnly: true, module: "rh" as OptionalModule },
+    { id: "meuponto" as Tab, label: "Meu Ponto", icon: Clock, adminOnly: false },
     { id: "sorteios" as Tab, label: "Sorteios", icon: Gift, adminOnly: true, module: "sorteios" as OptionalModule },
     { id: "robo" as Tab, label: "Robô", icon: Bot, adminOnly: true, module: "robo" as OptionalModule },
     { id: "history" as Tab, label: "Histórico", icon: ClipboardList, adminOnly: false, module: "history" as OptionalModule },
@@ -757,6 +759,8 @@ export default function AdminDashboard() {
         {tab === "suporte" && <Suporte />}
 
         {tab === "rh" && <RH />}
+
+        {tab === "meuponto" && <MeuPonto />}
 
         {tab === "sorteios" && <Sorteios />}
 
