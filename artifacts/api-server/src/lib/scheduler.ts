@@ -113,6 +113,7 @@ export async function deliverScheduledMessages(): Promise<void> {
         await db.update(conversationsTable).set({
           lastMessage: item.content,
           lastMessageDirection: "outbound",
+          lastMessageSenderName: "Mensagem agendada",
           lastMessageAt: new Date(),
           updatedAt: new Date(),
         }).where(eq(conversationsTable.id, conv.id));

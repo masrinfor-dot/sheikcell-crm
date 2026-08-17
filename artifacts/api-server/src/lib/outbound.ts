@@ -27,6 +27,7 @@ export async function sendOutboundText(conversationId: number, content: string, 
   await db.update(conversationsTable).set({
     lastMessage: content,
     lastMessageDirection: "outbound",
+    lastMessageSenderName: senderName,
     lastMessageAt: new Date(),
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, conv.id));

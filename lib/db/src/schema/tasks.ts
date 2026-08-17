@@ -10,7 +10,6 @@ export const tasksTable = pgTable("tasks", {
   description: text("description"),
   status: text("status").notNull().default("todo"),   // todo | doing | done
   priority: text("priority").notNull().default("media"), // baixa | media | alta
-  assigneeId: integer("assignee_id").references(() => usersTable.id),
   createdById: integer("created_by_id").references(() => usersTable.id),
   sectorId: integer("sector_id").references(() => sectorsTable.id),
   dueDate: timestamp("due_date", { withTimezone: true }),
@@ -18,6 +17,15 @@ export const tasksTable = pgTable("tasks", {
   isArchived: boolean("is_archived").notNull().default(false),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+// Responsáveis pela tarefa (0..N por tarefa — antes era um único assignee_id).
+export const taskAssigneesTable = pgTable("task_assignees", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  taskId: integer("task_id").notNull().references(() => tasksTable.id, { onDelete: "cascade" }),
+  userId: integer("user_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
 // Chat da tarefa: comentários para esclarecer dúvidas e complementar informações.

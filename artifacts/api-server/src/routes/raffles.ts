@@ -225,6 +225,7 @@ async function sendWhatsAppText(conversationId: number, content: string, tenantI
   await db.update(conversationsTable).set({
     lastMessage: content,
     lastMessageDirection: "outbound",
+    lastMessageSenderName: "Sorteio automático",
     lastMessageAt: new Date(),
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, conv.id));

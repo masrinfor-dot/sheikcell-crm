@@ -466,7 +466,7 @@ export default function InternalChat({ docked = false, onActiveConversationChang
       await api.tasks.create({
         title,
         description: `Criada a partir do chat interno — mensagem de ${taskFromMsg.senderName} em ${new Date(taskFromMsg.createdAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}:\n\n"${taskFromMsg.content}"`,
-        assigneeId: taskAssignee ? Number(taskAssignee) : null,
+        assigneeIds: taskAssignee ? [Number(taskAssignee)] : [],
         dueDate: taskDue || null,
       });
       setTaskFromMsg(null);

@@ -40,6 +40,11 @@ export const conversationsTable = pgTable("conversations", {
   // "inbound" = cliente falou por último (não respondida); "outbound" = já respondida.
   lastMessageDirection: text("last_message_direction"),
   lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
+  // Quem mandou a última mensagem: nome do atendente (mensagem manual), ou o
+  // remetente automático (robô, pesquisa, mensagem agendada, sorteio) — mesmo
+  // texto gravado em messages.senderName para aquela mensagem. Null quando o
+  // cliente foi quem mandou por último (lastMessageDirection = "inbound").
+  lastMessageSenderName: text("last_message_sender_name"),
   // Momento em que um vendedor assumiu o atendimento (assigneeId saiu de null).
   // Limpo quando a conversa volta para a fila/potenciais (perde o responsável).
   attendanceStartedAt: timestamp("attendance_started_at", { withTimezone: true }),

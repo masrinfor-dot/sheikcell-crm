@@ -1236,7 +1236,11 @@ export default function ChatCenter({
         }
         setConvs((prev) => prev.map((c) =>
           c.id === conversationId
-            ? { ...c, lastMessage: message.content, lastMessageDirection: message.direction, lastMessageAt: message.createdAt, unreadCount: conversationId === activeId ? 0 : c.unreadCount + 1 }
+            ? {
+                ...c, lastMessage: message.content, lastMessageDirection: message.direction,
+                lastMessageSenderName: message.direction === "outbound" ? message.senderName : null,
+                lastMessageAt: message.createdAt, unreadCount: conversationId === activeId ? 0 : c.unreadCount + 1,
+              }
             : c
         ));
         // Surface received (inbound) messages in the notification bell, in arrival
@@ -2226,6 +2230,14 @@ export default function ChatCenter({
                       <span className="text-[10px] font-bold bg-primary text-primary-foreground rounded-full min-w-[16px] h-4 px-1 flex items-center justify-center shrink-0">{c.unreadCount}</span>
                     )}
                   </div>
+                  {c.lastMessageSenderName && (
+                    <div className="flex items-center gap-1 mt-0.5">
+                      <UserCircle2 className="w-3 h-3 text-indigo-500 shrink-0" />
+                      <span className="text-[10px] text-indigo-600 font-medium truncate" title={`Última mensagem enviada por ${c.lastMessageSenderName}`}>
+                        {c.lastMessageSenderName}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </button>
             ))}

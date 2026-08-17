@@ -25,12 +25,12 @@ type TeamUser = { id: number; name: string; role: string };
 
 type TaskFormData = {
   title: string; description: string; status: TaskStatus; priority: TaskPriority;
-  assigneeId: string; sectorId: string; dueDate: string;
+  assigneeIds: number[]; sectorId: string; dueDate: string;
 };
 
 const emptyForm: TaskFormData = {
   title: "", description: "", status: "todo", priority: "media",
-  assigneeId: "", sectorId: "", dueDate: "",
+  assigneeIds: [], sectorId: "", dueDate: "",
 };
 
 function PriorityBadge({ priority }: { priority: TaskPriority }) {
@@ -120,6 +120,10 @@ function TaskCard({
         </div>
       </div>
 
+      <p className="text-[11px] text-muted-foreground/80 truncate">
+        Criada por {task.createdBy?.name ?? "—"}
+      </p>
+
       {task.description && (
         <p className="text-[13px] leading-relaxed text-muted-foreground line-clamp-3">{task.description}</p>
       )}
@@ -145,7 +149,9 @@ function TaskCard({
       <div className="flex items-center justify-between gap-1 pt-1 border-t border-border">
         <div className="flex items-center gap-1 text-[13px] text-muted-foreground min-w-0">
           <User className="w-3.5 h-3.5 shrink-0" />
-          <span className="truncate">{task.assignee ? task.assignee.name : "Sem responsável"}</span>
+          <span className="truncate">
+            {task.assignees.length > 0 ? task.assignees.map((a) => a.name).join(", ") : "Sem responsável"}
+          </span>
         </div>
         <button onClick={() => onOpenDetail(task)} data-testid={`button-task-detail-${task.id}`}
           className="flex items-center gap-2 text-[11px] text-muted-foreground hover:text-primary transition shrink-0">
@@ -247,7 +253,7 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
       description: t.description ?? "",
       status: t.status,
       priority: t.priority,
-      assigneeId: t.assigneeId ? String(t.assigneeId) : "",
+      assigneeIds: t.assignees.map((a) => a.id),
       sectorId: t.sectorId ? String(t.sectorId) : "",
       dueDate: t.dueDate ? t.dueDate.slice(0, 10) : "",
     });
@@ -399,7 +405,7 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
       description: form.description || undefined,
       status: form.status,
       priority: form.priority,
-      assigneeId: form.assigneeId ? Number(form.assigneeId) : null,
+      assigneeIds: form.assigneeIds,
       sectorId: form.sectorId ? Number(form.sectorId) : null,
       dueDate: form.dueDate ? new Date(form.dueDate).toISOString() : null,
     };
@@ -424,7 +430,7 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
   const PRIORITY_ORDER: Record<string, number> = { alta: 0, media: 1, baixa: 2 };
   const visibleTasks = tasks.filter((t) =>
     (!filterSector || String(t.sectorId ?? "") === filterSector) &&
-    (!filterAssignee || String(t.assigneeId ?? "") === filterAssignee));
+    (!filterAssignee || t.assignees.some((a) => String(a.id) === filterAssignee)));
   const byStatus = (status: TaskStatus) => visibleTasks
     .filter((t) => t.status === status)
     .sort((a, b) => {
@@ -526,7 +532,7 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
                       key={t.id} task={t} onMove={handleMove}
                       onEdit={openEdit} onDelete={handleDelete}
                       colIdx={colIdx}
-                      canComplete={t.assigneeId == null || t.assigneeId === user?.id}
+                      canComplete={t.assignees.length === 0 || t.assignees.some((a) => a.id === user?.id)}
                       onOpenDetail={openDetail}
                       hasUnread={unreadTaskIds.has(t.id)}
                       canEdit={canEdit}
@@ -547,7 +553,7 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
               <div className="min-w-0">
                 <h3 className="font-bold text-sm break-words">{detailTask.title}</h3>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  {detailTask.assignee ? `Responsável: ${detailTask.assignee.name}` : "Sem responsável"}
+                  {detailTask.assignees.length > 0 ? `Responsáveis: ${detailTask.assignees.map((a) => a.name).join(", ")}` : "Sem responsável"}
                   {detailTask.sector ? ` · ${detailTask.sector.name}` : ""}
                 </p>
                 <p className="text-[11px] text-muted-foreground/80 flex items-center gap-1 mt-0.5">
@@ -785,13 +791,29 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
                 </div>
               </div>
               <div>
-                <label className="text-xs font-medium mb-1 block">Responsável</label>
-                <select value={form.assigneeId} onChange={(e) => setForm({ ...form, assigneeId: e.target.value })}
-                  data-testid="select-task-assignee"
-                  className="w-full px-3 py-2 rounded-xl border border-border text-sm">
-                  <option value="">— Sem responsável —</option>
-                  {team.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
-                </select>
+                <label className="text-xs font-medium mb-1 block">
+                  Responsáveis {form.assigneeIds.length > 0 && `(${form.assigneeIds.length})`}
+                </label>
+                <div data-testid="select-task-assignee"
+                  className="w-full max-h-36 overflow-y-auto rounded-xl border border-border text-sm divide-y divide-border">
+                  {team.length === 0 && (
+                    <p className="px-3 py-2 text-xs text-muted-foreground">Nenhum usuário disponível</p>
+                  )}
+                  {team.map((u) => {
+                    const checked = form.assigneeIds.includes(u.id);
+                    return (
+                      <label key={u.id} className="flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-secondary/40">
+                        <input type="checkbox" checked={checked} data-testid={`checkbox-task-assignee-${u.id}`}
+                          onChange={() => setForm((f) => ({
+                            ...f,
+                            assigneeIds: checked ? f.assigneeIds.filter((id) => id !== u.id) : [...f.assigneeIds, u.id],
+                          }))}
+                          className="w-3.5 h-3.5 accent-primary shrink-0" />
+                        <span className="truncate">{u.name}</span>
+                      </label>
+                    );
+                  })}
+                </div>
               </div>
               {isGlobal && (
                 <div>

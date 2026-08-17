@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
-import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, attendanceLogsTable, attendanceStartEventsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, crmPurchasesTable, appSettingsTable } from "@workspace/db";
+import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, attendanceLogsTable, attendanceStartEventsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, taskAssigneesTable, crmPurchasesTable, appSettingsTable } from "@workspace/db";
 import { eq, desc, and, or, lt, gte, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { requireAuth, requireAdmin, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
@@ -625,6 +625,7 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
   await db.update(conversationsTable).set({
     lastMessage: content,
     lastMessageDirection: "outbound",
+    lastMessageSenderName: senderName,
     lastMessageAt: new Date(),
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, id));
@@ -772,6 +773,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
   await db.update(conversationsTable).set({
     lastMessage: content.trim(),
     lastMessageDirection: "outbound",
+    lastMessageSenderName: senderName,
     lastMessageAt: new Date(),
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, id));
@@ -1571,11 +1573,13 @@ router.post("/chat/conversations/:id/schedules", requireAuth, async (req, res): 
     description: `${text}\n\nCliente: ${conv.name} (${conv.phone})`,
     status: "todo",
     priority: "media",
-    assigneeId: req.session.userId ?? null,
     createdById: req.session.userId ?? null,
     sectorId: conv.sectorId,
     dueDate: when,
   }).returning();
+  if (req.session.userId != null) {
+    await db.insert(taskAssigneesTable).values({ tenantId, taskId: task!.id, userId: req.session.userId });
+  }
 
   const [created] = await db.insert(scheduledMessagesTable).values({
     tenantId,

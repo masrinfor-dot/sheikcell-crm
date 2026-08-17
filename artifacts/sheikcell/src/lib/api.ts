@@ -437,7 +437,6 @@ export type Task = {
   description: string | null;
   status: TaskStatus;
   priority: TaskPriority;
-  assigneeId: number | null;
   createdById: number | null;
   sectorId: number | null;
   dueDate: string | null;
@@ -446,7 +445,7 @@ export type Task = {
   createdAt: string;
   updatedAt: string;
   sector: Sector | null;
-  assignee: { id: number; name: string } | null;
+  assignees: { id: number; name: string }[];
   createdBy: { id: number; name: string } | null;
   subtaskTotal?: number;
   subtaskDone?: number;
@@ -689,6 +688,7 @@ export type Conversation = {
   unreadCount: number;
   lastMessage: string | null;
   lastMessageDirection: string | null;
+  lastMessageSenderName: string | null;
   attendanceStartedAt: string | null;
   lastMessageAt: string | null;
   isArchived: boolean;
@@ -1358,11 +1358,11 @@ export const api = {
     list: () => req<Task[]>("/tasks"),
     create: (data: {
       title: string; description?: string; status?: TaskStatus; priority?: TaskPriority;
-      assigneeId?: number | null; sectorId?: number | null; dueDate?: string | null;
+      assigneeIds?: number[]; sectorId?: number | null; dueDate?: string | null;
     }) => req<Task>("/tasks", { method: "POST", body: JSON.stringify(data) }),
     update: (id: number, data: Partial<{
       title: string; description: string; status: TaskStatus; priority: TaskPriority;
-      assigneeId: number | null; sectorId: number | null; dueDate: string | null;
+      assigneeIds: number[]; sectorId: number | null; dueDate: string | null;
       position: number; isArchived: boolean;
     }>) => req<Task>(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     report: () => req<{ bySector: TaskReportBucket[]; byUser: TaskReportBucket[] }>("/tasks/report"),

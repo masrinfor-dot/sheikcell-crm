@@ -9,7 +9,7 @@ process.env["OPENAI_API_KEY"] ??= "sk-fake-isolation-test";
 process.env["WHATSAPP_BRIDGE_URL"] ??= "http://localhost:3002";
 process.env["NODE_ENV"] ??= "development";
 
-const { db, tenantsTable, sectorsTable, conversationsTable, messagesTable, whatsappSessionsTable } = await import("@workspace/db");
+const { db, tenantsTable, sectorsTable, conversationsTable, messagesTable, whatsappSessionsTable, attendanceLogsTable } = await import("@workspace/db");
 const { eq } = await import("drizzle-orm");
 const { processInboundWA, MEDIA_DIR } = await import("./whatsappInbound.ts");
 
@@ -38,6 +38,11 @@ after(async () => {
     if (!m.mediaUrl) continue;
     await unlink(path.join(MEDIA_DIR, path.basename(m.mediaUrl))).catch(() => {});
   }
+  // messages/attendance_logs primeiro: messages.conversation_id não tem
+  // cascade, então apagar conversations antes deixaria as mensagens órfãs e
+  // travando exclusões futuras da mesma loja (restrição de chave estrangeira).
+  await db.delete(messagesTable).where(eq(messagesTable.tenantId, tenantId));
+  await db.delete(attendanceLogsTable).where(eq(attendanceLogsTable.tenantId, tenantId));
   await db.delete(conversationsTable).where(eq(conversationsTable.tenantId, tenantId));
   await db.delete(whatsappSessionsTable).where(eq(whatsappSessionsTable.tenantId, tenantId));
   await db.delete(sectorsTable).where(eq(sectorsTable.tenantId, tenantId));
@@ -102,4 +107,46 @@ test("documentWithCaptionMessage sem legenda: usa o nome do arquivo como preview
   assert.ok(msg, "mensagem deveria ter sido criada");
   assert.equal(msg!.type, "doc");
   assert.equal(msg!.content, "📄 nota-fiscal.pdf", "sem legenda, deveria cair no placeholder com o nome do arquivo");
+});
+
+test("resposta da pesquisa de satisfação com telefone sem o 9º dígito não reabre a conversa resolvida", async () => {
+  // Simula o cenário do bug: a conversa foi salva na forma canônica (COM o
+  // 9º dígito), mas a resposta chega com o JID SEM o 9 (comum em reentregas/
+  // roteamento do WhatsApp). Antes da correção, tryConsumeSurveyReply fazia
+  // match exato de telefone, não achava a conversa, e ela caía no fluxo
+  // normal — que reabre (vira "Potencial") por engano.
+  const canonicalPhone = "5511987776001";
+  const phoneWithout9 = "551187776001";
+
+  const [conv] = await db.insert(conversationsTable).values({
+    tenantId, phone: canonicalPhone, name: "Cliente Pesquisa", channel: "whatsapp",
+    sessionKey, sectorId: (await db.select().from(sectorsTable).where(eq(sectorsTable.tenantId, tenantId)).limit(1))[0]!.id,
+    status: "resolved", assigneeId: null,
+  }).returning();
+
+  const [log] = await db.insert(attendanceLogsTable).values({
+    tenantId, queueEntryId: 0, clientName: "Cliente Pesquisa", clientContact: canonicalPhone,
+    sectorId: conv!.sectorId!, sectorName: "Vendas", channel: "whatsapp", outcome: "completed",
+  }).returning();
+
+  await db.update(conversationsTable).set({
+    pendingSurveyLogId: log!.id, surveySentAt: new Date(), surveyScaleMax: 5, surveyWindowHours: 48,
+  }).where(eq(conversationsTable.id, conv!.id));
+
+  await processInboundWA({
+    sessionKey,
+    isGroupMsg: false,
+    data: {
+      key: { remoteJid: `${phoneWithout9}@s.whatsapp.net`, id: `SURVEYREPLY-${sessionKey}` },
+      pushName: "Cliente Pesquisa",
+      message: { conversation: "5" },
+    },
+  });
+
+  const [updatedConv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, conv!.id)).limit(1);
+  assert.equal(updatedConv!.status, "resolved", "a conversa não deveria reabrir ao responder a pesquisa");
+  assert.equal(updatedConv!.pendingSurveyLogId, null, "a pesquisa deveria ser consumida (deixar de aguardar)");
+
+  const [updatedLog] = await db.select().from(attendanceLogsTable).where(eq(attendanceLogsTable.id, log!.id)).limit(1);
+  assert.equal(updatedLog!.satisfactionRating, 5, "a nota deveria ter sido gravada no atendimento");
 });

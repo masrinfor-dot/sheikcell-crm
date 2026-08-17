@@ -7,7 +7,25 @@ description: Trello-style team task board for organizing atendimento work
 
 A Trello-style team board ("Tarefas" tab in both the vendedor and admin
 dashboards) backed by a `tasks` table. Columns are status todo/doing/done;
-cards carry priority (baixa/media/alta), assignee, sector, due date.
+cards carry priority (baixa/media/alta), assignees (0..N, see below), sector,
+due date, and the creator (`createdById`, shown as "Criada por X" both on the
+card and in the detail modal).
+
+## Multi-assignee (decision)
+
+A task can have zero or more assignees — `task_assignees` join table
+(tenant_id, task_id, user_id), not a single `assignee_id` column (that column
+was dropped in migration 0034). Any one of the assignees (not all) can mark
+the task "done"; a task with no assignees can be completed by anyone with
+access. `PATCH /tasks/:id` and `POST /tasks` take `assigneeIds: number[]`
+(never `assigneeId`). Other tables that reference "the" task assignee (the
+overdue-tasks widget in admin.ts, the ownership-transfer flow when
+deactivating/deleting a user) were updated to join/reassign against
+`task_assignees` instead — check those spots again if you touch task
+ownership transfer logic.
+
+**Why:** a task like "atender esse grupo de clientes" can genuinely need more
+than one person on it; a single owner field forced picking one arbitrarily.
 
 ## Access scoping (decision)
 

@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, conversationParticipantsTable, tasksTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable, accessLogsTable, whatsappSessionsTable, tenantsTable, storesTable } from "@workspace/db";
+import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, conversationParticipantsTable, tasksTable, taskAssigneesTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable, accessLogsTable, whatsappSessionsTable, tenantsTable, storesTable } from "@workspace/db";
 import { eq, sql, desc, asc, and, gte, lt, isNull, isNotNull, notInArray, inArray, or, ilike } from "drizzle-orm";
 import { requireAdmin, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
 import { sanitizePermissions } from "../lib/permissions";
@@ -159,10 +159,11 @@ router.get("/admin/dashboard-attention", requireAdminOrSupervisor, async (req, r
       id: tasksTable.id,
       title: tasksTable.title,
       dueDate: tasksTable.dueDate,
-      assigneeName: usersTable.name,
+      assigneeName: sql<string | null>`string_agg(${usersTable.name}, ', ')`,
     })
     .from(tasksTable)
-    .leftJoin(usersTable, eq(tasksTable.assigneeId, usersTable.id))
+    .leftJoin(taskAssigneesTable, eq(taskAssigneesTable.taskId, tasksTable.id))
+    .leftJoin(usersTable, eq(taskAssigneesTable.userId, usersTable.id))
     .where(and(
       eq(tasksTable.tenantId, tenantId),
       eq(tasksTable.isArchived, false),
@@ -170,6 +171,7 @@ router.get("/admin/dashboard-attention", requireAdminOrSupervisor, async (req, r
       isNotNull(tasksTable.dueDate),
       lt(tasksTable.dueDate, new Date()),
     ))
+    .groupBy(tasksTable.id, tasksTable.title, tasksTable.dueDate)
     .orderBy(asc(tasksTable.dueDate))
     .limit(5);
 
@@ -577,7 +579,15 @@ router.post("/admin/users/:id/deactivate", requireAdmin, async (req, res): Promi
           .values(openConvs.map((c) => ({ tenantId, conversationId: c.id, userId: transferToId })))
           .onConflictDoNothing();
       }
-      await tx.update(tasksTable).set({ assigneeId: transferToId }).where(and(eq(tasksTable.tenantId, tenantId), eq(tasksTable.assigneeId, id)));
+      // Troca o usuário como responsável em suas tarefas, sem duplicar a
+      // linha se o destinatário já for corresponsável na mesma tarefa.
+      await tx.execute(sql`
+        INSERT INTO task_assignees (tenant_id, task_id, user_id)
+        SELECT tenant_id, task_id, ${transferToId} FROM task_assignees
+        WHERE tenant_id = ${tenantId} AND user_id = ${id}
+        ON CONFLICT (task_id, user_id) DO NOTHING
+      `);
+      await tx.delete(taskAssigneesTable).where(and(eq(taskAssigneesTable.tenantId, tenantId), eq(taskAssigneesTable.userId, id)));
       await tx.update(crmContactsTable).set({ attendantId: transferToId, updatedAt: new Date() }).where(and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.attendantId, id)));
     } else {
       await tx.update(conversationsTable)
@@ -664,7 +674,17 @@ router.delete("/admin/users/:id", requireAdmin, async (req, res): Promise<void> 
         .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.assigneeId, id)));
     }
     // Tarefas, agendamentos, clientes do CRM e anotações (todos da loja).
-    await tx.update(tasksTable).set({ assigneeId: transferToId }).where(and(eq(tasksTable.tenantId, tenantId), eq(tasksTable.assigneeId, id)));
+    // task_assignees tem ON DELETE CASCADE em user_id: sem destino, o usuário
+    // simplesmente some da lista de responsáveis quando é excluído abaixo;
+    // com destino, ele entra como responsável ANTES do delete cascatear.
+    if (transferToId != null) {
+      await tx.execute(sql`
+        INSERT INTO task_assignees (tenant_id, task_id, user_id)
+        SELECT tenant_id, task_id, ${transferToId} FROM task_assignees
+        WHERE tenant_id = ${tenantId} AND user_id = ${id}
+        ON CONFLICT (task_id, user_id) DO NOTHING
+      `);
+    }
     await tx.update(tasksTable).set({ createdById: transferToId }).where(and(eq(tasksTable.tenantId, tenantId), eq(tasksTable.createdById, id)));
     await tx.update(scheduledMessagesTable).set({ createdById: transferToId }).where(and(eq(scheduledMessagesTable.tenantId, tenantId), eq(scheduledMessagesTable.createdById, id)));
     await tx.update(crmContactsTable).set({ attendantId: transferToId, updatedAt: new Date() }).where(and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.attendantId, id)));

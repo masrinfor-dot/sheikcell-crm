@@ -294,6 +294,7 @@ async function upsertConversation(
       .set({
         lastMessage: displayContent,
         lastMessageDirection: "inbound",
+        lastMessageSenderName: null,
         lastMessageAt: new Date(),
         unreadCount: sql`${conversationsTable.unreadCount} + 1`,
         updatedAt: new Date(),
@@ -351,6 +352,14 @@ async function tryConsumeSurveyReply(input: {
     rewardText: cfg.rewardText,
   };
 
+  // Mesmas variações de número que upsertConversation() usa pra achar a
+  // conversa (com/sem DDI, com/sem o 9º dígito) — sem isso, uma resposta que
+  // chega com o telefone formatado diferente do que foi salvo (comum: o
+  // WhatsApp às vezes entrega o mesmo contato com/sem o 9º dígito) não bate
+  // no match exato, cai como "não é resposta de pesquisa" e upsertConversation
+  // reabre a conversa resolvida (vira Potencial) por engano.
+  const matchCandidates = phoneVariants(phone);
+
   const outcome = await db.transaction(async (tx) => {
     // Trava a conversa: webhooks concorrentes/reentregues serializam aqui, e
     // só o primeiro encontra a pesquisa pendente (consumo atômico). Escopado
@@ -360,7 +369,7 @@ async function tryConsumeSurveyReply(input: {
       .from(conversationsTable)
       .where(and(
         eq(conversationsTable.tenantId, tenantId),
-        eq(conversationsTable.phone, phone),
+        inArray(conversationsTable.phone, matchCandidates),
         eq(conversationsTable.sessionKey, sessionKey),
         eq(conversationsTable.isArchived, false),
       ))
@@ -442,6 +451,7 @@ async function tryConsumeSurveyReply(input: {
       await tx.update(conversationsTable).set({
         lastMessage: displayContent,
         lastMessageDirection: "inbound",
+        lastMessageSenderName: null,
         lastMessageAt: new Date(),
         updatedAt: new Date(),
       }).where(eq(conversationsTable.id, conv.id));
@@ -727,10 +737,15 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   // Também loga o objeto bruto inteiro, pra identificar o tipo exato sem
   // precisar que o usuário mande print da tela.
   const NOISE_KEYS = new Set(["messageContextInfo", "senderKeyDistributionMessage"]);
-  const rawKeys = msgContent
-    ? Object.keys(msgContent).filter((k) => !NOISE_KEYS.has(k) && (msgContent as Record<string, unknown>)[k] != null)
+  const keysOf = (obj: object | undefined) => obj
+    ? Object.keys(obj).filter((k) => !NOISE_KEYS.has(k) && (obj as Record<string, unknown>)[k] != null)
     : [];
-  const unknownKind = rawKeys[0];
+  const rawKeys = keysOf(msgContent);
+  // Se o desembrulho (ephemeral/view-once/etc.) esvaziou o conteúdo — ex.: um
+  // wrapper novo que ainda não sabemos abrir — cai pro nome do campo bruto
+  // ORIGINAL (antes do unwrap), pra nunca mostrar a mensagem sem nenhuma
+  // pista do que ela é.
+  const unknownKind = rawKeys[0] ?? keysOf(rawMsg)[0];
   if (!mediaType && !text && !contactText && !locationText && !pollText && !productText && !paymentText && !groupInviteText && !interactiveText) {
     logger.warn({ rawKeys, msgContent }, "Tipo de mensagem WhatsApp não mapeado — caiu no fallback");
   }
