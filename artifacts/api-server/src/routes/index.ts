@@ -30,6 +30,7 @@ import superadminSaasRouter from "./superadminSaas";
 import systemBoardRouter from "./systemBoard";
 import teamDirectoryRouter from "./teamDirectory";
 import ticketsRouter from "./tickets";
+import tvboxRouter from "./tvbox";
 
 const router: IRouter = Router();
 router.use(healthRouter);
@@ -67,5 +68,6 @@ router.use(relatoriosRouter);
 router.use(systemBoardRouter);
 router.use(teamDirectoryRouter);
 router.use(ticketsRouter);
+router.use(tvboxRouter);
 
 export default router;

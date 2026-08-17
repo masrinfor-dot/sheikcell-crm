@@ -291,5 +291,15 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("./timeBankClosures").then((m) => m.closeMonthlyTimeBanks()).catch(() => {});
   }, 60 * 60_000);
+  // TV Box: garante as mensalidades do mês corrente (idempotente, mesmo
+  // espírito da mensalidade das lojas acima) e dispara lembrete/cobrança.
+  void import("./tvBoxBilling").then((m) => m.runTvBoxMonthlyBilling()).catch(() => {});
+  setInterval(() => {
+    void import("./tvBoxBilling").then((m) => m.runTvBoxMonthlyBilling()).catch(() => {});
+  }, 60 * 60_000);
+  setInterval(() => {
+    void import("./tvBoxMessaging").then((m) => m.sendTvBoxReminders()).catch(() => {});
+    void import("./tvBoxMessaging").then((m) => m.sendTvBoxCharges()).catch(() => {});
+  }, 30 * 60_000);
   logger.info("Agendador de mensagens iniciado (tick 30s)");
 }

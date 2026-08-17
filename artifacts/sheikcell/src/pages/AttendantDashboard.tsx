@@ -12,6 +12,7 @@ import { useChatExpandListener } from "@/lib/chatWidgetBus";
 import TaskBoard from "./TaskBoard";
 import Financeiras from "./Financeiras";
 import Avaliacao from "./Avaliacao";
+import TvBox from "./TvBox";
 import ChecklistGate from "@/components/ChecklistGate";
 import PontoGate from "@/components/PontoGate";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
@@ -28,13 +29,13 @@ import Documentos from "./Documentos";
 import {
   LogOut, KeyRound, Clock, PhoneCall, CheckCircle,
   ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, BadgeDollarSign, GraduationCap, Gift, Bot, UserSearch, ClipboardList, TrendingUp,
-  FolderArchive, BookUser, LifeBuoy,
+  FolderArchive, BookUser, LifeBuoy, Tv,
 } from "lucide-react";
 import Resultados from "./Resultados";
 import TeamDirectory from "./TeamDirectory";
 import Suporte from "./Suporte";
 
-type MainTab = "queue" | "resultados" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "avaliacao" | "treinamentos" | "documentos" | "financeiro" | "sorteios" | "robo" | "rh" | "meuponto" | "questionarios" | "diretorio" | "suporte";
+type MainTab = "queue" | "resultados" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "avaliacao" | "treinamentos" | "documentos" | "financeiro" | "sorteios" | "robo" | "rh" | "meuponto" | "questionarios" | "diretorio" | "suporte" | "tvbox";
 
 // Todas as abas que dependem de módulo — visibilidade decidida por
 // moduleGranted() (loja contratou E usuário tem acesso), ver mais abaixo.
@@ -47,6 +48,7 @@ const MAIN_TABS: { id: MainTab; label: string; icon: typeof PhoneCall; module?: 
   { id: "crm" as MainTab, label: "CRM", icon: Kanban, module: "crm" },
   { id: "financeiras" as MainTab, label: "Financeiras", icon: Landmark, module: "financeiras" },
   { id: "avaliacao" as MainTab, label: "Avaliação", icon: BadgeDollarSign, module: "avaliacao" },
+  { id: "tvbox" as MainTab, label: "TV Box", icon: Tv, module: "tvbox" },
   { id: "treinamentos" as MainTab, label: "Treinamentos", icon: GraduationCap, module: "treinamentos" },
   { id: "documentos" as MainTab, label: "Documentos", icon: FolderArchive, module: "documentos" },
   { id: "diretorio" as MainTab, label: "Diretório", icon: BookUser, module: "diretorio" },
@@ -366,6 +368,12 @@ export default function AttendantDashboard() {
       {mainTab === "financeiras" && (
         <div className="max-w-6xl mx-auto px-2 md:px-4 py-3 md:py-4">
           <Financeiras />
+        </div>
+      )}
+
+      {mainTab === "tvbox" && (
+        <div className="max-w-6xl mx-auto px-2 md:px-4 py-3 md:py-4">
+          <TvBox />
         </div>
       )}
 

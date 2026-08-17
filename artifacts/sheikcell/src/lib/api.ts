@@ -102,7 +102,7 @@ export type User = {
 export const OPTIONAL_MODULES = [
   "chat", "crm", "equipe", "financeiro", "diretorio", "tarefas", "resultados", "history",
   "avaliacao", "financeiras", "rh", "treinamentos", "questionarios", "sorteios", "documentos", "robo",
-  "relatorios",
+  "relatorios", "tvbox",
 ] as const;
 export type OptionalModule = typeof OPTIONAL_MODULES[number];
 
@@ -132,6 +132,7 @@ export const MODULE_LABELS: Record<OptionalModule, string> = {
   documentos: "Documentos",
   robo: "Robô",
   relatorios: "Relatórios",
+  tvbox: "TV Box",
 };
 // "Básico" = o conjunto padrão do CRM (o que antes era núcleo sempre ligado);
 // "Completo" = básico + todos os módulos de negócio adicionais.
@@ -641,6 +642,55 @@ export type LeaveRecord = {
 
 export type PartnerLink = {
   id: number; name: string; url: string; position: number; createdAt: string;
+};
+
+export type TvBoxClientStatus = "ativo" | "suspenso" | "cancelado";
+export type TvBoxInvoiceStatus = "pendente" | "pago" | "cancelado";
+
+export type TvBoxInvoice = {
+  id: number;
+  clientId: number;
+  description: string;
+  amountCents: number;
+  dueDate: string;
+  billingMonth: string | null;
+  status: TvBoxInvoiceStatus;
+  paidAt: string | null;
+  reminderSentAt: string | null;
+  lastChargeSentAt: string | null;
+  createdAt: string;
+  overdue: boolean;
+};
+
+export type TvBoxClient = {
+  id: number;
+  name: string;
+  phone: string;
+  monthlyValueCents: number;
+  dueDay: number;
+  status: TvBoxClientStatus;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+  pendingInvoice: TvBoxInvoice | null;
+  overdue: boolean;
+  daysLate: number;
+};
+
+export type TvBoxOverview = {
+  activeClients: number;
+  pendingCents: number;
+  pendingCount: number;
+  overdueCents: number;
+  overdueCount: number;
+};
+
+export type TvBoxSettings = {
+  enabled: boolean;
+  reminderDaysBefore: number;
+  overdueMessageIntervalDays: number;
+  reminderMessageTemplate: string;
+  chargeMessageTemplate: string;
 };
 
 export type Branding = {
@@ -1338,6 +1388,28 @@ export const api = {
     update: (id: number, data: Partial<{ name: string; url: string }>) =>
       req<PartnerLink>(`/partner-links/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/partner-links/${id}`, { method: "DELETE" }),
+  },
+  tvbox: {
+    clients: {
+      list: () => req<TvBoxClient[]>("/tvbox/clients"),
+      create: (data: { name: string; phone: string; monthlyValueCents: number; dueDay: number; notes?: string }) =>
+        req<TvBoxClient>("/tvbox/clients", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<{
+        name: string; phone: string; monthlyValueCents: number; dueDay: number; status: TvBoxClientStatus; notes: string;
+      }>) => req<TvBoxClient>(`/tvbox/clients/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    },
+    invoices: {
+      list: (clientId?: number) => req<TvBoxInvoice[]>(`/tvbox/invoices${clientId ? `?clientId=${clientId}` : ""}`),
+      update: (id: number, status: TvBoxInvoiceStatus) =>
+        req<TvBoxInvoice>(`/tvbox/invoices/${id}`, { method: "PATCH", body: JSON.stringify({ status }) }),
+      generate: () => req<{ created: number }>("/tvbox/invoices/generate", { method: "POST" }),
+    },
+    overview: () => req<TvBoxOverview>("/tvbox/overview"),
+    settings: {
+      get: () => req<TvBoxSettings>("/tvbox/settings"),
+      update: (data: Partial<TvBoxSettings>) =>
+        req<TvBoxSettings>("/tvbox/settings", { method: "PATCH", body: JSON.stringify(data) }),
+    },
   },
   settings: {
     get: () => req<AppSettings>("/settings"),
