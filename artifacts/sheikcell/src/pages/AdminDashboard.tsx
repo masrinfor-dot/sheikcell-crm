@@ -145,6 +145,15 @@ export default function AdminDashboard() {
   // Modals
   const [showAddUser, setShowAddUser] = useState(false);
   const [editUser, setEditUser] = useState<UserRow | null>(null);
+  // Seções colapsáveis do formulário de usuário — só "Dados básicos" abre por
+  // padrão (formulário completo era grande demais pra caber sem dar scroll/
+  // reduzir o zoom da tela).
+  const [openUserSections, setOpenUserSections] = useState<Set<string>>(new Set(["basico"]));
+  const toggleUserSection = (key: string) => setOpenUserSections((prev) => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
   // Modal de permissões individuais do vendedor
   const [permUser, setPermUser] = useState<UserRow | null>(null);
   const [permDraft, setPermDraft] = useState<Record<string, boolean>>({});
@@ -290,11 +299,13 @@ export default function AdminDashboard() {
   const openAddUser = () => {
     setEditUser(null);
     setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorId: sectors[0]?.id ?? 1, storeName: "", extension: "", adminAccess: [], moduleAccess: {}, ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [] });
+    setOpenUserSections(new Set(["basico"]));
     setShowAddUser(true);
   };
   const openEditUser = (u: UserRow) => {
     setEditUser(u);
     setUserForm({ name: u.name, email: u.email, password: "", role: u.role, sectorId: u.sectorId ?? 1, storeName: u.storeName ?? "", extension: u.extension ?? "", adminAccess: u.adminAccess ?? [], moduleAccess: u.moduleAccess ?? {}, ahEnabled: !!u.accessHours, ahStart: u.accessHours?.start ?? "08:00", ahEnd: u.accessHours?.end ?? "18:00", ahDays: u.accessHours?.days?.length ? u.accessHours.days : [1, 2, 3, 4, 5, 6], waEnabled: !!u.allowedSessionKeys, waKeys: u.allowedSessionKeys ?? [] });
+    setOpenUserSections(new Set(["basico"]));
     setShowAddUser(true);
   };
   const handleSaveUser = async (e: React.FormEvent) => {
@@ -1523,56 +1534,73 @@ export default function AdminDashboard() {
       {/* ===== USER MODAL ===== */}
       {showAddUser && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 overflow-y-auto">
-          <div className="shk-card w-full max-w-lg p-6 my-8 bg-white">
+          <div className="shk-card w-full max-w-lg md:max-w-2xl p-6 my-8 bg-white">
             <div className="flex items-center justify-between mb-4">
               <h3 className="font-bold">{editUser ? "Editar Usuário" : "Novo Usuário"}</h3>
               <button onClick={() => setShowAddUser(false)}><X className="w-5 h-5 text-muted-foreground" /></button>
             </div>
-            <form onSubmit={handleSaveUser} className="space-y-5">
+            <form onSubmit={handleSaveUser} className="space-y-4">
               {/* Dados básicos */}
-              <div className="space-y-3">
-                <div>
-                  <label className="text-xs font-medium mb-1 block">Nome *</label>
-                  <input required placeholder="João da Silva" value={userForm.name}
-                    onChange={(e) => setUserForm({ ...userForm, name: e.target.value })}
-                    className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
-                </div>
-                <div>
-                  <label className="text-xs font-medium mb-1 block">Email *</label>
-                  <input required type="email" placeholder="joao@sheikcell.com" value={userForm.email}
-                    onChange={(e) => setUserForm({ ...userForm, email: e.target.value })}
-                    className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
-                </div>
-                <div>
-                  <label className="text-xs font-medium mb-1 block">{editUser ? "Nova senha (deixe em branco para manter)" : "Senha *"}</label>
-                  <input type="password" placeholder="••••••••" required={!editUser} value={userForm.password}
-                    onChange={(e) => setUserForm({ ...userForm, password: e.target.value })}
-                    className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-xs font-medium mb-1 block">Perfil</label>
-                    <select value={userForm.role} onChange={(e) => setUserForm({ ...userForm, role: e.target.value })}
-                      className="w-full px-3 py-2 rounded-xl border border-border text-sm">
-                      <option value="vendedor">Vendedor</option>
-                      <option value="supervisor">Supervisor</option>
-                      <option value="admin">Administrador</option>
-                    </select>
+              <div>
+                <button type="button" onClick={() => toggleUserSection("basico")} data-testid="usersection-toggle-basico"
+                  className="flex items-center gap-2 w-full py-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground hover:text-foreground transition">
+                  <span className="flex-1 text-left">Dados básicos</span>
+                  <ChevronDown className={`w-3.5 h-3.5 shrink-0 transition-transform ${openUserSections.has("basico") ? "" : "-rotate-90"}`} />
+                </button>
+                {openUserSections.has("basico") && (
+                  <div className="space-y-3 mt-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-xs font-medium mb-1 block">Nome *</label>
+                        <input required placeholder="João da Silva" value={userForm.name}
+                          onChange={(e) => setUserForm({ ...userForm, name: e.target.value })}
+                          className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium mb-1 block">Email *</label>
+                        <input required type="email" placeholder="joao@sheikcell.com" value={userForm.email}
+                          onChange={(e) => setUserForm({ ...userForm, email: e.target.value })}
+                          className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium mb-1 block">{editUser ? "Nova senha (deixe em branco para manter)" : "Senha *"}</label>
+                      <input type="password" placeholder="••••••••" required={!editUser} value={userForm.password}
+                        onChange={(e) => setUserForm({ ...userForm, password: e.target.value })}
+                        className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-xs font-medium mb-1 block">Perfil</label>
+                        <select value={userForm.role} onChange={(e) => setUserForm({ ...userForm, role: e.target.value })}
+                          className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                          <option value="vendedor">Vendedor</option>
+                          <option value="supervisor">Supervisor</option>
+                          <option value="admin">Administrador</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium mb-1 block">Setor</label>
+                        <select value={userForm.sectorId} onChange={(e) => setUserForm({ ...userForm, sectorId: Number(e.target.value) })}
+                          className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                          {sectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                        </select>
+                      </div>
+                    </div>
                   </div>
-                  <div>
-                    <label className="text-xs font-medium mb-1 block">Setor</label>
-                    <select value={userForm.sectorId} onChange={(e) => setUserForm({ ...userForm, sectorId: Number(e.target.value) })}
-                      className="w-full px-3 py-2 rounded-xl border border-border text-sm">
-                      {sectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                    </select>
-                  </div>
-                </div>
+                )}
               </div>
 
               {/* Acesso e restrições (só vendedor) */}
               {userForm.role === "vendedor" && (
-                <div className="space-y-3 pt-4 border-t border-border">
-                  <p className="text-[11px] font-bold uppercase tracking-wide text-muted-foreground">Acesso e restrições</p>
+                <div className="pt-3 border-t border-border">
+                  <button type="button" onClick={() => toggleUserSection("acesso")} data-testid="usersection-toggle-acesso"
+                    className="flex items-center gap-2 w-full py-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground hover:text-foreground transition">
+                    <span className="flex-1 text-left">Acesso e restrições</span>
+                    <ChevronDown className={`w-3.5 h-3.5 shrink-0 transition-transform ${openUserSections.has("acesso") ? "" : "-rotate-90"}`} />
+                  </button>
+                  {openUserSections.has("acesso") && (
+                  <div className="space-y-3 mt-2">
                   <div>
                     <label className="flex items-center gap-2 text-xs font-medium mb-1">
                       <input type="checkbox" checked={userForm.ahEnabled} data-testid="toggle-access-hours"
@@ -1627,13 +1655,21 @@ export default function AdminDashboard() {
                       )}
                     </div>
                   )}
+                  </div>
+                  )}
                 </div>
               )}
 
               {/* Permissões (não-admin) */}
               {userForm.role !== "admin" && (
-                <div className="space-y-3 pt-4 border-t border-border">
-                  <p className="text-[11px] font-bold uppercase tracking-wide text-muted-foreground">Permissões</p>
+                <div className="pt-3 border-t border-border">
+                  <button type="button" onClick={() => toggleUserSection("permissoes")} data-testid="usersection-toggle-permissoes"
+                    className="flex items-center gap-2 w-full py-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground hover:text-foreground transition">
+                    <span className="flex-1 text-left">Permissões</span>
+                    <ChevronDown className={`w-3.5 h-3.5 shrink-0 transition-transform ${openUserSections.has("permissoes") ? "" : "-rotate-90"}`} />
+                  </button>
+                  {openUserSections.has("permissoes") && (
+                  <div className="space-y-3 mt-2">
                   <div>
                     <label className="flex items-center gap-2 text-xs font-medium">
                       <input type="checkbox" checked={userForm.adminAccess.includes("whatsapp")} data-testid="toggle-admin-access-whatsapp"
@@ -1669,12 +1705,20 @@ export default function AdminDashboard() {
                       })}
                     </div>
                   </div>
+                  </div>
+                  )}
                 </div>
               )}
 
               {/* Outras informações */}
-              <div className="space-y-3 pt-4 border-t border-border">
-                <p className="text-[11px] font-bold uppercase tracking-wide text-muted-foreground">Outras informações</p>
+              <div className="pt-3 border-t border-border">
+                <button type="button" onClick={() => toggleUserSection("outras")} data-testid="usersection-toggle-outras"
+                  className="flex items-center gap-2 w-full py-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground hover:text-foreground transition">
+                  <span className="flex-1 text-left">Outras informações</span>
+                  <ChevronDown className={`w-3.5 h-3.5 shrink-0 transition-transform ${openUserSections.has("outras") ? "" : "-rotate-90"}`} />
+                </button>
+                {openUserSections.has("outras") && (
+                <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-medium mb-1 block">Loja (para redes de lojas)</label>
                   <select value={userForm.storeName} onChange={(e) => setUserForm({ ...userForm, storeName: e.target.value })}
@@ -1697,6 +1741,8 @@ export default function AdminDashboard() {
                     className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
                   <p className="text-[10px] text-muted-foreground mt-1">Aparece no Diretório interno de contatos.</p>
                 </div>
+                </div>
+                )}
               </div>
 
               <div className="flex gap-2 pt-1">
