@@ -2,7 +2,7 @@ import { useCallback, useState } from "react";
 import { MessageCircle, X, Maximize2, Headphones, MessagesSquare } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { useInternalChatNotifier } from "@/hooks/useInternalChatNotifier";
-import { requestChatExpand } from "@/lib/chatWidgetBus";
+import { requestChatExpand, useAtendimentoTabVisible } from "@/lib/chatWidgetBus";
 import ChatCenter from "@/pages/ChatCenter";
 import InternalChat from "@/pages/InternalChat";
 
@@ -24,6 +24,10 @@ export default function GlobalChatWidget() {
     || ((user?.enabledModules == null || user.enabledModules.includes("equipe"))
       && user?.moduleAccess != null && "equipe" in user.moduleAccess);
   const [open, setOpen] = useState(false);
+  // Escondido enquanto o usuário já está na aba Atendimento do dashboard —
+  // sem isso o botão flutuante (fixed bottom-right) fica em cima do botão
+  // de enviar do composer, que também encosta no canto direito ali.
+  const hideBubble = useAtendimentoTabVisible();
   const [activeTab, setActiveTab] = useState<WidgetTab>("atendimento");
   // Sem permissão de chat interno, o widget só tem a aba Atendimento.
   const effectiveTab: WidgetTab = canEquipe ? activeTab : "atendimento";
@@ -52,7 +56,7 @@ export default function GlobalChatWidget() {
   return (
     <>
       <div
-        className={`fixed z-40 bottom-24 right-4 md:bottom-24 md:right-6 w-[calc(100vw-2rem)] max-w-[380px] h-[min(560px,calc(var(--vvh,100vh)-8rem))] bg-white rounded-2xl shadow-2xl border border-border flex-col overflow-hidden ${open ? "flex" : "hidden"}`}
+        className={`fixed z-40 bottom-24 right-4 md:bottom-24 md:right-6 w-[calc(100vw-2rem)] max-w-[380px] h-[min(560px,calc(var(--vvh,100vh)-8rem))] bg-white rounded-2xl shadow-2xl border border-border flex-col overflow-hidden ${open && !hideBubble ? "flex" : "hidden"}`}
         data-testid="panel-global-chat-widget"
       >
         <div className="flex items-center shrink-0 border-b border-border bg-white">
@@ -102,6 +106,7 @@ export default function GlobalChatWidget() {
         )}
       </div>
 
+      {!hideBubble && (
       <button
         onClick={() => setOpen((v) => !v)}
         data-testid="button-global-chat-widget"
@@ -115,6 +120,7 @@ export default function GlobalChatWidget() {
           </span>
         )}
       </button>
+      )}
     </>
   );
 }

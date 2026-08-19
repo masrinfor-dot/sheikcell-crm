@@ -8,7 +8,7 @@ import { useInternalChatNotifier } from "@/hooks/useInternalChatNotifier";
 import CrmBoard from "./CrmBoard";
 import ChatCenter from "./ChatCenter";
 import InternalChat from "./InternalChat";
-import { useChatExpandListener } from "@/lib/chatWidgetBus";
+import { useChatExpandListener, setAtendimentoTabVisible } from "@/lib/chatWidgetBus";
 import TaskBoard from "./TaskBoard";
 import Financeiras from "./Financeiras";
 import Avaliacao from "./Avaliacao";
@@ -74,6 +74,14 @@ export default function AttendantDashboard() {
   const { toast } = useToast();
 
   const [mainTab, setMainTab] = useState<MainTab>("queue");
+
+  // Some/aparece o balão flutuante global (GlobalChatWidget) conforme a aba
+  // Atendimento fica visível ou não — evita o botão dele ficar em cima do
+  // botão de enviar do composer, que também encosta no canto direito aqui.
+  useEffect(() => {
+    setAtendimentoTabVisible(mainTab === "chat" || mainTab === "equipe");
+    return () => setAtendimentoTabVisible(false);
+  }, [mainTab]);
   const enabledModules = user?.enabledModules ?? null;
   const userModuleAccess = user?.moduleAccess ?? null;
   // Loja precisa ter contratado o módulo E (exceto Atendimento, nunca

@@ -5,7 +5,7 @@ import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
 import { useInternalChatNotifier } from "@/hooks/useInternalChatNotifier";
-import { useChatExpandListener } from "@/lib/chatWidgetBus";
+import { useChatExpandListener, setAtendimentoTabVisible } from "@/lib/chatWidgetBus";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
 
 const CHAT_EVENTS_URL = "/api/chat/events";
@@ -98,6 +98,14 @@ export default function AdminDashboard() {
   const { toast } = useToast();
   const [tab, setTab] = useState<Tab>("dashboard");
   const internalChatUnread = useInternalChatNotifier(user?.id, tab === "equipe");
+
+  // Some/aparece o balão flutuante global (GlobalChatWidget) conforme a aba
+  // Atendimento fica visível ou não — evita o botão dele ficar em cima do
+  // botão de enviar do composer, que também encosta no canto direito aqui.
+  useEffect(() => {
+    setAtendimentoTabVisible(tab === "chat" || tab === "equipe");
+    return () => setAtendimentoTabVisible(false);
+  }, [tab]);
 
   // Alarme de sem resposta clicado em outra aba → volta para o chat.
   useEffect(() => {

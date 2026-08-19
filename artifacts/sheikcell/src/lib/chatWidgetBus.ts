@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 // Sinal fora do React pra pedir "abre essa conversa em tela cheia" a partir
 // do widget flutuante — o mini-chat (docked) e o chat completo são
@@ -28,4 +28,33 @@ export function useChatExpandListener(cb: (req: ChatExpandRequest) => void): voi
     listener = cb;
     return () => { if (listener === cb) listener = null; };
   }, [cb]);
+}
+
+// Sinal fora do React: "a aba Atendimento está a vista agora?" — os
+// dashboards (Admin/Attendant) publicam isso ao trocar de aba. O
+// GlobalChatWidget assina pra esconder o próprio balão/toggle quando o
+// usuário já está direto na Central de Atendimento: sem isso, o botão
+// flutuante (fixed bottom-right) fica sobreposto ao botão de enviar do
+// composer, que também encosta no canto direito da tela nessa tela.
+let atendimentoTabVisible = false;
+let atendimentoTabVisibleListeners: Array<(v: boolean) => void> = [];
+
+/** Chamado pelo AdminDashboard/AttendantDashboard ao trocar de aba. */
+export function setAtendimentoTabVisible(visible: boolean): void {
+  if (atendimentoTabVisible === visible) return;
+  atendimentoTabVisible = visible;
+  atendimentoTabVisibleListeners.forEach((cb) => cb(visible));
+}
+
+/** Assinado pelo GlobalChatWidget. */
+export function useAtendimentoTabVisible(): boolean {
+  const [visible, setVisible] = useState(atendimentoTabVisible);
+  useEffect(() => {
+    setVisible(atendimentoTabVisible); // sincroniza caso tenha mudado antes de montar
+    atendimentoTabVisibleListeners.push(setVisible);
+    return () => {
+      atendimentoTabVisibleListeners = atendimentoTabVisibleListeners.filter((cb) => cb !== setVisible);
+    };
+  }, []);
+  return visible;
 }
