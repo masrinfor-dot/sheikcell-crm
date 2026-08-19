@@ -175,6 +175,7 @@ export type InternalConversation = {
   lastMessage: string | null;
   lastMessageAt: string | null;
   unreadCount: number;
+  pinnedMessage: { id: number; senderName: string; content: string; type: "text" | "image" | "audio" | "doc" } | null;
 };
 
 export type Store = {
@@ -1150,6 +1151,11 @@ export const api = {
     forward: (messageId: number, conversationIds: number[]) =>
       req<{ ok: boolean; sent: { conversationId: number; message: InternalMessage }[] }>(
         `/internal-chat/messages/${messageId}/forward`, { method: "POST", body: JSON.stringify({ conversationIds }) }),
+    pin: (conversationId: number, messageId: number) =>
+      req<{ ok: boolean; pinnedMessage: InternalConversation["pinnedMessage"] }>(
+        `/internal-chat/conversations/${conversationId}/pin`, { method: "POST", body: JSON.stringify({ messageId }) }),
+    unpin: (conversationId: number) =>
+      req<{ ok: boolean }>(`/internal-chat/conversations/${conversationId}/pin`, { method: "DELETE" }),
   },
   crm: {
     list: (params?: { profile?: string; status?: string; search?: string }) => {

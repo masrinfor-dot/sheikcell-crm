@@ -175,6 +175,7 @@ router.get("/internal-chat/conversations", requireAuth, async (req, res): Promis
       lastMessage: internalConversationsTable.lastMessage,
       lastMessageAt: internalConversationsTable.lastMessageAt,
       createdAt: internalConversationsTable.createdAt,
+      pinnedMessageId: internalConversationsTable.pinnedMessageId,
     })
     .from(internalConversationMembersTable)
     .innerJoin(internalConversationsTable, eq(internalConversationMembersTable.conversationId, internalConversationsTable.id))
@@ -230,6 +231,18 @@ router.get("/internal-chat/conversations", requireAuth, async (req, res): Promis
   const unreadMap: Record<number, number> = {};
   for (const u of unreadRows) unreadMap[u.conversationId] = u.count;
 
+  // Mensagens fixadas: uma busca em lote (mesmo padrão de "others" acima).
+  const pinnedIds = [...new Set(memberships.map((m) => m.pinnedMessageId).filter((id): id is number => id != null))];
+  const pinnedRows = pinnedIds.length > 0
+    ? await db
+        .select({ id: internalMessagesTable.id, senderName: usersTable.name, content: internalMessagesTable.content, type: internalMessagesTable.type })
+        .from(internalMessagesTable)
+        .innerJoin(usersTable, eq(internalMessagesTable.senderId, usersTable.id))
+        .where(inArray(internalMessagesTable.id, pinnedIds))
+    : [];
+  const pinnedMap: Record<number, { id: number; senderName: string; content: string; type: string }> = {};
+  for (const p of pinnedRows) pinnedMap[p.id] = p;
+
   const result = memberships.map((m) => {
     const other = otherMap[m.conversationId] ?? null;
     return {
@@ -243,6 +256,7 @@ router.get("/internal-chat/conversations", requireAuth, async (req, res): Promis
       lastMessage: m.lastMessage,
       lastMessageAt: m.lastMessageAt,
       unreadCount: unreadMap[m.conversationId] ?? 0,
+      pinnedMessage: m.pinnedMessageId != null ? (pinnedMap[m.pinnedMessageId] ?? null) : null,
     };
   });
 
@@ -751,6 +765,58 @@ router.post("/internal-chat/messages/:id/forward", requireAuth, async (req, res)
 
   if (sent.length === 0) { res.status(403).json({ error: "Nenhum destino acessível" }); return; }
   res.json({ ok: true, sent });
+});
+
+// ─── Fixar / desafixar mensagem (estilo WhatsApp/Telegram) ─────────────────
+// Uma mensagem fixada por vez por conversa; qualquer membro com acesso de
+// escrita pode fixar/desafixar (mesma trava de acesso do envio de mensagem).
+router.post("/internal-chat/conversations/:id/pin", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const userId = req.session.userId!;
+  const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
+  if (Number.isNaN(convId)) { res.status(400).json({ error: "Conversa inválida" }); return; }
+
+  const conv = await getAccessibleConversation(convId, userId, tenantId);
+  if (!conv) { res.status(403).json({ error: "Acesso negado" }); return; }
+
+  const { messageId } = req.body as { messageId?: number };
+  if (!messageId) { res.status(400).json({ error: "messageId obrigatório" }); return; }
+
+  const [msg] = await db.select({ id: internalMessagesTable.id, senderName: usersTable.name, content: internalMessagesTable.content, type: internalMessagesTable.type })
+    .from(internalMessagesTable)
+    .innerJoin(usersTable, eq(internalMessagesTable.senderId, usersTable.id))
+    .where(and(
+      eq(internalMessagesTable.id, messageId),
+      eq(internalMessagesTable.conversationId, convId),
+      eq(internalMessagesTable.tenantId, tenantId),
+    )).limit(1);
+  if (!msg) { res.status(404).json({ error: "Mensagem não encontrada nesta conversa" }); return; }
+
+  await db.update(internalConversationsTable)
+    .set({ pinnedMessageId: msg.id, pinnedAt: new Date(), pinnedBy: userId })
+    .where(eq(internalConversationsTable.id, convId));
+
+  const recipients = await recipientsFor(conv);
+  broadcastInternal("internal_conversation_pinned", { conversationId: convId, pinnedMessage: msg }, tenantId, recipients);
+  res.json({ ok: true, pinnedMessage: msg });
+});
+
+router.delete("/internal-chat/conversations/:id/pin", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const userId = req.session.userId!;
+  const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
+  if (Number.isNaN(convId)) { res.status(400).json({ error: "Conversa inválida" }); return; }
+
+  const conv = await getAccessibleConversation(convId, userId, tenantId);
+  if (!conv) { res.status(403).json({ error: "Acesso negado" }); return; }
+
+  await db.update(internalConversationsTable)
+    .set({ pinnedMessageId: null, pinnedAt: null, pinnedBy: null })
+    .where(eq(internalConversationsTable.id, convId));
+
+  const recipients = await recipientsFor(conv);
+  broadcastInternal("internal_conversation_unpinned", { conversationId: convId }, tenantId, recipients);
+  res.json({ ok: true });
 });
 
 // ─── Excluir grupo ──────────────────────────────────────────────────────────

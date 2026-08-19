@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, canEditModule, type InternalConversation, type InternalMessage, type MessageMetadata } from "@/lib/api";
+import { api, can, canEditModule, type InternalConversation, type InternalMessage, type MessageMetadata } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { reportInternalChatUnread } from "@/hooks/useInternalChatNotifier";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -8,7 +8,7 @@ import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/shared
 const INTERNAL_CHAT_EVENTS_URL = "/api/internal-chat/events";
 import {
   Users, Send, Plus, X, Search, MessagesSquare, ChevronLeft, SquareKanban, ClipboardPlus, Trash2, Pencil,
-  Paperclip, Mic, Square, Reply, Forward, FileText, Volume2, Loader2,
+  Paperclip, Mic, Square, Reply, Forward, FileText, Volume2, Loader2, SpellCheck, RefreshCw, Pin, PinOff,
   FileSpreadsheet, FileArchive, File as FileGeneric, Globe,
 } from "lucide-react";
 import TaskBoard from "./TaskBoard";
@@ -255,6 +255,7 @@ export default function InternalChat({ docked = false, onActiveConversationChang
   // temporário ao pular para a mensagem original clicando na citação.
   const [replyTarget, setReplyTarget] = useState<InternalMessage | null>(null);
   const [highlightedMsgId, setHighlightedMsgId] = useState<number | null>(null);
+  const [correcting, setCorrecting] = useState(false);
 
   const activeIdRef = useRef<number | null>(null);
   activeIdRef.current = activeId;
@@ -420,6 +421,18 @@ export default function InternalChat({ docked = false, onActiveConversationChang
       }
     };
     es.addEventListener("internal_message_updated", onMessageUpdated);
+    // Alguém fixou/desafixou uma mensagem — atualiza o banner em tempo real
+    // pra todo mundo vinculado à conversa, sem precisar recarregar.
+    const onConversationPinned = (e: Event) => {
+      const payload = JSON.parse((e as MessageEvent).data) as { conversationId: number; pinnedMessage: InternalConversation["pinnedMessage"] };
+      setConversations((prev) => prev.map((c) => (c.id === payload.conversationId ? { ...c, pinnedMessage: payload.pinnedMessage } : c)));
+    };
+    es.addEventListener("internal_conversation_pinned", onConversationPinned);
+    const onConversationUnpinned = (e: Event) => {
+      const { conversationId } = JSON.parse((e as MessageEvent).data) as { conversationId: number };
+      setConversations((prev) => prev.map((c) => (c.id === conversationId ? { ...c, pinnedMessage: null } : c)));
+    };
+    es.addEventListener("internal_conversation_unpinned", onConversationUnpinned);
     const onResync = () => { reconcileAfterReconnect(); };
     es.addEventListener("resync", onResync);
     // After a within-buffer reconnect, the server replays missed messages (which
@@ -433,6 +446,8 @@ export default function InternalChat({ docked = false, onActiveConversationChang
       es.removeEventListener("internal_conversation_removed", onConversationRemoved);
       es.removeEventListener("internal_conversation_updated", onConversationUpdated);
       es.removeEventListener("internal_message_updated", onMessageUpdated);
+      es.removeEventListener("internal_conversation_pinned", onConversationPinned);
+      es.removeEventListener("internal_conversation_unpinned", onConversationUnpinned);
       es.removeEventListener("resync", onResync);
       es.removeEventListener("internal_reconnect", onInternalReconnect);
       releaseSharedEventSource(INTERNAL_CHAT_EVENTS_URL);
@@ -565,6 +580,22 @@ export default function InternalChat({ docked = false, onActiveConversationChang
     }
   };
 
+  const handleCorrectText = async () => {
+    const text = draft.trim();
+    if (!text || correcting || sending) return;
+    setCorrecting(true);
+    try {
+      const { corrected } = await api.chat.correctText(text);
+      // Só aplica se o usuário não editou o texto enquanto a IA respondia.
+      setDraft((prev) => (prev.trim() === text ? corrected : prev));
+      textareaRef.current?.focus();
+      if (corrected === text) toast({ title: "Nenhum erro encontrado" });
+      else toast({ title: "Texto corrigido — revise antes de enviar" });
+    } catch (err: unknown) {
+      toast({ title: "Correção indisponível", description: err instanceof Error ? err.message : "Erro ao corrigir texto", variant: "destructive" });
+    } finally { setCorrecting(false); }
+  };
+
   const handleSend = async () => {
     const content = draft.trim();
     if (!content || activeId == null || sending) return;
@@ -691,6 +722,43 @@ export default function InternalChat({ docked = false, onActiveConversationChang
   // ── Responder mensagem (estilo WhatsApp) ──
   const openReply = (m: InternalMessage) => setReplyTarget(m);
   const cancelReply = () => setReplyTarget(null);
+
+  // ── Fixar mensagem (estilo WhatsApp/Telegram) ──
+  const [pinning, setPinning] = useState(false);
+  const handlePin = async (m: InternalMessage) => {
+    if (activeId == null || pinning) return;
+    setPinning(true);
+    try {
+      const { pinnedMessage } = await api.internalChat.pin(activeId, m.id);
+      setConversations((prev) => prev.map((c) => (c.id === activeId ? { ...c, pinnedMessage } : c)));
+    } catch (err) {
+      toast({ title: "Erro ao fixar mensagem", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setPinning(false); }
+  };
+  const handleUnpin = async () => {
+    if (activeId == null || pinning) return;
+    setPinning(true);
+    try {
+      await api.internalChat.unpin(activeId);
+      setConversations((prev) => prev.map((c) => (c.id === activeId ? { ...c, pinnedMessage: null } : c)));
+    } catch (err) {
+      toast({ title: "Erro ao desafixar mensagem", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setPinning(false); }
+  };
+  // Responder direto à mensagem fixada: abre a citação sem precisar achar a
+  // mensagem original na lista — se ainda estiver carregada, cita com dados
+  // completos; senão monta uma citação mínima só com o que o banner já tem.
+  const replyToPinned = () => {
+    const pinned = active?.pinnedMessage;
+    if (!pinned) return;
+    const loaded = messages.find((mm) => mm.id === pinned.id);
+    setReplyTarget(loaded ?? {
+      id: pinned.id, conversationId: activeId!, senderId: 0, senderName: pinned.senderName,
+      content: pinned.content, type: pinned.type, mediaUrl: null, transcript: null,
+      forwarded: false, replyToId: null, replyTo: null, createdAt: new Date().toISOString(),
+    });
+    textareaRef.current?.focus();
+  };
 
   // Clique na citação dentro do balão: pula até a mensagem original (mesma
   // conversa, já carregada) e dá um realce temporário para achar na hora.
@@ -856,6 +924,32 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                 )}
               </header>
 
+              {active?.pinnedMessage && (
+                <div className="flex items-center gap-2 px-4 py-2 bg-amber-50 border-b border-amber-200 shrink-0" data-testid="banner-pinned-message">
+                  <Pin className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                  <button
+                    onClick={() => scrollToMessage(active.pinnedMessage!.id)}
+                    data-testid="button-goto-pinned"
+                    className="flex-1 min-w-0 text-left"
+                  >
+                    <div className="text-[11px] font-semibold text-amber-700">Fixado · {active.pinnedMessage.senderName}</div>
+                    <div className="text-xs text-amber-900/80 truncate">{replyPreviewText(active.pinnedMessage)}</div>
+                  </button>
+                  {canEdit && (
+                    <button onClick={replyToPinned} data-testid="button-reply-pinned" title="Responder à mensagem fixada"
+                      className="p-1.5 rounded-md text-amber-700 hover:bg-amber-100 shrink-0">
+                      <Reply className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                  {canEdit && (
+                    <button onClick={handleUnpin} disabled={pinning} data-testid="button-unpin" title="Desafixar"
+                      className="p-1.5 rounded-md text-amber-700 hover:bg-amber-100 disabled:opacity-40 shrink-0">
+                      <PinOff className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              )}
+
               <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3 bg-muted/10">
                 {messages.length === 0 && (
                   <div className="text-center text-xs text-muted-foreground py-8">Nenhuma mensagem. Diga olá! 👋</div>
@@ -892,6 +986,15 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                             className="p-1.5 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10"
                           >
                             <Reply className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={() => (active?.pinnedMessage?.id === m.id ? handleUnpin() : handlePin(m))}
+                            disabled={pinning}
+                            data-testid={`button-pin-msg-${m.id}`}
+                            title={active?.pinnedMessage?.id === m.id ? "Desafixar mensagem" : "Fixar mensagem"}
+                            className={`p-1.5 rounded-md hover:bg-primary/10 disabled:opacity-40 ${active?.pinnedMessage?.id === m.id ? "text-primary" : "text-muted-foreground hover:text-primary"}`}
+                          >
+                            <Pin className="w-3.5 h-3.5" />
                           </button>
                         </>
                       )}
@@ -1040,10 +1143,27 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                     }}
                     placeholder="Escreva uma mensagem... (Enter quebra linha, Ctrl+Enter envia)"
                     title="Enter quebra linha. Envie pelo botão ou com Ctrl+Enter."
+                    spellCheck
+                    lang="pt-BR"
                     rows={1}
                     data-testid="input-internal-message"
                     className="flex-1 resize-none rounded-lg border px-3 py-2 text-sm max-h-32 overflow-y-auto focus:outline-none focus:ring-2 focus:ring-primary/40"
                   />
+                )}
+                {!pendingAttachment && !recording && can(user, "usar_ia") && (
+                  <button
+                    type="button"
+                    onClick={handleCorrectText}
+                    disabled={!draft.trim() || correcting || sending}
+                    title="Corrigir ortografia com IA"
+                    data-testid="button-correct-internal-text"
+                    className="shrink-0 h-10 px-3 rounded-lg flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-100 hover:bg-emerald-200 transition disabled:opacity-40"
+                  >
+                    {correcting
+                      ? <RefreshCw className="w-4 h-4 animate-spin" />
+                      : <SpellCheck className="w-4 h-4" />}
+                    <span className="hidden sm:inline">Corrigir</span>
+                  </button>
                 )}
                 <input
                   ref={fileInputRef}

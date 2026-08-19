@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, timestamp, primaryKey, uniqueIndex, boolean, foreignKey, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, timestamp, primaryKey, uniqueIndex, boolean, foreignKey, jsonb, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { usersTable } from "./users";
 import type { MessageMetadata } from "./conversations";
@@ -16,6 +16,13 @@ export const internalConversationsTable = pgTable(
     lastMessage: text("last_message"),
     lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // Mensagem fixada no topo da conversa (estilo WhatsApp/Telegram) — uma por
+    // vez. "set null" em vez de cascade: apagar a mensagem fixada só desfixa,
+    // não precisa apagar a conversa. Referência lazy porque internalMessagesTable
+    // é declarada mais abaixo neste mesmo arquivo.
+    pinnedMessageId: integer("pinned_message_id").references((): AnyPgColumn => internalMessagesTable.id, { onDelete: "set null" }),
+    pinnedAt: timestamp("pinned_at", { withTimezone: true }),
+    pinnedBy: integer("pinned_by").references(() => usersTable.id, { onDelete: "set null" }),
   },
   // Guarantee at most one shared general/team room, even under concurrent creation.
   // No máximo UMA sala geral por loja (tenant), mesmo sob criação concorrente.
