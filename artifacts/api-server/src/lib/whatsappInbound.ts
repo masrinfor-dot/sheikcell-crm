@@ -68,6 +68,12 @@ export interface InboundWAMessageContent {
   listResponseMessage?: { title?: string; singleSelectReply?: { selectedRowId?: string } };
   templateButtonReplyMessage?: { selectedDisplayText?: string };
   interactiveResponseMessage?: { body?: { text?: string } };
+  // Mensagem interativa "de ida" (cartão com corpo de texto, botões ou fluxo
+  // nativo) — usada pelo WhatsApp Business/Cloud API pra pedidos, cobranças e
+  // fluxos de pagamento (ex.: cobrança via Pix). Antes só a RESPOSTA a esse
+  // tipo (interactiveResponseMessage) era tratada; o cartão em si caía direto
+  // no fallback "não suportado".
+  interactiveMessage?: { body?: { text?: string }; header?: { title?: string } };
   // Convite de grupo.
   groupInviteMessage?: { groupJid?: string; groupName?: string; inviteCode?: string };
   // Produto de catálogo compartilhado (loja do WhatsApp Business).
@@ -80,8 +86,15 @@ export interface InboundWAMessageContent {
   // Pagamentos via WhatsApp (Meta Pay / P2P) — raros no Brasil, mas melhor
   // mostrar um resumo do que cair no fallback de "não suportado".
   paymentInviteMessage?: object;
-  sendPaymentMessage?: object;
-  requestPaymentMessage?: { currencyCodeIso4217?: string; amount1000?: number };
+  // noteMessage: nota de texto livre anexada ao pagamento — é onde uma chave
+  // Pix ou observação digitada pelo cliente normalmente vai parar (antes
+  // ignorado; só valor/moeda eram lidos).
+  sendPaymentMessage?: { noteMessage?: { conversation?: string; extendedTextMessage?: { text?: string } } };
+  requestPaymentMessage?: {
+    currencyCodeIso4217?: string;
+    amount1000?: number;
+    noteMessage?: { conversation?: string; extendedTextMessage?: { text?: string } };
+  };
   declinePaymentRequestMessage?: object;
   cancelPaymentRequestMessage?: object;
   // Wrappers used by disappearing/view-once chats — the real content is nested.
@@ -658,16 +671,22 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     ].filter(Boolean).join("\n");
   }
 
+  // Extrai o texto de uma nota (proto.IMessage aninhado) anexada a um pagamento.
+  const notePlainText = (note?: { conversation?: string; extendedTextMessage?: { text?: string } }) =>
+    note?.conversation || note?.extendedTextMessage?.text || "";
+
   // Pagamentos via WhatsApp (envio, solicitação, convite, recusa, cancelamento).
   let paymentText = "";
   if (msgContent?.sendPaymentMessage) {
-    paymentText = "💳 Pagamento enviado";
+    const note = notePlainText(msgContent.sendPaymentMessage.noteMessage);
+    paymentText = note ? `💳 Pagamento enviado: ${note}` : "💳 Pagamento enviado";
   } else if (msgContent?.requestPaymentMessage) {
     const rp = msgContent.requestPaymentMessage;
     const amount = rp.amount1000 != null
       ? (rp.amount1000 / 1000).toLocaleString("pt-BR", { style: "currency", currency: rp.currencyCodeIso4217 || "BRL" })
       : null;
-    paymentText = `💳 Solicitação de pagamento${amount ? `: ${amount}` : ""}`;
+    const note = notePlainText(rp.noteMessage);
+    paymentText = `💳 Solicitação de pagamento${amount ? `: ${amount}` : ""}${note ? ` — ${note}` : ""}`;
   } else if (msgContent?.paymentInviteMessage) {
     paymentText = "💳 Convite para configurar pagamentos no WhatsApp";
   } else if (msgContent?.declinePaymentRequestMessage) {
@@ -694,6 +713,9 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
       : null) ??
     (msgContent?.interactiveResponseMessage?.body?.text
       ? `🔘 ${msgContent.interactiveResponseMessage.body.text}`
+      : null) ??
+    (msgContent?.interactiveMessage?.body?.text
+      ? `🔘 ${msgContent.interactiveMessage.header?.title ? `${msgContent.interactiveMessage.header.title}: ` : ""}${msgContent.interactiveMessage.body.text}`
       : null) ??
     "";
 
