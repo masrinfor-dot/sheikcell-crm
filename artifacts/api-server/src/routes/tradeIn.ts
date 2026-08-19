@@ -349,4 +349,45 @@ router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (re
   }
 });
 
+// ─── Fechar negócio (etapa 4) ───────────────────────────────────────────────
+// Captura os dados reais da compra: quem vendeu, CPF, IMEI do aparelho e o
+// valor final negociado (pode diferir do sugerido pela IA).
+const CPF_RE = /^\d{3}\.?\d{3}\.?\d{3}-?\d{2}$/;
+
+router.patch("/trade-in/:id/close", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ error: "Avaliação inválida" }); return; }
+
+  const { sellerCustomerName, sellerCpf, imei, finalAgreedPrice } = req.body as {
+    sellerCustomerName?: string; sellerCpf?: string; imei?: string; finalAgreedPrice?: string;
+  };
+  const name = clean(sellerCustomerName, 120);
+  const cpf = typeof sellerCpf === "string" ? sellerCpf.trim().slice(0, 20) : "";
+  const imeiClean = typeof imei === "string" ? imei.replace(/\D/g, "").slice(0, 20) : "";
+  const finalPrice = clean(finalAgreedPrice, 60);
+
+  if (!name) { res.status(400).json({ error: "Informe o nome do cliente vendedor" }); return; }
+  if (!CPF_RE.test(cpf)) { res.status(400).json({ error: "CPF inválido" }); return; }
+  if (imeiClean.length < 14 || imeiClean.length > 17) { res.status(400).json({ error: "IMEI inválido" }); return; }
+  if (!finalPrice) { res.status(400).json({ error: "Informe o valor final negociado" }); return; }
+
+  const [existing] = await db.select({ id: tradeInEvaluationsTable.id }).from(tradeInEvaluationsTable)
+    .where(and(eq(tradeInEvaluationsTable.id, id), eq(tradeInEvaluationsTable.tenantId, tenantId))).limit(1);
+  if (!existing) { res.status(404).json({ error: "Avaliação não encontrada" }); return; }
+
+  const [saved] = await db.update(tradeInEvaluationsTable)
+    .set({
+      sellerCustomerName: name,
+      sellerCpf: cpf,
+      imei: imeiClean,
+      finalAgreedPrice: finalPrice,
+      closedAt: new Date(),
+    })
+    .where(and(eq(tradeInEvaluationsTable.id, id), eq(tradeInEvaluationsTable.tenantId, tenantId)))
+    .returning();
+
+  res.json(saved);
+});
+
 export default router;

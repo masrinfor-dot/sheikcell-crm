@@ -43,6 +43,7 @@ const STEPS = [
   { n: 1, label: "Aparelho", hint: "Marca, modelo e detalhes" },
   { n: 2, label: "Condições", hint: "Estado do aparelho" },
   { n: 3, label: "Oferta", hint: "Valor sugerido" },
+  { n: 4, label: "Fechar negócio", hint: "Dados do cliente e valor final" },
 ];
 
 export default function Avaliacao() {
@@ -66,10 +67,17 @@ export default function Avaliacao() {
   const [loadingBase, setLoadingBase] = useState(false);
   const [basePrice, setBasePrice] = useState("");
   const [baseMarket, setBaseMarket] = useState("");
-  const [result, setResult] = useState<{ device: string; marketPrice: string; suggestedPrice: string; summary: string } | null>(null);
+  const [result, setResult] = useState<{ id: number; device: string; marketPrice: string; suggestedPrice: string; summary: string } | null>(null);
   // Tabela usada quando a IA calculou a oferta (para recalcular ao trocar).
   const [resultTable, setResultTable] = useState<1 | 2 | 3>(2);
   const [offerTable, setOfferTable] = useState<1 | 2 | 3>(2);
+  // Etapa 4: fechamento do negócio (dados do cliente vendedor + valor final).
+  const [dealName, setDealName] = useState("");
+  const [dealCpf, setDealCpf] = useState("");
+  const [dealImei, setDealImei] = useState("");
+  const [dealPrice, setDealPrice] = useState("");
+  const [closingDeal, setClosingDeal] = useState(false);
+  const [dealClosed, setDealClosed] = useState(false);
   const [history, setHistory] = useState<TradeInEvaluation[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   // Pesquisa e filtros do histórico
@@ -161,6 +169,31 @@ export default function Avaliacao() {
     setBrand(""); setOtherBrand(false); setModel(""); setMemory(""); setColor("");
     setBasePrice(""); setBaseMarket("");
     setAnswers({}); setResult(null); setStep(1);
+    setDealName(""); setDealCpf(""); setDealImei(""); setDealPrice("");
+    setClosingDeal(false); setDealClosed(false);
+  };
+
+  const handleCloseDeal = async () => {
+    if (!result || closingDeal) return;
+    const name = dealName.trim();
+    const cpf = dealCpf.trim();
+    const imei = dealImei.trim();
+    const price = dealPrice.trim();
+    if (!name || !cpf || !imei || !price) {
+      toast({ title: "Preencha todos os campos para fechar o negócio", variant: "destructive" });
+      return;
+    }
+    setClosingDeal(true);
+    try {
+      await api.tradeIn.close(result.id, { sellerCustomerName: name, sellerCpf: cpf, imei, finalAgreedPrice: price });
+      setDealClosed(true);
+      toast({ title: "Negócio fechado com sucesso" });
+      fetchHistory();
+    } catch (err) {
+      toast({ title: "Erro ao fechar negócio", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setClosingDeal(false);
+    }
   };
 
   // Filtros do histórico: pesquisa livre (aparelho/vendedor/cor) + marca + memória.
@@ -176,7 +209,7 @@ export default function Avaliacao() {
   });
 
   const modelSuggestions = MODELS_BY_BRAND[brand.trim()] ?? [];
-  const currentStep = result ? 3 : step;
+  const currentStep = step === 4 ? 4 : (result ? 3 : step);
 
   const chip = (selected: boolean) =>
     `px-3 py-1.5 rounded-full text-xs font-semibold border transition ${
@@ -479,12 +512,70 @@ export default function Avaliacao() {
           </div>
           {result.summary && <p className="text-xs text-foreground/80 whitespace-pre-wrap">{result.summary}</p>}
           <p className="text-[10px] text-muted-foreground">⚠ Sugestão gerada por IA com base em preços pesquisados — confirme antes de fechar a compra.</p>
-          <div className="flex gap-2">
+          <div className="flex gap-2 items-center flex-wrap">
+            <button onClick={() => { setDealPrice(offerPrice(result.suggestedPrice)); setStep(4); }}
+              data-testid="button-close-deal-start"
+              className="text-xs font-bold text-white bg-green-600 hover:bg-green-700 px-3 py-1.5 rounded-full transition">
+              Fechar negócio
+            </button>
             <button onClick={() => { setResult(null); setStep(2); }}
               className="text-xs font-semibold text-muted-foreground underline">Ajustar condições</button>
             <button onClick={resetForm} data-testid="button-tradein-new"
               className="text-xs font-semibold text-primary underline">Fazer nova avaliação</button>
           </div>
+        </div>
+      )}
+
+      {currentStep === 4 && result && (
+        <div className="shk-card p-5 border-2 border-green-200 bg-green-50/40 space-y-3">
+          <p className="text-xs font-bold text-muted-foreground">{result.device}</p>
+          {dealClosed ? (
+            <div className="text-center py-4 space-y-2">
+              <p className="text-sm font-bold text-green-700">Negócio fechado com sucesso!</p>
+              <p className="text-xs text-muted-foreground">
+                {dealName} · CPF {dealCpf} · IMEI {dealImei} · {dealPrice}
+              </p>
+              <button onClick={resetForm} data-testid="button-tradein-new-after-close"
+                className="text-xs font-semibold text-primary underline">Fazer nova avaliação</button>
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[10px] font-semibold text-muted-foreground uppercase">Nome do cliente vendedor</label>
+                  <input value={dealName} onChange={(e) => setDealName(e.target.value)}
+                    placeholder="Nome completo" data-testid="input-deal-name"
+                    className="w-full mt-1 px-3 py-2 rounded-xl border border-border text-sm" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-semibold text-muted-foreground uppercase">CPF</label>
+                  <input value={dealCpf} onChange={(e) => setDealCpf(e.target.value)}
+                    placeholder="000.000.000-00" data-testid="input-deal-cpf"
+                    className="w-full mt-1 px-3 py-2 rounded-xl border border-border text-sm" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-semibold text-muted-foreground uppercase">IMEI do aparelho</label>
+                  <input value={dealImei} onChange={(e) => setDealImei(e.target.value)}
+                    placeholder="15 dígitos" data-testid="input-deal-imei"
+                    className="w-full mt-1 px-3 py-2 rounded-xl border border-border text-sm" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-semibold text-muted-foreground uppercase">Valor final negociado</label>
+                  <input value={dealPrice} onChange={(e) => setDealPrice(e.target.value)}
+                    placeholder="R$ 0,00" data-testid="input-deal-price"
+                    className="w-full mt-1 px-3 py-2 rounded-xl border border-border text-sm" />
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={handleCloseDeal} disabled={closingDeal} data-testid="button-confirm-close-deal"
+                  className="text-xs font-bold text-white bg-green-600 hover:bg-green-700 disabled:opacity-50 px-4 py-2 rounded-full transition flex items-center gap-1.5">
+                  {closingDeal ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : null}
+                  Confirmar fechamento
+                </button>
+                <button onClick={() => setStep(3)} className="text-xs font-semibold text-muted-foreground underline">Voltar</button>
+              </div>
+            </>
+          )}
         </div>
       )}
       </>

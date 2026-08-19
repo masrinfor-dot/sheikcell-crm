@@ -528,6 +528,9 @@ export type TradeInEvaluation = {
   brand: string | null; model: string | null; memory: string | null; color: string | null;
   marketPrice: string | null; suggestedPrice: string | null;
   aiSummary: string | null; createdAt: string;
+  // Preenchidos só ao fechar o negócio (etapa 4).
+  sellerCustomerName?: string | null; sellerCpf?: string | null;
+  imei?: string | null; finalAgreedPrice?: string | null; closedAt?: string | null;
 };
 
 // Tabelas de margem da avaliação: 1 = maior, 2 = média, 3 = menor (em %).
@@ -1223,6 +1226,8 @@ export const api = {
     evaluate: (data: { device?: string; brand?: string; model?: string; memory?: string; color?: string; marginTable?: 1 | 2 | 3; basePrice?: string; answers: Record<string, string> }) =>
       req<{ id: number; device: string; marketPrice: string; suggestedPrice: string; summary: string; createdAt: string }>(
         "/trade-in/evaluate", { method: "POST", body: JSON.stringify(data) }),
+    close: (id: number, data: { sellerCustomerName: string; sellerCpf: string; imei: string; finalAgreedPrice: string }) =>
+      req<TradeInEvaluation>(`/trade-in/${id}/close`, { method: "PATCH", body: JSON.stringify(data) }),
     margins: () => req<TradeInMargins>("/trade-in/margins"),
     saveMargins: (data: Partial<TradeInMargins>) =>
       req<TradeInMargins>("/trade-in/margins", { method: "PATCH", body: JSON.stringify(data) }),

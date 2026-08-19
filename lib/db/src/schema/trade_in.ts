@@ -18,4 +18,10 @@ export const tradeInEvaluationsTable = pgTable("trade_in_evaluations", {
   suggestedPrice: text("suggested_price"),     // sugestão de valor de compra
   aiSummary: text("ai_summary"),               // justificativa da IA
   createdAt: timestamp("created_at").notNull().defaultNow(),
+  // Preenchidos só ao fechar o negócio (etapa 4) — uma avaliação pode nunca ser fechada.
+  sellerCustomerName: text("seller_customer_name"), // nome de quem está vendendo o aparelho pra loja
+  sellerCpf: text("seller_cpf"),
+  imei: text("imei"),
+  finalAgreedPrice: text("final_agreed_price"),     // valor final negociado (pode diferir do suggestedPrice)
+  closedAt: timestamp("closed_at"),
 });
