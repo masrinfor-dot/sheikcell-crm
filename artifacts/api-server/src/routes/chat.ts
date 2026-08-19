@@ -1031,6 +1031,13 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
         return;
       }
     }
+    // Mesma trava de linha restrita aplicada em POST /participants: vendedor
+    // preso a uma linha específica de WhatsApp não pode virar responsável de
+    // conversa de outra linha (senão fica sem receber os eventos em tempo real).
+    if (target.allowedSessionKeys != null && !target.allowedSessionKeys.includes(conv.sessionKey)) {
+      res.status(400).json({ error: "Esse vendedor só recebe conversas de uma linha específica de WhatsApp e não pode ser responsável por esta conversa." });
+      return;
+    }
   } else if (userRole === "vendedor" && assigneeId === null && conv.assigneeId != null) {
     res.status(403).json({ error: "Apenas admin ou supervisor podem remover o responsável" });
     return;
@@ -1775,9 +1782,19 @@ router.post("/chat/conversations/:id/participants", requireAuth, async (req, res
   if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
 
   // Fail closed: o participante precisa ser da mesma loja.
-  const [memberUser] = await db.select({ id: usersTable.id, role: usersTable.role })
+  const [memberUser] = await db.select({ id: usersTable.id, role: usersTable.role, allowedSessionKeys: usersTable.allowedSessionKeys })
     .from(usersTable).where(and(eq(usersTable.id, userId), eq(usersTable.tenantId, tenantId))).limit(1);
   if (!memberUser) { res.status(400).json({ error: "Usuário inválido" }); return; }
+
+  // Vendedor com linha de WhatsApp restrita não pode ser participante de uma
+  // conversa de outra linha: senão ele fica "preso" na lista de destinatários
+  // (restrictedTo) mas o fan-out de SSE some pra ele — mensagem chega pra
+  // outros vinculados e não pra ele, silenciosamente. Bloqueia aqui em vez de
+  // furar a restrição de linha no broadcast.
+  if (memberUser.allowedSessionKeys != null && !memberUser.allowedSessionKeys.includes(conv.sessionKey)) {
+    res.status(403).json({ error: "Este usuário só recebe conversas de uma linha específica de WhatsApp e não pode ser adicionado a esta conversa." });
+    return;
+  }
 
   await db.insert(conversationParticipantsTable).values({ tenantId, conversationId: convId, userId }).onConflictDoNothing();
 
