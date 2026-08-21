@@ -251,11 +251,29 @@ function MediaContent({ msg }: { msg: ChatMessage }) {
   return <MediaContentRest msg={msg} />;
 }
 
+/** Mensagem de mídia indisponível (arquivo apagado/movido no servidor, ou
+ * formato que o navegador não consegue tocar) — mostra erro em vez de um
+ * player quebrado/mudo, com um jeito de tentar abrir/baixar mesmo assim. */
+function MediaUnavailable({ mediaUrl, label }: { mediaUrl: string; label: string }) {
+  return (
+    <div className="flex items-center gap-2 bg-red-50 rounded-xl px-3 py-2 min-w-[200px]">
+      <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />
+      <div className="min-w-0">
+        <p className="text-xs text-red-700">{label}</p>
+        <a href={`${mediaUrl}?download=1`} download className="text-[11px] font-semibold text-primary underline">
+          Tentar baixar mesmo assim
+        </a>
+      </div>
+    </div>
+  );
+}
+
 /** Áudio com botão de transcrição (Whisper). */
 function AudioBubble({ msg }: { msg: ChatMessage }) {
   const [local, setLocal] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [mediaError, setMediaError] = useState(false);
   const transcript = msg.transcript ?? local;
 
   const handleTranscribe = async () => {
@@ -271,11 +289,15 @@ function AudioBubble({ msg }: { msg: ChatMessage }) {
     }
   };
 
+  if (mediaError && msg.mediaUrl) {
+    return <MediaUnavailable mediaUrl={msg.mediaUrl} label="Áudio indisponível no servidor" />;
+  }
+
   return (
     <div className="mb-1">
       <div className="flex items-center gap-2 bg-black/5 rounded-xl px-3 py-2 min-w-[200px]">
         <Volume2 className="w-4 h-4 text-primary shrink-0" />
-        <audio controls className="flex-1 h-8 max-w-[200px]" style={{ minWidth: 0 }}>
+        <audio controls className="flex-1 h-8 max-w-[200px]" style={{ minWidth: 0 }} onError={() => setMediaError(true)}>
           <source src={msg.mediaUrl ?? undefined} />
         </audio>
         <a href={`${msg.mediaUrl}?download=1`} download title="Baixar áudio"
@@ -294,6 +316,37 @@ function AudioBubble({ msg }: { msg: ChatMessage }) {
         </button>
       )}
       {err && <p className="text-[11px] text-red-600 mt-0.5">{err}</p>}
+    </div>
+  );
+}
+
+/** Vídeo com fallback de erro — cobre tanto arquivo indisponível no servidor
+ * quanto formato que o navegador não consegue tocar (ex.: .mov de iPhone em
+ * alguns navegadores): nesses casos o <video> dispara onError, e mostramos
+ * baixar/abrir em vez de um player preto travado. */
+function VideoBubble({ msg }: { msg: ChatMessage }) {
+  const [mediaError, setMediaError] = useState(false);
+  if (!msg.mediaUrl) return null;
+
+  if (mediaError) {
+    return <MediaUnavailable mediaUrl={msg.mediaUrl} label="Não foi possível tocar este vídeo no navegador" />;
+  }
+
+  return (
+    <div className="mb-1">
+      <video
+        controls
+        preload="metadata"
+        className="max-w-full rounded-xl max-h-64 bg-black"
+        style={{ minWidth: 200 }}
+        onError={() => setMediaError(true)}
+      >
+        <source src={msg.mediaUrl} />
+      </video>
+      <a href={`${msg.mediaUrl}?download=1`} download
+        className="flex items-center gap-1 text-[11px] font-semibold text-primary underline mt-0.5 w-fit">
+        <Download className="w-3 h-3" /> Baixar vídeo
+      </a>
     </div>
   );
 }
@@ -326,22 +379,7 @@ function MediaContentRest({ msg }: { msg: ChatMessage }) {
   }
 
   if (msg.type === "video") {
-    return (
-      <div className="mb-1">
-        <video
-          controls
-          preload="metadata"
-          className="max-w-full rounded-xl max-h-64 bg-black"
-          style={{ minWidth: 200 }}
-        >
-          <source src={msg.mediaUrl} />
-        </video>
-        <a href={`${msg.mediaUrl}?download=1`} download
-          className="flex items-center gap-1 text-[11px] font-semibold text-primary underline mt-0.5 w-fit">
-          <Download className="w-3 h-3" /> Baixar vídeo
-        </a>
-      </div>
-    );
+    return <VideoBubble msg={msg} />;
   }
 
   if (msg.type === "doc") {
