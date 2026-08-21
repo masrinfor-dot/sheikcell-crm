@@ -565,8 +565,8 @@ export default function AdminDashboard() {
 
         {/* Content */}
         <div className="flex-1 min-w-0 pb-[calc(3.5rem+env(safe-area-inset-bottom))] md:pb-0">
-          {/* O chat ocupa a largura toda; as demais abas ficam na coluna central */}
-          <div className={tab === "chat" ? "max-w-full px-0 py-0 md:px-4 md:py-4" : "max-w-5xl mx-auto px-4 py-6"}>
+          {/* O chat e o Chat Interno ocupam a largura toda; as demais abas ficam na coluna central */}
+          <div className={tab === "chat" || tab === "equipe" ? "max-w-full px-0 py-0 md:px-4 md:py-4" : "max-w-5xl mx-auto px-4 py-6"}>
 
         {/* === RESULTADOS TAB === */}
         {tab === "resultados" && <Resultados />}

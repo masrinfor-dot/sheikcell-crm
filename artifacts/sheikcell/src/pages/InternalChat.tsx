@@ -9,7 +9,7 @@ const INTERNAL_CHAT_EVENTS_URL = "/api/internal-chat/events";
 import {
   Users, Send, Plus, X, Search, MessagesSquare, ChevronLeft, SquareKanban, ClipboardPlus, Trash2, Pencil,
   Paperclip, Mic, Square, Reply, Forward, FileText, Volume2, Loader2, SpellCheck, RefreshCw, Pin, PinOff,
-  FileSpreadsheet, FileArchive, File as FileGeneric, Globe,
+  FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Image,
 } from "lucide-react";
 import TaskBoard from "./TaskBoard";
 
@@ -354,7 +354,13 @@ export default function InternalChat({ docked = false, onActiveConversationChang
       };
       const isActive = activeIdRef.current === payload.conversationId;
       if (isActive) {
-        setMessages((prev) => (prev.some((m) => m.id === payload.message.id) ? prev : [...prev, payload.message]));
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === payload.message.id)) return prev;
+          // Se a mensagem real (própria) chega pelo SSE antes da resposta do
+          // POST, descarta a bolha provisória (id negativo) pra não duplicar.
+          const base = payload.message.senderId === user?.id ? prev.filter((m) => m.id >= 0) : prev;
+          return [...base, payload.message];
+        });
         if (payload.message.senderId !== user?.id) {
           api.internalChat.markRead(payload.conversationId).catch(() => {});
         }
@@ -599,18 +605,41 @@ export default function InternalChat({ docked = false, onActiveConversationChang
   const handleSend = async () => {
     const content = draft.trim();
     if (!content || activeId == null || sending) return;
+    const replyingTo = replyTarget;
     setSending(true);
     setDraft("");
     setMentionQuery(null);
     // Mantém o foco no campo pra continuar digitando na hora — sem isso, quem
     // envia clicando no botão (em vez de Ctrl+Enter) perde o foco pro botão.
     textareaRef.current?.focus();
+    // Bolha provisória (id negativo, igual ao ChatCenter): aparece na hora,
+    // antes da resposta do servidor — troca pela mensagem real (ou some, se falhar).
+    const optimistic: InternalMessage = {
+      id: -Date.now(),
+      conversationId: activeId,
+      senderId: user?.id ?? 0,
+      senderName: user?.name ?? "",
+      content,
+      type: "text",
+      mediaUrl: null,
+      transcript: null,
+      forwarded: false,
+      replyToId: replyingTo?.id ?? null,
+      replyTo: replyingTo
+        ? { id: replyingTo.id, senderName: replyingTo.senderName, content: replyingTo.content, type: replyingTo.type }
+        : null,
+      createdAt: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, optimistic]);
     try {
-      const msg = await api.internalChat.send(activeId, content, replyTarget?.id);
-      setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
+      const msg = await api.internalChat.send(activeId, content, replyingTo?.id);
+      setMessages((prev) => (prev.some((m) => m.id === msg.id)
+        ? prev.filter((m) => m.id !== optimistic.id)
+        : prev.map((m) => (m.id === optimistic.id ? msg : m))));
       setConversations((prev) => prev.map((c) => (c.id === activeId ? { ...c, lastMessage: msg.content, lastMessageAt: msg.createdAt } : c)));
       setReplyTarget(null);
     } catch (err) {
+      setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
       setDraft(content);
       toast({ title: "Erro", description: err instanceof Error ? err.message : "Falha ao enviar", variant: "destructive" });
     } finally {
@@ -640,16 +669,42 @@ export default function InternalChat({ docked = false, onActiveConversationChang
 
   const confirmSendAttachment = async () => {
     if (!pendingAttachment || activeId == null || sendingMedia) return;
+    const { file, kind, previewUrl } = pendingAttachment;
+    const replyingTo = replyTarget;
+    const captionText = attachCaption.trim();
     setSendingMedia(true);
+    setPendingAttachment(null);
+    setAttachCaption("");
+    setReplyTarget(null);
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    // Bolha provisória sem mediaUrl (mostra "Enviando…") até o upload terminar
+    // — mesmo padrão do ChatCenter.
+    const baseContent = kind === "image" ? "📷 Foto" : kind === "audio" ? "🎤 Áudio" : `📄 ${file.name}`;
+    const optimistic: InternalMessage = {
+      id: -Date.now(),
+      conversationId: activeId,
+      senderId: user?.id ?? 0,
+      senderName: user?.name ?? "",
+      content: captionText ? `${baseContent}\n${captionText}` : baseContent,
+      type: kind === "image" ? "image" : kind === "audio" ? "audio" : "doc",
+      mediaUrl: null,
+      transcript: null,
+      forwarded: false,
+      replyToId: replyingTo?.id ?? null,
+      replyTo: replyingTo
+        ? { id: replyingTo.id, senderName: replyingTo.senderName, content: replyingTo.content, type: replyingTo.type }
+        : null,
+      createdAt: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, optimistic]);
     try {
-      const msg = await api.internalChat.sendMedia(activeId, pendingAttachment.file, attachCaption.trim() || undefined, replyTarget?.id);
-      setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
+      const msg = await api.internalChat.sendMedia(activeId, file, captionText || undefined, replyingTo?.id);
+      setMessages((prev) => (prev.some((m) => m.id === msg.id)
+        ? prev.filter((m) => m.id !== optimistic.id)
+        : prev.map((m) => (m.id === optimistic.id ? msg : m))));
       setConversations((prev) => prev.map((c) => (c.id === activeId ? { ...c, lastMessage: msg.content, lastMessageAt: msg.createdAt } : c)));
-      if (pendingAttachment.previewUrl) URL.revokeObjectURL(pendingAttachment.previewUrl);
-      setPendingAttachment(null);
-      setAttachCaption("");
-      setReplyTarget(null);
     } catch (err) {
+      setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
       toast({ title: "Erro ao enviar arquivo", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     } finally {
       setSendingMedia(false);
@@ -1009,7 +1064,7 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                       }`}
                     >
                       {mine && toolbar}
-                      <div className={`max-w-[75%] rounded-2xl px-3.5 py-2 ${
+                      <div className={`max-w-[75%] rounded-2xl px-3.5 py-2 shadow-sm ${
                         mine ? "bg-primary text-white rounded-br-sm" : "bg-card border rounded-bl-sm"
                       }`}>
                         {!mine && active.kind !== "direct" && (
@@ -1032,8 +1087,16 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                             <div className={`text-xs truncate ${mine ? "text-white/80" : "text-muted-foreground"}`}>{replyPreviewText(m.replyTo)}</div>
                           </button>
                         )}
-                        {m.type !== "text" && <InternalMediaContent msg={m} onTranscribed={onTranscribed} />}
-                        {(m.type === "text" || caption) && (
+                        {m.type !== "text" && m.mediaUrl && <InternalMediaContent msg={m} onTranscribed={onTranscribed} />}
+                        {m.type !== "text" && !m.mediaUrl && (
+                          <div className={`flex items-center gap-2 text-sm italic ${mine ? "text-white/80" : "text-muted-foreground"}`}>
+                            {m.type === "image" && <Image className="w-4 h-4 shrink-0" />}
+                            {m.type === "audio" && <Volume2 className="w-4 h-4 shrink-0" />}
+                            {m.type === "doc" && <FileText className="w-4 h-4 shrink-0" />}
+                            <span>Enviando…{caption ? ` ${caption}` : ""}</span>
+                          </div>
+                        )}
+                        {(m.type === "text" || (caption && m.mediaUrl)) && (
                           <div className="text-sm whitespace-pre-wrap break-words">
                             {renderWithMentions(m.type === "text" ? m.content : caption, teamNames, user?.name, mine)}
                           </div>
@@ -1532,10 +1595,12 @@ export default function InternalChat({ docked = false, onActiveConversationChang
   }
 
   return (
-    <div className="max-w-6xl mx-auto px-2 md:px-4 py-2 md:py-4">
+    <div className="px-2 md:px-4 py-2 md:py-4">
       {/* Celular: uma coluna só (lista OU conversa) e altura descontando a
-          bottom nav — duas colunas espremidas distorciam tudo. */}
-      <div className="relative flex flex-col h-[calc(var(--vvh,100dvh)-11rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-180px)] md:min-h-[480px] rounded-xl border bg-card overflow-hidden shadow-sm">
+          bottom nav — duas colunas espremidas distorciam tudo. Mesmo cálculo
+          de altura/largura do ChatCenter — sem o max-w antigo, que sobrava
+          espaço vazio nas laterais em telas largas. */}
+      <div className="relative flex flex-col h-[calc(var(--vvh,100dvh)-7rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-88px)] md:min-h-[480px] rounded-xl border bg-card overflow-hidden shadow-sm">
         {viewTabs}
         {view === "tasks" ? (
           <div className="flex-1 overflow-y-auto p-4">
@@ -1543,7 +1608,7 @@ export default function InternalChat({ docked = false, onActiveConversationChang
           </div>
         ) : (
           <div className="relative flex flex-1 min-h-0">
-            <aside className={`w-full md:w-72 shrink-0 md:border-r flex-col bg-muted/20 ${active ? "hidden md:flex" : "flex"}`}>{listPanel}</aside>
+            <aside className={`w-full md:w-80 lg:w-96 shrink-0 md:border-r flex-col bg-muted/20 ${active ? "hidden md:flex" : "flex"}`}>{listPanel}</aside>
             <section className={`flex-1 flex-col min-w-0 ${active ? "flex" : "hidden md:flex"}`}>{threadPanel}</section>
           </div>
         )}
