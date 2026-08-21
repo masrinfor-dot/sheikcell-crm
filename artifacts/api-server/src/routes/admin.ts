@@ -452,9 +452,12 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
 
   // Usuário editado precisa ser da própria loja.
-  const [existingUser] = await db.select({ id: usersTable.id }).from(usersTable)
+  const [existingUser] = await db.select({ id: usersTable.id, role: usersTable.role }).from(usersTable)
     .where(and(eq(usersTable.id, id), eq(usersTable.tenantId, tenantId))).limit(1);
   if (!existingUser) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
+  // Nunca permitir que um admin de loja edite a conta do superadmin — mesmo
+  // que ela carregue este tenant_id (coluna NOT NULL sem valor "sem loja").
+  if (existingUser.role === "superadmin") { res.status(403).json({ error: "Operação não permitida" }); return; }
 
   const { name, email, password, role, sectorId, isActive, permissions, storeName, extension, adminAccess, accessHours, allowedSessionKeys, moduleAccess } = req.body as {
     adminAccess?: unknown;
@@ -555,6 +558,9 @@ router.post("/admin/users/:id/deactivate", requireAdmin, async (req, res): Promi
   const [target] = await db.select().from(usersTable)
     .where(and(eq(usersTable.id, id), eq(usersTable.tenantId, tenantId))).limit(1);
   if (!target) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
+  // Nunca permitir que um admin de loja inative a conta do superadmin — mesmo
+  // que ela carregue este tenant_id (coluna NOT NULL sem valor "sem loja").
+  if (target.role === "superadmin") { res.status(403).json({ error: "Operação não permitida" }); return; }
 
   if (transferToId != null) {
     // Destino precisa ser um usuário ativo da MESMA loja.
@@ -634,6 +640,9 @@ router.delete("/admin/users/:id", requireAdmin, async (req, res): Promise<void> 
   const [target] = await db.select().from(usersTable)
     .where(and(eq(usersTable.id, id), eq(usersTable.tenantId, tenantId))).limit(1);
   if (!target) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
+  // Nunca permitir que um admin de loja apague a conta do superadmin — mesmo
+  // que ela carregue este tenant_id (coluna NOT NULL sem valor "sem loja").
+  if (target.role === "superadmin") { res.status(403).json({ error: "Operação não permitida" }); return; }
 
   if (transferToId != null) {
     // Destino precisa ser um usuário ativo da MESMA loja.
