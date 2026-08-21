@@ -10,6 +10,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   Users, Settings2, Copy, RefreshCw, Plus, Trash2, X, CheckCircle, XCircle,
   Video, ChevronDown, ChevronUp, Save, Link2, UserSquare2, CalendarClock, Clock, Wallet, Pencil, Archive, PlayCircle,
+  AlertTriangle, Image as ImageIcon, Smartphone,
 } from "lucide-react";
 
 const STATUS_META: Record<RhCandidate["status"], { label: string; cls: string }> = {
@@ -90,7 +91,7 @@ export default function RH() {
           </div>
           {dpView === "colaboradores" && <Colaboradores canEdit={canEdit} />}
           {dpView === "escalas" && <Escalas canEdit={canEdit} />}
-          {dpView === "ponto" && <PontoAdmin canEdit={canEdit} />}
+          {dpView === "ponto" && <PontoAdmin canEdit={canEdit} isAdmin={user?.role === "admin"} />}
           {dpView === "banco-horas" && <BancoHoras canEdit={canEdit} />}
           {dpView === "afastamentos" && <Afastamentos canEdit={canEdit} />}
           {dpView === "fechamentos" && <Fechamentos canEdit={canEdit} />}
@@ -738,8 +739,15 @@ function Escalas({ canEdit }: { canEdit: boolean }) {
   );
 }
 
+const PONTO_KIND_LABELS: Record<TimeClockEntry["kind"], string> = {
+  in: "Entrada", break_start: "Início intervalo", break_end: "Fim intervalo", out: "Saída",
+};
+const PONTO_SOURCE_LABELS: Record<TimeClockEntry["source"], string> = {
+  self: "Colaborador", admin: "Manual", whatsapp: "WhatsApp",
+};
+
 // ── Ponto (gestão) ───────────────────────────────────────────────────────
-function PontoAdmin({ canEdit }: { canEdit: boolean }) {
+function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }) {
   const { toast } = useToast();
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [employeeId, setEmployeeId] = useState(0);
@@ -747,6 +755,28 @@ function PontoAdmin({ canEdit }: { canEdit: boolean }) {
   const [to, setTo] = useState(todayStr());
   const [entries, setEntries] = useState<TimeClockEntry[]>([]);
   const [manual, setManual] = useState<{ kind: TimeClockEntry["kind"]; at: string } | null>(null);
+
+  // Configuração da linha oficial de check-in de ponto por WhatsApp (uma por
+  // tenant) — só admin edita; qualquer um com acesso ao módulo vê qual está.
+  const [waSessions, setWaSessions] = useState<{ sessionKey: string; displayName: string | null; phoneNumber: string | null }[]>([]);
+  const [checkInSessionKey, setCheckInSessionKey] = useState<string>("");
+  const [savingSettings, setSavingSettings] = useState(false);
+  useEffect(() => {
+    api.chat.waSessions().then(setWaSessions).catch(() => {});
+    api.rhDp.settings.get().then((s) => setCheckInSessionKey(s.pontoCheckInSessionKey ?? "")).catch(() => {});
+  }, []);
+  const saveCheckInSession = async (value: string) => {
+    setSavingSettings(true);
+    try {
+      await api.rhDp.settings.update(value || null);
+      setCheckInSessionKey(value);
+      toast({ title: value ? "Linha de check-in configurada" : "Check-in por WhatsApp desligado" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSavingSettings(false);
+    }
+  };
   // Editar o dia inteiro (as até 4 seções numa tela só), em vez de lançar
   // seção por seção — cada campo em branco limpa a batida daquele tipo.
   const [dayEditor, setDayEditor] = useState<{
@@ -765,6 +795,13 @@ function PontoAdmin({ canEdit }: { canEdit: boolean }) {
   const removeEntry = async (id: number) => {
     if (!window.confirm("Excluir esta batida?")) return;
     try { await api.rhDp.timeClockEntries.remove(id); load(); } catch { toast({ title: "Erro", variant: "destructive" }); }
+  };
+
+  // Admin conferiu uma batida sinalizada (duas fotos em pouco tempo via
+  // WhatsApp) e decidiu manter como está — some da lista de pendências.
+  const reviewEntry = async (id: number) => {
+    try { await api.rhDp.timeClockEntries.review(id); load(); toast({ title: "Marcado como revisado" }); }
+    catch { toast({ title: "Erro", variant: "destructive" }); }
   };
 
   const launchManual = async () => {
@@ -828,6 +865,33 @@ function PontoAdmin({ canEdit }: { canEdit: boolean }) {
 
   return (
     <div className="space-y-3">
+      <div className="shk-card p-4 space-y-1.5">
+        <p className="text-xs font-semibold flex items-center gap-1.5"><Smartphone className="w-3.5 h-3.5 text-primary" /> Check-in de ponto por WhatsApp</p>
+        <p className="text-[11px] text-muted-foreground">
+          Colaborador manda uma foto pra essa linha e o sistema registra a próxima batida esperada do dia automaticamente
+          (precisa ter o telefone cadastrado no colaborador). Uma linha só, vale pra todos os colaboradores do tenant.
+        </p>
+        {isAdmin ? (
+          <select value={checkInSessionKey} onChange={(e) => saveCheckInSession(e.target.value)} disabled={savingSettings}
+            data-testid="select-ponto-checkin-session"
+            className="mt-1 px-3 py-1.5 rounded-xl border border-border text-xs bg-white disabled:opacity-50">
+            <option value="">Desligado</option>
+            {waSessions.map((s) => (
+              <option key={s.sessionKey} value={s.sessionKey}>
+                {s.displayName || s.phoneNumber || s.sessionKey}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <p className="text-xs font-semibold mt-1">
+            {checkInSessionKey
+              ? (waSessions.find((s) => s.sessionKey === checkInSessionKey)?.displayName ?? checkInSessionKey)
+              : "Desligado"}
+            <span className="text-[11px] font-normal text-muted-foreground"> · só admin altera</span>
+          </p>
+        )}
+      </div>
+
       <div className="shk-card p-4 flex flex-wrap gap-2 items-end">
         <label className="text-xs">
           Colaborador
@@ -878,14 +942,36 @@ function PontoAdmin({ canEdit }: { canEdit: boolean }) {
             </thead>
             <tbody>
               {entries.map((e) => (
-                <tr key={e.id} className="border-b border-border/50 last:border-0">
+                <tr key={e.id} className={`border-b border-border/50 last:border-0 ${e.flagged ? "bg-amber-50" : ""}`}
+                  title={e.flagged ? e.flagReason ?? undefined : undefined}>
                   <td className="py-2 px-3 font-semibold">{e.employeeName ?? "—"}</td>
-                  <td className="py-2 px-3">{{ in: "Entrada", break_start: "Início intervalo", break_end: "Fim intervalo", out: "Saída" }[e.kind]}</td>
+                  <td className="py-2 px-3">{PONTO_KIND_LABELS[e.kind]}</td>
                   <td className="py-2 px-3">{new Date(e.at).toLocaleString("pt-BR")}</td>
-                  <td className="py-2 px-3">{e.source === "self" ? "Colaborador" : "Manual"}</td>
+                  <td className="py-2 px-3">
+                    <span className="inline-flex items-center gap-1">
+                      {PONTO_SOURCE_LABELS[e.source]}
+                      {e.proofUrl && (
+                        <a href={e.proofUrl} target="_blank" rel="noreferrer" title="Ver foto do comprovante"
+                          className="text-primary hover:opacity-70">
+                          <ImageIcon className="w-3.5 h-3.5" />
+                        </a>
+                      )}
+                      {e.flagged && (
+                        <span className="inline-flex items-center gap-0.5 text-amber-700 font-semibold" title={e.flagReason ?? undefined}>
+                          <AlertTriangle className="w-3.5 h-3.5" /> Revisar
+                        </span>
+                      )}
+                    </span>
+                  </td>
                   {canEdit && (
                     <td className="py-2 px-3 text-right">
-                      <button onClick={() => removeEntry(e.id)} className="p-1 rounded-lg hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>
+                      <span className="inline-flex items-center gap-1">
+                        {e.flagged && (
+                          <button onClick={() => reviewEntry(e.id)} title="Marcar como revisado" data-testid={`button-review-entry-${e.id}`}
+                            className="p-1 rounded-lg hover:bg-green-50 text-green-600"><CheckCircle className="w-3.5 h-3.5" /></button>
+                        )}
+                        <button onClick={() => removeEntry(e.id)} className="p-1 rounded-lg hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>
+                      </span>
                     </td>
                   )}
                 </tr>

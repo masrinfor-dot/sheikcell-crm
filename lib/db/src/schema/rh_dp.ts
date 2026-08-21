@@ -65,8 +65,16 @@ export const timeClockEntriesTable = pgTable("time_clock_entries", {
   employeeId: integer("employee_id").notNull(),
   kind: text("kind").notNull(), // "in" | "break_start" | "break_end" | "out"
   at: timestamp("at", { withTimezone: true }).notNull().defaultNow(), // sempre now() do servidor
-  source: text("source").notNull().default("self"), // "self" | "admin" (lançamento manual)
+  source: text("source").notNull().default("self"), // "self" | "admin" | "whatsapp" (check-in por foto)
   createdByUserId: integer("created_by_user_id"),
+  // Comprovante (foto) do check-in por WhatsApp — mesma mediaUrl que
+  // whatsappInbound.ts já salva em disco pra mensagens normais.
+  proofUrl: text("proof_url"),
+  // Duas fotos em pouco tempo do mesmo colaborador: registra as duas, mas
+  // marca ambas pra revisão manual em vez de decidir sozinho qual vale
+  // (ver tryConsumePontoCheckIn em lib/whatsappInbound.ts).
+  flagged: boolean("flagged").notNull().default(false),
+  flagReason: text("flag_reason"),
 });
 
 export const timeBankAdjustmentsTable = pgTable("time_bank_adjustments", {

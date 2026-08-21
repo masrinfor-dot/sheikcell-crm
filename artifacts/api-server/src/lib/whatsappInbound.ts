@@ -1,5 +1,9 @@
-import { db, conversationsTable, messagesTable, sectorsTable, attendanceLogsTable, whatsappSessionsTable } from "@workspace/db";
-import { eq, and, desc, sql, inArray } from "drizzle-orm";
+import {
+  db, conversationsTable, messagesTable, sectorsTable, attendanceLogsTable, whatsappSessionsTable,
+  tenantsTable, employeesTable, workShiftsTable, timeClockEntriesTable,
+} from "@workspace/db";
+import { eq, and, desc, asc, gte, lte, sql, inArray } from "drizzle-orm";
+import { nextPunchKind, dayKeySaoPaulo } from "./timeBank";
 import { normalizePhone, phoneVariants } from "./phone";
 import { broadcast } from "./sseEmitter";
 import { isPotentialConversation, restrictedRecipients } from "./conversationScope";
@@ -342,6 +346,96 @@ async function upsertConversation(
 // resposta segue o fluxo normal (reabertura, robô etc.) — aí sim é uma nova
 // interação de verdade. Compartilhado pelos dois caminhos de entrada
 // (Baileys e Meta). Retorna true quando a mensagem foi totalmente tratada aqui.
+// Janela de tolerância pra considerar duas fotos seguidas "duplicidade" (não
+// decide qual vale — só sinaliza as duas pro admin revisar na tela de Ponto).
+const PONTO_DUPLICATE_WINDOW_MS = 5 * 60_000;
+const PONTO_KIND_LABEL: Record<string, string> = {
+  in: "Entrada", break_start: "Início do intervalo", break_end: "Fim do intervalo", out: "Saída",
+};
+
+/**
+ * Check-in de ponto por WhatsApp: só entra em ação quando a sessão é a linha
+ * oficial de ponto do tenant (tenants.pontoCheckInSessionKey) E a mensagem
+ * tem foto — texto/áudio/vídeo/documento nunca contam como tentativa de
+ * check-in (decisão de produto), caem no fluxo normal de conversa como
+ * qualquer outra mensagem. Casa o remetente com um colaborador pelo telefone
+ * normalizado, decide a próxima batida esperada do dia (nextPunchKind, mesma
+ * função que POST /rh-dp/me/punch usa) e registra com a foto como
+ * comprovante. Retorna true quando a mensagem foi consumida (não deve virar
+ * conversa/ticket).
+ */
+async function tryConsumePontoCheckIn(input: {
+  tenantId: number;
+  sessionKey: string;
+  phone: string;
+  mediaType: string | null;
+  mediaUrl: string | null;
+}): Promise<boolean> {
+  const { tenantId, sessionKey, phone, mediaType, mediaUrl } = input;
+  if (mediaType !== "image" || !mediaUrl) return false;
+
+  const [tenant] = await db.select({ pontoCheckInSessionKey: tenantsTable.pontoCheckInSessionKey })
+    .from(tenantsTable).where(eq(tenantsTable.id, tenantId)).limit(1);
+  if (!tenant?.pontoCheckInSessionKey || tenant.pontoCheckInSessionKey !== sessionKey) return false;
+
+  // Telefone comparado normalizado dos dois lados (nunca contra o valor cru
+  // salvo em employees.phone, que é texto livre sem validação de formato) —
+  // sempre escopado por tenant, nunca uma busca global de telefone.
+  const normalizedInbound = normalizePhone(phone);
+  if (!normalizedInbound) return false;
+  const activeEmployees = await db.select().from(employeesTable)
+    .where(and(eq(employeesTable.tenantId, tenantId), eq(employeesTable.isActive, true)));
+  const employee = activeEmployees.find((e) => e.phone && normalizePhone(e.phone) === normalizedInbound);
+  if (!employee) return false; // número não cadastrado a nenhum colaborador: mensagem segue fluxo normal
+
+  const shift = employee.shiftId
+    ? (await db.select().from(workShiftsTable).where(eq(workShiftsTable.id, employee.shiftId)))[0] ?? null
+    : null;
+  const hasBreak = !!(shift?.breakStart && shift?.breakEnd);
+
+  const todayKey = dayKeySaoPaulo(new Date());
+  const dayStart = new Date(`${todayKey}T00:00:00-03:00`);
+  const dayEnd = new Date(`${todayKey}T23:59:59-03:00`);
+  const todayEntries = await db.select().from(timeClockEntriesTable)
+    .where(and(
+      eq(timeClockEntriesTable.employeeId, employee.id),
+      eq(timeClockEntriesTable.tenantId, tenantId),
+      gte(timeClockEntriesTable.at, dayStart),
+      lte(timeClockEntriesTable.at, dayEnd),
+    ))
+    .orderBy(asc(timeClockEntriesTable.at));
+
+  const { sendRawWhatsAppText } = await import("./outbound");
+  const kind = nextPunchKind(todayEntries, hasBreak);
+  if (!kind) {
+    void sendRawWhatsAppText(phone, sessionKey, "Seu ponto de hoje já está completo. ✅").catch(() => {});
+    return true;
+  }
+
+  // Duas fotos em pouco tempo do mesmo colaborador: registra as duas, mas
+  // marca ambas pra revisão manual — nunca decide sozinho qual vale.
+  const lastWaEntry = [...todayEntries].reverse().find((e) => e.source === "whatsapp");
+  const isDuplicate = !!lastWaEntry && (Date.now() - lastWaEntry.at.getTime()) < PONTO_DUPLICATE_WINDOW_MS;
+  const flagReason = isDuplicate ? "Duas fotos em poucos minutos — confira qual está correta" : null;
+
+  const [created] = await db.insert(timeClockEntriesTable).values({
+    tenantId, employeeId: employee.id, kind, source: "whatsapp", proofUrl: mediaUrl,
+    flagged: isDuplicate, flagReason,
+  }).returning();
+  if (isDuplicate && lastWaEntry) {
+    await db.update(timeClockEntriesTable).set({ flagged: true, flagReason })
+      .where(eq(timeClockEntriesTable.id, lastWaEntry.id));
+  }
+
+  const timeLabel = (created?.at ?? new Date()).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: "America/Sao_Paulo" });
+  const confirmMsg = isDuplicate
+    ? "Recebi sua foto, mas você já tinha mandado outra há pouco — o RH vai confirmar qual vale."
+    : `✅ ${PONTO_KIND_LABEL[kind]} registrada às ${timeLabel}.`;
+  void sendRawWhatsAppText(phone, sessionKey, confirmMsg).catch(() => {});
+
+  return true;
+}
+
 async function tryConsumeSurveyReply(input: {
   tenantId: number;
   phone: string;
@@ -813,6 +907,14 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     console.warn(`[whatsapp] Mensagem descartada: sessão desconhecida "${sessionKey}"`);
     return;
   }
+  // Check-in de ponto (foto na linha oficial + colaborador reconhecido pelo
+  // telefone): nunca vira conversa/ticket. Só entra aqui se a mensagem tem
+  // foto — decisão de produto, texto/áudio nunca contam como check-in.
+  if (!isGroup) {
+    const handled = await tryConsumePontoCheckIn({ tenantId, sessionKey, phone, mediaType, mediaUrl });
+    if (handled) return;
+  }
+
   // Pesquisa de satisfação: se a resposta consumiu a pesquisa, não reabre a
   // conversa nem aciona o robô.
   if (!isGroup) {

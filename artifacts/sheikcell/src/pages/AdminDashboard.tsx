@@ -593,7 +593,8 @@ export default function AdminDashboard() {
             {(() => {
               const waitingTooLong = attention?.waitingTooLong ?? [];
               const overdueTasks = attention?.overdueTasks ?? [];
-              const attentionCount = waitingTooLong.length + overdueTasks.length;
+              const pontoFlagged = attention?.pontoFlagged ?? [];
+              const attentionCount = waitingTooLong.length + overdueTasks.length + pontoFlagged.length;
               const disconnectedWA = (waSessions ?? []).filter((s) => s.status === "disconnected" || s.status === "unconfigured");
               return (
                 <div className="grid lg:grid-cols-3 gap-4 items-start">
@@ -629,6 +630,16 @@ export default function AdminDashboard() {
                               <p className="text-xs text-muted-foreground truncate">
                                 {t.assigneeName ?? "Sem responsável"} · atrasada {t.daysOverdue != null && t.daysOverdue > 0 ? `há ${t.daysOverdue}d` : "hoje"}
                               </p>
+                            </div>
+                          </button>
+                        ))}
+                        {pontoFlagged.map((p) => (
+                          <button key={`ponto-${p.id}`} onClick={() => setTab("rh")} data-testid={`attention-ponto-${p.id}`}
+                            className="w-full flex items-center gap-3 py-2.5 text-left hover:bg-secondary/40 rounded-lg px-2 -mx-2 transition">
+                            <div className="w-8 h-8 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center shrink-0"><Smartphone className="w-4 h-4" /></div>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-semibold truncate">{p.employeeName} <span className="font-normal text-muted-foreground">— ponto duplicado, revisar</span></p>
+                              <p className="text-xs text-muted-foreground truncate">{p.flagReason ?? "Duas fotos em pouco tempo"}</p>
                             </div>
                           </button>
                         ))}

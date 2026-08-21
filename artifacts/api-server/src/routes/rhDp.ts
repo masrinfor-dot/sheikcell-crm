@@ -1,12 +1,13 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import {
   db, employeesTable, workShiftsTable, timeClockEntriesTable, timeBankAdjustmentsTable, leaveRecordsTable,
-  timeBankClosuresTable, usersTable, storesTable,
+  timeBankClosuresTable, usersTable, storesTable, tenantsTable,
 } from "@workspace/db";
 import { eq, and, desc, asc, gte, lte, inArray } from "drizzle-orm";
-import { requireAuth, requireTenant, tenantIdOf } from "../middlewares/auth";
+import { requireAuth, requireAdmin, requireTenant, tenantIdOf } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import { computeTimeBank, nextPunchKind, dayKeySaoPaulo, employeeNeedsClockInToday } from "../lib/timeBank";
+import { normalizePhone } from "../lib/phone";
 import { generateClosuresForMonth, previousMonthKey, currentMonthKey } from "../lib/timeBankClosures";
 
 const router: IRouter = Router();
@@ -230,7 +231,10 @@ router.post("/rh-dp/employees", requireModuleAccess("rh"), async (req, res): Pro
   const [created] = await db.insert(employeesTable).values({
     tenantId, userId, name,
     birthDate: typeof b.birthDate === "string" && b.birthDate ? b.birthDate : null,
-    phone: typeof b.phone === "string" ? b.phone.trim().slice(0, 30) || null : null,
+    // Normalizado (mesma função usada em conversas/CRM) — é o que permite
+    // casar o telefone que manda o check-in de ponto via WhatsApp com este
+    // cadastro, sem depender de o admin digitar num formato específico.
+    phone: typeof b.phone === "string" && b.phone.trim() ? normalizePhone(b.phone) || null : null,
     email: typeof b.email === "string" ? b.email.trim().slice(0, 120) || null : null,
     cpf: typeof b.cpf === "string" ? b.cpf.trim().slice(0, 20) || null : null,
     rg: typeof b.rg === "string" ? b.rg.trim().slice(0, 20) || null : null,
@@ -258,7 +262,7 @@ router.patch("/rh-dp/employees/:id", requireModuleAccess("rh"), async (req, res)
     update.name = name;
   }
   if ("birthDate" in b) update.birthDate = typeof b.birthDate === "string" && b.birthDate ? b.birthDate : null;
-  if ("phone" in b) update.phone = typeof b.phone === "string" ? b.phone.trim().slice(0, 30) || null : null;
+  if ("phone" in b) update.phone = typeof b.phone === "string" && b.phone.trim() ? normalizePhone(b.phone) || null : null;
   if ("email" in b) update.email = typeof b.email === "string" ? b.email.trim().slice(0, 120) || null : null;
   if ("cpf" in b) update.cpf = typeof b.cpf === "string" ? b.cpf.trim().slice(0, 20) || null : null;
   if ("rg" in b) update.rg = typeof b.rg === "string" ? b.rg.trim().slice(0, 20) || null : null;
@@ -307,6 +311,28 @@ router.delete("/rh-dp/employees/:id", requireModuleAccess("rh"), async (req, res
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   await db.delete(employeesTable).where(and(eq(employeesTable.id, id), eq(employeesTable.tenantId, tenantId)));
   res.json({ ok: true });
+});
+
+// ── Configuração: linha oficial de check-in de ponto por WhatsApp ──────────
+// Uma linha por tenant (não por loja) — mensagem com foto recebida nela é
+// tratada como tentativa de check-in (ver tryConsumePontoCheckIn em
+// lib/whatsappInbound.ts). Null = feature desligada (padrão).
+
+router.get("/rh-dp/settings", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const [row] = await db.select({ pontoCheckInSessionKey: tenantsTable.pontoCheckInSessionKey })
+    .from(tenantsTable).where(eq(tenantsTable.id, tenantId));
+  res.json({ pontoCheckInSessionKey: row?.pontoCheckInSessionKey ?? null });
+});
+
+router.patch("/rh-dp/settings", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const b = (req.body ?? {}) as { pontoCheckInSessionKey?: string | null };
+  const value = typeof b.pontoCheckInSessionKey === "string" && b.pontoCheckInSessionKey.trim()
+    ? b.pontoCheckInSessionKey.trim() : null;
+  const [updated] = await db.update(tenantsTable).set({ pontoCheckInSessionKey: value })
+    .where(eq(tenantsTable.id, tenantId)).returning({ pontoCheckInSessionKey: tenantsTable.pontoCheckInSessionKey });
+  res.json(updated);
 });
 
 // ── Escalas ───────────────────────────────────────────────────────────────
@@ -546,6 +572,19 @@ router.delete("/rh-dp/time-clock-entries/:id", requireModuleAccess("rh"), async 
   res.json({ ok: true });
 });
 
+// Admin conferiu uma batida sinalizada (duas fotos em pouco tempo, ver
+// tryConsumePontoCheckIn) e decidiu manter como está — some da lista de
+// pendências sem apagar/alterar o horário registrado.
+router.post("/rh-dp/time-clock-entries/:id/review", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const [updated] = await db.update(timeClockEntriesTable).set({ flagged: false, flagReason: null })
+    .where(and(eq(timeClockEntriesTable.id, id), eq(timeClockEntriesTable.tenantId, tenantId))).returning();
+  if (!updated) { res.status(404).json({ error: "Batida não encontrada" }); return; }
+  res.json(updated);
+});
+
 router.get("/rh-dp/employees/:id/time-bank", requireModuleAccess("rh"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const employeeId = parseInt(String(req.params.id), 10);
@@ -643,6 +682,9 @@ router.get("/rh-dp/reports/timesheet", requireModuleAccess("rh"), async (req, re
     kind: timeClockEntriesTable.kind,
     at: timeClockEntriesTable.at,
     source: timeClockEntriesTable.source,
+    proofUrl: timeClockEntriesTable.proofUrl,
+    flagged: timeClockEntriesTable.flagged,
+    flagReason: timeClockEntriesTable.flagReason,
   }).from(timeClockEntriesTable)
     .leftJoin(employeesTable, eq(timeClockEntriesTable.employeeId, employeesTable.id))
     .where(and(...conditions))

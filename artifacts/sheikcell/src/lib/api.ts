@@ -369,6 +369,9 @@ export type SectorSummary = {
 export type DashboardAttention = {
   waitingTooLong: Array<{ id: number; name: string; sectorName: string | null; waitingMinutes: number | null }>;
   overdueTasks: Array<{ id: number; title: string; assigneeName: string | null; daysOverdue: number | null }>;
+  // Check-ins de ponto via WhatsApp sinalizados (duas fotos em pouco tempo do
+  // mesmo colaborador) — precisam de revisão manual do admin.
+  pontoFlagged: Array<{ id: number; employeeName: string; kind: string; at: string; flagReason: string | null }>;
   avgServiceSeconds: number | null;
   funnel: { potential: number; active: number };
 };
@@ -605,7 +608,10 @@ export type TimeClockEntry = {
   employeeName?: string | null;
   kind: "in" | "break_start" | "break_end" | "out";
   at: string;
-  source: "self" | "admin";
+  source: "self" | "admin" | "whatsapp";
+  proofUrl?: string | null;
+  flagged?: boolean;
+  flagReason?: string | null;
 };
 
 export type TimeBankDay = {
@@ -1375,6 +1381,15 @@ export const api = {
     },
     timeClockEntries: {
       remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/time-clock-entries/${id}`, { method: "DELETE" }),
+      // Admin conferiu uma batida sinalizada (duas fotos em pouco tempo via
+      // WhatsApp) e decidiu manter como está — some da lista de pendências.
+      review: (id: number) => req<TimeClockEntry>(`/rh-dp/time-clock-entries/${id}/review`, { method: "POST" }),
+    },
+    // Linha oficial de check-in de ponto por WhatsApp (uma por tenant).
+    settings: {
+      get: () => req<{ pontoCheckInSessionKey: string | null }>("/rh-dp/settings"),
+      update: (pontoCheckInSessionKey: string | null) =>
+        req<{ pontoCheckInSessionKey: string | null }>("/rh-dp/settings", { method: "PATCH", body: JSON.stringify({ pontoCheckInSessionKey }) }),
     },
     shifts: {
       list: () => req<WorkShift[]>("/rh-dp/shifts"),

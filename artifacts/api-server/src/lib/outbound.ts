@@ -5,6 +5,31 @@ import { broadcast } from "./sseEmitter";
 import { isPotentialConversation, restrictedRecipients } from "./conversationScope";
 
 /**
+ * Envia texto puro pelo bridge, sem gravar mensagem/conversa — uso para
+ * respostas que não devem virar atendimento (ex.: confirmação de check-in de
+ * ponto). sendOutboundText (abaixo) é a versão que grava tudo; esta é o
+ * primitivo que ela usa por baixo.
+ */
+export async function sendRawWhatsAppText(phone: string, sessionKey: string, text: string): Promise<boolean> {
+  const bridgeUrl = process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
+  const bridgeSecret = createHmac(
+    "sha256",
+    process.env["SESSION_SECRET"] ?? "sheikcell-dev-only-secret",
+  ).update("whatsapp-bridge-v1").digest("hex");
+  try {
+    const r = await fetch(`${bridgeUrl}/whatsapp/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Bridge-Secret": bridgeSecret },
+      body: JSON.stringify({ to: phone, text, session: sessionKey }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Envia um texto para o cliente de uma conversa (mesmo caminho do envio manual):
  * grava a mensagem, atualiza a conversa, avisa via SSE e encaminha ao bridge.
  * Retorna true se o bridge aceitou o envio.
@@ -37,22 +62,7 @@ export async function sendOutboundText(conversationId: number, content: string, 
 
   let delivered = true;
   if (conv.channel === "whatsapp") {
-    const bridgeUrl = process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
-    const bridgeSecret = createHmac(
-      "sha256",
-      process.env["SESSION_SECRET"] ?? "sheikcell-dev-only-secret",
-    ).update("whatsapp-bridge-v1").digest("hex");
-    try {
-      const r = await fetch(`${bridgeUrl}/whatsapp/send`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Bridge-Secret": bridgeSecret },
-        body: JSON.stringify({ to: conv.phone, text: content, session: conv.sessionKey }),
-        signal: AbortSignal.timeout(60_000),
-      });
-      if (!r.ok) delivered = false;
-    } catch {
-      delivered = false;
-    }
+    delivered = await sendRawWhatsAppText(conv.phone, conv.sessionKey, content);
     if (!delivered && msg) {
       const [failedMsg] = await db.update(messagesTable).set({ status: "failed" })
         .where(eq(messagesTable.id, msg.id)).returning();

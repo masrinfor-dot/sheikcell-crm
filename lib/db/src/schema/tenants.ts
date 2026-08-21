@@ -44,6 +44,11 @@ export const tenantsTable = pgTable("tenants", {
   // isso, ensureGeneralRoom() recriaria uma nova (vazia) no próximo GET
   // /internal-chat/conversations de qualquer membro da equipe.
   internalChatGeneralDisabled: boolean("internal_chat_general_disabled").notNull().default(false),
+  // sessionKey (whatsapp_sessions) marcada como a linha oficial de ponto da
+  // loja — mensagem com foto recebida nela é tratada como tentativa de
+  // check-in (ver lib/whatsappInbound.ts). Null = feature desligada (opt-in,
+  // nenhuma mensagem é interceptada até o admin escolher a linha).
+  pontoCheckInSessionKey: text("ponto_check_in_session_key"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

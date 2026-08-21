@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, conversationParticipantsTable, tasksTable, taskAssigneesTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable, accessLogsTable, whatsappSessionsTable, tenantsTable, storesTable } from "@workspace/db";
+import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, conversationParticipantsTable, tasksTable, taskAssigneesTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable, accessLogsTable, whatsappSessionsTable, tenantsTable, storesTable, timeClockEntriesTable, employeesTable } from "@workspace/db";
 import { eq, sql, desc, asc, and, gte, lt, isNull, isNotNull, notInArray, inArray, or, ilike } from "drizzle-orm";
 import { requireAdmin, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
 import { sanitizePermissions } from "../lib/permissions";
@@ -203,6 +203,22 @@ router.get("/admin/dashboard-attention", requireAdminOrSupervisor, async (req, r
     .from(conversationsTable)
     .where(and(notFinished, isNotNull(conversationsTable.assigneeId)));
 
+  // Batidas de ponto via WhatsApp sinalizadas (duas fotos em pouco tempo do
+  // mesmo colaborador) — ver tryConsumePontoCheckIn em lib/whatsappInbound.ts.
+  const pontoFlaggedRows = await db
+    .select({
+      id: timeClockEntriesTable.id,
+      employeeName: employeesTable.name,
+      kind: timeClockEntriesTable.kind,
+      at: timeClockEntriesTable.at,
+      flagReason: timeClockEntriesTable.flagReason,
+    })
+    .from(timeClockEntriesTable)
+    .leftJoin(employeesTable, eq(timeClockEntriesTable.employeeId, employeesTable.id))
+    .where(and(eq(timeClockEntriesTable.tenantId, tenantId), eq(timeClockEntriesTable.flagged, true)))
+    .orderBy(desc(timeClockEntriesTable.at))
+    .limit(10);
+
   const now = Date.now();
   res.json({
     waitingTooLong: waitingRows.map((c) => ({
@@ -216,6 +232,13 @@ router.get("/admin/dashboard-attention", requireAdminOrSupervisor, async (req, r
       title: t.title,
       assigneeName: t.assigneeName,
       daysOverdue: t.dueDate ? Math.floor((now - t.dueDate.getTime()) / 86_400_000) : null,
+    })),
+    pontoFlagged: pontoFlaggedRows.map((r) => ({
+      id: r.id,
+      employeeName: r.employeeName ?? "—",
+      kind: r.kind,
+      at: r.at,
+      flagReason: r.flagReason,
     })),
     avgServiceSeconds: avgRow?.avgSeconds ?? null,
     funnel: {
