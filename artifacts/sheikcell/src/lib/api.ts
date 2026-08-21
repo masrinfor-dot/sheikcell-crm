@@ -1362,6 +1362,12 @@ export const api = {
       remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/employees/${id}`, { method: "DELETE" }),
       punch: (id: number, data: { kind: TimeClockEntry["kind"]; at?: string }) =>
         req<TimeClockEntry>(`/rh-dp/employees/${id}/punch`, { method: "POST", body: JSON.stringify(data) }),
+      // Lança/edita/limpa o dia inteiro (até 4 seções) numa chamada só —
+      // cada seção omitida/vazia remove a batida existente daquele tipo.
+      setDay: (id: number, data: { date: string; in?: string | null; break_start?: string | null; break_end?: string | null; out?: string | null }) =>
+        req<{ ok: boolean; date: string } & Partial<Record<"in" | "break_start" | "break_end" | "out", string>>>(
+          `/rh-dp/employees/${id}/day`, { method: "PUT", body: JSON.stringify(data) },
+        ),
       timeBank: (id: number, from?: string, to?: string) =>
         req<TimeBankResult>(`/rh-dp/employees/${id}/time-bank?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
       addAdjustment: (id: number, data: { minutes: number; reason: string }) =>

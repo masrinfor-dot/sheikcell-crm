@@ -3,7 +3,7 @@ import {
   db, employeesTable, workShiftsTable, timeClockEntriesTable, timeBankAdjustmentsTable, leaveRecordsTable,
   timeBankClosuresTable, usersTable, storesTable,
 } from "@workspace/db";
-import { eq, and, desc, asc, gte, lte } from "drizzle-orm";
+import { eq, and, desc, asc, gte, lte, inArray } from "drizzle-orm";
 import { requireAuth, requireTenant, tenantIdOf } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import { computeTimeBank, nextPunchKind, dayKeySaoPaulo, employeeNeedsClockInToday } from "../lib/timeBank";
@@ -442,6 +442,100 @@ router.post("/rh-dp/employees/:id/punch", requireModuleAccess("rh"), async (req,
   // do colaborador, se ele tiver login vinculado.
   if (b.kind === "in" && employee.userId != null) invalidateClockInBlock(employee.userId);
   res.status(201).json(created);
+});
+
+// Lança/edita/limpa as até 4 batidas de um dia inteiro do colaborador numa
+// chamada só — cada seção (in/break_start/break_end/out) é opcional: horário
+// informado cria (se não existir) ou atualiza (se já existir) a batida
+// daquele tipo no dia; omitido/vazio remove a batida existente daquele tipo,
+// se houver. Complementa POST .../punch (uma seção por vez) sem substituí-lo.
+router.put("/rh-dp/employees/:id/day", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const employeeId = parseInt(String(req.params.id), 10);
+  if (isNaN(employeeId)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const employee = await getEmployee(employeeId, tenantId);
+  if (!employee) { res.status(404).json({ error: "Colaborador não encontrado" }); return; }
+
+  const b = (req.body ?? {}) as { date?: string } & Partial<Record<PunchKind, string | null>>;
+  if (typeof b.date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(b.date)) {
+    res.status(400).json({ error: "Data inválida (use YYYY-MM-DD)" }); return;
+  }
+  const date = b.date;
+
+  // Valida formato de cada horário informado.
+  for (const k of PUNCH_KINDS) {
+    const v = b[k];
+    if (v != null && v !== "" && parseHHMM(v) == null) {
+      res.status(400).json({ error: `Horário inválido em "${k}" (use HH:MM)` }); return;
+    }
+  }
+  // Sequência lógica: horários informados precisam estar em ordem crescente
+  // (entrada ≤ início intervalo ≤ fim intervalo ≤ saída).
+  let prevMinutes: number | null = null;
+  for (const k of PUNCH_KINDS) {
+    const v = b[k];
+    if (v == null || v === "") continue;
+    const mins = parseHHMM(v)!;
+    if (prevMinutes != null && mins < prevMinutes) {
+      res.status(400).json({ error: "Os horários precisam estar em ordem: entrada ≤ início intervalo ≤ fim intervalo ≤ saída" });
+      return;
+    }
+    prevMinutes = mins;
+  }
+
+  const dayStart = new Date(`${date}T00:00:00-03:00`);
+  const dayEnd = new Date(`${date}T23:59:59-03:00`);
+  const existing = await db.select().from(timeClockEntriesTable)
+    .where(and(
+      eq(timeClockEntriesTable.employeeId, employeeId),
+      eq(timeClockEntriesTable.tenantId, tenantId),
+      gte(timeClockEntriesTable.at, dayStart),
+      lte(timeClockEntriesTable.at, dayEnd),
+    ));
+
+  const result: Partial<Record<PunchKind, string>> = {};
+  for (const k of PUNCH_KINDS) {
+    const v = b[k];
+    const existingForKind = existing.filter((e) => e.kind === k);
+
+    if (v == null || v === "") {
+      // Seção não informada/limpa: remove qualquer batida existente desse tipo no dia.
+      if (existingForKind.length > 0) {
+        await db.delete(timeClockEntriesTable).where(and(
+          eq(timeClockEntriesTable.tenantId, tenantId),
+          inArray(timeClockEntriesTable.id, existingForKind.map((e) => e.id)),
+        ));
+      }
+      continue;
+    }
+
+    const at = new Date(`${date}T${v}:00-03:00`);
+    if (existingForKind.length > 0) {
+      // Atualiza a primeira batida desse tipo no dia; qualquer duplicata
+      // extra (não deveria existir, mas por segurança) é removida.
+      const [first, ...rest] = existingForKind;
+      await db.update(timeClockEntriesTable)
+        .set({ at, source: "admin", createdByUserId: req.session.userId })
+        .where(and(eq(timeClockEntriesTable.id, first!.id), eq(timeClockEntriesTable.tenantId, tenantId)));
+      if (rest.length > 0) {
+        await db.delete(timeClockEntriesTable).where(and(
+          eq(timeClockEntriesTable.tenantId, tenantId),
+          inArray(timeClockEntriesTable.id, rest.map((e) => e.id)),
+        ));
+      }
+    } else {
+      await db.insert(timeClockEntriesTable).values({
+        tenantId, employeeId, kind: k, at, source: "admin", createdByUserId: req.session.userId,
+      });
+    }
+    result[k] = at.toISOString();
+  }
+
+  // Lançar/editar a entrada também libera o gate de ponto obrigatório, se o
+  // colaborador tiver login vinculado — mesmo efeito de POST .../punch.
+  if (b.in != null && b.in !== "" && employee.userId != null) invalidateClockInBlock(employee.userId);
+
+  res.json({ ok: true, date, ...result });
 });
 
 router.delete("/rh-dp/time-clock-entries/:id", requireModuleAccess("rh"), async (req, res): Promise<void> => {

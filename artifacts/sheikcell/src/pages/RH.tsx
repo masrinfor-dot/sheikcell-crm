@@ -747,6 +747,13 @@ function PontoAdmin({ canEdit }: { canEdit: boolean }) {
   const [to, setTo] = useState(todayStr());
   const [entries, setEntries] = useState<TimeClockEntry[]>([]);
   const [manual, setManual] = useState<{ kind: TimeClockEntry["kind"]; at: string } | null>(null);
+  // Editar o dia inteiro (as até 4 seções numa tela só), em vez de lançar
+  // seção por seção — cada campo em branco limpa a batida daquele tipo.
+  const [dayEditor, setDayEditor] = useState<{
+    employeeId: number; date: string;
+    in: string; break_start: string; break_end: string; out: string;
+    saving: boolean;
+  } | null>(null);
 
   useEffect(() => { api.rhDp.employees.list().then(setEmployees).catch(() => {}); }, []);
 
@@ -772,6 +779,53 @@ function PontoAdmin({ canEdit }: { canEdit: boolean }) {
     }
   };
 
+  const openDayEditor = () => {
+    setDayEditor({
+      employeeId: employeeId || employees[0]?.id || 0,
+      date: todayStr(),
+      in: "", break_start: "", break_end: "", out: "",
+      saving: false,
+    });
+  };
+
+  // Recarrega as batidas já existentes do colaborador/dia escolhidos toda vez
+  // que um dos dois muda (inclusive ao abrir o editor) — pré-preenche o
+  // formulário em vez de abrir em branco.
+  useEffect(() => {
+    if (!dayEditor || !dayEditor.employeeId) return;
+    api.rhDp.reports.timesheet(`${dayEditor.date}T00:00:00`, `${dayEditor.date}T23:59:59`, dayEditor.employeeId)
+      .then((rows) => {
+        const byKind = Object.fromEntries(rows.map((r) => [
+          r.kind, new Date(r.at).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: "America/Sao_Paulo" }),
+        ]));
+        setDayEditor((d) => d && ({
+          ...d,
+          in: byKind.in ?? "", break_start: byKind.break_start ?? "", break_end: byKind.break_end ?? "", out: byKind.out ?? "",
+        }));
+      }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dayEditor?.employeeId, dayEditor?.date]);
+
+  const saveDayEditor = async () => {
+    if (!dayEditor || !dayEditor.employeeId) { toast({ title: "Selecione o colaborador", variant: "destructive" }); return; }
+    setDayEditor({ ...dayEditor, saving: true });
+    try {
+      await api.rhDp.employees.setDay(dayEditor.employeeId, {
+        date: dayEditor.date,
+        in: dayEditor.in || null,
+        break_start: dayEditor.break_start || null,
+        break_end: dayEditor.break_end || null,
+        out: dayEditor.out || null,
+      });
+      setDayEditor(null);
+      load();
+      toast({ title: "Ponto do dia salvo" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+      setDayEditor((d) => d && ({ ...d, saving: false }));
+    }
+  };
+
   return (
     <div className="space-y-3">
       <div className="shk-card p-4 flex flex-wrap gap-2 items-end">
@@ -792,10 +846,16 @@ function PontoAdmin({ canEdit }: { canEdit: boolean }) {
           <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="block mt-0.5 px-3 py-1.5 rounded-xl border border-border text-xs" />
         </label>
         {canEdit && (
-          <button onClick={() => setManual({ kind: "in", at: "" })} data-testid="button-manual-punch"
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-primary text-white text-xs font-bold ml-auto">
-            <Plus className="w-3.5 h-3.5" /> Lançar manualmente
-          </button>
+          <div className="flex items-center gap-2 ml-auto">
+            <button onClick={openDayEditor} data-testid="button-edit-day"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-primary text-primary text-xs font-bold">
+              <CalendarClock className="w-3.5 h-3.5" /> Editar dia
+            </button>
+            <button onClick={() => setManual({ kind: "in", at: "" })} data-testid="button-manual-punch"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-primary text-white text-xs font-bold">
+              <Plus className="w-3.5 h-3.5" /> Lançar manualmente
+            </button>
+          </div>
         )}
       </div>
 
@@ -860,6 +920,64 @@ function PontoAdmin({ canEdit }: { canEdit: boolean }) {
             <button onClick={launchManual} data-testid="button-confirm-manual-punch"
               className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold">
               <Save className="w-3.5 h-3.5" /> Lançar
+            </button>
+          </div>
+        </div>
+      )}
+
+      {dayEditor && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="shk-card w-full max-w-sm p-6 bg-white space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold">Editar ponto do dia</h3>
+              <button onClick={() => setDayEditor(null)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <p className="text-[11px] text-muted-foreground -mt-1">
+              Deixe um campo em branco para remover a batida daquele tipo, se já houver uma lançada.
+            </p>
+            <label className="text-xs block">
+              Colaborador
+              <select value={dayEditor.employeeId} onChange={(e) => setDayEditor({ ...dayEditor, employeeId: Number(e.target.value) })}
+                data-testid="select-day-editor-employee"
+                className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white">
+                {employees.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+              </select>
+            </label>
+            <label className="text-xs block">
+              Data
+              <input type="date" value={dayEditor.date} onChange={(e) => setDayEditor({ ...dayEditor, date: e.target.value })}
+                data-testid="input-day-editor-date"
+                className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="text-xs">
+                Entrada
+                <input type="time" value={dayEditor.in} onChange={(e) => setDayEditor({ ...dayEditor, in: e.target.value })}
+                  data-testid="input-day-editor-in"
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+              <label className="text-xs">
+                Início intervalo
+                <input type="time" value={dayEditor.break_start} onChange={(e) => setDayEditor({ ...dayEditor, break_start: e.target.value })}
+                  data-testid="input-day-editor-break-start"
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+              <label className="text-xs">
+                Fim intervalo
+                <input type="time" value={dayEditor.break_end} onChange={(e) => setDayEditor({ ...dayEditor, break_end: e.target.value })}
+                  data-testid="input-day-editor-break-end"
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+              <label className="text-xs">
+                Saída
+                <input type="time" value={dayEditor.out} onChange={(e) => setDayEditor({ ...dayEditor, out: e.target.value })}
+                  data-testid="input-day-editor-out"
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+            </div>
+            <button onClick={saveDayEditor} disabled={dayEditor.saving} data-testid="button-save-day"
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
+              <Save className="w-3.5 h-3.5" /> {dayEditor.saving ? "Salvando..." : "Salvar dia"}
             </button>
           </div>
         </div>
