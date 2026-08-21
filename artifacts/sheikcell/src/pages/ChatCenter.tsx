@@ -838,6 +838,48 @@ type ChatCenterProps = {
   focusRequestId?: number;
 };
 
+type FilePreviewItem = { file: File; previewUrl: string | null; kind: "image" | "video" | "other" };
+
+/** Frame do vídeo (por padrão perto do início) capturado num <canvas>, pra
+ * mostrar uma miniatura de verdade no preview de envio — igual ao WhatsApp,
+ * em vez de só um ícone genérico de arquivo. Resolve null se o navegador não
+ * conseguir decodificar o vídeo (preview cai pro ícone genérico nesse caso). */
+function captureVideoFrame(file: File): Promise<string | null> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.muted = true;
+    video.playsInline = true;
+    const cleanup = () => URL.revokeObjectURL(url);
+    video.onloadeddata = () => {
+      try {
+        video.currentTime = Math.min(0.1, video.duration || 0);
+      } catch {
+        resolve(null);
+        cleanup();
+      }
+    };
+    video.onseeked = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = video.videoWidth || 320;
+        canvas.height = video.videoHeight || 240;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) { resolve(null); return; }
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", 0.7));
+      } catch {
+        resolve(null);
+      } finally {
+        cleanup();
+      }
+    };
+    video.onerror = () => { resolve(null); cleanup(); };
+    video.src = url;
+  });
+}
+
 export default function ChatCenter({
   docked = false,
   onUnreadChange,
@@ -926,8 +968,12 @@ export default function ChatCenter({
   // ao abrir o modal de Nova Conversa — mostra o risco ANTES de tentar criar.
   const [outboundUsage, setOutboundUsage] = useState<OutboundUsage | null>(null);
 
-  const [filePreview, setFilePreview] = useState<{ file: File; previewUrl: string | null } | null>(null);
+  const [filePreview, setFilePreview] = useState<FilePreviewItem[] | null>(null);
   const [caption, setCaption] = useState("");
+  // { current, total } enquanto envia um lote de vários arquivos em sequência
+  // (a API só manda uma mídia por mensagem — não existe "álbum" de verdade
+  // no envio, cada foto vira uma mensagem própria, uma atrás da outra).
+  const [sendProgress, setSendProgress] = useState<{ current: number; total: number } | null>(null);
 
   // CRM connection: contact opened from the active conversation
   const [crmContactId, setCrmContactId] = useState<number | null>(null);
@@ -1594,22 +1640,16 @@ export default function ChatCenter({
     } finally { setSending(false); }
   };
 
-  // ── Send file (image or document) ──
-  const handleSendFile = async (file: File, fileCaption?: string) => {
-    if (!activeId || sending) return;
-    const previewUrl = filePreview?.previewUrl ?? null;
-    const replyingTo = replyTarget;
-    setFilePreview(null);
-    setCaption("");
-    setReplyTarget(null);
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
-    setSending(true);
+  // ── Send one file (image, video, audio ou documento) — usado tanto pra um
+  // arquivo avulso quanto por handleSendFiles em loop pra um lote. ──
+  const sendOneFile = async (file: File, fileCaption: string | undefined, replyingTo: ChatMessage | null) => {
+    if (!activeId) return;
     const isImage = file.type.startsWith("image/");
     const isVideo = file.type.startsWith("video/");
     const isAudio = file.type.startsWith("audio/");
     const baseContent = isImage ? "📷 Foto" : isVideo ? "🎥 Vídeo" : isAudio ? "🎤 Áudio" : `📄 ${file.name}`;
     const optimistic: ChatMessage = {
-      id: -Date.now(), conversationId: activeId,
+      id: -(Date.now() * 1000 + Math.floor(Math.random() * 1000)), conversationId: activeId,
       content: fileCaption ? `${baseContent}\n${fileCaption}` : baseContent,
       direction: "outbound", type: isImage ? "image" : isVideo ? "video" : isAudio ? "audio" : "doc", status: "sent",
       senderName: user?.name ?? null, mediaUrl: null, transcript: null, externalId: null,
@@ -1625,8 +1665,29 @@ export default function ChatCenter({
         : prev.map((m) => m.id === optimistic.id ? msg : m));
     } catch {
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
-      toast({ title: "Erro ao enviar arquivo", variant: "destructive" });
-    } finally { setSending(false); }
+      toast({ title: `Erro ao enviar ${file.name}`, variant: "destructive" });
+    }
+  };
+
+  // ── Send file(s) — lote enviado em sequência (a API só aceita uma mídia
+  // por mensagem). Legenda só vai anexada à última mensagem do lote, igual
+  // ao WhatsApp mostra a legenda embaixo da última foto de um álbum. ──
+  const handleSendFiles = async (items: FilePreviewItem[], fileCaption?: string) => {
+    if (!activeId || sending || items.length === 0) return;
+    const replyingTo = replyTarget;
+    setFilePreview(null);
+    setCaption("");
+    setReplyTarget(null);
+    items.forEach((it) => { if (it.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(it.previewUrl); });
+    setSending(true);
+    setSendProgress(items.length > 1 ? { current: 0, total: items.length } : null);
+    for (let i = 0; i < items.length; i++) {
+      const isLast = i === items.length - 1;
+      await sendOneFile(items[i].file, isLast ? fileCaption : undefined, replyingTo);
+      setSendProgress(items.length > 1 ? { current: i + 1, total: items.length } : null);
+    }
+    setSendProgress(null);
+    setSending(false);
   };
 
   // ── Gravação de nota de voz (microfone) ──
@@ -1727,20 +1788,41 @@ export default function ChatCenter({
     };
   }, [activeId]);
 
-  // ── Open file preview modal ──
-  const handleFileSelected = (file: File) => {
-    const isImage = file.type.startsWith("image/");
-    if (isImage) {
-      const url = URL.createObjectURL(file);
-      setFilePreview({ file, previewUrl: url });
-    } else {
-      setFilePreview({ file, previewUrl: null });
-    }
+  // ── Open file preview modal (um ou vários arquivos de uma vez) ──
+  const handleFilesSelected = (files: File[]) => {
+    const items: FilePreviewItem[] = files.map((file) => {
+      const isImage = file.type.startsWith("image/");
+      const isVideo = file.type.startsWith("video/");
+      return {
+        file,
+        previewUrl: isImage ? URL.createObjectURL(file) : null,
+        kind: isImage ? "image" : isVideo ? "video" : "other",
+      };
+    });
+    setFilePreview((prev) => (prev ? [...prev, ...items] : items));
     setCaption("");
+    // Miniatura de vídeo é assíncrona (precisa carregar o arquivo pra tirar
+    // o frame) — atualiza o item pelo file quando (se) resolver.
+    for (const item of items) {
+      if (item.kind !== "video") continue;
+      captureVideoFrame(item.file).then((thumb) => {
+        if (!thumb) return;
+        setFilePreview((prev) => prev?.map((p) => (p.file === item.file ? { ...p, previewUrl: thumb } : p)) ?? prev);
+      });
+    }
+  };
+
+  const handleRemoveFilePreview = (file: File) => {
+    setFilePreview((prev) => {
+      const target = prev?.find((p) => p.file === file);
+      if (target?.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(target.previewUrl);
+      const next = prev?.filter((p) => p.file !== file) ?? null;
+      return next && next.length > 0 ? next : null;
+    });
   };
 
   const handleCancelPreview = () => {
-    if (filePreview?.previewUrl) URL.revokeObjectURL(filePreview.previewUrl);
+    filePreview?.forEach((p) => { if (p.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(p.previewUrl); });
     setFilePreview(null);
     setCaption("");
   };
@@ -3048,11 +3130,12 @@ export default function ChatCenter({
             <input
               ref={fileInputRef}
               type="file"
+              multiple
               accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/3gpp,video/webm,video/quicktime,audio/ogg,audio/mpeg,audio/mp4,audio/webm,audio/aac,audio/wav,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
               className="hidden"
               onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) { handleFileSelected(file); }
+                const files = Array.from(e.target.files ?? []);
+                if (files.length > 0) { handleFilesSelected(files); }
                 e.target.value = "";
               }}
             />
@@ -3270,53 +3353,90 @@ export default function ChatCenter({
         </div>
       )}
 
-      {/* ── File preview modal ─────────────────────────────────────────── */}
+      {/* ── File preview modal (um ou vários arquivos) ────────────────────── */}
       {filePreview && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl w-full max-w-sm shadow-xl flex flex-col overflow-hidden">
             <div className="flex items-center justify-between px-5 pt-5 pb-3">
               <h3 className="font-bold text-base">
-                {filePreview.previewUrl ? "Prévia da foto" : "Enviar documento"}
+                {filePreview.length > 1
+                  ? `Prévia (${filePreview.length})`
+                  : filePreview[0].kind === "image" ? "Prévia da foto"
+                  : filePreview[0].kind === "video" ? "Prévia do vídeo"
+                  : "Enviar documento"}
               </h3>
               <button onClick={handleCancelPreview} className="text-muted-foreground hover:text-foreground transition">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="px-5 pb-3">
-              {filePreview.previewUrl ? (
-                <img
-                  src={filePreview.previewUrl}
-                  alt="Prévia"
-                  className="w-full max-h-64 object-contain rounded-xl bg-secondary/30"
-                />
-              ) : (
-                <div className="flex items-center gap-3 p-4 bg-secondary/30 rounded-xl">
-                  <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center shrink-0">
-                    <FileText className="w-6 h-6 text-primary" />
+            {filePreview.length === 1 ? (
+              <div className="px-5 pb-3">
+                {filePreview[0].previewUrl ? (
+                  <img
+                    src={filePreview[0].previewUrl}
+                    alt="Prévia"
+                    className="w-full max-h-64 object-contain rounded-xl bg-secondary/30"
+                  />
+                ) : (
+                  <div className="flex items-center gap-3 p-4 bg-secondary/30 rounded-xl">
+                    <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center shrink-0">
+                      <FileText className="w-6 h-6 text-primary" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium truncate">{filePreview[0].file.name}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        {(filePreview[0].file.size / 1024).toFixed(0)} KB
+                      </p>
+                    </div>
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium truncate">{filePreview.file.name}</p>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      {(filePreview.file.size / 1024).toFixed(0)} KB
-                    </p>
+                )}
+              </div>
+            ) : (
+              <div className="px-5 pb-3 flex flex-wrap gap-2">
+                {filePreview.map((item, i) => (
+                  <div key={i} className="relative w-16 h-16 rounded-lg overflow-hidden bg-secondary/30 border border-border shrink-0">
+                    {item.previewUrl ? (
+                      <img src={item.previewUrl} alt="" className="w-full h-full object-cover" />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center">
+                        <FileText className="w-5 h-5 text-primary" />
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveFilePreview(item.file)}
+                      title="Remover"
+                      className="absolute top-0.5 right-0.5 bg-black/60 hover:bg-black/80 text-white rounded-full p-0.5"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
                   </div>
-                </div>
-              )}
-            </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  title="Adicionar mais arquivos"
+                  data-testid="button-add-more-files"
+                  className="w-16 h-16 rounded-lg border-2 border-dashed border-border flex items-center justify-center text-muted-foreground hover:bg-secondary/50 transition shrink-0"
+                >
+                  <Paperclip className="w-5 h-5" />
+                </button>
+              </div>
+            )}
 
             <div className="px-5 pb-4">
               <input
                 autoFocus
                 value={caption}
                 onChange={(e) => setCaption(e.target.value)}
-                placeholder="Adicionar legenda (opcional)"
+                placeholder={filePreview.length > 1 ? "Legenda na última mensagem (opcional)" : "Adicionar legenda (opcional)"}
                 data-testid="input-file-caption"
                 className="w-full px-3 py-2 rounded-xl border border-border text-sm outline-none focus:ring-2 focus:ring-primary/20"
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
-                    void handleSendFile(filePreview.file, caption.trim() || undefined);
+                    void handleSendFiles(filePreview, caption.trim() || undefined);
                   }
                 }}
               />
@@ -3326,19 +3446,30 @@ export default function ChatCenter({
               <button
                 type="button"
                 onClick={handleCancelPreview}
+                disabled={sending}
                 data-testid="button-cancel-file-preview"
-                className="flex-1 py-2 rounded-xl border border-border text-sm font-medium text-muted-foreground hover:bg-secondary transition"
+                className="flex-1 py-2 rounded-xl border border-border text-sm font-medium text-muted-foreground hover:bg-secondary transition disabled:opacity-50"
               >
                 Cancelar
               </button>
               <button
                 type="button"
+                disabled={sending}
                 data-testid="button-confirm-file-send"
-                onClick={() => void handleSendFile(filePreview.file, caption.trim() || undefined)}
-                className="flex-1 py-2 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition flex items-center justify-center gap-1.5"
+                onClick={() => void handleSendFiles(filePreview, caption.trim() || undefined)}
+                className="flex-1 py-2 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition flex items-center justify-center gap-1.5 disabled:opacity-60"
               >
-                <Send className="w-3.5 h-3.5" />
-                Enviar
+                {sendProgress ? (
+                  <>
+                    <div className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                    Enviando {sendProgress.current}/{sendProgress.total}
+                  </>
+                ) : (
+                  <>
+                    <Send className="w-3.5 h-3.5" />
+                    Enviar
+                  </>
+                )}
               </button>
             </div>
           </div>
