@@ -1889,7 +1889,7 @@ router.get("/chat/media/:filename", requireAuth, async (req: Request, res: Respo
   // Resolve the media file to its owning conversation and enforce sector access.
   const mediaUrl = `/api/chat/media/${filename}`;
   const [owningMsg] = await db
-    .select({ conversationId: messagesTable.conversationId })
+    .select({ conversationId: messagesTable.conversationId, metadata: messagesTable.metadata })
     .from(messagesTable)
     .where(eq(messagesTable.mediaUrl, mediaUrl))
     .limit(1);
@@ -1928,6 +1928,14 @@ router.get("/chat/media/:filename", requireAuth, async (req: Request, res: Respo
   const contentType = mimeMap[ext] ?? "application/octet-stream";
   res.setHeader("Content-Type", contentType);
   res.setHeader("Cache-Control", "private, max-age=86400");
+
+  // ?download=1: força "salvar como" em vez de abrir inline — usado pelo
+  // botão de baixar de vídeo/áudio/doc na Central (sem isso, o navegador
+  // abre o arquivo na própria aba/visualizador nativo em vez de baixar).
+  if (req.query["download"] === "1") {
+    const downloadName = owningMsg.metadata?.fileName ?? filename;
+    res.setHeader("Content-Disposition", `attachment; filename="${downloadName.replace(/"/g, "")}"`);
+  }
 
   // Suporte a Range (leitura por partes): obrigatório para <video>/<audio>
   // em Safari/iOS e permite pular para o meio do vídeo em qualquer navegador.

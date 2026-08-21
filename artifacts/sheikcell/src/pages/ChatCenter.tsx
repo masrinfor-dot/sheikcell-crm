@@ -11,7 +11,7 @@ import {
   Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX, Zap, CalendarClock, AlertTriangle,
   Pin, PinOff, Reply, StickyNote, Star, StarOff, ChevronLeft,
   MapPin, ShoppingBag, CreditCard, BarChart3, Ban, UserPlus, ExternalLink,
-  FileSpreadsheet, FileArchive, File as FileGeneric, Globe,
+  FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Download,
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -278,6 +278,10 @@ function AudioBubble({ msg }: { msg: ChatMessage }) {
         <audio controls className="flex-1 h-8 max-w-[200px]" style={{ minWidth: 0 }}>
           <source src={msg.mediaUrl ?? undefined} />
         </audio>
+        <a href={`${msg.mediaUrl}?download=1`} download title="Baixar áudio"
+          className="text-gray-500 hover:text-primary shrink-0">
+          <Download className="w-3.5 h-3.5" />
+        </a>
       </div>
       {transcript ? (
         <p className="text-xs mt-1 bg-black/5 rounded-lg px-2.5 py-1.5 whitespace-pre-wrap" data-testid={`text-transcript-${msg.id}`}>
@@ -323,14 +327,20 @@ function MediaContentRest({ msg }: { msg: ChatMessage }) {
 
   if (msg.type === "video") {
     return (
-      <video
-        controls
-        preload="metadata"
-        className="max-w-full rounded-xl max-h-64 mb-1 bg-black"
-        style={{ minWidth: 200 }}
-      >
-        <source src={msg.mediaUrl} />
-      </video>
+      <div className="mb-1">
+        <video
+          controls
+          preload="metadata"
+          className="max-w-full rounded-xl max-h-64 bg-black"
+          style={{ minWidth: 200 }}
+        >
+          <source src={msg.mediaUrl} />
+        </video>
+        <a href={`${msg.mediaUrl}?download=1`} download
+          className="flex items-center gap-1 text-[11px] font-semibold text-primary underline mt-0.5 w-fit">
+          <Download className="w-3 h-3" /> Baixar vídeo
+        </a>
+      </div>
     );
   }
 
