@@ -193,6 +193,66 @@ router.get("/auth/me", requireAuth, async (req, res): Promise<void> => {
   });
 });
 
+// Auto-edição de nome/e-mail (qualquer role, inclusive superadmin) — SEMPRE
+// no próprio usuário da sessão (req.session.userId), nunca um id vindo do
+// corpo da requisição. Existe justamente pra edição de perfil não depender
+// das rotas /admin/users, que bloqueiam qualquer alvo com role "superadmin"
+// (ver admin.ts) — o superadmin edita a própria conta por aqui.
+router.patch("/auth/me", requireAuth, async (req, res): Promise<void> => {
+  const { name, email } = req.body as { name?: string; email?: string };
+  const updateData: Record<string, unknown> = {};
+
+  if (name !== undefined) {
+    const cleanName = name.trim();
+    if (!cleanName) { res.status(400).json({ error: "Nome não pode ficar vazio" }); return; }
+    updateData.name = cleanName;
+  }
+  if (email !== undefined) {
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes("@")) { res.status(400).json({ error: "E-mail inválido" }); return; }
+    // E-mail é único na tabela inteira (login não filtra por loja), então a
+    // checagem de colisão também precisa ser global, não só dentro da loja.
+    const [existing] = await db.select({ id: usersTable.id }).from(usersTable)
+      .where(eq(usersTable.email, cleanEmail)).limit(1);
+    if (existing && existing.id !== req.session.userId) {
+      res.status(409).json({ error: "Este e-mail já está em uso por outra conta" });
+      return;
+    }
+    updateData.email = cleanEmail;
+  }
+  if (Object.keys(updateData).length === 0) { res.status(400).json({ error: "Nada para atualizar" }); return; }
+
+  const [user] = await db.update(usersTable).set(updateData)
+    .where(eq(usersTable.id, req.session.userId!)).returning();
+  if (!user) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
+
+  if (user.name) req.session.userName = user.name;
+
+  let sector = null;
+  if (user.sectorId) {
+    const [s] = await db.select().from(sectorsTable).where(eq(sectorsTable.id, user.sectorId));
+    sector = s ?? null;
+  }
+
+  res.json({
+    user: {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      sectorId: user.sectorId,
+      sector,
+      storeName: user.storeName ?? null,
+      permissions: user.permissions ?? null,
+      mustChangePassword: user.mustChangePassword,
+      adminAccess: user.adminAccess ?? null,
+      moduleAccess: user.moduleAccess ?? null,
+      enabledModules: await enabledModulesFor(req.session.tenantId),
+      impersonatedBy: await impersonatedByFor(req),
+    },
+  });
+});
+
 // "Entrar como": volta pro superadmin original (a sessão tinha sido
 // sobrescrita por POST /superadmin/tenants/:id/impersonate/:userId).
 router.post("/auth/stop-impersonation", requireAuth, async (req, res): Promise<void> => {

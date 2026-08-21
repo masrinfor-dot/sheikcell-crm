@@ -29,10 +29,11 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
+import ChangePasswordModal from "@/components/ChangePasswordModal";
 import {
   Building2, LogOut, Plus, Users, MessageSquare, Smartphone, KeyRound, Ban,
   CheckCircle2, DollarSign, FileText, Wrench, Pencil, AlertTriangle, Trash2,
-  Bug, HelpCircle, Sparkles, Clock, Send, LogIn, LayoutGrid,
+  Bug, HelpCircle, Sparkles, Clock, Send, LogIn, LayoutGrid, UserCog,
 } from "lucide-react";
 
 // Compara duas listas de módulos ignorando ordem (usado pra destacar o botão
@@ -148,19 +149,46 @@ function slaBadge(tk: SaasTicket) {
   return <Badge className={className}><Clock className="w-3 h-3 mr-1" /> {label}</Badge>;
 }
 
-type Tab = "lojistas" | "financeiro" | "contratos" | "suporte";
+type Tab = "lojistas" | "financeiro" | "contratos" | "suporte" | "meucadastro";
 
 const TABS: { id: Tab; label: string; icon: typeof Building2 }[] = [
   { id: "lojistas", label: "Lojistas", icon: Building2 },
   { id: "financeiro", label: "Financeiro", icon: DollarSign },
   { id: "contratos", label: "Contratos", icon: FileText },
   { id: "suporte", label: "Suporte", icon: Wrench },
+  { id: "meucadastro", label: "Meu Cadastro", icon: UserCog },
 ];
 
 export default function SuperAdminDashboard() {
-  const { user, logout } = useAuth();
+  const { user, logout, setUser } = useAuth();
   const { toast } = useToast();
   const [tab, setTab] = useState<Tab>("lojistas");
+
+  // Meu Cadastro: edição do próprio nome/e-mail (PATCH /auth/me — nunca um
+  // id de outra conta) + troca de senha (reaproveita o mesmo modal usado no
+  // resto do sistema).
+  const [profileForm, setProfileForm] = useState({ name: user?.name ?? "", email: user?.email ?? "" });
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [showChangePassword, setShowChangePassword] = useState(false);
+  useEffect(() => {
+    if (user) setProfileForm({ name: user.name, email: user.email });
+  }, [user]);
+  const saveProfile = async () => {
+    const name = profileForm.name.trim();
+    const email = profileForm.email.trim();
+    if (!name) { toast({ title: "Nome não pode ficar vazio", variant: "destructive" }); return; }
+    if (!email.includes("@")) { toast({ title: "E-mail inválido", variant: "destructive" }); return; }
+    setSavingProfile(true);
+    try {
+      const { user: updated } = await api.auth.updateProfile({ name, email });
+      setUser(updated);
+      toast({ title: "Cadastro atualizado" });
+    } catch (e) {
+      fail("Erro ao salvar cadastro")(e);
+    } finally {
+      setSavingProfile(false);
+    }
+  };
   const [tenants, setTenants] = useState<TenantSummary[]>([]);
   const [overview, setOverview] = useState<SaasOverview | null>(null);
   const [invoices, setInvoices] = useState<SaasInvoice[]>([]);
@@ -681,6 +709,45 @@ export default function SuperAdminDashboard() {
                 )}
               </>
             )}
+
+            {/* --------------------------------------------- MEU CADASTRO */}
+            {tab === "meucadastro" && (
+              <div className="max-w-lg space-y-4">
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">Meus dados</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <div>
+                      <Label>Nome</Label>
+                      <Input value={profileForm.name} onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })} data-testid="input-profile-name" />
+                    </div>
+                    <div>
+                      <Label>E-mail</Label>
+                      <Input type="email" value={profileForm.email} onChange={(e) => setProfileForm({ ...profileForm, email: e.target.value })} data-testid="input-profile-email" />
+                    </div>
+                    <div className="flex justify-end">
+                      <Button size="sm" disabled={savingProfile || !profileForm.name.trim() || !profileForm.email.trim()}
+                        onClick={saveProfile} data-testid="button-save-profile">
+                        {savingProfile ? "Salvando..." : "Salvar"}
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">Segurança</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <p className="text-xs text-muted-foreground mb-3">Troque sua senha de acesso ao painel do sistema.</p>
+                    <Button size="sm" variant="outline" onClick={() => setShowChangePassword(true)} data-testid="button-open-change-password">
+                      <KeyRound className="w-4 h-4 mr-1" /> Trocar senha
+                    </Button>
+                  </CardContent>
+                </Card>
+              </div>
+            )}
           </>
         )}
       </main>
@@ -1111,6 +1178,11 @@ export default function SuperAdminDashboard() {
           )}
         </DialogContent>
       </Dialog>
+
+      {showChangePassword && (
+        <ChangePasswordModal onDone={() => { setShowChangePassword(false); toast({ title: "Senha alterada com sucesso!" }); }}
+          onClose={() => setShowChangePassword(false)} />
+      )}
     </div>
   );
 }

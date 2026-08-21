@@ -984,6 +984,10 @@ export const api = {
       req<{ user: User }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
     logout: () => req<{ ok: boolean }>("/auth/logout", { method: "POST" }),
     me: () => req<{ user: User }>("/auth/me"),
+    // Auto-edição de nome/e-mail do próprio usuário logado — sempre a
+    // própria conta (o servidor nunca aceita id vindo daqui).
+    updateProfile: (data: Partial<{ name: string; email: string }>) =>
+      req<{ user: User }>("/auth/me", { method: "PATCH", body: JSON.stringify(data) }),
     changePassword: (currentPassword: string, newPassword: string) =>
       req<{ ok: boolean }>("/auth/change-password", { method: "POST", body: JSON.stringify({ currentPassword, newPassword }) }),
     stopImpersonation: () => req<{ ok: boolean }>("/auth/stop-impersonation", { method: "POST" }),
