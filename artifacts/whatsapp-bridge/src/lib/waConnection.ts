@@ -272,7 +272,12 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
     // já acontece com protocolMessage.MESSAGE_EDIT), vale tratar como edição
     // de verdade em vez de invisível.
     const keys = Object.keys(msg).filter((k) => k !== "messageContextInfo" && k !== "senderKeyDistributionMessage");
-    const INVISIBLE = new Set(["reactionMessage", "protocolMessage", "pollUpdateMessage", "keepInChatMessage", "pinInChatMessage", "secretEncryptedMessage"]);
+    // albumMessage: container do WhatsApp que anuncia "seguem N fotos/vídeos
+    // juntos" — cada item do álbum chega em seguida como imageMessage/
+    // videoMessage normal (já tratado abaixo), então o container em si não
+    // tem conteúdo próprio pra mostrar. Sem isso, virava "Tipo de mensagem
+    // não suportado (albumMessage)" no meio das fotos do álbum.
+    const INVISIBLE = new Set(["reactionMessage", "protocolMessage", "pollUpdateMessage", "keepInChatMessage", "pinInChatMessage", "secretEncryptedMessage", "albumMessage"]);
     if (keys.length === 0 || keys.every((k) => INVISIBLE.has(k))) return;
   }
 
