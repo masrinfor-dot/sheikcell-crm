@@ -11,10 +11,12 @@ import {
   Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX, Zap, CalendarClock, AlertTriangle,
   Pin, PinOff, Reply, StickyNote, Star, StarOff, ChevronLeft,
   MapPin, ShoppingBag, CreditCard, BarChart3, Ban, UserPlus, ExternalLink,
-  FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Download,
+  FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Download, Maximize2,
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
+import { MediaLightboxProvider, useMediaLightbox } from "@/components/MediaLightbox";
+import { PdfBubble } from "@/components/PdfPreview";
 
 const CHAT_EVENTS_URL = "/api/chat/events";
 
@@ -326,24 +328,36 @@ function AudioBubble({ msg }: { msg: ChatMessage }) {
  * baixar/abrir em vez de um player preto travado. */
 function VideoBubble({ msg }: { msg: ChatMessage }) {
   const [mediaError, setMediaError] = useState(false);
+  const openLightbox = useMediaLightbox();
   if (!msg.mediaUrl) return null;
+  const url = msg.mediaUrl;
 
   if (mediaError) {
-    return <MediaUnavailable mediaUrl={msg.mediaUrl} label="Não foi possível tocar este vídeo no navegador" />;
+    return <MediaUnavailable mediaUrl={url} label="Não foi possível tocar este vídeo no navegador" />;
   }
 
   return (
     <div className="mb-1">
-      <video
-        controls
-        preload="metadata"
-        className="max-w-full rounded-xl max-h-64 bg-black"
-        style={{ minWidth: 200 }}
-        onError={() => setMediaError(true)}
-      >
-        <source src={msg.mediaUrl} />
-      </video>
-      <a href={`${msg.mediaUrl}?download=1`} download
+      <div className="relative w-fit">
+        <video
+          controls
+          preload="metadata"
+          className="max-w-full rounded-xl max-h-64 bg-black"
+          style={{ minWidth: 200 }}
+          onError={() => setMediaError(true)}
+        >
+          <source src={url} />
+        </video>
+        <button
+          onClick={() => openLightbox({ type: "video", src: url, mimeType: msg.metadata?.mimeType })}
+          title="Expandir vídeo"
+          data-testid={`button-expand-video-${msg.id}`}
+          className="absolute top-1.5 right-1.5 bg-black/50 hover:bg-black/70 text-white rounded-full p-1"
+        >
+          <Maximize2 className="w-3.5 h-3.5" />
+        </button>
+      </div>
+      <a href={`${url}?download=1`} download
         className="flex items-center gap-1 text-[11px] font-semibold text-primary underline mt-0.5 w-fit">
         <Download className="w-3 h-3" /> Baixar vídeo
       </a>
@@ -352,18 +366,20 @@ function VideoBubble({ msg }: { msg: ChatMessage }) {
 }
 
 function MediaContentRest({ msg }: { msg: ChatMessage }) {
+  const openLightbox = useMediaLightbox();
   if (!msg.mediaUrl) return null;
 
   if (msg.type === "image") {
+    const url = msg.mediaUrl;
     return (
-      <a href={msg.mediaUrl} target="_blank" rel="noopener noreferrer" className="block mb-1">
+      <button onClick={() => openLightbox({ type: "image", src: url })} className="block mb-1" data-testid={`button-open-image-${msg.id}`}>
         <img
-          src={msg.mediaUrl}
+          src={url}
           alt="Foto"
           className="max-w-full rounded-xl object-cover max-h-64 cursor-pointer hover:opacity-90 transition"
           onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
         />
-      </a>
+      </button>
     );
   }
 
@@ -385,6 +401,17 @@ function MediaContentRest({ msg }: { msg: ChatMessage }) {
   if (msg.type === "doc") {
     const filename = msg.metadata?.fileName ?? msg.mediaUrl.split("/").pop() ?? "documento";
     const size = formatFileSize(msg.metadata?.fileSize);
+    const isPdf = msg.metadata?.mimeType?.includes("pdf") || filename.toLowerCase().endsWith(".pdf");
+    if (isPdf) {
+      return (
+        <PdfBubble
+          src={msg.mediaUrl}
+          fileName={filename}
+          sizeLabel={size || undefined}
+          icon={<DocIcon mimeType={msg.metadata?.mimeType} fileName={filename} />}
+        />
+      );
+    }
     return (
       <a
         href={msg.mediaUrl}
@@ -2901,6 +2928,7 @@ export default function ChatCenter({
             className="flex-1 overflow-y-auto px-4 py-4"
             style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400'%3E%3Crect width='400' height='400' fill='%23e5ddd5'/%3E%3C/svg%3E\")", backgroundColor: "#e5ddd5" }}
           >
+            <MediaLightboxProvider>
             {loadingMsgs ? (
               <div className="flex justify-center items-center h-20">
                 <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
@@ -2937,6 +2965,7 @@ export default function ChatCenter({
                 <div ref={msgsEndRef} />
               </>
             )}
+            </MediaLightboxProvider>
           </div>
 
           {/* Barra "respondendo a": some ao enviar/cancelar, vale pro próximo texto ou anexo. */}

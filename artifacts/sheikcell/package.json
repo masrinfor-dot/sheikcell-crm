@@ -73,5 +73,9 @@
     "vite": "catalog:",
     "wouter": "^3.3.5",
     "zod": "catalog:"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^6.2.108",
+    "yet-another-react-lightbox": "^3.32.2"
   }
 }
