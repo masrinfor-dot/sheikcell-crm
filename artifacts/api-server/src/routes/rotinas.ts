@@ -1,11 +1,11 @@
 import { Router, type IRouter } from "express";
 import {
   db, routineChecklistsTable, routineChecklistQuestionsTable, routineChecklistScopesTable,
-  routineResponsesTable, employeesTable, storesTable, sectorsTable, usersTable, leaveRecordsTable,
+  routineResponsesTable, routineUrgentBypassesTable, employeesTable, storesTable, sectorsTable, usersTable, leaveRecordsTable,
   type RoutineChecklist, type RoutineChecklistQuestion, type RoutineChecklistScope,
 } from "@workspace/db";
 import { eq, and, desc, asc, isNotNull, lte, gte } from "drizzle-orm";
-import { requireAuth, requireTenant, requireModule } from "../middlewares/auth";
+import { requireAuth, requireTenant, requireModule, tenantIdOf } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import { isPasswordRecentlyVerified, clearPasswordVerified } from "./auth";
 
@@ -414,6 +414,7 @@ router.post("/rotinas/checklists/:id/respond", requireAuth, requireModule("rotin
       deviceInfo: (req.headers["user-agent"] as string | undefined)?.slice(0, 300) ?? null,
     }).returning();
     clearPasswordVerified(tenantId, userId);
+    invalidateRoutineBlock(tenantId, userId);
     res.status(201).json(saved);
   } catch {
     res.status(409).json({ error: "Você já respondeu este checklist neste período" });
@@ -452,5 +453,84 @@ router.get("/rotinas/checklists/:id/responses", requireAuth, async (req, res): P
 
   res.json(visible.map(({ userSectorId: _userSectorId, ...r }) => r));
 });
+
+// ── Atendimento urgente (Fase 3) ────────────────────────────────────────
+// Libera temporariamente a trava sem marcar o checklist como respondido —
+// só grava que o bypass foi usado (auditoria) e libera por uma janela curta.
+const URGENT_BYPASS_MS = 20 * 60_000; // 20 minutos
+const urgentBypassCache = new Map<string, number>(); // "tenantId:userId" -> expira em (epoch ms)
+
+function hasActiveUrgentBypass(tenantId: number, userId: number): boolean {
+  const exp = urgentBypassCache.get(`${tenantId}:${userId}`);
+  return !!exp && exp > Date.now();
+}
+
+router.post("/rotinas/checklists/:id/urgent-bypass", requireAuth, requireModule("rotinas"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const userId = req.session.userId!;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+
+  const pending = await getPendingRoutines(tenantId, userId);
+  const target = pending.find((p) => p.id === id && p.mandatory);
+  if (!target) { res.status(404).json({ error: "Checklist obrigatório não está pendente pra você agora" }); return; }
+
+  await db.insert(routineUrgentBypassesTable).values({ tenantId, checklistId: id, userId });
+  const bypassUntil = Date.now() + URGENT_BYPASS_MS;
+  urgentBypassCache.set(`${tenantId}:${userId}`, bypassUntil);
+  res.json({ ok: true, bypassUntil: new Date(bypassUntil).toISOString() });
+});
+
+// ── Trava dura: bloqueia (423) enquanto houver checklist OBRIGATÓRIO
+// pendente, igual ao enforceMandatoryChecklists (checklists.ts) — mas com
+// allowlist mais larga: atendimento (chat/internal-chat) nunca trava, pra
+// não interromper mensagem em andamento nem encerrar atendimento ativo
+// (item 44 do relatório mestre). "Atendimento urgente" libera tudo por uma
+// janela curta, mesmo com checklist ainda pendente.
+const BLOCK_ALLOWLIST = [
+  /^\/auth\//,
+  /^\/rotinas\/pending$/,
+  /^\/rotinas\/checklists\/\d+\/respond$/,
+  /^\/rotinas\/checklists\/\d+\/urgent-bypass$/,
+  /^\/chat\//,
+  /^\/internal-chat\//,
+];
+const BLOCK_CACHE_MS = 60_000;
+const blockCache = new Map<string, { until: number; blocked: boolean }>();
+export function invalidateRoutineBlock(tenantId: number, userId: number): void {
+  blockCache.delete(`${tenantId}:${userId}`);
+}
+
+export async function enforceMandatoryRoutines(
+  req: import("express").Request,
+  res: import("express").Response,
+  next: import("express").NextFunction,
+): Promise<void> {
+  const uid = req.session?.userId;
+  if (!uid) { next(); return; }
+  if (BLOCK_ALLOWLIST.some((r) => r.test(req.path))) { next(); return; }
+  const tenantId = tenantIdOf(req);
+  if (tenantId == null) { next(); return; }
+  if (hasActiveUrgentBypass(tenantId, uid)) { next(); return; }
+  try {
+    const cacheKey = `${tenantId}:${uid}`;
+    const cached = blockCache.get(cacheKey);
+    let blocked: boolean;
+    if (cached && cached.until > Date.now()) {
+      blocked = cached.blocked;
+    } else {
+      const pending = await getPendingRoutines(tenantId, uid);
+      blocked = pending.some((p) => p.mandatory);
+      blockCache.set(cacheKey, { until: Date.now() + BLOCK_CACHE_MS, blocked });
+    }
+    if (blocked) {
+      res.status(423).json({ error: "Responda o checklist obrigatório para liberar o sistema", code: "ROUTINE_REQUIRED" });
+      return;
+    }
+    next();
+  } catch {
+    next(); // em falha do banco, não derruba o sistema inteiro
+  }
+}
 
 export default router;

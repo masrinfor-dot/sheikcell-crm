@@ -1,25 +1,35 @@
 import { useState, useEffect, useCallback } from "react";
 import { api, ApiError, type PendingRoutine } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
-import { ListChecks, KeyRound, X } from "lucide-react";
+import { useActivityGuard } from "@/lib/activityGuard";
+import { ListChecks, KeyRound, X, ShieldAlert } from "lucide-react";
 
 const INPUT = "w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30";
 
-// Fase 2 (Rotinas e Produtividade): checklist "devido agora" pro usuário
-// logado — senha → perguntas → envia. AINDA SOFT (dá pra fechar e responder
-// depois) — a trava de verdade (não fechável, guard de operação crítica,
-// atendimento urgente) é a Fase 3. Mesmo esqueleto de polling/fila do
+// Fase 3 (Rotinas e Produtividade): checklist "devido agora" pro usuário
+// logado — senha → perguntas → envia. Checklist NÃO obrigatório continua
+// soft (fechável, "Responder depois"). Checklist OBRIGATÓRIO trava de
+// verdade: não fechável, só aparece quando não há operação crítica em
+// andamento (ActivityGuard — envio de mensagem, gravação de áudio), e tem
+// "Atendimento urgente" como válvula de escape (libera sem marcar como
+// respondido, backend registra o uso). Mesmo esqueleto de polling/fila do
 // ChecklistGate.tsx (Questionários), mas com o passo de senha na frente.
 export default function RoutineChecklistGate() {
   const { toast } = useToast();
+  const guard = useActivityGuard();
   const [pending, setPending] = useState<PendingRoutine[]>([]);
   const [dismissed, setDismissed] = useState<Set<number>>(new Set());
+  const [urgentUntil, setUrgentUntil] = useState<Record<number, number>>({});
   const [step, setStep] = useState<"password" | "questions">("password");
   const [password, setPassword] = useState("");
   const [passwordError, setPasswordError] = useState("");
   const [verifying, setVerifying] = useState(false);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+  const [bypassing, setBypassing] = useState(false);
+  // Só existe pra forçar reavaliação de guard.isBusy() (ref, não é reativo
+  // sozinho) enquanto um checklist obrigatório espera a operação crítica terminar.
+  const [, forceRecheck] = useState(0);
 
   const refresh = useCallback(() => {
     api.rotinas.pending().then(setPending).catch(() => {});
@@ -31,7 +41,10 @@ export default function RoutineChecklistGate() {
     return () => clearInterval(t);
   }, [refresh]);
 
-  const current = pending.find((p) => !dismissed.has(p.id));
+  const now = Date.now();
+  const current = pending.find((p) => !dismissed.has(p.id) && !(urgentUntil[p.id] > now));
+  const waitingOnGuard = !!current?.mandatory && guard.isBusy();
+
   useEffect(() => {
     // Cada checklist novo começa pedindo senha de novo — uma confirmação
     // não vale pra vários (mesma regra do backend, ver clearPasswordVerified).
@@ -41,7 +54,15 @@ export default function RoutineChecklistGate() {
     setAnswers({});
   }, [current?.id]);
 
-  if (!current) return null;
+  useEffect(() => {
+    // Checklist obrigatório com operação crítica em andamento: não trava
+    // ainda — reavalia a cada poucos segundos até o guard ficar livre.
+    if (!waitingOnGuard) return;
+    const t = setInterval(() => forceRecheck((n) => n + 1), 3000);
+    return () => clearInterval(t);
+  }, [waitingOnGuard]);
+
+  if (!current || waitingOnGuard) return null;
 
   const handleVerifyPassword = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -83,13 +104,36 @@ export default function RoutineChecklistGate() {
 
   const handleDismiss = () => setDismissed((prev) => new Set(prev).add(current.id));
 
+  const handleUrgentBypass = async () => {
+    if (bypassing) return;
+    setBypassing(true);
+    try {
+      const r = await api.rotinas.urgentBypass(current.id);
+      const until = new Date(r.bypassUntil).getTime();
+      setUrgentUntil((prev) => ({ ...prev, [current.id]: until }));
+      toast({ title: "Atendimento liberado por 20 minutos", description: "O checklist continua pendente — vai aparecer de novo depois." });
+    } catch (err) {
+      toast({ title: "Erro ao liberar atendimento urgente", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setBypassing(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-4 overflow-y-auto">
       <div className="shk-card w-full max-w-lg p-6 my-8 bg-white relative">
-        <button onClick={handleDismiss} title="Responder depois" data-testid="button-dismiss-routine"
-          className="absolute top-4 right-4 text-muted-foreground hover:text-foreground transition">
-          <X className="w-5 h-5" />
-        </button>
+        {current.mandatory ? (
+          <button onClick={handleUrgentBypass} disabled={bypassing} title="Libera o sistema por 20 min sem responder — o checklist continua pendente"
+            data-testid="button-urgent-bypass"
+            className="absolute top-4 right-4 flex items-center gap-1 text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2.5 py-1 hover:bg-amber-100 transition disabled:opacity-50">
+            <ShieldAlert className="w-3.5 h-3.5" /> {bypassing ? "Liberando..." : "Atendimento urgente"}
+          </button>
+        ) : (
+          <button onClick={handleDismiss} title="Responder depois" data-testid="button-dismiss-routine"
+            className="absolute top-4 right-4 text-muted-foreground hover:text-foreground transition">
+            <X className="w-5 h-5" />
+          </button>
+        )}
 
         {step === "password" ? (
           <>

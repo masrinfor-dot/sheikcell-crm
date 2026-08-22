@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { api, can, ApiError, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { useActivityGuard } from "@/lib/activityGuard";
 import { useToast } from "@/hooks/use-toast";
 import {
   Search, Plus, Send, RefreshCw, X, ChevronDown, SpellCheck,
@@ -905,6 +906,10 @@ export default function ChatCenter({
   const [hasMoreOlder, setHasMoreOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [sending, setSending] = useState(false);
+  // Trava obrigatória de Rotinas e Produtividade (Fase 3) só aparece quando
+  // isBusy() está livre — registra aqui os mesmos momentos em que liga/
+  // desliga `sending`/`recording`, pra nunca interromper um envio em curso.
+  const guard = useActivityGuard();
   const [showNewConv, setShowNewConv] = useState(false);
   const [showLabelPicker, setShowLabelPicker] = useState(false);
   const [labels, setLabels] = useState<ChatLabel[]>([]);
@@ -1616,6 +1621,7 @@ export default function ChatCenter({
     // envia clicando no botão (em vez de Enter) perde o foco pro botão.
     inputRef.current?.focus();
     setSending(true);
+    guard.register("send-text");
     const optimistic: ChatMessage = {
       id: -Date.now(), conversationId: activeId, content: text,
       direction: "outbound", type: isNote ? "note" : "text", status: "sent",
@@ -1637,7 +1643,7 @@ export default function ChatCenter({
       setMsgText(text);
       setReplyTarget(replyingTo);
       toast({ title: isNote ? "Erro ao salvar nota" : "Erro ao enviar mensagem", variant: "destructive" });
-    } finally { setSending(false); }
+    } finally { setSending(false); guard.unregister("send-text"); }
   };
 
   // ── Send one file (image, video, audio ou documento) — usado tanto pra um
@@ -1680,6 +1686,7 @@ export default function ChatCenter({
     setReplyTarget(null);
     items.forEach((it) => { if (it.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(it.previewUrl); });
     setSending(true);
+    guard.register("send-files");
     setSendProgress(items.length > 1 ? { current: 0, total: items.length } : null);
     for (let i = 0; i < items.length; i++) {
       const isLast = i === items.length - 1;
@@ -1688,6 +1695,7 @@ export default function ChatCenter({
     }
     setSendProgress(null);
     setSending(false);
+    guard.unregister("send-files");
   };
 
   // ── Gravação de nota de voz (microfone) ──
@@ -1727,6 +1735,7 @@ export default function ChatCenter({
         stream.getTracks().forEach((t) => t.stop());
         stopRecordTimer();
         setRecording(false);
+        guard.unregister("recording");
         setRecordSecs(0);
         const chunks = recordChunksRef.current;
         recordChunksRef.current = [];
@@ -1735,6 +1744,7 @@ export default function ChatCenter({
         const ext = type === "audio/mp4" ? "m4a" : "weba";
         const file = new File([new Blob(chunks, { type })], `nota-de-voz.${ext}`, { type: rec.mimeType || "audio/webm" });
         setSending(true);
+        guard.register("send-voice-note");
         const optimistic: ChatMessage = {
           id: -Date.now(), conversationId: convId,
           content: "🎤 Áudio",
@@ -1751,11 +1761,12 @@ export default function ChatCenter({
         } catch (err) {
           setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
           toast({ title: "Erro ao enviar áudio", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
-        } finally { setSending(false); }
+        } finally { setSending(false); guard.unregister("send-voice-note"); }
       };
       recorderRef.current = rec;
       rec.start();
       setRecording(true);
+      guard.register("recording");
       setRecordSecs(0);
       recordTimerRef.current = setInterval(() => setRecordSecs((s) => s + 1), 1000);
     } catch (err) {

@@ -1281,6 +1281,7 @@ export const api = {
     respond: (id: number, answers: Record<string, string>) =>
       req<{ id: number }>(`/rotinas/checklists/${id}/respond`, { method: "POST", body: JSON.stringify({ answers }) }),
     responses: (id: number) => req<RoutineResponse[]>(`/rotinas/checklists/${id}/responses`),
+    urgentBypass: (id: number) => req<{ ok: boolean; bypassUntil: string }>(`/rotinas/checklists/${id}/urgent-bypass`, { method: "POST" }),
   },
   tradeIn: {
     list: () => req<TradeInEvaluation[]>("/trade-in"),

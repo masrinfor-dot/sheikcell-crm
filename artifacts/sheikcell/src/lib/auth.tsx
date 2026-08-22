@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useEffect, type ReactNode } from "react";
 import { api, type User } from "./api";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
+import { ActivityGuardProvider } from "./activityGuard";
 
 type AuthCtx = {
   user: User | null;
@@ -43,7 +44,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   return (
     <AuthContext.Provider value={{ user, loading, login, logout, setUser }}>
-      {children}
+      <ActivityGuardProvider>
+        {children}
+      </ActivityGuardProvider>
       {/* Primeiro acesso ou senha resetada: obriga criar senha nova */}
       {user?.mustChangePassword && (
         <ChangePasswordModal forced

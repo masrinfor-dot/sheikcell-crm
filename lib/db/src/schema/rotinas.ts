@@ -95,7 +95,23 @@ export const routineResponsesTable = pgTable("routine_responses", {
   index("routine_responses_user_idx").on(t.userId),
 ]);
 
+// "Atendimento urgente" (Fase 3): libera temporariamente a trava sem marcar
+// o checklist como respondido — só um registro de auditoria de que o bypass
+// foi usado. A liberação em si é um carimbo em memória (ver rotinas.ts),
+// não depende desta tabela pra funcionar; ela existe só pra não perder o
+// rastro de quando/por quem foi usada.
+export const routineUrgentBypassesTable = pgTable("routine_urgent_bypasses", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  checklistId: integer("checklist_id").notNull().references(() => routineChecklistsTable.id, { onDelete: "cascade" }),
+  userId: integer("user_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("routine_urgent_bypasses_user_idx").on(t.userId),
+]);
+
 export type RoutineChecklist = typeof routineChecklistsTable.$inferSelect;
 export type RoutineChecklistQuestion = typeof routineChecklistQuestionsTable.$inferSelect;
 export type RoutineChecklistScope = typeof routineChecklistScopesTable.$inferSelect;
 export type RoutineResponse = typeof routineResponsesTable.$inferSelect;
+export type RoutineUrgentBypass = typeof routineUrgentBypassesTable.$inferSelect;

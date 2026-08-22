@@ -31,7 +31,7 @@ import systemBoardRouter from "./systemBoard";
 import teamDirectoryRouter from "./teamDirectory";
 import ticketsRouter from "./tickets";
 import tvboxRouter from "./tvbox";
-import rotinasRouter from "./rotinas";
+import rotinasRouter, { enforceMandatoryRoutines } from "./rotinas";
 
 const router: IRouter = Router();
 router.use(healthRouter);
@@ -42,6 +42,7 @@ router.use(superadminSaasRouter);
 router.use(enforceMandatoryChecklists);
 router.use(enforceMandatoryTrainings);
 router.use(enforceMandatoryClockIn);
+router.use(enforceMandatoryRoutines);
 router.use(sectorsRouter);
 router.use(queueRouter);
 router.use(adminRouter);
