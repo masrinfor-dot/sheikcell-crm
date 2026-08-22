@@ -8,8 +8,9 @@ import {
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
+import { Button, Modal, Select } from "@/components/kit";
 import {
-  ListChecks, Plus, X, Trash2, Pencil, CalendarClock, Users2, Bell, Eye, FolderOpen, ChevronRight, FileText, Image as ImageIcon,
+  ListChecks, Plus, Trash2, Pencil, CalendarClock, Users2, Bell, Eye, FolderOpen, ChevronRight, FileText, Image as ImageIcon,
   BarChart3, Clock, Building2, Trophy, CheckCircle2, ShieldQuestion, LayoutDashboard, AlertTriangle, RefreshCw,
 } from "lucide-react";
 
@@ -269,15 +270,18 @@ export default function RotinasProdutividade() {
       )}
 
       {/* Modal criar/editar */}
-      {showForm && (
-        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 overflow-y-auto">
-          <div className="shk-card w-full max-w-2xl p-6 my-8 bg-white">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-bold">{editing ? "Editar checklist" : "Novo checklist"}</h3>
-              <button onClick={() => setShowForm(false)}><X className="w-5 h-5 text-muted-foreground" /></button>
-            </div>
-
-            <fieldset disabled={!canEdit} className="space-y-4 max-h-[65vh] overflow-y-auto pr-1 border-0 p-0 m-0">
+      <Modal open={showForm} onClose={() => setShowForm(false)} title={editing ? "Editar checklist" : "Novo checklist"} width="lg"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setShowForm(false)} className="flex-1">{canEdit ? "Cancelar" : "Fechar"}</Button>
+            {canEdit && (
+              <Button onClick={handleSave} disabled={!valid || saving} data-testid="button-save-routine" className="flex-1">
+                {saving ? "Salvando..." : "Salvar"}
+              </Button>
+            )}
+          </>
+        }>
+            <fieldset disabled={!canEdit} className="space-y-4 border-0 p-0 m-0">
               <div>
                 <label className="text-xs font-medium mb-1 block">Nome</label>
                 <input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
@@ -465,33 +469,12 @@ export default function RotinasProdutividade() {
                 </button>
               </div>
             </fieldset>
-
-            <div className="flex gap-2 mt-5">
-              <button onClick={() => setShowForm(false)}
-                className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold border border-border hover:bg-secondary transition">
-                {canEdit ? "Cancelar" : "Fechar"}
-              </button>
-              {canEdit && (
-                <button onClick={handleSave} disabled={!valid || saving} data-testid="button-save-routine"
-                  className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold bg-primary text-white disabled:opacity-40 transition">
-                  {saving ? "Salvando..." : "Salvar"}
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Modal respostas — funcionário vê só a própria, supervisor o setor
           dele, admin tudo (filtro já aplicado pelo backend). */}
-      {viewing && (
-        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 overflow-y-auto">
-          <div className="shk-card w-full max-w-2xl p-6 my-8 bg-white">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-bold">Respostas — {viewing.name}</h3>
-              <button onClick={() => setViewing(null)}><X className="w-5 h-5 text-muted-foreground" /></button>
-            </div>
-            <div className="space-y-3 max-h-[65vh] overflow-y-auto pr-1">
+      <Modal open={!!viewing} onClose={() => setViewing(null)} title={`Respostas — ${viewing?.name ?? ""}`} width="lg">
+            <div className="space-y-3">
               {responses.length === 0 ? (
                 <p className="text-xs text-muted-foreground text-center py-4">Nenhuma resposta ainda.</p>
               ) : responses.map((r) => (
@@ -535,9 +518,7 @@ export default function RotinasProdutividade() {
                 </div>
               ))}
             </div>
-          </div>
-        </div>
-      )}
+      </Modal>
       </>
       )}
     </div>
@@ -1197,35 +1178,31 @@ function RotinasPainel({ scopeOptions, jobFunctions, canEdit }: { scopeOptions: 
         </div>
         <div>
           <label className="text-xs font-medium mb-1 block">Loja</label>
-          <select value={storeId ?? ""} onChange={(e) => setStoreId(e.target.value ? parseInt(e.target.value, 10) : null)}
-            className="px-2 py-1.5 rounded-lg border border-border text-xs bg-white">
+          <Select value={storeId ?? ""} onChange={(e) => setStoreId(e.target.value ? parseInt(e.target.value, 10) : null)}>
             <option value="">Todas</option>
             {scopeOptions?.stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
+          </Select>
         </div>
         <div>
           <label className="text-xs font-medium mb-1 block">Setor</label>
-          <select value={sectorId ?? ""} onChange={(e) => setSectorId(e.target.value ? parseInt(e.target.value, 10) : null)}
-            className="px-2 py-1.5 rounded-lg border border-border text-xs bg-white">
+          <Select value={sectorId ?? ""} onChange={(e) => setSectorId(e.target.value ? parseInt(e.target.value, 10) : null)}>
             <option value="">Todos</option>
             {scopeOptions?.sectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
+          </Select>
         </div>
         <div>
           <label className="text-xs font-medium mb-1 block">Função</label>
-          <select value={jobFunction} onChange={(e) => setJobFunction(e.target.value)}
-            className="px-2 py-1.5 rounded-lg border border-border text-xs bg-white">
+          <Select value={jobFunction} onChange={(e) => setJobFunction(e.target.value)}>
             <option value="">Todas</option>
             {jobFunctions.map((f) => <option key={f} value={f}>{f}</option>)}
-          </select>
+          </Select>
         </div>
         <div>
           <label className="text-xs font-medium mb-1 block">Status</label>
-          <select value={status} onChange={(e) => setStatus(e.target.value as RoutineDashboardStatus | "")}
-            className="px-2 py-1.5 rounded-lg border border-border text-xs bg-white">
+          <Select value={status} onChange={(e) => setStatus(e.target.value as RoutineDashboardStatus | "")}>
             <option value="">Todos</option>
             {(Object.entries(STATUS_LABELS) as [RoutineDashboardStatus, string][]).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-          </select>
+          </Select>
         </div>
       </div>
 
