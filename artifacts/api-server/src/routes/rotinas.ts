@@ -1,16 +1,20 @@
 import { Router, type IRouter } from "express";
 import {
   db, routineChecklistsTable, routineChecklistQuestionsTable, routineChecklistScopesTable,
-  employeesTable, storesTable, sectorsTable, usersTable,
+  routineResponsesTable, employeesTable, storesTable, sectorsTable, usersTable, leaveRecordsTable,
+  type RoutineChecklist, type RoutineChecklistQuestion, type RoutineChecklistScope,
 } from "@workspace/db";
-import { eq, and, desc, asc, isNotNull } from "drizzle-orm";
-import { requireTenant } from "../middlewares/auth";
+import { eq, and, desc, asc, isNotNull, lte, gte } from "drizzle-orm";
+import { requireAuth, requireTenant, requireModule } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
+import { isPasswordRecentlyVerified, clearPasswordVerified } from "./auth";
 
 const router: IRouter = Router();
 
-// Fase 1: só o CRUD do admin (modelo de dados). Sem trava, sem cálculo de
-// "devido agora", sem reautenticação por senha — isso entra nas Fases 2/3.
+// Fase 1: CRUD do admin (modelo de dados), sem trava/agendamento disparando.
+// Fase 2 (abaixo, a partir de "Devido agora"): checklist "devido agora" pro
+// usuário logado, reautenticação por senha e resposta com snapshot — ainda
+// SOFT (fechável), sem travar o sistema de verdade (isso é a Fase 3).
 
 const VALID_RECURRENCE = ["daily", "weekdays", "specific_days", "weekly", "monthly", "specific_date"];
 const VALID_QUESTION_TYPES = ["yes_no", "done_not_done", "text", "number", "value", "photo", "document", "observation"];
@@ -257,6 +261,196 @@ router.get("/rotinas/scope-options", requireModuleAccess("rotinas"), async (req,
     db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable).where(eq(usersTable.tenantId, tenantId)),
   ]);
   res.json({ stores, sectors, users });
+});
+
+// ── Devido agora (resolução pro usuário logado) ────────────────────────────
+
+function todayInfo(): { dateKey: string; weekday: number; dayOfMonth: number; nowMinutes: number } {
+  const now = new Date();
+  const dateKey = now.toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
+  const weekdayName = now.toLocaleDateString("en-US", { timeZone: "America/Sao_Paulo", weekday: "short" });
+  const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(weekdayName);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Sao_Paulo", hour12: false, hour: "2-digit", minute: "2-digit", day: "2-digit",
+  }).formatToParts(now);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "0";
+  let hh = parseInt(get("hour"), 10);
+  if (hh === 24) hh = 0; // quirk do Intl: meia-noite às vezes vem como "24"
+  const nowMinutes = hh * 60 + parseInt(get("minute"), 10);
+  const dayOfMonth = parseInt(get("day"), 10);
+  return { dateKey, weekday, dayOfMonth, nowMinutes };
+}
+
+// Devido hoje (dia certo pra recorrência) — fica pendente pro resto do dia
+// até responder, mesmo espírito de checklists.ts (não "expira" sozinho).
+function isDueToday(c: RoutineChecklist, info: ReturnType<typeof todayInfo>): boolean {
+  switch (c.recurrence) {
+    case "daily": return true;
+    case "weekdays": return info.weekday >= 1 && info.weekday <= 5;
+    case "specific_days":
+    case "weekly": return (c.recurrenceDays ?? []).includes(info.weekday);
+    case "monthly": return (c.recurrenceDays ?? [])[0] === info.dayOfMonth;
+    case "specific_date": return c.specificDate === info.dateKey;
+    default: return false;
+  }
+}
+
+type UserRoutineContext = { storeId: number | null; sectorId: number | null; jobFunction: string | null; employeeId: number | null };
+
+async function resolveUserContext(tenantId: number, userId: number): Promise<UserRoutineContext> {
+  const [user] = await db.select({ storeId: usersTable.storeId, sectorId: usersTable.sectorId })
+    .from(usersTable).where(and(eq(usersTable.id, userId), eq(usersTable.tenantId, tenantId)));
+  const [employee] = await db.select({ id: employeesTable.id, jobFunction: employeesTable.jobFunction })
+    .from(employeesTable).where(and(eq(employeesTable.userId, userId), eq(employeesTable.tenantId, tenantId)));
+  return {
+    storeId: user?.storeId ?? null,
+    sectorId: user?.sectorId ?? null,
+    jobFunction: employee?.jobFunction ?? null,
+    employeeId: employee?.id ?? null,
+  };
+}
+
+// Uma regra "casa" se TODA dimensão preenchida bate (AND); dimensão nula na
+// regra = coringa. O checklist se aplica ao usuário se QUALQUER regra casar
+// (OR entre regras) — várias regras cobrem várias combinações de uma vez.
+function scopeMatchesUser(scope: RoutineChecklistScope, ctx: UserRoutineContext, userId: number): boolean {
+  if (scope.storeId != null && scope.storeId !== ctx.storeId) return false;
+  if (scope.sectorId != null && scope.sectorId !== ctx.sectorId) return false;
+  if (scope.jobFunction != null && scope.jobFunction !== ctx.jobFunction) return false;
+  if (scope.userId != null && scope.userId !== userId) return false;
+  return true;
+}
+
+async function isOnLeaveToday(tenantId: number, employeeId: number | null, dateKey: string): Promise<boolean> {
+  if (employeeId == null) return false;
+  const [leave] = await db.select({ id: leaveRecordsTable.id }).from(leaveRecordsTable)
+    .where(and(
+      eq(leaveRecordsTable.tenantId, tenantId), eq(leaveRecordsTable.employeeId, employeeId),
+      lte(leaveRecordsTable.startDate, dateKey), gte(leaveRecordsTable.endDate, dateKey),
+    )).limit(1);
+  return !!leave;
+}
+
+type PendingRoutine = RoutineChecklist & { questions: RoutineChecklistQuestion[]; periodKey: string };
+
+async function getPendingRoutines(tenantId: number, userId: number): Promise<PendingRoutine[]> {
+  const info = todayInfo();
+  const ctx = await resolveUserContext(tenantId, userId);
+  if (await isOnLeaveToday(tenantId, ctx.employeeId, info.dateKey)) return [];
+
+  const checklists = await db.select().from(routineChecklistsTable)
+    .where(and(eq(routineChecklistsTable.tenantId, tenantId), eq(routineChecklistsTable.active, true)));
+  const due = checklists.filter((c) => info.nowMinutes >= parseInt(c.scheduledTime.slice(0, 2), 10) * 60 + parseInt(c.scheduledTime.slice(3, 5), 10) && isDueToday(c, info));
+  if (due.length === 0) return [];
+
+  const allScopes = await db.select().from(routineChecklistScopesTable)
+    .where(eq(routineChecklistScopesTable.tenantId, tenantId));
+  const scopesByChecklist = new Map<number, RoutineChecklistScope[]>();
+  for (const s of allScopes) scopesByChecklist.set(s.checklistId, [...(scopesByChecklist.get(s.checklistId) ?? []), s]);
+
+  const applicable = due.filter((c) => {
+    const scopes = scopesByChecklist.get(c.id) ?? [];
+    return scopes.some((s) => scopeMatchesUser(s, ctx, userId));
+  });
+  if (applicable.length === 0) return [];
+
+  const answered = await db.select({ checklistId: routineResponsesTable.checklistId })
+    .from(routineResponsesTable)
+    .where(and(eq(routineResponsesTable.userId, userId), eq(routineResponsesTable.periodKey, info.dateKey)));
+  const answeredIds = new Set(answered.map((a) => a.checklistId));
+  const pending = applicable.filter((c) => !answeredIds.has(c.id));
+  if (pending.length === 0) return [];
+
+  const questions = await db.select().from(routineChecklistQuestionsTable)
+    .where(eq(routineChecklistQuestionsTable.tenantId, tenantId))
+    .orderBy(asc(routineChecklistQuestionsTable.orderIndex));
+  const questionsByChecklist = new Map<number, RoutineChecklistQuestion[]>();
+  for (const q of questions) questionsByChecklist.set(q.checklistId, [...(questionsByChecklist.get(q.checklistId) ?? []), q]);
+
+  return pending.map((c) => ({ ...c, questions: questionsByChecklist.get(c.id) ?? [], periodKey: info.dateKey }));
+}
+
+router.get("/rotinas/pending", requireAuth, requireModule("rotinas"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const pending = await getPendingRoutines(tenantId, req.session.userId!);
+  res.json(pending.map((p) => ({
+    id: p.id, name: p.name, message: p.message, mandatory: p.mandatory, periodKey: p.periodKey,
+    questions: p.questions.map((q) => ({ id: q.id, label: q.label, type: q.type, required: q.required, requiresEvidence: q.requiresEvidence, evidenceType: q.evidenceType })),
+  })));
+});
+
+// ── Responder ───────────────────────────────────────────────────────────
+router.post("/rotinas/checklists/:id/respond", requireAuth, requireModule("rotinas"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const userId = req.session.userId!;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+
+  if (!isPasswordRecentlyVerified(tenantId, userId)) {
+    res.status(401).json({ error: "Confirme sua senha antes de responder", code: "REAUTH_REQUIRED" });
+    return;
+  }
+
+  const pending = await getPendingRoutines(tenantId, userId);
+  const target = pending.find((p) => p.id === id);
+  if (!target) { res.status(404).json({ error: "Checklist não está pendente pra você agora" }); return; }
+
+  const body = (req.body ?? {}) as { answers?: Record<string, string> };
+  const raw = body.answers && typeof body.answers === "object" ? body.answers : {};
+  const answers: Record<string, string> = {};
+  for (const q of target.questions) {
+    const v = typeof raw[q.id] === "string" ? raw[q.id].trim().slice(0, 1000) : "";
+    if (!v && q.required) { res.status(400).json({ error: `Responda: "${q.label}"` }); return; }
+    if (v) answers[q.id] = v;
+  }
+
+  try {
+    const [saved] = await db.insert(routineResponsesTable).values({
+      tenantId, checklistId: id, userId, periodKey: target.periodKey, answers,
+      questionsSnapshot: target.questions.map((q) => ({
+        id: q.id, label: q.label, type: q.type, required: q.required, requiresEvidence: q.requiresEvidence, evidenceType: q.evidenceType,
+      })),
+      reauthAt: new Date(),
+      deviceInfo: (req.headers["user-agent"] as string | undefined)?.slice(0, 300) ?? null,
+    }).returning();
+    clearPasswordVerified(tenantId, userId);
+    res.status(201).json(saved);
+  } catch {
+    res.status(409).json({ error: "Você já respondeu este checklist neste período" });
+  }
+});
+
+// ── Respostas de um checklist — funcionário vê só a própria, supervisor vê
+// o setor dele, admin vê tudo (mesmo formato de canAccessConversation, chat.ts). ──
+router.get("/rotinas/checklists/:id/responses", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const [checklist] = await db.select({ id: routineChecklistsTable.id }).from(routineChecklistsTable)
+    .where(and(eq(routineChecklistsTable.id, id), eq(routineChecklistsTable.tenantId, tenantId)));
+  if (!checklist) { res.status(404).json({ error: "Checklist não encontrado" }); return; }
+
+  const rows = await db.select({
+    id: routineResponsesTable.id, userId: routineResponsesTable.userId, userName: usersTable.name,
+    userSectorId: usersTable.sectorId, periodKey: routineResponsesTable.periodKey,
+    answers: routineResponsesTable.answers, questionsSnapshot: routineResponsesTable.questionsSnapshot,
+    reauthAt: routineResponsesTable.reauthAt, createdAt: routineResponsesTable.createdAt,
+  })
+    .from(routineResponsesTable)
+    .leftJoin(usersTable, eq(routineResponsesTable.userId, usersTable.id))
+    .where(eq(routineResponsesTable.checklistId, id))
+    .orderBy(desc(routineResponsesTable.createdAt))
+    .limit(500);
+
+  const role = req.session.userRole;
+  const ownSectorId = req.session.userSectorId;
+  const visible = role === "admin"
+    ? rows
+    : role === "supervisor"
+      ? rows.filter((r) => r.userId === req.session.userId || (ownSectorId != null && r.userSectorId === ownSectorId))
+      : rows.filter((r) => r.userId === req.session.userId);
+
+  res.json(visible.map(({ userSectorId: _userSectorId, ...r }) => r));
 });
 
 export default router;

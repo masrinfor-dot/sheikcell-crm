@@ -29,6 +29,7 @@ import ChangePasswordModal from "@/components/ChangePasswordModal";
 import ChecklistGate from "@/components/ChecklistGate";
 import PontoGate from "@/components/PontoGate";
 import TrainingGate from "@/components/TrainingGate";
+import RoutineChecklistGate from "@/components/RoutineChecklistGate";
 import InternalChat from "./InternalChat";
 import TaskBoard from "./TaskBoard";
 import SystemBoard from "./SystemBoard";
@@ -521,6 +522,7 @@ export default function AdminDashboard() {
           onClose={() => setShowChangePassword(false)} />
       )}
       <TrainingGate />
+      <RoutineChecklistGate />
 
       {/* Left sidebar + content */}
       <div className="flex">

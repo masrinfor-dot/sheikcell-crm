@@ -549,6 +549,20 @@ export type RoutineChecklistFull = RoutineChecklist & { questions: RoutineCheckl
 export type RoutineScopeOptions = {
   stores: { id: number; name: string }[]; sectors: { id: number; name: string }[]; users: { id: number; name: string }[];
 };
+// Checklist "devido agora" pro usuário logado (Fase 2) — versão enxuta de
+// RoutineChecklistQuestion, só o que o modal de resposta precisa mostrar.
+export type PendingRoutineQuestion = {
+  id: number; label: string; type: RoutineQuestionType; required: boolean; requiresEvidence: boolean; evidenceType: "photo" | "document" | null;
+};
+export type PendingRoutine = {
+  id: number; name: string; message: string | null; mandatory: boolean; periodKey: string;
+  questions: PendingRoutineQuestion[];
+};
+export type RoutineResponse = {
+  id: number; userId: number; userName: string | null; periodKey: string;
+  answers: Record<string, string>; questionsSnapshot: PendingRoutineQuestion[];
+  reauthAt: string; createdAt: string;
+};
 
 export type TradeInEvaluation = {
   id: number; userId: number | null; userName?: string | null;
@@ -1021,6 +1035,8 @@ export const api = {
       req<{ user: User }>("/auth/me", { method: "PATCH", body: JSON.stringify(data) }),
     changePassword: (currentPassword: string, newPassword: string) =>
       req<{ ok: boolean }>("/auth/change-password", { method: "POST", body: JSON.stringify({ currentPassword, newPassword }) }),
+    verifyPassword: (password: string) =>
+      req<{ ok: boolean; verifiedForSeconds: number }>("/auth/verify-password", { method: "POST", body: JSON.stringify({ password }) }),
     stopImpersonation: () => req<{ ok: boolean }>("/auth/stop-impersonation", { method: "POST" }),
     forgotPassword: (email: string) =>
       req<{ ok: boolean; message: string }>("/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) }),
@@ -1261,6 +1277,10 @@ export const api = {
     remove: (id: number) => req<{ ok: boolean }>(`/rotinas/checklists/${id}`, { method: "DELETE" }),
     jobFunctions: () => req<string[]>("/rotinas/job-functions"),
     scopeOptions: () => req<RoutineScopeOptions>("/rotinas/scope-options"),
+    pending: () => req<PendingRoutine[]>("/rotinas/pending"),
+    respond: (id: number, answers: Record<string, string>) =>
+      req<{ id: number }>(`/rotinas/checklists/${id}/respond`, { method: "POST", body: JSON.stringify({ answers }) }),
+    responses: (id: number) => req<RoutineResponse[]>(`/rotinas/checklists/${id}/responses`),
   },
   tradeIn: {
     list: () => req<TradeInEvaluation[]>("/trade-in"),

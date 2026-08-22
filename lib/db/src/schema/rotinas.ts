@@ -1,7 +1,11 @@
-import { pgTable, serial, text, timestamp, integer, boolean, jsonb, date, index } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, timestamp, integer, boolean, jsonb, date, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { storesTable } from "./stores";
 import { sectorsTable } from "./sectors";
 import { usersTable } from "./users";
+
+export type RoutineQuestionSnapshot = {
+  id: number; label: string; type: string; required: boolean; requiresEvidence: boolean; evidenceType: string | null;
+};
 
 // Rotinas e Produtividade: checklists operacionais agendados (abertura,
 // fechamento, conferência de caixa etc.) que travam o uso do sistema até
@@ -69,6 +73,29 @@ export const routineChecklistScopesTable = pgTable("routine_checklist_scopes", {
   index("routine_checklist_scopes_checklist_idx").on(t.checklistId),
 ]);
 
+// Resposta de checklist — uma linha por execução, nunca sobrescrita (histórico
+// por construção, item 50). questionsSnapshot guarda as perguntas exatamente
+// como estavam ao responder, então editar o checklist depois (bump de
+// version em routineChecklistsTable) nunca muda o sentido de uma resposta
+// antiga (item 61). reauthAt registra quando a senha foi confirmada — a
+// senha em si nunca é armazenada, só o carimbo de quando foi validada.
+export const routineResponsesTable = pgTable("routine_responses", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  checklistId: integer("checklist_id").notNull().references(() => routineChecklistsTable.id, { onDelete: "cascade" }),
+  userId: integer("user_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }),
+  periodKey: text("period_key").notNull(), // "YYYY-MM-DD" — uma resposta por dia por usuário/checklist
+  answers: jsonb("answers").$type<Record<string, string>>().notNull(), // { [questionId]: valor }
+  questionsSnapshot: jsonb("questions_snapshot").$type<RoutineQuestionSnapshot[]>().notNull(),
+  reauthAt: timestamp("reauth_at", { withTimezone: true }).notNull(),
+  deviceInfo: text("device_info"), // User-Agent de quem respondeu
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("routine_responses_unique").on(t.checklistId, t.userId, t.periodKey),
+  index("routine_responses_user_idx").on(t.userId),
+]);
+
 export type RoutineChecklist = typeof routineChecklistsTable.$inferSelect;
 export type RoutineChecklistQuestion = typeof routineChecklistQuestionsTable.$inferSelect;
 export type RoutineChecklistScope = typeof routineChecklistScopesTable.$inferSelect;
+export type RoutineResponse = typeof routineResponsesTable.$inferSelect;

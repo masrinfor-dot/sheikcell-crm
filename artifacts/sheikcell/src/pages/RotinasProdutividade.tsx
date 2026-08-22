@@ -2,11 +2,11 @@ import { useState, useEffect } from "react";
 import {
   api, canEditModule,
   type RoutineChecklist, type RoutineChecklistFull, type RoutineChecklistQuestion, type RoutineChecklistScope,
-  type RoutineQuestionType, type RoutineRecurrence, type RoutineScopeOptions,
+  type RoutineQuestionType, type RoutineRecurrence, type RoutineScopeOptions, type RoutineResponse,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
-import { ListChecks, Plus, X, Trash2, Pencil, CalendarClock, Users2, Bell } from "lucide-react";
+import { ListChecks, Plus, X, Trash2, Pencil, CalendarClock, Users2, Bell, Eye } from "lucide-react";
 
 const WEEKDAYS = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
 const RECURRENCE_LABELS: Record<RoutineRecurrence, string> = {
@@ -52,6 +52,8 @@ export default function RotinasProdutividade() {
   const [editing, setEditing] = useState<RoutineChecklistFull | null>(null);
   const [form, setForm] = useState(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
+  const [viewing, setViewing] = useState<RoutineChecklist | null>(null);
+  const [responses, setResponses] = useState<RoutineResponse[]>([]);
 
   const fetchLists = () => api.rotinas.list().then(setLists).catch(() => {}).finally(() => setLoading(false));
   useEffect(() => {
@@ -128,6 +130,12 @@ export default function RotinasProdutividade() {
     }
   };
 
+  const openResponses = async (c: RoutineChecklist) => {
+    setViewing(c);
+    setResponses([]);
+    try { setResponses(await api.rotinas.responses(c.id)); } catch { /* noop */ }
+  };
+
   const handleDelete = async (c: RoutineChecklist) => {
     if (!window.confirm(`Excluir "${c.name}"?`)) return;
     try {
@@ -198,6 +206,8 @@ export default function RotinasProdutividade() {
                 </div>
               </div>
               <div className="flex gap-1 shrink-0">
+                <button onClick={() => openResponses(c)} title="Ver respostas" data-testid={`button-responses-routine-${c.id}`}
+                  className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground transition"><Eye className="w-3.5 h-3.5" /></button>
                 <button onClick={() => openForm(c)} title={canEdit ? "Editar" : "Ver"} data-testid={`button-edit-routine-${c.id}`}
                   className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground transition"><Pencil className="w-3.5 h-3.5" /></button>
                 {canEdit && (
@@ -400,6 +410,41 @@ export default function RotinasProdutividade() {
                   {saving ? "Salvando..." : "Salvar"}
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal respostas — funcionário vê só a própria, supervisor o setor
+          dele, admin tudo (filtro já aplicado pelo backend). */}
+      {viewing && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="shk-card w-full max-w-2xl p-6 my-8 bg-white">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-bold">Respostas — {viewing.name}</h3>
+              <button onClick={() => setViewing(null)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <div className="space-y-3 max-h-[65vh] overflow-y-auto pr-1">
+              {responses.length === 0 ? (
+                <p className="text-xs text-muted-foreground text-center py-4">Nenhuma resposta ainda.</p>
+              ) : responses.map((r) => (
+                <div key={r.id} className="border border-border rounded-xl p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-xs font-bold">{r.userName ?? "—"}</p>
+                    <p className="text-[10px] text-muted-foreground">
+                      {r.periodKey} · {new Date(r.createdAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                    </p>
+                  </div>
+                  <div className="space-y-1.5">
+                    {r.questionsSnapshot.map((q) => (
+                      <div key={q.id} className="text-xs">
+                        <span className="text-muted-foreground">{q.label}: </span>
+                        <span className="font-semibold">{r.answers[q.id] ?? "—"}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         </div>

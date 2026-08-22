@@ -24,6 +24,7 @@ import RH from "./RH";
 import MeuPonto from "./MeuPonto";
 import Questionarios from "./Questionarios";
 import TrainingGate from "@/components/TrainingGate";
+import RoutineChecklistGate from "@/components/RoutineChecklistGate";
 import Treinamentos from "./Treinamentos";
 import Documentos from "./Documentos";
 import {
@@ -232,6 +233,7 @@ export default function AttendantDashboard() {
       <PontoGate />
       <ChecklistGate />
       <TrainingGate />
+      <RoutineChecklistGate />
       {/* Navbar */}
       <nav className="bg-white border-b border-border sticky top-0 z-20">
         <div className="max-w-3xl mx-auto px-4 h-14 flex items-center justify-between">

@@ -148,6 +148,68 @@ router.post("/auth/change-password", requireAuth, async (req, res): Promise<void
   res.json({ ok: true });
 });
 
+// ── Confirmação de senha (Rotinas e Produtividade) ─────────────────────────
+// Reautenticação "pura": só confirma a senha ATUAL do próprio usuário —
+// nunca muda nada (diferente de change-password acima) e nunca recria a
+// sessão (diferente de login). Usado antes de responder um checklist
+// obrigatório (ver routes/rotinas.ts). A senha em si nunca é armazenada —
+// só um carimbo "confirmado até" em memória, consumido pelo endpoint de
+// resposta do checklist.
+const VERIFY_MAX_ATTEMPTS = 5;
+const VERIFY_LOCKOUT_MS = 5 * 60_000; // 5 minutos
+const verifyAttempts = new Map<string, { count: number; lockedUntil: number }>();
+const PASSWORD_VERIFIED_TTL_MS = 5 * 60_000; // janela pra completar o checklist depois de confirmar a senha
+const passwordVerifiedCache = new Map<string, number>(); // chave "tenantId:userId" -> expira em (epoch ms)
+
+export function markPasswordVerified(tenantId: number, userId: number): void {
+  passwordVerifiedCache.set(`${tenantId}:${userId}`, Date.now() + PASSWORD_VERIFIED_TTL_MS);
+}
+export function isPasswordRecentlyVerified(tenantId: number, userId: number): boolean {
+  const exp = passwordVerifiedCache.get(`${tenantId}:${userId}`);
+  return !!exp && exp > Date.now();
+}
+// Consumida depois de responder um checklist — obriga confirmar a senha de
+// novo pro próximo checklist, em vez de uma confirmação valer pra vários.
+export function clearPasswordVerified(tenantId: number, userId: number): void {
+  passwordVerifiedCache.delete(`${tenantId}:${userId}`);
+}
+
+router.post("/auth/verify-password", requireAuth, async (req, res): Promise<void> => {
+  const { password } = req.body as { password?: string };
+  if (!password) { res.status(400).json({ error: "Informe a senha" }); return; }
+
+  const tenantId = req.session.tenantId;
+  const userId = req.session.userId!;
+  if (tenantId == null) { res.status(403).json({ error: "Sessão sem loja associada" }); return; }
+  const rateKey = `${tenantId}:${userId}`;
+
+  const attempt = verifyAttempts.get(rateKey);
+  if (attempt && attempt.lockedUntil > Date.now()) {
+    const retryAfterSec = Math.ceil((attempt.lockedUntil - Date.now()) / 1000);
+    res.status(429).json({ error: `Muitas tentativas erradas. Tente de novo em ${Math.ceil(retryAfterSec / 60)} min.`, retryAfterSec });
+    return;
+  }
+
+  const [user] = await db.select().from(usersTable).where(eq(usersTable.id, userId));
+  const valid = user ? await bcrypt.compare(password, user.passwordHash) : false;
+
+  if (!valid) {
+    const next = attempt ?? { count: 0, lockedUntil: 0 };
+    next.count += 1;
+    if (next.count >= VERIFY_MAX_ATTEMPTS) {
+      next.lockedUntil = Date.now() + VERIFY_LOCKOUT_MS;
+      next.count = 0;
+    }
+    verifyAttempts.set(rateKey, next);
+    res.status(401).json({ error: "Senha incorreta" });
+    return;
+  }
+
+  verifyAttempts.delete(rateKey);
+  markPasswordVerified(tenantId, userId);
+  res.json({ ok: true, verifiedForSeconds: PASSWORD_VERIFIED_TTL_MS / 1000 });
+});
+
 router.post("/auth/logout", requireAuth, (req, res): void => {
   req.session.destroy(() => {
     res.json({ ok: true });
