@@ -113,6 +113,26 @@ export const routineResponsesTable = pgTable("routine_responses", {
   index("routine_responses_user_idx").on(t.userId),
 ]);
 
+// Fase 4: evidência (foto/documento) anexada a uma pergunta de uma resposta —
+// arquivo em disco (mesmo padrão de documents.ts: UUID + magic-bytes),
+// metadado aqui. Uma linha por pergunta com evidência numa resposta (uma
+// resposta pode ter várias, uma por pergunta que exige). Histórico imutável
+// por construção (nunca sobrescreve, só a resposta original é apagada em
+// cascade se o checklist for excluído).
+export const routineResponseEvidenceTable = pgTable("routine_response_evidence", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  responseId: integer("response_id").notNull().references(() => routineResponsesTable.id, { onDelete: "cascade" }),
+  questionId: integer("question_id").notNull().references(() => routineChecklistQuestionsTable.id, { onDelete: "cascade" }),
+  fileName: text("file_name").notNull(),
+  storedName: text("stored_name").notNull(), // nome em disco (UUID.ext), nunca o nome original
+  mimeType: text("mime_type").notNull(),
+  sizeBytes: integer("size_bytes").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("routine_response_evidence_response_idx").on(t.responseId),
+]);
+
 // "Atendimento urgente" (Fase 3): libera temporariamente a trava sem marcar
 // o checklist como respondido — só um registro de auditoria de que o bypass
 // foi usado. A liberação em si é um carimbo em memória (ver rotinas.ts),
@@ -133,3 +153,4 @@ export type RoutineChecklistQuestion = typeof routineChecklistQuestionsTable.$in
 export type RoutineChecklistScope = typeof routineChecklistScopesTable.$inferSelect;
 export type RoutineResponse = typeof routineResponsesTable.$inferSelect;
 export type RoutineUrgentBypass = typeof routineUrgentBypassesTable.$inferSelect;
+export type RoutineResponseEvidence = typeof routineResponseEvidenceTable.$inferSelect;

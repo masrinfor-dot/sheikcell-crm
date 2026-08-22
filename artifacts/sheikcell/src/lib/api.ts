@@ -579,11 +579,20 @@ export type PendingRoutine = {
 // numa pergunta requiresJustificationOnNo — senão o valor é uma string simples.
 export type RoutineNoJustification = { value: string; motivo: string; pendencia: string | null; comunicarA: string | null };
 export type RoutineAnswerValue = string | RoutineNoJustification;
+// Evidência anexada a uma pergunta de uma resposta (Fase 4) — o arquivo em
+// si sai por GET /rotinas/evidence/:id/file.
+export type RoutineEvidence = {
+  id: number; responseId: number; questionId: number; fileName: string; mimeType: string; sizeBytes: number; createdAt: string;
+};
 export type RoutineResponse = {
   id: number; userId: number; userName: string | null; periodKey: string;
+  userStoreId: number | null; storeName: string | null; sectorName: string | null;
   answers: Record<string, RoutineAnswerValue>; questionsSnapshot: PendingRoutineQuestion[];
+  evidence: RoutineEvidence[];
   reauthAt: string; createdAt: string;
 };
+// Upload de evidência (Fase 4) — base64, mesmo padrão de documents.ts.
+export type RoutineEvidenceUpload = { fileName: string; mimeType: string; data: string };
 
 export type TradeInEvaluation = {
   id: number; userId: number | null; userName?: string | null;
@@ -1299,9 +1308,10 @@ export const api = {
     jobFunctions: () => req<string[]>("/rotinas/job-functions"),
     scopeOptions: () => req<RoutineScopeOptions>("/rotinas/scope-options"),
     pending: () => req<PendingRoutine[]>("/rotinas/pending"),
-    respond: (id: number, answers: Record<string, RoutineAnswerValue>) =>
-      req<{ id: number }>(`/rotinas/checklists/${id}/respond`, { method: "POST", body: JSON.stringify({ answers }) }),
+    respond: (id: number, answers: Record<string, RoutineAnswerValue>, evidence?: Record<string, RoutineEvidenceUpload>) =>
+      req<{ id: number }>(`/rotinas/checklists/${id}/respond`, { method: "POST", body: JSON.stringify({ answers, evidence }) }),
     responses: (id: number) => req<RoutineResponse[]>(`/rotinas/checklists/${id}/responses`),
+    evidenceFileUrl: (evidenceId: number) => `${API_BASE}/rotinas/evidence/${evidenceId}/file`,
     urgentBypass: (id: number) => req<{ ok: boolean; bypassUntil: string }>(`/rotinas/checklists/${id}/urgent-bypass`, { method: "POST" }),
   },
   tradeIn: {

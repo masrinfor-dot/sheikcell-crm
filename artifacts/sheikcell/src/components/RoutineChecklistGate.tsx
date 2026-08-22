@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
-import { api, ApiError, ROUTINE_NO_REASONS, type PendingRoutine, type RoutineAnswerValue } from "@/lib/api";
+import { api, ApiError, ROUTINE_NO_REASONS, type PendingRoutine, type RoutineAnswerValue, type RoutineEvidenceUpload } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { useActivityGuard } from "@/lib/activityGuard";
-import { ListChecks, KeyRound, X, ShieldAlert } from "lucide-react";
+import { ListChecks, KeyRound, X, ShieldAlert, Paperclip } from "lucide-react";
 
 const INPUT = "w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30";
 
@@ -10,6 +10,20 @@ const INPUT = "w-full px-3 py-2 rounded-xl border border-border text-sm focus:ou
 // disparam a justificativa estruturada (motivo/pendência/quem comunicar).
 const NEGATIVE_ANSWER: Record<string, string> = { yes_no: "Não", done_not_done: "Não executado" };
 type Justification = { motivo: string; pendencia: string; comunicarA: string };
+// Fase 4: pergunta pede anexo quando o TIPO dela é a própria evidência
+// (foto/documento) ou quando requiresEvidence marca um anexo extra junto
+// com o valor normal.
+const wantsEvidence = (q: PendingRoutine["questions"][number]) =>
+  q.requiresEvidence || q.type === "photo" || q.type === "document";
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
 
 // Fase 3 (Rotinas e Produtividade): checklist "devido agora" pro usuário
 // logado — senha → perguntas → envia. Checklist NÃO obrigatório continua
@@ -31,6 +45,8 @@ export default function RoutineChecklistGate() {
   const [verifying, setVerifying] = useState(false);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [justifications, setJustifications] = useState<Record<string, Justification>>({});
+  const [evidenceFiles, setEvidenceFiles] = useState<Record<string, RoutineEvidenceUpload>>({});
+  const [evidenceError, setEvidenceError] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [bypassing, setBypassing] = useState(false);
   // Só existe pra forçar reavaliação de guard.isBusy() (ref, não é reativo
@@ -59,6 +75,8 @@ export default function RoutineChecklistGate() {
     setPasswordError("");
     setAnswers({});
     setJustifications({});
+    setEvidenceFiles({});
+    setEvidenceError({});
   }, [current?.id]);
 
   useEffect(() => {
@@ -90,10 +108,24 @@ export default function RoutineChecklistGate() {
     q.requiresJustificationOnNo && answers[q.id] === NEGATIVE_ANSWER[q.type];
 
   const allAnswered = current.questions.every((q) => {
-    if (q.required && !(answers[q.id] ?? "").trim()) return false;
+    // Foto/documento: a evidência É a resposta, não pede o valor de texto.
+    if (q.required && !(q.type === "photo" || q.type === "document") && !(answers[q.id] ?? "").trim()) return false;
     if (needsJustification(q) && !(justifications[q.id]?.motivo ?? "").trim()) return false;
+    if (q.required && wantsEvidence(q) && !evidenceFiles[q.id]) return false;
     return true;
   });
+
+  const MAX_EVIDENCE_MB = 10;
+  const handleEvidenceChange = async (q: PendingRoutine["questions"][number], file: File | null) => {
+    if (!file) { setEvidenceFiles((f) => { const n = { ...f }; delete n[q.id]; return n; }); return; }
+    if (file.size > MAX_EVIDENCE_MB * 1024 * 1024) {
+      setEvidenceError((e) => ({ ...e, [q.id]: `Arquivo muito grande (máx. ${MAX_EVIDENCE_MB}MB)` }));
+      return;
+    }
+    setEvidenceError((e) => { const n = { ...e }; delete n[q.id]; return n; });
+    const data = await fileToBase64(file);
+    setEvidenceFiles((f) => ({ ...f, [q.id]: { fileName: file.name, mimeType: file.type, data } }));
+  };
 
   const handleSubmit = async () => {
     if (!allAnswered || saving) return;
@@ -107,7 +139,7 @@ export default function RoutineChecklistGate() {
           ? { value, motivo: justifications[q.id]?.motivo ?? "", pendencia: justifications[q.id]?.pendencia || null, comunicarA: justifications[q.id]?.comunicarA || null }
           : value;
       }
-      await api.rotinas.respond(current.id, payload);
+      await api.rotinas.respond(current.id, payload, evidenceFiles);
       toast({ title: "Checklist enviado. Obrigado!" });
       setPending((prev) => prev.filter((p) => p.id !== current.id));
     } catch (err) {
@@ -246,13 +278,28 @@ export default function RoutineChecklistGate() {
                   )}
                   {(q.type === "photo" || q.type === "document") && (
                     <div>
-                      <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 mb-1.5">
-                        Anexo de {q.type === "photo" ? "foto" : "documento"} chega numa fase futura — por enquanto, descreva por texto.
-                      </p>
-                      <textarea rows={2} value={answers[q.id] ?? ""}
-                        onChange={(e) => setAnswers((a) => ({ ...a, [q.id]: e.target.value }))}
-                        data-testid={`routine-q-${q.id}`}
-                        className="w-full px-3 py-2 rounded-xl border border-border text-sm resize-none" />
+                      <label className="flex items-center gap-2 px-3 py-2 rounded-xl border border-dashed border-border text-xs cursor-pointer hover:bg-secondary/40 transition"
+                        data-testid={`routine-q-${q.id}-file`}>
+                        <Paperclip className="w-4 h-4 text-muted-foreground shrink-0" />
+                        <span className="truncate">{evidenceFiles[q.id]?.fileName ?? `Selecionar ${q.type === "photo" ? "foto" : "documento"}...`}</span>
+                        <input type="file" className="hidden"
+                          accept={q.type === "photo" ? "image/jpeg,image/png,image/webp" : "application/pdf,image/jpeg,image/png,image/webp"}
+                          onChange={(e) => handleEvidenceChange(q, e.target.files?.[0] ?? null)} />
+                      </label>
+                      {evidenceError[q.id] && <p className="text-[11px] text-destructive font-medium mt-1">{evidenceError[q.id]}</p>}
+                    </div>
+                  )}
+                  {q.requiresEvidence && q.type !== "photo" && q.type !== "document" && (
+                    <div className="mt-1.5">
+                      <label className="flex items-center gap-2 px-3 py-2 rounded-xl border border-dashed border-border text-xs cursor-pointer hover:bg-secondary/40 transition"
+                        data-testid={`routine-q-${q.id}-file`}>
+                        <Paperclip className="w-4 h-4 text-muted-foreground shrink-0" />
+                        <span className="truncate">{evidenceFiles[q.id]?.fileName ?? `Anexar ${q.evidenceType === "document" ? "documento" : "foto"} de evidência...`}</span>
+                        <input type="file" className="hidden"
+                          accept={q.evidenceType === "document" ? "application/pdf,image/jpeg,image/png,image/webp" : "image/jpeg,image/png,image/webp"}
+                          onChange={(e) => handleEvidenceChange(q, e.target.files?.[0] ?? null)} />
+                      </label>
+                      {evidenceError[q.id] && <p className="text-[11px] text-destructive font-medium mt-1">{evidenceError[q.id]}</p>}
                     </div>
                   )}
                 </div>

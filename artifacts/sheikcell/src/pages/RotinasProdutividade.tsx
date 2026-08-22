@@ -7,7 +7,7 @@ import {
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
-import { ListChecks, Plus, X, Trash2, Pencil, CalendarClock, Users2, Bell, Eye } from "lucide-react";
+import { ListChecks, Plus, X, Trash2, Pencil, CalendarClock, Users2, Bell, Eye, FolderOpen, ChevronRight, FileText, Image as ImageIcon } from "lucide-react";
 
 const WEEKDAYS = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
 const RECURRENCE_LABELS: Record<RoutineRecurrence, string> = {
@@ -66,6 +66,7 @@ export default function RotinasProdutividade() {
   const [saving, setSaving] = useState(false);
   const [viewing, setViewing] = useState<RoutineChecklist | null>(null);
   const [responses, setResponses] = useState<RoutineResponse[]>([]);
+  const [mainTab, setMainTab] = useState<"checklists" | "documentos">("checklists");
 
   const fetchLists = () => api.rotinas.list().then(setLists).catch(() => {}).finally(() => setLoading(false));
   useEffect(() => {
@@ -177,21 +178,34 @@ export default function RotinasProdutividade() {
         <h2 className="text-lg font-bold flex items-center gap-2">
           <ListChecks className="w-5 h-5 text-primary" /> Rotinas e Produtividade
         </h2>
-        {canEdit && (
+        {canEdit && mainTab === "checklists" && (
           <button onClick={() => openForm()} data-testid="button-add-routine"
             className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-primary text-white text-xs font-semibold">
             <Plus className="w-3.5 h-3.5" /> Novo checklist
           </button>
         )}
       </div>
+
+      <div className="flex gap-1.5 border-b border-border">
+        {([["checklists", "Checklists", ListChecks], ["documentos", "Documentos", FolderOpen]] as const).map(([v, label, Icon]) => (
+          <button key={v} onClick={() => setMainTab(v)} data-testid={`tab-rotinas-${v}`}
+            className={`flex items-center gap-1.5 px-3 py-2 text-xs font-semibold border-b-2 -mb-px transition ${
+              mainTab === v ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
+            }`}>
+            <Icon className="w-3.5 h-3.5" /> {label}
+          </button>
+        ))}
+      </div>
+
+      {mainTab === "documentos" ? (
+        <RotinasDocumentos checklists={lists} />
+      ) : (
+      <>
       {!canEdit && (
         <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
           Você só tem acesso de visualização a Rotinas e Produtividade — peça ao administrador para liberar edição.
         </p>
       )}
-      <p className="text-[11px] text-muted-foreground bg-secondary/40 rounded-lg px-3 py-1.5">
-        Fase 1: cadastro dos checklists. Ainda não trava o sistema nem dispara alertas — isso vem nas próximas etapas.
-      </p>
 
       {loading ? (
         <div className="h-24 rounded-xl bg-secondary/40 animate-pulse" />
@@ -489,10 +503,121 @@ export default function RotinasProdutividade() {
                       );
                     })}
                   </div>
+                  {r.evidence.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mt-2 pt-2 border-t border-border">
+                      {r.evidence.map((e) => (
+                        <a key={e.id} href={api.rotinas.evidenceFileUrl(e.id)} target="_blank" rel="noreferrer"
+                          className="flex items-center gap-1 text-[11px] px-2 py-1 rounded-lg bg-secondary/60 hover:bg-secondary text-foreground transition">
+                          {e.mimeType.startsWith("image/") ? <ImageIcon className="w-3 h-3" /> : <FileText className="w-3 h-3" />}
+                          {e.fileName}
+                        </a>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
           </div>
+        </div>
+      )}
+      </>
+      )}
+    </div>
+  );
+}
+
+// ── Documentos (Fase 4): Checklists → Loja → Setor → Funcionário → Ano →
+// Mês, drill-down sobre a evidência já trazida por api.rotinas.responses()
+// (mesmo controle de acesso 3 camadas do backend — nada novo aqui). ──
+type EvidenceEntry = {
+  evidenceId: number; fileName: string; mimeType: string;
+  checklistName: string; storeName: string; sectorName: string; userName: string;
+  year: string; month: string; questionLabel: string; createdAt: string;
+};
+function RotinasDocumentos({ checklists }: { checklists: RoutineChecklist[] }) {
+  const [entries, setEntries] = useState<EvidenceEntry[] | null>(null);
+  const [path, setPath] = useState<string[]>([]); // [checklist, loja, setor, funcionário, ano, mês]
+
+  useEffect(() => {
+    setEntries(null);
+    Promise.all(checklists.map((c) => api.rotinas.responses(c.id).then((rs) => ({ c, rs })).catch(() => ({ c, rs: [] as RoutineResponse[] }))))
+      .then((all) => {
+        const out: EvidenceEntry[] = [];
+        for (const { c, rs } of all) {
+          for (const r of rs) {
+            const [year, month] = r.periodKey.split("-");
+            const labelByQ = new Map(r.questionsSnapshot.map((q) => [q.id, q.label]));
+            for (const e of r.evidence) {
+              out.push({
+                evidenceId: e.id, fileName: e.fileName, mimeType: e.mimeType,
+                checklistName: c.name, storeName: r.storeName ?? "Sem loja", sectorName: r.sectorName ?? "Sem setor",
+                userName: r.userName ?? "—", year: year ?? "—", month: month ?? "—",
+                questionLabel: labelByQ.get(e.questionId) ?? "—", createdAt: e.createdAt,
+              });
+            }
+          }
+        }
+        setEntries(out);
+      });
+  }, [checklists]);
+
+  const LEVELS: ("checklistName" | "storeName" | "sectorName" | "userName" | "year" | "month")[] =
+    ["checklistName", "storeName", "sectorName", "userName", "year", "month"];
+  const MONTH_NAMES = ["", "Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
+  const filtered = (entries ?? []).filter((e) => path.every((v, i) => e[LEVELS[i]] === v));
+  const depth = path.length;
+
+  if (entries === null) return <div className="h-24 rounded-xl bg-secondary/40 animate-pulse" />;
+
+  if (entries.length === 0) {
+    return (
+      <div className="shk-card p-8 text-center text-muted-foreground">
+        <FolderOpen className="w-8 h-8 mx-auto mb-2 opacity-30" />
+        <p className="text-sm font-semibold">Nenhuma evidência anexada ainda</p>
+        <p className="text-xs mt-1">Fotos e documentos anexados nas respostas dos checklists aparecem aqui, navegáveis por loja/setor/funcionário/ano/mês.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-1 text-xs flex-wrap">
+        <button onClick={() => setPath([])} className={`font-semibold ${depth === 0 ? "text-primary" : "text-muted-foreground hover:text-foreground"}`}>
+          Checklists
+        </button>
+        {path.map((v, i) => (
+          <span key={i} className="flex items-center gap-1">
+            <ChevronRight className="w-3 h-3 text-muted-foreground" />
+            <button onClick={() => setPath(path.slice(0, i + 1))}
+              className={`font-semibold ${i === depth - 1 ? "text-primary" : "text-muted-foreground hover:text-foreground"}`}>
+              {LEVELS[i] === "month" ? MONTH_NAMES[parseInt(v, 10)] ?? v : v}
+            </button>
+          </span>
+        ))}
+      </div>
+
+      {depth < LEVELS.length ? (
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+          {Array.from(new Set(filtered.map((e) => e[LEVELS[depth]]))).sort().map((v) => (
+            <button key={v} onClick={() => setPath([...path, v])} data-testid={`doc-drill-${v}`}
+              className="shk-card p-3 flex items-center gap-2 text-left hover:bg-secondary/40 transition">
+              <FolderOpen className="w-4 h-4 text-primary shrink-0" />
+              <span className="text-xs font-semibold truncate">{LEVELS[depth] === "month" ? MONTH_NAMES[parseInt(v, 10)] ?? v : v}</span>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          {filtered.map((e) => (
+            <a key={e.evidenceId} href={api.rotinas.evidenceFileUrl(e.evidenceId)} target="_blank" rel="noreferrer"
+              className="shk-card p-3 flex items-center gap-2 hover:bg-secondary/40 transition">
+              {e.mimeType.startsWith("image/") ? <ImageIcon className="w-4 h-4 text-primary shrink-0" /> : <FileText className="w-4 h-4 text-primary shrink-0" />}
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-semibold truncate">{e.fileName}</p>
+                <p className="text-[10px] text-muted-foreground truncate">{e.questionLabel} · {new Date(e.createdAt).toLocaleDateString("pt-BR")}</p>
+              </div>
+            </a>
+          ))}
         </div>
       )}
     </div>

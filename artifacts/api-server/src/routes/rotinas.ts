@@ -1,13 +1,18 @@
-import { Router, type IRouter } from "express";
+import { Router, type IRouter, type Request, type Response } from "express";
 import {
   db, routineChecklistsTable, routineChecklistQuestionsTable, routineChecklistScopesTable,
-  routineResponsesTable, routineUrgentBypassesTable, employeesTable, storesTable, sectorsTable, usersTable, leaveRecordsTable,
+  routineResponsesTable, routineUrgentBypassesTable, routineResponseEvidenceTable,
+  employeesTable, storesTable, sectorsTable, usersTable, leaveRecordsTable,
   type RoutineChecklist, type RoutineChecklistQuestion, type RoutineChecklistScope, type RoutineNoJustification,
 } from "@workspace/db";
-import { eq, and, desc, asc, isNotNull, lte, gte } from "drizzle-orm";
+import { eq, and, desc, asc, isNotNull, lte, gte, inArray } from "drizzle-orm";
 import { requireAuth, requireTenant, requireModule, tenantIdOf } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import { isPasswordRecentlyVerified, clearPasswordVerified } from "./auth";
+import path from "path";
+import { randomUUID } from "crypto";
+import { existsSync } from "fs";
+import { mkdir, writeFile, unlink } from "fs/promises";
 
 const router: IRouter = Router();
 
@@ -30,6 +35,64 @@ export const VALID_NO_REASONS = [
 // Valor que conta como "resposta negativa" por tipo de pergunta — só esses
 // tipos disparam a justificativa estruturada.
 const NEGATIVE_ANSWER: Record<string, string> = { yes_no: "Não", done_not_done: "Não executado" };
+
+// ── Evidência (Fase 4) — mesmo padrão de documents.ts: disco + UUID +
+// validação de magic-bytes, separado da biblioteca geral de Documentos
+// (é evidência presa a uma resposta de checklist, não um documento avulso).
+const EVIDENCE_DIR = path.resolve(process.cwd(), "rotinas-evidence");
+const EVIDENCE_MAX_SIZE = 10 * 1024 * 1024; // 10MB
+const EVIDENCE_MIME: Record<string, Record<string, string>> = {
+  photo: { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" },
+  document: { "application/pdf": "pdf", "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" },
+};
+function evidenceContentMatchesMime(buf: Buffer, mime: string): boolean {
+  const startsWith = (sig: number[]) => sig.every((b, i) => buf[i] === b);
+  switch (mime) {
+    case "application/pdf": return startsWith([0x25, 0x50, 0x44, 0x46]);
+    case "image/jpeg": return startsWith([0xff, 0xd8, 0xff]);
+    case "image/png": return startsWith([0x89, 0x50, 0x4e, 0x47]);
+    case "image/webp": return startsWith([0x52, 0x49, 0x46, 0x46]) && buf.length > 11 && buf.toString("ascii", 8, 12) === "WEBP";
+    default: return false;
+  }
+}
+type EvidenceInput = { fileName?: unknown; mimeType?: unknown; data?: unknown };
+type SavedEvidence = { questionId: number; fileName: string; storedName: string; mimeType: string; sizeBytes: number };
+// Valida e grava em disco cada anexo enviado; lança { status, error } se algo
+// não bater (tipo não permitido, assinatura não confere, tamanho, obrigatório
+// faltando). Retorna só o que foi de fato salvo, pra inserir depois do
+// insert da resposta (não cria arquivo órfão se a resposta falhar).
+async function processEvidence(
+  questions: RoutineChecklistQuestion[],
+  rawEvidence: Record<string, unknown>,
+): Promise<{ error: string } | { saved: SavedEvidence[] }> {
+  const saved: SavedEvidence[] = [];
+  for (const q of questions) {
+    const wantsEvidence = q.requiresEvidence || q.type === "photo" || q.type === "document";
+    if (!wantsEvidence) continue;
+    const evidenceType = q.evidenceType ?? (q.type === "photo" || q.type === "document" ? q.type : "photo");
+    const raw = rawEvidence[q.id] as EvidenceInput | undefined;
+    if (!raw || typeof raw !== "object") {
+      if (q.required) return { error: `Anexe uma evidência em: "${q.label}"` };
+      continue;
+    }
+    const fileName = typeof raw.fileName === "string" && raw.fileName.trim() ? raw.fileName.trim().slice(0, 255) : "evidencia";
+    const mime = typeof raw.mimeType === "string" ? raw.mimeType.split(";")[0].trim() : "";
+    const allowed = EVIDENCE_MIME[evidenceType] ?? EVIDENCE_MIME.photo;
+    const ext = allowed[mime];
+    if (!ext) return { error: `Tipo de arquivo não permitido em: "${q.label}"` };
+    if (typeof raw.data !== "string" || !raw.data) return { error: `Arquivo vazio em: "${q.label}"` };
+    const buf = Buffer.from(raw.data, "base64");
+    if (buf.length === 0) return { error: `Arquivo vazio em: "${q.label}"` };
+    if (!evidenceContentMatchesMime(buf, mime)) return { error: `O conteúdo do arquivo não corresponde ao tipo em: "${q.label}"` };
+    if (buf.length > EVIDENCE_MAX_SIZE) return { error: `Arquivo muito grande (máx. 10MB) em: "${q.label}"` };
+
+    await mkdir(EVIDENCE_DIR, { recursive: true });
+    const storedName = `${randomUUID()}.${ext}`;
+    await writeFile(path.join(EVIDENCE_DIR, storedName), buf);
+    saved.push({ questionId: q.id, fileName, storedName, mimeType: mime, sizeBytes: buf.length });
+  }
+  return { saved };
+}
 
 type QuestionInput = {
   label?: unknown; type?: unknown; required?: unknown;
@@ -265,8 +328,17 @@ router.delete("/rotinas/checklists/:id", requireModuleAccess("rotinas"), async (
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  // Recolhe os arquivos de evidência ANTES do delete (cascade apaga as
+  // linhas do banco, mas não o arquivo em disco — isso limpa os dois).
+  const orphanFiles = await db.select({ storedName: routineResponseEvidenceTable.storedName })
+    .from(routineResponseEvidenceTable)
+    .innerJoin(routineResponsesTable, eq(routineResponseEvidenceTable.responseId, routineResponsesTable.id))
+    .where(and(eq(routineResponsesTable.checklistId, id), eq(routineResponseEvidenceTable.tenantId, tenantId)));
   await db.delete(routineChecklistsTable)
     .where(and(eq(routineChecklistsTable.id, id), eq(routineChecklistsTable.tenantId, tenantId)));
+  for (const f of orphanFiles) {
+    await unlink(path.join(EVIDENCE_DIR, path.basename(f.storedName))).catch(() => {});
+  }
   res.json({ ok: true });
 });
 
@@ -458,9 +530,18 @@ router.post("/rotinas/checklists/:id/respond", requireAuth, requireModule("rotin
     } else {
       value = typeof rawVal === "string" ? rawVal.trim().slice(0, 1000) : "";
     }
-    if (!value && q.required) { res.status(400).json({ error: `Responda: "${q.label}"` }); return; }
+    // Foto/documento: a evidência anexada É a resposta — não pede valor de
+    // texto (validado abaixo, em processEvidence).
+    const isEvidenceOnlyType = q.type === "photo" || q.type === "document";
+    if (!value && q.required && !isEvidenceOnlyType) { res.status(400).json({ error: `Responda: "${q.label}"` }); return; }
     if (value) answers[q.id] = justification ?? value;
   }
+
+  // Fase 4: valida e grava em disco ANTES de inserir a resposta — se algo
+  // não bater, não sobra linha de resposta sem evidência obrigatória.
+  const rawEvidence = (req.body?.evidence && typeof req.body.evidence === "object" ? req.body.evidence : {}) as Record<string, unknown>;
+  const evidenceResult = await processEvidence(target.questions, rawEvidence);
+  if ("error" in evidenceResult) { res.status(400).json({ error: evidenceResult.error }); return; }
 
   try {
     const [saved] = await db.insert(routineResponsesTable).values({
@@ -472,6 +553,11 @@ router.post("/rotinas/checklists/:id/respond", requireAuth, requireModule("rotin
       reauthAt: new Date(),
       deviceInfo: (req.headers["user-agent"] as string | undefined)?.slice(0, 300) ?? null,
     }).returning();
+    if (evidenceResult.saved.length) {
+      await db.insert(routineResponseEvidenceTable).values(
+        evidenceResult.saved.map((e) => ({ tenantId, responseId: saved!.id, ...e })),
+      );
+    }
     clearPasswordVerified(tenantId, userId);
     invalidateRoutineBlock(tenantId, userId);
     res.status(201).json(saved);
@@ -492,12 +578,16 @@ router.get("/rotinas/checklists/:id/responses", requireAuth, async (req, res): P
 
   const rows = await db.select({
     id: routineResponsesTable.id, userId: routineResponsesTable.userId, userName: usersTable.name,
-    userSectorId: usersTable.sectorId, periodKey: routineResponsesTable.periodKey,
+    userSectorId: usersTable.sectorId, sectorName: sectorsTable.name,
+    userStoreId: usersTable.storeId, storeName: storesTable.name,
+    periodKey: routineResponsesTable.periodKey,
     answers: routineResponsesTable.answers, questionsSnapshot: routineResponsesTable.questionsSnapshot,
     reauthAt: routineResponsesTable.reauthAt, createdAt: routineResponsesTable.createdAt,
   })
     .from(routineResponsesTable)
     .leftJoin(usersTable, eq(routineResponsesTable.userId, usersTable.id))
+    .leftJoin(storesTable, eq(usersTable.storeId, storesTable.id))
+    .leftJoin(sectorsTable, eq(usersTable.sectorId, sectorsTable.id))
     .where(eq(routineResponsesTable.checklistId, id))
     .orderBy(desc(routineResponsesTable.createdAt))
     .limit(500);
@@ -510,7 +600,59 @@ router.get("/rotinas/checklists/:id/responses", requireAuth, async (req, res): P
       ? rows.filter((r) => r.userId === req.session.userId || (ownSectorId != null && r.userSectorId === ownSectorId))
       : rows.filter((r) => r.userId === req.session.userId);
 
-  res.json(visible.map(({ userSectorId: _userSectorId, ...r }) => r));
+  // Evidência (Fase 4) por resposta — só metadado + id (o arquivo em si sai
+  // por /rotinas/evidence/:id/file, com o mesmo controle de acesso).
+  const responseIds = visible.map((r) => r.id);
+  const evidenceRows = responseIds.length
+    ? await db.select({
+        id: routineResponseEvidenceTable.id, responseId: routineResponseEvidenceTable.responseId,
+        questionId: routineResponseEvidenceTable.questionId, fileName: routineResponseEvidenceTable.fileName,
+        mimeType: routineResponseEvidenceTable.mimeType, sizeBytes: routineResponseEvidenceTable.sizeBytes,
+        createdAt: routineResponseEvidenceTable.createdAt,
+      }).from(routineResponseEvidenceTable).where(inArray(routineResponseEvidenceTable.responseId, responseIds))
+    : [];
+  const evidenceByResponse = new Map<number, typeof evidenceRows>();
+  for (const e of evidenceRows) {
+    evidenceByResponse.set(e.responseId, [...(evidenceByResponse.get(e.responseId) ?? []), e]);
+  }
+
+  res.json(visible.map(({ userSectorId: _userSectorId, ...r }) => ({ ...r, evidence: evidenceByResponse.get(r.id) ?? [] })));
+});
+
+// ── Baixar/visualizar evidência (Fase 4) — mesmo controle de acesso 3
+// camadas do /responses (admin tudo, supervisor o setor dele, funcionário só
+// a própria), verificado aqui de novo porque é uma rota de arquivo separada. ──
+router.get("/rotinas/evidence/:id/file", requireAuth, async (req: Request, res: Response): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+
+  const [row] = await db.select({
+    fileName: routineResponseEvidenceTable.fileName, storedName: routineResponseEvidenceTable.storedName,
+    mimeType: routineResponseEvidenceTable.mimeType, responseUserId: routineResponsesTable.userId,
+    responseUserSectorId: usersTable.sectorId,
+  })
+    .from(routineResponseEvidenceTable)
+    .innerJoin(routineResponsesTable, eq(routineResponseEvidenceTable.responseId, routineResponsesTable.id))
+    .leftJoin(usersTable, eq(routineResponsesTable.userId, usersTable.id))
+    .where(and(eq(routineResponseEvidenceTable.id, id), eq(routineResponseEvidenceTable.tenantId, tenantId)));
+  if (!row) { res.status(404).json({ error: "Evidência não encontrada" }); return; }
+
+  const role = req.session.userRole;
+  const ownSectorId = req.session.userSectorId;
+  const allowed = role === "admin"
+    || row.responseUserId === req.session.userId
+    || (role === "supervisor" && ownSectorId != null && row.responseUserSectorId === ownSectorId);
+  if (!allowed) { res.status(403).json({ error: "Sem acesso a esta evidência" }); return; }
+
+  const filepath = path.join(EVIDENCE_DIR, path.basename(row.storedName));
+  if (!existsSync(filepath)) { res.status(404).json({ error: "Arquivo não encontrado no servidor" }); return; }
+  const INLINE_SAFE = new Set(["application/pdf", "image/jpeg", "image/png", "image/webp"]);
+  res.setHeader("Content-Type", row.mimeType);
+  res.setHeader("Content-Disposition", `${INLINE_SAFE.has(row.mimeType) ? "inline" : "attachment"}; filename="${encodeURIComponent(row.fileName)}"`);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Cache-Control", "private, max-age=3600");
+  res.sendFile(filepath);
 });
 
 // ── Atendimento urgente (Fase 3) ────────────────────────────────────────
