@@ -214,6 +214,30 @@ export const routineScoreWeightsTable = pgTable("routine_score_weights", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });
 
+// Fase 7: alerta automático pro gestor — checklist obrigatório sem resposta
+// dentro do prazo, ou resposta negativa numa pergunta alertLevel="critico".
+// Gerado por job periódico (routineAlerts.ts), não em tempo real (ver
+// generateRoutineAlerts). dedupeKey garante que o mesmo evento não gera
+// alerta duplicado a cada execução do job (onConflictDoNothing na geração,
+// mesmo espírito idempotente do fechamento mensal).
+export const routineAlertsTable = pgTable("routine_alerts", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  recipientUserId: integer("recipient_user_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }), // gestor/supervisor que recebe
+  employeeUserId: integer("employee_user_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }), // de quem é o alerta
+  employeeName: text("employee_name").notNull(),
+  checklistId: integer("checklist_id").references(() => routineChecklistsTable.id, { onDelete: "cascade" }),
+  checklistName: text("checklist_name").notNull(),
+  kind: text("kind").notNull(), // "atraso" | "critico"
+  message: text("message").notNull(),
+  dedupeKey: text("dedupe_key").notNull(),
+  read: boolean("read").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("routine_alerts_dedupe_unique").on(t.dedupeKey),
+  index("routine_alerts_recipient_idx").on(t.recipientUserId),
+]);
+
 export type RoutineChecklist = typeof routineChecklistsTable.$inferSelect;
 export type RoutineChecklistQuestion = typeof routineChecklistQuestionsTable.$inferSelect;
 export type RoutineChecklistScope = typeof routineChecklistScopesTable.$inferSelect;
@@ -222,3 +246,4 @@ export type RoutineUrgentBypass = typeof routineUrgentBypassesTable.$inferSelect
 export type RoutineResponseEvidence = typeof routineResponseEvidenceTable.$inferSelect;
 export type RoutineClosure = typeof routineClosuresTable.$inferSelect;
 export type RoutineScoreWeights = typeof routineScoreWeightsTable.$inferSelect;
+export type RoutineAlert = typeof routineAlertsTable.$inferSelect;

@@ -297,6 +297,12 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("./routineClosures").then((m) => m.closeMonthlyRoutines()).catch(() => {});
   }, 60 * 60_000);
+  // Alertas automáticos de Rotinas e Produtividade (Fase 7): checklist
+  // obrigatório atrasado ou pendência crítica — não precisa ser em tempo
+  // real, checa a cada 15 minutos (idempotente via dedupeKey).
+  setInterval(() => {
+    void import("./routineAlerts").then((m) => m.runRoutineAlerts()).catch(() => {});
+  }, 15 * 60_000);
   // TV Box: garante as mensalidades do mês corrente (idempotente, mesmo
   // espírito da mensalidade das lojas acima) e dispara lembrete/cobrança.
   void import("./tvBoxBilling").then((m) => m.runTvBoxMonthlyBilling()).catch(() => {});

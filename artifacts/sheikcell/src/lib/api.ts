@@ -589,6 +589,21 @@ export type RoutineRanking = { periodMonth: string; weights: RoutineScoreWeights
 export type RoutinePendingPendency = { id: number; userId: number; userName: string | null; periodKey: string; answers: Record<string, RoutineAnswerValue> };
 export type RoutinePendingBypass = { id: number; userId: number; userName: string | null; createdAt: string };
 export type RoutineReviewPending = { periodMonth: string; pendencies: RoutinePendingPendency[]; urgentBypasses: RoutinePendingBypass[] };
+// Painel consolidado (Fase 7) — não recalcula nada, junta fechamento (Fase
+// 5) + review de pendência (Fase 6) sob filtro comum.
+export type RoutineDashboardStatus = "pendente" | "em_dia" | "pendencia_nao_justificada";
+export type RoutineDashboardRow = {
+  employeeId: number; employeeName: string; periodMonth: string;
+  storeId: number | null; storeName: string | null; sectorId: number | null; sectorName: string | null; jobFunction: string | null;
+  totalDue: number; totalAnswered: number; totalOnTime: number; totalWithPendency: number; totalUrgentBypass: number;
+  approved: boolean; status: RoutineDashboardStatus; score: number | null;
+};
+// Alerta automático (Fase 7) — checklist obrigatório atrasado, ou resposta
+// negativa em pergunta alertLevel="critico".
+export type RoutineAlert = {
+  id: number; recipientUserId: number; employeeUserId: number; employeeName: string;
+  checklistId: number | null; checklistName: string; kind: "atraso" | "critico"; message: string; read: boolean; createdAt: string;
+};
 // Checklist "devido agora" pro usuário logado (Fase 2) — versão enxuta de
 // RoutineChecklistQuestion, só o que o modal de resposta precisa mostrar.
 export type PendingRoutineQuestion = {
@@ -1360,6 +1375,19 @@ export const api = {
     reviewUrgentBypass: (id: number, status: "approved" | "contested", note?: string) =>
       req(`/rotinas/urgent-bypasses/${id}/review`, { method: "POST", body: JSON.stringify({ status, note }) }),
     approveClosure: (id: number) => req<RoutineClosure>(`/rotinas/closures/${id}/approve`, { method: "POST" }),
+    dashboard: (params?: { periodMonth?: string; storeId?: number; sectorId?: number; jobFunction?: string; status?: RoutineDashboardStatus }) => {
+      const q = new URLSearchParams();
+      if (params?.periodMonth) q.set("periodMonth", params.periodMonth);
+      if (params?.storeId) q.set("storeId", String(params.storeId));
+      if (params?.sectorId) q.set("sectorId", String(params.sectorId));
+      if (params?.jobFunction) q.set("jobFunction", params.jobFunction);
+      if (params?.status) q.set("status", params.status);
+      const qs = q.toString();
+      return req<{ periodMonth: string; rows: RoutineDashboardRow[] }>(`/rotinas/dashboard${qs ? `?${qs}` : ""}`);
+    },
+    alerts: () => req<RoutineAlert[]>("/rotinas/alerts"),
+    markAlertRead: (id: number) => req<RoutineAlert>(`/rotinas/alerts/${id}/read`, { method: "POST" }),
+    runAlerts: () => req<{ ok: boolean; created: number }>("/rotinas/alerts/run", { method: "POST" }),
     urgentBypass: (id: number) => req<{ ok: boolean; bypassUntil: string }>(`/rotinas/checklists/${id}/urgent-bypass`, { method: "POST" }),
   },
   tradeIn: {

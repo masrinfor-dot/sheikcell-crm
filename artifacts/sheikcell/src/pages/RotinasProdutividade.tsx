@@ -4,11 +4,14 @@ import {
   type RoutineChecklist, type RoutineChecklistFull, type RoutineChecklistQuestion, type RoutineChecklistScope,
   type RoutineQuestionType, type RoutineRecurrence, type RoutineScopeOptions, type RoutineResponse, type RoutineClosure,
   type RoutineAlertLevel, type RoutineAnswerValue, ROUTINE_NO_REASONS,
-  type RoutineScoreWeights, type RoutineRankingRow,
+  type RoutineScoreWeights, type RoutineRankingRow, type RoutineDashboardRow, type RoutineDashboardStatus, type RoutineAlert,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
-import { ListChecks, Plus, X, Trash2, Pencil, CalendarClock, Users2, Bell, Eye, FolderOpen, ChevronRight, FileText, Image as ImageIcon, BarChart3, Clock, Building2, Trophy, CheckCircle2, ShieldQuestion } from "lucide-react";
+import {
+  ListChecks, Plus, X, Trash2, Pencil, CalendarClock, Users2, Bell, Eye, FolderOpen, ChevronRight, FileText, Image as ImageIcon,
+  BarChart3, Clock, Building2, Trophy, CheckCircle2, ShieldQuestion, LayoutDashboard, AlertTriangle, RefreshCw,
+} from "lucide-react";
 
 const WEEKDAYS = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
 const RECURRENCE_LABELS: Record<RoutineRecurrence, string> = {
@@ -67,7 +70,7 @@ export default function RotinasProdutividade() {
   const [saving, setSaving] = useState(false);
   const [viewing, setViewing] = useState<RoutineChecklist | null>(null);
   const [responses, setResponses] = useState<RoutineResponse[]>([]);
-  const [mainTab, setMainTab] = useState<"checklists" | "documentos" | "relatorio" | "loja" | "ranking" | "aprovacoes">("checklists");
+  const [mainTab, setMainTab] = useState<"painel" | "checklists" | "documentos" | "relatorio" | "loja" | "ranking" | "aprovacoes">("painel");
 
   const fetchLists = () => api.rotinas.list().then(setLists).catch(() => {}).finally(() => setLoading(false));
   useEffect(() => {
@@ -189,6 +192,7 @@ export default function RotinasProdutividade() {
 
       <div className="flex gap-1.5 border-b border-border">
         {([
+          ["painel", "Painel", LayoutDashboard],
           ["checklists", "Checklists", ListChecks], ["documentos", "Documentos", FolderOpen], ["relatorio", "Relatório Mensal", BarChart3],
           ["loja", "Relatório por Loja", Building2], ["ranking", "Ranking", Trophy], ["aprovacoes", "Aprovações", ShieldQuestion],
         ] as const).map(([v, label, Icon]) => (
@@ -201,7 +205,9 @@ export default function RotinasProdutividade() {
         ))}
       </div>
 
-      {mainTab === "documentos" ? (
+      {mainTab === "painel" ? (
+        <RotinasPainel scopeOptions={scopeOptions} jobFunctions={jobFunctions} canEdit={canEdit} />
+      ) : mainTab === "documentos" ? (
         <RotinasDocumentos checklists={lists} />
       ) : mainTab === "relatorio" ? (
         <RotinasRelatorio employees={scopeOptions?.employees ?? []} canEdit={canEdit} />
@@ -1083,6 +1089,171 @@ function RotinasAprovacoes() {
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Painel consolidado (Fase 7) — reúne o que já foi construído nas fases
+// anteriores (checklists, respostas/pendências, documentos, relatório
+// mensal, relatório por loja/ranking) sob um filtro comum de loja/setor/
+// função/período/status. Não recalcula nada — só junta o que já existe
+// (GET /rotinas/dashboard, ver rotinas.ts). Também mostra os alertas
+// automáticos (Fase 7) pro gestor logado, com botão de teste (admin) pra
+// não precisar esperar o job periódico de 15 min. ──
+const STATUS_LABELS: Record<RoutineDashboardStatus, string> = {
+  pendente: "Pendente", em_dia: "Em dia", pendencia_nao_justificada: "Pendência não justificada",
+};
+const STATUS_COLORS: Record<RoutineDashboardStatus, string> = {
+  pendente: "bg-gray-100 text-gray-600 border-gray-200",
+  em_dia: "bg-green-50 text-green-700 border-green-200",
+  pendencia_nao_justificada: "bg-red-50 text-red-600 border-red-200",
+};
+
+function RotinasPainel({ scopeOptions, jobFunctions, canEdit }: { scopeOptions: RoutineScopeOptions | null; jobFunctions: string[]; canEdit: boolean }) {
+  const { toast } = useToast();
+  const [periodMonth, setPeriodMonth] = useState(defaultPeriodMonth());
+  const [storeId, setStoreId] = useState<number | null>(null);
+  const [sectorId, setSectorId] = useState<number | null>(null);
+  const [jobFunction, setJobFunction] = useState("");
+  const [status, setStatus] = useState<RoutineDashboardStatus | "">("");
+  const [rows, setRows] = useState<RoutineDashboardRow[] | null>(null);
+  const [alerts, setAlerts] = useState<RoutineAlert[] | null>(null);
+  const [runningAlerts, setRunningAlerts] = useState(false);
+
+  const loadRows = () => {
+    setRows(null);
+    api.rotinas.dashboard({
+      periodMonth, storeId: storeId ?? undefined, sectorId: sectorId ?? undefined,
+      jobFunction: jobFunction || undefined, status: status || undefined,
+    }).then((r) => setRows(r.rows)).catch(() => setRows([]));
+  };
+  const loadAlerts = () => api.rotinas.alerts().then(setAlerts).catch(() => {});
+
+  useEffect(loadRows, [periodMonth, storeId, sectorId, jobFunction, status]);
+  useEffect(() => { loadAlerts(); }, []);
+
+  const markRead = async (id: number) => {
+    try { await api.rotinas.markAlertRead(id); loadAlerts(); } catch { /* noop */ }
+  };
+  const handleRunAlerts = async () => {
+    if (runningAlerts) return;
+    setRunningAlerts(true);
+    try {
+      const r = await api.rotinas.runAlerts();
+      toast({ title: `${r.created} alerta(s) novo(s) gerado(s)` });
+      loadAlerts();
+    } catch (err) {
+      toast({ title: "Erro ao rodar alertas", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setRunningAlerts(false);
+    }
+  };
+
+  const unread = (alerts ?? []).filter((a) => !a.read);
+  const pct = (n: number, total: number) => (total === 0 ? "—" : `${Math.round((n / total) * 100)}%`);
+
+  return (
+    <div className="space-y-4">
+      {/* Alertas automáticos */}
+      <div className="shk-card p-3">
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-xs font-bold flex items-center gap-1.5">
+            <Bell className="w-3.5 h-3.5" /> Alertas ({unread.length} não lido{unread.length === 1 ? "" : "s"})
+          </p>
+          {canEdit && (
+            <button onClick={handleRunAlerts} disabled={runningAlerts} data-testid="button-run-alerts"
+              className="flex items-center gap-1 text-[11px] font-semibold text-primary disabled:opacity-40">
+              <RefreshCw className={`w-3 h-3 ${runningAlerts ? "animate-spin" : ""}`} /> Checar agora
+            </button>
+          )}
+        </div>
+        {alerts === null ? (
+          <div className="h-10 rounded-lg bg-secondary/40 animate-pulse" />
+        ) : alerts.length === 0 ? (
+          <p className="text-xs text-muted-foreground">Nenhum alerta ainda.</p>
+        ) : (
+          <div className="space-y-1.5 max-h-52 overflow-y-auto">
+            {alerts.map((a) => (
+              <div key={a.id} className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs ${a.read ? "bg-secondary/30" : "bg-amber-50 border border-amber-200"}`}>
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <AlertTriangle className={`w-3.5 h-3.5 shrink-0 ${a.kind === "critico" ? "text-red-500" : "text-amber-500"}`} />
+                  <span className="truncate">{a.message}</span>
+                </div>
+                {!a.read && (
+                  <button onClick={() => markRead(a.id)} className="text-[11px] font-semibold text-primary shrink-0">Marcar lida</button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Filtros */}
+      <div className="flex items-end gap-3 flex-wrap">
+        <div>
+          <label className="text-xs font-medium mb-1 block">Mês</label>
+          <input type="month" value={periodMonth} onChange={(e) => setPeriodMonth(e.target.value)}
+            className="px-2 py-1.5 rounded-lg border border-border text-xs" />
+        </div>
+        <div>
+          <label className="text-xs font-medium mb-1 block">Loja</label>
+          <select value={storeId ?? ""} onChange={(e) => setStoreId(e.target.value ? parseInt(e.target.value, 10) : null)}
+            className="px-2 py-1.5 rounded-lg border border-border text-xs bg-white">
+            <option value="">Todas</option>
+            {scopeOptions?.stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="text-xs font-medium mb-1 block">Setor</label>
+          <select value={sectorId ?? ""} onChange={(e) => setSectorId(e.target.value ? parseInt(e.target.value, 10) : null)}
+            className="px-2 py-1.5 rounded-lg border border-border text-xs bg-white">
+            <option value="">Todos</option>
+            {scopeOptions?.sectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="text-xs font-medium mb-1 block">Função</label>
+          <select value={jobFunction} onChange={(e) => setJobFunction(e.target.value)}
+            className="px-2 py-1.5 rounded-lg border border-border text-xs bg-white">
+            <option value="">Todas</option>
+            {jobFunctions.map((f) => <option key={f} value={f}>{f}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="text-xs font-medium mb-1 block">Status</label>
+          <select value={status} onChange={(e) => setStatus(e.target.value as RoutineDashboardStatus | "")}
+            className="px-2 py-1.5 rounded-lg border border-border text-xs bg-white">
+            <option value="">Todos</option>
+            {(Object.entries(STATUS_LABELS) as [RoutineDashboardStatus, string][]).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {/* Resultado */}
+      {rows === null ? (
+        <div className="h-24 rounded-xl bg-secondary/40 animate-pulse" />
+      ) : rows.length === 0 ? (
+        <p className="text-xs text-muted-foreground">Nenhum funcionário bate com esses filtros em {monthLabel(periodMonth)}.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {rows.map((r) => (
+            <div key={r.employeeId} className="shk-card p-3 flex items-center gap-3 flex-wrap" data-testid={`painel-row-${r.employeeId}`}>
+              <div className="flex-1 min-w-[160px]">
+                <p className="text-xs font-bold">{r.employeeName}</p>
+                <p className="text-[11px] text-muted-foreground">{r.storeName ?? "—"} · {r.sectorName ?? "—"}{r.jobFunction ? ` · ${r.jobFunction}` : ""}</p>
+              </div>
+              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${STATUS_COLORS[r.status]}`}>{STATUS_LABELS[r.status]}</span>
+              <div className="flex gap-3 text-[11px] text-muted-foreground">
+                <span>{pct(r.totalOnTime, r.totalDue)} no prazo</span>
+                <span>{r.totalWithPendency} pendência(s)</span>
+                <span>{r.totalUrgentBypass} urgência(s)</span>
+                {r.score != null && <span className="font-bold text-primary">Score {r.score}</span>}
+              </div>
+              {!r.approved && <span className="text-[10px] font-bold bg-amber-50 text-amber-600 border border-amber-100 px-1.5 py-0.5 rounded-full shrink-0">Provisório</span>}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -1,7 +1,7 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import {
   db, routineChecklistsTable, routineChecklistQuestionsTable, routineChecklistScopesTable,
-  routineResponsesTable, routineUrgentBypassesTable, routineResponseEvidenceTable, routineClosuresTable, routineScoreWeightsTable,
+  routineResponsesTable, routineUrgentBypassesTable, routineResponseEvidenceTable, routineClosuresTable, routineScoreWeightsTable, routineAlertsTable,
   employeesTable, storesTable, sectorsTable, usersTable,
   type RoutineChecklist, type RoutineChecklistQuestion, type RoutineChecklistScope, type RoutineNoJustification,
 } from "@workspace/db";
@@ -12,6 +12,7 @@ import { isPasswordRecentlyVerified, clearPasswordVerified } from "./auth";
 import { todayInfo, isDueToday, resolveUserContext, scopeMatchesUser, isOnLeaveToday, computePontoRelative } from "../lib/routinesShared";
 import { generateRoutineClosuresForMonth, previousMonthKey, currentMonthKey } from "../lib/routineClosures";
 import { getScoreWeights, computeRoutineScore } from "../lib/routineScore";
+import { generateRoutineAlerts } from "../lib/routineAlerts";
 import path from "path";
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
@@ -804,6 +805,72 @@ router.get("/rotinas/ranking", requireModuleAccess("rotinas"), async (req, res):
   res.json({ periodMonth, weights, ranking: ranked });
 });
 
+// ── Painel consolidado (Fase 7) — mesma ideia da aba "Gestão → Rotinas e
+// Produtividade": não recalcula nada, só junta o que já existe (fechamento
+// congelado da Fase 5, review de pendência da Fase 6) sob um filtro comum
+// de loja/setor/função/período/status. ──
+router.get("/rotinas/dashboard", requireModuleAccess("rotinas"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const periodMonth = typeof req.query.periodMonth === "string" && /^\d{4}-\d{2}$/.test(req.query.periodMonth) ? req.query.periodMonth : previousMonthKey(new Date());
+  const storeId = req.query.storeId ? parseInt(String(req.query.storeId), 10) : null;
+  const sectorId = req.query.sectorId ? parseInt(String(req.query.sectorId), 10) : null;
+  const jobFunction = typeof req.query.jobFunction === "string" && req.query.jobFunction.trim() ? req.query.jobFunction.trim() : null;
+  const statusFilter = typeof req.query.status === "string" ? req.query.status : null;
+
+  const conditions = [eq(routineClosuresTable.tenantId, tenantId), eq(routineClosuresTable.periodMonth, periodMonth)];
+  if (storeId != null && !isNaN(storeId)) conditions.push(eq(employeesTable.storeId, storeId));
+  if (sectorId != null && !isNaN(sectorId)) conditions.push(eq(usersTable.sectorId, sectorId));
+  if (jobFunction) conditions.push(eq(employeesTable.jobFunction, jobFunction));
+
+  const rows = await db.select({
+    closure: routineClosuresTable, userId: employeesTable.userId,
+    storeId: employeesTable.storeId, storeName: storesTable.name,
+    sectorId: usersTable.sectorId, sectorName: sectorsTable.name, jobFunction: employeesTable.jobFunction,
+  })
+    .from(routineClosuresTable)
+    .innerJoin(employeesTable, eq(routineClosuresTable.employeeId, employeesTable.id))
+    .leftJoin(usersTable, eq(employeesTable.userId, usersTable.id))
+    .leftJoin(storesTable, eq(employeesTable.storeId, storesTable.id))
+    .leftJoin(sectorsTable, eq(usersTable.sectorId, sectorsTable.id))
+    .where(and(...conditions));
+
+  // Mesma checagem de "pendência sem revisão" já usada em /review/pending —
+  // reaproveitada aqui pra classificar o status, não recalculada do zero.
+  const userIds = rows.map((r) => r.userId).filter((id): id is number => id != null);
+  const responseRows = userIds.length
+    ? await db.select({ userId: routineResponsesTable.userId, answers: routineResponsesTable.answers, reviewStatus: routineResponsesTable.pendencyReviewStatus })
+        .from(routineResponsesTable)
+        .where(and(
+          eq(routineResponsesTable.tenantId, tenantId), inArray(routineResponsesTable.userId, userIds),
+          gte(routineResponsesTable.periodKey, `${periodMonth}-01`), lte(routineResponsesTable.periodKey, `${periodMonth}-31`),
+        ))
+    : [];
+  const hasUnreviewedPendency = new Set<number>();
+  for (const r of responseRows) {
+    if (r.reviewStatus == null && Object.values(r.answers).some((v) => typeof v === "object" && !!v.pendencia)) hasUnreviewedPendency.add(r.userId);
+  }
+
+  const weights = await getScoreWeights(tenantId);
+  let result = rows.map((r) => {
+    const breakdown = computeRoutineScore(r.closure, weights);
+    const status = r.closure.totalDue > r.closure.totalAnswered
+      ? "pendente"
+      : r.userId != null && hasUnreviewedPendency.has(r.userId)
+        ? "pendencia_nao_justificada"
+        : "em_dia";
+    return {
+      employeeId: r.closure.employeeId, employeeName: r.closure.employeeName, periodMonth,
+      storeId: r.storeId, storeName: r.storeName, sectorId: r.sectorId, sectorName: r.sectorName, jobFunction: r.jobFunction,
+      totalDue: r.closure.totalDue, totalAnswered: r.closure.totalAnswered, totalOnTime: r.closure.totalOnTime,
+      totalWithPendency: r.closure.totalWithPendency, totalUrgentBypass: r.closure.totalUrgentBypass,
+      approved: r.closure.approvedAt != null, status, score: breakdown?.score ?? null,
+    };
+  });
+  if (statusFilter) result = result.filter((r) => r.status === statusFilter);
+
+  res.json({ periodMonth, rows: result });
+});
+
 // ── Aprovação do supervisor (Fase 6) — revisa pendência/urgência antes do
 // fechamento do mês contar "de verdade" no ranking. Escopo: admin vê tudo,
 // supervisor (gerente de loja) só a loja dele — usersTable.storeId,
@@ -950,6 +1017,34 @@ router.post("/rotinas/closures/:id/approve", requireAdminOrSupervisor, async (re
     .where(and(eq(routineClosuresTable.id, id), eq(routineClosuresTable.tenantId, tenantId)))
     .returning();
   res.json(updated);
+});
+
+// ── Alertas automáticos (Fase 7) ─────────────────────────────────────────
+router.get("/rotinas/alerts", requireAuth, requireModule("rotinas"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rows = await db.select().from(routineAlertsTable)
+    .where(and(eq(routineAlertsTable.tenantId, tenantId), eq(routineAlertsTable.recipientUserId, req.session.userId!)))
+    .orderBy(desc(routineAlertsTable.createdAt))
+    .limit(100);
+  res.json(rows);
+});
+
+router.post("/rotinas/alerts/:id/read", requireAuth, requireModule("rotinas"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const [updated] = await db.update(routineAlertsTable).set({ read: true })
+    .where(and(eq(routineAlertsTable.id, id), eq(routineAlertsTable.tenantId, tenantId), eq(routineAlertsTable.recipientUserId, req.session.userId!)))
+    .returning();
+  if (!updated) { res.status(404).json({ error: "Alerta não encontrado" }); return; }
+  res.json(updated);
+});
+
+// Dispara o job manualmente (admin) — útil pra testar sem esperar o tick de
+// 15 min. Mesmo padrão de POST /rotinas/closures/run.
+router.post("/rotinas/alerts/run", requireModuleAccess("rotinas"), async (req, res): Promise<void> => {
+  const created = await generateRoutineAlerts();
+  res.json({ ok: true, created });
 });
 
 export default router;
