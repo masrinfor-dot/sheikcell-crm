@@ -2,7 +2,7 @@ import { Router, type IRouter } from "express";
 import {
   db, routineChecklistsTable, routineChecklistQuestionsTable, routineChecklistScopesTable,
   routineResponsesTable, routineUrgentBypassesTable, employeesTable, storesTable, sectorsTable, usersTable, leaveRecordsTable,
-  type RoutineChecklist, type RoutineChecklistQuestion, type RoutineChecklistScope,
+  type RoutineChecklist, type RoutineChecklistQuestion, type RoutineChecklistScope, type RoutineNoJustification,
 } from "@workspace/db";
 import { eq, and, desc, asc, isNotNull, lte, gte } from "drizzle-orm";
 import { requireAuth, requireTenant, requireModule, tenantIdOf } from "../middlewares/auth";
@@ -16,18 +16,33 @@ const router: IRouter = Router();
 // usuário logado, reautenticação por senha e resposta com snapshot — ainda
 // SOFT (fechável), sem travar o sistema de verdade (isso é a Fase 3).
 
-const VALID_RECURRENCE = ["daily", "weekdays", "specific_days", "weekly", "monthly", "specific_date"];
+const VALID_RECURRENCE = ["daily", "weekdays", "specific_days", "weekly", "monthly", "specific_date", "continuous"];
 const VALID_QUESTION_TYPES = ["yes_no", "done_not_done", "text", "number", "value", "photo", "document", "observation"];
 const VALID_EVIDENCE_TYPES = ["photo", "document"];
+const VALID_ALERT_LEVELS = ["critico", "atencao"];
+// Fase 3.5: lista fixa de motivo quando a resposta é negativa numa pergunta
+// requiresJustificationOnNo — mesmos códigos usados no front (RotinasProdutividade,
+// RoutineChecklistGate) pra rotular.
+export const VALID_NO_REASONS = [
+  "falta_tempo", "dependencia_colega", "dependencia_gerente", "falta_produto_peca",
+  "problema_sistema", "problema_equipamento", "cliente_nao_respondeu", "nao_foi_possivel_executar", "outro",
+];
+// Valor que conta como "resposta negativa" por tipo de pergunta — só esses
+// tipos disparam a justificativa estruturada.
+const NEGATIVE_ANSWER: Record<string, string> = { yes_no: "Não", done_not_done: "Não executado" };
 
 type QuestionInput = {
   label?: unknown; type?: unknown; required?: unknown;
   requiresEvidence?: unknown; evidenceType?: unknown;
+  requiresJustificationOnNo?: unknown; alertLevel?: unknown;
 };
 type ScopeInput = {
   storeId?: unknown; sectorId?: unknown; jobFunction?: unknown; userId?: unknown;
 };
-type SanitizedQuestion = { label: string; type: string; required: boolean; requiresEvidence: boolean; evidenceType: string | null };
+type SanitizedQuestion = {
+  label: string; type: string; required: boolean; requiresEvidence: boolean; evidenceType: string | null;
+  requiresJustificationOnNo: boolean; alertLevel: string | null;
+};
 type SanitizedScope = { storeId: number | null; sectorId: number | null; jobFunction: string | null; userId: number | null };
 
 function sanitizeQuestions(input: unknown): SanitizedQuestion[] | null {
@@ -42,7 +57,9 @@ function sanitizeQuestions(input: unknown): SanitizedQuestion[] | null {
     if (requiresEvidence) {
       evidenceType = typeof raw?.evidenceType === "string" && VALID_EVIDENCE_TYPES.includes(raw.evidenceType) ? raw.evidenceType : "photo";
     }
-    out.push({ label, type, required: raw?.required !== false, requiresEvidence, evidenceType });
+    const requiresJustificationOnNo = raw?.requiresJustificationOnNo === true && type in NEGATIVE_ANSWER;
+    const alertLevel = typeof raw?.alertLevel === "string" && VALID_ALERT_LEVELS.includes(raw.alertLevel) ? raw.alertLevel : null;
+    out.push({ label, type, required: raw?.required !== false, requiresEvidence, evidenceType, requiresJustificationOnNo, alertLevel });
   }
   return out;
 }
@@ -120,9 +137,13 @@ router.post("/rotinas/checklists", requireModuleAccess("rotinas"), async (req, r
   const b = (req.body ?? {}) as Record<string, unknown>;
   const name = typeof b.name === "string" ? b.name.trim().slice(0, 150) : "";
   if (!name) { res.status(400).json({ error: "Informe o nome" }); return; }
-  const scheduledTime = typeof b.scheduledTime === "string" && /^\d{2}:\d{2}$/.test(b.scheduledTime) ? b.scheduledTime : "";
-  if (!scheduledTime) { res.status(400).json({ error: "Horário inválido (use HH:MM)" }); return; }
   const recurrence = typeof b.recurrence === "string" && VALID_RECURRENCE.includes(b.recurrence) ? b.recurrence : "daily";
+  // "continuous" não tem horário fixo — devido o expediente inteiro.
+  let scheduledTime: string | null = null;
+  if (recurrence !== "continuous") {
+    scheduledTime = typeof b.scheduledTime === "string" && /^\d{2}:\d{2}$/.test(b.scheduledTime) ? b.scheduledTime : "";
+    if (!scheduledTime) { res.status(400).json({ error: "Horário inválido (use HH:MM)" }); return; }
+  }
   const recurrenceDays = sanitizeRecurrenceDays(recurrence, b.recurrenceDays);
   const specificDate = recurrence === "specific_date" && typeof b.specificDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(b.specificDate)
     ? b.specificDate : null;
@@ -177,12 +198,19 @@ router.patch("/rotinas/checklists/:id", requireModuleAccess("rotinas"), async (r
     update.name = name;
   }
   if (b.message !== undefined) update.message = typeof b.message === "string" ? b.message.trim().slice(0, 1000) || null : null;
-  if (b.scheduledTime !== undefined) {
-    if (typeof b.scheduledTime !== "string" || !/^\d{2}:\d{2}$/.test(b.scheduledTime)) { res.status(400).json({ error: "Horário inválido (use HH:MM)" }); return; }
-    update.scheduledTime = b.scheduledTime;
-  }
   const recurrence = typeof b.recurrence === "string" && VALID_RECURRENCE.includes(b.recurrence) ? b.recurrence : existing.recurrence;
   if (b.recurrence !== undefined) update.recurrence = recurrence;
+  // "continuous" não tem horário fixo; sair de "continuous" pra qualquer
+  // outra recorrência exige informar um horário (não sobra um scheduledTime
+  // nulo herdado de antes).
+  if (recurrence === "continuous") {
+    if (b.recurrence !== undefined) update.scheduledTime = null;
+  } else if (b.scheduledTime !== undefined) {
+    if (typeof b.scheduledTime !== "string" || !/^\d{2}:\d{2}$/.test(b.scheduledTime)) { res.status(400).json({ error: "Horário inválido (use HH:MM)" }); return; }
+    update.scheduledTime = b.scheduledTime;
+  } else if (b.recurrence !== undefined && !existing.scheduledTime) {
+    res.status(400).json({ error: "Informe um horário pra sair de 'contínuo'" }); return;
+  }
   if (b.recurrenceDays !== undefined || b.recurrence !== undefined) update.recurrenceDays = sanitizeRecurrenceDays(recurrence, b.recurrenceDays ?? existing.recurrenceDays);
   if (b.specificDate !== undefined) {
     update.specificDate = recurrence === "specific_date" && typeof b.specificDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(b.specificDate)
@@ -286,6 +314,9 @@ function todayInfo(): { dateKey: string; weekday: number; dayOfMonth: number; no
 function isDueToday(c: RoutineChecklist, info: ReturnType<typeof todayInfo>): boolean {
   switch (c.recurrence) {
     case "daily": return true;
+    // Contínuo: mesmo padrão de dias do "daily" — todo dia, sem horário fixo
+    // (a diferença de "daily" está no filtro de horário em getPendingRoutines).
+    case "continuous": return true;
     case "weekdays": return info.weekday >= 1 && info.weekday <= 5;
     case "specific_days":
     case "weekly": return (c.recurrenceDays ?? []).includes(info.weekday);
@@ -340,7 +371,11 @@ async function getPendingRoutines(tenantId: number, userId: number): Promise<Pen
 
   const checklists = await db.select().from(routineChecklistsTable)
     .where(and(eq(routineChecklistsTable.tenantId, tenantId), eq(routineChecklistsTable.active, true)));
-  const due = checklists.filter((c) => info.nowMinutes >= parseInt(c.scheduledTime.slice(0, 2), 10) * 60 + parseInt(c.scheduledTime.slice(3, 5), 10) && isDueToday(c, info));
+  const due = checklists.filter((c) => {
+    if (!isDueToday(c, info)) return false;
+    if (c.recurrence === "continuous" || !c.scheduledTime) return true; // devido o expediente inteiro
+    return info.nowMinutes >= parseInt(c.scheduledTime.slice(0, 2), 10) * 60 + parseInt(c.scheduledTime.slice(3, 5), 10);
+  });
   if (due.length === 0) return [];
 
   const allScopes = await db.select().from(routineChecklistScopesTable)
@@ -375,7 +410,10 @@ router.get("/rotinas/pending", requireAuth, requireModule("rotinas"), async (req
   const pending = await getPendingRoutines(tenantId, req.session.userId!);
   res.json(pending.map((p) => ({
     id: p.id, name: p.name, message: p.message, mandatory: p.mandatory, periodKey: p.periodKey,
-    questions: p.questions.map((q) => ({ id: q.id, label: q.label, type: q.type, required: q.required, requiresEvidence: q.requiresEvidence, evidenceType: q.evidenceType })),
+    questions: p.questions.map((q) => ({
+      id: q.id, label: q.label, type: q.type, required: q.required, requiresEvidence: q.requiresEvidence, evidenceType: q.evidenceType,
+      requiresJustificationOnNo: q.requiresJustificationOnNo, alertLevel: q.alertLevel,
+    })),
   })));
 });
 
@@ -395,13 +433,33 @@ router.post("/rotinas/checklists/:id/respond", requireAuth, requireModule("rotin
   const target = pending.find((p) => p.id === id);
   if (!target) { res.status(404).json({ error: "Checklist não está pendente pra você agora" }); return; }
 
-  const body = (req.body ?? {}) as { answers?: Record<string, string> };
+  const body = (req.body ?? {}) as { answers?: Record<string, unknown> };
   const raw = body.answers && typeof body.answers === "object" ? body.answers : {};
-  const answers: Record<string, string> = {};
+  const answers: Record<string, string | RoutineNoJustification> = {};
   for (const q of target.questions) {
-    const v = typeof raw[q.id] === "string" ? raw[q.id].trim().slice(0, 1000) : "";
-    if (!v && q.required) { res.status(400).json({ error: `Responda: "${q.label}"` }); return; }
-    if (v) answers[q.id] = v;
+    const rawVal = raw[q.id];
+    // Justificativa estruturada: { value, motivo, pendencia?, comunicarA? }.
+    // Só é aceita/exigida quando a pergunta marca requiresJustificationOnNo
+    // e o valor bate com a resposta negativa do tipo dela.
+    let value = "";
+    let justification: RoutineNoJustification | null = null;
+    if (rawVal && typeof rawVal === "object") {
+      const j = rawVal as Record<string, unknown>;
+      value = typeof j.value === "string" ? j.value.trim().slice(0, 1000) : "";
+      if (q.requiresJustificationOnNo && value === NEGATIVE_ANSWER[q.type]) {
+        const motivo = typeof j.motivo === "string" && VALID_NO_REASONS.includes(j.motivo) ? j.motivo : "";
+        if (!motivo) { res.status(400).json({ error: `Informe o motivo em: "${q.label}"` }); return; }
+        justification = {
+          value, motivo,
+          pendencia: typeof j.pendencia === "string" ? j.pendencia.trim().slice(0, 500) || null : null,
+          comunicarA: typeof j.comunicarA === "string" ? j.comunicarA.trim().slice(0, 200) || null : null,
+        };
+      }
+    } else {
+      value = typeof rawVal === "string" ? rawVal.trim().slice(0, 1000) : "";
+    }
+    if (!value && q.required) { res.status(400).json({ error: `Responda: "${q.label}"` }); return; }
+    if (value) answers[q.id] = justification ?? value;
   }
 
   try {
@@ -409,6 +467,7 @@ router.post("/rotinas/checklists/:id/respond", requireAuth, requireModule("rotin
       tenantId, checklistId: id, userId, periodKey: target.periodKey, answers,
       questionsSnapshot: target.questions.map((q) => ({
         id: q.id, label: q.label, type: q.type, required: q.required, requiresEvidence: q.requiresEvidence, evidenceType: q.evidenceType,
+        requiresJustificationOnNo: q.requiresJustificationOnNo, alertLevel: q.alertLevel,
       })),
       reauthAt: new Date(),
       deviceInfo: (req.headers["user-agent"] as string | undefined)?.slice(0, 300) ?? null,

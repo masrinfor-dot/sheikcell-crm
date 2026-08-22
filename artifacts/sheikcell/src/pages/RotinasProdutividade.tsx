@@ -3,6 +3,7 @@ import {
   api, canEditModule,
   type RoutineChecklist, type RoutineChecklistFull, type RoutineChecklistQuestion, type RoutineChecklistScope,
   type RoutineQuestionType, type RoutineRecurrence, type RoutineScopeOptions, type RoutineResponse,
+  type RoutineAlertLevel, type RoutineAnswerValue, ROUTINE_NO_REASONS,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
@@ -12,6 +13,7 @@ const WEEKDAYS = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "
 const RECURRENCE_LABELS: Record<RoutineRecurrence, string> = {
   daily: "Diário", weekdays: "Segunda a sexta", specific_days: "Dias específicos",
   weekly: "Semanal", monthly: "Mensal", specific_date: "Data específica",
+  continuous: "Contínuo (o expediente inteiro, sem horário fixo)",
 };
 const QUESTION_TYPE_LABELS: Record<RoutineQuestionType, string> = {
   yes_no: "Sim/Não", done_not_done: "Executado/Não executado", text: "Texto", number: "Número",
@@ -23,11 +25,21 @@ const TOLERANCE_OPTIONS = [
   { value: 15, label: "Até 15 minutos" },
   { value: 30, label: "Até 30 minutos" },
 ];
+const ALERT_LEVEL_LABELS: Record<RoutineAlertLevel, string> = { critico: "🔴 Crítico", atencao: "🟠 Atenção" };
+// Só pergunta Sim/Não e Executado/Não executado tem "resposta negativa" pra
+// disparar a justificativa estruturada (Fase 3.5).
+const NEGATIVE_CAPABLE_TYPES: RoutineQuestionType[] = ["yes_no", "done_not_done"];
 
-type FormQuestion = { label: string; type: RoutineQuestionType; required: boolean; requiresEvidence: boolean; evidenceType: "photo" | "document" };
+type FormQuestion = {
+  label: string; type: RoutineQuestionType; required: boolean; requiresEvidence: boolean; evidenceType: "photo" | "document";
+  requiresJustificationOnNo: boolean; alertLevel: RoutineAlertLevel | null;
+};
 type FormScope = { storeId: number | null; sectorId: number | null; jobFunction: string; userId: number | null };
 
-const EMPTY_QUESTION: FormQuestion = { label: "", type: "yes_no", required: true, requiresEvidence: false, evidenceType: "photo" };
+const EMPTY_QUESTION: FormQuestion = {
+  label: "", type: "yes_no", required: true, requiresEvidence: false, evidenceType: "photo",
+  requiresJustificationOnNo: false, alertLevel: null,
+};
 const EMPTY_SCOPE: FormScope = { storeId: null, sectorId: null, jobFunction: "", userId: null };
 const EMPTY_FORM = {
   name: "", message: "", scheduledTime: "08:00",
@@ -73,13 +85,14 @@ export default function RotinasProdutividade() {
       const full = await api.rotinas.get(c.id);
       setEditing(full);
       setForm({
-        name: full.name, message: full.message ?? "", scheduledTime: full.scheduledTime,
+        name: full.name, message: full.message ?? "", scheduledTime: full.scheduledTime ?? "08:00",
         recurrence: full.recurrence, recurrenceDays: full.recurrenceDays ?? [], specificDate: full.specificDate ?? "",
         toleranceMinutes: full.toleranceMinutes, mandatory: full.mandatory, active: full.active,
         questions: full.questions.length
           ? full.questions.map((q: RoutineChecklistQuestion) => ({
               label: q.label, type: q.type, required: q.required,
               requiresEvidence: q.requiresEvidence, evidenceType: q.evidenceType ?? "photo",
+              requiresJustificationOnNo: q.requiresJustificationOnNo, alertLevel: q.alertLevel,
             }))
           : [{ ...EMPTY_QUESTION }],
         scopes: full.scopes.length
@@ -95,7 +108,7 @@ export default function RotinasProdutividade() {
   };
 
   const valid = form.name.trim()
-    && /^\d{2}:\d{2}$/.test(form.scheduledTime)
+    && (form.recurrence === "continuous" || /^\d{2}:\d{2}$/.test(form.scheduledTime))
     && (form.recurrence !== "specific_date" || form.specificDate)
     && form.questions.length > 0
     && form.questions.every((q) => q.label.trim());
@@ -104,7 +117,8 @@ export default function RotinasProdutividade() {
     if (!valid || saving) return;
     setSaving(true);
     const payload: Partial<RoutineChecklistFull> = {
-      name: form.name, message: form.message || null, scheduledTime: form.scheduledTime,
+      name: form.name, message: form.message || null,
+      scheduledTime: form.recurrence === "continuous" ? null : form.scheduledTime,
       recurrence: form.recurrence,
       recurrenceDays: ["specific_days", "weekly", "monthly"].includes(form.recurrence) ? form.recurrenceDays : null,
       specificDate: form.recurrence === "specific_date" ? form.specificDate : null,
@@ -112,6 +126,8 @@ export default function RotinasProdutividade() {
       questions: form.questions.map((q) => ({
         label: q.label, type: q.type, required: q.required,
         requiresEvidence: q.requiresEvidence, evidenceType: q.requiresEvidence ? q.evidenceType : null,
+        requiresJustificationOnNo: NEGATIVE_CAPABLE_TYPES.includes(q.type) && q.requiresJustificationOnNo,
+        alertLevel: q.alertLevel,
       })) as unknown as RoutineChecklistQuestion[],
       scopes: form.scopes
         .filter((s) => s.storeId != null || s.sectorId != null || s.jobFunction.trim() || s.userId != null)
@@ -198,7 +214,7 @@ export default function RotinasProdutividade() {
                 </div>
                 <div className="flex items-center gap-3 mt-1 text-[11px] text-muted-foreground flex-wrap">
                   <span className="flex items-center gap-1">
-                    <CalendarClock className="w-3 h-3" /> {c.scheduledTime} · {RECURRENCE_LABELS[c.recurrence]}
+                    <CalendarClock className="w-3 h-3" /> {c.scheduledTime ? `${c.scheduledTime} · ` : ""}{RECURRENCE_LABELS[c.recurrence]}
                   </span>
                   <span className="flex items-center gap-1"><Bell className="w-3 h-3" />{TOLERANCE_OPTIONS.find((t) => t.value === c.toleranceMinutes)?.label}</span>
                   <span className="flex items-center gap-1"><Users2 className="w-3 h-3" />{c.scopeCount ?? 0} regra(s) de escopo</span>
@@ -243,12 +259,14 @@ export default function RotinasProdutividade() {
               </div>
 
               <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs font-medium mb-1 block">Horário</label>
-                  <input type="time" value={form.scheduledTime} onChange={(e) => setForm((f) => ({ ...f, scheduledTime: e.target.value }))}
-                    data-testid="input-routine-time"
-                    className="w-full px-3 py-2 rounded-xl border border-border text-sm" />
-                </div>
+                {form.recurrence !== "continuous" && (
+                  <div>
+                    <label className="text-xs font-medium mb-1 block">Horário</label>
+                    <input type="time" value={form.scheduledTime} onChange={(e) => setForm((f) => ({ ...f, scheduledTime: e.target.value }))}
+                      data-testid="input-routine-time"
+                      className="w-full px-3 py-2 rounded-xl border border-border text-sm" />
+                  </div>
+                )}
                 <div>
                   <label className="text-xs font-medium mb-1 block">Tolerância</label>
                   <select value={form.toleranceMinutes} onChange={(e) => setForm((f) => ({ ...f, toleranceMinutes: parseInt(e.target.value, 10) }))}
@@ -389,6 +407,23 @@ export default function RotinasProdutividade() {
                         </select>
                       )}
                     </div>
+                    <div className="flex items-center gap-4 flex-wrap">
+                      {NEGATIVE_CAPABLE_TYPES.includes(q.type) && (
+                        <label className="flex items-center gap-1.5 text-[11px] font-medium">
+                          <input type="checkbox" checked={q.requiresJustificationOnNo}
+                            onChange={(e) => setQ(i, { requiresJustificationOnNo: e.target.checked })} />
+                          Exige motivo se a resposta for negativa
+                        </label>
+                      )}
+                      <label className="flex items-center gap-1.5 text-[11px] font-medium">
+                        Nível de alerta:
+                        <select value={q.alertLevel ?? ""} onChange={(e) => setQ(i, { alertLevel: e.target.value ? e.target.value as RoutineAlertLevel : null })}
+                          className="px-2 py-1 rounded-lg border border-border text-[11px] bg-white">
+                          <option value="">Nenhum</option>
+                          {(Object.entries(ALERT_LEVEL_LABELS) as [RoutineAlertLevel, string][]).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                        </select>
+                      </label>
+                    </div>
                   </div>
                 ))}
                 <button type="button" onClick={() => setForm((f) => ({ ...f, questions: [...f.questions, { ...EMPTY_QUESTION }] }))}
@@ -436,12 +471,23 @@ export default function RotinasProdutividade() {
                     </p>
                   </div>
                   <div className="space-y-1.5">
-                    {r.questionsSnapshot.map((q) => (
-                      <div key={q.id} className="text-xs">
-                        <span className="text-muted-foreground">{q.label}: </span>
-                        <span className="font-semibold">{r.answers[q.id] ?? "—"}</span>
-                      </div>
-                    ))}
+                    {r.questionsSnapshot.map((q) => {
+                      const a: RoutineAnswerValue | undefined = r.answers[q.id];
+                      const isJustified = a && typeof a === "object";
+                      return (
+                        <div key={q.id} className="text-xs">
+                          <span className="text-muted-foreground">{q.label}: </span>
+                          <span className="font-semibold">{isJustified ? a.value : (a ?? "—")}</span>
+                          {isJustified && (
+                            <div className="mt-0.5 ml-2 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 inline-block">
+                              Motivo: {ROUTINE_NO_REASONS.find((r2) => r2.value === a.motivo)?.label ?? a.motivo}
+                              {a.pendencia && <> · Pendência: {a.pendencia}</>}
+                              {a.comunicarA && <> · Comunicar: {a.comunicarA}</>}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               ))}

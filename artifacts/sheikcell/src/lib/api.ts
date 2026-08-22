@@ -529,17 +529,33 @@ export type ChecklistResponse = {
 // Rotinas e Produtividade (RH) — checklists operacionais agendados,
 // separado de Checklist/Questionários acima (ver lib/db/src/schema/rotinas.ts).
 export type RoutineQuestionType = "yes_no" | "done_not_done" | "text" | "number" | "value" | "photo" | "document" | "observation";
+// Fase 3.5: lista fixa de motivo quando a resposta é negativa numa pergunta
+// requiresJustificationOnNo (mesmos códigos validados no backend, rotinas.ts).
+export const ROUTINE_NO_REASONS: { value: string; label: string }[] = [
+  { value: "falta_tempo", label: "Falta de tempo" },
+  { value: "dependencia_colega", label: "Dependência de outro colaborador" },
+  { value: "dependencia_gerente", label: "Dependência do gerente" },
+  { value: "falta_produto_peca", label: "Falta de produto/peça" },
+  { value: "problema_sistema", label: "Problema no sistema" },
+  { value: "problema_equipamento", label: "Problema em equipamento" },
+  { value: "cliente_nao_respondeu", label: "Cliente não respondeu" },
+  { value: "nao_foi_possivel_executar", label: "Não foi possível executar" },
+  { value: "outro", label: "Outro" },
+];
+export type RoutineAlertLevel = "critico" | "atencao";
 export type RoutineChecklistQuestion = {
   id: number; checklistId: number; orderIndex: number; label: string;
   type: RoutineQuestionType; required: boolean; requiresEvidence: boolean; evidenceType: "photo" | "document" | null;
+  requiresJustificationOnNo: boolean; alertLevel: RoutineAlertLevel | null;
 };
 export type RoutineChecklistScope = {
   id: number; checklistId: number;
   storeId: number | null; sectorId: number | null; jobFunction: string | null; userId: number | null;
 };
-export type RoutineRecurrence = "daily" | "weekdays" | "specific_days" | "weekly" | "monthly" | "specific_date";
+// "continuous" = devido o expediente inteiro, sem horário fixo (Fase 3.5).
+export type RoutineRecurrence = "daily" | "weekdays" | "specific_days" | "weekly" | "monthly" | "specific_date" | "continuous";
 export type RoutineChecklist = {
-  id: number; name: string; message: string | null; scheduledTime: string;
+  id: number; name: string; message: string | null; scheduledTime: string | null;
   recurrence: RoutineRecurrence; recurrenceDays: number[] | null; specificDate: string | null;
   toleranceMinutes: number; mandatory: boolean; active: boolean; version: number;
   createdByUserId: number | null; createdAt: string; updatedAt: string;
@@ -553,14 +569,19 @@ export type RoutineScopeOptions = {
 // RoutineChecklistQuestion, só o que o modal de resposta precisa mostrar.
 export type PendingRoutineQuestion = {
   id: number; label: string; type: RoutineQuestionType; required: boolean; requiresEvidence: boolean; evidenceType: "photo" | "document" | null;
+  requiresJustificationOnNo: boolean; alertLevel: RoutineAlertLevel | null;
 };
 export type PendingRoutine = {
   id: number; name: string; message: string | null; mandatory: boolean; periodKey: string;
   questions: PendingRoutineQuestion[];
 };
+// Justificativa estruturada (Fase 3.5) gravada quando a resposta é negativa
+// numa pergunta requiresJustificationOnNo — senão o valor é uma string simples.
+export type RoutineNoJustification = { value: string; motivo: string; pendencia: string | null; comunicarA: string | null };
+export type RoutineAnswerValue = string | RoutineNoJustification;
 export type RoutineResponse = {
   id: number; userId: number; userName: string | null; periodKey: string;
-  answers: Record<string, string>; questionsSnapshot: PendingRoutineQuestion[];
+  answers: Record<string, RoutineAnswerValue>; questionsSnapshot: PendingRoutineQuestion[];
   reauthAt: string; createdAt: string;
 };
 
@@ -1278,7 +1299,7 @@ export const api = {
     jobFunctions: () => req<string[]>("/rotinas/job-functions"),
     scopeOptions: () => req<RoutineScopeOptions>("/rotinas/scope-options"),
     pending: () => req<PendingRoutine[]>("/rotinas/pending"),
-    respond: (id: number, answers: Record<string, string>) =>
+    respond: (id: number, answers: Record<string, RoutineAnswerValue>) =>
       req<{ id: number }>(`/rotinas/checklists/${id}/respond`, { method: "POST", body: JSON.stringify({ answers }) }),
     responses: (id: number) => req<RoutineResponse[]>(`/rotinas/checklists/${id}/responses`),
     urgentBypass: (id: number) => req<{ ok: boolean; bypassUntil: string }>(`/rotinas/checklists/${id}/urgent-bypass`, { method: "POST" }),

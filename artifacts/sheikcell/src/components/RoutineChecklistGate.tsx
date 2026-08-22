@@ -1,10 +1,15 @@
 import { useState, useEffect, useCallback } from "react";
-import { api, ApiError, type PendingRoutine } from "@/lib/api";
+import { api, ApiError, ROUTINE_NO_REASONS, type PendingRoutine, type RoutineAnswerValue } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { useActivityGuard } from "@/lib/activityGuard";
 import { ListChecks, KeyRound, X, ShieldAlert } from "lucide-react";
 
 const INPUT = "w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30";
+
+// Fase 3.5: valor que conta como "resposta negativa" por tipo — só esses
+// disparam a justificativa estruturada (motivo/pendência/quem comunicar).
+const NEGATIVE_ANSWER: Record<string, string> = { yes_no: "Não", done_not_done: "Não executado" };
+type Justification = { motivo: string; pendencia: string; comunicarA: string };
 
 // Fase 3 (Rotinas e Produtividade): checklist "devido agora" pro usuário
 // logado — senha → perguntas → envia. Checklist NÃO obrigatório continua
@@ -25,6 +30,7 @@ export default function RoutineChecklistGate() {
   const [passwordError, setPasswordError] = useState("");
   const [verifying, setVerifying] = useState(false);
   const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [justifications, setJustifications] = useState<Record<string, Justification>>({});
   const [saving, setSaving] = useState(false);
   const [bypassing, setBypassing] = useState(false);
   // Só existe pra forçar reavaliação de guard.isBusy() (ref, não é reativo
@@ -52,6 +58,7 @@ export default function RoutineChecklistGate() {
     setPassword("");
     setPasswordError("");
     setAnswers({});
+    setJustifications({});
   }, [current?.id]);
 
   useEffect(() => {
@@ -79,13 +86,28 @@ export default function RoutineChecklistGate() {
     }
   };
 
-  const allAnswered = current.questions.every((q) => !q.required || (answers[q.id] ?? "").trim());
+  const needsJustification = (q: PendingRoutine["questions"][number]) =>
+    q.requiresJustificationOnNo && answers[q.id] === NEGATIVE_ANSWER[q.type];
+
+  const allAnswered = current.questions.every((q) => {
+    if (q.required && !(answers[q.id] ?? "").trim()) return false;
+    if (needsJustification(q) && !(justifications[q.id]?.motivo ?? "").trim()) return false;
+    return true;
+  });
 
   const handleSubmit = async () => {
     if (!allAnswered || saving) return;
     setSaving(true);
     try {
-      await api.rotinas.respond(current.id, answers);
+      const payload: Record<string, RoutineAnswerValue> = {};
+      for (const q of current.questions) {
+        const value = answers[q.id];
+        if (!value) continue;
+        payload[q.id] = needsJustification(q)
+          ? { value, motivo: justifications[q.id]?.motivo ?? "", pendencia: justifications[q.id]?.pendencia || null, comunicarA: justifications[q.id]?.comunicarA || null }
+          : value;
+      }
+      await api.rotinas.respond(current.id, payload);
       toast({ title: "Checklist enviado. Obrigado!" });
       setPending((prev) => prev.filter((p) => p.id !== current.id));
     } catch (err) {
@@ -180,6 +202,34 @@ export default function RoutineChecklistGate() {
                           {opt}
                         </button>
                       ))}
+                    </div>
+                  )}
+                  {needsJustification(q) && (
+                    <div className="mt-2 space-y-2 bg-amber-50 border border-amber-200 rounded-lg p-2.5">
+                      <div>
+                        <label className="text-[11px] font-semibold text-amber-800 mb-1 block">Motivo</label>
+                        <select value={justifications[q.id]?.motivo ?? ""}
+                          onChange={(e) => setJustifications((j) => ({ ...j, [q.id]: { motivo: e.target.value, pendencia: j[q.id]?.pendencia ?? "", comunicarA: j[q.id]?.comunicarA ?? "" } }))}
+                          data-testid={`routine-q-${q.id}-motivo`}
+                          className="w-full px-2.5 py-1.5 rounded-lg border border-amber-300 text-xs bg-white">
+                          <option value="">Selecione...</option>
+                          {ROUTINE_NO_REASONS.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-[11px] font-semibold text-amber-800 mb-1 block">Existe alguma pendência? (opcional)</label>
+                        <input value={justifications[q.id]?.pendencia ?? ""}
+                          onChange={(e) => setJustifications((j) => ({ ...j, [q.id]: { motivo: j[q.id]?.motivo ?? "", pendencia: e.target.value, comunicarA: j[q.id]?.comunicarA ?? "" } }))}
+                          data-testid={`routine-q-${q.id}-pendencia`}
+                          className="w-full px-2.5 py-1.5 rounded-lg border border-amber-300 text-xs bg-white" />
+                      </div>
+                      <div>
+                        <label className="text-[11px] font-semibold text-amber-800 mb-1 block">Quem precisa ser comunicado? (opcional)</label>
+                        <input value={justifications[q.id]?.comunicarA ?? ""}
+                          onChange={(e) => setJustifications((j) => ({ ...j, [q.id]: { motivo: j[q.id]?.motivo ?? "", pendencia: j[q.id]?.pendencia ?? "", comunicarA: e.target.value } }))}
+                          data-testid={`routine-q-${q.id}-comunicar`}
+                          className="w-full px-2.5 py-1.5 rounded-lg border border-amber-300 text-xs bg-white" />
+                      </div>
                     </div>
                   )}
                   {(q.type === "text" || q.type === "observation") && (

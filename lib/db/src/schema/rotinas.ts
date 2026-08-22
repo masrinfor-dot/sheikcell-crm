@@ -5,6 +5,14 @@ import { usersTable } from "./users";
 
 export type RoutineQuestionSnapshot = {
   id: number; label: string; type: string; required: boolean; requiresEvidence: boolean; evidenceType: string | null;
+  requiresJustificationOnNo: boolean; alertLevel: string | null;
+};
+
+// Fase 3.5: resposta "Não" em pergunta marcada requiresJustificationOnNo
+// carrega motivo (lista fixa) + pendência + quem precisa ser comunicado, em
+// vez de só o valor simples — ver sanitização em rotinas.ts.
+export type RoutineNoJustification = {
+  value: string; motivo: string; pendencia: string | null; comunicarA: string | null;
 };
 
 // Rotinas e Produtividade: checklists operacionais agendados (abertura,
@@ -19,8 +27,10 @@ export const routineChecklistsTable = pgTable("routine_checklists", {
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
   message: text("message"), // texto exibido ao usuário quando o alerta aparece
-  scheduledTime: text("scheduled_time").notNull(), // "08:00"
-  // "daily" | "weekdays" (seg-sex) | "specific_days" | "weekly" | "monthly" | "specific_date"
+  // "08:00" — null quando recurrence="continuous" (sem horário fixo, devido
+  // o expediente inteiro).
+  scheduledTime: text("scheduled_time"),
+  // "daily" | "weekdays" (seg-sex) | "specific_days" | "weekly" | "monthly" | "specific_date" | "continuous"
   recurrence: text("recurrence").notNull().default("daily"),
   // dias da semana (0=domingo..6=sábado) pra specific_days/weekly, OU dia do
   // mês (1-31) pra monthly — formato depende de `recurrence`.
@@ -50,6 +60,12 @@ export const routineChecklistQuestionsTable = pgTable("routine_checklist_questio
   required: boolean("required").notNull().default(true),
   requiresEvidence: boolean("requires_evidence").notNull().default(false),
   evidenceType: text("evidence_type"), // "photo" | "document" | null
+  // Fase 3.5: resposta negativa ("Não" / "Não executado") passa a exigir
+  // motivo (lista fixa) + pendência + quem comunicar, ver rotinas.ts.
+  requiresJustificationOnNo: boolean("requires_justification_on_no").notNull().default(false),
+  // "critico" | "atencao" | null — mapeamento pro motor de alerta da Fase 7,
+  // só o desenho por enquanto (sem entrega de notificação ainda).
+  alertLevel: text("alert_level"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
   index("routine_checklist_questions_checklist_idx").on(t.checklistId),
@@ -85,7 +101,9 @@ export const routineResponsesTable = pgTable("routine_responses", {
   checklistId: integer("checklist_id").notNull().references(() => routineChecklistsTable.id, { onDelete: "cascade" }),
   userId: integer("user_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }),
   periodKey: text("period_key").notNull(), // "YYYY-MM-DD" — uma resposta por dia por usuário/checklist
-  answers: jsonb("answers").$type<Record<string, string>>().notNull(), // { [questionId]: valor }
+  // { [questionId]: valor simples, ou objeto de justificativa quando a
+  // pergunta exige motivo pra resposta negativa (Fase 3.5) }
+  answers: jsonb("answers").$type<Record<string, string | RoutineNoJustification>>().notNull(),
   questionsSnapshot: jsonb("questions_snapshot").$type<RoutineQuestionSnapshot[]>().notNull(),
   reauthAt: timestamp("reauth_at", { withTimezone: true }).notNull(),
   deviceInfo: text("device_info"), // User-Agent de quem respondeu
