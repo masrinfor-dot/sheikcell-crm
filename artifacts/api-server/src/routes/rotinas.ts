@@ -1056,48 +1056,4 @@ router.post("/rotinas/alerts/run", requireModuleAccess("rotinas"), async (req, r
   res.json({ ok: true, created });
 });
 
-// ── TEMPORÁRIO — autorizado em conversa pra testar fechamento mensal
-// (Fase 5/6) com dados retroativos de julho, já que respond() sempre grava
-// "hoje" e não existe outro jeito de simular histórico sem isso. REMOVER
-// depois do teste (não faz parte do escopo permanente do módulo). ──
-router.post("/rotinas/dev-seed", requireModuleAccess("rotinas"), async (req, res): Promise<void> => {
-  const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const b = (req.body ?? {}) as Record<string, unknown>;
-  const at = typeof b.at === "string" ? new Date(b.at) : null;
-  if (!at || isNaN(at.getTime())) { res.status(400).json({ error: "Informe 'at' (ISO datetime) válido" }); return; }
-
-  if (b.type === "response") {
-    const checklistId = Number(b.checklistId);
-    const userId = Number(b.userId);
-    const periodKey = typeof b.periodKey === "string" ? b.periodKey : "";
-    if (!checklistId || !userId || !periodKey) { res.status(400).json({ error: "checklistId, userId e periodKey são obrigatórios" }); return; }
-    const checklist = await loadChecklistFull(tenantId, checklistId);
-    if (!checklist) { res.status(404).json({ error: "Checklist não encontrado" }); return; }
-    const answers = (b.answers && typeof b.answers === "object" ? b.answers : {}) as Record<string, string | RoutineNoJustification>;
-    try {
-      const [saved] = await db.insert(routineResponsesTable).values({
-        tenantId, checklistId, userId, periodKey, answers,
-        questionsSnapshot: checklist.questions.map((q) => ({
-          id: q.id, label: q.label, type: q.type, required: q.required, requiresEvidence: q.requiresEvidence, evidenceType: q.evidenceType,
-          requiresJustificationOnNo: q.requiresJustificationOnNo, requiresJustificationOnYes: q.requiresJustificationOnYes, alertLevel: q.alertLevel,
-        })),
-        reauthAt: at, deviceInfo: "dev-seed (teste manual)",
-        respondedRelativeToPonto: typeof b.respondedRelativeToPonto === "string" ? b.respondedRelativeToPonto : null,
-        createdAt: at,
-      }).returning();
-      res.status(201).json(saved);
-    } catch {
-      res.status(409).json({ error: "Já existe resposta desse checklist/usuário/período" });
-    }
-  } else if (b.type === "urgent_bypass") {
-    const checklistId = Number(b.checklistId);
-    const userId = Number(b.userId);
-    if (!checklistId || !userId) { res.status(400).json({ error: "checklistId e userId são obrigatórios" }); return; }
-    const [saved] = await db.insert(routineUrgentBypassesTable).values({ tenantId, checklistId, userId, createdAt: at }).returning();
-    res.status(201).json(saved);
-  } else {
-    res.status(400).json({ error: "type inválido (use 'response' ou 'urgent_bypass')" });
-  }
-});
-
 export default router;
