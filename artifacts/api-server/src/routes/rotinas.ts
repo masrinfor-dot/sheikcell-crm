@@ -1,16 +1,17 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import {
   db, routineChecklistsTable, routineChecklistQuestionsTable, routineChecklistScopesTable,
-  routineResponsesTable, routineUrgentBypassesTable, routineResponseEvidenceTable, routineClosuresTable,
+  routineResponsesTable, routineUrgentBypassesTable, routineResponseEvidenceTable, routineClosuresTable, routineScoreWeightsTable,
   employeesTable, storesTable, sectorsTable, usersTable,
   type RoutineChecklist, type RoutineChecklistQuestion, type RoutineChecklistScope, type RoutineNoJustification,
 } from "@workspace/db";
-import { eq, and, desc, asc, isNotNull, inArray } from "drizzle-orm";
-import { requireAuth, requireTenant, requireModule, tenantIdOf } from "../middlewares/auth";
+import { eq, and, desc, asc, isNotNull, inArray, gte, lte } from "drizzle-orm";
+import { requireAuth, requireTenant, requireModule, requireAdminOrSupervisor, tenantIdOf } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import { isPasswordRecentlyVerified, clearPasswordVerified } from "./auth";
 import { todayInfo, isDueToday, resolveUserContext, scopeMatchesUser, isOnLeaveToday, computePontoRelative } from "../lib/routinesShared";
 import { generateRoutineClosuresForMonth, previousMonthKey, currentMonthKey } from "../lib/routineClosures";
+import { getScoreWeights, computeRoutineScore } from "../lib/routineScore";
 import path from "path";
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
@@ -691,9 +692,27 @@ export async function enforceMandatoryRoutines(
 router.get("/rotinas/closures", requireModuleAccess("rotinas"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const employeeId = req.query.employeeId ? parseInt(String(req.query.employeeId), 10) : null;
+  const periodMonth = typeof req.query.periodMonth === "string" && /^\d{4}-\d{2}$/.test(req.query.periodMonth) ? req.query.periodMonth : null;
   const conditions = [eq(routineClosuresTable.tenantId, tenantId)];
   if (employeeId != null && !isNaN(employeeId)) conditions.push(eq(routineClosuresTable.employeeId, employeeId));
-  const rows = await db.select().from(routineClosuresTable)
+  if (periodMonth) conditions.push(eq(routineClosuresTable.periodMonth, periodMonth));
+  // Fase 6: enriquece com loja/setor — o relatório por loja reaproveita a
+  // mesma hierarquia de navegação Loja → Setor → Funcionário de Documentos,
+  // agregando esta mesma lista no front (ver RotinasProdutividade.tsx).
+  const rows = await db.select({
+    id: routineClosuresTable.id, employeeId: routineClosuresTable.employeeId, employeeName: routineClosuresTable.employeeName,
+    periodMonth: routineClosuresTable.periodMonth,
+    totalDue: routineClosuresTable.totalDue, totalAnswered: routineClosuresTable.totalAnswered, totalOnTime: routineClosuresTable.totalOnTime,
+    totalWithPendency: routineClosuresTable.totalWithPendency, totalUrgentBypass: routineClosuresTable.totalUrgentBypass,
+    pontoBeforeEntry: routineClosuresTable.pontoBeforeEntry, pontoAfterEntry: routineClosuresTable.pontoAfterEntry, pontoNoRecord: routineClosuresTable.pontoNoRecord,
+    closedAt: routineClosuresTable.closedAt, approvedAt: routineClosuresTable.approvedAt, approvedByUserId: routineClosuresTable.approvedByUserId,
+    storeId: employeesTable.storeId, storeName: storesTable.name, sectorId: usersTable.sectorId, sectorName: sectorsTable.name,
+  })
+    .from(routineClosuresTable)
+    .leftJoin(employeesTable, eq(routineClosuresTable.employeeId, employeesTable.id))
+    .leftJoin(storesTable, eq(employeesTable.storeId, storesTable.id))
+    .leftJoin(usersTable, eq(employeesTable.userId, usersTable.id))
+    .leftJoin(sectorsTable, eq(usersTable.sectorId, sectorsTable.id))
     .where(and(...conditions))
     .orderBy(desc(routineClosuresTable.periodMonth), asc(routineClosuresTable.employeeName));
   res.json(rows);
@@ -717,6 +736,219 @@ router.delete("/rotinas/closures/:id", requireModuleAccess("rotinas"), async (re
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   await db.delete(routineClosuresTable).where(and(eq(routineClosuresTable.id, id), eq(routineClosuresTable.tenantId, tenantId)));
   res.json({ ok: true });
+});
+
+// ── Score/ranking (Fase 6) ──────────────────────────────────────────────
+router.get("/rotinas/score-weights", requireModuleAccess("rotinas"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  res.json(await getScoreWeights(tenantId));
+});
+
+router.patch("/rotinas/score-weights", requireModuleAccess("rotinas"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const clamp = (v: unknown, fallback: number) => (typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 100 ? Math.round(v) : fallback);
+  const current = await getScoreWeights(tenantId);
+  const weightOnTime = clamp(b.weightOnTime, current.weightOnTime);
+  const weightNoPendency = clamp(b.weightNoPendency, current.weightNoPendency);
+  const weightNoUrgentAbuse = clamp(b.weightNoUrgentAbuse, current.weightNoUrgentAbuse);
+  if (weightOnTime + weightNoPendency + weightNoUrgentAbuse === 0) {
+    res.status(400).json({ error: "A soma dos pesos não pode ser zero" }); return;
+  }
+  await db.insert(routineScoreWeightsTable).values({ tenantId, weightOnTime, weightNoPendency, weightNoUrgentAbuse })
+    .onConflictDoUpdate({ target: routineScoreWeightsTable.tenantId, set: { weightOnTime, weightNoPendency, weightNoUrgentAbuse, updatedAt: new Date() } });
+  res.json({ weightOnTime, weightNoPendency, weightNoUrgentAbuse });
+});
+
+// Ranking: só vendedor/técnico (role "vendedor" — gerente de loja é role
+// "supervisor" e fica de fora, já que é quem supervisiona). Sem
+// reconhecimento visual ainda (Fase 7) — só a lista ordenada com o score e
+// os componentes que formaram ele (transparência, item 55).
+router.get("/rotinas/ranking", requireModuleAccess("rotinas"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const periodMonth = typeof req.query.periodMonth === "string" && /^\d{4}-\d{2}$/.test(req.query.periodMonth) ? req.query.periodMonth : previousMonthKey(new Date());
+  const storeId = req.query.storeId ? parseInt(String(req.query.storeId), 10) : null;
+
+  const conditions = [eq(routineClosuresTable.tenantId, tenantId), eq(routineClosuresTable.periodMonth, periodMonth), eq(usersTable.role, "vendedor")];
+  if (storeId != null && !isNaN(storeId)) conditions.push(eq(employeesTable.storeId, storeId));
+
+  const rows = await db.select({
+    closure: routineClosuresTable,
+    storeId: employeesTable.storeId, storeName: storesTable.name, sectorName: sectorsTable.name, jobFunction: employeesTable.jobFunction,
+  })
+    .from(routineClosuresTable)
+    .innerJoin(employeesTable, eq(routineClosuresTable.employeeId, employeesTable.id))
+    .innerJoin(usersTable, eq(employeesTable.userId, usersTable.id))
+    .leftJoin(storesTable, eq(employeesTable.storeId, storesTable.id))
+    .leftJoin(sectorsTable, eq(usersTable.sectorId, sectorsTable.id))
+    .where(and(...conditions));
+
+  const weights = await getScoreWeights(tenantId);
+  const ranked = rows
+    .map((r) => {
+      const breakdown = computeRoutineScore(r.closure, weights);
+      if (!breakdown) return null;
+      return {
+        employeeId: r.closure.employeeId, employeeName: r.closure.employeeName,
+        storeId: r.storeId, storeName: r.storeName, sectorName: r.sectorName, jobFunction: r.jobFunction,
+        totalDue: r.closure.totalDue, totalAnswered: r.closure.totalAnswered,
+        approved: r.closure.approvedAt != null,
+        ...breakdown,
+      };
+    })
+    .filter((r): r is NonNullable<typeof r> => r !== null)
+    .sort((a, b) => b.score - a.score);
+
+  res.json({ periodMonth, weights, ranking: ranked });
+});
+
+// ── Aprovação do supervisor (Fase 6) — revisa pendência/urgência antes do
+// fechamento do mês contar "de verdade" no ranking. Escopo: admin vê tudo,
+// supervisor só o setor dele (mesmo padrão 3 camadas do resto do módulo —
+// a sessão só carrega setor, não loja, então "loja" aqui é aproximado pelo
+// setor do funcionário, consistente com o resto de Rotinas). ──
+async function assertReviewAccess(req: Request, res: Response, targetUserId: number): Promise<boolean> {
+  if (req.session.userRole === "admin") return true;
+  if (req.session.userRole !== "supervisor") { res.status(403).json({ error: "Sem permissão pra revisar" }); return false; }
+  const tenantId = tenantIdOf(req)!;
+  const [target] = await db.select({ sectorId: usersTable.sectorId }).from(usersTable)
+    .where(and(eq(usersTable.id, targetUserId), eq(usersTable.tenantId, tenantId)));
+  if (!target || target.sectorId == null || target.sectorId !== req.session.userSectorId) {
+    res.status(403).json({ error: "Sem permissão pra revisar funcionário de outro setor" }); return false;
+  }
+  return true;
+}
+
+router.post("/rotinas/responses/:id/review", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const [target] = await db.select({ userId: routineResponsesTable.userId }).from(routineResponsesTable)
+    .where(and(eq(routineResponsesTable.id, id), eq(routineResponsesTable.tenantId, tenantId)));
+  if (!target) { res.status(404).json({ error: "Resposta não encontrada" }); return; }
+  if (!(await assertReviewAccess(req, res, target.userId))) return;
+
+  const b = (req.body ?? {}) as { status?: unknown; note?: unknown };
+  const status = b.status === "approved" || b.status === "contested" ? b.status : null;
+  if (!status) { res.status(400).json({ error: "Status inválido (use 'approved' ou 'contested')" }); return; }
+  const [updated] = await db.update(routineResponsesTable).set({
+    pendencyReviewStatus: status, pendencyReviewedByUserId: req.session.userId!,
+    pendencyReviewNote: typeof b.note === "string" ? b.note.trim().slice(0, 500) || null : null,
+    pendencyReviewedAt: new Date(),
+  }).where(and(eq(routineResponsesTable.id, id), eq(routineResponsesTable.tenantId, tenantId))).returning();
+  res.json(updated);
+});
+
+router.post("/rotinas/urgent-bypasses/:id/review", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const [target] = await db.select({ userId: routineUrgentBypassesTable.userId }).from(routineUrgentBypassesTable)
+    .where(and(eq(routineUrgentBypassesTable.id, id), eq(routineUrgentBypassesTable.tenantId, tenantId)));
+  if (!target) { res.status(404).json({ error: "Registro não encontrado" }); return; }
+  if (!(await assertReviewAccess(req, res, target.userId))) return;
+
+  const b = (req.body ?? {}) as { status?: unknown; note?: unknown };
+  const status = b.status === "approved" || b.status === "contested" ? b.status : null;
+  if (!status) { res.status(400).json({ error: "Status inválido (use 'approved' ou 'contested')" }); return; }
+  const [updated] = await db.update(routineUrgentBypassesTable).set({
+    reviewStatus: status, reviewedByUserId: req.session.userId!,
+    reviewNote: typeof b.note === "string" ? b.note.trim().slice(0, 500) || null : null,
+    reviewedAt: new Date(),
+  }).where(and(eq(routineUrgentBypassesTable.id, id), eq(routineUrgentBypassesTable.tenantId, tenantId))).returning();
+  res.json(updated);
+});
+
+// Lista o que falta revisar num mês (admin vê tudo, supervisor só o setor
+// dele) — alimenta a tela de aprovação antes de POST /closures/:id/approve.
+router.get("/rotinas/review/pending", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const periodMonth = typeof req.query.periodMonth === "string" && /^\d{4}-\d{2}$/.test(req.query.periodMonth) ? req.query.periodMonth : previousMonthKey(new Date());
+  const sectorScope = req.session.userRole === "supervisor" ? req.session.userSectorId : undefined;
+
+  const pendencyRows = await db.select({
+    id: routineResponsesTable.id, userId: routineResponsesTable.userId, userName: usersTable.name, sectorId: usersTable.sectorId,
+    periodKey: routineResponsesTable.periodKey, answers: routineResponsesTable.answers,
+    reviewStatus: routineResponsesTable.pendencyReviewStatus,
+  })
+    .from(routineResponsesTable)
+    .leftJoin(usersTable, eq(routineResponsesTable.userId, usersTable.id))
+    .where(and(
+      eq(routineResponsesTable.tenantId, tenantId),
+      gte(routineResponsesTable.periodKey, `${periodMonth}-01`), lte(routineResponsesTable.periodKey, `${periodMonth}-31`),
+    ));
+  const pendencies = pendencyRows.filter((r) =>
+    Object.values(r.answers).some((v) => typeof v === "object" && !!v.pendencia)
+    && r.reviewStatus == null
+    && (sectorScope == null || r.sectorId === sectorScope),
+  );
+
+  const monthStart = new Date(`${periodMonth}-01T00:00:00-03:00`);
+  const [y, m] = periodMonth.split("-").map(Number);
+  const monthEnd = new Date(`${periodMonth}-${String(new Date(y!, m!, 0).getDate()).padStart(2, "0")}T23:59:59-03:00`);
+  const bypassRows = await db.select({
+    id: routineUrgentBypassesTable.id, userId: routineUrgentBypassesTable.userId, userName: usersTable.name, sectorId: usersTable.sectorId,
+    createdAt: routineUrgentBypassesTable.createdAt, reviewStatus: routineUrgentBypassesTable.reviewStatus,
+  })
+    .from(routineUrgentBypassesTable)
+    .leftJoin(usersTable, eq(routineUrgentBypassesTable.userId, usersTable.id))
+    .where(and(
+      eq(routineUrgentBypassesTable.tenantId, tenantId),
+      gte(routineUrgentBypassesTable.createdAt, monthStart), lte(routineUrgentBypassesTable.createdAt, monthEnd),
+    ));
+  const bypasses = bypassRows.filter((r) => r.reviewStatus == null && (sectorScope == null || r.sectorId === sectorScope));
+
+  res.json({
+    periodMonth,
+    pendencies: pendencies.map(({ sectorId: _s, reviewStatus: _r, ...r }) => r),
+    urgentBypasses: bypasses.map(({ sectorId: _s, reviewStatus: _r, ...r }) => r),
+  });
+});
+
+router.post("/rotinas/closures/:id/approve", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const [closure] = await db.select().from(routineClosuresTable)
+    .where(and(eq(routineClosuresTable.id, id), eq(routineClosuresTable.tenantId, tenantId)));
+  if (!closure) { res.status(404).json({ error: "Fechamento não encontrado" }); return; }
+  const [employee] = await db.select({ userId: employeesTable.userId }).from(employeesTable)
+    .where(and(eq(employeesTable.id, closure.employeeId), eq(employeesTable.tenantId, tenantId)));
+  if (!employee?.userId) { res.status(404).json({ error: "Funcionário sem usuário vinculado" }); return; }
+  if (!(await assertReviewAccess(req, res, employee.userId))) return;
+
+  const periodMonth = closure.periodMonth;
+  const responses = await db.select({ answers: routineResponsesTable.answers, reviewStatus: routineResponsesTable.pendencyReviewStatus })
+    .from(routineResponsesTable)
+    .where(and(
+      eq(routineResponsesTable.tenantId, tenantId), eq(routineResponsesTable.userId, employee.userId),
+      gte(routineResponsesTable.periodKey, `${periodMonth}-01`), lte(routineResponsesTable.periodKey, `${periodMonth}-31`),
+    ));
+  const unreviewedPendencies = responses.filter((r) => Object.values(r.answers).some((v) => typeof v === "object" && !!v.pendencia) && r.reviewStatus == null).length;
+
+  const monthStart = new Date(`${periodMonth}-01T00:00:00-03:00`);
+  const [y, m] = periodMonth.split("-").map(Number);
+  const monthEnd = new Date(`${periodMonth}-${String(new Date(y!, m!, 0).getDate()).padStart(2, "0")}T23:59:59-03:00`);
+  const bypasses = await db.select({ reviewStatus: routineUrgentBypassesTable.reviewStatus }).from(routineUrgentBypassesTable)
+    .where(and(
+      eq(routineUrgentBypassesTable.tenantId, tenantId), eq(routineUrgentBypassesTable.userId, employee.userId),
+      gte(routineUrgentBypassesTable.createdAt, monthStart), lte(routineUrgentBypassesTable.createdAt, monthEnd),
+    ));
+  const unreviewedBypasses = bypasses.filter((b) => b.reviewStatus == null).length;
+
+  if (unreviewedPendencies + unreviewedBypasses > 0) {
+    res.status(400).json({
+      error: `Ainda falta revisar ${unreviewedPendencies} pendência(s) e ${unreviewedBypasses} atendimento(s) urgente(s) antes de aprovar o mês`,
+      unreviewedPendencies, unreviewedBypasses,
+    });
+    return;
+  }
+
+  const [updated] = await db.update(routineClosuresTable)
+    .set({ approvedAt: new Date(), approvedByUserId: req.session.userId! })
+    .where(and(eq(routineClosuresTable.id, id), eq(routineClosuresTable.tenantId, tenantId)))
+    .returning();
+  res.json(updated);
 });
 
 export default router;

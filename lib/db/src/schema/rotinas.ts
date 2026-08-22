@@ -113,6 +113,15 @@ export const routineResponsesTable = pgTable("routine_responses", {
   // Puro dado pro relatório mensal — não trava nem penaliza ninguém.
   respondedRelativeToPonto: text("responded_relative_to_ponto"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  // Fase 6: revisão do supervisor/gestor sobre a pendência marcada nesta
+  // resposta (ver hasPendency em routineClosures.ts) — "approved" (pendência
+  // já resolvida/reconhecida) ou "contested" (gestor discorda que seja uma
+  // pendência de verdade). null enquanto ninguém revisou ainda. Puro
+  // controle de gestão — nunca muda o dado bruto da resposta em si.
+  pendencyReviewStatus: text("pendency_review_status"),
+  pendencyReviewedByUserId: integer("pendency_reviewed_by_user_id"),
+  pendencyReviewNote: text("pendency_review_note"),
+  pendencyReviewedAt: timestamp("pendency_reviewed_at", { withTimezone: true }),
 }, (t) => [
   uniqueIndex("routine_responses_unique").on(t.checklistId, t.userId, t.periodKey),
   index("routine_responses_user_idx").on(t.userId),
@@ -161,6 +170,12 @@ export const routineClosuresTable = pgTable("routine_closures", {
   pontoAfterEntry: integer("ponto_after_entry").notNull(),
   pontoNoRecord: integer("ponto_no_record").notNull(),
   closedAt: timestamp("closed_at", { withTimezone: true }).notNull().defaultNow(),
+  // Fase 6: só entra "de verdade" no ranking depois que o supervisor revisar
+  // todas as pendências/urgências do funcionário nesse mês e aprovar (ver
+  // POST /rotinas/closures/:id/approve). Até lá, o score já pode ser
+  // visualizado mas fica marcado como provisório na tela de ranking.
+  approvedAt: timestamp("approved_at", { withTimezone: true }),
+  approvedByUserId: integer("approved_by_user_id"),
 }, (t) => [
   uniqueIndex("routine_closures_unique").on(t.tenantId, t.employeeId, t.periodMonth),
 ]);
@@ -176,9 +191,28 @@ export const routineUrgentBypassesTable = pgTable("routine_urgent_bypasses", {
   checklistId: integer("checklist_id").notNull().references(() => routineChecklistsTable.id, { onDelete: "cascade" }),
   userId: integer("user_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  // Fase 6: mesmo espírito do pendencyReviewStatus acima — supervisor pode
+  // aprovar (bypass justificado) ou contestar (mal registrado) antes do
+  // fechamento do mês ser aprovado.
+  reviewStatus: text("review_status"),
+  reviewedByUserId: integer("reviewed_by_user_id"),
+  reviewNote: text("review_note"),
+  reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
 }, (t) => [
   index("routine_urgent_bypasses_user_idx").on(t.userId),
 ]);
+
+// Fase 6: pesos do score de produtividade — configurável pelo admin, sem
+// deploy (mesmo espírito de routine_checklist_scopes: tabela flat que o
+// admin edita). Uma linha por tenant (upsert). Ver fórmula documentada em
+// computeRoutineScore (lib/routineScore.ts).
+export const routineScoreWeightsTable = pgTable("routine_score_weights", {
+  tenantId: integer("tenant_id").primaryKey(),
+  weightOnTime: integer("weight_on_time").notNull().default(50),
+  weightNoPendency: integer("weight_no_pendency").notNull().default(30),
+  weightNoUrgentAbuse: integer("weight_no_urgent_abuse").notNull().default(20),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+});
 
 export type RoutineChecklist = typeof routineChecklistsTable.$inferSelect;
 export type RoutineChecklistQuestion = typeof routineChecklistQuestionsTable.$inferSelect;
@@ -187,3 +221,4 @@ export type RoutineResponse = typeof routineResponsesTable.$inferSelect;
 export type RoutineUrgentBypass = typeof routineUrgentBypassesTable.$inferSelect;
 export type RoutineResponseEvidence = typeof routineResponseEvidenceTable.$inferSelect;
 export type RoutineClosure = typeof routineClosuresTable.$inferSelect;
+export type RoutineScoreWeights = typeof routineScoreWeightsTable.$inferSelect;

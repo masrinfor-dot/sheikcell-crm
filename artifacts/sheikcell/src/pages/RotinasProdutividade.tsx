@@ -4,10 +4,11 @@ import {
   type RoutineChecklist, type RoutineChecklistFull, type RoutineChecklistQuestion, type RoutineChecklistScope,
   type RoutineQuestionType, type RoutineRecurrence, type RoutineScopeOptions, type RoutineResponse, type RoutineClosure,
   type RoutineAlertLevel, type RoutineAnswerValue, ROUTINE_NO_REASONS,
+  type RoutineScoreWeights, type RoutineRankingRow,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
-import { ListChecks, Plus, X, Trash2, Pencil, CalendarClock, Users2, Bell, Eye, FolderOpen, ChevronRight, FileText, Image as ImageIcon, BarChart3, Clock } from "lucide-react";
+import { ListChecks, Plus, X, Trash2, Pencil, CalendarClock, Users2, Bell, Eye, FolderOpen, ChevronRight, FileText, Image as ImageIcon, BarChart3, Clock, Building2, Trophy, CheckCircle2, ShieldQuestion } from "lucide-react";
 
 const WEEKDAYS = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
 const RECURRENCE_LABELS: Record<RoutineRecurrence, string> = {
@@ -66,7 +67,7 @@ export default function RotinasProdutividade() {
   const [saving, setSaving] = useState(false);
   const [viewing, setViewing] = useState<RoutineChecklist | null>(null);
   const [responses, setResponses] = useState<RoutineResponse[]>([]);
-  const [mainTab, setMainTab] = useState<"checklists" | "documentos" | "relatorio">("checklists");
+  const [mainTab, setMainTab] = useState<"checklists" | "documentos" | "relatorio" | "loja" | "ranking" | "aprovacoes">("checklists");
 
   const fetchLists = () => api.rotinas.list().then(setLists).catch(() => {}).finally(() => setLoading(false));
   useEffect(() => {
@@ -187,7 +188,10 @@ export default function RotinasProdutividade() {
       </div>
 
       <div className="flex gap-1.5 border-b border-border">
-        {([["checklists", "Checklists", ListChecks], ["documentos", "Documentos", FolderOpen], ["relatorio", "Relatório Mensal", BarChart3]] as const).map(([v, label, Icon]) => (
+        {([
+          ["checklists", "Checklists", ListChecks], ["documentos", "Documentos", FolderOpen], ["relatorio", "Relatório Mensal", BarChart3],
+          ["loja", "Relatório por Loja", Building2], ["ranking", "Ranking", Trophy], ["aprovacoes", "Aprovações", ShieldQuestion],
+        ] as const).map(([v, label, Icon]) => (
           <button key={v} onClick={() => setMainTab(v)} data-testid={`tab-rotinas-${v}`}
             className={`flex items-center gap-1.5 px-3 py-2 text-xs font-semibold border-b-2 -mb-px transition ${
               mainTab === v ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
@@ -201,6 +205,12 @@ export default function RotinasProdutividade() {
         <RotinasDocumentos checklists={lists} />
       ) : mainTab === "relatorio" ? (
         <RotinasRelatorio employees={scopeOptions?.employees ?? []} canEdit={canEdit} />
+      ) : mainTab === "loja" ? (
+        <RotinasRelatorioLoja />
+      ) : mainTab === "ranking" ? (
+        <RotinasRanking scopeOptions={scopeOptions} canEdit={canEdit} />
+      ) : mainTab === "aprovacoes" ? (
+        <RotinasAprovacoes />
       ) : (
       <>
       {!canEdit && (
@@ -642,7 +652,7 @@ function RotinasRelatorio({ employees, canEdit }: { employees: { id: number; nam
   useEffect(() => {
     if (employeeId == null) { setClosures([]); return; }
     setLoading(true);
-    api.rotinas.closures(employeeId).then(setClosures).catch(() => {}).finally(() => setLoading(false));
+    api.rotinas.closures({ employeeId }).then(setClosures).catch(() => {}).finally(() => setLoading(false));
   }, [employeeId]);
 
   const handleRun = async () => {
@@ -651,7 +661,7 @@ function RotinasRelatorio({ employees, canEdit }: { employees: { id: number; nam
     try {
       const r = await api.rotinas.runClosure(runMonth || undefined);
       toast({ title: `Fechamento de ${r.month} gerado`, description: `${r.created} funcionário(s) fechado(s) agora (os já fechados foram ignorados).` });
-      if (employeeId != null) api.rotinas.closures(employeeId).then(setClosures).catch(() => {});
+      if (employeeId != null) api.rotinas.closures({ employeeId }).then(setClosures).catch(() => {});
     } catch (err) {
       toast({ title: "Erro ao fechar mês", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     } finally {
@@ -736,6 +746,343 @@ function RotinasRelatorio({ employees, canEdit }: { employees: { id: number; nam
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Relatório por Loja (Fase 6): mesma hierarquia de navegação Loja → Setor
+// → Funcionário de Documentos, agregando os fechamentos mensais já
+// congelados (Fase 5) em vez de recalcular em cima das respostas brutas. ──
+function monthLabel(m: string): string {
+  const [y, mo] = m.split("-");
+  const names = ["", "Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
+  return `${names[parseInt(mo ?? "0", 10)] ?? mo}/${y}`;
+}
+function defaultPeriodMonth(): string {
+  const now = new Date();
+  const sp = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit" }).formatToParts(now);
+  const y = Number(sp.find((p) => p.type === "year")!.value);
+  const m = Number(sp.find((p) => p.type === "month")!.value);
+  const prevY = m === 1 ? y - 1 : y;
+  const prevM = m === 1 ? 12 : m - 1;
+  return `${prevY}-${String(prevM).padStart(2, "0")}`;
+}
+
+function RotinasRelatorioLoja() {
+  const [periodMonth, setPeriodMonth] = useState(defaultPeriodMonth());
+  const [closures, setClosures] = useState<RoutineClosure[] | null>(null);
+  const [path, setPath] = useState<string[]>([]);
+
+  useEffect(() => {
+    setClosures(null);
+    api.rotinas.closures({ periodMonth }).then(setClosures).catch(() => setClosures([]));
+  }, [periodMonth]);
+
+  const LEVELS: ("storeName" | "sectorName" | "employeeName")[] = ["storeName", "sectorName", "employeeName"];
+  const rows = (closures ?? []).map((c) => ({ ...c, storeName: c.storeName ?? "Sem loja", sectorName: c.sectorName ?? "Sem setor" }));
+  const filtered = rows.filter((r) => path.every((v, i) => r[LEVELS[i]] === v));
+  const depth = path.length;
+
+  const pct = (n: number, total: number) => (total === 0 ? "—" : `${Math.round((n / total) * 100)}%`);
+  function aggregate(group: typeof rows) {
+    const withDue = group.filter((r) => r.totalDue > 0);
+    const avgOnTimePct = withDue.length ? Math.round(withDue.reduce((s, r) => s + (r.totalOnTime / r.totalDue) * 100, 0) / withDue.length) : null;
+    const totalPendency = group.reduce((s, r) => s + r.totalWithPendency, 0);
+    const totalUrgent = group.reduce((s, r) => s + r.totalUrgentBypass, 0);
+    return { avgOnTimePct, totalPendency, totalUrgent, count: group.length };
+  }
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <label className="text-xs font-medium mb-1 block">Mês</label>
+        <input type="month" value={periodMonth} onChange={(e) => { setPeriodMonth(e.target.value); setPath([]); }}
+          className="px-2 py-1.5 rounded-lg border border-border text-xs" />
+      </div>
+
+      <div className="flex items-center gap-1 text-xs flex-wrap">
+        <button onClick={() => setPath([])} className={`font-semibold ${depth === 0 ? "text-primary" : "text-muted-foreground hover:text-foreground"}`}>
+          Todas as lojas
+        </button>
+        {path.map((v, i) => (
+          <span key={i} className="flex items-center gap-1">
+            <ChevronRight className="w-3 h-3 text-muted-foreground" />
+            <button onClick={() => setPath(path.slice(0, i + 1))}
+              className={`font-semibold ${i === depth - 1 ? "text-primary" : "text-muted-foreground hover:text-foreground"}`}>
+              {v}
+            </button>
+          </span>
+        ))}
+      </div>
+
+      {closures === null ? (
+        <div className="h-24 rounded-xl bg-secondary/40 animate-pulse" />
+      ) : filtered.length === 0 ? (
+        <p className="text-xs text-muted-foreground">Nenhum fechamento pra {monthLabel(periodMonth)} ainda.</p>
+      ) : depth < LEVELS.length ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {Array.from(new Set(filtered.map((r) => r[LEVELS[depth]]))).sort().map((v) => {
+            const group = filtered.filter((r) => r[LEVELS[depth]] === v);
+            const agg = aggregate(group);
+            return (
+              <button key={v} onClick={() => setPath([...path, v])} data-testid={`loja-drill-${v}`}
+                className="shk-card p-3 text-left hover:bg-secondary/40 transition">
+                <div className="flex items-center gap-2 mb-1.5">
+                  {LEVELS[depth] === "employeeName" ? <Users2 className="w-4 h-4 text-primary shrink-0" /> : <Building2 className="w-4 h-4 text-primary shrink-0" />}
+                  <span className="text-xs font-semibold truncate">{v}</span>
+                </div>
+                <div className="flex gap-3 text-[11px] text-muted-foreground flex-wrap">
+                  <span>{agg.avgOnTimePct == null ? "—" : `${agg.avgOnTimePct}%`} no prazo (média)</span>
+                  <span>{agg.totalPendency} pendência(s)</span>
+                  <span>{agg.totalUrgent} urgência(s)</span>
+                  {LEVELS[depth] !== "employeeName" && <span>{agg.count} func.</span>}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {filtered.map((c) => (
+            <div key={c.id} className="shk-card p-3 flex items-center justify-between gap-2 flex-wrap">
+              <div>
+                <p className="text-xs font-bold">{c.employeeName}</p>
+                <p className="text-[11px] text-muted-foreground">{c.storeName} · {c.sectorName}</p>
+              </div>
+              <div className="flex gap-3 text-xs">
+                <span>{pct(c.totalOnTime, c.totalDue)} no prazo</span>
+                <span>{c.totalWithPendency} pendência(s)</span>
+                <span>{c.totalUrgentBypass} urgência(s)</span>
+                {c.approvedAt ? <span className="text-green-600 font-semibold">Aprovado</span> : <span className="text-amber-600 font-semibold">Provisório</span>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Ranking (Fase 6): só role "vendedor" (gerente de loja/supervisor fica
+// de fora). Score não premia só quantidade — combina % no prazo, ausência
+// de pendência e não abuso de "Atendimento urgente", pesos configuráveis
+// (ver computeRoutineScore no backend pra fórmula documentada). Fechamentos
+// ainda não aprovados pelo supervisor aparecem marcados "provisório". ──
+function RotinasRanking({ scopeOptions, canEdit }: { scopeOptions: RoutineScopeOptions | null; canEdit: boolean }) {
+  const { toast } = useToast();
+  const [periodMonth, setPeriodMonth] = useState(defaultPeriodMonth());
+  const [storeId, setStoreId] = useState<number | null>(null);
+  const [ranking, setRanking] = useState<{ weights: RoutineScoreWeights; ranking: RoutineRankingRow[] } | null>(null);
+  const [weightsForm, setWeightsForm] = useState<RoutineScoreWeights | null>(null);
+  const [savingWeights, setSavingWeights] = useState(false);
+
+  const load = () => {
+    setRanking(null);
+    api.rotinas.ranking({ periodMonth, storeId: storeId ?? undefined }).then((r) => {
+      setRanking(r);
+      setWeightsForm((prev) => prev ?? r.weights);
+    }).catch(() => setRanking({ weights: { weightOnTime: 50, weightNoPendency: 30, weightNoUrgentAbuse: 20 }, ranking: [] }));
+  };
+  useEffect(load, [periodMonth, storeId]);
+
+  const handleSaveWeights = async () => {
+    if (!weightsForm || savingWeights) return;
+    setSavingWeights(true);
+    try {
+      const saved = await api.rotinas.updateScoreWeights(weightsForm);
+      setWeightsForm(saved);
+      toast({ title: "Pesos atualizados" });
+      load();
+    } catch (err) {
+      toast({ title: "Erro ao salvar pesos", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSavingWeights(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-end gap-3 flex-wrap">
+        <div>
+          <label className="text-xs font-medium mb-1 block">Mês</label>
+          <input type="month" value={periodMonth} onChange={(e) => setPeriodMonth(e.target.value)}
+            className="px-2 py-1.5 rounded-lg border border-border text-xs" />
+        </div>
+        <div>
+          <label className="text-xs font-medium mb-1 block">Loja</label>
+          <select value={storeId ?? ""} onChange={(e) => setStoreId(e.target.value ? parseInt(e.target.value, 10) : null)}
+            className="px-2 py-1.5 rounded-lg border border-border text-xs bg-white">
+            <option value="">Todas as lojas</option>
+            {scopeOptions?.stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {canEdit && weightsForm && (
+        <div className="shk-card p-3">
+          <p className="text-xs font-bold mb-2">Pesos do score (soma não precisa ser 100 — só a proporção entre eles importa)</p>
+          <div className="flex gap-3 flex-wrap items-end">
+            {([["weightOnTime", "No prazo"], ["weightNoPendency", "Sem pendência"], ["weightNoUrgentAbuse", "Sem abuso de urgência"]] as const).map(([k, label]) => (
+              <div key={k}>
+                <label className="text-[11px] text-muted-foreground mb-1 block">{label}</label>
+                <input type="number" min={0} max={100} value={weightsForm[k]}
+                  onChange={(e) => setWeightsForm((f) => f && ({ ...f, [k]: parseInt(e.target.value, 10) || 0 }))}
+                  data-testid={`input-weight-${k}`}
+                  className="w-20 px-2 py-1.5 rounded-lg border border-border text-xs" />
+              </div>
+            ))}
+            <button onClick={handleSaveWeights} disabled={savingWeights} data-testid="button-save-weights"
+              className="px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold disabled:opacity-40">
+              {savingWeights ? "Salvando..." : "Salvar pesos"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {ranking === null ? (
+        <div className="h-24 rounded-xl bg-secondary/40 animate-pulse" />
+      ) : ranking.ranking.length === 0 ? (
+        <p className="text-xs text-muted-foreground">Nenhum funcionário (função vendedor) com checklist devido em {monthLabel(periodMonth)}.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {ranking.ranking.map((r, i) => (
+            <div key={r.employeeId} className="shk-card p-3 flex items-center gap-3" data-testid={`ranking-${r.employeeId}`}>
+              <span className="text-lg font-black text-muted-foreground w-6 text-center shrink-0">{i + 1}</span>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <p className="text-xs font-bold">{r.employeeName}</p>
+                  {!r.approved && <span className="text-[10px] font-bold bg-amber-50 text-amber-600 border border-amber-100 px-1.5 py-0.5 rounded-full">Provisório</span>}
+                </div>
+                <p className="text-[11px] text-muted-foreground">{r.storeName ?? "—"} · {r.sectorName ?? "—"}{r.jobFunction ? ` · ${r.jobFunction}` : ""}</p>
+                <div className="flex gap-3 text-[11px] text-muted-foreground mt-1 flex-wrap">
+                  <span>No prazo: {r.onTimeRate}%</span>
+                  <span>Sem pendência: {r.noPendencyRate}%</span>
+                  <span>Sem abuso de urgência: {r.noUrgentAbuseRate}%</span>
+                </div>
+              </div>
+              <span className="text-xl font-black text-primary shrink-0">{r.score}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Aprovações (Fase 6): revisão do supervisor/admin sobre pendência e
+// "Atendimento urgente" antes do fechamento contar de verdade no ranking —
+// mesmo espírito de POST /rh-dp/time-clock-entries/:id/review (rhDp.ts),
+// reaproveitado em vez de um fluxo de aprovação novo do zero. ──
+function RotinasAprovacoes() {
+  const { toast } = useToast();
+  const [periodMonth, setPeriodMonth] = useState(defaultPeriodMonth());
+  const [pending, setPending] = useState<Awaited<ReturnType<typeof api.rotinas.reviewPending>> | null>(null);
+  const [closures, setClosures] = useState<RoutineClosure[]>([]);
+  const [busy, setBusy] = useState<number | null>(null);
+
+  const load = () => {
+    setPending(null);
+    api.rotinas.reviewPending(periodMonth).then(setPending).catch(() => {});
+    api.rotinas.closures({ periodMonth }).then(setClosures).catch(() => {});
+  };
+  useEffect(load, [periodMonth]);
+
+  const reviewResponse = async (id: number, status: "approved" | "contested") => {
+    setBusy(id);
+    try { await api.rotinas.reviewResponse(id, status); toast({ title: status === "approved" ? "Pendência confirmada como resolvida" : "Pendência contestada" }); load(); }
+    catch (err) { toast({ title: "Erro", description: err instanceof Error ? err.message : "Erro", variant: "destructive" }); }
+    finally { setBusy(null); }
+  };
+  const reviewBypass = async (id: number, status: "approved" | "contested") => {
+    setBusy(id);
+    try { await api.rotinas.reviewUrgentBypass(id, status); toast({ title: status === "approved" ? "Urgência confirmada" : "Urgência contestada" }); load(); }
+    catch (err) { toast({ title: "Erro", description: err instanceof Error ? err.message : "Erro", variant: "destructive" }); }
+    finally { setBusy(null); }
+  };
+  const approveClosure = async (id: number) => {
+    setBusy(id);
+    try { await api.rotinas.approveClosure(id); toast({ title: "Fechamento aprovado — entra no ranking" }); load(); }
+    catch (err) { toast({ title: "Não foi possível aprovar", description: err instanceof Error ? err.message : "Ainda há itens pra revisar", variant: "destructive" }); }
+    finally { setBusy(null); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <label className="text-xs font-medium mb-1 block">Mês</label>
+        <input type="month" value={periodMonth} onChange={(e) => setPeriodMonth(e.target.value)}
+          className="px-2 py-1.5 rounded-lg border border-border text-xs" />
+      </div>
+
+      <div>
+        <p className="text-xs font-bold mb-2">Pendências marcadas ({pending?.pendencies.length ?? 0})</p>
+        {pending && pending.pendencies.length === 0 && <p className="text-xs text-muted-foreground">Nenhuma pendência pra revisar.</p>}
+        <div className="space-y-1.5">
+          {pending?.pendencies.map((p) => (
+            <div key={p.id} className="shk-card p-3 flex items-center justify-between gap-2 flex-wrap" data-testid={`review-pendency-${p.id}`}>
+              <div>
+                <p className="text-xs font-bold">{p.userName ?? "—"}</p>
+                <p className="text-[11px] text-muted-foreground">{p.periodKey}</p>
+              </div>
+              <div className="flex gap-1.5">
+                <button onClick={() => reviewResponse(p.id, "approved")} disabled={busy === p.id}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-green-50 text-green-700 border border-green-200 text-[11px] font-semibold disabled:opacity-40">
+                  <CheckCircle2 className="w-3.5 h-3.5" /> Resolvida
+                </button>
+                <button onClick={() => reviewResponse(p.id, "contested")} disabled={busy === p.id}
+                  className="px-2.5 py-1 rounded-lg bg-red-50 text-red-600 border border-red-200 text-[11px] font-semibold disabled:opacity-40">
+                  Contestar
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <p className="text-xs font-bold mb-2">Atendimentos urgentes usados ({pending?.urgentBypasses.length ?? 0})</p>
+        {pending && pending.urgentBypasses.length === 0 && <p className="text-xs text-muted-foreground">Nenhum atendimento urgente pra revisar.</p>}
+        <div className="space-y-1.5">
+          {pending?.urgentBypasses.map((b) => (
+            <div key={b.id} className="shk-card p-3 flex items-center justify-between gap-2 flex-wrap" data-testid={`review-bypass-${b.id}`}>
+              <div>
+                <p className="text-xs font-bold">{b.userName ?? "—"}</p>
+                <p className="text-[11px] text-muted-foreground">{new Date(b.createdAt).toLocaleString("pt-BR")}</p>
+              </div>
+              <div className="flex gap-1.5">
+                <button onClick={() => reviewBypass(b.id, "approved")} disabled={busy === b.id}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-green-50 text-green-700 border border-green-200 text-[11px] font-semibold disabled:opacity-40">
+                  <CheckCircle2 className="w-3.5 h-3.5" /> Justificado
+                </button>
+                <button onClick={() => reviewBypass(b.id, "contested")} disabled={busy === b.id}
+                  className="px-2.5 py-1 rounded-lg bg-red-50 text-red-600 border border-red-200 text-[11px] font-semibold disabled:opacity-40">
+                  Mal registrado
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <p className="text-xs font-bold mb-2">Aprovar fechamento do mês</p>
+        <div className="space-y-1.5">
+          {closures.map((c) => (
+            <div key={c.id} className="shk-card p-3 flex items-center justify-between gap-2 flex-wrap">
+              <p className="text-xs font-bold">{c.employeeName} <span className="font-normal text-muted-foreground">— {c.storeName ?? "—"}</span></p>
+              {c.approvedAt ? (
+                <span className="text-[11px] font-semibold text-green-600">Aprovado</span>
+              ) : (
+                <button onClick={() => approveClosure(c.id)} disabled={busy === c.id}
+                  data-testid={`button-approve-closure-${c.id}`}
+                  className="px-2.5 py-1 rounded-lg bg-primary text-white text-[11px] font-semibold disabled:opacity-40">
+                  Aprovar mês
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

@@ -567,13 +567,28 @@ export type RoutineScopeOptions = {
   employees: { id: number; name: string }[];
 };
 // Fechamento mensal (Fase 5) — snapshot congelado, mesmo padrão de
-// TimeBankClosure (rh_dp.ts).
+// TimeBankClosure (rh_dp.ts). Fase 6: enriquecido com loja/setor (relatório
+// por loja) e aprovação do supervisor (approvedAt/approvedByUserId).
 export type RoutineClosure = {
   id: number; employeeId: number; employeeName: string; periodMonth: string;
   totalDue: number; totalAnswered: number; totalOnTime: number; totalWithPendency: number; totalUrgentBypass: number;
   pontoBeforeEntry: number; pontoAfterEntry: number; pontoNoRecord: number;
   closedAt: string;
+  storeId: number | null; storeName: string | null; sectorId: number | null; sectorName: string | null;
+  approvedAt: string | null; approvedByUserId: number | null;
 };
+// Fase 6: pesos do score de produtividade — configurável, ver
+// computeRoutineScore no backend (rotinas.ts) pra fórmula documentada.
+export type RoutineScoreWeights = { weightOnTime: number; weightNoPendency: number; weightNoUrgentAbuse: number };
+export type RoutineRankingRow = {
+  employeeId: number; employeeName: string; storeId: number | null; storeName: string | null; sectorName: string | null; jobFunction: string | null;
+  totalDue: number; totalAnswered: number; approved: boolean;
+  score: number; onTimeRate: number; noPendencyRate: number; noUrgentAbuseRate: number;
+};
+export type RoutineRanking = { periodMonth: string; weights: RoutineScoreWeights; ranking: RoutineRankingRow[] };
+export type RoutinePendingPendency = { id: number; userId: number; userName: string | null; periodKey: string; answers: Record<string, RoutineAnswerValue> };
+export type RoutinePendingBypass = { id: number; userId: number; userName: string | null; createdAt: string };
+export type RoutineReviewPending = { periodMonth: string; pendencies: RoutinePendingPendency[]; urgentBypasses: RoutinePendingBypass[] };
 // Checklist "devido agora" pro usuário logado (Fase 2) — versão enxuta de
 // RoutineChecklistQuestion, só o que o modal de resposta precisa mostrar.
 export type PendingRoutineQuestion = {
@@ -1321,9 +1336,30 @@ export const api = {
       req<{ id: number }>(`/rotinas/checklists/${id}/respond`, { method: "POST", body: JSON.stringify({ answers, evidence }) }),
     responses: (id: number) => req<RoutineResponse[]>(`/rotinas/checklists/${id}/responses`),
     evidenceFileUrl: (evidenceId: number) => `${API_BASE}/rotinas/evidence/${evidenceId}/file`,
-    closures: (employeeId?: number) => req<RoutineClosure[]>(`/rotinas/closures${employeeId ? `?employeeId=${employeeId}` : ""}`),
+    closures: (params?: { employeeId?: number; periodMonth?: string }) => {
+      const q = new URLSearchParams();
+      if (params?.employeeId) q.set("employeeId", String(params.employeeId));
+      if (params?.periodMonth) q.set("periodMonth", params.periodMonth);
+      const qs = q.toString();
+      return req<RoutineClosure[]>(`/rotinas/closures${qs ? `?${qs}` : ""}`);
+    },
     runClosure: (month?: string) => req<{ ok: boolean; month: string; created: number }>("/rotinas/closures/run", { method: "POST", body: JSON.stringify({ month }) }),
     removeClosure: (id: number) => req<{ ok: boolean }>(`/rotinas/closures/${id}`, { method: "DELETE" }),
+    scoreWeights: () => req<RoutineScoreWeights>("/rotinas/score-weights"),
+    updateScoreWeights: (w: Partial<RoutineScoreWeights>) => req<RoutineScoreWeights>("/rotinas/score-weights", { method: "PATCH", body: JSON.stringify(w) }),
+    ranking: (params?: { periodMonth?: string; storeId?: number }) => {
+      const q = new URLSearchParams();
+      if (params?.periodMonth) q.set("periodMonth", params.periodMonth);
+      if (params?.storeId) q.set("storeId", String(params.storeId));
+      const qs = q.toString();
+      return req<RoutineRanking>(`/rotinas/ranking${qs ? `?${qs}` : ""}`);
+    },
+    reviewPending: (periodMonth?: string) => req<RoutineReviewPending>(`/rotinas/review/pending${periodMonth ? `?periodMonth=${periodMonth}` : ""}`),
+    reviewResponse: (id: number, status: "approved" | "contested", note?: string) =>
+      req(`/rotinas/responses/${id}/review`, { method: "POST", body: JSON.stringify({ status, note }) }),
+    reviewUrgentBypass: (id: number, status: "approved" | "contested", note?: string) =>
+      req(`/rotinas/urgent-bypasses/${id}/review`, { method: "POST", body: JSON.stringify({ status, note }) }),
+    approveClosure: (id: number) => req<RoutineClosure>(`/rotinas/closures/${id}/approve`, { method: "POST" }),
     urgentBypass: (id: number) => req<{ ok: boolean; bypassUntil: string }>(`/rotinas/checklists/${id}/urgent-bypass`, { method: "POST" }),
   },
   tradeIn: {
