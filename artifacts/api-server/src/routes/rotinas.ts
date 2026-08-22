@@ -39,6 +39,9 @@ export const VALID_NO_REASONS = [
 // Valor que conta como "resposta negativa" por tipo de pergunta — só esses
 // tipos disparam a justificativa estruturada.
 const NEGATIVE_ANSWER: Record<string, string> = { yes_no: "Não", done_not_done: "Não executado" };
+// Padrão invertido — pergunta onde a pendência dispara na resposta
+// POSITIVA (ex.: "Encontrou alguma irregularidade?" → Sim exige motivo).
+const POSITIVE_ANSWER: Record<string, string> = { yes_no: "Sim", done_not_done: "Executado" };
 
 // ── Evidência (Fase 4) — mesmo padrão de documents.ts: disco + UUID +
 // validação de magic-bytes, separado da biblioteca geral de Documentos
@@ -101,14 +104,14 @@ async function processEvidence(
 type QuestionInput = {
   label?: unknown; type?: unknown; required?: unknown;
   requiresEvidence?: unknown; evidenceType?: unknown;
-  requiresJustificationOnNo?: unknown; alertLevel?: unknown;
+  requiresJustificationOnNo?: unknown; requiresJustificationOnYes?: unknown; alertLevel?: unknown;
 };
 type ScopeInput = {
   storeId?: unknown; sectorId?: unknown; jobFunction?: unknown; userId?: unknown;
 };
 type SanitizedQuestion = {
   label: string; type: string; required: boolean; requiresEvidence: boolean; evidenceType: string | null;
-  requiresJustificationOnNo: boolean; alertLevel: string | null;
+  requiresJustificationOnNo: boolean; requiresJustificationOnYes: boolean; alertLevel: string | null;
 };
 type SanitizedScope = { storeId: number | null; sectorId: number | null; jobFunction: string | null; userId: number | null };
 
@@ -125,8 +128,11 @@ function sanitizeQuestions(input: unknown): SanitizedQuestion[] | null {
       evidenceType = typeof raw?.evidenceType === "string" && VALID_EVIDENCE_TYPES.includes(raw.evidenceType) ? raw.evidenceType : "photo";
     }
     const requiresJustificationOnNo = raw?.requiresJustificationOnNo === true && type in NEGATIVE_ANSWER;
+    // Padrão invertido — nunca os dois juntos na mesma pergunta; "No" ganha
+    // se por algum motivo vier os dois marcados.
+    const requiresJustificationOnYes = raw?.requiresJustificationOnYes === true && type in POSITIVE_ANSWER && !requiresJustificationOnNo;
     const alertLevel = typeof raw?.alertLevel === "string" && VALID_ALERT_LEVELS.includes(raw.alertLevel) ? raw.alertLevel : null;
-    out.push({ label, type, required: raw?.required !== false, requiresEvidence, evidenceType, requiresJustificationOnNo, alertLevel });
+    out.push({ label, type, required: raw?.required !== false, requiresEvidence, evidenceType, requiresJustificationOnNo, requiresJustificationOnYes, alertLevel });
   }
   return out;
 }
@@ -425,7 +431,7 @@ router.get("/rotinas/pending", requireAuth, requireModule("rotinas"), async (req
     id: p.id, name: p.name, message: p.message, mandatory: p.mandatory, periodKey: p.periodKey,
     questions: p.questions.map((q) => ({
       id: q.id, label: q.label, type: q.type, required: q.required, requiresEvidence: q.requiresEvidence, evidenceType: q.evidenceType,
-      requiresJustificationOnNo: q.requiresJustificationOnNo, alertLevel: q.alertLevel,
+      requiresJustificationOnNo: q.requiresJustificationOnNo, requiresJustificationOnYes: q.requiresJustificationOnYes, alertLevel: q.alertLevel,
     })),
   })));
 });
@@ -453,13 +459,16 @@ router.post("/rotinas/checklists/:id/respond", requireAuth, requireModule("rotin
     const rawVal = raw[q.id];
     // Justificativa estruturada: { value, motivo, pendencia?, comunicarA? }.
     // Só é aceita/exigida quando a pergunta marca requiresJustificationOnNo
-    // e o valor bate com a resposta negativa do tipo dela.
+    // (valor bate com a resposta negativa) OU requiresJustificationOnYes
+    // (padrão invertido — valor bate com a resposta positiva).
     let value = "";
     let justification: RoutineNoJustification | null = null;
     if (rawVal && typeof rawVal === "object") {
       const j = rawVal as Record<string, unknown>;
       value = typeof j.value === "string" ? j.value.trim().slice(0, 1000) : "";
-      if (q.requiresJustificationOnNo && value === NEGATIVE_ANSWER[q.type]) {
+      const triggersJustification = (q.requiresJustificationOnNo && value === NEGATIVE_ANSWER[q.type])
+        || (q.requiresJustificationOnYes && value === POSITIVE_ANSWER[q.type]);
+      if (triggersJustification) {
         const motivo = typeof j.motivo === "string" && VALID_NO_REASONS.includes(j.motivo) ? j.motivo : "";
         if (!motivo) { res.status(400).json({ error: `Informe o motivo em: "${q.label}"` }); return; }
         justification = {
@@ -499,7 +508,7 @@ router.post("/rotinas/checklists/:id/respond", requireAuth, requireModule("rotin
       tenantId, checklistId: id, userId, periodKey: target.periodKey, answers,
       questionsSnapshot: target.questions.map((q) => ({
         id: q.id, label: q.label, type: q.type, required: q.required, requiresEvidence: q.requiresEvidence, evidenceType: q.evidenceType,
-        requiresJustificationOnNo: q.requiresJustificationOnNo, alertLevel: q.alertLevel,
+        requiresJustificationOnNo: q.requiresJustificationOnNo, requiresJustificationOnYes: q.requiresJustificationOnYes, alertLevel: q.alertLevel,
       })),
       reauthAt: new Date(),
       deviceInfo: (req.headers["user-agent"] as string | undefined)?.slice(0, 300) ?? null,
@@ -1045,6 +1054,50 @@ router.post("/rotinas/alerts/:id/read", requireAuth, requireModule("rotinas"), a
 router.post("/rotinas/alerts/run", requireModuleAccess("rotinas"), async (req, res): Promise<void> => {
   const created = await generateRoutineAlerts();
   res.json({ ok: true, created });
+});
+
+// ── TEMPORÁRIO — autorizado em conversa pra testar fechamento mensal
+// (Fase 5/6) com dados retroativos de julho, já que respond() sempre grava
+// "hoje" e não existe outro jeito de simular histórico sem isso. REMOVER
+// depois do teste (não faz parte do escopo permanente do módulo). ──
+router.post("/rotinas/dev-seed", requireModuleAccess("rotinas"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const at = typeof b.at === "string" ? new Date(b.at) : null;
+  if (!at || isNaN(at.getTime())) { res.status(400).json({ error: "Informe 'at' (ISO datetime) válido" }); return; }
+
+  if (b.type === "response") {
+    const checklistId = Number(b.checklistId);
+    const userId = Number(b.userId);
+    const periodKey = typeof b.periodKey === "string" ? b.periodKey : "";
+    if (!checklistId || !userId || !periodKey) { res.status(400).json({ error: "checklistId, userId e periodKey são obrigatórios" }); return; }
+    const checklist = await loadChecklistFull(tenantId, checklistId);
+    if (!checklist) { res.status(404).json({ error: "Checklist não encontrado" }); return; }
+    const answers = (b.answers && typeof b.answers === "object" ? b.answers : {}) as Record<string, string | RoutineNoJustification>;
+    try {
+      const [saved] = await db.insert(routineResponsesTable).values({
+        tenantId, checklistId, userId, periodKey, answers,
+        questionsSnapshot: checklist.questions.map((q) => ({
+          id: q.id, label: q.label, type: q.type, required: q.required, requiresEvidence: q.requiresEvidence, evidenceType: q.evidenceType,
+          requiresJustificationOnNo: q.requiresJustificationOnNo, requiresJustificationOnYes: q.requiresJustificationOnYes, alertLevel: q.alertLevel,
+        })),
+        reauthAt: at, deviceInfo: "dev-seed (teste manual)",
+        respondedRelativeToPonto: typeof b.respondedRelativeToPonto === "string" ? b.respondedRelativeToPonto : null,
+        createdAt: at,
+      }).returning();
+      res.status(201).json(saved);
+    } catch {
+      res.status(409).json({ error: "Já existe resposta desse checklist/usuário/período" });
+    }
+  } else if (b.type === "urgent_bypass") {
+    const checklistId = Number(b.checklistId);
+    const userId = Number(b.userId);
+    if (!checklistId || !userId) { res.status(400).json({ error: "checklistId e userId são obrigatórios" }); return; }
+    const [saved] = await db.insert(routineUrgentBypassesTable).values({ tenantId, checklistId, userId, createdAt: at }).returning();
+    res.status(201).json(saved);
+  } else {
+    res.status(400).json({ error: "type inválido (use 'response' ou 'urgent_bypass')" });
+  }
 });
 
 export default router;

@@ -5,7 +5,7 @@ import { usersTable } from "./users";
 
 export type RoutineQuestionSnapshot = {
   id: number; label: string; type: string; required: boolean; requiresEvidence: boolean; evidenceType: string | null;
-  requiresJustificationOnNo: boolean; alertLevel: string | null;
+  requiresJustificationOnNo: boolean; requiresJustificationOnYes: boolean; alertLevel: string | null;
 };
 
 // Fase 3.5: resposta "Não" em pergunta marcada requiresJustificationOnNo
@@ -63,6 +63,11 @@ export const routineChecklistQuestionsTable = pgTable("routine_checklist_questio
   // Fase 3.5: resposta negativa ("Não" / "Não executado") passa a exigir
   // motivo (lista fixa) + pendência + quem comunicar, ver rotinas.ts.
   requiresJustificationOnNo: boolean("requires_justification_on_no").notNull().default(false),
+  // Padrão invertido (perguntas do tipo "Encontrou alguma irregularidade?"):
+  // a pendência dispara na resposta POSITIVA, não na negativa. Mesmo fluxo
+  // de justificativa de requiresJustificationOnNo, só que no gatilho oposto
+  // — nunca os dois juntos na mesma pergunta (validado em sanitizeQuestions).
+  requiresJustificationOnYes: boolean("requires_justification_on_yes").notNull().default(false),
   // "critico" | "atencao" | null — mapeamento pro motor de alerta da Fase 7,
   // só o desenho por enquanto (sem entrega de notificação ainda).
   alertLevel: text("alert_level"),
