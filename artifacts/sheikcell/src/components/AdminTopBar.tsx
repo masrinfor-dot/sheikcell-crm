@@ -68,7 +68,7 @@ export default function AdminTopBar({ groups, tab, setTab, internalChatUnread }:
   groups: TopBarGroup[]; tab: string; setTab: (id: string) => void; internalChatUnread: number;
 }) {
   return (
-    <div className="hidden md:flex items-center gap-1 bg-white border-b border-border sticky top-14 z-20 px-4 h-12 overflow-x-auto">
+    <div className="hidden md:flex items-center gap-1 bg-white border-b border-border sticky top-14 z-20 px-4 min-h-12 py-1 flex-wrap">
       <LayoutGrid className="w-4 h-4 text-muted-foreground shrink-0 mr-1" />
       {groups.map((group) => (
         group.tabs.length ? (
