@@ -36,13 +36,14 @@ import SystemBoard from "./SystemBoard";
 import ConfiguracoesAparencia from "./ConfiguracoesAparencia";
 import ConfiguracoesIntegracoes from "./ConfiguracoesIntegracoes";
 import BrandLogo from "@/components/BrandLogo";
+import AdminTopBar from "@/components/AdminTopBar";
 import {
   Smartphone, LogOut, LayoutDashboard, ClipboardList,
   Settings, Users, RefreshCw, Plus, X, Clock, CheckCircle,
   PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck,
   AlertTriangle, WifiOff,
   FolderArchive, Headphones, ShoppingBag, BarChart3, SlidersHorizontal, Palette, ChevronDown, Wrench,
-  ArrowRight, Filter, BookUser, LifeBuoy, FileBarChart2, Plug, Tv, ListChecks,
+  ArrowRight, Filter, BookUser, LifeBuoy, FileBarChart2, Plug, Tv, ListChecks, PanelTop,
 } from "lucide-react";
 import Resultados from "./Resultados";
 import Relatorios from "./Relatorios";
@@ -388,6 +389,25 @@ export default function AdminDashboard() {
   const isSupervisor = user?.role === "supervisor";
   const [showMoreNav, setShowMoreNav] = useState(false);
 
+  // Redesign de layout (Fase 1, preview) — barra superior nova convivendo
+  // com a sidebar antiga, atrás de flag. `?nav=preview` na URL liga uma vez
+  // e fica lembrado (localStorage); o botão no navbar alterna e persiste.
+  // Só afeta admin/supervisor (AdminDashboard) — AttendantDashboard não
+  // muda nesta rodada.
+  const [navPreview, setNavPreview] = useState(() => {
+    try {
+      if (new URLSearchParams(window.location.search).get("nav") === "preview") return true;
+      return localStorage.getItem("sheikcell:nav-preview") === "1";
+    } catch { return false; }
+  });
+  const toggleNavPreview = () => {
+    setNavPreview((prev) => {
+      const next = !prev;
+      try { localStorage.setItem("sheikcell:nav-preview", next ? "1" : "0"); } catch { /* silent */ }
+      return next;
+    });
+  };
+
   // Categorias do menu lateral colapsadas pelo admin — lembradas no navegador.
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>(() => {
     try {
@@ -484,6 +504,14 @@ export default function AdminDashboard() {
   const mobilePrimaryTabs = tabs.slice(0, 4);
   const mobileMoreTabs = tabs.slice(4);
 
+  // Barra superior nova (Fase 1, preview) — mesmos TAB_GROUPS/tabs já
+  // filtrados por permissão acima, só resolvidos pro formato que
+  // AdminTopBar espera. Nenhuma lógica de permissão nova.
+  const topBarGroups = TAB_GROUPS.map((group) => ({
+    key: group.key, label: group.label, icon: group.icon,
+    tabs: group.tabIds.map((id) => tabs.find((t) => t.id === id)).filter((t): t is typeof tabs[number] => !!t),
+  }));
+
   return (
     <div className="min-h-screen bg-background">
       {/* Navbar */}
@@ -491,6 +519,13 @@ export default function AdminDashboard() {
         <div className="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
           <BrandLogo subtitle={isAdmin ? "— Administrador" : isSupervisor ? "— Supervisor" : undefined} />
           <div className="flex items-center gap-3">
+            <button onClick={toggleNavPreview} data-testid="button-toggle-nav-preview"
+              title={navPreview ? "Voltar pro menu lateral" : "Prévia: barra superior nova (redesign)"}
+              className={`hidden md:flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1.5 rounded-full border transition ${
+                navPreview ? "bg-primary/10 text-primary border-primary/30" : "text-muted-foreground border-border hover:bg-secondary"
+              }`}>
+              <PanelTop className="w-3.5 h-3.5" /> {navPreview ? "Prévia: barra superior" : "Prévia do novo menu"}
+            </button>
             <span className="text-xs text-muted-foreground hidden sm:block">{user?.name}</span>
             <button onClick={() => setShowChangePassword(true)} data-testid="button-change-password"
               className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition">
@@ -524,9 +559,14 @@ export default function AdminDashboard() {
       <TrainingGate />
       <RoutineChecklistGate />
 
+      {navPreview && (
+        <AdminTopBar groups={topBarGroups} tab={tab} setTab={(id) => setTab(id as Tab)} internalChatUnread={internalChatUnread} />
+      )}
+
       {/* Left sidebar + content */}
       <div className="flex">
-        {/* Sidebar tabs */}
+        {/* Sidebar tabs — escondida na prévia da barra superior (Fase 1 do redesign) */}
+        {!navPreview && (
         <aside className="hidden md:block w-56 shrink-0 border-r border-border bg-white sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3">
           <div className="flex flex-col gap-3">
             {TAB_GROUPS.map((group) => {
@@ -566,6 +606,7 @@ export default function AdminDashboard() {
             })}
           </div>
         </aside>
+        )}
 
         {/* Content */}
         <div className="flex-1 min-w-0 pb-[calc(3.5rem+env(safe-area-inset-bottom))] md:pb-0">
