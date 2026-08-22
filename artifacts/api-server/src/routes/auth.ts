@@ -97,6 +97,7 @@ router.post("/auth/login", async (req, res): Promise<void> => {
   req.session.userRole = user.role;
   req.session.tenantId = user.role === "superadmin" ? undefined : user.tenantId;
   req.session.userSectorId = user.sectorId ?? undefined;
+  req.session.userStoreId = user.storeId ?? undefined;
   req.session.userName = user.name;
   req.session.allowedSessionKeys = user.role === "vendedor" ? (user.allowedSessionKeys ?? null) : null;
   // Login "de verdade" encerra qualquer impersonação que sobrou na sessão.
@@ -331,6 +332,7 @@ router.post("/auth/stop-impersonation", requireAuth, async (req, res): Promise<v
   req.session.userRole = superadmin.role;
   req.session.tenantId = undefined;
   req.session.userSectorId = superadmin.sectorId ?? undefined;
+  req.session.userStoreId = undefined;
   req.session.userName = superadmin.name;
   req.session.accessHours = null;
   req.session.impersonatorId = undefined;

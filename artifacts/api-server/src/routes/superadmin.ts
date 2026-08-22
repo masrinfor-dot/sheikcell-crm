@@ -240,6 +240,7 @@ router.post("/superadmin/tenants/:tenantId/impersonate/:userId", async (req, res
   req.session.userRole = target.role;
   req.session.tenantId = target.tenantId;
   req.session.userSectorId = target.sectorId ?? undefined;
+  req.session.userStoreId = target.storeId ?? undefined;
   req.session.userName = target.name;
   req.session.accessHours = null;
   req.session.allowedSessionKeys = null;

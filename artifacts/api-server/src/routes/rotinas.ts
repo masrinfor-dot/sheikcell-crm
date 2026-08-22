@@ -544,11 +544,13 @@ router.get("/rotinas/checklists/:id/responses", requireAuth, async (req, res): P
     .limit(500);
 
   const role = req.session.userRole;
-  const ownSectorId = req.session.userSectorId;
+  // Fase 6: supervisor (gerente de loja) escopado por LOJA, não setor — uma
+  // loja pode ter vários setores, e o gerente supervisiona a loja inteira.
+  const ownStoreId = req.session.userStoreId;
   const visible = role === "admin"
     ? rows
     : role === "supervisor"
-      ? rows.filter((r) => r.userId === req.session.userId || (ownSectorId != null && r.userSectorId === ownSectorId))
+      ? rows.filter((r) => r.userId === req.session.userId || (ownStoreId != null && r.userStoreId === ownStoreId))
       : rows.filter((r) => r.userId === req.session.userId);
 
   // Evidência (Fase 4) por resposta — só metadado + id (o arquivo em si sai
@@ -567,7 +569,7 @@ router.get("/rotinas/checklists/:id/responses", requireAuth, async (req, res): P
     evidenceByResponse.set(e.responseId, [...(evidenceByResponse.get(e.responseId) ?? []), e]);
   }
 
-  res.json(visible.map(({ userSectorId: _userSectorId, ...r }) => ({ ...r, evidence: evidenceByResponse.get(r.id) ?? [] })));
+  res.json(visible.map(({ userSectorId: _userSectorId, userStoreId: _userStoreId, ...r }) => ({ ...r, evidence: evidenceByResponse.get(r.id) ?? [] })));
 });
 
 // ── Baixar/visualizar evidência (Fase 4) — mesmo controle de acesso 3
@@ -581,7 +583,7 @@ router.get("/rotinas/evidence/:id/file", requireAuth, async (req: Request, res: 
   const [row] = await db.select({
     fileName: routineResponseEvidenceTable.fileName, storedName: routineResponseEvidenceTable.storedName,
     mimeType: routineResponseEvidenceTable.mimeType, responseUserId: routineResponsesTable.userId,
-    responseUserSectorId: usersTable.sectorId,
+    responseUserStoreId: usersTable.storeId,
   })
     .from(routineResponseEvidenceTable)
     .innerJoin(routineResponsesTable, eq(routineResponseEvidenceTable.responseId, routineResponsesTable.id))
@@ -590,10 +592,10 @@ router.get("/rotinas/evidence/:id/file", requireAuth, async (req: Request, res: 
   if (!row) { res.status(404).json({ error: "Evidência não encontrada" }); return; }
 
   const role = req.session.userRole;
-  const ownSectorId = req.session.userSectorId;
+  const ownStoreId = req.session.userStoreId;
   const allowed = role === "admin"
     || row.responseUserId === req.session.userId
-    || (role === "supervisor" && ownSectorId != null && row.responseUserSectorId === ownSectorId);
+    || (role === "supervisor" && ownStoreId != null && row.responseUserStoreId === ownStoreId);
   if (!allowed) { res.status(403).json({ error: "Sem acesso a esta evidência" }); return; }
 
   const filepath = path.join(EVIDENCE_DIR, path.basename(row.storedName));
@@ -804,17 +806,16 @@ router.get("/rotinas/ranking", requireModuleAccess("rotinas"), async (req, res):
 
 // ── Aprovação do supervisor (Fase 6) — revisa pendência/urgência antes do
 // fechamento do mês contar "de verdade" no ranking. Escopo: admin vê tudo,
-// supervisor só o setor dele (mesmo padrão 3 camadas do resto do módulo —
-// a sessão só carrega setor, não loja, então "loja" aqui é aproximado pelo
-// setor do funcionário, consistente com o resto de Rotinas). ──
+// supervisor (gerente de loja) só a loja dele — usersTable.storeId,
+// carregado na sessão no login (ver session.d.ts). ──
 async function assertReviewAccess(req: Request, res: Response, targetUserId: number): Promise<boolean> {
   if (req.session.userRole === "admin") return true;
   if (req.session.userRole !== "supervisor") { res.status(403).json({ error: "Sem permissão pra revisar" }); return false; }
   const tenantId = tenantIdOf(req)!;
-  const [target] = await db.select({ sectorId: usersTable.sectorId }).from(usersTable)
+  const [target] = await db.select({ storeId: usersTable.storeId }).from(usersTable)
     .where(and(eq(usersTable.id, targetUserId), eq(usersTable.tenantId, tenantId)));
-  if (!target || target.sectorId == null || target.sectorId !== req.session.userSectorId) {
-    res.status(403).json({ error: "Sem permissão pra revisar funcionário de outro setor" }); return false;
+  if (!target || target.storeId == null || target.storeId !== req.session.userStoreId) {
+    res.status(403).json({ error: "Sem permissão pra revisar funcionário de outra loja" }); return false;
   }
   return true;
 }
@@ -859,15 +860,15 @@ router.post("/rotinas/urgent-bypasses/:id/review", requireAdminOrSupervisor, asy
   res.json(updated);
 });
 
-// Lista o que falta revisar num mês (admin vê tudo, supervisor só o setor
+// Lista o que falta revisar num mês (admin vê tudo, supervisor só a loja
 // dele) — alimenta a tela de aprovação antes de POST /closures/:id/approve.
 router.get("/rotinas/review/pending", requireAdminOrSupervisor, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const periodMonth = typeof req.query.periodMonth === "string" && /^\d{4}-\d{2}$/.test(req.query.periodMonth) ? req.query.periodMonth : previousMonthKey(new Date());
-  const sectorScope = req.session.userRole === "supervisor" ? req.session.userSectorId : undefined;
+  const storeScope = req.session.userRole === "supervisor" ? req.session.userStoreId : undefined;
 
   const pendencyRows = await db.select({
-    id: routineResponsesTable.id, userId: routineResponsesTable.userId, userName: usersTable.name, sectorId: usersTable.sectorId,
+    id: routineResponsesTable.id, userId: routineResponsesTable.userId, userName: usersTable.name, storeId: usersTable.storeId,
     periodKey: routineResponsesTable.periodKey, answers: routineResponsesTable.answers,
     reviewStatus: routineResponsesTable.pendencyReviewStatus,
   })
@@ -880,14 +881,14 @@ router.get("/rotinas/review/pending", requireAdminOrSupervisor, async (req, res)
   const pendencies = pendencyRows.filter((r) =>
     Object.values(r.answers).some((v) => typeof v === "object" && !!v.pendencia)
     && r.reviewStatus == null
-    && (sectorScope == null || r.sectorId === sectorScope),
+    && (storeScope == null || r.storeId === storeScope),
   );
 
   const monthStart = new Date(`${periodMonth}-01T00:00:00-03:00`);
   const [y, m] = periodMonth.split("-").map(Number);
   const monthEnd = new Date(`${periodMonth}-${String(new Date(y!, m!, 0).getDate()).padStart(2, "0")}T23:59:59-03:00`);
   const bypassRows = await db.select({
-    id: routineUrgentBypassesTable.id, userId: routineUrgentBypassesTable.userId, userName: usersTable.name, sectorId: usersTable.sectorId,
+    id: routineUrgentBypassesTable.id, userId: routineUrgentBypassesTable.userId, userName: usersTable.name, storeId: usersTable.storeId,
     createdAt: routineUrgentBypassesTable.createdAt, reviewStatus: routineUrgentBypassesTable.reviewStatus,
   })
     .from(routineUrgentBypassesTable)
@@ -896,12 +897,12 @@ router.get("/rotinas/review/pending", requireAdminOrSupervisor, async (req, res)
       eq(routineUrgentBypassesTable.tenantId, tenantId),
       gte(routineUrgentBypassesTable.createdAt, monthStart), lte(routineUrgentBypassesTable.createdAt, monthEnd),
     ));
-  const bypasses = bypassRows.filter((r) => r.reviewStatus == null && (sectorScope == null || r.sectorId === sectorScope));
+  const bypasses = bypassRows.filter((r) => r.reviewStatus == null && (storeScope == null || r.storeId === storeScope));
 
   res.json({
     periodMonth,
-    pendencies: pendencies.map(({ sectorId: _s, reviewStatus: _r, ...r }) => r),
-    urgentBypasses: bypasses.map(({ sectorId: _s, reviewStatus: _r, ...r }) => r),
+    pendencies: pendencies.map(({ storeId: _s, reviewStatus: _r, ...r }) => r),
+    urgentBypasses: bypasses.map(({ storeId: _s, reviewStatus: _r, ...r }) => r),
   });
 });
 

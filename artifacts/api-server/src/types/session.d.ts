@@ -8,6 +8,9 @@ declare module "express-session" {
     // Loja (tenant) do usuário. Superadmin não tem loja (undefined).
     tenantId: number | undefined;
     userSectorId: number | undefined;
+    // Loja (stores.id — loja física dentro do tenant, multi-loja). Usado
+    // pra escopar supervisor por loja (Fase 6 de Rotinas e Produtividade).
+    userStoreId: number | undefined;
     userName: string | undefined;
     // Horário de acesso do vendedor (null/undefined = sem restrição)
     accessHours: { start: string; end: string; days: number[] } | null | undefined;
