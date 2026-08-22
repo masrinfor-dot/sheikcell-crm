@@ -102,7 +102,7 @@ export type User = {
 export const OPTIONAL_MODULES = [
   "chat", "crm", "equipe", "financeiro", "diretorio", "tarefas", "resultados", "history",
   "avaliacao", "financeiras", "rh", "treinamentos", "questionarios", "sorteios", "documentos", "robo",
-  "relatorios", "tvbox",
+  "relatorios", "tvbox", "rotinas",
 ] as const;
 export type OptionalModule = typeof OPTIONAL_MODULES[number];
 
@@ -133,6 +133,7 @@ export const MODULE_LABELS: Record<OptionalModule, string> = {
   robo: "Robô",
   relatorios: "Relatórios",
   tvbox: "TV Box",
+  rotinas: "Rotinas e Produtividade",
 };
 // "Básico" = o conjunto padrão do CRM (o que antes era núcleo sempre ligado);
 // "Completo" = básico + todos os módulos de negócio adicionais.
@@ -523,6 +524,30 @@ export type PendingChecklist = {
 export type ChecklistResponse = {
   id: number; userId: number; userName: string | null;
   periodKey: string; answers: Record<string, string>; createdAt: string;
+};
+
+// Rotinas e Produtividade (RH) — checklists operacionais agendados,
+// separado de Checklist/Questionários acima (ver lib/db/src/schema/rotinas.ts).
+export type RoutineQuestionType = "yes_no" | "done_not_done" | "text" | "number" | "value" | "photo" | "document" | "observation";
+export type RoutineChecklistQuestion = {
+  id: number; checklistId: number; orderIndex: number; label: string;
+  type: RoutineQuestionType; required: boolean; requiresEvidence: boolean; evidenceType: "photo" | "document" | null;
+};
+export type RoutineChecklistScope = {
+  id: number; checklistId: number;
+  storeId: number | null; sectorId: number | null; jobFunction: string | null; userId: number | null;
+};
+export type RoutineRecurrence = "daily" | "weekdays" | "specific_days" | "weekly" | "monthly" | "specific_date";
+export type RoutineChecklist = {
+  id: number; name: string; message: string | null; scheduledTime: string;
+  recurrence: RoutineRecurrence; recurrenceDays: number[] | null; specificDate: string | null;
+  toleranceMinutes: number; mandatory: boolean; active: boolean; version: number;
+  createdByUserId: number | null; createdAt: string; updatedAt: string;
+  questionCount?: number; scopeCount?: number;
+};
+export type RoutineChecklistFull = RoutineChecklist & { questions: RoutineChecklistQuestion[]; scopes: RoutineChecklistScope[] };
+export type RoutineScopeOptions = {
+  stores: { id: number; name: string }[]; sectors: { id: number; name: string }[]; users: { id: number; name: string }[];
 };
 
 export type TradeInEvaluation = {
@@ -1227,6 +1252,15 @@ export const api = {
     update: (id: number, data: Partial<Checklist>) => req<Checklist>(`/checklists/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/checklists/${id}`, { method: "DELETE" }),
     responses: (id: number) => req<ChecklistResponse[]>(`/checklists/${id}/responses`),
+  },
+  rotinas: {
+    list: () => req<RoutineChecklist[]>("/rotinas/checklists"),
+    get: (id: number) => req<RoutineChecklistFull>(`/rotinas/checklists/${id}`),
+    create: (data: Partial<RoutineChecklistFull>) => req<RoutineChecklistFull>("/rotinas/checklists", { method: "POST", body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<RoutineChecklistFull>) => req<RoutineChecklistFull>(`/rotinas/checklists/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/rotinas/checklists/${id}`, { method: "DELETE" }),
+    jobFunctions: () => req<string[]>("/rotinas/job-functions"),
+    scopeOptions: () => req<RoutineScopeOptions>("/rotinas/scope-options"),
   },
   tradeIn: {
     list: () => req<TradeInEvaluation[]>("/trade-in"),

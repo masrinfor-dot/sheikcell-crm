@@ -31,6 +31,8 @@ import systemBoardRouter from "./systemBoard";
 import teamDirectoryRouter from "./teamDirectory";
 import ticketsRouter from "./tickets";
 import tvboxRouter from "./tvbox";
+import pdfRouter from "./pdf";
+import rotinasRouter from "./rotinas";
 
 const router: IRouter = Router();
 router.use(healthRouter);
@@ -69,5 +71,7 @@ router.use(systemBoardRouter);
 router.use(teamDirectoryRouter);
 router.use(ticketsRouter);
 router.use(tvboxRouter);
+router.use(pdfRouter);
+router.use(rotinasRouter);
 
 export default router;

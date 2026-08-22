@@ -3,6 +3,7 @@ export * from "./app_settings";
 export * from "./partner_links";
 export * from "./trade_in";
 export * from "./checklists";
+export * from "./rotinas";
 export * from "./trainings";
 export * from "./documents";
 export * from "./meetings";

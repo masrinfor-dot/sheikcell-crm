@@ -14,6 +14,7 @@ import ChatCenter from "./ChatCenter";
 import Financeiras from "./Financeiras";
 import Avaliacao from "./Avaliacao";
 import Questionarios from "./Questionarios";
+import RotinasProdutividade from "./RotinasProdutividade";
 import Treinamentos from "./Treinamentos";
 import Documentos from "./Documentos";
 import EquipeOnline from "@/components/EquipeOnline";
@@ -40,20 +41,20 @@ import {
   PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck,
   AlertTriangle, WifiOff,
   FolderArchive, Headphones, ShoppingBag, BarChart3, SlidersHorizontal, Palette, ChevronDown, Wrench,
-  ArrowRight, Filter, BookUser, LifeBuoy, FileBarChart2, Plug, Tv,
+  ArrowRight, Filter, BookUser, LifeBuoy, FileBarChart2, Plug, Tv, ListChecks,
 } from "lucide-react";
 import Resultados from "./Resultados";
 import Relatorios from "./Relatorios";
 import TvBox from "./TvBox";
 
-type Tab = "dashboard" | "resultados" | "relatorios" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "questionarios" | "treinamentos" | "documentos" | "rh" | "meuponto" | "sorteios" | "robo" | "financeiro" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "integracoes" | "sistema" | "diretorio" | "suporte" | "tvbox";
+type Tab = "dashboard" | "resultados" | "relatorios" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "questionarios" | "treinamentos" | "documentos" | "rh" | "meuponto" | "sorteios" | "robo" | "financeiro" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "integracoes" | "sistema" | "diretorio" | "suporte" | "tvbox" | "rotinas";
 
 // Categorias colapsáveis do menu lateral — cada aba pertence a um único grupo.
 type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabIds: Tab[] };
 const TAB_GROUPS: TabGroup[] = [
   { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["dashboard", "chat", "equipe", "crm"] },
   { key: "vendas", label: "Vendas e Serviços", icon: ShoppingBag, tabIds: ["avaliacao", "financeiras", "tvbox"] },
-  { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["resultados", "relatorios", "tarefas", "documentos", "history", "suporte"] },
+  { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["resultados", "relatorios", "tarefas", "documentos", "history", "suporte", "rotinas"] },
   { key: "pessoas", label: "Pessoas", icon: Users, tabIds: ["diretorio", "meuponto", "rh", "treinamentos", "questionarios", "sorteios", "users"] },
   { key: "administracao", label: "Administração", icon: Settings, tabIds: ["financeiro", "sectors", "quickreplies", "whatsapp", "robo"] },
   { key: "configuracoes", label: "Configurações", icon: SlidersHorizontal, tabIds: ["aparencia", "integracoes"] },
@@ -446,6 +447,7 @@ export default function AdminDashboard() {
     { id: "avaliacao" as Tab, label: "Avaliação de Usados", icon: BadgeDollarSign, adminOnly: false, module: "avaliacao" as OptionalModule },
     { id: "tvbox" as Tab, label: "TV Box", icon: Tv, adminOnly: false, module: "tvbox" as OptionalModule },
     { id: "questionarios" as Tab, label: "Questionários", icon: ClipboardList, adminOnly: true, module: "questionarios" as OptionalModule },
+    { id: "rotinas" as Tab, label: "Rotinas e Produtividade", icon: ListChecks, adminOnly: true, module: "rotinas" as OptionalModule },
     { id: "treinamentos" as Tab, label: "Treinamentos", icon: GraduationCap, adminOnly: false, module: "treinamentos" as OptionalModule },
     { id: "documentos" as Tab, label: "Documentos", icon: FolderArchive, adminOnly: false, module: "documentos" as OptionalModule },
     { id: "diretorio" as Tab, label: "Diretório", icon: BookUser, adminOnly: false, module: "diretorio" as OptionalModule },
@@ -785,6 +787,8 @@ export default function AdminDashboard() {
         {tab === "tvbox" && <TvBox />}
 
         {tab === "questionarios" && <Questionarios />}
+
+        {tab === "rotinas" && <RotinasProdutividade />}
 
         {tab === "treinamentos" && <Treinamentos />}
 
