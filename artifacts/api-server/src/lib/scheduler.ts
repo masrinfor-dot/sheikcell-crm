@@ -291,6 +291,12 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("./timeBankClosures").then((m) => m.closeMonthlyTimeBanks()).catch(() => {});
   }, 60 * 60_000);
+  // Fechamento mensal de Rotinas e Produtividade (Fase 5): mesmo gatilho do
+  // banco de horas acima — idempotente, então rodar de novo a cada hora é seguro.
+  void import("./routineClosures").then((m) => m.closeMonthlyRoutines()).catch(() => {});
+  setInterval(() => {
+    void import("./routineClosures").then((m) => m.closeMonthlyRoutines()).catch(() => {});
+  }, 60 * 60_000);
   // TV Box: garante as mensalidades do mês corrente (idempotente, mesmo
   // espírito da mensalidade das lojas acima) e dispara lembrete/cobrança.
   void import("./tvBoxBilling").then((m) => m.runTvBoxMonthlyBilling()).catch(() => {});

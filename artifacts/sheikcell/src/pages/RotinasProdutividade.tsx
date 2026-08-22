@@ -2,12 +2,12 @@ import { useState, useEffect } from "react";
 import {
   api, canEditModule,
   type RoutineChecklist, type RoutineChecklistFull, type RoutineChecklistQuestion, type RoutineChecklistScope,
-  type RoutineQuestionType, type RoutineRecurrence, type RoutineScopeOptions, type RoutineResponse,
+  type RoutineQuestionType, type RoutineRecurrence, type RoutineScopeOptions, type RoutineResponse, type RoutineClosure,
   type RoutineAlertLevel, type RoutineAnswerValue, ROUTINE_NO_REASONS,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
-import { ListChecks, Plus, X, Trash2, Pencil, CalendarClock, Users2, Bell, Eye, FolderOpen, ChevronRight, FileText, Image as ImageIcon } from "lucide-react";
+import { ListChecks, Plus, X, Trash2, Pencil, CalendarClock, Users2, Bell, Eye, FolderOpen, ChevronRight, FileText, Image as ImageIcon, BarChart3, Clock } from "lucide-react";
 
 const WEEKDAYS = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
 const RECURRENCE_LABELS: Record<RoutineRecurrence, string> = {
@@ -66,7 +66,7 @@ export default function RotinasProdutividade() {
   const [saving, setSaving] = useState(false);
   const [viewing, setViewing] = useState<RoutineChecklist | null>(null);
   const [responses, setResponses] = useState<RoutineResponse[]>([]);
-  const [mainTab, setMainTab] = useState<"checklists" | "documentos">("checklists");
+  const [mainTab, setMainTab] = useState<"checklists" | "documentos" | "relatorio">("checklists");
 
   const fetchLists = () => api.rotinas.list().then(setLists).catch(() => {}).finally(() => setLoading(false));
   useEffect(() => {
@@ -187,7 +187,7 @@ export default function RotinasProdutividade() {
       </div>
 
       <div className="flex gap-1.5 border-b border-border">
-        {([["checklists", "Checklists", ListChecks], ["documentos", "Documentos", FolderOpen]] as const).map(([v, label, Icon]) => (
+        {([["checklists", "Checklists", ListChecks], ["documentos", "Documentos", FolderOpen], ["relatorio", "Relatório Mensal", BarChart3]] as const).map(([v, label, Icon]) => (
           <button key={v} onClick={() => setMainTab(v)} data-testid={`tab-rotinas-${v}`}
             className={`flex items-center gap-1.5 px-3 py-2 text-xs font-semibold border-b-2 -mb-px transition ${
               mainTab === v ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
@@ -199,6 +199,8 @@ export default function RotinasProdutividade() {
 
       {mainTab === "documentos" ? (
         <RotinasDocumentos checklists={lists} />
+      ) : mainTab === "relatorio" ? (
+        <RotinasRelatorio employees={scopeOptions?.employees ?? []} canEdit={canEdit} />
       ) : (
       <>
       {!canEdit && (
@@ -617,6 +619,120 @@ function RotinasDocumentos({ checklists }: { checklists: RoutineChecklist[] }) {
                 <p className="text-[10px] text-muted-foreground truncate">{e.questionLabel} · {new Date(e.createdAt).toLocaleDateString("pt-BR")}</p>
               </div>
             </a>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Relatório Mensal (Fase 5): fechamento congelado por funcionário/mês —
+// leitura sobre routine_closures, mais o botão "Fechar mês" (admin) pra
+// gerar manualmente sem esperar o job automático. Só leitura, sem ranking
+// (isso é Fase 6) e sem nenhuma trava/penalidade — cruzamento com Ponto é
+// dado cru mesmo (pontoBeforeEntry/pontoAfterEntry/pontoNoRecord).
+function RotinasRelatorio({ employees, canEdit }: { employees: { id: number; name: string }[]; canEdit: boolean }) {
+  const { toast } = useToast();
+  const [employeeId, setEmployeeId] = useState<number | null>(null);
+  const [closures, setClosures] = useState<RoutineClosure[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [runMonth, setRunMonth] = useState("");
+  const [running, setRunning] = useState(false);
+
+  useEffect(() => {
+    if (employeeId == null) { setClosures([]); return; }
+    setLoading(true);
+    api.rotinas.closures(employeeId).then(setClosures).catch(() => {}).finally(() => setLoading(false));
+  }, [employeeId]);
+
+  const handleRun = async () => {
+    if (running) return;
+    setRunning(true);
+    try {
+      const r = await api.rotinas.runClosure(runMonth || undefined);
+      toast({ title: `Fechamento de ${r.month} gerado`, description: `${r.created} funcionário(s) fechado(s) agora (os já fechados foram ignorados).` });
+      if (employeeId != null) api.rotinas.closures(employeeId).then(setClosures).catch(() => {});
+    } catch (err) {
+      toast({ title: "Erro ao fechar mês", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const pct = (n: number, total: number) => (total === 0 ? "—" : `${Math.round((n / total) * 100)}%`);
+  const monthLabel = (m: string) => {
+    const [y, mo] = m.split("-");
+    const names = ["", "Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
+    return `${names[parseInt(mo ?? "0", 10)] ?? mo}/${y}`;
+  };
+
+  return (
+    <div className="space-y-4">
+      {canEdit && (
+        <div className="shk-card p-3 flex items-center gap-2 flex-wrap">
+          <Clock className="w-4 h-4 text-muted-foreground shrink-0" />
+          <p className="text-xs text-muted-foreground flex-1 min-w-[200px]">
+            Fecha automaticamente todo início de mês (mês anterior). Pra fechar um mês específico agora (ex.: testar):
+          </p>
+          <input type="month" value={runMonth} onChange={(e) => setRunMonth(e.target.value)}
+            data-testid="input-closure-month"
+            className="px-2 py-1.5 rounded-lg border border-border text-xs" />
+          <button onClick={handleRun} disabled={running} data-testid="button-run-closure"
+            className="px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold disabled:opacity-40">
+            {running ? "Fechando..." : "Fechar mês"}
+          </button>
+        </div>
+      )}
+
+      <div>
+        <label className="text-xs font-medium mb-1 block">Funcionário</label>
+        <select value={employeeId ?? ""} onChange={(e) => setEmployeeId(e.target.value ? parseInt(e.target.value, 10) : null)}
+          data-testid="select-closure-employee"
+          className="w-full sm:w-72 px-3 py-2 rounded-xl border border-border text-sm bg-white">
+          <option value="">Selecione um funcionário...</option>
+          {employees.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+        </select>
+      </div>
+
+      {employeeId == null ? (
+        <p className="text-xs text-muted-foreground">Escolha um funcionário pra ver o histórico mensal.</p>
+      ) : loading ? (
+        <div className="h-24 rounded-xl bg-secondary/40 animate-pulse" />
+      ) : closures.length === 0 ? (
+        <p className="text-xs text-muted-foreground">Nenhum mês fechado ainda pra esse funcionário.</p>
+      ) : (
+        <div className="space-y-2">
+          {closures.map((c) => (
+            <div key={c.id} className="shk-card p-4" data-testid={`closure-${c.id}`}>
+              <p className="text-sm font-bold mb-2">{monthLabel(c.periodMonth)}</p>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                <div>
+                  <p className="text-muted-foreground">Respondidos no prazo</p>
+                  <p className="font-bold text-sm">{pct(c.totalOnTime, c.totalDue)} <span className="font-normal text-muted-foreground">({c.totalOnTime}/{c.totalDue})</span></p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground">Respondidos (total)</p>
+                  <p className="font-bold text-sm">{pct(c.totalAnswered, c.totalDue)} <span className="font-normal text-muted-foreground">({c.totalAnswered}/{c.totalDue})</span></p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground">Pendências</p>
+                  <p className="font-bold text-sm">{c.totalWithPendency}</p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground">Atendimentos urgentes</p>
+                  <p className="font-bold text-sm">{c.totalUrgentBypass}</p>
+                </div>
+              </div>
+              <div className="mt-3 pt-3 border-t border-border">
+                <p className="text-[11px] text-muted-foreground mb-1">Cruzamento com o Ponto (checklists de horário fixo)</p>
+                <div className="flex gap-3 text-xs flex-wrap">
+                  <span>Antes da entrada: <span className="font-semibold">{c.pontoBeforeEntry}</span></span>
+                  <span>Depois da entrada: <span className="font-semibold">{c.pontoAfterEntry}</span></span>
+                  <span>Sem registro de Ponto no dia: <span className="font-semibold">{c.pontoNoRecord}</span></span>
+                </div>
+              </div>
+              <p className="text-[10px] text-muted-foreground mt-2">Fechado em {new Date(c.closedAt).toLocaleString("pt-BR")}</p>
+            </div>
           ))}
         </div>
       )}

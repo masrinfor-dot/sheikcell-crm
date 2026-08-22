@@ -564,6 +564,15 @@ export type RoutineChecklist = {
 export type RoutineChecklistFull = RoutineChecklist & { questions: RoutineChecklistQuestion[]; scopes: RoutineChecklistScope[] };
 export type RoutineScopeOptions = {
   stores: { id: number; name: string }[]; sectors: { id: number; name: string }[]; users: { id: number; name: string }[];
+  employees: { id: number; name: string }[];
+};
+// Fechamento mensal (Fase 5) — snapshot congelado, mesmo padrão de
+// TimeBankClosure (rh_dp.ts).
+export type RoutineClosure = {
+  id: number; employeeId: number; employeeName: string; periodMonth: string;
+  totalDue: number; totalAnswered: number; totalOnTime: number; totalWithPendency: number; totalUrgentBypass: number;
+  pontoBeforeEntry: number; pontoAfterEntry: number; pontoNoRecord: number;
+  closedAt: string;
 };
 // Checklist "devido agora" pro usuário logado (Fase 2) — versão enxuta de
 // RoutineChecklistQuestion, só o que o modal de resposta precisa mostrar.
@@ -1312,6 +1321,9 @@ export const api = {
       req<{ id: number }>(`/rotinas/checklists/${id}/respond`, { method: "POST", body: JSON.stringify({ answers, evidence }) }),
     responses: (id: number) => req<RoutineResponse[]>(`/rotinas/checklists/${id}/responses`),
     evidenceFileUrl: (evidenceId: number) => `${API_BASE}/rotinas/evidence/${evidenceId}/file`,
+    closures: (employeeId?: number) => req<RoutineClosure[]>(`/rotinas/closures${employeeId ? `?employeeId=${employeeId}` : ""}`),
+    runClosure: (month?: string) => req<{ ok: boolean; month: string; created: number }>("/rotinas/closures/run", { method: "POST", body: JSON.stringify({ month }) }),
+    removeClosure: (id: number) => req<{ ok: boolean }>(`/rotinas/closures/${id}`, { method: "DELETE" }),
     urgentBypass: (id: number) => req<{ ok: boolean; bypassUntil: string }>(`/rotinas/checklists/${id}/urgent-bypass`, { method: "POST" }),
   },
   tradeIn: {

@@ -1,14 +1,16 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import {
   db, routineChecklistsTable, routineChecklistQuestionsTable, routineChecklistScopesTable,
-  routineResponsesTable, routineUrgentBypassesTable, routineResponseEvidenceTable,
-  employeesTable, storesTable, sectorsTable, usersTable, leaveRecordsTable,
+  routineResponsesTable, routineUrgentBypassesTable, routineResponseEvidenceTable, routineClosuresTable,
+  employeesTable, storesTable, sectorsTable, usersTable,
   type RoutineChecklist, type RoutineChecklistQuestion, type RoutineChecklistScope, type RoutineNoJustification,
 } from "@workspace/db";
-import { eq, and, desc, asc, isNotNull, lte, gte, inArray } from "drizzle-orm";
+import { eq, and, desc, asc, isNotNull, inArray } from "drizzle-orm";
 import { requireAuth, requireTenant, requireModule, tenantIdOf } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import { isPasswordRecentlyVerified, clearPasswordVerified } from "./auth";
+import { todayInfo, isDueToday, resolveUserContext, scopeMatchesUser, isOnLeaveToday, computePontoRelative } from "../lib/routinesShared";
+import { generateRoutineClosuresForMonth, previousMonthKey, currentMonthKey } from "../lib/routineClosures";
 import path from "path";
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
@@ -355,84 +357,21 @@ router.get("/rotinas/job-functions", requireModuleAccess("rotinas"), async (req,
 
 router.get("/rotinas/scope-options", requireModuleAccess("rotinas"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const [stores, sectors, users] = await Promise.all([
+  const [stores, sectors, users, employees] = await Promise.all([
     db.select({ id: storesTable.id, name: storesTable.name }).from(storesTable).where(eq(storesTable.tenantId, tenantId)),
     db.select({ id: sectorsTable.id, name: sectorsTable.name }).from(sectorsTable).where(eq(sectorsTable.tenantId, tenantId)),
     db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable).where(eq(usersTable.tenantId, tenantId)),
+    // Fase 5: relatório mensal é por employeeId (Ponto), não userId — só
+    // quem tem login vinculado pode ter respondido algum checklist.
+    db.select({ id: employeesTable.id, name: employeesTable.name }).from(employeesTable)
+      .where(and(eq(employeesTable.tenantId, tenantId), isNotNull(employeesTable.userId))),
   ]);
-  res.json({ stores, sectors, users });
+  res.json({ stores, sectors, users, employees });
 });
 
 // ── Devido agora (resolução pro usuário logado) ────────────────────────────
-
-function todayInfo(): { dateKey: string; weekday: number; dayOfMonth: number; nowMinutes: number } {
-  const now = new Date();
-  const dateKey = now.toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
-  const weekdayName = now.toLocaleDateString("en-US", { timeZone: "America/Sao_Paulo", weekday: "short" });
-  const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(weekdayName);
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Sao_Paulo", hour12: false, hour: "2-digit", minute: "2-digit", day: "2-digit",
-  }).formatToParts(now);
-  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "0";
-  let hh = parseInt(get("hour"), 10);
-  if (hh === 24) hh = 0; // quirk do Intl: meia-noite às vezes vem como "24"
-  const nowMinutes = hh * 60 + parseInt(get("minute"), 10);
-  const dayOfMonth = parseInt(get("day"), 10);
-  return { dateKey, weekday, dayOfMonth, nowMinutes };
-}
-
-// Devido hoje (dia certo pra recorrência) — fica pendente pro resto do dia
-// até responder, mesmo espírito de checklists.ts (não "expira" sozinho).
-function isDueToday(c: RoutineChecklist, info: ReturnType<typeof todayInfo>): boolean {
-  switch (c.recurrence) {
-    case "daily": return true;
-    // Contínuo: mesmo padrão de dias do "daily" — todo dia, sem horário fixo
-    // (a diferença de "daily" está no filtro de horário em getPendingRoutines).
-    case "continuous": return true;
-    case "weekdays": return info.weekday >= 1 && info.weekday <= 5;
-    case "specific_days":
-    case "weekly": return (c.recurrenceDays ?? []).includes(info.weekday);
-    case "monthly": return (c.recurrenceDays ?? [])[0] === info.dayOfMonth;
-    case "specific_date": return c.specificDate === info.dateKey;
-    default: return false;
-  }
-}
-
-type UserRoutineContext = { storeId: number | null; sectorId: number | null; jobFunction: string | null; employeeId: number | null };
-
-async function resolveUserContext(tenantId: number, userId: number): Promise<UserRoutineContext> {
-  const [user] = await db.select({ storeId: usersTable.storeId, sectorId: usersTable.sectorId })
-    .from(usersTable).where(and(eq(usersTable.id, userId), eq(usersTable.tenantId, tenantId)));
-  const [employee] = await db.select({ id: employeesTable.id, jobFunction: employeesTable.jobFunction })
-    .from(employeesTable).where(and(eq(employeesTable.userId, userId), eq(employeesTable.tenantId, tenantId)));
-  return {
-    storeId: user?.storeId ?? null,
-    sectorId: user?.sectorId ?? null,
-    jobFunction: employee?.jobFunction ?? null,
-    employeeId: employee?.id ?? null,
-  };
-}
-
-// Uma regra "casa" se TODA dimensão preenchida bate (AND); dimensão nula na
-// regra = coringa. O checklist se aplica ao usuário se QUALQUER regra casar
-// (OR entre regras) — várias regras cobrem várias combinações de uma vez.
-function scopeMatchesUser(scope: RoutineChecklistScope, ctx: UserRoutineContext, userId: number): boolean {
-  if (scope.storeId != null && scope.storeId !== ctx.storeId) return false;
-  if (scope.sectorId != null && scope.sectorId !== ctx.sectorId) return false;
-  if (scope.jobFunction != null && scope.jobFunction !== ctx.jobFunction) return false;
-  if (scope.userId != null && scope.userId !== userId) return false;
-  return true;
-}
-
-async function isOnLeaveToday(tenantId: number, employeeId: number | null, dateKey: string): Promise<boolean> {
-  if (employeeId == null) return false;
-  const [leave] = await db.select({ id: leaveRecordsTable.id }).from(leaveRecordsTable)
-    .where(and(
-      eq(leaveRecordsTable.tenantId, tenantId), eq(leaveRecordsTable.employeeId, employeeId),
-      lte(leaveRecordsTable.startDate, dateKey), gte(leaveRecordsTable.endDate, dateKey),
-    )).limit(1);
-  return !!leave;
-}
+// Funções de escopo/data compartilhadas com routineClosures.ts (Fase 5) —
+// ver lib/routinesShared.ts.
 
 type PendingRoutine = RoutineChecklist & { questions: RoutineChecklistQuestion[]; periodKey: string };
 
@@ -543,6 +482,16 @@ router.post("/rotinas/checklists/:id/respond", requireAuth, requireModule("rotin
   const evidenceResult = await processEvidence(target.questions, rawEvidence);
   if ("error" in evidenceResult) { res.status(400).json({ error: evidenceResult.error }); return; }
 
+  // Fase 5: cruzamento com o Ponto — só faz sentido pra checklist com
+  // horário fixo (abertura/fechamento); "contínuo" não tem um instante de
+  // comparação único. Puro dado pro relatório, calculado uma vez aqui e
+  // nunca recalculado (mesma imutabilidade do resto da resposta).
+  let respondedRelativeToPonto: string | null = null;
+  if (target.recurrence !== "continuous") {
+    const ctx = await resolveUserContext(tenantId, userId);
+    respondedRelativeToPonto = await computePontoRelative(tenantId, ctx.employeeId, target.periodKey, new Date());
+  }
+
   try {
     const [saved] = await db.insert(routineResponsesTable).values({
       tenantId, checklistId: id, userId, periodKey: target.periodKey, answers,
@@ -552,6 +501,7 @@ router.post("/rotinas/checklists/:id/respond", requireAuth, requireModule("rotin
       })),
       reauthAt: new Date(),
       deviceInfo: (req.headers["user-agent"] as string | undefined)?.slice(0, 300) ?? null,
+      respondedRelativeToPonto,
     }).returning();
     if (evidenceResult.saved.length) {
       await db.insert(routineResponseEvidenceTable).values(
@@ -733,5 +683,40 @@ export async function enforceMandatoryRoutines(
     next(); // em falha do banco, não derruba o sistema inteiro
   }
 }
+
+// ── Fechamento mensal + relatório (Fase 5) — mesmo padrão de
+// /rh-dp/closures (rhDp.ts): listar, gerar (admin, mês já encerrado só),
+// apagar (correção). Congelado — nunca recalculado por cima do que já
+// fechou (idempotente via índice único, ver routineClosures.ts). ──
+router.get("/rotinas/closures", requireModuleAccess("rotinas"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const employeeId = req.query.employeeId ? parseInt(String(req.query.employeeId), 10) : null;
+  const conditions = [eq(routineClosuresTable.tenantId, tenantId)];
+  if (employeeId != null && !isNaN(employeeId)) conditions.push(eq(routineClosuresTable.employeeId, employeeId));
+  const rows = await db.select().from(routineClosuresTable)
+    .where(and(...conditions))
+    .orderBy(desc(routineClosuresTable.periodMonth), asc(routineClosuresTable.employeeName));
+  res.json(rows);
+});
+
+router.post("/rotinas/closures/run", requireModuleAccess("rotinas"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const b = (req.body ?? {}) as { month?: string };
+  const month = typeof b.month === "string" && /^\d{4}-\d{2}$/.test(b.month) ? b.month : previousMonthKey(new Date());
+  // Só fecha mês já encerrado — nunca o mês corrente (ainda em andamento).
+  if (month >= currentMonthKey(new Date())) {
+    res.status(400).json({ error: "Só é possível fechar meses já encerrados" }); return;
+  }
+  const created = await generateRoutineClosuresForMonth(month, tenantId);
+  res.json({ ok: true, month, created });
+});
+
+router.delete("/rotinas/closures/:id", requireModuleAccess("rotinas"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  await db.delete(routineClosuresTable).where(and(eq(routineClosuresTable.id, id), eq(routineClosuresTable.tenantId, tenantId)));
+  res.json({ ok: true });
+});
 
 export default router;

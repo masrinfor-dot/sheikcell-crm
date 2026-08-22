@@ -107,6 +107,11 @@ export const routineResponsesTable = pgTable("routine_responses", {
   questionsSnapshot: jsonb("questions_snapshot").$type<RoutineQuestionSnapshot[]>().notNull(),
   reauthAt: timestamp("reauth_at", { withTimezone: true }).notNull(),
   deviceInfo: text("device_info"), // User-Agent de quem respondeu
+  // Fase 5: horário da resposta comparado ao Ponto do mesmo funcionário no
+  // mesmo dia — "antes_entrada" | "depois_entrada" | "sem_ponto_no_dia" |
+  // null (checklist contínuo, ou funcionário sem registro de Ponto vinculado).
+  // Puro dado pro relatório mensal — não trava nem penaliza ninguém.
+  respondedRelativeToPonto: text("responded_relative_to_ponto"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
   uniqueIndex("routine_responses_unique").on(t.checklistId, t.userId, t.periodKey),
@@ -133,6 +138,33 @@ export const routineResponseEvidenceTable = pgTable("routine_response_evidence",
   index("routine_response_evidence_response_idx").on(t.responseId),
 ]);
 
+// Fase 5: fechamento mensal de Rotinas por funcionário — snapshot CONGELADO,
+// gerado uma vez e nunca recalculado, mesmo padrão de timeBankClosuresTable
+// (rh_dp.ts): índice único (tenantId, employeeId, periodMonth) +
+// onConflictDoNothing na geração, idempotente.
+export const routineClosuresTable = pgTable("routine_closures", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  employeeId: integer("employee_id").notNull(),
+  employeeName: text("employee_name").notNull(),
+  periodMonth: text("period_month").notNull(), // "YYYY-MM"
+  totalDue: integer("total_due").notNull(),
+  totalAnswered: integer("total_answered").notNull(),
+  totalOnTime: integer("total_on_time").notNull(),
+  // Resposta negativa (Fase 3.5) em que o funcionário marcou que existe uma
+  // pendência (campo "pendencia" preenchido) — não "Não sem motivo", que não
+  // existe: motivo é sempre obrigatório quando a pergunta exige.
+  totalWithPendency: integer("total_with_pendency").notNull(),
+  totalUrgentBypass: integer("total_urgent_bypass").notNull(),
+  // Cruzamento com o Ponto (item 2) — só dado cru, sem trava/penalidade.
+  pontoBeforeEntry: integer("ponto_before_entry").notNull(),
+  pontoAfterEntry: integer("ponto_after_entry").notNull(),
+  pontoNoRecord: integer("ponto_no_record").notNull(),
+  closedAt: timestamp("closed_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("routine_closures_unique").on(t.tenantId, t.employeeId, t.periodMonth),
+]);
+
 // "Atendimento urgente" (Fase 3): libera temporariamente a trava sem marcar
 // o checklist como respondido — só um registro de auditoria de que o bypass
 // foi usado. A liberação em si é um carimbo em memória (ver rotinas.ts),
@@ -154,3 +186,4 @@ export type RoutineChecklistScope = typeof routineChecklistScopesTable.$inferSel
 export type RoutineResponse = typeof routineResponsesTable.$inferSelect;
 export type RoutineUrgentBypass = typeof routineUrgentBypassesTable.$inferSelect;
 export type RoutineResponseEvidence = typeof routineResponseEvidenceTable.$inferSelect;
+export type RoutineClosure = typeof routineClosuresTable.$inferSelect;
