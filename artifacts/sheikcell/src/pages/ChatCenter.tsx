@@ -113,6 +113,20 @@ function isGroupConv(c: { phone: string }) {
   return c.phone.includes("@g.us");
 }
 
+// Texto colado de Word/PDF/sites: normaliza aspas curvas, espaço sem quebra,
+// caracteres invisíveis e traços longos pra texto limpo — o WhatsApp não
+// renderiza esses caracteres de forma confiável em todos os aparelhos.
+// Preserva quebras de linha (só normaliza o fim de linha).
+function cleanPastedText(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/[–—]/g, "-")
+    .replace(/ /g, " ")
+    .replace(/[​-‍﻿]/g, "");
+}
+
 function channelIcon(ch: string, group?: boolean) {
   if (group) return <Users className="w-3 h-3 text-green-600" />;
   if (ch === "whatsapp") return <Smartphone className="w-3 h-3 text-green-500" />;
@@ -3294,14 +3308,33 @@ export default function ChatCenter({
               className="flex-1 resize-none bg-white rounded-2xl px-4 py-2 text-sm border border-border outline-none focus:ring-2 focus:ring-primary/20 max-h-32 overflow-y-auto"
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(e); } }}
               onPaste={(e) => {
-                if (!can(user, "enviar_midia")) return;
-                const images = Array.from(e.clipboardData.items)
-                  .filter((item) => item.type.startsWith("image/"))
-                  .map((item) => item.getAsFile())
-                  .filter((f): f is File => f != null);
-                if (images.length === 0) return;
+                if (can(user, "enviar_midia")) {
+                  const images = Array.from(e.clipboardData.items)
+                    .filter((item) => item.type.startsWith("image/"))
+                    .map((item) => item.getAsFile())
+                    .filter((f): f is File => f != null);
+                  if (images.length > 0) {
+                    e.preventDefault();
+                    handleFilesSelected(images);
+                    return;
+                  }
+                }
+                // Texto colado de Word/sites vem com aspas curvas, espaço
+                // sem quebra e caracteres invisíveis — normaliza pra texto
+                // limpo antes de ir pro WhatsApp (item 3 do roadmap).
+                const text = e.clipboardData.getData("text/plain");
+                if (!text) return;
                 e.preventDefault();
-                handleFilesSelected(images);
+                const clean = cleanPastedText(text);
+                const el = e.currentTarget;
+                const start = el.selectionStart;
+                const end = el.selectionEnd;
+                const next = msgText.slice(0, start) + clean + msgText.slice(end);
+                setMsgText(next);
+                requestAnimationFrame(() => {
+                  const pos = start + clean.length;
+                  el.setSelectionRange(pos, pos);
+                });
               }}
             />
             {msgText.trim() ? (
