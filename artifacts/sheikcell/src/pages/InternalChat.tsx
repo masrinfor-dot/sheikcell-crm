@@ -1600,7 +1600,7 @@ export default function InternalChat({ docked = false, onActiveConversationChang
           bottom nav — duas colunas espremidas distorciam tudo. Mesmo cálculo
           de altura/largura do ChatCenter — sem o max-w antigo, que sobrava
           espaço vazio nas laterais em telas largas. */}
-      <div className="relative flex flex-col h-[calc(var(--vvh,100dvh)-7rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-88px)] md:min-h-[480px] rounded-xl border bg-card overflow-hidden shadow-sm">
+      <div className="relative flex flex-col h-[calc(var(--vvh,100dvh)-7rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-88px-var(--shk-topbar-extra,0px))] md:min-h-[480px] rounded-xl border bg-card overflow-hidden shadow-sm">
         {viewTabs}
         {view === "tasks" ? (
           <div className="flex-1 overflow-y-auto p-4">

@@ -513,7 +513,7 @@ export default function AdminDashboard() {
   }));
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-background" style={navPreview ? ({ "--shk-topbar-extra": "48px" } as React.CSSProperties) : undefined}>
       {/* Navbar */}
       <nav className="bg-white border-b border-border sticky top-0 z-20">
         <div className="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
