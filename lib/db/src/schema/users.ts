@@ -6,12 +6,16 @@ import { storesTable } from "./stores";
 import type { OptionalModule } from "./tenants";
 
 export const usersTable = pgTable("users", {
+  // tenant_id=0 é reservado pro Super Admin (role "superadmin") — ele não
+  // pertence a nenhuma loja real (lojas começam em 1), então nunca bate com
+  // nenhuma query "WHERE tenant_id = <loja>" espalhada pelo backend. Ver
+  // migration 0050_superadmin_no_tenant.sql.
   tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
   email: text("email").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
-  role: text("role").notNull().default("vendedor"), // "vendedor" | "supervisor" | "admin"
+  role: text("role").notNull().default("vendedor"), // "vendedor" | "supervisor" | "admin" | "superadmin"
   sectorId: integer("sector_id").references(() => sectorsTable.id),
   // Loja da rede a que o vendedor pertence (texto livre; ex.: "Loja Centro")
   storeName: text("store_name"),
