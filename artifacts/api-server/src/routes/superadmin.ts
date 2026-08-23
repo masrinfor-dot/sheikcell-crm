@@ -253,9 +253,9 @@ router.post("/superadmin/tenants/:tenantId/impersonate/:userId", async (req, res
 // enxerga isso. Reaproveita a tabela "session" do connect-pg-simple.
 router.get("/superadmin/sessions", async (_req, res): Promise<void> => {
   const rows = await db.execute(sql`
-    select sid, sess, expire from session
+    select sid, sess::jsonb as sess, expire from session
     where expire > now()
-    order by (sess->>'loginAt') desc nulls last
+    order by (sess::jsonb->>'loginAt') desc nulls last
   `);
   const list = rows.rows as { sid: string; sess: Record<string, unknown>; expire: string }[];
   const userIds = [...new Set(

@@ -230,9 +230,9 @@ router.post("/auth/logout", requireAuth, (req, res): void => {
 // navegador, IP e horário de login, pra ele mesmo revisar e encerrar.
 router.get("/auth/sessions", requireAuth, async (req, res): Promise<void> => {
   const rows = await db.execute(sql`
-    select sid, sess, expire from session
-    where sess->>'userId' = ${String(req.session.userId)} and expire > now()
-    order by (sess->>'loginAt') desc nulls last
+    select sid, sess::jsonb as sess, expire from session
+    where sess::jsonb->>'userId' = ${String(req.session.userId)} and expire > now()
+    order by (sess::jsonb->>'loginAt') desc nulls last
   `);
   const sessions = (rows.rows as { sid: string; sess: Record<string, unknown>; expire: string }[]).map((r) => {
     const { device, browser } = parseUserAgent(r.sess["loginUserAgent"] as string | undefined);
@@ -258,7 +258,7 @@ router.delete("/auth/sessions/:sid", requireAuth, async (req, res): Promise<void
     return;
   }
   await db.execute(sql`
-    delete from session where sid = ${sid} and sess->>'userId' = ${String(req.session.userId)}
+    delete from session where sid = ${sid} and sess::jsonb->>'userId' = ${String(req.session.userId)}
   `);
   res.json({ ok: true });
 });
@@ -266,7 +266,7 @@ router.delete("/auth/sessions/:sid", requireAuth, async (req, res): Promise<void
 // "Encerrar todas as outras sessões" — mantém só a atual.
 router.post("/auth/sessions/end-others", requireAuth, async (req, res): Promise<void> => {
   await db.execute(sql`
-    delete from session where sess->>'userId' = ${String(req.session.userId)} and sid != ${req.sessionID}
+    delete from session where sess::jsonb->>'userId' = ${String(req.session.userId)} and sid != ${req.sessionID}
   `);
   res.json({ ok: true });
 });

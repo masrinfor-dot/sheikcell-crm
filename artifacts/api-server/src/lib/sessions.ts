@@ -2,8 +2,10 @@ import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
 
 // Controle de sessões (item 15 do roadmap de segurança). Reaproveita a
-// própria tabela "session" do connect-pg-simple (sid, sess jsonb, expire) —
-// sem tabela nova. sess->>'userId' funciona igual pra número ou string
+// própria tabela "session" do connect-pg-simple (sid, sess, expire) — sem
+// tabela nova. Nesta instância "sess" é coluna TEXT (não json/jsonb), então
+// todo acesso precisa de "::jsonb" antes do "->>" — sem o cast o Postgres
+// rejeita o operador. sess->>'userId' funciona igual pra número ou string
 // dentro do JSON (extração sempre devolve texto).
 
 const MAX_SESSIONS_PER_USER = 2;
@@ -15,8 +17,8 @@ const MAX_SESSIONS_PER_USER = 2;
 export async function enforceSessionLimit(userId: number, currentSid: string): Promise<void> {
   const rows = await db.execute(sql`
     select sid from session
-    where sess->>'userId' = ${String(userId)} and sid != ${currentSid} and expire > now()
-    order by (sess->>'loginAt') asc nulls first
+    where sess::jsonb->>'userId' = ${String(userId)} and sid != ${currentSid} and expire > now()
+    order by (sess::jsonb->>'loginAt') asc nulls first
   `);
   const others = rows.rows as { sid: string }[];
   const excess = others.length + 1 - MAX_SESSIONS_PER_USER;
