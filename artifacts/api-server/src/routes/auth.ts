@@ -5,6 +5,7 @@ import { db, usersTable, sectorsTable, accessLogsTable, tenantsTable, impersonat
 import { eq, sql } from "drizzle-orm";
 import { requireAuth, isWithinAccessHours } from "../middlewares/auth";
 import { sendEmail } from "@workspace/integrations-email";
+import { enforceSessionLimit, parseUserAgent } from "../lib/sessions";
 
 const RESET_TOKEN_TTL_MS = 30 * 60 * 1000; // 30 minutos
 const RESET_TOKEN_MIN_INTERVAL_MS = 60 * 1000; // evita reenviar em cada clique duplo
@@ -102,6 +103,13 @@ router.post("/auth/login", async (req, res): Promise<void> => {
   req.session.allowedSessionKeys = user.role === "vendedor" ? (user.allowedSessionKeys ?? null) : null;
   // Login "de verdade" encerra qualquer impersonação que sobrou na sessão.
   req.session.impersonatorId = undefined;
+  // Controle de sessões (item 15): metadados só pra exibir/auditar depois.
+  req.session.loginAt = new Date().toISOString();
+  req.session.loginIp = req.ip;
+  req.session.loginUserAgent = req.headers["user-agent"] ?? "";
+  await enforceSessionLimit(user.id, req.sessionID).catch((err) => {
+    console.error("[auth] falha ao aplicar limite de sessões:", err);
+  });
 
   res.json({
     user: {
@@ -215,6 +223,52 @@ router.post("/auth/logout", requireAuth, (req, res): void => {
   req.session.destroy(() => {
     res.json({ ok: true });
   });
+});
+
+// ─── Controle de sessões (item 15) ─────────────────────────────────────────
+// Lista as sessões ativas do PRÓPRIO usuário (não de outros) — device,
+// navegador, IP e horário de login, pra ele mesmo revisar e encerrar.
+router.get("/auth/sessions", requireAuth, async (req, res): Promise<void> => {
+  const rows = await db.execute(sql`
+    select sid, sess, expire from session
+    where sess->>'userId' = ${String(req.session.userId)} and expire > now()
+    order by (sess->>'loginAt') desc nulls last
+  `);
+  const sessions = (rows.rows as { sid: string; sess: Record<string, unknown>; expire: string }[]).map((r) => {
+    const { device, browser } = parseUserAgent(r.sess["loginUserAgent"] as string | undefined);
+    return {
+      sid: r.sid,
+      isCurrent: r.sid === req.sessionID,
+      device,
+      browser,
+      ip: (r.sess["loginIp"] as string | undefined) ?? null,
+      loginAt: (r.sess["loginAt"] as string | undefined) ?? null,
+      expiresAt: r.expire,
+    };
+  });
+  res.json({ sessions });
+});
+
+// Encerra UMA sessão específica do próprio usuário (nunca a atual — pra
+// isso é POST /auth/logout — e nunca de outro usuário).
+router.delete("/auth/sessions/:sid", requireAuth, async (req, res): Promise<void> => {
+  const sid = Array.isArray(req.params.sid) ? req.params.sid[0] : req.params.sid;
+  if (sid === req.sessionID) {
+    res.status(400).json({ error: "Use \"Sair\" para encerrar a sessão atual" });
+    return;
+  }
+  await db.execute(sql`
+    delete from session where sid = ${sid} and sess->>'userId' = ${String(req.session.userId)}
+  `);
+  res.json({ ok: true });
+});
+
+// "Encerrar todas as outras sessões" — mantém só a atual.
+router.post("/auth/sessions/end-others", requireAuth, async (req, res): Promise<void> => {
+  await db.execute(sql`
+    delete from session where sess->>'userId' = ${String(req.session.userId)} and sid != ${req.sessionID}
+  `);
+  res.json({ ok: true });
 });
 
 router.get("/auth/me", requireAuth, async (req, res): Promise<void> => {

@@ -21,6 +21,13 @@ declare module "express-session" {
     // está atuando como um admin de loja. Presente = mostra a faixa de
     // impersonação no front e libera POST /auth/stop-impersonation.
     impersonatorId: number | undefined;
+    // Controle de sessões (item 15 do roadmap de segurança): metadados
+    // gravados uma vez no login, usados só pra exibir/auditar — nunca pra
+    // autenticação. userAgent cru (o parsing pra "dispositivo/navegador"
+    // acontece na hora de listar, não aqui).
+    loginAt: string | undefined;
+    loginIp: string | undefined;
+    loginUserAgent: string | undefined;
   }
 }
 

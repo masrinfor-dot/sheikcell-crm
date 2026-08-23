@@ -825,6 +825,23 @@ export type AiCredentialsStatus = {
   useOwnKey: boolean;
 };
 
+export type MySession = {
+  sid: string;
+  isCurrent: boolean;
+  device: string;
+  browser: string;
+  ip: string | null;
+  loginAt: string | null;
+  expiresAt: string;
+};
+
+export type AuditedSession = MySession & {
+  userId: number | null;
+  userName: string;
+  role: string | null;
+  tenantName: string | null;
+};
+
 export type AppSettings = {
   alertUnansweredEnabled: boolean;
   alertUnansweredMinutes: number;
@@ -1041,6 +1058,7 @@ export const api = {
       req<{ tenant: TenantSummary }>("/superadmin/tenants", { method: "POST", body: JSON.stringify(data) }),
     impersonate: (tenantId: number, userId: number) =>
       req<{ ok: boolean }>(`/superadmin/tenants/${tenantId}/impersonate/${userId}`, { method: "POST" }),
+    sessions: () => req<{ sessions: AuditedSession[] }>("/superadmin/sessions"),
     updateTenant: (id: number, data: {
       name?: string; isActive?: boolean; saasStatus?: "ativo" | "cancelado";
       contactName?: string | null; contactPhone?: string | null; contactEmail?: string | null;
@@ -1112,6 +1130,11 @@ export const api = {
       req<{ ok: boolean; message: string }>("/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) }),
     resetPassword: (token: string, newPassword: string, confirmNewPassword: string) =>
       req<{ ok: boolean }>("/auth/reset-password", { method: "POST", body: JSON.stringify({ token, newPassword, confirmNewPassword }) }),
+    sessions: {
+      list: () => req<{ sessions: MySession[] }>("/auth/sessions"),
+      end: (sid: string) => req<{ ok: boolean }>(`/auth/sessions/${encodeURIComponent(sid)}`, { method: "DELETE" }),
+      endOthers: () => req<{ ok: boolean }>("/auth/sessions/end-others", { method: "POST" }),
+    },
   },
   sectors: {
     list: () => req<Sector[]>("/sectors"),

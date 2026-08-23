@@ -26,6 +26,7 @@ import Sorteios from "./Sorteios";
 import Robo from "./Robo";
 import Financeiro from "./Financeiro";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
+import MySessionsModal from "@/components/MySessionsModal";
 import ChecklistGate from "@/components/ChecklistGate";
 import PontoGate from "@/components/PontoGate";
 import TrainingGate from "@/components/TrainingGate";
@@ -99,6 +100,7 @@ const ICONS = ["smartphone", "headphones", "wrench", "dollar-sign", "users", "sh
 export default function AdminDashboard() {
   const { user, logout } = useAuth();
   const [showChangePassword, setShowChangePassword] = useState(false);
+  const [showMySessions, setShowMySessions] = useState(false);
   const { toast } = useToast();
   const [tab, setTab] = useState<Tab>("dashboard");
   const internalChatUnread = useInternalChatNotifier(user?.id, tab === "equipe");
@@ -538,6 +540,10 @@ export default function AdminDashboard() {
               className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition">
               <KeyRound className="w-3.5 h-3.5" /> <span className="hidden sm:inline">Trocar senha</span>
             </button>
+            <button onClick={() => setShowMySessions(true)} data-testid="button-my-sessions"
+              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition">
+              <ShieldCheck className="w-3.5 h-3.5" /> <span className="hidden sm:inline">Minhas sessões</span>
+            </button>
             <button onClick={() => logout()} data-testid="button-logout"
               className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition">
               <LogOut className="w-3.5 h-3.5" /> Sair
@@ -563,6 +569,7 @@ export default function AdminDashboard() {
         <ChangePasswordModal onDone={() => { setShowChangePassword(false); toast({ title: "Senha alterada com sucesso!" }); }}
           onClose={() => setShowChangePassword(false)} />
       )}
+      {showMySessions && <MySessionsModal onClose={() => setShowMySessions(false)} />}
       <TrainingGate />
       <RoutineChecklistGate />
 

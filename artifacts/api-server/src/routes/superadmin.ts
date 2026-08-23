@@ -1,9 +1,10 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
 import { db, tenantsTable, usersTable, sectorsTable, conversationsTable, whatsappSessionsTable, saasContractsTable, saasInvoicesTable, impersonationLogTable, OPTIONAL_MODULES, type OptionalModule } from "@workspace/db";
-import { eq, and, count, desc, lt } from "drizzle-orm";
+import { eq, and, count, desc, lt, inArray, sql } from "drizzle-orm";
 import { requireSuperadmin, invalidateTenantCache } from "../middlewares/auth";
 import { validateCpfCnpj } from "../lib/cpfCnpj";
+import { parseUserAgent } from "../lib/sessions";
 
 function sanitizeModules(v: unknown): OptionalModule[] {
   if (!Array.isArray(v)) return [];
@@ -245,6 +246,50 @@ router.post("/superadmin/tenants/:tenantId/impersonate/:userId", async (req, res
   req.session.accessHours = null;
   req.session.allowedSessionKeys = null;
   res.json({ ok: true });
+});
+
+// ─── Auditoria de sessões (item 15) ────────────────────────────────────────
+// Todas as sessões ativas do sistema, de qualquer loja — só o superadmin
+// enxerga isso. Reaproveita a tabela "session" do connect-pg-simple.
+router.get("/superadmin/sessions", async (_req, res): Promise<void> => {
+  const rows = await db.execute(sql`
+    select sid, sess, expire from session
+    where expire > now()
+    order by (sess->>'loginAt') desc nulls last
+  `);
+  const list = rows.rows as { sid: string; sess: Record<string, unknown>; expire: string }[];
+  const userIds = [...new Set(
+    list.map((r) => Number(r.sess["userId"])).filter((n) => Number.isFinite(n)),
+  )];
+  const users = userIds.length
+    ? await db.select({ id: usersTable.id, name: usersTable.name, role: usersTable.role, tenantId: usersTable.tenantId })
+        .from(usersTable).where(inArray(usersTable.id, userIds))
+    : [];
+  const tenantIds = [...new Set(users.map((u) => u.tenantId).filter((t) => t > 0))];
+  const tenants = tenantIds.length
+    ? await db.select({ id: tenantsTable.id, name: tenantsTable.name }).from(tenantsTable).where(inArray(tenantsTable.id, tenantIds))
+    : [];
+  const userMap = new Map(users.map((u) => [u.id, u]));
+  const tenantMap = new Map(tenants.map((t) => [t.id, t.name]));
+
+  const sessions = list.map((r) => {
+    const uid = Number(r.sess["userId"]);
+    const u = userMap.get(uid);
+    const { device, browser } = parseUserAgent(r.sess["loginUserAgent"] as string | undefined);
+    return {
+      sid: r.sid,
+      userId: Number.isFinite(uid) ? uid : null,
+      userName: u?.name ?? "(desconhecido)",
+      role: u?.role ?? null,
+      tenantName: u ? (tenantMap.get(u.tenantId) ?? null) : null,
+      device,
+      browser,
+      ip: (r.sess["loginIp"] as string | undefined) ?? null,
+      loginAt: (r.sess["loginAt"] as string | undefined) ?? null,
+      expiresAt: r.expire,
+    };
+  });
+  res.json({ sessions });
 });
 
 export default router;
