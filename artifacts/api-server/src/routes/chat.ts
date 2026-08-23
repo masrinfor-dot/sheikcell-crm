@@ -1233,21 +1233,6 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
   res.json(updated);
 });
 
-// ─── TEMPORÁRIO: corrige pendingSurveyLogId deixado por um teste de API que
-// resolveu uma conversa real por engano (disparou a pesquisa de satisfação
-// pro cliente). Sem endpoint pra limpar isoladamente esses campos — este é
-// removido assim que usado uma vez. Admin only. ───────────────────────────
-router.post("/chat/conversations/:id/clear-stray-survey", requireAuth, requireAdmin, async (req, res): Promise<void> => {
-  const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
-  const [updated] = await db.update(conversationsTable)
-    .set({ pendingSurveyLogId: null, surveySentAt: null, surveyScaleMax: null, surveyWindowHours: null, surveyRewardText: null, surveyReminderSentAt: null })
-    .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)))
-    .returning();
-  if (!updated) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
-  res.json({ id: updated.id, pendingSurveyLogId: updated.pendingSurveyLogId });
-});
-
 // ─── Claim conversation (self-assign / take from queue) ────────────────────
 // Any authenticated user may take a conversation they can access and assign it
 // to themselves, moving it from "Pendentes" (queue) to "Ativos". This is a
