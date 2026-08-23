@@ -213,6 +213,12 @@ export default function InternalChat({ docked = false, onActiveConversationChang
   const [activeId, setActiveId] = useState<number | null>(initialConversationId);
   const [messages, setMessages] = useState<InternalMessage[]>([]);
   const [draft, setDraft] = useState("");
+  // Rascunho por conversa — mesmo padrão do ChatCenter (ver comentário lá):
+  // nunca deixa o texto digitado numa conversa vazar pra outra ao trocar.
+  const draftRef = useRef("");
+  const draftsRef = useRef<Map<number, string>>(new Map());
+  const prevActiveIdForDraftRef = useRef<number | null>(null);
+  useEffect(() => { draftRef.current = draft; }, [draft]);
   const [sending, setSending] = useState(false);
   const [showNew, setShowNew] = useState(false);
   // Aba interna: conversas da equipe ou o quadro de tarefas (kanban).
@@ -328,6 +334,18 @@ export default function InternalChat({ docked = false, onActiveConversationChang
     // Optimistically clear unread badge for this conversation.
     setConversations((prev) => prev.map((c) => (c.id === activeId ? { ...c, unreadCount: 0 } : c)));
     return () => { cancelled = true; };
+  }, [activeId]);
+
+  // Salva o rascunho da conversa deixada e restaura (ou limpa) o da nova.
+  useEffect(() => {
+    const prev = prevActiveIdForDraftRef.current;
+    if (prev != null) {
+      const text = draftRef.current;
+      if (text.trim()) draftsRef.current.set(prev, text);
+      else draftsRef.current.delete(prev);
+    }
+    setDraft(activeId != null ? (draftsRef.current.get(activeId) ?? "") : "");
+    prevActiveIdForDraftRef.current = activeId;
   }, [activeId]);
 
   useEffect(() => {

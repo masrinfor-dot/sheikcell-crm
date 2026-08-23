@@ -898,6 +898,13 @@ export default function ChatCenter({
   const [category, setCategory] = useState<Category>("pendentes");
   const [labelFilter, setLabelFilter] = useState("");
   const [msgText, setMsgText] = useState("");
+  // Rascunho por conversa: cada conversationId guarda seu próprio texto não
+  // enviado, pra nunca vazar o que foi digitado pro cliente errado ao trocar
+  // de conversa (ver draftsRef/prevActiveIdRef mais abaixo).
+  const msgTextRef = useRef("");
+  const draftsRef = useRef<Map<number, string>>(new Map());
+  const prevActiveIdRef = useRef<number | null>(null);
+  useEffect(() => { msgTextRef.current = msgText; }, [msgText]);
   const [replyTarget, setReplyTarget] = useState<ChatMessage | null>(null);
   const [composerMode, setComposerMode] = useState<"message" | "note">("message");
   const [highlightedMsgId, setHighlightedMsgId] = useState<number | null>(null);
@@ -1134,7 +1141,17 @@ export default function ChatCenter({
   const activeIdRef = useRef<number | null>(null);
   // Ao prependar mensagens antigas, NÃO rolar para o fim — preservar a posição.
   const skipAutoScrollRef = useRef(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  // HTMLInputElement no modo docked (linha compacta), HTMLTextAreaElement no
+  // composer principal (precisa crescer com quebras de linha — ver item 3).
+  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
+  // Campo de mensagem multi-linha: cresce junto com o texto (até max-h-32,
+  // quando passa a rolar) — mesmo padrão do InternalChat.tsx.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [msgText]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Latest conversations, read from inside the SSE handler without re-subscribing.
   const convsRef = useRef<Conversation[]>([]);
@@ -1617,6 +1634,19 @@ export default function ChatCenter({
   };
 
   useEffect(() => { setShowParticipantPicker(false); setShowStatusPicker(false); setCrmContactId(null); }, [activeId]);
+
+  // Salva o rascunho da conversa que está sendo deixada e restaura o
+  // rascunho (ou vazio) da conversa que está sendo aberta.
+  useEffect(() => {
+    const prev = prevActiveIdRef.current;
+    if (prev != null) {
+      const draft = msgTextRef.current;
+      if (draft.trim()) draftsRef.current.set(prev, draft);
+      else draftsRef.current.delete(prev);
+    }
+    setMsgText(activeId != null ? (draftsRef.current.get(activeId) ?? "") : "");
+    prevActiveIdRef.current = activeId;
+  }, [activeId]);
 
   // ── Send message ──
   const cancelReply = () => setReplyTarget(null);
@@ -2384,7 +2414,7 @@ export default function ChatCenter({
               <div ref={msgsEndRef} />
             </div>
             <form onSubmit={handleSend} className="flex items-center gap-2 px-3 py-2 border-t border-border shrink-0">
-              <input ref={inputRef} value={msgText} onChange={(e) => setMsgText(e.target.value)} placeholder="Mensagem..."
+              <input ref={inputRef as React.RefObject<HTMLInputElement>} value={msgText} onChange={(e) => setMsgText(e.target.value)} placeholder="Mensagem..."
                 data-testid="input-docked-message"
                 className="flex-1 text-sm bg-secondary/50 rounded-full px-3 py-1.5 outline-none" />
               <button type="submit" disabled={!msgText.trim() || sending} data-testid="button-docked-send"
@@ -3252,15 +3282,16 @@ export default function ChatCenter({
               <span className="hidden sm:inline">Corrigir</span>
             </button>
             </>)}
-            <input
-              ref={inputRef}
+            <textarea
+              ref={inputRef as React.RefObject<HTMLTextAreaElement>}
               value={msgText}
               onChange={(e) => setMsgText(e.target.value)}
               placeholder={composerMode === "note" ? "Escreva uma nota interna (só a equipe vê)..." : "Digite uma mensagem..."}
               spellCheck
               lang="pt-BR"
+              rows={1}
               data-testid="input-message"
-              className="flex-1 bg-white rounded-full px-4 py-2 text-sm border border-border outline-none focus:ring-2 focus:ring-primary/20"
+              className="flex-1 resize-none bg-white rounded-2xl px-4 py-2 text-sm border border-border outline-none focus:ring-2 focus:ring-primary/20 max-h-32 overflow-y-auto"
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(e); } }}
               onPaste={(e) => {
                 if (!can(user, "enviar_midia")) return;

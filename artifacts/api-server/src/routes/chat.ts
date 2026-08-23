@@ -1004,6 +1004,13 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
       res.status(403).json({ error: "Você não tem permissão para finalizar atendimentos. Fale com o administrador." });
       return;
     }
+    // Máquina de estados: só dá pra finalizar um atendimento que já está
+    // "Ativo" (com responsável). Potencial/Pendente precisam ser assumidos
+    // primeiro — evita finalizar direto um lead que ninguém atendeu ainda.
+    if ((status === "resolved" || status === "archived" || isArchived === true) && conv.assigneeId == null) {
+      res.status(400).json({ error: "Esse atendimento ainda não está Ativo. Assuma o atendimento antes de finalizar." });
+      return;
+    }
     if (sectorId !== undefined && sectorId !== conv.sectorId && !(await checkPerm(req, "transferir"))) {
       res.status(403).json({ error: "Você não tem permissão para transferir conversas de setor. Fale com o administrador." });
       return;
