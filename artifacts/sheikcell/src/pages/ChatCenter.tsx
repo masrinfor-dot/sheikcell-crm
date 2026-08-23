@@ -3325,9 +3325,17 @@ export default function ChatCenter({
                 <ChevronLeft className="w-4 h-4" />
               </button>
             </div>
-            {infoLoading || !infoContact ? (
+            {infoLoading ? (
               <div className="flex-1 flex items-center justify-center">
                 <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+              </div>
+            ) : !infoContact ? (
+              <div className="flex-1 flex items-center justify-center p-6 text-center">
+                <p className="text-xs text-muted-foreground">
+                  {activeConv && isGroupConv(activeConv)
+                    ? "Grupos do WhatsApp não têm ficha de cliente no CRM."
+                    : "Não foi possível carregar as informações do cliente."}
+                </p>
               </div>
             ) : (
               <div className="flex-1 overflow-y-auto p-4 space-y-3">
