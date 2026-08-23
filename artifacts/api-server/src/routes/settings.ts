@@ -19,6 +19,10 @@ const DEFAULTS: Record<string, string> = {
   // sem API oficial da Meta, número real sob risco de ban por uso indevido).
   outbound_hourly_limit: "10",
   outbound_daily_limit: "40",
+  // Identificação do vendedor pro cliente (item 5 do roadmap): hoje sempre
+  // veio ligado ("*Nome:*" antes da mensagem no WhatsApp) — default "true"
+  // preserva esse comportamento pra quem nunca configurou nada.
+  attendant_name_visible_to_customer: "true",
 };
 
 function brandingOf(map: Record<string, string>) {
@@ -41,6 +45,7 @@ router.get("/settings", requireAuth, async (req, res): Promise<void> => {
     alertUnansweredMinutes: Math.max(1, parseInt(map.alert_unanswered_minutes, 10) || 5),
     outboundHourlyLimit: Math.max(1, parseInt(map.outbound_hourly_limit, 10) || 10),
     outboundDailyLimit: Math.max(1, parseInt(map.outbound_daily_limit, 10) || 40),
+    attendantNameVisibleToCustomer: map.attendant_name_visible_to_customer !== "false",
     branding: brandingOf(map),
   });
 });
@@ -48,11 +53,12 @@ router.get("/settings", requireAuth, async (req, res): Promise<void> => {
 // Só admin/supervisor alteram.
 router.patch("/settings", requireAdminOrSupervisor, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { alertUnansweredEnabled, alertUnansweredMinutes, outboundHourlyLimit, outboundDailyLimit } = req.body as {
+  const { alertUnansweredEnabled, alertUnansweredMinutes, outboundHourlyLimit, outboundDailyLimit, attendantNameVisibleToCustomer } = req.body as {
     alertUnansweredEnabled?: boolean;
     alertUnansweredMinutes?: number;
     outboundHourlyLimit?: number;
     outboundDailyLimit?: number;
+    attendantNameVisibleToCustomer?: boolean;
   };
   const updates: [string, string][] = [];
   if (alertUnansweredEnabled !== undefined) {
@@ -82,6 +88,9 @@ router.patch("/settings", requireAdminOrSupervisor, async (req, res): Promise<vo
     }
     updates.push(["outbound_daily_limit", String(d)]);
   }
+  if (attendantNameVisibleToCustomer !== undefined) {
+    updates.push(["attendant_name_visible_to_customer", attendantNameVisibleToCustomer ? "true" : "false"]);
+  }
   if (updates.length === 0) { res.status(400).json({ error: "Nada para atualizar" }); return; }
   for (const [key, value] of updates) {
     // app_settings agora é chaveado por (tenant_id, key) — o upsert precisa
@@ -97,6 +106,7 @@ router.patch("/settings", requireAdminOrSupervisor, async (req, res): Promise<vo
     alertUnansweredMinutes: Math.max(1, parseInt(map.alert_unanswered_minutes, 10) || 5),
     outboundHourlyLimit: Math.max(1, parseInt(map.outbound_hourly_limit, 10) || 10),
     outboundDailyLimit: Math.max(1, parseInt(map.outbound_daily_limit, 10) || 40),
+    attendantNameVisibleToCustomer: map.attendant_name_visible_to_customer !== "false",
     branding: brandingOf(map),
   });
 });

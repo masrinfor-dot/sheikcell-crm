@@ -423,6 +423,17 @@ async function resolveReplyTo(
   return { replyToId: row.id, replyTo: row };
 }
 
+// Item 5 do roadmap: liga/desliga o prefixo "*Nome:*" que o cliente vê no
+// WhatsApp — a identificação em si (senderId/senderName) é sempre gravada,
+// isso só controla se aparece pro cliente. Default "true" preserva o
+// comportamento de sempre mostrar (ver settings.ts DEFAULTS).
+async function isAttendantNameVisibleToCustomer(tenantId: number): Promise<boolean> {
+  const [row] = await db.select().from(appSettingsTable)
+    .where(and(eq(appSettingsTable.tenantId, tenantId), eq(appSettingsTable.key, "attendant_name_visible_to_customer")))
+    .limit(1);
+  return row ? row.value !== "false" : true;
+}
+
 // ─── Get messages ──────────────────────────────────────────────────────────
 router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
@@ -557,6 +568,7 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
     isImage ? "image" : isVideo ? "video" : isAudio ? "audio" : "document";
 
   const senderName = req.session.userName ?? "Atendente";
+  const showNameToCustomer = await isAttendantNameVisibleToCustomer(tenantId);
 
   const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
@@ -616,6 +628,7 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
     type: msgType,
     status: "sent",
     senderName,
+    senderId: req.session.userId!,
     mediaUrl,
     replyToId,
     metadata,
@@ -653,8 +666,11 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
           base64,
           mimetype,
           filename: filename ?? savedFilename,
-          // Cliente vê quem está atendendo (áudios não têm legenda no WhatsApp)
-          caption: isAudio ? caption : (caption ? `*${senderName}:*\n${caption}` : `*${senderName}:*`),
+          // Cliente vê quem está atendendo (áudios não têm legenda no WhatsApp),
+          // exceto se a loja desligou isso em Configurações (item 5 do roadmap).
+          caption: isAudio ? caption
+            : !showNameToCustomer ? caption
+            : (caption ? `*${senderName}:*\n${caption}` : `*${senderName}:*`),
           ptt: isAudio ? (ptt ?? false) : undefined,
           session: conv.sessionKey,
         }),
@@ -714,6 +730,7 @@ router.post("/chat/conversations/:id/notes", requireAuth, async (req, res): Prom
     type: "note",
     status: "sent",
     senderName,
+    senderId: req.session.userId!,
   }).returning();
 
   broadcast("message", { conversationId: id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
@@ -728,6 +745,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
   if (!content?.trim()) { res.status(400).json({ error: "Mensagem vazia" }); return; }
 
   const senderName = req.session.userName ?? "Atendente";
+  const showNameToCustomer = await isAttendantNameVisibleToCustomer(tenantId);
 
   const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
@@ -747,6 +765,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
     type: "text",
     status: "sent",
     senderName,
+    senderId: req.session.userId!,
     replyToId,
   }).returning();
   const msg = { ...inserted!, replyTo };
@@ -795,8 +814,13 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
           "Content-Type": "application/json",
           "X-Bridge-Secret": bridgeSecret,
         },
-        // Cliente vê quem está atendendo: "*Nome:*" antes da mensagem
-        body: JSON.stringify({ to: conv.phone, text: `*${senderName}:*\n${content.trim()}`, session: conv.sessionKey }),
+        // Cliente vê quem está atendendo: "*Nome:*" antes da mensagem, exceto
+        // se a loja desligou isso em Configurações (item 5 do roadmap).
+        body: JSON.stringify({
+          to: conv.phone,
+          text: showNameToCustomer ? `*${senderName}:*\n${content.trim()}` : content.trim(),
+          session: conv.sessionKey,
+        }),
         signal: AbortSignal.timeout(60_000),
       });
       if (!r.ok) {

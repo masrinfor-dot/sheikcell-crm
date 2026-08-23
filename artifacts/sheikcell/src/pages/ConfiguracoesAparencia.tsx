@@ -3,7 +3,7 @@ import { api } from "@/lib/api";
 import { useBranding } from "@/lib/branding";
 import { extractDominantColor } from "@/lib/dominantColor";
 import { useToast } from "@/hooks/use-toast";
-import { Palette, Upload, Trash2, RotateCcw } from "lucide-react";
+import { Palette, Upload, Trash2, RotateCcw, UserCircle2 } from "lucide-react";
 
 const DEFAULT_COLOR = "#1a2e6e";
 const MAX_LOGO_BYTES = 500 * 1024;
@@ -19,11 +19,36 @@ export default function ConfiguracoesAparencia() {
   const [logoDataUrl, setLogoDataUrl] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // Item 5 do roadmap de Atendimento: liga/desliga a identificação do
+  // vendedor ("*Nome:*") que o cliente vê no WhatsApp. Sem tela própria de
+  // configurações gerais ainda — reaproveita esta (única página que já
+  // grava em app_settings) em vez de criar uma nova.
+  const [showAttendantName, setShowAttendantName] = useState(true);
+  const [savingAttendantName, setSavingAttendantName] = useState(false);
+
   useEffect(() => {
     setCompanyName(branding.companyName ?? "");
     setPrimaryColor(branding.primaryColor ?? DEFAULT_COLOR);
     setLogoDataUrl(branding.logoDataUrl);
   }, [branding]);
+
+  useEffect(() => {
+    api.settings.get().then((s) => setShowAttendantName(s.attendantNameVisibleToCustomer)).catch(() => {});
+  }, []);
+
+  const handleToggleAttendantName = async (value: boolean) => {
+    setShowAttendantName(value);
+    setSavingAttendantName(true);
+    try {
+      await api.settings.update({ attendantNameVisibleToCustomer: value });
+      toast({ title: value ? "Cliente volta a ver o nome do vendedor" : "Nome do vendedor não aparece mais pro cliente" });
+    } catch (err) {
+      setShowAttendantName(!value);
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSavingAttendantName(false);
+    }
+  };
 
   const handleFile = (file: File) => {
     if (!ACCEPTED_TYPES.includes(file.type)) {
@@ -145,6 +170,30 @@ export default function ConfiguracoesAparencia() {
             {saving ? "Salvando..." : "Salvar alterações"}
           </button>
         </div>
+      </div>
+
+      <div>
+        <h2 className="font-bold text-foreground flex items-center gap-2"><UserCircle2 className="w-5 h-5" /> Atendimento</h2>
+        <p className="text-xs text-muted-foreground mt-1">Como o cliente vê quem está atendendo ele no WhatsApp.</p>
+      </div>
+      <div className="shk-card p-5">
+        <label className="flex items-center justify-between gap-3 cursor-pointer">
+          <span>
+            <span className="text-sm font-medium block">Mostrar nome do vendedor pro cliente</span>
+            <span className="text-[11px] text-muted-foreground">
+              Quando ligado, cada mensagem enviada chega ao cliente como "*Nome do vendedor:*" antes do texto.
+              Desligado, o cliente só vê o conteúdo — a identificação continua registrada internamente pro admin/supervisor.
+            </span>
+          </span>
+          <input
+            type="checkbox"
+            checked={showAttendantName}
+            disabled={savingAttendantName}
+            onChange={(e) => handleToggleAttendantName(e.target.checked)}
+            data-testid="toggle-attendant-name-visible"
+            className="w-9 h-5 shrink-0 accent-primary cursor-pointer disabled:opacity-50"
+          />
+        </label>
       </div>
     </div>
   );

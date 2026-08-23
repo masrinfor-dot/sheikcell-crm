@@ -119,6 +119,10 @@ export const messagesTable = pgTable(
     type: text("type").notNull().default("text"),
     status: text("status").notNull().default("sent"), // sent | delivered | read | failed
     senderName: text("sender_name"),
+    // Identificação individual do vendedor (item 5 do roadmap): quem mandou,
+    // além do nome em texto — sobrevive à saída do usuário da empresa porque
+    // não tem cascade (só desvincula, nunca apaga a mensagem).
+    senderId: integer("sender_id").references(() => usersTable.id, { onDelete: "set null" }),
     // Telefone de quem mandou DENTRO de um grupo do WhatsApp (participante),
     // extraído do key.participant do Baileys — diferente do "phone" da
     // conversa (que é o JID do grupo). Permite abrir uma conversa 1:1 com

@@ -830,6 +830,7 @@ export type AppSettings = {
   alertUnansweredMinutes: number;
   outboundHourlyLimit: number;
   outboundDailyLimit: number;
+  attendantNameVisibleToCustomer: boolean;
   branding: Branding;
 };
 
