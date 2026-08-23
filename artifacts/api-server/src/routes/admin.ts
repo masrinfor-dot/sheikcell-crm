@@ -303,7 +303,10 @@ router.get("/admin/users", requireAdmin, async (req, res): Promise<void> => {
       createdAt: usersTable.createdAt,
     })
     .from(usersTable)
-    .where(eq(usersTable.tenantId, tenantId))
+    // Super Admin (role "superadmin") não pertence a nenhuma loja de verdade —
+    // a linha existe com tenant_id=1 só por causa do NOT NULL default, mas
+    // nunca deve aparecer na lista de Usuários que o admin de loja gerencia.
+    .where(and(eq(usersTable.tenantId, tenantId), notInArray(usersTable.role, ["superadmin"])))
     .orderBy(usersTable.name);
 
   // Get sectors for each user (da loja)
