@@ -10,7 +10,7 @@ import {
   Smartphone, Instagram, UserCircle2, Circle,
   ArrowRightLeft, FileText, Volume2, Image, Video, Mic, Users, Paperclip, IdCard,
   Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX, Zap, CalendarClock, AlertTriangle,
-  Pin, PinOff, Reply, StickyNote, Star, StarOff, ChevronLeft,
+  Pin, PinOff, Reply, StickyNote, Star, StarOff, ChevronLeft, ChevronRight,
   MapPin, ShoppingBag, CreditCard, BarChart3, Ban, UserPlus, ExternalLink,
   FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Download, Maximize2,
 } from "lucide-react";
@@ -984,8 +984,26 @@ export default function ChatCenter({
   const [crmContactId, setCrmContactId] = useState<number | null>(null);
   const [crmLoading, setCrmLoading] = useState(false);
 
-  // Informações side panel: view/edit the linked CRM contact next to the chat
-  const [showInfo, setShowInfo] = useState(false);
+  // Informações side panel: view/edit the linked CRM contact next to the chat.
+  // Fase 3a do redesign: painel colapsável fixo (nunca desmonta no desktop,
+  // vira um trilho estreito quando fechado) — estado persistido por
+  // atendente via localStorage. No celular continua sendo overlay
+  // fullscreen só quando expandido (ver classes no <aside> abaixo).
+  const [infoCollapsed, setInfoCollapsed] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem("shk_chat_info_collapsed");
+      return saved === null ? true : saved === "1";
+    } catch {
+      return true;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("shk_chat_info_collapsed", infoCollapsed ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }, [infoCollapsed]);
   const [infoContact, setInfoContact] = useState<CrmContact | null>(null);
   const [infoLoading, setInfoLoading] = useState(false);
   const [infoSaving, setInfoSaving] = useState(false);
@@ -2089,11 +2107,11 @@ export default function ChatCenter({
     api.crm.customFields.list().then((f) => setCustomDefs(f.filter((d) => d.isActive))).catch(() => {});
   }, []);
 
-  // (Re)load contact whenever the panel opens or the active conversation changes
+  // (Re)load contact whenever the panel is expanded or the active conversation changes
   useEffect(() => {
-    if (showInfo && activeConv) void loadInfoContact();
+    if (!infoCollapsed && activeConv) void loadInfoContact();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showInfo, activeId]);
+  }, [infoCollapsed, activeId]);
 
   const handleSaveInfo = async () => {
     if (!infoContact) return;
@@ -2991,11 +3009,11 @@ export default function ChatCenter({
                   ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                   : <IdCard className="w-3.5 h-3.5" />}
               </button>
-              {/* Informações — toggle the customer info side panel */}
+              {/* Informações — expande/recolhe o painel do cliente */}
               <button
-                onClick={() => setShowInfo((v) => !v)}
+                onClick={() => setInfoCollapsed((v) => !v)}
                 data-testid="button-toggle-info"
-                className={`p-2 rounded-lg border transition ${showInfo ? "bg-primary text-white border-primary" : "bg-white border-border hover:bg-secondary"}`}
+                className={`p-2 rounded-lg border transition ${!infoCollapsed ? "bg-primary text-white border-primary" : "bg-white border-border hover:bg-secondary"}`}
                 title="Informações do cliente"
               >
                 <Info className="w-3.5 h-3.5" />
@@ -3277,16 +3295,34 @@ export default function ChatCenter({
           ))}
         </div>
 
-        {/* ── Informações side panel ─────────────────────────────────────── */}
-        {showInfo && (
-          <aside className="fixed inset-0 z-40 w-full md:static md:z-auto md:w-80 shrink-0 md:border-l border-border bg-white flex flex-col overflow-hidden" data-testid="panel-info">
+        {/* ── Informações side panel — colapsável fixo (Fase 3a) ───────────── */}
+        <aside
+          className={`shrink-0 md:border-l border-border bg-white flex-col overflow-hidden ${
+            infoCollapsed
+              ? "hidden md:flex md:w-12"
+              : "fixed inset-0 z-40 md:static md:z-auto flex w-full md:w-80"
+          }`}
+          data-testid="panel-info"
+        >
+          {infoCollapsed ? (
+            <button
+              onClick={() => setInfoCollapsed(false)}
+              className="flex flex-col items-center gap-2 py-4 w-full h-full text-muted-foreground hover:text-primary hover:bg-secondary transition"
+              title="Mostrar informações do cliente"
+              data-testid="button-expand-info"
+            >
+              <ChevronRight className="w-4 h-4" />
+              <Info className="w-4 h-4" />
+            </button>
+          ) : (
+          <>
             <div className="bg-primary px-4 py-3 text-white flex items-center justify-between shrink-0">
               <div className="flex items-center gap-2">
                 <Info className="w-4 h-4" />
                 <span className="font-semibold text-sm">Informações do cliente</span>
               </div>
-              <button onClick={() => setShowInfo(false)} className="p-1 rounded-lg hover:bg-white/20 transition" title="Fechar">
-                <X className="w-4 h-4" />
+              <button onClick={() => setInfoCollapsed(true)} className="p-1 rounded-lg hover:bg-white/20 transition" title="Recolher">
+                <ChevronLeft className="w-4 h-4" />
               </button>
             </div>
             {infoLoading || !infoContact ? (
@@ -3369,8 +3405,9 @@ export default function ChatCenter({
                 </button>
               </div>
             )}
-          </aside>
-        )}
+          </>
+          )}
+        </aside>
         </div>
       )}
 

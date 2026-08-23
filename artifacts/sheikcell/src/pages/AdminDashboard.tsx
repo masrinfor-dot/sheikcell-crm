@@ -42,7 +42,7 @@ import {
   Settings, Users, RefreshCw, Plus, X, Clock, CheckCircle,
   PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck,
   AlertTriangle, WifiOff,
-  FolderArchive, Headphones, ShoppingBag, BarChart3, SlidersHorizontal, Palette, ChevronDown, Wrench,
+  FolderArchive, Headphones, BarChart3, SlidersHorizontal, Palette, ChevronDown, Wrench,
   ArrowRight, Filter, BookUser, LifeBuoy, FileBarChart2, Plug, Tv, ListChecks, PanelTop,
 } from "lucide-react";
 import Resultados from "./Resultados";
@@ -53,12 +53,13 @@ type Tab = "dashboard" | "resultados" | "relatorios" | "chat" | "equipe" | "tare
 
 // Categorias colapsáveis do menu lateral — cada aba pertence a um único grupo.
 type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabIds: Tab[] };
+// Reorganização de grupos (produção + prévia nova) — Suporte não entra em
+// nenhum tabIds: ele é sempre renderizado à parte, fixo no fim de toda
+// lista de navegação (ver `suporteTab` mais abaixo).
 const TAB_GROUPS: TabGroup[] = [
-  { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["dashboard", "chat", "equipe", "crm"] },
-  { key: "vendas", label: "Vendas e Serviços", icon: ShoppingBag, tabIds: ["avaliacao", "financeiras", "tvbox"] },
-  { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["resultados", "relatorios", "tarefas", "documentos", "history", "suporte", "rotinas"] },
-  { key: "pessoas", label: "Pessoas", icon: Users, tabIds: ["diretorio", "meuponto", "rh", "treinamentos", "questionarios", "sorteios", "users"] },
-  { key: "administracao", label: "Administração", icon: Settings, tabIds: ["financeiro", "sectors", "quickreplies", "whatsapp", "robo"] },
+  { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["dashboard", "chat", "equipe", "crm", "avaliacao", "financeiras"] },
+  { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["resultados", "relatorios", "tarefas", "documentos", "history", "rotinas", "diretorio", "meuponto", "rh", "treinamentos", "questionarios", "sorteios"] },
+  { key: "administracao", label: "Administração", icon: Settings, tabIds: ["users", "sectors", "financeiro", "quickreplies", "whatsapp", "robo", "tvbox"] },
   { key: "configuracoes", label: "Configurações", icon: SlidersHorizontal, tabIds: ["aparencia", "integracoes"] },
   { key: "sistema", label: "Sistema (Dev)", icon: Wrench, tabIds: ["sistema"] },
 ];
@@ -456,7 +457,7 @@ export default function AdminDashboard() {
   };
 
   const allTabs = [
-    { id: "dashboard" as Tab, label: "Visão Geral", icon: LayoutDashboard, adminOnly: false },
+    { id: "dashboard" as Tab, label: "Dashboard", icon: LayoutDashboard, adminOnly: false },
     { id: "resultados" as Tab, label: "Resultados", icon: TrendingUp, adminOnly: false, module: "resultados" as OptionalModule },
     { id: "relatorios" as Tab, label: "Relatórios", icon: FileBarChart2, adminOnly: true, module: "relatorios" as OptionalModule },
     { id: "chat" as Tab, label: "Atendimento", icon: MessageCircle, adminOnly: false, module: "chat" as OptionalModule },
@@ -500,9 +501,15 @@ export default function AdminDashboard() {
     (!t.adminOnly || isAdmin || granted.includes(t.id)) &&
     (!t.module || enabledModules == null || enabledModules.includes(t.module)) &&
     moduleGranted(t.module));
+  // Suporte é sempre fixo por último em toda lista de navegação (sidebar,
+  // barra superior nova e painel "Mais" do celular) — nunca faz parte de
+  // nenhum grupo do TAB_GROUPS, ver comentário acima da constante.
+  const suporteTab = tabs.find((t) => t.id === "suporte");
+  const tabsWithoutSuporte = tabs.filter((t) => t.id !== "suporte");
+
   // Celular: 4 abas principais + "Mais" (painel com o restante)
-  const mobilePrimaryTabs = tabs.slice(0, 4);
-  const mobileMoreTabs = tabs.slice(4);
+  const mobilePrimaryTabs = tabsWithoutSuporte.slice(0, 4);
+  const mobileMoreTabs = tabsWithoutSuporte.slice(4);
 
   // Barra superior nova (Fase 1, preview) — mesmos TAB_GROUPS/tabs já
   // filtrados por permissão acima, só resolvidos pro formato que
@@ -560,7 +567,7 @@ export default function AdminDashboard() {
       <RoutineChecklistGate />
 
       {navPreview && (
-        <AdminTopBar groups={topBarGroups} tab={tab} setTab={(id) => setTab(id as Tab)} internalChatUnread={internalChatUnread} />
+        <AdminTopBar groups={topBarGroups} tab={tab} setTab={(id) => setTab(id as Tab)} internalChatUnread={internalChatUnread} supportTab={suporteTab} />
       )}
 
       {/* Left sidebar + content */}
@@ -604,6 +611,14 @@ export default function AdminDashboard() {
                 </div>
               );
             })}
+            {suporteTab && (
+              <button onClick={() => setTab("suporte")} data-testid="tab-suporte"
+                className={`flex items-center gap-2 w-full px-2 py-2 rounded-lg text-xs font-semibold text-left transition-colors mt-1 ${
+                  tab === "suporte" ? "bg-amber-100 text-amber-700" : "text-amber-600 hover:bg-amber-50"
+                }`}>
+                <suporteTab.icon className="w-4 h-4 shrink-0" />{suporteTab.label}
+              </button>
+            )}
           </div>
         </aside>
         )}
@@ -1912,6 +1927,18 @@ export default function AdminDashboard() {
                   {label}
                 </button>
               ))}
+              {suporteTab && (
+                <button
+                  onClick={() => { setTab("suporte"); setShowMoreNav(false); }}
+                  data-testid="bottomnav-more-suporte"
+                  className={`relative flex flex-col items-center justify-center gap-1 py-3 rounded-xl text-[11px] font-semibold transition ${
+                    tab === "suporte" ? "bg-amber-100 text-amber-700" : "text-amber-600 hover:bg-amber-50"
+                  }`}
+                >
+                  <suporteTab.icon className="w-5 h-5" />
+                  {suporteTab.label}
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -1937,12 +1964,12 @@ export default function AdminDashboard() {
             {label}
           </button>
         ))}
-        {mobileMoreTabs.length > 0 && (
+        {(mobileMoreTabs.length > 0 || suporteTab) && (
           <button
             onClick={() => setShowMoreNav((v) => !v)}
             data-testid="bottomnav-more"
             className={`flex-1 flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold transition ${
-              showMoreNav || mobileMoreTabs.some((t) => t.id === tab) ? "text-primary" : "text-muted-foreground"
+              showMoreNav || mobileMoreTabs.some((t) => t.id === tab) || tab === "suporte" ? "text-primary" : "text-muted-foreground"
             }`}
           >
             <MoreHorizontal className="w-5 h-5" />

@@ -64,8 +64,9 @@ function GroupMenu({ group, tab, setTab, internalChatUnread }: {
   );
 }
 
-export default function AdminTopBar({ groups, tab, setTab, internalChatUnread }: {
+export default function AdminTopBar({ groups, tab, setTab, internalChatUnread, supportTab }: {
   groups: TopBarGroup[]; tab: string; setTab: (id: string) => void; internalChatUnread: number;
+  supportTab?: TopBarTab;
 }) {
   return (
     <div className="hidden md:flex items-center gap-1 bg-white border-b border-border sticky top-14 z-20 px-4 min-h-12 py-1 flex-wrap">
@@ -76,6 +77,15 @@ export default function AdminTopBar({ groups, tab, setTab, internalChatUnread }:
         ) : null
       ))}
       <div className="flex-1" />
+      {supportTab && (
+        <button onClick={() => setTab(supportTab.id)} data-testid="topbar-tab-suporte"
+          className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold transition whitespace-nowrap ${
+            tab === supportTab.id ? "bg-amber-100 text-amber-700" : "text-amber-600 hover:bg-amber-50"
+          }`}>
+          <supportTab.icon className="w-4 h-4 shrink-0" />
+          {supportTab.label}
+        </button>
+      )}
       <button disabled title="Pesquisa global — chega na Fase 5" data-testid="topbar-search-stub"
         className="p-2 rounded-lg text-muted-foreground/50 cursor-not-allowed">
         <Search className="w-4 h-4" />
