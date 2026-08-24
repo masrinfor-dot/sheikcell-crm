@@ -34,7 +34,7 @@ await esbuild({
   outExtension: { ".js": ".mjs" },
   logLevel: "info",
   external: [
-    "*.node", "@whiskeysockets/baileys", "sharp", "better-sqlite3", "sqlite3", "canvas", "bcrypt",
+    "*.node", "@whiskeysockets/baileys", "sharp", "pdfkit", "fontkit", "better-sqlite3", "sqlite3", "canvas", "bcrypt",
     "argon2", "fsevents", "re2", "farmhash", "xxhash-addon", "bufferutil", "utf-8-validate", "ssh2",
     "cpu-features", "dtrace-provider", "isolated-vm", "lightningcss", "pg-native", "oracledb",
     "mongodb-client-encryption", "nodemailer", "handlebars", "knex", "typeorm", "protobufjs",

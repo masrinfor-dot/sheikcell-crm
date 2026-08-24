@@ -31,6 +31,8 @@ async function buildAll() {
       "*.node",
       "@whiskeysockets/baileys",
       "sharp",
+      "pdfkit",
+      "fontkit",
       "better-sqlite3",
       "sqlite3",
       "canvas",
