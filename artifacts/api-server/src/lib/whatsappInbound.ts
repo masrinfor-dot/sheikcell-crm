@@ -15,7 +15,17 @@ import { randomUUID } from "crypto";
 import path from "path";
 import { logger } from "./logger";
 
-export const MEDIA_DIR = path.resolve(process.cwd(), "media");
+// Em produção (EasyPanel/Docker) defina MEDIA_DIR com o caminho absoluto do
+// volume persistente montado no serviço "api" (ex.: /app/storage/media).
+// Sem essa env var o caminho é resolvido a partir de process.cwd() — que MUDA
+// entre dev (roda de dentro de artifacts/api-server) e produção no Dockerfile
+// (WORKDIR /app, comando executado direto de /app): sem MEDIA_DIR fixo, um
+// redeploy reconstrói /app do zero e qualquer mídia que não esteja no caminho
+// realmente montado como volume desaparece — o arquivo grava, mas em disco
+// efêmero, e o próximo GET .../file 404 ("arquivo não encontrado no servidor").
+export const MEDIA_DIR = process.env["MEDIA_DIR"]
+  ? path.resolve(process.env["MEDIA_DIR"])
+  : path.resolve(process.cwd(), "media");
 
 // Sessão padrão/legada pertence à loja 1 (dados legados). Chaves novas de
 // sessão são prefixadas t{tenantId}- (ver routes/whatsapp.ts).

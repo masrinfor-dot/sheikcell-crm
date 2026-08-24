@@ -12,7 +12,15 @@ const router: IRouter = Router();
 router.use("/documents", requireModuleAccess("documentos"));
 
 // Documentos ficam separados das mídias do WhatsApp.
-export const DOCS_DIR = path.resolve(process.cwd(), "documents");
+// Em produção (EasyPanel/Docker) defina DOCS_DIR com o caminho absoluto do
+// volume persistente montado no serviço "api" (ex.: /app/storage/documents).
+// Mesmo motivo do MEDIA_DIR em whatsappInbound.ts: sem essa env var o caminho
+// vem de process.cwd(), que é diferente em dev (artifacts/api-server) e em
+// produção (WORKDIR /app) — sem um caminho fixo, o volume monta num lugar e o
+// código grava/lê em outro, e cada redeploy apaga os documentos enviados.
+export const DOCS_DIR = process.env["DOCS_DIR"]
+  ? path.resolve(process.env["DOCS_DIR"])
+  : path.resolve(process.cwd(), "documents");
 
 const CATEGORIES = ["ata", "documento", "comunicado", "contrato"];
 

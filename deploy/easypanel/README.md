@@ -25,6 +25,28 @@ O sistema tem 4 serviços dentro de um mesmo projeto do EasyPanel:
 > O nome interno dos serviços segue o padrão `<projeto>_<serviço>`
 > (ex.: projeto `sheikcell`, serviço `whatsapp` → host `sheikcell_whatsapp`).
 
+## Persistência de arquivos (mídias do WhatsApp e documentos)
+
+O código grava mídias e documentos enviados em disco (não no Postgres). Sem
+volume persistente configurado, cada rebuild da imagem (`COPY . .` no
+`Dockerfile.api`) apaga tudo que foi enviado — os links antigos param de abrir
+("arquivo não encontrado no servidor").
+
+No serviço **`api`**:
+1. Em **Volumes**, adicione um volume montado em `/app/storage` (caminho
+   dentro do container — pode escolher qualquer nome/tamanho no EasyPanel,
+   só o path de montagem importa).
+2. Em **Variáveis de ambiente**, defina:
+   - `MEDIA_DIR=/app/storage/media`
+   - `DOCS_DIR=/app/storage/documents`
+
+Sem essas duas variáveis o código cai no padrão antigo (caminho relativo ao
+diretório de trabalho do processo, que é `/app` no container) — funciona
+enquanto o container não for recriado, mas não sobrevive a um redeploy a
+menos que o volume esteja montado EXATAMENTE em `/app/media` e
+`/app/documents`. Definir `MEDIA_DIR`/`DOCS_DIR` explicitamente remove essa
+ambiguidade.
+
 ## Ordem de criação
 1. Criar projeto `sheikcell`
 2. Criar serviço Postgres (`db`)
