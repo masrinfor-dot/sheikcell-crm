@@ -13,6 +13,7 @@ import CrmBoard from "./CrmBoard";
 import ChatCenter from "./ChatCenter";
 import Financeiras from "./Financeiras";
 import Avaliacao from "./Avaliacao";
+import VitrineAparelhos from "./VitrineAparelhos";
 import Questionarios from "./Questionarios";
 import RotinasProdutividade from "./RotinasProdutividade";
 import Treinamentos from "./Treinamentos";
@@ -50,7 +51,7 @@ import Resultados from "./Resultados";
 import Relatorios from "./Relatorios";
 import TvBox from "./TvBox";
 
-type Tab = "dashboard" | "resultados" | "relatorios" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "questionarios" | "treinamentos" | "documentos" | "rh" | "meuponto" | "sorteios" | "robo" | "financeiro" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "integracoes" | "sistema" | "diretorio" | "suporte" | "tvbox" | "rotinas";
+type Tab = "dashboard" | "resultados" | "relatorios" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "vitrine" | "questionarios" | "treinamentos" | "documentos" | "rh" | "meuponto" | "sorteios" | "robo" | "financeiro" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "integracoes" | "sistema" | "diretorio" | "suporte" | "tvbox" | "rotinas";
 
 // Categorias colapsáveis do menu lateral — cada aba pertence a um único grupo.
 type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabIds: Tab[] };
@@ -58,7 +59,7 @@ type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabI
 // nenhum tabIds: ele é sempre renderizado à parte, fixo no fim de toda
 // lista de navegação (ver `suporteTab` mais abaixo).
 const TAB_GROUPS: TabGroup[] = [
-  { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["dashboard", "chat", "equipe", "crm", "avaliacao", "financeiras"] },
+  { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["dashboard", "chat", "equipe", "crm", "avaliacao", "vitrine", "financeiras"] },
   { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["resultados", "relatorios", "tarefas", "documentos", "history", "rotinas", "diretorio", "meuponto", "rh", "treinamentos", "questionarios", "sorteios"] },
   { key: "administracao", label: "Administração", icon: Settings, tabIds: ["users", "sectors", "financeiro", "quickreplies", "whatsapp", "robo", "tvbox"] },
   { key: "configuracoes", label: "Configurações", icon: SlidersHorizontal, tabIds: ["aparencia", "integracoes"] },
@@ -469,6 +470,7 @@ export default function AdminDashboard() {
     { id: "financeiro" as Tab, label: "Financeiro", icon: BadgeDollarSign, adminOnly: true, module: "financeiro" as OptionalModule },
     { id: "financeiras" as Tab, label: "Financeiras", icon: Landmark, adminOnly: false, module: "financeiras" as OptionalModule },
     { id: "avaliacao" as Tab, label: "Avaliação de Usados", icon: BadgeDollarSign, adminOnly: false, module: "avaliacao" as OptionalModule },
+    { id: "vitrine" as Tab, label: "Vitrine Aparelhos", icon: Smartphone, adminOnly: false, module: "vitrine" as OptionalModule },
     { id: "tvbox" as Tab, label: "TV Box", icon: Tv, adminOnly: false, module: "tvbox" as OptionalModule },
     { id: "questionarios" as Tab, label: "Questionários", icon: ClipboardList, adminOnly: true, module: "questionarios" as OptionalModule },
     { id: "rotinas" as Tab, label: "Rotinas e Produtividade", icon: ListChecks, adminOnly: true, module: "rotinas" as OptionalModule },
@@ -848,6 +850,7 @@ export default function AdminDashboard() {
         {tab === "financeiras" && <Financeiras />}
 
         {tab === "avaliacao" && <Avaliacao />}
+        {tab === "vitrine" && <VitrineAparelhos />}
 
         {tab === "tvbox" && <TvBox />}
 

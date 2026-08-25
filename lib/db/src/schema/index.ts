@@ -36,3 +36,4 @@ export * from "./system_board";
 export * from "./team_favorites";
 export * from "./password_reset_tokens";
 export * from "./tv_box";
+export * from "./catalog";

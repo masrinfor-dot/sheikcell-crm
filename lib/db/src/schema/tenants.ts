@@ -13,7 +13,7 @@ import { usersTable } from "./users";
 export const OPTIONAL_MODULES = [
   "chat", "crm", "equipe", "financeiro", "diretorio", "tarefas", "resultados", "history",
   "avaliacao", "financeiras", "rh", "treinamentos", "questionarios", "sorteios", "documentos", "robo",
-  "relatorios", "tvbox", "rotinas",
+  "relatorios", "tvbox", "rotinas", "vitrine",
 ] as const;
 export type OptionalModule = typeof OPTIONAL_MODULES[number];
 
@@ -49,6 +49,9 @@ export const tenantsTable = pgTable("tenants", {
   // check-in (ver lib/whatsappInbound.ts). Null = feature desligada (opt-in,
   // nenhuma mensagem é interceptada até o admin escolher a linha).
   pontoCheckInSessionKey: text("ponto_check_in_session_key"),
+  // Endereço público da Vitrine de Aparelhos (/vitrine/:slug) — null = a loja
+  // ainda não escolheu um endereço (link desligado). Único entre lojas.
+  catalogSlug: text("catalog_slug"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

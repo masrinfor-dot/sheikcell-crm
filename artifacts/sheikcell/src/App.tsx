@@ -12,6 +12,7 @@ import NotFound from "@/pages/not-found";
 import Candidatura from "@/pages/Candidatura";
 import ForgotPassword from "@/pages/ForgotPassword";
 import ResetPassword from "@/pages/ResetPassword";
+import VitrinePublica from "@/pages/VitrinePublica";
 import GlobalChatWidget from "@/components/GlobalChatWidget";
 import { useVisualViewportVar } from "@/hooks/useVisualViewportVar";
 
@@ -35,6 +36,9 @@ function AppRoutes() {
     <Switch>
       <Route path="/candidatura/:token">
         <Candidatura />
+      </Route>
+      <Route path="/vitrine/:slug">
+        <VitrinePublica />
       </Route>
       <Route path="/forgot-password">
         {user ? <Redirect to="/" /> : <ForgotPassword />}
