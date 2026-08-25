@@ -1092,6 +1092,9 @@ export type ChatMessage = {
   type: string;
   status: string;
   senderName: string | null;
+  // Id do usuário do sistema que enviou (só preenchido em mensagens outbound) —
+  // usado só pra decidir quem pode editar/apagar a mensagem.
+  senderId?: number | null;
   // Telefone de quem enviou DENTRO de uma conversa de grupo (participante),
   // diferente do "phone" da conversa (que é o JID do grupo em si). Só
   // preenchido pra mensagens de grupo — permite abrir uma conversa 1:1 com
@@ -1349,6 +1352,10 @@ export const api = {
       req<ChatMessage>(`/chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content, replyToId }) }),
     sendNote: (id: number, content: string) =>
       req<ChatMessage>(`/chat/conversations/${id}/notes`, { method: "POST", body: JSON.stringify({ content }) }),
+    editMessage: (messageId: number, content: string) =>
+      req<ChatMessage>(`/chat/messages/${messageId}`, { method: "PATCH", body: JSON.stringify({ content }) }),
+    deleteMessage: (messageId: number) =>
+      req<ChatMessage>(`/chat/messages/${messageId}`, { method: "DELETE" }),
     suggestReply: (id: number) =>
       req<{ suggestion: string }>(`/chat/conversations/${id}/suggest-reply`, { method: "POST" }),
     transcribe: (messageId: number) =>

@@ -115,6 +115,12 @@ export interface InboundWAMessageContent {
   ephemeralMessage?: { message?: InboundWAMessageContent };
   viewOnceMessage?: { message?: InboundWAMessageContent };
   viewOnceMessageV2?: { message?: InboundWAMessageContent };
+  // Mensagem de modelo (contas Business — texto/rodapé/botões). A forma
+  // exata varia entre versões do protocolo (hydratedTemplate,
+  // hydratedFourRowTemplate, etc.) — não vale a pena tipar campo por campo,
+  // então fica solto e o texto é extraído por busca recursiva (ver
+  // extractAnyText mais abaixo neste arquivo).
+  templateMessage?: unknown;
 }
 
 export interface InboundWAPayload {
@@ -877,13 +883,38 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   // ORIGINAL (antes do unwrap), pra nunca mostrar a mensagem sem nenhuma
   // pista do que ela é.
   const unknownKind = rawKeys[0] ?? keysOf(rawMsg)[0];
-  if (!mediaType && !text && !contactText && !locationText && !pollText && !productText && !paymentText && !groupInviteText && !interactiveText) {
+
+  // Template messages (contas Business — mensagem com texto/rodapé/botões):
+  // a estrutura interna varia bastante entre versões do protocolo do
+  // WhatsApp (hydratedTemplate, hydratedFourRowTemplate, etc.), então em vez
+  // de mapear campo por campo — e quebrar de novo na próxima variação —
+  // procura qualquer texto legível dentro do objeto inteiro (título, corpo,
+  // rodapé, texto de botão) e junta numa mensagem só.
+  const extractAnyText = (obj: unknown, depth = 0): string[] => {
+    if (depth > 5 || obj == null) return [];
+    if (typeof obj === "string") return obj.trim() ? [obj.trim()] : [];
+    if (Array.isArray(obj)) return obj.flatMap((v) => extractAnyText(v, depth + 1));
+    if (typeof obj === "object") {
+      return Object.entries(obj as Record<string, unknown>)
+        .filter(([k]) => !NOISE_KEYS.has(k))
+        .flatMap(([, v]) => extractAnyText(v, depth + 1));
+    }
+    return [];
+  };
+  const templateText = msgContent?.templateMessage
+    ? (() => {
+        const parts = [...new Set(extractAnyText(msgContent.templateMessage))];
+        return parts.length ? `📋 ${parts.join(" — ")}` : "📋 Mensagem de modelo (template)";
+      })()
+    : "";
+
+  if (!mediaType && !text && !contactText && !locationText && !pollText && !productText && !paymentText && !groupInviteText && !interactiveText && !templateText) {
     logger.warn({ rawKeys, msgContent }, "Tipo de mensagem WhatsApp não mapeado — caiu no fallback");
   }
 
   // Contato compartilhado, localização, enquete, produto de catálogo,
-  // pagamento e convite de grupo viram tipos próprios pra renderizar como
-  // cartão no front, em vez de cair no balão de texto genérico.
+  // pagamento, convite de grupo e template viram tipos próprios pra
+  // renderizar como cartão no front, em vez de cair no balão de texto genérico.
   const msgType: string = mediaType
     ?? (text ? "text"
       : contactText ? "contact"
@@ -892,6 +923,7 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
       : productText ? "product"
       : paymentText ? "payment"
       : groupInviteText ? "group_invite"
+      : templateText ? "template"
       : "text");
 
   const displayContent =
@@ -903,6 +935,7 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     paymentText ||
     groupInviteText ||
     interactiveText ||
+    templateText ||
     (mediaType === "image" ? "📷 Foto"
       : mediaType === "video" ? "🎥 Vídeo"
       : mediaType === "audio" ? "🎵 Áudio"

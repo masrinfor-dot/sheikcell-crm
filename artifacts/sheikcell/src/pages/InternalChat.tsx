@@ -1213,17 +1213,26 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                         insertMention(mentionOptions[0].name);
                         return;
                       }
-                      // Enter e Shift+Enter só quebram linha (comportamento padrão do
-                      // textarea); enviar é só pelo botão ou Ctrl/Cmd+Enter.
-                      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                      // Igual ao Atendimento: Enter envia, Shift+Enter quebra linha.
+                      if (e.key === "Enter" && !e.shiftKey) {
                         e.preventDefault();
                         handleSend();
                         return;
                       }
                       if (e.key === "Escape") setMentionQuery(null);
                     }}
-                    placeholder="Escreva uma mensagem... (Enter quebra linha, Ctrl+Enter envia)"
-                    title="Enter quebra linha. Envie pelo botão ou com Ctrl+Enter."
+                    onPaste={(e) => {
+                      const images = Array.from(e.clipboardData.items)
+                        .filter((item) => item.type.startsWith("image/"))
+                        .map((item) => item.getAsFile())
+                        .filter((f): f is File => f != null);
+                      if (images.length > 0) {
+                        e.preventDefault();
+                        pickAttachment(images[0]!);
+                      }
+                    }}
+                    placeholder="Escreva uma mensagem... (Enter envia, Shift+Enter quebra linha)"
+                    title="Enter envia. Shift+Enter quebra linha."
                     spellCheck
                     lang="pt-BR"
                     rows={1}
