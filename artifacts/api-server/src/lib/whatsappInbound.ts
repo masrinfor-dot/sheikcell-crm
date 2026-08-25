@@ -840,7 +840,12 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   if (mediaBase64 && mediaMimeType) {
     try {
       mediaUrl = await saveMedia(mediaBase64, mediaMimeType);
-    } catch {
+    } catch (err) {
+      // Sem este log, uma mídia que falha ao salvar (limite de tamanho,
+      // MIME não suportado, ou o volume/disco do MEDIA_DIR indisponível)
+      // vira silenciosamente uma mensagem sem mídia ("vídeo/foto não abre")
+      // e não sobra nenhum rastro pra descobrir o motivo real depois.
+      logger.error({ err, mediaMimeType, bytes: mediaBase64.length }, "Falha ao salvar mídia inbound (bridge)");
       mediaUrl = null;
     }
   }
@@ -1048,7 +1053,10 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
           if (accessToken && msg.image?.id) {
             const dl = await downloadMetaMedia(msg.image.id, accessToken);
             if (dl) {
-              try { mediaUrl = await saveMedia(dl.base64, dl.mime); } catch { mediaUrl = null; }
+              try { mediaUrl = await saveMedia(dl.base64, dl.mime); } catch (err) {
+                logger.error({ err, mime: dl.mime }, "Falha ao salvar mídia inbound (Meta: imagem)");
+                mediaUrl = null;
+              }
             }
           }
         } else if (msg.type === "video") {
@@ -1057,7 +1065,10 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
           if (accessToken && msg.video?.id) {
             const dl = await downloadMetaMedia(msg.video.id, accessToken);
             if (dl) {
-              try { mediaUrl = await saveMedia(dl.base64, dl.mime); } catch { mediaUrl = null; }
+              try { mediaUrl = await saveMedia(dl.base64, dl.mime); } catch (err) {
+                logger.error({ err, mime: dl.mime }, "Falha ao salvar mídia inbound (Meta: vídeo)");
+                mediaUrl = null;
+              }
             }
           }
         } else if (msg.type === "audio") {
@@ -1065,7 +1076,10 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
           if (accessToken && msg.audio?.id) {
             const dl = await downloadMetaMedia(msg.audio.id, accessToken);
             if (dl) {
-              try { mediaUrl = await saveMedia(dl.base64, dl.mime); } catch { mediaUrl = null; }
+              try { mediaUrl = await saveMedia(dl.base64, dl.mime); } catch (err) {
+                logger.error({ err, mime: dl.mime }, "Falha ao salvar mídia inbound (Meta: áudio)");
+                mediaUrl = null;
+              }
             }
           }
         } else if (msg.type === "document") {
@@ -1074,7 +1088,10 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
           if (accessToken && msg.document?.id) {
             const dl = await downloadMetaMedia(msg.document.id, accessToken);
             if (dl) {
-              try { mediaUrl = await saveMedia(dl.base64, dl.mime); } catch { mediaUrl = null; }
+              try { mediaUrl = await saveMedia(dl.base64, dl.mime); } catch (err) {
+                logger.error({ err, mime: dl.mime }, "Falha ao salvar mídia inbound (Meta: documento)");
+                mediaUrl = null;
+              }
             }
           }
         } else if (msg.type === "sticker") {
