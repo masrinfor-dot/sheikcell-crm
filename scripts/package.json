@@ -6,16 +6,19 @@
   "scripts": {
     "hello": "tsx ./src/hello.ts",
     "rotate-wa-credentials": "tsx ./src/rotateWaCredentials.ts",
+    "reset-superadmin-password": "tsx ./src/resetSuperadminPassword.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "merge-duplicates": "tsx ./src/mergeDuplicates.ts"
   },
   "dependencies": {
     "drizzle-orm": "catalog:",
-    "pg": "^8.20.0"
+    "pg": "^8.20.0",
+    "bcryptjs": "^3.0.3"
   },
   "devDependencies": {
     "@types/node": "catalog:",
     "@types/pg": "^8.20.0",
+    "@types/bcryptjs": "^3.0.0",
     "tsx": "catalog:"
   }
 }
