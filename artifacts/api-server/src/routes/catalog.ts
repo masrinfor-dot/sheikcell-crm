@@ -9,6 +9,7 @@ import {
   catalogProductsTable,
   catalogProductVariantsTable,
   catalogProductPhotosTable,
+  catalogCategoriesTable,
   appSettingsTable,
   tenantsTable,
 } from "@workspace/db";
@@ -131,6 +132,7 @@ type VariantInput = {
   costIncludesInvoice: boolean;
   marginPercentOverride: number | null;
   salePrice: number | null;
+  wholesalePrice: number | null;
   stockQty: number;
 };
 
@@ -143,6 +145,7 @@ function cleanVariantInput(raw: unknown): VariantInput {
     costIncludesInvoice: o.costIncludesInvoice === true,
     marginPercentOverride: toNumberOrNull(o.marginPercentOverride),
     salePrice: "salePrice" in o ? toNumberOrNull(o.salePrice) : null,
+    wholesalePrice: toNumberOrNull(o.wholesalePrice),
     stockQty: Number.isInteger(o.stockQty) ? Math.max(0, o.stockQty as number) : 1,
   };
 }
@@ -175,6 +178,7 @@ async function replaceVariants(tenantId: number, productId: number, rawVariants:
       costIncludesInvoice: v.costIncludesInvoice,
       marginPercentOverride: v.marginPercentOverride != null ? String(v.marginPercentOverride) : null,
       salePrice,
+      wholesalePrice: v.wholesalePrice != null ? String(v.wholesalePrice) : null,
       stockQty: v.stockQty,
       sortOrder: i,
       updatedAt: new Date(),
@@ -195,6 +199,62 @@ async function replaceVariants(tenantId: number, productId: number, rawVariants:
       .where(and(inArray(catalogProductVariantsTable.id, toDelete), eq(catalogProductVariantsTable.tenantId, tenantId)));
   }
 }
+
+// ─── Categorias/abas personalizáveis ────────────────────────────────────────
+
+async function cleanCategoryId(tenantId: number, v: unknown): Promise<number | null> {
+  if (v === null || v === undefined || v === "") return null;
+  const id = Number(v);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  const [row] = await db.select({ id: catalogCategoriesTable.id }).from(catalogCategoriesTable)
+    .where(and(eq(catalogCategoriesTable.id, id), eq(catalogCategoriesTable.tenantId, tenantId))).limit(1);
+  return row ? id : null;
+}
+
+router.get("/catalog/categories", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rows = await db.select().from(catalogCategoriesTable)
+    .where(eq(catalogCategoriesTable.tenantId, tenantId))
+    .orderBy(catalogCategoriesTable.sortOrder, catalogCategoriesTable.id);
+  res.json({ categories: rows });
+});
+
+router.post("/catalog/categories", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const body = req.body as Record<string, unknown>;
+  const name = clean(body.name, 60);
+  if (!name) { res.status(400).json({ error: "Informe o nome da categoria" }); return; }
+  const parentId = await cleanCategoryId(tenantId, body.parentId);
+  const [category] = await db.insert(catalogCategoriesTable).values({ tenantId, name, parentId }).returning();
+  res.status(201).json(category);
+});
+
+router.patch("/catalog/categories/:id", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ error: "Categoria inválida" }); return; }
+  const [existing] = await db.select().from(catalogCategoriesTable)
+    .where(and(eq(catalogCategoriesTable.id, id), eq(catalogCategoriesTable.tenantId, tenantId))).limit(1);
+  if (!existing) { res.status(404).json({ error: "Categoria não encontrada" }); return; }
+
+  const body = req.body as Record<string, unknown>;
+  const parentId = "parentId" in body ? await cleanCategoryId(tenantId, body.parentId) : existing.parentId;
+  if (parentId === id) { res.status(400).json({ error: "Uma categoria não pode ser subcategoria dela mesma" }); return; }
+  const [updated] = await db.update(catalogCategoriesTable).set({
+    name: "name" in body ? (clean(body.name, 60) || existing.name) : existing.name,
+    parentId,
+    sortOrder: "sortOrder" in body && Number.isInteger(body.sortOrder) ? (body.sortOrder as number) : existing.sortOrder,
+  }).where(and(eq(catalogCategoriesTable.id, id), eq(catalogCategoriesTable.tenantId, tenantId))).returning();
+  res.json(updated);
+});
+
+router.delete("/catalog/categories/:id", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ error: "Categoria inválida" }); return; }
+  await db.delete(catalogCategoriesTable).where(and(eq(catalogCategoriesTable.id, id), eq(catalogCategoriesTable.tenantId, tenantId)));
+  res.json({ ok: true });
+});
 
 // ─── Listar / criar / editar / excluir produtos ─────────────────────────────
 
@@ -225,6 +285,7 @@ router.post("/catalog/products", requireAuth, async (req, res): Promise<void> =>
     colors: cleanColors(body.colors),
     description: clean(body.description, 2000) || null,
     status: body.status === "inactive" || body.status === "sold" ? body.status : "active",
+    categoryId: await cleanCategoryId(tenantId, body.categoryId),
     createdBy: req.session.userId ?? null,
   }).returning();
 
@@ -249,6 +310,7 @@ router.patch("/catalog/products/:id", requireAuth, async (req, res): Promise<voi
     colors: "colors" in body ? cleanColors(body.colors) : existing.colors,
     description: "description" in body ? (clean(body.description, 2000) || null) : existing.description,
     status: body.status === "active" || body.status === "inactive" || body.status === "sold" ? body.status : existing.status,
+    categoryId: "categoryId" in body ? await cleanCategoryId(tenantId, body.categoryId) : existing.categoryId,
     sortOrder: "sortOrder" in body && Number.isInteger(body.sortOrder) ? (body.sortOrder as number) : existing.sortOrder,
     updatedAt: new Date(),
   }).where(and(eq(catalogProductsTable.id, id), eq(catalogProductsTable.tenantId, tenantId))).returning();
@@ -490,6 +552,24 @@ router.put("/catalog/whatsapp", requireAdmin, async (req, res): Promise<void> =>
   res.json({ whatsapp: digits || null });
 });
 
+// Código de acesso ao preço de atacado — senha única compartilhada com
+// técnicos/lojistas de confiança (não é um login individual). Nunca é
+// devolvido em texto puro pra ninguém além do admin da própria loja aqui;
+// a vitrine pública só recebe se o código enviado bateu (ver /catalog-public).
+router.get("/catalog/wholesale-code", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const [tenant] = await db.select({ code: tenantsTable.catalogWholesaleCode }).from(tenantsTable).where(eq(tenantsTable.id, tenantId)).limit(1);
+  res.json({ hasCode: !!tenant?.code, code: tenant?.code ?? null });
+});
+
+router.put("/catalog/wholesale-code", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const raw = (req.body as { code?: unknown }).code;
+  const code = typeof raw === "string" ? raw.trim().slice(0, 40) : "";
+  await db.update(tenantsTable).set({ catalogWholesaleCode: code || null }).where(eq(tenantsTable.id, tenantId));
+  res.json({ hasCode: !!code, code: code || null });
+});
+
 // ─── Importação de lista do fornecedor via IA ───────────────────────────────
 
 type ParsedVariant = { storage: string | null; costPrice: number | null };
@@ -625,11 +705,26 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
     .where(and(eq(catalogProductsTable.tenantId, tenant.id), eq(catalogProductsTable.status, "active")))
     .orderBy(catalogProductsTable.sortOrder, desc(catalogProductsTable.createdAt));
   const ids = rows.map((r) => r.id);
-  const [photos, variants] = await Promise.all([photosByProductIds(tenant.id, ids), variantsByProductIds(tenant.id, ids)]);
+  const [photos, variants, categories] = await Promise.all([
+    photosByProductIds(tenant.id, ids),
+    variantsByProductIds(tenant.id, ids),
+    db.select().from(catalogCategoriesTable).where(eq(catalogCategoriesTable.tenantId, tenant.id)).orderBy(catalogCategoriesTable.sortOrder, catalogCategoriesTable.id),
+  ]);
+
+  // Preço de atacado só sai na resposta se o código enviado bater com o
+  // configurado pela loja — sem código configurado, ninguém vê (nem com
+  // código nenhum, nem com código errado).
+  const sentCode = clean((req.query as Record<string, unknown>).code, 40);
+  const wholesaleUnlocked = !!tenant.catalogWholesaleCode && sentCode === tenant.catalogWholesaleCode;
+
   res.json({
     storeName: tenant.name,
     whatsapp: tenant.catalogWhatsapp ?? tenant.contactPhone ?? null,
-    // Nunca expõe custo/margem — só o que o cliente final pode ver.
+    hasWholesale: !!tenant.catalogWholesaleCode,
+    wholesaleUnlocked,
+    categories: categories.map((c) => ({ id: c.id, name: c.name, parentId: c.parentId, sortOrder: c.sortOrder })),
+    // Nunca expõe custo/margem — só o que o cliente final (ou o
+    // técnico/lojista com código, no caso do atacado) pode ver.
     products: rows
       .map((r) => ({
         id: r.id,
@@ -637,10 +732,14 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
         condition: r.condition,
         colors: r.colors,
         description: r.description,
+        categoryId: r.categoryId,
         photos: (photos.get(r.id) ?? []).map((p) => p.id),
         variants: (variants.get(r.id) ?? [])
           .filter((v) => v.salePrice != null)
-          .map((v) => ({ id: v.id, storage: v.storage, salePrice: v.salePrice, inStock: v.stockQty > 0 })),
+          .map((v) => ({
+            id: v.id, storage: v.storage, salePrice: v.salePrice, inStock: v.stockQty > 0,
+            wholesalePrice: wholesaleUnlocked ? v.wholesalePrice : null,
+          })),
       }))
       .filter((p) => p.variants.length > 0),
   });

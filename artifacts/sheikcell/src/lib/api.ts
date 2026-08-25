@@ -270,6 +270,11 @@ export const CATALOG_CONDITION_CRITERIA: Record<
 
 export type CatalogPhoto = { id: number; storedName: string; sourceUrl?: string | null; sortOrder: number };
 
+// Categoria/aba personalizável (Celulares > Samsung/Apple, Peças de
+// celular...) — a loja cria/edita/apaga livremente. parentId null = aba
+// principal; parentId preenchido = subcategoria.
+export type CatalogCategory = { id: number; name: string; parentId: number | null; sortOrder: number };
+
 // Variante de armazenamento/memória — cada família de produto (modelo +
 // condição + cores) pode ter várias, com preço/estoque próprios.
 export type CatalogProductVariant = {
@@ -280,6 +285,9 @@ export type CatalogProductVariant = {
   costIncludesInvoice: boolean;
   marginPercentOverride: string | null;
   salePrice: string | null;
+  // Preço de atacado, digitado na mão — só sai na vitrine pública pra quem
+  // desbloqueou com o código de acesso (ver api.catalog.getWholesaleCode).
+  wholesalePrice: string | null;
   stockQty: number;
   sortOrder: number;
 };
@@ -293,6 +301,7 @@ export type CatalogVariantInput = {
   costIncludesInvoice: boolean;
   marginPercentOverride: number | null;
   salePrice?: number | null;
+  wholesalePrice?: number | null;
   stockQty: number;
 };
 
@@ -303,6 +312,7 @@ export type CatalogProduct = {
   colors: string[];
   description: string | null;
   status: "active" | "inactive" | "sold";
+  categoryId: number | null;
   sortOrder: number;
   createdAt: string;
   updatedAt: string;
@@ -316,7 +326,10 @@ export type CatalogPricingSettings = {
   cardFeeTable: Record<string, number>;
 };
 
-export type CatalogPublicVariant = { id: number; storage: string | null; salePrice: string | null; inStock: boolean };
+export type CatalogPublicVariant = {
+  id: number; storage: string | null; salePrice: string | null; inStock: boolean;
+  wholesalePrice: string | null;
+};
 
 export type CatalogPublicProduct = {
   id: number;
@@ -324,6 +337,7 @@ export type CatalogPublicProduct = {
   condition: CatalogCondition;
   colors: string[];
   description: string | null;
+  categoryId: number | null;
   photos: number[];
   variants: CatalogPublicVariant[];
 };
@@ -1852,9 +1866,20 @@ export const api = {
     setSlug: (slug: string) => req<{ slug: string | null }>("/catalog/slug", { method: "PUT", body: JSON.stringify({ slug }) }),
     getWhatsapp: () => req<{ whatsapp: string | null }>("/catalog/whatsapp"),
     setWhatsapp: (whatsapp: string) => req<{ whatsapp: string | null }>("/catalog/whatsapp", { method: "PUT", body: JSON.stringify({ whatsapp }) }),
+    getWholesaleCode: () => req<{ hasCode: boolean; code: string | null }>("/catalog/wholesale-code"),
+    setWholesaleCode: (code: string) => req<{ hasCode: boolean; code: string | null }>("/catalog/wholesale-code", { method: "PUT", body: JSON.stringify({ code }) }),
+    categories: () => req<{ categories: CatalogCategory[] }>("/catalog/categories"),
+    createCategory: (data: { name: string; parentId?: number | null }) => req<CatalogCategory>("/catalog/categories", { method: "POST", body: JSON.stringify(data) }),
+    updateCategory: (id: number, data: { name?: string; parentId?: number | null; sortOrder?: number }) =>
+      req<CatalogCategory>(`/catalog/categories/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    removeCategory: (id: number) => req<{ ok: boolean }>(`/catalog/categories/${id}`, { method: "DELETE" }),
     importParse: (rawText: string) => req<{ items: CatalogImportItem[] }>("/catalog/import/parse", { method: "POST", body: JSON.stringify({ rawText }) }),
     importConfirm: (items: CatalogImportItem[]) => req<{ imported: number; products: CatalogProduct[] }>("/catalog/import/confirm", { method: "POST", body: JSON.stringify({ items }) }),
-    public: (slug: string) => req<{ storeName: string; whatsapp: string | null; products: CatalogPublicProduct[] }>(`/catalog-public/${slug}`),
+    public: (slug: string, code?: string) =>
+      req<{
+        storeName: string; whatsapp: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
+        categories: CatalogCategory[]; products: CatalogPublicProduct[];
+      }>(`/catalog-public/${slug}${code ? `?code=${encodeURIComponent(code)}` : ""}`),
   },
   meetings: {
     list: () => req<MeetingItem[]>("/meetings"),

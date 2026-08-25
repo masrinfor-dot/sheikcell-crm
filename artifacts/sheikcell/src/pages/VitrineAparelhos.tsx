@@ -4,11 +4,12 @@ import { useToast } from "@/hooks/use-toast";
 import {
   api, canEditModule, CATALOG_CONDITIONS, CATALOG_CONDITION_CRITERIA,
   type CatalogProduct, type CatalogPricingSettings, type CatalogImportItem, type CatalogCondition,
-  type CatalogImportVariant, type CatalogPhotoSearchResult,
+  type CatalogImportVariant, type CatalogPhotoSearchResult, type CatalogCategory,
 } from "@/lib/api";
 import {
   Smartphone, Plus, X, Search, Trash2, Pencil, Sparkles, Settings2, Link2,
   Copy, ImagePlus, Check, AlertTriangle, Loader2, MessageCircle, Info, Calculator,
+  Tags, Lock, KeyRound,
 } from "lucide-react";
 
 function formatBRL(v: string | number | null): string {
@@ -27,18 +28,29 @@ type VariantFormRow = {
   costIncludesInvoice: boolean;
   marginPercentOverride: string;
   salePrice: string;
+  wholesalePrice: string;
   stockQty: string;
 };
 
 const emptyVariant: VariantFormRow = {
-  storage: "", costPrice: "", costIncludesInvoice: false, marginPercentOverride: "", salePrice: "", stockQty: "1",
+  storage: "", costPrice: "", costIncludesInvoice: false, marginPercentOverride: "", salePrice: "", wholesalePrice: "", stockQty: "1",
 };
 
 const emptyForm = {
   model: "", condition: "bom" as CatalogCondition, colors: "",
-  description: "", status: "active" as CatalogProduct["status"],
+  description: "", status: "active" as CatalogProduct["status"], categoryId: null as number | null,
   variants: [{ ...emptyVariant }] as VariantFormRow[],
 };
+
+// "Celulares" ou "Celulares > Samsung", pra mostrar hierarquia no select.
+function categoryPathLabel(categories: CatalogCategory[], id: number): string {
+  const byId = new Map(categories.map((c) => [c.id, c]));
+  const cat = byId.get(id);
+  if (!cat) return "";
+  if (cat.parentId == null) return cat.name;
+  const parent = byId.get(cat.parentId);
+  return parent ? `${parent.name} > ${cat.name}` : cat.name;
+}
 
 // Faixa de preço de venda considerando todas as variantes com preço definido.
 function priceRangeLabel(p: CatalogProduct): string {
@@ -98,18 +110,79 @@ export default function VitrineAparelhos() {
   const [whatsappInput, setWhatsappInput] = useState("");
   const [savingWhatsapp, setSavingWhatsapp] = useState(false);
 
+  const [hasWholesaleCode, setHasWholesaleCode] = useState(false);
+  const [wholesaleCodeInput, setWholesaleCodeInput] = useState("");
+  const [savingWholesaleCode, setSavingWholesaleCode] = useState(false);
+
+  const [categories, setCategories] = useState<CatalogCategory[]>([]);
+  const [showCategories, setShowCategories] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [newCategoryParent, setNewCategoryParent] = useState<number | "">("");
+  const [savingCategory, setSavingCategory] = useState(false);
+
   const load = () => {
     setLoading(true);
-    Promise.all([api.catalog.list(), api.catalog.getSlug(), api.catalog.getWhatsapp()])
-      .then(([l, s, w]) => {
+    Promise.all([api.catalog.list(), api.catalog.getSlug(), api.catalog.getWhatsapp(), api.catalog.categories(), api.catalog.getWholesaleCode()])
+      .then(([l, s, w, cats, wc]) => {
         setProducts(l.products); setSettings(l.settings);
         setSlug(s.slug); setSlugInput(s.slug ?? "");
         setWhatsapp(w.whatsapp); setWhatsappInput(w.whatsapp ?? "");
+        setCategories(cats.categories);
+        setHasWholesaleCode(wc.hasCode); setWholesaleCodeInput(wc.code ?? "");
       })
       .catch(() => toast({ title: "Erro ao carregar a vitrine", variant: "destructive" }))
       .finally(() => setLoading(false));
   };
   useEffect(load, []);
+
+  const topCategories = categories.filter((c) => c.parentId == null);
+  const childCategories = (parentId: number) => categories.filter((c) => c.parentId === parentId);
+
+  const handleAddCategory = async () => {
+    const name = newCategoryName.trim();
+    if (!name || savingCategory) return;
+    setSavingCategory(true);
+    try {
+      const created = await api.catalog.createCategory({ name, parentId: newCategoryParent === "" ? null : newCategoryParent });
+      setCategories((prev) => [...prev, created]);
+      setNewCategoryName(""); setNewCategoryParent("");
+    } catch (err) {
+      toast({ title: "Erro ao criar categoria", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    } finally {
+      setSavingCategory(false);
+    }
+  };
+
+  const handleRenameCategory = async (id: number, name: string) => {
+    try {
+      const updated = await api.catalog.updateCategory(id, { name });
+      setCategories((prev) => prev.map((c) => (c.id === id ? updated : c)));
+    } catch { toast({ title: "Erro ao renomear categoria", variant: "destructive" }); }
+  };
+
+  const handleDeleteCategory = async (c: CatalogCategory) => {
+    const hasChildren = categories.some((x) => x.parentId === c.id);
+    if (!confirm(hasChildren ? `Excluir "${c.name}" e todas as subcategorias?` : `Excluir "${c.name}"?`)) return;
+    try {
+      await api.catalog.removeCategory(c.id);
+      setCategories((prev) => prev.filter((x) => x.id !== c.id && x.parentId !== c.id));
+      setProducts((prev) => prev.map((p) => (p.categoryId === c.id || (hasChildren && categories.some((x) => x.parentId === c.id && x.id === p.categoryId)) ? { ...p, categoryId: null } : p)));
+    } catch { toast({ title: "Erro ao excluir categoria", variant: "destructive" }); }
+  };
+
+  const handleSaveWholesaleCode = async () => {
+    if (savingWholesaleCode) return;
+    setSavingWholesaleCode(true);
+    try {
+      const r = await api.catalog.setWholesaleCode(wholesaleCodeInput.trim());
+      setHasWholesaleCode(r.hasCode); setWholesaleCodeInput(r.code ?? "");
+      toast({ title: r.hasCode ? "Código de atacado atualizado" : "Preço de atacado desligado" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar código", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    } finally {
+      setSavingWholesaleCode(false);
+    }
+  };
 
   const filtered = products.filter((p) =>
     (filterStatus === "all" || p.status === "active") &&
@@ -122,11 +195,12 @@ export default function VitrineAparelhos() {
     setEditing(p);
     setForm({
       model: p.model, condition: p.condition, colors: p.colors.join(", "),
-      description: p.description ?? "", status: p.status,
+      description: p.description ?? "", status: p.status, categoryId: p.categoryId,
       variants: p.variants.length > 0
         ? p.variants.map((v) => ({
             id: v.id, storage: v.storage ?? "", costPrice: v.costPrice ?? "", costIncludesInvoice: v.costIncludesInvoice,
-            marginPercentOverride: v.marginPercentOverride ?? "", salePrice: v.salePrice ?? "", stockQty: String(v.stockQty),
+            marginPercentOverride: v.marginPercentOverride ?? "", salePrice: v.salePrice ?? "", wholesalePrice: v.wholesalePrice ?? "",
+            stockQty: String(v.stockQty),
           }))
         : [{ ...emptyVariant }],
     });
@@ -167,6 +241,7 @@ export default function VitrineAparelhos() {
       colors: form.colors.split(",").map((c) => c.trim()).filter(Boolean),
       description: form.description.trim() || null,
       status: form.status,
+      categoryId: form.categoryId,
       variants: form.variants.map((v) => ({
         id: v.id,
         storage: v.storage.trim() || null,
@@ -174,6 +249,7 @@ export default function VitrineAparelhos() {
         costIncludesInvoice: v.costIncludesInvoice,
         marginPercentOverride: v.marginPercentOverride ? Number(v.marginPercentOverride) : null,
         salePrice: v.salePrice ? Number(v.salePrice) : null,
+        wholesalePrice: v.wholesalePrice ? Number(v.wholesalePrice) : null,
         stockQty: Number(v.stockQty) || 0,
       })),
     };
@@ -408,6 +484,10 @@ export default function VitrineAparelhos() {
               className="flex items-center gap-1.5 px-3 py-2 bg-secondary text-foreground rounded-xl text-xs font-semibold hover:bg-secondary/70 transition">
               <Settings2 className="w-3.5 h-3.5" /> Preço e cartão
             </button>
+            <button onClick={() => setShowCategories(true)} data-testid="button-catalog-categories"
+              className="flex items-center gap-1.5 px-3 py-2 bg-secondary text-foreground rounded-xl text-xs font-semibold hover:bg-secondary/70 transition">
+              <Tags className="w-3.5 h-3.5" /> Categorias
+            </button>
             <button onClick={openCreate} data-testid="button-add-product"
               className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition">
               <Plus className="w-3.5 h-3.5" /> Novo aparelho
@@ -460,6 +540,28 @@ export default function VitrineAparelhos() {
                 </button>
               </div>
               {!whatsapp && <p className="text-[10px] text-amber-600 mt-1">Sem número configurado, a vitrine usa o telefone de contato administrativo como reserva.</p>}
+            </div>
+          </div>
+        )}
+        {canManage && (
+          <div className="flex flex-wrap items-center gap-3 pt-3 border-t">
+            <KeyRound className="w-4 h-4 text-amber-600 shrink-0" />
+            <div className="flex-1 min-w-[220px]">
+              <p className="text-xs font-semibold text-muted-foreground mb-1">Código de acesso ao preço de atacado (pra técnicos e lojistas)</p>
+              <div className="flex items-center gap-2">
+                <input value={wholesaleCodeInput} onChange={(e) => setWholesaleCodeInput(e.target.value)}
+                  placeholder="Ex.: sheikcell2026" data-testid="input-wholesale-code"
+                  className="flex-1 min-w-[160px] rounded-lg border px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
+                <button onClick={handleSaveWholesaleCode} disabled={savingWholesaleCode} data-testid="button-save-wholesale-code"
+                  className="px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary/90 disabled:opacity-50 transition">
+                  {savingWholesaleCode ? "Salvando..." : "Salvar"}
+                </button>
+              </div>
+              <p className="text-[10px] text-muted-foreground mt-1">
+                {hasWholesaleCode
+                  ? "Compartilhe esse código só com quem deve ver o preço de atacado — quem tiver o código destrava o preço na vitrine pública."
+                  : "Sem código configurado, o preço de atacado fica desligado (mesmo que você preencha o campo em algum aparelho, ninguém vê)."}
+              </p>
             </div>
           </div>
         )}
@@ -573,6 +675,15 @@ export default function VitrineAparelhos() {
                   <input value={form.colors} onChange={(e) => setForm({ ...form, colors: e.target.value })} data-testid="input-product-colors"
                     placeholder="Preto, Azul, Rosa" className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
                 </div>
+                <div className="col-span-2">
+                  <label className="text-xs font-semibold text-muted-foreground">Categoria (aba da vitrine pública)</label>
+                  <select value={form.categoryId ?? ""} onChange={(e) => setForm({ ...form, categoryId: e.target.value ? Number(e.target.value) : null })}
+                    data-testid="select-product-category"
+                    className="mt-1 w-full rounded-lg border px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary/40">
+                    <option value="">Sem categoria</option>
+                    {categories.map((c) => <option key={c.id} value={c.id}>{categoryPathLabel(categories, c.id)}</option>)}
+                  </select>
+                </div>
               </div>
 
               {showConditionInfo && (
@@ -636,6 +747,12 @@ export default function VitrineAparelhos() {
                         <input type="number" value={v.stockQty} onChange={(e) => updateVariant(idx, { stockQty: e.target.value })} data-testid={`input-variant-stock-${idx}`}
                           className="mt-0.5 w-full rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40" />
                       </div>
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-muted-foreground flex items-center gap-1"><Lock className="w-2.5 h-2.5" /> Preço de atacado (só pra quem tem o código — em branco = sem atacado)</label>
+                      <input type="number" value={v.wholesalePrice} onChange={(e) => updateVariant(idx, { wholesalePrice: e.target.value })}
+                        placeholder="0,00" data-testid={`input-variant-wholesale-price-${idx}`}
+                        className="mt-0.5 w-full rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400/60 bg-amber-50/50" />
                     </div>
                   </div>
                 ))}
@@ -848,6 +965,68 @@ export default function VitrineAparelhos() {
                 className="w-full py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition">
                 {savingSettings ? "Salvando..." : "Salvar configurações"}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: categorias/abas personalizáveis */}
+      {showCategories && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-3 py-6 overflow-y-auto" onClick={() => setShowCategories(false)}>
+          <div className="bg-card rounded-xl w-full max-w-lg shadow-xl border overflow-hidden my-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <span className="font-semibold text-sm flex items-center gap-2"><Tags className="w-4 h-4 text-primary" /> Categorias e subcategorias</span>
+              <button onClick={() => setShowCategories(false)} className="p-1 rounded hover:bg-muted/60"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-4 space-y-4 max-h-[75vh] overflow-y-auto">
+              <p className="text-xs text-muted-foreground">Crie abas pra organizar a vitrine, tipo "Celulares" (com subcategorias "Samsung", "Apple") e "Peças de celular". Aparecem como abas na vitrine pública.</p>
+
+              <div className="space-y-2">
+                {topCategories.length === 0 && <p className="text-xs text-muted-foreground text-center py-3">Nenhuma categoria ainda.</p>}
+                {topCategories.map((c) => (
+                  <div key={c.id} className="rounded-lg border p-2.5 space-y-1.5">
+                    <div className="flex items-center gap-2">
+                      <input defaultValue={c.name} onBlur={(e) => e.target.value.trim() && e.target.value !== c.name && handleRenameCategory(c.id, e.target.value.trim())}
+                        data-testid={`input-category-name-${c.id}`}
+                        className="flex-1 rounded border px-2 py-1.5 text-sm font-semibold focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                      <button onClick={() => handleDeleteCategory(c)} data-testid={`button-delete-category-${c.id}`}
+                        className="p-1.5 rounded hover:bg-red-50 text-red-600"><Trash2 className="w-3.5 h-3.5" /></button>
+                    </div>
+                    <div className="pl-3 space-y-1.5">
+                      {childCategories(c.id).map((sub) => (
+                        <div key={sub.id} className="flex items-center gap-2">
+                          <span className="text-muted-foreground text-xs">↳</span>
+                          <input defaultValue={sub.name} onBlur={(e) => e.target.value.trim() && e.target.value !== sub.name && handleRenameCategory(sub.id, e.target.value.trim())}
+                            data-testid={`input-category-name-${sub.id}`}
+                            className="flex-1 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                          <button onClick={() => handleDeleteCategory(sub)} data-testid={`button-delete-category-${sub.id}`}
+                            className="p-1 rounded hover:bg-red-50 text-red-600"><Trash2 className="w-3 h-3" /></button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="rounded-lg border border-dashed p-3 space-y-2 bg-secondary/30">
+                <p className="text-xs font-semibold text-muted-foreground">Nova categoria</p>
+                <div className="flex items-center gap-2">
+                  <input value={newCategoryName} onChange={(e) => setNewCategoryName(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleAddCategory()}
+                    placeholder="Ex.: Celulares, Samsung, Peças de celular" data-testid="input-new-category-name"
+                    className="flex-1 rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
+                </div>
+                <select value={newCategoryParent} onChange={(e) => setNewCategoryParent(e.target.value ? Number(e.target.value) : "")}
+                  data-testid="select-new-category-parent"
+                  className="w-full rounded-lg border px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary/40">
+                  <option value="">Categoria principal (aba de topo)</option>
+                  {topCategories.map((c) => <option key={c.id} value={c.id}>Subcategoria de "{c.name}"</option>)}
+                </select>
+                <button onClick={handleAddCategory} disabled={savingCategory || !newCategoryName.trim()} data-testid="button-add-category"
+                  className="w-full py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition flex items-center justify-center gap-2">
+                  <Plus className="w-3.5 h-3.5" /> Adicionar categoria
+                </button>
+              </div>
             </div>
           </div>
         </div>

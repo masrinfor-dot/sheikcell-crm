@@ -57,6 +57,10 @@ export const tenantsTable = pgTable("tenants", {
   // que é o telefone de contato administrativo cadastrado pelo superadmin).
   // Null = a vitrine cai no fallback de contactPhone.
   catalogWhatsapp: text("catalog_whatsapp"),
+  // Código de acesso ao preço de atacado da Vitrine pública — compartilhado
+  // com técnicos/lojistas de confiança (não é login individual, é uma senha
+  // única). Null = preço de atacado desligado (ninguém vê, nem com código).
+  catalogWholesaleCode: text("catalog_wholesale_code"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

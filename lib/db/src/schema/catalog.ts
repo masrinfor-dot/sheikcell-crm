@@ -62,6 +62,22 @@ export const CATALOG_CONDITION_CRITERIA: Record<
   },
 };
 
+// Categoria/aba personalizável (ex.: "Celulares" > "Samsung"/"Apple", "Peças
+// de celular") — a loja cria/edita/apaga livremente, sem lista fixa no
+// código. parentId null = categoria de topo (aba principal); parentId
+// preenchido = subcategoria (sub-aba, mostrada quando a aba principal está
+// selecionada na vitrine pública). Só 2 níveis são usados na UI hoje, mas o
+// schema não impede aninhar mais.
+export const catalogCategoriesTable = pgTable("catalog_categories", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  name: text("name").notNull(),
+  parentId: integer("parent_id"),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type CatalogCategory = typeof catalogCategoriesTable.$inferSelect;
+
 // Um "produto" é a FAMÍLIA do aparelho (modelo + condição + cores +
 // descrição + fotos). Cada variação de armazenamento/memória vira uma linha
 // em catalog_product_variants, com preço e estoque próprios — assim
@@ -75,6 +91,7 @@ export const catalogProductsTable = pgTable("catalog_products", {
   colors: jsonb("colors").$type<string[]>().notNull().default([]),
   description: text("description"),
   status: text("status").notNull().default("active"), // active | inactive | sold
+  categoryId: integer("category_id").references(() => catalogCategoriesTable.id, { onDelete: "set null" }),
   sortOrder: integer("sort_order").notNull().default(0),
   createdBy: integer("created_by").references(() => usersTable.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -94,6 +111,11 @@ export const catalogProductVariantsTable = pgTable("catalog_product_variants", {
   costIncludesInvoice: boolean("cost_includes_invoice").notNull().default(false),
   marginPercentOverride: numeric("margin_percent_override"), // null = usa a margem padrão da loja
   salePrice: numeric("sale_price"),
+  // Preço de atacado — só aparece na vitrine pública pra quem desbloqueou
+  // com o código de acesso (ver tenants.catalogWholesaleCode). Digitado na
+  // mão pelo lojista, sem cálculo automático (é uma tabela à parte, não uma
+  // margem sobre o varejo). Null = esse aparelho não tem preço de atacado.
+  wholesalePrice: numeric("wholesale_price"),
   stockQty: integer("stock_qty").notNull().default(1),
   sortOrder: integer("sort_order").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
