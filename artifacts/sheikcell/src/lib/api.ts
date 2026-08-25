@@ -211,33 +211,103 @@ export type DocumentItem = {
 };
 
 // ─── Vitrine Aparelhos ───────────────────────────────────────────────────────
-export type CatalogCondition = "lacrado" | "seminovo" | "cpo" | "usado";
+// Selo de qualidade padrão SheikCell — mesma lista/critério de
+// CATALOG_CONDITION_CRITERIA em lib/db/src/schema/catalog.ts (mantenha em sincronia).
+export type CatalogCondition = "excelente" | "muito_bom" | "bom" | "outlet";
 export const CATALOG_CONDITIONS: { value: CatalogCondition; label: string }[] = [
-  { value: "lacrado", label: "Lacrado" },
-  { value: "seminovo", label: "Seminovo" },
-  { value: "cpo", label: "CPO" },
-  { value: "usado", label: "Usado" },
+  { value: "excelente", label: "Excelente" },
+  { value: "muito_bom", label: "Muito Bom" },
+  { value: "bom", label: "Bom" },
+  { value: "outlet", label: "Outlet" },
 ];
 
-export type CatalogPhoto = { id: number; storedName: string; sortOrder: number };
+export const CATALOG_CONDITION_CRITERIA: Record<
+  CatalogCondition,
+  { label: string; criteria: { label: string; text: string }[] }
+> = {
+  excelente: {
+    label: "Excelente",
+    criteria: [
+      { label: "Tela", text: "Poucos ou nenhum sinal de uso, como pequenos riscos" },
+      { label: "Lateral", text: "Pode apresentar arranhões imperceptíveis" },
+      { label: "Traseira", text: "Pode apresentar pequeno desgaste ou arranhão, mas nada aparente" },
+      { label: "Bateria", text: "Os aparelhos possuem no mínimo 80% da capacidade da bateria" },
+      { label: "Acessórios", text: "Não acompanha acessórios" },
+    ],
+  },
+  muito_bom: {
+    label: "Muito Bom",
+    criteria: [
+      { label: "Tela", text: "Alguns sinais de uso, como pequenos riscos" },
+      { label: "Lateral", text: "Pode apresentar pequenos amassados" },
+      { label: "Traseira", text: "Pode apresentar arranhões leves" },
+      { label: "Bateria", text: "Os aparelhos possuem no mínimo 80% da capacidade da bateria" },
+      { label: "Acessórios", text: "Não acompanha acessórios" },
+    ],
+  },
+  bom: {
+    label: "Bom",
+    criteria: [
+      { label: "Tela", text: "Sinais de uso mais nítidos, como riscos" },
+      { label: "Lateral", text: "Pode apresentar amassados, partes descascadas ou arranhões" },
+      { label: "Traseira", text: "Pode apresentar riscos e arranhões nítidos" },
+      { label: "Bateria", text: "Os aparelhos possuem no mínimo 80% da capacidade da bateria" },
+      { label: "Acessórios", text: "Não acompanha acessórios" },
+    ],
+  },
+  outlet: {
+    label: "Outlet",
+    criteria: [
+      { label: "Tela", text: "Pode apresentar manchas fortes, sombras (efeito fantasma) e/ou riscos na tela" },
+      { label: "Lateral", text: "Pode apresentar pequenos amassados, partes descascadas ou arranhões" },
+      { label: "Traseira", text: "Pode apresentar riscos e arranhões nítidos" },
+      { label: "Bateria", text: "Os aparelhos possuem no mínimo 80% da capacidade da bateria" },
+      { label: "Leitor de Digital/Facial", text: "Pode não funcionar" },
+      { label: "Acessórios", text: "Não acompanha acessórios" },
+    ],
+  },
+};
 
-export type CatalogProduct = {
+export type CatalogPhoto = { id: number; storedName: string; sourceUrl?: string | null; sortOrder: number };
+
+// Variante de armazenamento/memória — cada família de produto (modelo +
+// condição + cores) pode ter várias, com preço/estoque próprios.
+export type CatalogProductVariant = {
   id: number;
-  model: string;
+  productId: number;
   storage: string | null;
-  condition: CatalogCondition;
-  colors: string[];
-  description: string | null;
   costPrice: string | null;
   costIncludesInvoice: boolean;
   marginPercentOverride: string | null;
   salePrice: string | null;
   stockQty: number;
+  sortOrder: number;
+};
+
+// Input de variante enviado pro backend (form de cadastro/edição) — id
+// presente = atualiza a variante existente; ausente = cria uma nova.
+export type CatalogVariantInput = {
+  id?: number;
+  storage: string | null;
+  costPrice: number | null;
+  costIncludesInvoice: boolean;
+  marginPercentOverride: number | null;
+  salePrice?: number | null;
+  stockQty: number;
+};
+
+export type CatalogProduct = {
+  id: number;
+  model: string;
+  condition: CatalogCondition;
+  colors: string[];
+  description: string | null;
   status: "active" | "inactive" | "sold";
   sortOrder: number;
   createdAt: string;
   updatedAt: string;
   photos: CatalogPhoto[];
+  variants: CatalogProductVariant[];
 };
 
 export type CatalogPricingSettings = {
@@ -246,28 +316,31 @@ export type CatalogPricingSettings = {
   cardFeeTable: Record<string, number>;
 };
 
+export type CatalogPublicVariant = { id: number; storage: string | null; salePrice: string | null; inStock: boolean };
+
 export type CatalogPublicProduct = {
   id: number;
   model: string;
-  storage: string | null;
   condition: CatalogCondition;
   colors: string[];
   description: string | null;
-  salePrice: string | null;
-  inStock: boolean;
   photos: number[];
+  variants: CatalogPublicVariant[];
 };
+
+export type CatalogImportVariant = { storage: string | null; costPrice: number | null };
 
 export type CatalogImportItem = {
   model: string;
-  storage: string | null;
   condition: CatalogCondition;
   colors: string[];
-  costPrice: number | null;
+  variants: CatalogImportVariant[];
   status: "approved" | "pending";
   issue: string | null;
   rawLine: string;
 };
+
+export type CatalogPhotoSearchResult = { title: string; imageUrl: string; thumbnailUrl: string; sourceUrl: string };
 
 export type MeetingItem = {
   id: number;
@@ -1768,12 +1841,17 @@ export const api = {
       req<CatalogPhoto>(`/catalog/products/${productId}/photos`, { method: "POST", body: JSON.stringify({ mimeType: att?.mimetype, data: att?.base64 }) })),
     removePhoto: (productId: number, photoId: number) => req<{ ok: boolean }>(`/catalog/products/${productId}/photos/${photoId}`, { method: "DELETE" }),
     photoUrl: (photoId: number) => `/api/catalog-public/photos/${photoId}/file`,
+    photoSearch: (q: string) => req<{ results: CatalogPhotoSearchResult[] }>(`/catalog/photo-search?q=${encodeURIComponent(q)}`),
+    addPhotoFromUrl: (productId: number, url: string) =>
+      req<CatalogPhoto>(`/catalog/products/${productId}/photos/from-url`, { method: "POST", body: JSON.stringify({ url }) }),
     pricingSettings: () => req<CatalogPricingSettings>("/catalog/pricing-settings"),
     savePricingSettings: (data: CatalogPricingSettings) => req<CatalogPricingSettings>("/catalog/pricing-settings", { method: "PUT", body: JSON.stringify(data) }),
     simulatePrice: (data: { costPrice: number; costIncludesInvoice?: boolean; marginPercentOverride?: number | null }) =>
       req<{ salePrice: number | null; settings: CatalogPricingSettings }>("/catalog/pricing-settings/simulate", { method: "POST", body: JSON.stringify(data) }),
     getSlug: () => req<{ slug: string | null }>("/catalog/slug"),
     setSlug: (slug: string) => req<{ slug: string | null }>("/catalog/slug", { method: "PUT", body: JSON.stringify({ slug }) }),
+    getWhatsapp: () => req<{ whatsapp: string | null }>("/catalog/whatsapp"),
+    setWhatsapp: (whatsapp: string) => req<{ whatsapp: string | null }>("/catalog/whatsapp", { method: "PUT", body: JSON.stringify({ whatsapp }) }),
     importParse: (rawText: string) => req<{ items: CatalogImportItem[] }>("/catalog/import/parse", { method: "POST", body: JSON.stringify({ rawText }) }),
     importConfirm: (items: CatalogImportItem[]) => req<{ imported: number; products: CatalogProduct[] }>("/catalog/import/confirm", { method: "POST", body: JSON.stringify({ items }) }),
     public: (slug: string) => req<{ storeName: string; whatsapp: string | null; products: CatalogPublicProduct[] }>(`/catalog-public/${slug}`),

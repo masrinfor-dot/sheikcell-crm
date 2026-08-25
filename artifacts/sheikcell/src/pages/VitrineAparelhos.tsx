@@ -2,12 +2,13 @@ import { useState, useEffect, useMemo } from "react";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
-  api, canEditModule, CATALOG_CONDITIONS,
+  api, canEditModule, CATALOG_CONDITIONS, CATALOG_CONDITION_CRITERIA,
   type CatalogProduct, type CatalogPricingSettings, type CatalogImportItem, type CatalogCondition,
+  type CatalogImportVariant, type CatalogPhotoSearchResult,
 } from "@/lib/api";
 import {
   Smartphone, Plus, X, Search, Trash2, Pencil, Sparkles, Settings2, Link2,
-  Copy, ImagePlus, Check, AlertTriangle, Loader2, MessageCircle,
+  Copy, ImagePlus, Check, AlertTriangle, Loader2, MessageCircle, Info, Calculator,
 } from "lucide-react";
 
 function formatBRL(v: string | number | null): string {
@@ -19,11 +20,38 @@ function formatBRL(v: string | number | null): string {
 
 const INSTALLMENT_OPTIONS = [1, 2, 3, 4, 6, 10, 12, 18];
 
-const emptyForm = {
-  model: "", storage: "", condition: "seminovo" as CatalogCondition, colors: "",
-  description: "", costPrice: "", costIncludesInvoice: false, marginPercentOverride: "",
-  salePrice: "", stockQty: "1", status: "active" as CatalogProduct["status"],
+type VariantFormRow = {
+  id?: number;
+  storage: string;
+  costPrice: string;
+  costIncludesInvoice: boolean;
+  marginPercentOverride: string;
+  salePrice: string;
+  stockQty: string;
 };
+
+const emptyVariant: VariantFormRow = {
+  storage: "", costPrice: "", costIncludesInvoice: false, marginPercentOverride: "", salePrice: "", stockQty: "1",
+};
+
+const emptyForm = {
+  model: "", condition: "bom" as CatalogCondition, colors: "",
+  description: "", status: "active" as CatalogProduct["status"],
+  variants: [{ ...emptyVariant }] as VariantFormRow[],
+};
+
+// Faixa de preço de venda considerando todas as variantes com preço definido.
+function priceRangeLabel(p: CatalogProduct): string {
+  const prices = p.variants.map((v) => v.salePrice).filter((x): x is string => x != null).map(Number).filter(Number.isFinite);
+  if (prices.length === 0) return "—";
+  const min = Math.min(...prices), max = Math.max(...prices);
+  return min === max ? formatBRL(min) : `${formatBRL(min)} a ${formatBRL(max)}`;
+}
+
+function storagesLabel(p: CatalogProduct): string {
+  const list = [...new Set(p.variants.map((v) => v.storage).filter((s): s is string => !!s))];
+  return list.join(", ");
+}
 
 export default function VitrineAparelhos() {
   const { user } = useAuth();
@@ -41,6 +69,15 @@ export default function VitrineAparelhos() {
   const [form, setForm] = useState(emptyForm);
   const [saving, setSaving] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [showConditionInfo, setShowConditionInfo] = useState(false);
+
+  // Busca de fotos na internet (dentro do modal de edição do produto)
+  const [showPhotoSearch, setShowPhotoSearch] = useState(false);
+  const [photoQuery, setPhotoQuery] = useState("");
+  const [photoResults, setPhotoResults] = useState<CatalogPhotoSearchResult[] | null>(null);
+  const [searchingPhotos, setSearchingPhotos] = useState(false);
+  const [photoSearchError, setPhotoSearchError] = useState<string | null>(null);
+  const [attachingPhotoUrl, setAttachingPhotoUrl] = useState<string | null>(null);
 
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState("");
@@ -57,10 +94,18 @@ export default function VitrineAparelhos() {
   const [slugInput, setSlugInput] = useState("");
   const [savingSlug, setSavingSlug] = useState(false);
 
+  const [whatsapp, setWhatsapp] = useState<string | null>(null);
+  const [whatsappInput, setWhatsappInput] = useState("");
+  const [savingWhatsapp, setSavingWhatsapp] = useState(false);
+
   const load = () => {
     setLoading(true);
-    Promise.all([api.catalog.list(), api.catalog.getSlug()])
-      .then(([l, s]) => { setProducts(l.products); setSettings(l.settings); setSlug(s.slug); setSlugInput(s.slug ?? ""); })
+    Promise.all([api.catalog.list(), api.catalog.getSlug(), api.catalog.getWhatsapp()])
+      .then(([l, s, w]) => {
+        setProducts(l.products); setSettings(l.settings);
+        setSlug(s.slug); setSlugInput(s.slug ?? "");
+        setWhatsapp(w.whatsapp); setWhatsappInput(w.whatsapp ?? "");
+      })
       .catch(() => toast({ title: "Erro ao carregar a vitrine", variant: "destructive" }))
       .finally(() => setLoading(false));
   };
@@ -68,41 +113,48 @@ export default function VitrineAparelhos() {
 
   const filtered = products.filter((p) =>
     (filterStatus === "all" || p.status === "active") &&
-    (!search || p.model.toLowerCase().includes(search.toLowerCase()) || (p.storage ?? "").toLowerCase().includes(search.toLowerCase()))
+    (!search || p.model.toLowerCase().includes(search.toLowerCase()) || storagesLabel(p).toLowerCase().includes(search.toLowerCase()))
   );
 
   // ─── Formulário de produto ─────────────────────────────────────────────
-  const openCreate = () => { setEditing(null); setForm(emptyForm); setShowForm(true); };
+  const openCreate = () => { setEditing(null); setForm({ ...emptyForm, variants: [{ ...emptyVariant }] }); setShowConditionInfo(false); setShowForm(true); };
   const openEdit = (p: CatalogProduct) => {
     setEditing(p);
     setForm({
-      model: p.model, storage: p.storage ?? "", condition: p.condition, colors: p.colors.join(", "),
-      description: p.description ?? "", costPrice: p.costPrice ?? "", costIncludesInvoice: p.costIncludesInvoice,
-      marginPercentOverride: p.marginPercentOverride ?? "", salePrice: p.salePrice ?? "",
-      stockQty: String(p.stockQty), status: p.status,
+      model: p.model, condition: p.condition, colors: p.colors.join(", "),
+      description: p.description ?? "", status: p.status,
+      variants: p.variants.length > 0
+        ? p.variants.map((v) => ({
+            id: v.id, storage: v.storage ?? "", costPrice: v.costPrice ?? "", costIncludesInvoice: v.costIncludesInvoice,
+            marginPercentOverride: v.marginPercentOverride ?? "", salePrice: v.salePrice ?? "", stockQty: String(v.stockQty),
+          }))
+        : [{ ...emptyVariant }],
     });
+    setShowConditionInfo(false);
+    setShowPhotoSearch(false); setPhotoResults(null); setPhotoQuery("");
     setShowForm(true);
   };
 
-  // Recalcula o preço sugerido ao vivo quando custo/margem mudam, sem
-  // sobrescrever se o lojista já digitou um preço manualmente nesta sessão.
-  const [salePriceTouched, setSalePriceTouched] = useState(false);
-  useEffect(() => {
-    if (!showForm || salePriceTouched) return;
-    const custo = Number(form.costPrice);
-    if (!Number.isFinite(custo) || custo <= 0) return;
-    const t = setTimeout(() => {
-      api.catalog.simulatePrice({
-        costPrice: custo,
-        costIncludesInvoice: form.costIncludesInvoice,
-        marginPercentOverride: form.marginPercentOverride ? Number(form.marginPercentOverride) : null,
-      }).then((r) => { if (r.salePrice != null) setForm((f) => ({ ...f, salePrice: String(r.salePrice) })); }).catch(() => {});
-    }, 400);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.costPrice, form.costIncludesInvoice, form.marginPercentOverride, showForm, salePriceTouched]);
+  const closeForm = () => { setShowForm(false); setEditing(null); setShowPhotoSearch(false); setPhotoResults(null); };
 
-  const closeForm = () => { setShowForm(false); setEditing(null); setSalePriceTouched(false); };
+  const updateVariant = (idx: number, patch: Partial<VariantFormRow>) => {
+    setForm((f) => ({ ...f, variants: f.variants.map((v, i) => (i === idx ? { ...v, ...patch } : v)) }));
+  };
+  const addVariant = () => setForm((f) => ({ ...f, variants: [...f.variants, { ...emptyVariant }] }));
+  const removeVariant = (idx: number) => setForm((f) => ({ ...f, variants: f.variants.length > 1 ? f.variants.filter((_, i) => i !== idx) : f.variants }));
+
+  const calcVariantPrice = async (idx: number) => {
+    const v = form.variants[idx];
+    const custo = Number(v.costPrice);
+    if (!Number.isFinite(custo) || custo <= 0) { toast({ title: "Informe o custo dessa variante primeiro", variant: "destructive" }); return; }
+    try {
+      const r = await api.catalog.simulatePrice({
+        costPrice: custo, costIncludesInvoice: v.costIncludesInvoice,
+        marginPercentOverride: v.marginPercentOverride ? Number(v.marginPercentOverride) : null,
+      });
+      if (r.salePrice != null) updateVariant(idx, { salePrice: String(r.salePrice) });
+    } catch { toast({ title: "Erro ao calcular preço", variant: "destructive" }); }
+  };
 
   const handleSave = async () => {
     if (saving) return;
@@ -111,17 +163,20 @@ export default function VitrineAparelhos() {
     setSaving(true);
     const payload: Record<string, unknown> = {
       model,
-      storage: form.storage.trim() || null,
       condition: form.condition,
       colors: form.colors.split(",").map((c) => c.trim()).filter(Boolean),
       description: form.description.trim() || null,
-      costPrice: form.costPrice ? Number(form.costPrice) : null,
-      costIncludesInvoice: form.costIncludesInvoice,
-      marginPercentOverride: form.marginPercentOverride ? Number(form.marginPercentOverride) : null,
-      stockQty: Number(form.stockQty) || 0,
       status: form.status,
+      variants: form.variants.map((v) => ({
+        id: v.id,
+        storage: v.storage.trim() || null,
+        costPrice: v.costPrice ? Number(v.costPrice) : null,
+        costIncludesInvoice: v.costIncludesInvoice,
+        marginPercentOverride: v.marginPercentOverride ? Number(v.marginPercentOverride) : null,
+        salePrice: v.salePrice ? Number(v.salePrice) : null,
+        stockQty: Number(v.stockQty) || 0,
+      })),
     };
-    if (salePriceTouched || editing) payload.salePrice = form.salePrice ? Number(form.salePrice) : null;
     try {
       if (editing) {
         const updated = await api.catalog.update(editing.id, payload);
@@ -175,11 +230,52 @@ export default function VitrineAparelhos() {
     } catch { toast({ title: "Erro ao remover foto", variant: "destructive" }); }
   };
 
+  // ─── Busca de fotos padronizadas na internet ────────────────────────────
+  const openPhotoSearch = () => {
+    setPhotoQuery(editing ? editing.model : form.model);
+    setPhotoResults(null);
+    setPhotoSearchError(null);
+    setShowPhotoSearch(true);
+  };
+
+  const handlePhotoSearch = async () => {
+    if (!photoQuery.trim() || searchingPhotos) return;
+    setSearchingPhotos(true);
+    setPhotoSearchError(null);
+    try {
+      const r = await api.catalog.photoSearch(photoQuery.trim());
+      setPhotoResults(r.results);
+      if (r.results.length === 0) toast({ title: "Nenhuma imagem encontrada pra essa busca" });
+    } catch (err) {
+      setPhotoResults(null);
+      setPhotoSearchError(err instanceof Error ? err.message : "Busca de imagens indisponível");
+    } finally {
+      setSearchingPhotos(false);
+    }
+  };
+
+  const handleUsePhotoResult = async (result: CatalogPhotoSearchResult) => {
+    if (!editing || attachingPhotoUrl) return;
+    setAttachingPhotoUrl(result.imageUrl);
+    try {
+      const photo = await api.catalog.addPhotoFromUrl(editing.id, result.imageUrl);
+      setEditing((prev) => prev && { ...prev, photos: [...prev.photos, photo] });
+      setProducts((prev) => prev.map((p) => (p.id === editing.id ? { ...p, photos: [...p.photos, photo] } : p)));
+      toast({ title: "Foto adicionada" });
+    } catch (err) {
+      toast({ title: "Erro ao anexar imagem", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    } finally {
+      setAttachingPhotoUrl(null);
+    }
+  };
+
   // ─── Copiar mensagem formatada pro WhatsApp ────────────────────────────
   const productMessage = (p: CatalogProduct) => [
-    `📱 ${p.model}${p.storage ? ` – ${p.storage}` : ""}`,
+    `📱 ${p.model}`,
     p.colors.length ? `🎨 Cores: ${p.colors.join(", ")}` : null,
-    `💰 ${formatBRL(p.salePrice)}`,
+    ...p.variants
+      .filter((v) => v.salePrice != null)
+      .map((v) => `💰 ${v.storage ? `${v.storage}: ` : ""}${formatBRL(v.salePrice)}${v.stockQty <= 0 ? " (sem estoque)" : ""}`),
   ].filter(Boolean).join("\n");
 
   const copyMessage = async (text: string) => {
@@ -215,6 +311,15 @@ export default function VitrineAparelhos() {
   const updateImportItem = (idx: number, patch: Partial<CatalogImportItem>) => {
     setImportItems((prev) => prev && prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
   };
+  const updateImportVariant = (idx: number, vIdx: number, patch: Partial<CatalogImportVariant>) => {
+    setImportItems((prev) => prev && prev.map((it, i) => (i === idx ? { ...it, variants: it.variants.map((v, j) => (j === vIdx ? { ...v, ...patch } : v)) } : it)));
+  };
+  const addImportVariant = (idx: number) => {
+    setImportItems((prev) => prev && prev.map((it, i) => (i === idx ? { ...it, variants: [...it.variants, { storage: null, costPrice: null }] } : it)));
+  };
+  const removeImportVariant = (idx: number, vIdx: number) => {
+    setImportItems((prev) => prev && prev.map((it, i) => (i === idx ? { ...it, variants: it.variants.length > 1 ? it.variants.filter((_, j) => j !== vIdx) : it.variants } : it)));
+  };
 
   const handleConfirmImport = async () => {
     if (!importItems || confirming) return;
@@ -223,9 +328,10 @@ export default function VitrineAparelhos() {
     setConfirming(true);
     try {
       const r = await api.catalog.importConfirm(toImport);
-      setProducts((prev) => [...r.products, ...prev]);
-      toast({ title: `${r.imported} aparelho(s) importado(s)!` });
+      setProducts((prev) => [...r.products.map((p) => ({ ...p, photos: [], variants: [] as CatalogProduct["variants"] })), ...prev]);
+      toast({ title: `${r.imported} aparelho(s) importado(s)! Recarregando lista...` });
       setShowImport(false);
+      load();
     } catch (err) {
       toast({ title: "Erro ao importar", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
     } finally {
@@ -268,6 +374,20 @@ export default function VitrineAparelhos() {
     }
   };
 
+  const handleSaveWhatsapp = async () => {
+    if (savingWhatsapp) return;
+    setSavingWhatsapp(true);
+    try {
+      const r = await api.catalog.setWhatsapp(whatsappInput.trim());
+      setWhatsapp(r.whatsapp);
+      toast({ title: r.whatsapp ? "WhatsApp da vitrine atualizado" : "WhatsApp da vitrine removido" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar WhatsApp", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    } finally {
+      setSavingWhatsapp(false);
+    }
+  };
+
   const publicUrl = slug ? `${window.location.origin}/vitrine/${slug}` : null;
 
   return (
@@ -296,32 +416,52 @@ export default function VitrineAparelhos() {
         )}
       </div>
 
-      {/* Link público */}
-      <div className="bg-white rounded-xl border border-border p-4 flex flex-wrap items-center gap-3">
-        <Link2 className="w-4 h-4 text-primary shrink-0" />
-        <div className="flex-1 min-w-[220px]">
-          <p className="text-xs font-semibold text-muted-foreground mb-1">Link público da vitrine (pra clientes verem sem login)</p>
-          {canManage ? (
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-muted-foreground shrink-0">{window.location.origin}/vitrine/</span>
-              <input value={slugInput} onChange={(e) => setSlugInput(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""))}
-                placeholder="minha-loja" data-testid="input-catalog-slug"
-                className="flex-1 min-w-[120px] rounded-lg border px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
-              <button onClick={handleSaveSlug} disabled={savingSlug} data-testid="button-save-slug"
-                className="px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary/90 disabled:opacity-50 transition">
-                {savingSlug ? "Salvando..." : "Salvar"}
-              </button>
-            </div>
-          ) : (
-            <p className="text-sm">{publicUrl ?? "Vitrine ainda não publicada"}</p>
+      {/* Link público + WhatsApp */}
+      <div className="bg-white rounded-xl border border-border p-4 space-y-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <Link2 className="w-4 h-4 text-primary shrink-0" />
+          <div className="flex-1 min-w-[220px]">
+            <p className="text-xs font-semibold text-muted-foreground mb-1">Link público da vitrine (pra clientes verem sem login)</p>
+            {canManage ? (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground shrink-0">{window.location.origin}/vitrine/</span>
+                <input value={slugInput} onChange={(e) => setSlugInput(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""))}
+                  placeholder="minha-loja" data-testid="input-catalog-slug"
+                  className="flex-1 min-w-[120px] rounded-lg border px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
+                <button onClick={handleSaveSlug} disabled={savingSlug} data-testid="button-save-slug"
+                  className="px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary/90 disabled:opacity-50 transition">
+                  {savingSlug ? "Salvando..." : "Salvar"}
+                </button>
+              </div>
+            ) : (
+              <p className="text-sm">{publicUrl ?? "Vitrine ainda não publicada"}</p>
+            )}
+          </div>
+          {publicUrl && (
+            <button onClick={() => { navigator.clipboard.writeText(publicUrl); toast({ title: "Link copiado!" }); }}
+              data-testid="button-copy-catalog-link"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-secondary text-xs font-semibold hover:bg-secondary/70 transition shrink-0">
+              <Copy className="w-3.5 h-3.5" /> Copiar link
+            </button>
           )}
         </div>
-        {publicUrl && (
-          <button onClick={() => { navigator.clipboard.writeText(publicUrl); toast({ title: "Link copiado!" }); }}
-            data-testid="button-copy-catalog-link"
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-secondary text-xs font-semibold hover:bg-secondary/70 transition shrink-0">
-            <Copy className="w-3.5 h-3.5" /> Copiar link
-          </button>
+        {canManage && (
+          <div className="flex flex-wrap items-center gap-3 pt-3 border-t">
+            <MessageCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+            <div className="flex-1 min-w-[220px]">
+              <p className="text-xs font-semibold text-muted-foreground mb-1">WhatsApp oficial da loja (botão "Falar no WhatsApp" da vitrine pública)</p>
+              <div className="flex items-center gap-2">
+                <input value={whatsappInput} onChange={(e) => setWhatsappInput(e.target.value.replace(/[^\d]/g, ""))}
+                  placeholder="Ex.: 5511999998888 (DDI+DDD+número)" data-testid="input-catalog-whatsapp"
+                  className="flex-1 min-w-[160px] rounded-lg border px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
+                <button onClick={handleSaveWhatsapp} disabled={savingWhatsapp} data-testid="button-save-whatsapp"
+                  className="px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary/90 disabled:opacity-50 transition">
+                  {savingWhatsapp ? "Salvando..." : "Salvar"}
+                </button>
+              </div>
+              {!whatsapp && <p className="text-[10px] text-amber-600 mt-1">Sem número configurado, a vitrine usa o telefone de contato administrativo como reserva.</p>}
+            </div>
+          </div>
         )}
       </div>
 
@@ -370,7 +510,8 @@ export default function VitrineAparelhos() {
               </div>
               <div className="p-3 flex-1 flex flex-col gap-1">
                 <div className="flex items-center gap-1.5 flex-wrap">
-                  <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-full bg-neutral-100 text-neutral-600">
+                  <span title={CATALOG_CONDITION_CRITERIA[p.condition].criteria.map((c) => `${c.label}: ${c.text}`).join(" · ")}
+                    className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-full bg-neutral-100 text-neutral-600 cursor-help">
                     {CATALOG_CONDITIONS.find((c) => c.value === p.condition)?.label}
                   </span>
                   {p.status !== "active" && (
@@ -380,9 +521,9 @@ export default function VitrineAparelhos() {
                   )}
                 </div>
                 <p className="text-sm font-semibold leading-tight">{p.model}</p>
-                {p.storage && <p className="text-xs text-muted-foreground">{p.storage}</p>}
-                <p className="text-sm font-bold mt-auto">{formatBRL(p.salePrice)}</p>
-                {p.costPrice && <p className="text-[10px] text-muted-foreground">custo {formatBRL(p.costPrice)}</p>}
+                {storagesLabel(p) && <p className="text-xs text-muted-foreground">{storagesLabel(p)}</p>}
+                {p.variants.length > 1 && <p className="text-[10px] text-muted-foreground">{p.variants.length} variantes</p>}
+                <p className="text-sm font-bold mt-auto">{priceRangeLabel(p)}</p>
                 <div className="flex items-center gap-1 pt-1">
                   <button onClick={() => copyMessage(productMessage(p))} title="Copiar mensagem" data-testid={`button-copy-product-${p.id}`}
                     className="p-1.5 rounded-lg hover:bg-emerald-50 text-emerald-600"><MessageCircle className="w-3.5 h-3.5" /></button>
@@ -404,7 +545,7 @@ export default function VitrineAparelhos() {
       {/* Modal: criar/editar produto */}
       {showForm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-3 py-6 overflow-y-auto" onClick={closeForm}>
-          <div className="bg-card rounded-xl w-full max-w-lg shadow-xl border overflow-hidden my-auto" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-card rounded-xl w-full max-w-2xl shadow-xl border overflow-hidden my-auto" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-4 py-3 border-b">
               <span className="font-semibold text-sm flex items-center gap-2"><Smartphone className="w-4 h-4 text-primary" /> {editing ? "Editar aparelho" : "Novo aparelho"}</span>
               <button onClick={closeForm} className="p-1 rounded hover:bg-muted/60"><X className="w-4 h-4" /></button>
@@ -417,64 +558,97 @@ export default function VitrineAparelhos() {
                     placeholder="Ex.: iPhone 15 Pro Max" className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
                 </div>
                 <div>
-                  <label className="text-xs font-semibold text-muted-foreground">Armazenamento</label>
-                  <input value={form.storage} onChange={(e) => setForm({ ...form, storage: e.target.value })} data-testid="input-product-storage"
-                    placeholder="Ex.: 256GB" className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
-                </div>
-                <div>
-                  <label className="text-xs font-semibold text-muted-foreground">Condição</label>
+                  <label className="text-xs font-semibold text-muted-foreground flex items-center gap-1">
+                    Selo de qualidade
+                    <button type="button" onClick={() => setShowConditionInfo((v) => !v)} data-testid="button-toggle-condition-info"
+                      className="text-muted-foreground hover:text-primary"><Info className="w-3 h-3" /></button>
+                  </label>
                   <select value={form.condition} onChange={(e) => setForm({ ...form, condition: e.target.value as CatalogCondition })} data-testid="select-product-condition"
                     className="mt-1 w-full rounded-lg border px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary/40">
                     {CATALOG_CONDITIONS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
                   </select>
                 </div>
-                <div className="col-span-2">
+                <div>
                   <label className="text-xs font-semibold text-muted-foreground">Cores (separadas por vírgula)</label>
                   <input value={form.colors} onChange={(e) => setForm({ ...form, colors: e.target.value })} data-testid="input-product-colors"
                     placeholder="Preto, Azul, Rosa" className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
                 </div>
               </div>
 
-              <div className="rounded-lg border border-dashed p-3 space-y-2 bg-secondary/30">
-                <p className="text-xs font-semibold text-muted-foreground">Formação de preço</p>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-xs text-muted-foreground">Custo (nota do fornecedor)</label>
-                    <input type="number" value={form.costPrice} onChange={(e) => setForm({ ...form, costPrice: e.target.value })} data-testid="input-product-cost"
-                      placeholder="0,00" className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
-                  </div>
-                  <div>
-                    <label className="text-xs text-muted-foreground">Margem % (em branco = padrão)</label>
-                    <input type="number" value={form.marginPercentOverride} onChange={(e) => setForm({ ...form, marginPercentOverride: e.target.value })} data-testid="input-product-margin"
-                      placeholder={settings ? String(settings.defaultMarginPercent) : ""} className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
-                  </div>
+              {showConditionInfo && (
+                <div className="rounded-lg border bg-secondary/30 p-3 space-y-1">
+                  <p className="text-xs font-semibold">{CATALOG_CONDITION_CRITERIA[form.condition].label} — critério padrão SheikCell</p>
+                  {CATALOG_CONDITION_CRITERIA[form.condition].criteria.map((c) => (
+                    <p key={c.label} className="text-[11px] text-muted-foreground"><b>{c.label}:</b> {c.text}</p>
+                  ))}
                 </div>
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <input type="checkbox" checked={form.costIncludesInvoice} onChange={(e) => setForm({ ...form, costIncludesInvoice: e.target.checked })} />
-                  Custo já inclui a nota fiscal
-                </label>
-                <div>
-                  <label className="text-xs text-muted-foreground">Preço de venda (calculado — pode ajustar na mão)</label>
-                  <input type="number" value={form.salePrice} onChange={(e) => { setSalePriceTouched(true); setForm({ ...form, salePrice: e.target.value }); }} data-testid="input-product-sale-price"
-                    placeholder="0,00" className="mt-1 w-full rounded-lg border px-3 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-primary/40" />
+              )}
+
+              {/* Variantes de armazenamento */}
+              <div className="rounded-lg border border-dashed p-3 space-y-3 bg-secondary/30">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-semibold text-muted-foreground">Variantes (armazenamento/memória) — preço e estoque próprios de cada uma</p>
+                  <button type="button" onClick={addVariant} data-testid="button-add-variant"
+                    className="flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline">
+                    <Plus className="w-3 h-3" /> Adicionar variante
+                  </button>
                 </div>
+                {form.variants.map((v, idx) => (
+                  <div key={idx} className="rounded-lg border bg-white p-2.5 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <input value={v.storage} onChange={(e) => updateVariant(idx, { storage: e.target.value })}
+                        placeholder="Ex.: 256GB" data-testid={`input-variant-storage-${idx}`}
+                        className="flex-1 rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                      {form.variants.length > 1 && (
+                        <button type="button" onClick={() => removeVariant(idx)} data-testid={`button-remove-variant-${idx}`}
+                          className="p-1.5 rounded hover:bg-red-50 text-red-600"><Trash2 className="w-3.5 h-3.5" /></button>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-[10px] text-muted-foreground">Custo (nota do fornecedor)</label>
+                        <input type="number" value={v.costPrice} onChange={(e) => updateVariant(idx, { costPrice: e.target.value })}
+                          placeholder="0,00" data-testid={`input-variant-cost-${idx}`}
+                          className="mt-0.5 w-full rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                      </div>
+                      <div>
+                        <label className="text-[10px] text-muted-foreground">Margem % (em branco = padrão)</label>
+                        <input type="number" value={v.marginPercentOverride} onChange={(e) => updateVariant(idx, { marginPercentOverride: e.target.value })}
+                          placeholder={settings ? String(settings.defaultMarginPercent) : ""} data-testid={`input-variant-margin-${idx}`}
+                          className="mt-0.5 w-full rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                      </div>
+                    </div>
+                    <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                      <input type="checkbox" checked={v.costIncludesInvoice} onChange={(e) => updateVariant(idx, { costIncludesInvoice: e.target.checked })} />
+                      Custo já inclui a nota fiscal
+                    </label>
+                    <div className="flex items-end gap-2">
+                      <div className="flex-1">
+                        <label className="text-[10px] text-muted-foreground">Preço de venda (em branco = calcula do custo)</label>
+                        <input type="number" value={v.salePrice} onChange={(e) => updateVariant(idx, { salePrice: e.target.value })}
+                          placeholder="0,00" data-testid={`input-variant-sale-price-${idx}`}
+                          className="mt-0.5 w-full rounded border px-2 py-1.5 text-sm font-semibold focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                      </div>
+                      <button type="button" onClick={() => calcVariantPrice(idx)} title="Calcular a partir do custo" data-testid={`button-calc-variant-${idx}`}
+                        className="p-2 rounded border hover:bg-secondary text-muted-foreground"><Calculator className="w-3.5 h-3.5" /></button>
+                      <div className="w-20">
+                        <label className="text-[10px] text-muted-foreground">Estoque</label>
+                        <input type="number" value={v.stockQty} onChange={(e) => updateVariant(idx, { stockQty: e.target.value })} data-testid={`input-variant-stock-${idx}`}
+                          className="mt-0.5 w-full rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs font-semibold text-muted-foreground">Estoque</label>
-                  <input type="number" value={form.stockQty} onChange={(e) => setForm({ ...form, stockQty: e.target.value })} data-testid="input-product-stock"
-                    className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
-                </div>
-                <div>
-                  <label className="text-xs font-semibold text-muted-foreground">Status</label>
-                  <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value as CatalogProduct["status"] })} data-testid="select-product-status"
-                    className="mt-1 w-full rounded-lg border px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary/40">
-                    <option value="active">Ativo (na vitrine)</option>
-                    <option value="inactive">Inativo</option>
-                    <option value="sold">Vendido</option>
-                  </select>
-                </div>
+              <div>
+                <label className="text-xs font-semibold text-muted-foreground">Status</label>
+                <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value as CatalogProduct["status"] })} data-testid="select-product-status"
+                  className="mt-1 w-full rounded-lg border px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary/40">
+                  <option value="active">Ativo (na vitrine)</option>
+                  <option value="inactive">Inativo</option>
+                  <option value="sold">Vendido</option>
+                </select>
               </div>
 
               <div>
@@ -485,7 +659,13 @@ export default function VitrineAparelhos() {
 
               {editing && (
                 <div>
-                  <label className="text-xs font-semibold text-muted-foreground">Fotos</label>
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-muted-foreground">Fotos</label>
+                    <button type="button" onClick={openPhotoSearch} data-testid="button-open-photo-search"
+                      className="flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline">
+                      <Search className="w-3 h-3" /> Buscar fotos na internet
+                    </button>
+                  </div>
                   <div className="mt-1 flex flex-wrap gap-2">
                     {editing.photos.map((ph) => (
                       <div key={ph.id} className="relative w-16 h-16 rounded-lg overflow-hidden border group">
@@ -502,6 +682,36 @@ export default function VitrineAparelhos() {
                         onChange={(e) => handlePhotoUpload(e.target.files)} disabled={uploadingPhoto} />
                     </label>
                   </div>
+
+                  {showPhotoSearch && (
+                    <div className="mt-2 rounded-lg border bg-secondary/30 p-2.5 space-y-2">
+                      <div className="flex items-center gap-2">
+                        <input value={photoQuery} onChange={(e) => setPhotoQuery(e.target.value)}
+                          onKeyDown={(e) => e.key === "Enter" && handlePhotoSearch()}
+                          placeholder="Ex.: iPhone 15 Pro Max Preto" data-testid="input-photo-search-query"
+                          className="flex-1 rounded border px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                        <button type="button" onClick={handlePhotoSearch} disabled={searchingPhotos} data-testid="button-run-photo-search"
+                          className="px-3 py-1.5 rounded bg-primary text-white text-xs font-semibold disabled:opacity-50 flex items-center gap-1">
+                          {searchingPhotos ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />} Buscar
+                        </button>
+                      </div>
+                      {photoSearchError && <p className="text-[11px] text-amber-700">{photoSearchError}</p>}
+                      {photoResults && photoResults.length > 0 && (
+                        <div className="grid grid-cols-4 gap-2">
+                          {photoResults.map((r) => (
+                            <button key={r.imageUrl} type="button" onClick={() => handleUsePhotoResult(r)} title={r.title}
+                              disabled={attachingPhotoUrl != null} data-testid={`button-use-photo-result-${r.imageUrl}`}
+                              className="relative aspect-square rounded overflow-hidden border hover:ring-2 hover:ring-primary/50 transition disabled:opacity-50">
+                              <img src={r.thumbnailUrl || r.imageUrl} alt={r.title} className="w-full h-full object-cover" />
+                              {attachingPhotoUrl === r.imageUrl && (
+                                <div className="absolute inset-0 bg-black/40 flex items-center justify-center"><Loader2 className="w-4 h-4 animate-spin text-white" /></div>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -525,7 +735,7 @@ export default function VitrineAparelhos() {
             <div className="p-4 space-y-3 max-h-[75vh] overflow-y-auto">
               {!importItems ? (
                 <>
-                  <p className="text-xs text-muted-foreground">Cole abaixo a lista de aparelhos do fornecedor (o texto que chega pelo WhatsApp, por exemplo). A IA identifica modelo, armazenamento, cor e o preço de custo automaticamente.</p>
+                  <p className="text-xs text-muted-foreground">Cole abaixo a lista de aparelhos do fornecedor (o texto que chega pelo WhatsApp, por exemplo). A IA identifica modelo, armazenamento, cor e o preço de custo automaticamente — e agrupa cores/memórias do mesmo modelo num só cadastro com várias variantes.</p>
                   <textarea value={importText} onChange={(e) => setImportText(e.target.value)} rows={10} data-testid="input-import-text"
                     placeholder={"iPhone 15 128GB\nCores: Preto, Azul\nR$ 3.250\n\niPhone 15 Pro Max 256GB\n..."}
                     className="w-full rounded-lg border px-3 py-2 text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-primary/40" />
@@ -548,17 +758,34 @@ export default function VitrineAparelhos() {
                   </div>
                   <div className="space-y-2">
                     {visibleImportItems.map(({ it, idx }) => (
-                      <div key={idx} className={`rounded-lg border p-2.5 ${it.status === "pending" ? "border-amber-300 bg-amber-50/50" : "border-border"}`}>
-                        <div className="grid grid-cols-4 gap-2 items-center">
+                      <div key={idx} className={`rounded-lg border p-2.5 space-y-2 ${it.status === "pending" ? "border-amber-300 bg-amber-50/50" : "border-border"}`}>
+                        <div className="flex items-center gap-2">
                           <input value={it.model} onChange={(e) => updateImportItem(idx, { model: e.target.value })} data-testid={`import-item-model-${idx}`}
-                            className="col-span-2 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Modelo" />
-                          <input value={it.storage ?? ""} onChange={(e) => updateImportItem(idx, { storage: e.target.value || null })}
-                            className="rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Armazenamento" />
-                          <input type="number" value={it.costPrice ?? ""} onChange={(e) => updateImportItem(idx, { costPrice: e.target.value ? Number(e.target.value) : null })}
-                            className="rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Custo R$" />
+                            className="flex-1 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Modelo" />
+                          <select value={it.condition} onChange={(e) => updateImportItem(idx, { condition: e.target.value as CatalogCondition })}
+                            data-testid={`import-item-condition-${idx}`}
+                            className="rounded border px-2 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-primary/40">
+                            {CATALOG_CONDITIONS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+                          </select>
                         </div>
-                        {it.issue && <p className="text-[10px] text-amber-700 mt-1">{it.issue}</p>}
-                        {it.rawLine && <p className="text-[10px] text-muted-foreground mt-1 truncate">"{it.rawLine}"</p>}
+                        <div className="space-y-1.5">
+                          {it.variants.map((v, vIdx) => (
+                            <div key={vIdx} className="flex items-center gap-2">
+                              <input value={v.storage ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { storage: e.target.value || null })}
+                                className="flex-1 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Armazenamento" />
+                              <input type="number" value={v.costPrice ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { costPrice: e.target.value ? Number(e.target.value) : null })}
+                                className="flex-1 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Custo R$" />
+                              {it.variants.length > 1 && (
+                                <button onClick={() => removeImportVariant(idx, vIdx)} className="p-1 rounded hover:bg-red-50 text-red-600"><X className="w-3 h-3" /></button>
+                              )}
+                            </div>
+                          ))}
+                          <button onClick={() => addImportVariant(idx)} className="text-[10px] font-semibold text-primary hover:underline flex items-center gap-1">
+                            <Plus className="w-2.5 h-2.5" /> Adicionar variante
+                          </button>
+                        </div>
+                        {it.issue && <p className="text-[10px] text-amber-700">{it.issue}</p>}
+                        {it.rawLine && <p className="text-[10px] text-muted-foreground truncate">"{it.rawLine}"</p>}
                       </div>
                     ))}
                     {visibleImportItems.length === 0 && <p className="text-xs text-muted-foreground text-center py-4">Nada aqui.</p>}

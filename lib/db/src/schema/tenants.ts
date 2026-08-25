@@ -52,6 +52,11 @@ export const tenantsTable = pgTable("tenants", {
   // Endereço público da Vitrine de Aparelhos (/vitrine/:slug) — null = a loja
   // ainda não escolheu um endereço (link desligado). Único entre lojas.
   catalogSlug: text("catalog_slug"),
+  // WhatsApp de vendas mostrado pro cliente final na Vitrine pública —
+  // configurado pelo próprio admin da loja (não confundir com contactPhone,
+  // que é o telefone de contato administrativo cadastrado pelo superadmin).
+  // Null = a vitrine cai no fallback de contactPhone.
+  catalogWhatsapp: text("catalog_whatsapp"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

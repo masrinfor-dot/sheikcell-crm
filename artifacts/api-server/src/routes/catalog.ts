@@ -7,6 +7,7 @@ import { eq, and, desc, inArray } from "drizzle-orm";
 import {
   db,
   catalogProductsTable,
+  catalogProductVariantsTable,
   catalogProductPhotosTable,
   appSettingsTable,
   tenantsTable,
@@ -52,6 +53,15 @@ function photoContentMatchesMime(buf: Buffer, mime: string): boolean {
   }
 }
 
+// Detecta o mime a partir dos magic bytes (pra fotos baixadas de URL, onde o
+// Content-Type do servidor de origem nem sempre é confiável).
+function sniffImageMime(buf: Buffer): string | null {
+  for (const mime of Object.keys(PHOTO_MIME)) {
+    if (photoContentMatchesMime(buf, mime)) return mime;
+  }
+  return null;
+}
+
 const PRICING_KEY = "catalog_pricing_settings";
 
 async function getPricingSettings(tenantId: number): Promise<PricingSettings> {
@@ -75,7 +85,7 @@ function cleanColors(v: unknown): string[] {
 }
 
 function cleanCondition(v: unknown): CatalogCondition {
-  return CATALOG_CONDITIONS.includes(v as CatalogCondition) ? (v as CatalogCondition) : "seminovo";
+  return CATALOG_CONDITIONS.includes(v as CatalogCondition) ? (v as CatalogCondition) : "bom";
 }
 
 function toNumberOrNull(v: unknown): number | null {
@@ -98,6 +108,94 @@ async function photosByProductIds(tenantId: number, productIds: number[]) {
   return map;
 }
 
+async function variantsByProductIds(tenantId: number, productIds: number[]) {
+  if (productIds.length === 0) return new Map<number, (typeof catalogProductVariantsTable.$inferSelect)[]>();
+  const rows = await db.select().from(catalogProductVariantsTable)
+    .where(and(eq(catalogProductVariantsTable.tenantId, tenantId), inArray(catalogProductVariantsTable.productId, productIds)))
+    .orderBy(catalogProductVariantsTable.sortOrder, catalogProductVariantsTable.id);
+  const map = new Map<number, (typeof catalogProductVariantsTable.$inferSelect)[]>();
+  for (const v of rows) {
+    const list = map.get(v.productId) ?? [];
+    list.push(v);
+    map.set(v.productId, list);
+  }
+  return map;
+}
+
+// Normaliza um item de variante vindo do cliente (form de cadastro/edição ou
+// confirmação de importação) — calcula salePrice se não vier informado.
+type VariantInput = {
+  id?: number;
+  storage: string | null;
+  costPrice: number | null;
+  costIncludesInvoice: boolean;
+  marginPercentOverride: number | null;
+  salePrice: number | null;
+  stockQty: number;
+};
+
+function cleanVariantInput(raw: unknown): VariantInput {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  return {
+    id: Number.isInteger(o.id) ? (o.id as number) : undefined,
+    storage: clean(o.storage, 40) || null,
+    costPrice: toNumberOrNull(o.costPrice),
+    costIncludesInvoice: o.costIncludesInvoice === true,
+    marginPercentOverride: toNumberOrNull(o.marginPercentOverride),
+    salePrice: "salePrice" in o ? toNumberOrNull(o.salePrice) : null,
+    stockQty: Number.isInteger(o.stockQty) ? Math.max(0, o.stockQty as number) : 1,
+  };
+}
+
+async function resolveVariantSalePrice(v: VariantInput, settings: PricingSettings): Promise<string | null> {
+  if (v.salePrice != null) return String(v.salePrice);
+  if (v.costPrice == null) return null;
+  const computed = precoVendaDoProduto(
+    { costPrice: v.costPrice, costIncludesInvoice: v.costIncludesInvoice, marginPercentOverride: v.marginPercentOverride },
+    settings,
+  );
+  return computed != null ? String(computed) : null;
+}
+
+/** Substitui as variantes de um produto (upsert por id + remove as que sumiram). Sempre garante ao menos 1 variante. */
+async function replaceVariants(tenantId: number, productId: number, rawVariants: unknown, settings: PricingSettings) {
+  const list = Array.isArray(rawVariants) && rawVariants.length > 0 ? rawVariants : [{}];
+  const inputs = list.slice(0, 20).map(cleanVariantInput);
+
+  const existing = await db.select({ id: catalogProductVariantsTable.id }).from(catalogProductVariantsTable)
+    .where(and(eq(catalogProductVariantsTable.productId, productId), eq(catalogProductVariantsTable.tenantId, tenantId)));
+  const existingIds = new Set(existing.map((r) => r.id));
+  const keepIds = new Set<number>();
+
+  for (const [i, v] of inputs.entries()) {
+    const salePrice = await resolveVariantSalePrice(v, settings);
+    const values = {
+      storage: v.storage,
+      costPrice: v.costPrice != null ? String(v.costPrice) : null,
+      costIncludesInvoice: v.costIncludesInvoice,
+      marginPercentOverride: v.marginPercentOverride != null ? String(v.marginPercentOverride) : null,
+      salePrice,
+      stockQty: v.stockQty,
+      sortOrder: i,
+      updatedAt: new Date(),
+    };
+    if (v.id != null && existingIds.has(v.id)) {
+      await db.update(catalogProductVariantsTable).set(values)
+        .where(and(eq(catalogProductVariantsTable.id, v.id), eq(catalogProductVariantsTable.tenantId, tenantId)));
+      keepIds.add(v.id);
+    } else {
+      const [created] = await db.insert(catalogProductVariantsTable)
+        .values({ tenantId, productId, ...values }).returning({ id: catalogProductVariantsTable.id });
+      keepIds.add(created.id);
+    }
+  }
+  const toDelete = [...existingIds].filter((id) => !keepIds.has(id));
+  if (toDelete.length > 0) {
+    await db.delete(catalogProductVariantsTable)
+      .where(and(inArray(catalogProductVariantsTable.id, toDelete), eq(catalogProductVariantsTable.tenantId, tenantId)));
+  }
+}
+
 // ─── Listar / criar / editar / excluir produtos ─────────────────────────────
 
 router.get("/catalog/products", requireAuth, async (req, res): Promise<void> => {
@@ -105,11 +203,12 @@ router.get("/catalog/products", requireAuth, async (req, res): Promise<void> => 
   const rows = await db.select().from(catalogProductsTable)
     .where(eq(catalogProductsTable.tenantId, tenantId))
     .orderBy(desc(catalogProductsTable.createdAt));
-  const photos = await photosByProductIds(tenantId, rows.map((r) => r.id));
+  const ids = rows.map((r) => r.id);
+  const [photos, variants] = await Promise.all([photosByProductIds(tenantId, ids), variantsByProductIds(tenantId, ids)]);
   const settings = await getPricingSettings(tenantId);
   res.json({
     settings,
-    products: rows.map((r) => ({ ...r, photos: photos.get(r.id) ?? [] })),
+    products: rows.map((r) => ({ ...r, photos: photos.get(r.id) ?? [], variants: variants.get(r.id) ?? [] })),
   });
 });
 
@@ -119,31 +218,20 @@ router.post("/catalog/products", requireAuth, async (req, res): Promise<void> =>
   const model = clean(body.model, 120);
   if (!model) { res.status(400).json({ error: "Informe o modelo do aparelho" }); return; }
 
-  const costPrice = toNumberOrNull(body.costPrice);
-  const costIncludesInvoice = body.costIncludesInvoice === true;
-  const marginPercentOverride = toNumberOrNull(body.marginPercentOverride);
-  let salePrice = toNumberOrNull(body.salePrice);
-  if (salePrice == null && costPrice != null) {
-    const settings = await getPricingSettings(tenantId);
-    salePrice = precoVendaDoProduto({ costPrice, costIncludesInvoice, marginPercentOverride }, settings);
-  }
-
   const [product] = await db.insert(catalogProductsTable).values({
     tenantId,
     model,
-    storage: clean(body.storage, 40) || null,
     condition: cleanCondition(body.condition),
     colors: cleanColors(body.colors),
     description: clean(body.description, 2000) || null,
-    costPrice: costPrice != null ? String(costPrice) : null,
-    costIncludesInvoice,
-    marginPercentOverride: marginPercentOverride != null ? String(marginPercentOverride) : null,
-    salePrice: salePrice != null ? String(salePrice) : null,
-    stockQty: Number.isInteger(body.stockQty) ? Math.max(0, body.stockQty as number) : 1,
     status: body.status === "inactive" || body.status === "sold" ? body.status : "active",
     createdBy: req.session.userId ?? null,
   }).returning();
-  res.status(201).json({ ...product, photos: [] });
+
+  const settings = await getPricingSettings(tenantId);
+  await replaceVariants(tenantId, product.id, body.variants, settings);
+  const variants = await variantsByProductIds(tenantId, [product.id]);
+  res.status(201).json({ ...product, photos: [], variants: variants.get(product.id) ?? [] });
 });
 
 router.patch("/catalog/products/:id", requireAuth, async (req, res): Promise<void> => {
@@ -155,40 +243,23 @@ router.patch("/catalog/products/:id", requireAuth, async (req, res): Promise<voi
   if (!existing) { res.status(404).json({ error: "Produto não encontrado" }); return; }
 
   const body = req.body as Record<string, unknown>;
-  const costPrice = "costPrice" in body ? toNumberOrNull(body.costPrice) : Number(existing.costPrice ?? "") || null;
-  const costIncludesInvoice = "costIncludesInvoice" in body ? body.costIncludesInvoice === true : existing.costIncludesInvoice;
-  const marginPercentOverride = "marginPercentOverride" in body ? toNumberOrNull(body.marginPercentOverride) : (existing.marginPercentOverride != null ? Number(existing.marginPercentOverride) : null);
-
-  let salePrice: number | null;
-  if ("salePrice" in body) {
-    // Preço definido manualmente pelo lojista — respeita a sobrescrita.
-    salePrice = toNumberOrNull(body.salePrice);
-  } else if ("costPrice" in body || "marginPercentOverride" in body || "costIncludesInvoice" in body) {
-    // Custo/margem mudaram e o preço não foi informado — recalcula.
-    const settings = await getPricingSettings(tenantId);
-    salePrice = costPrice != null ? precoVendaDoProduto({ costPrice, costIncludesInvoice, marginPercentOverride }, settings) : null;
-  } else {
-    salePrice = existing.salePrice != null ? Number(existing.salePrice) : null;
-  }
-
   const [updated] = await db.update(catalogProductsTable).set({
     model: "model" in body ? (clean(body.model, 120) || existing.model) : existing.model,
-    storage: "storage" in body ? (clean(body.storage, 40) || null) : existing.storage,
     condition: "condition" in body ? cleanCondition(body.condition) : existing.condition,
     colors: "colors" in body ? cleanColors(body.colors) : existing.colors,
     description: "description" in body ? (clean(body.description, 2000) || null) : existing.description,
-    costPrice: costPrice != null ? String(costPrice) : null,
-    costIncludesInvoice,
-    marginPercentOverride: marginPercentOverride != null ? String(marginPercentOverride) : null,
-    salePrice: salePrice != null ? String(salePrice) : null,
-    stockQty: "stockQty" in body && Number.isInteger(body.stockQty) ? Math.max(0, body.stockQty as number) : existing.stockQty,
     status: body.status === "active" || body.status === "inactive" || body.status === "sold" ? body.status : existing.status,
     sortOrder: "sortOrder" in body && Number.isInteger(body.sortOrder) ? (body.sortOrder as number) : existing.sortOrder,
     updatedAt: new Date(),
   }).where(and(eq(catalogProductsTable.id, id), eq(catalogProductsTable.tenantId, tenantId))).returning();
 
-  const photos = await photosByProductIds(tenantId, [id]);
-  res.json({ ...updated, photos: photos.get(id) ?? [] });
+  if ("variants" in body) {
+    const settings = await getPricingSettings(tenantId);
+    await replaceVariants(tenantId, id, body.variants, settings);
+  }
+
+  const [photos, variants] = await Promise.all([photosByProductIds(tenantId, [id]), variantsByProductIds(tenantId, [id])]);
+  res.json({ ...updated, photos: photos.get(id) ?? [], variants: variants.get(id) ?? [] });
 });
 
 router.delete("/catalog/products/:id", requireAuth, async (req, res): Promise<void> => {
@@ -241,6 +312,96 @@ router.post("/catalog/products/:id/photos", requireAuth, async (req, res): Promi
   res.status(201).json(photo);
 });
 
+// Busca de imagens padronizadas na internet (Google Custom Search — Imagens).
+// Exige as env vars GOOGLE_CSE_API_KEY e GOOGLE_CSE_CX (Programmable Search
+// Engine com "busca de imagem" habilitada). Sem elas, devolve 501 com uma
+// mensagem clara em vez de quebrar a tela — a loja pode seguir cadastrando
+// fotos por upload manual normalmente.
+router.get("/catalog/photo-search", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  void tenantId;
+  const apiKey = process.env["GOOGLE_CSE_API_KEY"];
+  const cx = process.env["GOOGLE_CSE_CX"];
+  if (!apiKey || !cx) {
+    res.status(501).json({ error: "Busca de imagens não configurada neste servidor. Peça pro desenvolvedor configurar GOOGLE_CSE_API_KEY e GOOGLE_CSE_CX (Google Programmable Search Engine)." });
+    return;
+  }
+  const q = clean((req.query as Record<string, unknown>).q, 150);
+  if (!q) { res.status(400).json({ error: "Informe o que buscar" }); return; }
+
+  try {
+    const url = new URL("https://www.googleapis.com/customsearch/v1");
+    url.searchParams.set("key", apiKey);
+    url.searchParams.set("cx", cx);
+    url.searchParams.set("q", q);
+    url.searchParams.set("searchType", "image");
+    url.searchParams.set("num", "8");
+    url.searchParams.set("safe", "active");
+    url.searchParams.set("imgSize", "large");
+
+    const r = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    if (!r.ok) {
+      req.log.warn({ status: r.status }, "Catalog photo search: Google CSE respondeu erro");
+      res.status(502).json({ error: "A busca de imagens falhou. Tente novamente." });
+      return;
+    }
+    const json = (await r.json()) as { items?: { title?: string; link?: string; image?: { thumbnailLink?: string; contextLink?: string } }[] };
+    const results = (json.items ?? []).slice(0, 8).map((it) => ({
+      title: clean(it.title, 150),
+      imageUrl: typeof it.link === "string" ? it.link : "",
+      thumbnailUrl: typeof it.image?.thumbnailLink === "string" ? it.image.thumbnailLink : (typeof it.link === "string" ? it.link : ""),
+      sourceUrl: typeof it.image?.contextLink === "string" ? it.image.contextLink : "",
+    })).filter((r) => r.imageUrl);
+    res.json({ results });
+  } catch (err) {
+    req.log.error({ err }, "Catalog photo search failed");
+    res.status(503).json({ error: "A busca de imagens está indisponível no momento. Tente novamente em instantes." });
+  }
+});
+
+// Baixa uma imagem de uma URL (resultado da busca acima) e anexa ao produto
+// como se fosse um upload — mesma validação de conteúdo/tamanho.
+router.post("/catalog/products/:id/photos/from-url", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const productId = Number(req.params.id);
+  const [existing] = await db.select({ id: catalogProductsTable.id }).from(catalogProductsTable)
+    .where(and(eq(catalogProductsTable.id, productId), eq(catalogProductsTable.tenantId, tenantId))).limit(1);
+  if (!existing) { res.status(404).json({ error: "Produto não encontrado" }); return; }
+
+  const raw = (req.body as { url?: unknown }).url;
+  const sourceUrl = typeof raw === "string" ? raw.trim().slice(0, 2000) : "";
+  let parsed: URL;
+  try { parsed = new URL(sourceUrl); } catch { res.status(400).json({ error: "URL inválida" }); return; }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") { res.status(400).json({ error: "URL inválida" }); return; }
+
+  try {
+    const r = await fetch(parsed, { signal: AbortSignal.timeout(15_000), headers: { "User-Agent": "SheikCellVitrineBot/1.0" } });
+    if (!r.ok) { res.status(502).json({ error: "Não consegui baixar essa imagem." }); return; }
+    const contentLength = Number(r.headers.get("content-length") ?? "0");
+    if (contentLength > MAX_PHOTO_SIZE) { res.status(400).json({ error: "Imagem muito grande (máximo 8MB)" }); return; }
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (buf.length === 0) { res.status(400).json({ error: "Imagem vazia" }); return; }
+    if (buf.length > MAX_PHOTO_SIZE) { res.status(400).json({ error: "Imagem muito grande (máximo 8MB)" }); return; }
+    const mime = sniffImageMime(buf);
+    const ext = mime ? PHOTO_MIME[mime] : null;
+    if (!ext) { res.status(400).json({ error: "O arquivo baixado não é uma imagem JPEG, PNG ou WEBP válida." }); return; }
+
+    await mkdir(CATALOG_MEDIA_DIR, { recursive: true });
+    const storedName = `${randomUUID()}.${ext}`;
+    await writeFile(path.join(CATALOG_MEDIA_DIR, storedName), buf);
+
+    const [count] = await db.select({ id: catalogProductPhotosTable.id }).from(catalogProductPhotosTable)
+      .where(eq(catalogProductPhotosTable.productId, productId));
+    const [photo] = await db.insert(catalogProductPhotosTable).values({
+      tenantId, productId, storedName, sourceUrl: parsed.toString(), sortOrder: count ? 1 : 0,
+    }).returning();
+    res.status(201).json(photo);
+  } catch (err) {
+    req.log.error({ err }, "Catalog photo from-url failed");
+    res.status(503).json({ error: "Não consegui baixar essa imagem agora. Tente novamente." });
+  }
+});
+
 router.delete("/catalog/products/:id/photos/:photoId", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const productId = Number(req.params.id);
@@ -270,7 +431,8 @@ router.put("/catalog/pricing-settings", requireAdmin, async (req, res): Promise<
   res.json(settings);
 });
 
-// Simulação de preço sem salvar — usada pela calculadora no formulário do produto.
+// Simulação de preço sem salvar — usada pela calculadora ao lado de cada
+// variante no formulário do produto.
 router.post("/catalog/pricing-settings/simulate", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const settings = await getPricingSettings(tenantId);
@@ -284,7 +446,7 @@ router.post("/catalog/pricing-settings/simulate", requireAuth, async (req, res):
   res.json({ salePrice, settings });
 });
 
-// ─── Link público da vitrine ─────────────────────────────────────────────────
+// ─── Link público e contato (WhatsApp) da vitrine ───────────────────────────
 
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{1,38}[a-z0-9])?$/;
 
@@ -310,14 +472,32 @@ router.put("/catalog/slug", requireAdmin, async (req, res): Promise<void> => {
   res.json({ slug });
 });
 
+// WhatsApp de vendas mostrado no botão da vitrine pública — configurado pelo
+// admin da loja (não é o contactPhone administrativo do superadmin).
+router.get("/catalog/whatsapp", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const [tenant] = await db.select({ catalogWhatsapp: tenantsTable.catalogWhatsapp, contactPhone: tenantsTable.contactPhone })
+    .from(tenantsTable).where(eq(tenantsTable.id, tenantId)).limit(1);
+  res.json({ whatsapp: tenant?.catalogWhatsapp ?? tenant?.contactPhone ?? null });
+});
+
+router.put("/catalog/whatsapp", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const raw = (req.body as { whatsapp?: unknown }).whatsapp;
+  const digits = typeof raw === "string" ? raw.replace(/\D/g, "").slice(0, 15) : "";
+  if (raw && !digits) { res.status(400).json({ error: "Número inválido" }); return; }
+  await db.update(tenantsTable).set({ catalogWhatsapp: digits || null }).where(eq(tenantsTable.id, tenantId));
+  res.json({ whatsapp: digits || null });
+});
+
 // ─── Importação de lista do fornecedor via IA ───────────────────────────────
 
+type ParsedVariant = { storage: string | null; costPrice: number | null };
 type ParsedItem = {
   model: string;
-  storage: string | null;
   condition: CatalogCondition;
   colors: string[];
-  costPrice: number | null;
+  variants: ParsedVariant[];
   status: "approved" | "pending";
   issue: string | null;
   rawLine: string;
@@ -336,6 +516,15 @@ function extractJsonArray(raw: string): unknown[] | null {
   }
 }
 
+function cleanParsedVariants(raw: unknown): ParsedVariant[] {
+  const arr = Array.isArray(raw) ? raw : [];
+  const list = arr.slice(0, 20).map((v) => {
+    const o = (v ?? {}) as Record<string, unknown>;
+    return { storage: clean(o.storage, 40) || null, costPrice: toNumberOrNull(o.costPrice) };
+  });
+  return list.length > 0 ? list : [{ storage: null, costPrice: null }];
+}
+
 router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rawText = typeof (req.body as { rawText?: unknown }).rawText === "string" ? (req.body as { rawText: string }).rawText : "";
@@ -346,14 +535,15 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
     `Você organiza listas de fornecedores de celulares (mercado brasileiro) em dados estruturados.`,
     `Cada linha ou bloco da lista abaixo descreve um aparelho: modelo, armazenamento, cor(es) e preço de CUSTO (preço do fornecedor pra loja, não o preço de venda ao cliente final).`,
     `Ignore emojis, cabeçalhos, informações de garantia/contato/endereço — extraia SÓ os aparelhos.`,
+    `IMPORTANTE: quando o MESMO modelo (mesma condição, mesmas cores) aparecer na lista com mais de um armazenamento/memória, agrupe num ÚNICO item, com um array "variants" contendo um {"storage","costPrice"} por armazenamento — não crie um item separado por armazenamento.`,
     ``,
     `Lista:`,
     text,
     ``,
-    `Responda SOMENTE com um JSON array válido, sem markdown, um objeto por aparelho, neste formato:`,
-    `[{"model":"iPhone 15 Pro Max","storage":"256GB","condition":"seminovo","colors":["Preto","Azul"],"costPrice":3850,"rawLine":"trecho original correspondente"}]`,
-    `"condition" deve ser um destes: lacrado, seminovo, cpo, usado (use "seminovo" se não estiver claro).`,
-    `Se não conseguir identificar o modelo ou o preço com confiança, ainda inclua o item com o que conseguir e deixe o campo faltante null.`,
+    `Responda SOMENTE com um JSON array válido, sem markdown, um objeto por aparelho (família modelo+condição+cor), neste formato:`,
+    `[{"model":"iPhone 15 Pro Max","condition":"excelente","colors":["Preto","Azul"],"variants":[{"storage":"256GB","costPrice":3850},{"storage":"512GB","costPrice":4200}],"rawLine":"trecho original correspondente"}]`,
+    `"condition" deve ser um destes: excelente, muito_bom, bom, outlet (use "bom" se não estiver claro).`,
+    `Se não conseguir identificar o modelo ou nenhum preço de custo com confiança, ainda inclua o item com o que conseguir e deixe os campos faltantes null.`,
   ].join("\n");
 
   try {
@@ -371,14 +561,14 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
     const items: ParsedItem[] = arr.slice(0, 200).map((raw) => {
       const o = (raw ?? {}) as Record<string, unknown>;
       const model = clean(o.model, 120);
-      const costPrice = toNumberOrNull(o.costPrice);
-      const missing = !model || costPrice == null;
+      const variants = cleanParsedVariants(o.variants);
+      const hasPrice = variants.some((v) => v.costPrice != null);
+      const missing = !model || !hasPrice;
       return {
         model: model || "(modelo não identificado)",
-        storage: clean(o.storage, 40) || null,
         condition: cleanCondition(o.condition),
         colors: cleanColors(o.colors),
-        costPrice,
+        variants,
         status: missing ? "pending" : "approved",
         issue: missing ? (!model ? "Modelo não identificado" : "Preço não identificado") : null,
         rawLine: clean(o.rawLine, 300),
@@ -397,30 +587,22 @@ router.post("/catalog/import/confirm", requireAuth, async (req, res): Promise<vo
   if (!Array.isArray(items) || items.length === 0) { res.status(400).json({ error: "Nenhum item para importar" }); return; }
 
   const settings = await getPricingSettings(tenantId);
-  const toInsert = items.slice(0, 200).map((raw) => {
+  const toImport = items.slice(0, 200).map((raw) => {
     const o = (raw ?? {}) as Record<string, unknown>;
-    const model = clean(o.model, 120);
-    const costPrice = toNumberOrNull(o.costPrice);
-    const marginPercentOverride = toNumberOrNull(o.marginPercentOverride);
-    const salePrice = "salePrice" in o
-      ? toNumberOrNull(o.salePrice)
-      : (costPrice != null ? precoVendaDoProduto({ costPrice, costIncludesInvoice: false, marginPercentOverride }, settings) : null);
-    return {
-      tenantId,
-      model: model || "(sem modelo)",
-      storage: clean(o.storage, 40) || null,
-      condition: cleanCondition(o.condition),
-      colors: cleanColors(o.colors),
-      costPrice: costPrice != null ? String(costPrice) : null,
-      marginPercentOverride: marginPercentOverride != null ? String(marginPercentOverride) : null,
-      salePrice: salePrice != null ? String(salePrice) : null,
-      createdBy: req.session.userId ?? null,
-    };
-  }).filter((p) => p.model !== "(sem modelo)");
+    return { model: clean(o.model, 120), condition: cleanCondition(o.condition), colors: cleanColors(o.colors), variants: cleanParsedVariants(o.variants) };
+  }).filter((p) => p.model);
 
-  if (toInsert.length === 0) { res.status(400).json({ error: "Nenhum item válido para importar" }); return; }
-  const inserted = await db.insert(catalogProductsTable).values(toInsert).returning();
-  res.status(201).json({ imported: inserted.length, products: inserted });
+  if (toImport.length === 0) { res.status(400).json({ error: "Nenhum item válido para importar" }); return; }
+
+  const createdProducts: (typeof catalogProductsTable.$inferSelect)[] = [];
+  for (const item of toImport) {
+    const [product] = await db.insert(catalogProductsTable).values({
+      tenantId, model: item.model, condition: item.condition, colors: item.colors, createdBy: req.session.userId ?? null,
+    }).returning();
+    await replaceVariants(tenantId, product.id, item.variants.map((v) => ({ storage: v.storage, costPrice: v.costPrice })), settings);
+    createdProducts.push(product);
+  }
+  res.status(201).json({ imported: createdProducts.length, products: createdProducts });
 });
 
 export default router;
@@ -442,22 +624,25 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
   const rows = await db.select().from(catalogProductsTable)
     .where(and(eq(catalogProductsTable.tenantId, tenant.id), eq(catalogProductsTable.status, "active")))
     .orderBy(catalogProductsTable.sortOrder, desc(catalogProductsTable.createdAt));
-  const photos = await photosByProductIds(tenant.id, rows.map((r) => r.id));
+  const ids = rows.map((r) => r.id);
+  const [photos, variants] = await Promise.all([photosByProductIds(tenant.id, ids), variantsByProductIds(tenant.id, ids)]);
   res.json({
     storeName: tenant.name,
-    whatsapp: tenant.contactPhone ?? null,
+    whatsapp: tenant.catalogWhatsapp ?? tenant.contactPhone ?? null,
     // Nunca expõe custo/margem — só o que o cliente final pode ver.
-    products: rows.map((r) => ({
-      id: r.id,
-      model: r.model,
-      storage: r.storage,
-      condition: r.condition,
-      colors: r.colors,
-      description: r.description,
-      salePrice: r.salePrice,
-      inStock: r.stockQty > 0,
-      photos: (photos.get(r.id) ?? []).map((p) => p.id),
-    })),
+    products: rows
+      .map((r) => ({
+        id: r.id,
+        model: r.model,
+        condition: r.condition,
+        colors: r.colors,
+        description: r.description,
+        photos: (photos.get(r.id) ?? []).map((p) => p.id),
+        variants: (variants.get(r.id) ?? [])
+          .filter((v) => v.salePrice != null)
+          .map((v) => ({ id: v.id, storage: v.storage, salePrice: v.salePrice, inStock: v.stockQty > 0 })),
+      }))
+      .filter((p) => p.variants.length > 0),
   });
 });
 

@@ -2,29 +2,78 @@ import { pgTable, serial, text, integer, timestamp, numeric, jsonb, boolean } fr
 import { usersTable } from "./users";
 
 // Vitrine de Aparelhos — catálogo de produtos (módulo opcional "vitrine").
-// Cada aparelho tem custo, margem e preço de venda: o preço de venda é
-// calculado a partir do custo + margem de lucro bruto + taxa de cartão da
-// forma de pagamento de referência + custo de nota fiscal (ver
-// lib/catalogPricing.ts), mas fica sempre gravado aqui e pode ser sobrescrito
-// manualmente depois — o cálculo é só o ponto de partida.
-export const CATALOG_CONDITIONS = ["lacrado", "seminovo", "cpo", "usado"] as const;
+// Cada VARIANTE (armazenamento) tem custo, margem e preço de venda: o preço
+// de venda é calculado a partir do custo + margem de lucro bruto + taxa de
+// cartão da forma de pagamento de referência + custo de nota fiscal (ver
+// lib/catalogPricing.ts), mas fica sempre gravado aqui e pode ser
+// sobrescrito manualmente depois — o cálculo é só o ponto de partida.
+
+// Selo de qualidade padrão SheikCell — 4 graus, cada um com critério fixo
+// (tela, lateral, traseira, bateria, acessórios; Outlet também cobre o
+// leitor de digital/facial). Mostrado tanto no cadastro quanto na vitrine
+// pública, pra o cliente final saber exatamente o que esperar do aparelho.
+export const CATALOG_CONDITIONS = ["excelente", "muito_bom", "bom", "outlet"] as const;
 export type CatalogCondition = (typeof CATALOG_CONDITIONS)[number];
 
+export const CATALOG_CONDITION_CRITERIA: Record<
+  CatalogCondition,
+  { label: string; criteria: { label: string; text: string }[] }
+> = {
+  excelente: {
+    label: "Excelente",
+    criteria: [
+      { label: "Tela", text: "Poucos ou nenhum sinal de uso, como pequenos riscos" },
+      { label: "Lateral", text: "Pode apresentar arranhões imperceptíveis" },
+      { label: "Traseira", text: "Pode apresentar pequeno desgaste ou arranhão, mas nada aparente" },
+      { label: "Bateria", text: "Os aparelhos possuem no mínimo 80% da capacidade da bateria" },
+      { label: "Acessórios", text: "Não acompanha acessórios" },
+    ],
+  },
+  muito_bom: {
+    label: "Muito Bom",
+    criteria: [
+      { label: "Tela", text: "Alguns sinais de uso, como pequenos riscos" },
+      { label: "Lateral", text: "Pode apresentar pequenos amassados" },
+      { label: "Traseira", text: "Pode apresentar arranhões leves" },
+      { label: "Bateria", text: "Os aparelhos possuem no mínimo 80% da capacidade da bateria" },
+      { label: "Acessórios", text: "Não acompanha acessórios" },
+    ],
+  },
+  bom: {
+    label: "Bom",
+    criteria: [
+      { label: "Tela", text: "Sinais de uso mais nítidos, como riscos" },
+      { label: "Lateral", text: "Pode apresentar amassados, partes descascadas ou arranhões" },
+      { label: "Traseira", text: "Pode apresentar riscos e arranhões nítidos" },
+      { label: "Bateria", text: "Os aparelhos possuem no mínimo 80% da capacidade da bateria" },
+      { label: "Acessórios", text: "Não acompanha acessórios" },
+    ],
+  },
+  outlet: {
+    label: "Outlet",
+    criteria: [
+      { label: "Tela", text: "Pode apresentar manchas fortes, sombras (efeito fantasma) e/ou riscos na tela" },
+      { label: "Lateral", text: "Pode apresentar pequenos amassados, partes descascadas ou arranhões" },
+      { label: "Traseira", text: "Pode apresentar riscos e arranhões nítidos" },
+      { label: "Bateria", text: "Os aparelhos possuem no mínimo 80% da capacidade da bateria" },
+      { label: "Leitor de Digital/Facial", text: "Pode não funcionar" },
+      { label: "Acessórios", text: "Não acompanha acessórios" },
+    ],
+  },
+};
+
+// Um "produto" é a FAMÍLIA do aparelho (modelo + condição + cores +
+// descrição + fotos). Cada variação de armazenamento/memória vira uma linha
+// em catalog_product_variants, com preço e estoque próprios — assim
+// "iPhone 15 Pro Max" com 256GB e 512GB é UM cadastro só, com duas
+// variantes, em vez de dois cards duplicados na vitrine.
 export const catalogProductsTable = pgTable("catalog_products", {
   tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   model: text("model").notNull(), // ex.: "iPhone 15 Pro Max"
-  storage: text("storage"), // ex.: "256GB" (texto livre — varia por fornecedor)
-  condition: text("condition").notNull().default("seminovo"), // ver CATALOG_CONDITIONS
+  condition: text("condition").notNull().default("bom"), // ver CATALOG_CONDITIONS
   colors: jsonb("colors").$type<string[]>().notNull().default([]),
   description: text("description"),
-  // Formação de preço (ver lib/catalogPricing.ts). costPrice normalmente vem
-  // da lista do fornecedor (importação por IA) ou é digitado na mão.
-  costPrice: numeric("cost_price"),
-  costIncludesInvoice: boolean("cost_includes_invoice").notNull().default(false),
-  marginPercentOverride: numeric("margin_percent_override"), // null = usa a margem padrão da loja
-  salePrice: numeric("sale_price"),
-  stockQty: integer("stock_qty").notNull().default(1),
   status: text("status").notNull().default("active"), // active | inactive | sold
   sortOrder: integer("sort_order").notNull().default(0),
   createdBy: integer("created_by").references(() => usersTable.id, { onDelete: "set null" }),
@@ -33,13 +82,35 @@ export const catalogProductsTable = pgTable("catalog_products", {
 });
 export type CatalogProduct = typeof catalogProductsTable.$inferSelect;
 
+// Variante de armazenamento de um produto — formação de preço própria (ver
+// lib/catalogPricing.ts). costPrice normalmente vem da lista do fornecedor
+// (importação por IA) ou é digitado na mão.
+export const catalogProductVariantsTable = pgTable("catalog_product_variants", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  productId: integer("product_id").notNull().references(() => catalogProductsTable.id, { onDelete: "cascade" }),
+  storage: text("storage"), // ex.: "256GB" (texto livre — varia por fornecedor); null = não varia por armazenamento
+  costPrice: numeric("cost_price"),
+  costIncludesInvoice: boolean("cost_includes_invoice").notNull().default(false),
+  marginPercentOverride: numeric("margin_percent_override"), // null = usa a margem padrão da loja
+  salePrice: numeric("sale_price"),
+  stockQty: integer("stock_qty").notNull().default(1),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type CatalogProductVariant = typeof catalogProductVariantsTable.$inferSelect;
+
 // Fotos do aparelho — o arquivo em si fica no disco (CATALOG_MEDIA_DIR),
 // aqui só os metadados (mesmo padrão de documentsTable em schema/documents.ts).
+// Uma foto pode vir de upload manual ou de busca de imagem (sourceUrl guarda
+// a origem, pra auditoria/repetir a busca depois).
 export const catalogProductPhotosTable = pgTable("catalog_product_photos", {
   tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   productId: integer("product_id").notNull().references(() => catalogProductsTable.id, { onDelete: "cascade" }),
   storedName: text("stored_name").notNull(),
+  sourceUrl: text("source_url"), // null = upload manual; preenchido = veio de busca de imagem
   sortOrder: integer("sort_order").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
