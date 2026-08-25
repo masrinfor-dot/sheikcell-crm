@@ -102,6 +102,81 @@ export default function RH() {
   );
 }
 
+// Histórico de candidaturas repetidas: junta candidatos que são a mesma
+// pessoa se candidatando de novo (CPF, telefone ou e-mail em comum). Não
+// existe coluna de CPF na tabela — o processo é configurável pelo admin, então
+// procuramos por qualquer pergunta cujo rótulo contenha "cpf" nas etapas
+// daquela candidatura específica (stagesSnapshot, já congelado por resposta).
+// Puramente visual: cada candidatura continua sendo seu próprio registro, sem
+// nenhuma escrita no banco.
+function onlyDigits(v: string): string {
+  return v.replace(/\D/g, "");
+}
+
+function extractCpf(c: RhCandidate): string | null {
+  if (!c.stagesSnapshot) return null;
+  for (const stage of c.stagesSnapshot) {
+    for (const q of stage.questions) {
+      if (!/cpf/i.test(q.label)) continue;
+      const raw = c.answers[stage.id]?.[q.id];
+      const digits = raw ? onlyDigits(raw) : "";
+      if (digits.length === 11) return digits;
+    }
+  }
+  return null;
+}
+
+function candidatePersonKeys(c: RhCandidate): string[] {
+  const keys: string[] = [];
+  const cpf = extractCpf(c);
+  if (cpf) keys.push(`cpf:${cpf}`);
+  const phoneDigits = onlyDigits(c.phone);
+  if (phoneDigits.length >= 8) keys.push(`tel:${phoneDigits}`);
+  if (c.email && c.email.trim()) keys.push(`mail:${c.email.trim().toLowerCase()}`);
+  return keys;
+}
+
+// Union-Find simples: agrupa candidaturas que compartilham qualquer chave
+// (CPF, telefone ou e-mail) — a mesma pessoa pode ter preenchido os dados de
+// forma levemente diferente entre uma tentativa e outra.
+function groupCandidatesByPerson(list: RhCandidate[]): Map<number, RhCandidate[]> {
+  const parent = new Map<number, number>();
+  for (const c of list) parent.set(c.id, c.id);
+  const find = (x: number): number => {
+    let root = x;
+    while (parent.get(root) !== root) root = parent.get(root)!;
+    while (parent.get(x) !== root) {
+      const next = parent.get(x)!;
+      parent.set(x, root);
+      x = next;
+    }
+    return root;
+  };
+  const union = (a: number, b: number) => {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  };
+  const byKey = new Map<string, number[]>();
+  for (const c of list) {
+    for (const k of candidatePersonKeys(c)) {
+      const arr = byKey.get(k) ?? [];
+      arr.push(c.id);
+      byKey.set(k, arr);
+    }
+  }
+  for (const ids of byKey.values()) {
+    for (let i = 1; i < ids.length; i++) union(ids[0]!, ids[i]!);
+  }
+  const groups = new Map<number, RhCandidate[]>();
+  for (const c of list) {
+    const root = find(c.id);
+    const arr = groups.get(root) ?? [];
+    arr.push(c);
+    groups.set(root, arr);
+  }
+  return groups;
+}
+
 // ── Recrutamento (processo seletivo, já existia) ────────────────────────────
 function Recrutamento({ canEdit }: { canEdit: boolean }) {
   const { toast } = useToast();
@@ -113,6 +188,7 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
   const [saving, setSaving] = useState(false);
   const [filter, setFilter] = useState<"todos" | RhCandidate["status"]>("todos");
   const [notesDraft, setNotesDraft] = useState("");
+  const [expandedHistory, setExpandedHistory] = useState<Set<number>>(new Set());
 
   useEffect(() => {
     api.rh.settings().then((s) => { setToken(s.publicToken); setStages(s.stages); }).catch(() => {});
@@ -188,6 +264,22 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
 
   const shown = candidates.filter((c) => filter === "todos" || c.status === filter);
 
+  // Outras candidaturas da mesma pessoa (por CPF/telefone/e-mail), mais
+  // recentes primeiro — calculado sobre TODOS os candidatos (não só os que
+  // passam no filtro de status), pra sempre mostrar o histórico completo.
+  const historyById = new Map<number, RhCandidate[]>();
+  for (const members of groupCandidatesByPerson(candidates).values()) {
+    if (members.length < 2) continue;
+    const sorted = [...members].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    for (const m of sorted) historyById.set(m.id, sorted.filter((x) => x.id !== m.id));
+  }
+  const toggleHistory = (id: number) =>
+    setExpandedHistory((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-end gap-2 flex-wrap">
@@ -235,19 +327,46 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
             </div>
           ) : (
             <div className="space-y-2">
-              {shown.map((c) => (
-                <button key={c.id} onClick={() => { setOpened(c); setNotesDraft(c.notes ?? ""); }} data-testid={`candidate-${c.id}`}
-                  className="shk-card p-4 w-full text-left flex items-center gap-3 hover:bg-secondary/30 transition">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <p className="font-bold text-sm">{c.name}</p>
-                      <span className={`text-[10px] font-bold border px-2 py-0.5 rounded-full ${STATUS_META[c.status].cls}`}>{STATUS_META[c.status].label}</span>
-                      {c.hasVideo && <Video className="w-3.5 h-3.5 text-primary" />}
-                    </div>
-                    <p className="text-[11px] text-muted-foreground">{c.phone}{c.email ? ` · ${c.email}` : ""} · {new Date(c.createdAt).toLocaleDateString("pt-BR")}</p>
+              {shown.map((c) => {
+                const history = historyById.get(c.id) ?? [];
+                const expanded = expandedHistory.has(c.id);
+                return (
+                  <div key={c.id}>
+                    <button onClick={() => { setOpened(c); setNotesDraft(c.notes ?? ""); }} data-testid={`candidate-${c.id}`}
+                      className="shk-card p-4 w-full text-left flex items-center gap-3 hover:bg-secondary/30 transition">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="font-bold text-sm">{c.name}</p>
+                          <span className={`text-[10px] font-bold border px-2 py-0.5 rounded-full ${STATUS_META[c.status].cls}`}>{STATUS_META[c.status].label}</span>
+                          {c.hasVideo && <Video className="w-3.5 h-3.5 text-primary" />}
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">{c.phone}{c.email ? ` · ${c.email}` : ""} · {new Date(c.createdAt).toLocaleDateString("pt-BR")}</p>
+                      </div>
+                    </button>
+                    {history.length > 0 && (
+                      <div className="pl-3 mt-1">
+                        <button type="button" onClick={() => toggleHistory(c.id)} data-testid={`button-history-${c.id}`}
+                          className="text-[11px] text-primary font-semibold flex items-center gap-1 py-0.5">
+                          {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                          {history.length === 1 ? "1 candidatura anterior desta pessoa" : `${history.length} candidaturas anteriores desta pessoa`}
+                        </button>
+                        {expanded && (
+                          <div className="mt-1 space-y-1">
+                            {history.map((h) => (
+                              <button key={h.id} type="button" onClick={() => { setOpened(h); setNotesDraft(h.notes ?? ""); }} data-testid={`candidate-history-${h.id}`}
+                                className="shk-card p-2.5 w-full text-left flex items-center gap-2 text-xs hover:bg-secondary/30 transition">
+                                <span className={`text-[10px] font-bold border px-1.5 py-0.5 rounded-full ${STATUS_META[h.status].cls}`}>{STATUS_META[h.status].label}</span>
+                                <span className="text-muted-foreground">{new Date(h.createdAt).toLocaleDateString("pt-BR")}</span>
+                                {h.hasVideo && <Video className="w-3 h-3 text-primary" />}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
-                </button>
-              ))}
+                );
+              })}
             </div>
           )}
         </>
