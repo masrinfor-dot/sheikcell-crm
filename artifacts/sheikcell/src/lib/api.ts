@@ -102,7 +102,7 @@ export type User = {
 export const OPTIONAL_MODULES = [
   "chat", "crm", "equipe", "financeiro", "diretorio", "tarefas", "resultados", "history",
   "avaliacao", "financeiras", "rh", "treinamentos", "questionarios", "sorteios", "documentos", "robo",
-  "relatorios", "tvbox", "rotinas",
+  "relatorios", "tvbox", "rotinas", "vitrine",
 ] as const;
 export type OptionalModule = typeof OPTIONAL_MODULES[number];
 
@@ -134,6 +134,7 @@ export const MODULE_LABELS: Record<OptionalModule, string> = {
   relatorios: "Relatórios",
   tvbox: "TV Box",
   rotinas: "Rotinas e Produtividade",
+  vitrine: "Vitrine Aparelhos",
 };
 // "Básico" = o conjunto padrão do CRM (o que antes era núcleo sempre ligado);
 // "Completo" = básico + todos os módulos de negócio adicionais.
@@ -207,6 +208,65 @@ export type DocumentItem = {
   createdAt: string;
   uploadedBy: number | null;
   uploaderName: string | null;
+};
+
+// ─── Vitrine Aparelhos ───────────────────────────────────────────────────────
+export type CatalogCondition = "lacrado" | "seminovo" | "cpo" | "usado";
+export const CATALOG_CONDITIONS: { value: CatalogCondition; label: string }[] = [
+  { value: "lacrado", label: "Lacrado" },
+  { value: "seminovo", label: "Seminovo" },
+  { value: "cpo", label: "CPO" },
+  { value: "usado", label: "Usado" },
+];
+
+export type CatalogPhoto = { id: number; storedName: string; sortOrder: number };
+
+export type CatalogProduct = {
+  id: number;
+  model: string;
+  storage: string | null;
+  condition: CatalogCondition;
+  colors: string[];
+  description: string | null;
+  costPrice: string | null;
+  costIncludesInvoice: boolean;
+  marginPercentOverride: string | null;
+  salePrice: string | null;
+  stockQty: number;
+  status: "active" | "inactive" | "sold";
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+  photos: CatalogPhoto[];
+};
+
+export type CatalogPricingSettings = {
+  defaultMarginPercent: number;
+  invoiceCostPercent: number;
+  cardFeeTable: Record<string, number>;
+};
+
+export type CatalogPublicProduct = {
+  id: number;
+  model: string;
+  storage: string | null;
+  condition: CatalogCondition;
+  colors: string[];
+  description: string | null;
+  salePrice: string | null;
+  inStock: boolean;
+  photos: number[];
+};
+
+export type CatalogImportItem = {
+  model: string;
+  storage: string | null;
+  condition: CatalogCondition;
+  colors: string[];
+  costPrice: number | null;
+  status: "approved" | "pending";
+  issue: string | null;
+  rawLine: string;
 };
 
 export type MeetingItem = {
@@ -653,7 +713,7 @@ export type TradeInQuestion = { key: string; label: string; options: TradeInQues
 export type TradeInQuestionsConfig = { apple: TradeInQuestion[]; android: TradeInQuestion[] };
 
 export type RhQuestion = { id: string; label: string; type: "text" | "longtext" | "options"; options?: string[] };
-export type RhStage = { id: string; title: string; description: string; type: "form" | "video"; enabled: boolean; questions: RhQuestion[] };
+export type RhStage = { id: string; title: string; description: string; type: "form" | "video"; enabled: boolean; questions: RhQuestion[]; maxVideoSeconds?: number | null };
 export type RhCandidate = {
   id: number; name: string; phone: string; email: string | null;
   status: "novo" | "aprovado" | "reprovado";
@@ -1698,6 +1758,25 @@ export const api = {
       req<DocumentItem>("/documents", { method: "POST", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/documents/${id}`, { method: "DELETE" }),
     fileUrl: (id: number) => `/api/documents/${id}/file`,
+  },
+  catalog: {
+    list: () => req<{ settings: CatalogPricingSettings; products: CatalogProduct[] }>("/catalog/products"),
+    create: (data: Record<string, unknown>) => req<CatalogProduct>("/catalog/products", { method: "POST", body: JSON.stringify(data) }),
+    update: (id: number, data: Record<string, unknown>) => req<CatalogProduct>(`/catalog/products/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/catalog/products/${id}`, { method: "DELETE" }),
+    addPhoto: (productId: number, file: File) => readAsAttachment(file).then((att) =>
+      req<CatalogPhoto>(`/catalog/products/${productId}/photos`, { method: "POST", body: JSON.stringify({ mimeType: att?.mimetype, data: att?.base64 }) })),
+    removePhoto: (productId: number, photoId: number) => req<{ ok: boolean }>(`/catalog/products/${productId}/photos/${photoId}`, { method: "DELETE" }),
+    photoUrl: (photoId: number) => `/api/catalog-public/photos/${photoId}/file`,
+    pricingSettings: () => req<CatalogPricingSettings>("/catalog/pricing-settings"),
+    savePricingSettings: (data: CatalogPricingSettings) => req<CatalogPricingSettings>("/catalog/pricing-settings", { method: "PUT", body: JSON.stringify(data) }),
+    simulatePrice: (data: { costPrice: number; costIncludesInvoice?: boolean; marginPercentOverride?: number | null }) =>
+      req<{ salePrice: number | null; settings: CatalogPricingSettings }>("/catalog/pricing-settings/simulate", { method: "POST", body: JSON.stringify(data) }),
+    getSlug: () => req<{ slug: string | null }>("/catalog/slug"),
+    setSlug: (slug: string) => req<{ slug: string | null }>("/catalog/slug", { method: "PUT", body: JSON.stringify({ slug }) }),
+    importParse: (rawText: string) => req<{ items: CatalogImportItem[] }>("/catalog/import/parse", { method: "POST", body: JSON.stringify({ rawText }) }),
+    importConfirm: (items: CatalogImportItem[]) => req<{ imported: number; products: CatalogProduct[] }>("/catalog/import/confirm", { method: "POST", body: JSON.stringify({ items }) }),
+    public: (slug: string) => req<{ storeName: string; whatsapp: string | null; products: CatalogPublicProduct[] }>(`/catalog-public/${slug}`),
   },
   meetings: {
     list: () => req<MeetingItem[]>("/meetings"),

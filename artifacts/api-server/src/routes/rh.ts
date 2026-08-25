@@ -8,10 +8,15 @@ import { requireModuleAccess } from "../lib/moduleAccess";
 const router: IRouter = Router();
 
 export type RhQuestion = { id: string; label: string; type: "text" | "longtext" | "options"; options?: string[] };
-export type RhStage = { id: string; title: string; description: string; type: "form" | "video"; enabled: boolean; questions: RhQuestion[] };
+export type RhStage = { id: string; title: string; description: string; type: "form" | "video"; enabled: boolean; questions: RhQuestion[]; maxVideoSeconds?: number | null };
 
 const Q_TYPES = ["text", "longtext", "options"];
 const MAX_VIDEO_BASE64 = 26 * 1024 * 1024; // ~19MB de vídeo real
+// Limite configurável por etapa de vídeo: null = sem limite; número = segundos,
+// sempre restrito a essa faixa pra evitar tanto travas irreais quanto vídeos gigantes.
+const MIN_VIDEO_SECONDS = 5;
+const MAX_VIDEO_SECONDS = 1800;
+const DEFAULT_VIDEO_SECONDS = 60;
 
 // Etapas padrão do processo (o admin personaliza depois).
 const DEFAULT_STAGES: RhStage[] = [
@@ -45,7 +50,7 @@ const DEFAULT_STAGES: RhStage[] = [
   {
     id: "s4", title: "Vídeo de apresentação", type: "video", enabled: true,
     description: "Grave um vídeo de até 60 segundos se apresentando: nome, experiência e por que devemos te contratar.",
-    questions: [],
+    questions: [], maxVideoSeconds: DEFAULT_VIDEO_SECONDS,
   },
 ];
 
@@ -88,6 +93,17 @@ function sanitizeStages(input: unknown): RhStage[] | null {
     if (!title) return null;
     const type = s?.type === "video" ? "video" : "form";
     const questions: RhQuestion[] = [];
+    // maxVideoSeconds: null = sem limite; número inválido/ausente cai no
+    // padrão de 60s; qualquer número informado é sempre restrito à faixa
+    // [MIN_VIDEO_SECONDS, MAX_VIDEO_SECONDS] pra não aceitar valor absurdo.
+    let maxVideoSeconds: number | null = DEFAULT_VIDEO_SECONDS;
+    if (type === "video") {
+      if (s?.maxVideoSeconds === null) {
+        maxVideoSeconds = null;
+      } else if (typeof s?.maxVideoSeconds === "number" && Number.isFinite(s.maxVideoSeconds)) {
+        maxVideoSeconds = Math.max(MIN_VIDEO_SECONDS, Math.min(MAX_VIDEO_SECONDS, Math.round(s.maxVideoSeconds)));
+      }
+    }
     if (type === "form") {
       if (!Array.isArray(s?.questions) || s.questions.length === 0 || s.questions.length > 30) return null;
       for (let j = 0; j < s.questions.length; j++) {
@@ -111,6 +127,7 @@ function sanitizeStages(input: unknown): RhStage[] | null {
       description: typeof s?.description === "string" ? s.description.trim().slice(0, 1000) : "",
       enabled: s?.enabled !== false,
       questions,
+      ...(type === "video" ? { maxVideoSeconds } : {}),
     });
   }
   return out;

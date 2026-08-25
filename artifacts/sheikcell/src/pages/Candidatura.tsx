@@ -3,7 +3,7 @@ import { useParams } from "wouter";
 import { api, type RhStage } from "@/lib/api";
 import { Video, CheckCircle, Circle, StopCircle, RotateCcw, Send } from "lucide-react";
 
-const MAX_VIDEO_SECONDS = 60;
+const DEFAULT_MAX_VIDEO_SECONDS = 60;
 
 // Página PÚBLICA do candidato (sem login): responde as etapas configuradas
 // pelo admin (pré-entrevista, teste de perfil, prova escrita, vídeo) e envia.
@@ -44,6 +44,13 @@ export default function Candidatura() {
   }, []);
   useEffect(() => () => { stopStream(); if (videoUrl) URL.revokeObjectURL(videoUrl); }, [stopStream, videoUrl]);
 
+  // Etapa atual e duração máxima do vídeo dela — configurável por empresa
+  // (etapas antigas sem o campo caem no padrão de 60s; `null` = sem limite).
+  const current = step >= 0 ? stages?.[step] ?? null : null;
+  const maxSeconds = current?.type === "video"
+    ? (current.maxVideoSeconds === undefined ? DEFAULT_MAX_VIDEO_SECONDS : current.maxVideoSeconds)
+    : DEFAULT_MAX_VIDEO_SECONDS;
+
   const startRecording = async () => {
     setSubmitError(null);
     try {
@@ -73,7 +80,7 @@ export default function Candidatura() {
       setElapsed(0);
       timerRef.current = setInterval(() => {
         setElapsed((e) => {
-          if (e + 1 >= MAX_VIDEO_SECONDS) mediaRef.current?.state === "recording" && mediaRef.current.stop();
+          if (maxSeconds !== null && e + 1 >= maxSeconds) mediaRef.current?.state === "recording" && mediaRef.current.stop();
           return e + 1;
         });
       }, 1000);
@@ -111,7 +118,6 @@ export default function Candidatura() {
     );
   }
 
-  const current = step >= 0 ? stages[step] : null;
   const setAns = (sid: string, qid: string, v: string) =>
     setAnswers((a) => ({ ...a, [sid]: { ...(a[sid] ?? {}), [qid]: v } }));
   const stageComplete = (s: RhStage) =>
@@ -226,12 +232,12 @@ export default function Candidatura() {
                       {recording ? (
                         <button onClick={stopRecording} data-testid="button-stop-recording"
                           className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-red-600 text-white text-sm font-bold">
-                          <StopCircle className="w-4 h-4" /> Parar ({MAX_VIDEO_SECONDS - elapsed}s restantes)
+                          <StopCircle className="w-4 h-4" /> Parar {maxSeconds !== null ? `(${Math.max(0, maxSeconds - elapsed)}s restantes)` : "(gravando)"}
                         </button>
                       ) : (
                         <button onClick={startRecording} data-testid="button-start-recording"
                           className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-primary text-white text-sm font-bold">
-                          <Video className="w-4 h-4" /> Gravar vídeo (até {MAX_VIDEO_SECONDS}s)
+                          <Video className="w-4 h-4" /> Gravar vídeo {maxSeconds !== null ? `(até ${maxSeconds}s)` : "(sem limite de tempo)"}
                         </button>
                       )}
                     </>

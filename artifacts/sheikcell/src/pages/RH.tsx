@@ -25,6 +25,7 @@ const LEAVE_LABELS: Record<string, string> = {
   falta_injustificada: "Falta injustificada", outro: "Outro",
 };
 const WEEKDAY_LABELS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
+const VIDEO_SECONDS_PRESETS = [30, 60, 120, 180, 300, 600];
 
 function formatMinutes(mins: number): string {
   const sign = mins < 0 ? "-" : "";
@@ -268,7 +269,11 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                 </div>
                 <input value={s.title} onChange={(e) => setStage(si, { title: e.target.value })}
                   className="flex-1 px-3 py-2 rounded-xl border border-border text-sm font-bold" />
-                <select value={s.type} onChange={(e) => setStage(si, { type: e.target.value as RhStage["type"], questions: e.target.value === "video" ? [] : (s.questions.length ? s.questions : [{ id: "q1", label: "", type: "text" }]) })}
+                <select value={s.type} onChange={(e) => setStage(si, {
+                  type: e.target.value as RhStage["type"],
+                  questions: e.target.value === "video" ? [] : (s.questions.length ? s.questions : [{ id: "q1", label: "", type: "text" }]),
+                  ...(e.target.value === "video" ? { maxVideoSeconds: s.maxVideoSeconds ?? 60 } : {}),
+                })}
                   className="px-2 py-2 rounded-xl border border-border text-xs">
                   <option value="form">Perguntas</option>
                   <option value="video">Vídeo gravado</option>
@@ -282,6 +287,34 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
               <textarea value={s.description} onChange={(e) => setStage(si, { description: e.target.value })}
                 rows={2} placeholder="Instruções para o candidato nesta etapa..."
                 className="w-full px-3 py-2 rounded-xl border border-border text-xs resize-none" />
+              {s.type === "video" && (
+                <div className="flex items-center gap-2 pl-2 border-l-2 border-border flex-wrap">
+                  <label className="text-[11px] font-medium shrink-0">Duração máxima do vídeo:</label>
+                  <select
+                    value={s.maxVideoSeconds === null ? "unlimited" : VIDEO_SECONDS_PRESETS.includes(s.maxVideoSeconds ?? 60) ? String(s.maxVideoSeconds ?? 60) : "custom"}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === "unlimited") setStage(si, { maxVideoSeconds: null });
+                      else if (v === "custom") setStage(si, { maxVideoSeconds: s.maxVideoSeconds ?? 60 });
+                      else setStage(si, { maxVideoSeconds: parseInt(v, 10) });
+                    }}
+                    className="px-2 py-1.5 rounded-xl border border-border text-[11px]">
+                    <option value="30">30 segundos</option>
+                    <option value="60">1 minuto</option>
+                    <option value="120">2 minutos</option>
+                    <option value="180">3 minutos</option>
+                    <option value="300">5 minutos</option>
+                    <option value="600">10 minutos</option>
+                    <option value="custom">Personalizado</option>
+                    <option value="unlimited">Sem limite</option>
+                  </select>
+                  {s.maxVideoSeconds != null && !VIDEO_SECONDS_PRESETS.includes(s.maxVideoSeconds) && (
+                    <input type="number" min={5} max={1800} value={s.maxVideoSeconds}
+                      onChange={(e) => setStage(si, { maxVideoSeconds: Math.max(5, Math.min(1800, parseInt(e.target.value, 10) || 60)) })}
+                      className="w-20 px-2 py-1.5 rounded-xl border border-border text-[11px]" />
+                  )}
+                </div>
+              )}
               {s.type === "form" && (
                 <div className="space-y-2 pl-2 border-l-2 border-border">
                   {s.questions.map((q, qi) => (
