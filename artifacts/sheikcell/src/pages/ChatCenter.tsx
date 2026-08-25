@@ -992,6 +992,9 @@ export default function ChatCenter({
   const [nowTick, setNowTick] = useState(() => Date.now());
   const alertedRef = useRef<Set<number>>(new Set());
   // Finalizar atendimento: modal para capturar o motivo da finalização.
+  // Opções editáveis pelo admin em Configurações → Aparência (api.settings) —
+  // começa com o padrão embutido e é substituída assim que /settings carrega.
+  const [finalizeReasonOptions, setFinalizeReasonOptions] = useState<string[]>([...FINALIZE_REASONS]);
   const [finalizeTarget, setFinalizeTarget] = useState<number | null>(null);
   const [finalizeReason, setFinalizeReason] = useState<string>(FINALIZE_REASONS[0]);
   const [finalizeDetail, setFinalizeDetail] = useState("");
@@ -1656,6 +1659,9 @@ export default function ChatCenter({
     api.settings.get().then((s) => {
       setAlertEnabled(s.alertUnansweredEnabled); setAlertMinutes(s.alertUnansweredMinutes);
       setCfgOutboundHourly(s.outboundHourlyLimit); setCfgOutboundDaily(s.outboundDailyLimit);
+      // "Outro" nunca vem do backend — é sempre a última opção fixa aqui,
+      // porque a UI depende dela pra abrir o campo de descrição livre.
+      setFinalizeReasonOptions([...s.finalizeReasons, "Outro"]);
     }).catch(() => {});
     api.chat.quickReplies.list().then(setQuickReplies).catch(() => {});
     api.chat.labels.list().then(setLabels).catch(() => {});
@@ -2076,7 +2082,7 @@ export default function ChatCenter({
 
   const handleFinalize = (id: number) => {
     setFinalizeTarget(id);
-    setFinalizeReason(FINALIZE_REASONS[0]);
+    setFinalizeReason(finalizeReasonOptions[0] ?? FINALIZE_REASONS[0]);
     setFinalizeDetail("");
     setFinalizeHadSale(null);
     setFinalizeSaleAmount("");
@@ -4155,7 +4161,7 @@ export default function ChatCenter({
               <select value={finalizeReason} onChange={(e) => setFinalizeReason(e.target.value)}
                 data-testid="select-finalize-reason"
                 className="w-full px-3 py-2 rounded-xl border border-border text-sm">
-                {FINALIZE_REASONS.map((r) => <option key={r} value={r}>{r}</option>)}
+                {finalizeReasonOptions.map((r) => <option key={r} value={r}>{r}</option>)}
               </select>
             </div>
             {finalizeReason === "Outro" && (

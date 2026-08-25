@@ -1006,6 +1006,7 @@ export type AppSettings = {
   outboundHourlyLimit: number;
   outboundDailyLimit: number;
   attendantNameVisibleToCustomer: boolean;
+  finalizeReasons: string[];
   branding: Branding;
 };
 
@@ -1798,6 +1799,10 @@ export const api = {
     branding: {
       update: (data: Partial<Branding>) =>
         req<Branding>("/settings/branding", { method: "PATCH", body: JSON.stringify(data) }),
+    },
+    finalizeReasons: {
+      update: (reasons: string[]) =>
+        req<{ finalizeReasons: string[] }>("/settings/finalize-reasons", { method: "PATCH", body: JSON.stringify({ reasons }) }),
     },
     ai: {
       get: () => req<AiCredentialsStatus>("/settings/ai"),

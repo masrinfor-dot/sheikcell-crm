@@ -3,7 +3,7 @@ import { api } from "@/lib/api";
 import { useBranding } from "@/lib/branding";
 import { extractDominantColor } from "@/lib/dominantColor";
 import { useToast } from "@/hooks/use-toast";
-import { Palette, Upload, Trash2, RotateCcw, UserCircle2 } from "lucide-react";
+import { Palette, Upload, Trash2, RotateCcw, UserCircle2, Plus } from "lucide-react";
 
 const DEFAULT_COLOR = "#1a2e6e";
 const MAX_LOGO_BYTES = 500 * 1024;
@@ -26,6 +26,12 @@ export default function ConfiguracoesAparencia() {
   const [showAttendantName, setShowAttendantName] = useState(true);
   const [savingAttendantName, setSavingAttendantName] = useState(false);
 
+  // Motivos do modal "Finalizar atendimento" — editável aqui pelo admin.
+  // "Outro" não entra na lista: é sempre a última opção fixa (ver ChatCenter.tsx).
+  const [finalizeReasons, setFinalizeReasons] = useState<string[]>([]);
+  const [newReason, setNewReason] = useState("");
+  const [savingReasons, setSavingReasons] = useState(false);
+
   useEffect(() => {
     setCompanyName(branding.companyName ?? "");
     setPrimaryColor(branding.primaryColor ?? DEFAULT_COLOR);
@@ -33,7 +39,10 @@ export default function ConfiguracoesAparencia() {
   }, [branding]);
 
   useEffect(() => {
-    api.settings.get().then((s) => setShowAttendantName(s.attendantNameVisibleToCustomer)).catch(() => {});
+    api.settings.get().then((s) => {
+      setShowAttendantName(s.attendantNameVisibleToCustomer);
+      setFinalizeReasons(s.finalizeReasons);
+    }).catch(() => {});
   }, []);
 
   const handleToggleAttendantName = async (value: boolean) => {
@@ -47,6 +56,31 @@ export default function ConfiguracoesAparencia() {
       toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     } finally {
       setSavingAttendantName(false);
+    }
+  };
+
+  // Só atualiza o estado local — a gravação de verdade é sempre via
+  // handleSaveReasons, pra não disparar uma request a cada tecla digitada.
+  const addReason = () => {
+    const r = newReason.trim().slice(0, 60);
+    if (!r || r.toLowerCase() === "outro" || finalizeReasons.includes(r)) return;
+    setFinalizeReasons((prev) => [...prev, r]);
+    setNewReason("");
+  };
+  const removeReason = (i: number) => setFinalizeReasons((prev) => prev.filter((_, j) => j !== i));
+  const updateReason = (i: number, value: string) =>
+    setFinalizeReasons((prev) => prev.map((r, j) => (j === i ? value : r)));
+
+  const handleSaveReasons = async () => {
+    setSavingReasons(true);
+    try {
+      const { finalizeReasons: saved } = await api.settings.finalizeReasons.update(finalizeReasons);
+      setFinalizeReasons(saved);
+      toast({ title: "Motivos de finalização atualizados!" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSavingReasons(false);
     }
   };
 
@@ -194,6 +228,49 @@ export default function ConfiguracoesAparencia() {
             className="w-9 h-5 shrink-0 accent-primary cursor-pointer disabled:opacity-50"
           />
         </label>
+      </div>
+
+      <div className="shk-card p-5 space-y-3">
+        <div>
+          <span className="text-sm font-medium block">Motivos de finalização do atendimento</span>
+          <span className="text-[11px] text-muted-foreground">
+            Opções que aparecem pro vendedor ao clicar em "Finalizar atendimento". A opção "Outro"
+            (com campo de texto livre) sempre aparece por último e não pode ser removida.
+          </span>
+        </div>
+        <div className="space-y-2">
+          {finalizeReasons.map((r, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <input value={r} onChange={(e) => updateReason(i, e.target.value)}
+                maxLength={60} data-testid={`input-finalize-reason-${i}`}
+                className="flex-1 px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+              <button type="button" onClick={() => removeReason(i)} data-testid={`button-remove-finalize-reason-${i}`}
+                className="p-2 rounded-lg text-red-600 hover:bg-red-50 transition shrink-0">
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ))}
+          {finalizeReasons.length === 0 && (
+            <p className="text-xs text-muted-foreground">Nenhum motivo cadastrado — adicione pelo menos um abaixo.</p>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <input value={newReason} onChange={(e) => setNewReason(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addReason(); } }}
+            placeholder="Novo motivo..." maxLength={60} data-testid="input-new-finalize-reason"
+            className="flex-1 px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+          <button type="button" onClick={addReason} disabled={!newReason.trim()} data-testid="button-add-finalize-reason"
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-border text-xs font-semibold hover:bg-secondary transition disabled:opacity-50">
+            <Plus className="w-3.5 h-3.5" /> Adicionar
+          </button>
+        </div>
+        <div className="flex justify-end pt-1">
+          <button type="button" onClick={handleSaveReasons} disabled={savingReasons || finalizeReasons.length === 0}
+            data-testid="button-save-finalize-reasons"
+            className="px-4 py-2 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition disabled:opacity-50">
+            {savingReasons ? "Salvando..." : "Salvar motivos"}
+          </button>
+        </div>
       </div>
     </div>
   );
