@@ -171,6 +171,26 @@ function Avatar({ name, src, size = "md" }: { name: string; src?: string | null;
   );
 }
 
+// Avatar do cabeçalho da conversa, clicável pra ver a foto de perfil em tela
+// cheia — reaproveita o mesmo MediaLightbox das fotos/vídeos de mensagem
+// (useMediaLightbox precisa estar dentro do próprio <MediaLightboxProvider>,
+// por isso vira um sub-componente em vez de só um onClick na função Avatar).
+function HeaderAvatar({ name, src }: { name: string; src?: string | null }) {
+  const openLightbox = useMediaLightbox();
+  if (!src) return <Avatar name={name} src={src} size="md" />;
+  return (
+    <button
+      type="button"
+      onClick={() => openLightbox({ type: "image", src })}
+      title="Ver foto de perfil"
+      data-testid="button-open-profile-photo"
+      className="rounded-full shrink-0 focus:outline-none focus:ring-2 focus:ring-primary/40"
+    >
+      <Avatar name={name} src={src} size="md" />
+    </button>
+  );
+}
+
 // Conexão de WhatsApp (número de atendimento) — usada para etiquetar de qual
 // número a conversa está chegando quando há mais de uma conexão pareada.
 type WaSessionInfo = { sessionKey: string; displayName: string | null; phoneNumber: string | null };
@@ -756,6 +776,12 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConver
             <p className="text-xs font-semibold text-primary mb-1">{msg.senderName}</p>
           )
         )}
+        {/* Quem da equipe enviou — visível pra qualquer vendedor que abra esta
+            conversa depois (ex.: após transferência), não só quem respondeu.
+            Data/hora já aparece sempre, junto ao status de entrega, mais abaixo. */}
+        {out && msg.senderName && (
+          <p className="text-[11px] font-semibold text-gray-600 mb-1 text-right" data-testid={`text-sender-${msg.id}`}>{msg.senderName}</p>
+        )}
         {msg.replyTo && (
           <button
             onClick={() => onJumpTo(msg.replyTo!.id)}
@@ -946,6 +972,9 @@ export default function ChatCenter({
   const [filterVendedor, setFilterVendedor] = useState("");
   const [filterSetor, setFilterSetor] = useState("");
   const [filterNivel, setFilterNivel] = useState("");
+  // Filtro por número de WhatsApp (linha Varejo/Oficial/Atacado/Adm etc.) —
+  // usa o sessionKey já gravado em cada conversa (ver waSessions abaixo).
+  const [filterSessionKey, setFilterSessionKey] = useState("");
   // Alerta de atendimento sem resposta (configurável por admin/supervisor).
   const [alertEnabled, setAlertEnabled] = useState(true);
   const [alertMinutes, setAlertMinutes] = useState(5);
@@ -2420,9 +2449,10 @@ export default function ChatCenter({
     (!onlyUnanswered || c.lastMessageDirection === "inbound" || c.unreadCount > 0) &&
     (!filterVendedor || String(c.assigneeId ?? "") === filterVendedor) &&
     (!filterSetor || String(c.sectorId ?? "") === filterSetor) &&
-    (!filterNivel || (c.crmProfile ?? "") === filterNivel)
+    (!filterNivel || (c.crmProfile ?? "") === filterNivel) &&
+    (!filterSessionKey || (c.sessionKey ?? "default") === filterSessionKey)
   );
-  const hasAdvancedFilter = !!(filterVendedor || filterSetor || filterNivel);
+  const hasAdvancedFilter = !!(filterVendedor || filterSetor || filterNivel || filterSessionKey);
 
   const counts: Record<Category, number> = { potenciais: 0, pendentes: 0, ativos: 0, resolvidas: 0, favoritos: 0 };
   for (const c of visibleConvs) {
@@ -2748,8 +2778,20 @@ export default function ChatCenter({
                 <option value="Regular">Regular</option>
                 <option value="VIP">VIP</option>
               </select>
+              {/* Número de WhatsApp (Varejo/Oficial/Atacado/Adm etc.) — só faz
+                  sentido mostrar quando existe mais de uma linha cadastrada. */}
+              {waSessions.length > 1 && (
+                <select value={filterSessionKey} onChange={(e) => setFilterSessionKey(e.target.value)}
+                  data-testid="filter-conv-numero"
+                  className="text-xs px-2 py-1 rounded-lg border border-border bg-white max-w-[140px]">
+                  <option value="">Número: todos</option>
+                  {waSessions.map((s) => (
+                    <option key={s.sessionKey} value={s.sessionKey}>{waSessionLabel(s.sessionKey, waSessions)}</option>
+                  ))}
+                </select>
+              )}
               {hasAdvancedFilter && (
-                <button onClick={() => { setFilterVendedor(""); setFilterSetor(""); setFilterNivel(""); }}
+                <button onClick={() => { setFilterVendedor(""); setFilterSetor(""); setFilterNivel(""); setFilterSessionKey(""); }}
                   data-testid="button-clear-conv-filters"
                   className="text-xs px-2 py-1 rounded-lg border border-red-200 bg-red-50 text-red-600 font-semibold">
                   Limpar
@@ -2835,7 +2877,9 @@ export default function ChatCenter({
             >
               <ChevronDown className="w-5 h-5 rotate-90" />
             </button>
-            <Avatar name={activeConv.name} src={activeConv.avatarUrl} size="md" />
+            <MediaLightboxProvider>
+              <HeaderAvatar name={activeConv.name} src={activeConv.avatarUrl} />
+            </MediaLightboxProvider>
             <div className="flex-1 min-w-0">
               <p className="font-bold text-sm text-foreground truncate">{activeConv.name}</p>
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
