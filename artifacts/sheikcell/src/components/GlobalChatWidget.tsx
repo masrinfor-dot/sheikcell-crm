@@ -24,13 +24,22 @@ export default function GlobalChatWidget() {
     || ((user?.enabledModules == null || user.enabledModules.includes("equipe"))
       && user?.moduleAccess != null && "equipe" in user.moduleAccess);
   const [open, setOpen] = useState(false);
-  // Escondido enquanto o usuário já está na aba Atendimento do dashboard —
-  // sem isso o botão flutuante (fixed bottom-right) fica em cima do botão
-  // de enviar do composer, que também encosta no canto direito ali.
-  const hideBubble = useAtendimentoTabVisible();
+  // Enquanto o usuário já está na aba Atendimento do dashboard, o balão
+  // continua aparecendo (pra dar acesso ao chat interno sem precisar sair da
+  // Central) — mas muda pro canto ESQUERDO, porque o botão flutuante (fixed
+  // bottom-right) senão fica em cima do botão de enviar/gravar áudio do
+  // composer, que encosta no canto direito ali. Sem permissão de chat
+  // interno não sobra nada útil pra mostrar nessa tela (a aba Atendimento do
+  // próprio balão seria só um Atendimento dentro do Atendimento), então
+  // nesse caso ele continua escondido como antes.
+  const insideAtendimento = useAtendimentoTabVisible();
+  const hideBubble = insideAtendimento && !canEquipe;
   const [activeTab, setActiveTab] = useState<WidgetTab>("atendimento");
-  // Sem permissão de chat interno, o widget só tem a aba Atendimento.
-  const effectiveTab: WidgetTab = canEquipe ? activeTab : "atendimento";
+  // Sem permissão de chat interno, o widget só tem a aba Atendimento. Dentro
+  // da própria tela de Atendimento, força a aba Equipe (a de Atendimento
+  // ficaria redundante ali).
+  const effectiveTab: WidgetTab = !canEquipe ? "atendimento" : insideAtendimento ? "equipe" : activeTab;
+  const cornerClass = insideAtendimento ? "left-4 md:left-6" : "right-4 md:right-6";
 
   const [atendimentoUnread, setAtendimentoUnread] = useState(0);
   const [atendimentoActiveId, setAtendimentoActiveId] = useState<number | null>(null);
@@ -56,10 +65,11 @@ export default function GlobalChatWidget() {
   return (
     <>
       <div
-        className={`fixed z-40 bottom-24 right-4 md:bottom-24 md:right-6 w-[calc(100vw-2rem)] max-w-[380px] h-[min(560px,calc(var(--vvh,100vh)-8rem))] bg-white rounded-2xl shadow-2xl border border-border flex-col overflow-hidden ${open && !hideBubble ? "flex" : "hidden"}`}
+        className={`fixed z-40 bottom-24 ${cornerClass} w-[calc(100vw-2rem)] max-w-[380px] h-[min(560px,calc(var(--vvh,100vh)-8rem))] bg-white rounded-2xl shadow-2xl border border-border flex-col overflow-hidden ${open && !hideBubble ? "flex" : "hidden"}`}
         data-testid="panel-global-chat-widget"
       >
         <div className="flex items-center shrink-0 border-b border-border bg-white">
+          {!insideAtendimento && (
           <button
             onClick={() => setActiveTab("atendimento")}
             data-testid="tab-widget-atendimento"
@@ -72,6 +82,7 @@ export default function GlobalChatWidget() {
               <span className="text-[10px] font-bold bg-red-500 text-white rounded-full min-w-[16px] h-4 px-1 flex items-center justify-center">{atendimentoUnread}</span>
             )}
           </button>
+          )}
           {canEquipe && (
             <button
               onClick={() => setActiveTab("equipe")}
@@ -110,8 +121,8 @@ export default function GlobalChatWidget() {
       <button
         onClick={() => setOpen((v) => !v)}
         data-testid="button-global-chat-widget"
-        title="Chat"
-        className="fixed z-40 bottom-20 right-4 md:bottom-6 md:right-6 w-14 h-14 rounded-full bg-primary text-primary-foreground shadow-2xl flex items-center justify-center hover:scale-105 active:scale-95 transition"
+        title={insideAtendimento ? "Chat interno" : "Chat"}
+        className={`fixed z-40 bottom-20 ${cornerClass} md:bottom-6 w-14 h-14 rounded-full bg-primary text-primary-foreground shadow-2xl flex items-center justify-center hover:scale-105 active:scale-95 transition`}
       >
         {open ? <X className="w-6 h-6" /> : <MessageCircle className="w-6 h-6" />}
         {!open && totalUnread > 0 && (
