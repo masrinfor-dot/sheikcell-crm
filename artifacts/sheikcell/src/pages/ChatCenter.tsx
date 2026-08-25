@@ -1182,11 +1182,22 @@ export default function ChatCenter({
   // ── Gravação de áudio (nota de voz, igual WhatsApp) ──
   const [recording, setRecording] = useState(false);
   const [recordSecs, setRecordSecs] = useState(0);
+  // Enquanto aguarda o navegador liberar o microfone (getUserMedia) — em
+  // alguns celulares/navegadores essa promessa pode nunca resolver nem dar
+  // erro (trava em silêncio, ex.: app voltou do segundo plano). Sem esse
+  // estado o toque no microfone parecia não fazer nada; com ele, o botão
+  // mostra "carregando" e, se travar mesmo, um watchdog (ver
+  // MIC_REQUEST_TIMEOUT_MS abaixo) cancela e avisa em vez de ficar preso.
+  const [requestingMic, setRequestingMic] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordChunksRef = useRef<Blob[]>([]);
   const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Decide no stop se a gravação vira envio ou é descartada.
   const recordSendRef = useRef(false);
+  // Trava de corrida: se o watchdog já desistiu (ou o componente trocou de
+  // conversa/desmontou) enquanto getUserMedia ainda não respondeu, o stream
+  // que chegar depois é encerrado na hora — nunca vira uma gravação "fantasma".
+  const micRequestIdRef = useRef(0);
 
   const activeConv = convs.find((c) => c.id === activeId) ?? null;
   const unreadNotifications = notifications.reduce((n, x) => n + (x.read ? 0 : 1), 0);
@@ -1765,8 +1776,15 @@ export default function ChatCenter({
     if (recordTimerRef.current) { clearInterval(recordTimerRef.current); recordTimerRef.current = null; }
   };
 
+  // Alguns celulares/navegadores (ex.: Safari/Chrome depois de o app voltar
+  // do segundo plano) deixam a promessa de getUserMedia presa — nunca resolve
+  // nem rejeita. Sem um limite de tempo, o toque no microfone parece travar
+  // pra sempre, sem nenhum aviso. Esse valor é só o prazo de espera pelo
+  // navegador liberar o microfone, não da gravação em si.
+  const MIC_REQUEST_TIMEOUT_MS = 12000;
+
   const handleStartRecording = async () => {
-    if (!activeId || recording || sending) return;
+    if (!activeId || recording || sending || requestingMic) return;
     // Navegadores só liberam o microfone em página segura (https). Sem isso,
     // navigator.mediaDevices nem existe — avisa o motivo real em vez de um
     // erro genérico.
@@ -1782,8 +1800,29 @@ export default function ChatCenter({
       toast({ title: "Gravação de áudio não suportada neste navegador", variant: "destructive" });
       return;
     }
+    const requestId = ++micRequestIdRef.current;
+    setRequestingMic(true);
+    let timedOut = false;
+    const watchdog = setTimeout(() => {
+      timedOut = true;
+      setRequestingMic(false);
+      toast({
+        title: "Não consegui acessar o microfone a tempo",
+        description: "Se o navegador mostrou um aviso pedindo permissão, toque em \"Permitir\". Se não mostrou nada, recarregue a página e tente de novo.",
+        variant: "destructive",
+      });
+    }, MIC_REQUEST_TIMEOUT_MS);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      clearTimeout(watchdog);
+      // O watchdog já desistiu (ou o usuário trocou de conversa/saiu enquanto
+      // o navegador ainda não tinha respondido) — o stream chegou tarde
+      // demais. Libera o microfone na hora, nunca inicia gravação "fantasma".
+      if (timedOut || requestId !== micRequestIdRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      setRequestingMic(false);
       const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
         ? "audio/webm;codecs=opus"
         : MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm"
@@ -1832,6 +1871,9 @@ export default function ChatCenter({
       setRecordSecs(0);
       recordTimerRef.current = setInterval(() => setRecordSecs((s) => s + 1), 1000);
     } catch (err) {
+      clearTimeout(watchdog);
+      setRequestingMic(false);
+      if (timedOut) return; // watchdog já mostrou o próprio aviso — evita toast duplicado
       const name = err instanceof DOMException ? err.name : "";
       toast({
         title: name === "NotFoundError" || name === "DevicesNotFoundError"
@@ -1851,9 +1893,14 @@ export default function ChatCenter({
     recorderRef.current = null;
   };
 
-  // Cancela gravação ao trocar de conversa ou sair da tela.
+  // Cancela gravação ao trocar de conversa ou sair da tela. Também invalida
+  // qualquer pedido de microfone ainda em andamento (getUserMedia pendente) —
+  // se ele responder depois de trocar de conversa, o stream é descartado em
+  // vez de virar uma gravação na conversa errada.
   useEffect(() => {
     return () => {
+      micRequestIdRef.current++;
+      setRequestingMic(false);
       recordSendRef.current = false;
       recorderRef.current?.stop();
       recorderRef.current = null;
@@ -3305,7 +3352,7 @@ export default function ChatCenter({
               lang="pt-BR"
               rows={1}
               data-testid="input-message"
-              className="flex-1 resize-none bg-white rounded-2xl px-4 py-2 text-sm border border-border outline-none focus:ring-2 focus:ring-primary/20 max-h-32 overflow-y-auto"
+              className="flex-1 min-w-0 resize-none bg-white rounded-2xl px-4 py-2 text-sm border border-border outline-none focus:ring-2 focus:ring-primary/20 max-h-32 overflow-y-auto"
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(e); } }}
               onPaste={(e) => {
                 if (can(user, "enviar_midia")) {
@@ -3343,10 +3390,10 @@ export default function ChatCenter({
                 <Send className="w-4 h-4" />
               </button>
             ) : composerMode === "message" && can(user, "enviar_midia") ? (
-              <button type="button" onClick={handleStartRecording} disabled={sending}
-                title="Gravar nota de voz" data-testid="button-record-audio"
+              <button type="button" onClick={handleStartRecording} disabled={sending || requestingMic}
+                title={requestingMic ? "Aguardando o navegador liberar o microfone..." : "Gravar nota de voz"} data-testid="button-record-audio"
                 className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white hover:bg-primary/90 disabled:opacity-40 transition shrink-0">
-                <Mic className="w-4 h-4" />
+                {requestingMic ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Mic className="w-4 h-4" />}
               </button>
             ) : (
               <button type="submit" disabled data-testid="button-send-message-disabled"
