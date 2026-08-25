@@ -29,11 +29,13 @@ type VariantFormRow = {
   marginPercentOverride: string;
   salePrice: string;
   wholesalePrice: string;
+  wholesaleMarginPercentOverride: string;
   stockQty: string;
 };
 
 const emptyVariant: VariantFormRow = {
-  storage: "", costPrice: "", costIncludesInvoice: false, marginPercentOverride: "", salePrice: "", wholesalePrice: "", stockQty: "1",
+  storage: "", costPrice: "", costIncludesInvoice: false, marginPercentOverride: "", salePrice: "",
+  wholesalePrice: "", wholesaleMarginPercentOverride: "", stockQty: "1",
 };
 
 const emptyForm = {
@@ -97,6 +99,10 @@ export default function VitrineAparelhos() {
   const [importTab, setImportTab] = useState<"approved" | "pending">("approved");
   const [parsing, setParsing] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  // Categorias/subcategorias novas sugeridas pela IA (que ainda não existem
+  // na loja) — só são criadas de verdade se o lojista autorizar explicitamente.
+  const [importNewCategoryPaths, setImportNewCategoryPaths] = useState<string[][]>([]);
+  const [authorizeNewCategories, setAuthorizeNewCategories] = useState(false);
 
   const [showSettings, setShowSettings] = useState(false);
   const [settingsForm, setSettingsForm] = useState<CatalogPricingSettings | null>(null);
@@ -170,6 +176,18 @@ export default function VitrineAparelhos() {
     } catch { toast({ title: "Erro ao excluir categoria", variant: "destructive" }); }
   };
 
+  // Muda a categoria de um produto direto pelo card, sem precisar abrir o
+  // formulário de edição inteiro.
+  const handleQuickCategoryChange = async (p: CatalogProduct, categoryId: number | null) => {
+    setProducts((prev) => prev.map((x) => (x.id === p.id ? { ...x, categoryId } : x)));
+    try {
+      await api.catalog.update(p.id, { categoryId });
+    } catch {
+      setProducts((prev) => prev.map((x) => (x.id === p.id ? { ...x, categoryId: p.categoryId } : x)));
+      toast({ title: "Erro ao mudar categoria", variant: "destructive" });
+    }
+  };
+
   const handleSaveWholesaleCode = async () => {
     if (savingWholesaleCode) return;
     setSavingWholesaleCode(true);
@@ -200,6 +218,7 @@ export default function VitrineAparelhos() {
         ? p.variants.map((v) => ({
             id: v.id, storage: v.storage ?? "", costPrice: v.costPrice ?? "", costIncludesInvoice: v.costIncludesInvoice,
             marginPercentOverride: v.marginPercentOverride ?? "", salePrice: v.salePrice ?? "", wholesalePrice: v.wholesalePrice ?? "",
+            wholesaleMarginPercentOverride: v.wholesaleMarginPercentOverride ?? "",
             stockQty: String(v.stockQty),
           }))
         : [{ ...emptyVariant }],
@@ -225,8 +244,12 @@ export default function VitrineAparelhos() {
       const r = await api.catalog.simulatePrice({
         costPrice: custo, costIncludesInvoice: v.costIncludesInvoice,
         marginPercentOverride: v.marginPercentOverride ? Number(v.marginPercentOverride) : null,
+        wholesaleMarginPercentOverride: v.wholesaleMarginPercentOverride ? Number(v.wholesaleMarginPercentOverride) : null,
       });
-      if (r.salePrice != null) updateVariant(idx, { salePrice: String(r.salePrice) });
+      const patch: Partial<VariantFormRow> = {};
+      if (r.salePrice != null) patch.salePrice = String(r.salePrice);
+      if (r.wholesalePrice != null) patch.wholesalePrice = String(r.wholesalePrice);
+      updateVariant(idx, patch);
     } catch { toast({ title: "Erro ao calcular preço", variant: "destructive" }); }
   };
 
@@ -250,6 +273,7 @@ export default function VitrineAparelhos() {
         marginPercentOverride: v.marginPercentOverride ? Number(v.marginPercentOverride) : null,
         salePrice: v.salePrice ? Number(v.salePrice) : null,
         wholesalePrice: v.wholesalePrice ? Number(v.wholesalePrice) : null,
+        wholesaleMarginPercentOverride: v.wholesaleMarginPercentOverride ? Number(v.wholesaleMarginPercentOverride) : null,
         stockQty: Number(v.stockQty) || 0,
       })),
     };
@@ -368,7 +392,11 @@ export default function VitrineAparelhos() {
   };
 
   // ─── Importação por IA ──────────────────────────────────────────────────
-  const openImport = () => { setImportText(""); setImportItems(null); setImportTab("approved"); setShowImport(true); };
+  const openImport = () => {
+    setImportText(""); setImportItems(null); setImportTab("approved");
+    setImportNewCategoryPaths([]); setAuthorizeNewCategories(false);
+    setShowImport(true);
+  };
 
   const handleParse = async () => {
     if (parsing || !importText.trim()) return;
@@ -376,6 +404,8 @@ export default function VitrineAparelhos() {
     try {
       const r = await api.catalog.importParse(importText);
       setImportItems(r.items);
+      setImportNewCategoryPaths(r.newCategoryPaths ?? []);
+      setAuthorizeNewCategories(false);
       setImportTab(r.items.some((i) => i.status === "approved") ? "approved" : "pending");
     } catch (err) {
       toast({ title: "Erro ao analisar a lista", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
@@ -397,13 +427,53 @@ export default function VitrineAparelhos() {
     setImportItems((prev) => prev && prev.map((it, i) => (i === idx ? { ...it, variants: it.variants.length > 1 ? it.variants.filter((_, j) => j !== vIdx) : it.variants } : it)));
   };
 
+  // Cria (ou reaproveita, se já existir) cada nível do caminho de categoria
+  // sugerido — ex.: ["Celulares","Samsung"] cria "Samsung" como subcategoria
+  // de "Celulares" (criando "Celulares" também, se nem ele existir ainda).
+  // Só é chamada quando o lojista autorizou explicitamente.
+  const ensureCategoryPath = async (path: string[], localCategories: CatalogCategory[], cache: Map<string, number>): Promise<{ id: number; categories: CatalogCategory[] }> => {
+    let parentId: number | null = null;
+    let key = "";
+    let cats = localCategories;
+    for (const name of path) {
+      key = key ? `${key}>${name.toLowerCase()}` : name.toLowerCase();
+      const cached = cache.get(key);
+      if (cached != null) { parentId = cached; continue; }
+      const existing = cats.find((c) => c.name.toLowerCase() === name.toLowerCase() && c.parentId === parentId);
+      if (existing) { cache.set(key, existing.id); parentId = existing.id; continue; }
+      const created = await api.catalog.createCategory({ name, parentId });
+      cache.set(key, created.id);
+      cats = [...cats, created];
+      parentId = created.id;
+    }
+    return { id: parentId as number, categories: cats };
+  };
+
   const handleConfirmImport = async () => {
     if (!importItems || confirming) return;
     const toImport = importItems.filter((i) => i.model && i.model !== "(modelo não identificado)" && i.model !== "(sem modelo)");
     if (toImport.length === 0) { toast({ title: "Nenhum item pronto para importar", variant: "destructive" }); return; }
     setConfirming(true);
     try {
-      const r = await api.catalog.importConfirm(toImport);
+      let localCategories = categories;
+      const pathIdCache = new Map<string, number>();
+      if (authorizeNewCategories && importNewCategoryPaths.length > 0) {
+        for (const path of importNewCategoryPaths) {
+          const r = await ensureCategoryPath(path, localCategories, pathIdCache);
+          localCategories = r.categories;
+        }
+        setCategories(localCategories);
+      }
+      const resolved = toImport.map((it) => {
+        if (it.categoryId != null) return it;
+        if (it.categoryPath && authorizeNewCategories) {
+          const key = it.categoryPath.map((n) => n.toLowerCase()).join(">");
+          const id = pathIdCache.get(key);
+          if (id != null) return { ...it, categoryId: id };
+        }
+        return it; // sem categoria (o lojista pode ter escolhido uma manualmente — já está em it.categoryId)
+      });
+      const r = await api.catalog.importConfirm(resolved);
       setProducts((prev) => [...r.products.map((p) => ({ ...p, photos: [], variants: [] as CatalogProduct["variants"] })), ...prev]);
       toast({ title: `${r.imported} aparelho(s) importado(s)! Recarregando lista...` });
       setShowImport(false);
@@ -625,6 +695,14 @@ export default function VitrineAparelhos() {
                 <p className="text-sm font-semibold leading-tight">{p.model}</p>
                 {storagesLabel(p) && <p className="text-xs text-muted-foreground">{storagesLabel(p)}</p>}
                 {p.variants.length > 1 && <p className="text-[10px] text-muted-foreground">{p.variants.length} variantes</p>}
+                {canManage && (
+                  <select value={p.categoryId ?? ""} onChange={(e) => handleQuickCategoryChange(p, e.target.value ? Number(e.target.value) : null)}
+                    data-testid={`select-quick-category-${p.id}`} title="Mudar categoria"
+                    className="text-[10px] rounded border px-1.5 py-1 bg-white text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/40">
+                    <option value="">Sem categoria</option>
+                    {categories.map((c) => <option key={c.id} value={c.id}>{categoryPathLabel(categories, c.id)}</option>)}
+                  </select>
+                )}
                 <p className="text-sm font-bold mt-auto">{priceRangeLabel(p)}</p>
                 <div className="flex items-center gap-1 pt-1">
                   <button onClick={() => copyMessage(productMessage(p))} title="Copiar mensagem" data-testid={`button-copy-product-${p.id}`}
@@ -748,11 +826,23 @@ export default function VitrineAparelhos() {
                           className="mt-0.5 w-full rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40" />
                       </div>
                     </div>
-                    <div>
-                      <label className="text-[10px] text-muted-foreground flex items-center gap-1"><Lock className="w-2.5 h-2.5" /> Preço de atacado (só pra quem tem o código — em branco = sem atacado)</label>
-                      <input type="number" value={v.wholesalePrice} onChange={(e) => updateVariant(idx, { wholesalePrice: e.target.value })}
-                        placeholder="0,00" data-testid={`input-variant-wholesale-price-${idx}`}
-                        className="mt-0.5 w-full rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400/60 bg-amber-50/50" />
+                    <div className="rounded border border-amber-200 bg-amber-50/50 p-2 space-y-2">
+                      <p className="text-[10px] font-semibold text-amber-800 flex items-center gap-1"><Lock className="w-2.5 h-2.5" /> Preço de atacado — só aparece pra quem tem o código de acesso</p>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[10px] text-muted-foreground">Margem de atacado % (em branco = padrão)</label>
+                          <input type="number" value={v.wholesaleMarginPercentOverride} onChange={(e) => updateVariant(idx, { wholesaleMarginPercentOverride: e.target.value })}
+                            placeholder={settings ? String(settings.wholesaleMarginPercent) : ""} data-testid={`input-variant-wholesale-margin-${idx}`}
+                            className="mt-0.5 w-full rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400/60" />
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-muted-foreground">Preço de atacado (em branco = calcula do custo)</label>
+                          <input type="number" value={v.wholesalePrice} onChange={(e) => updateVariant(idx, { wholesalePrice: e.target.value })}
+                            placeholder="0,00" data-testid={`input-variant-wholesale-price-${idx}`}
+                            className="mt-0.5 w-full rounded border px-2 py-1.5 text-sm font-semibold focus:outline-none focus:ring-1 focus:ring-amber-400/60" />
+                        </div>
+                      </div>
+                      <p className="text-[10px] text-muted-foreground">Clique em <Calculator className="w-2.5 h-2.5 inline" /> acima pra calcular o preço de venda e o de atacado juntos a partir do custo.</p>
                     </div>
                   </div>
                 ))}
@@ -863,6 +953,23 @@ export default function VitrineAparelhos() {
                 </>
               ) : (
                 <>
+                  {importNewCategoryPaths.length > 0 && (
+                    <div className="rounded-lg border border-violet-200 bg-violet-50/60 p-3 space-y-2">
+                      <p className="text-xs font-semibold text-violet-800 flex items-center gap-1">
+                        <Tags className="w-3.5 h-3.5" /> A IA sugere criar {importNewCategoryPaths.length} categoria(s)/subcategoria(s) nova(s):
+                      </p>
+                      <ul className="text-xs text-violet-700 list-disc list-inside">
+                        {importNewCategoryPaths.map((path, i) => <li key={i}>{path.join(" > ")}</li>)}
+                      </ul>
+                      <label className="flex items-center gap-2 text-xs font-medium text-violet-900" data-testid="checkbox-authorize-new-categories">
+                        <input type="checkbox" checked={authorizeNewCategories} onChange={(e) => setAuthorizeNewCategories(e.target.checked)} />
+                        Autorizo criar essas categorias agora
+                      </label>
+                      {!authorizeNewCategories && (
+                        <p className="text-[10px] text-muted-foreground">Sem autorização, esses itens importam sem categoria — você pode escolher uma categoria já existente pra cada um abaixo, ou categorizar depois.</p>
+                      )}
+                    </div>
+                  )}
                   <div className="flex gap-2">
                     <button onClick={() => setImportTab("approved")} data-testid="tab-import-approved"
                       className={`px-3 py-1.5 rounded-full text-xs font-semibold transition flex items-center gap-1 ${importTab === "approved" ? "bg-primary text-white" : "bg-secondary text-muted-foreground"}`}>
@@ -900,6 +1007,17 @@ export default function VitrineAparelhos() {
                           <button onClick={() => addImportVariant(idx)} className="text-[10px] font-semibold text-primary hover:underline flex items-center gap-1">
                             <Plus className="w-2.5 h-2.5" /> Adicionar variante
                           </button>
+                        </div>
+                        <div>
+                          <select value={it.categoryId ?? ""} data-testid={`import-item-category-${idx}`}
+                            onChange={(e) => updateImportItem(idx, { categoryId: e.target.value ? Number(e.target.value) : null, categoryPath: e.target.value ? null : it.categoryPath })}
+                            className="w-full rounded border px-2 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-primary/40">
+                            <option value="">Sem categoria</option>
+                            {categories.map((c) => <option key={c.id} value={c.id}>{categoryPathLabel(categories, c.id)}</option>)}
+                          </select>
+                          {it.categoryPath && (
+                            <p className="text-[10px] text-violet-700 mt-0.5">Sugestão da IA (categoria nova): {it.categoryPath.join(" > ")}</p>
+                          )}
                         </div>
                         {it.issue && <p className="text-[10px] text-amber-700">{it.issue}</p>}
                         {it.rawLine && <p className="text-[10px] text-muted-foreground truncate">"{it.rawLine}"</p>}
@@ -944,6 +1062,13 @@ export default function VitrineAparelhos() {
                   <input type="number" value={settingsForm.invoiceCostPercent}
                     onChange={(e) => setSettingsForm({ ...settingsForm, invoiceCostPercent: Number(e.target.value) })} data-testid="input-invoice-cost"
                     className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
+                </div>
+                <div className="col-span-2">
+                  <label className="text-xs font-semibold text-muted-foreground flex items-center gap-1"><Lock className="w-3 h-3 text-amber-600" /> Margem de atacado padrão (%) — preço pra técnicos/lojistas com código de acesso</label>
+                  <input type="number" value={settingsForm.wholesaleMarginPercent}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, wholesaleMarginPercent: Number(e.target.value) })} data-testid="input-wholesale-margin"
+                    className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400/60 bg-amber-50/50" />
+                  <p className="text-[10px] text-muted-foreground mt-1">Preço de atacado = custo ÷ (1 − margem de atacado%), sem taxa de cartão (venda combinada fora do cartão). Normalmente menor que a margem de varejo.</p>
                 </div>
               </div>
               <div>

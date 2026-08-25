@@ -112,10 +112,13 @@ export const catalogProductVariantsTable = pgTable("catalog_product_variants", {
   marginPercentOverride: numeric("margin_percent_override"), // null = usa a margem padrão da loja
   salePrice: numeric("sale_price"),
   // Preço de atacado — só aparece na vitrine pública pra quem desbloqueou
-  // com o código de acesso (ver tenants.catalogWholesaleCode). Digitado na
-  // mão pelo lojista, sem cálculo automático (é uma tabela à parte, não uma
-  // margem sobre o varejo). Null = esse aparelho não tem preço de atacado.
+  // com o código de acesso (ver tenants.catalogWholesaleCode). Calculado
+  // automaticamente a partir do custo (custo × margem de atacado, sem taxa
+  // de cartão — é uma venda direta pra técnico/lojista), do mesmo jeito que
+  // o preço de venda normal; pode ser sobrescrito manualmente digitando um
+  // valor exato. Null = não foi possível calcular (sem custo informado).
   wholesalePrice: numeric("wholesale_price"),
+  wholesaleMarginPercentOverride: numeric("wholesale_margin_percent_override"), // null = usa a margem de atacado padrão da loja
   stockQty: integer("stock_qty").notNull().default(1),
   sortOrder: integer("sort_order").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

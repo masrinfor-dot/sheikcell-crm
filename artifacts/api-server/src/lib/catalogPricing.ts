@@ -9,6 +9,7 @@ export type PricingSettings = {
   defaultMarginPercent: number; // margem de lucro bruto padrão da loja (%)
   invoiceCostPercent: number; // custo de nota fiscal — impostos/tributação sobre o custo (%)
   cardFeeTable: Record<string, number>; // taxa de cartão por nº de parcelas ("1".."18") em %
+  wholesaleMarginPercent: number; // margem de lucro padrão pro preço de atacado (técnico/lojista) — normalmente menor que a de varejo
 };
 
 const INSTALLMENTS = Array.from({ length: 18 }, (_, i) => String(i + 1));
@@ -17,6 +18,7 @@ export const DEFAULT_PRICING_SETTINGS: PricingSettings = {
   defaultMarginPercent: 25,
   invoiceCostPercent: 0,
   cardFeeTable: Object.fromEntries(INSTALLMENTS.map((n) => [n, Math.min(2 + Number(n) * 1.1, 40)])),
+  wholesaleMarginPercent: 12,
 };
 
 /** Sanitiza as configurações de precificação vindas do cliente (só números válidos, dentro de faixas seguras). */
@@ -35,6 +37,7 @@ export function sanitizePricingSettings(input: unknown): PricingSettings {
     defaultMarginPercent: norm(o.defaultMarginPercent, DEFAULT_PRICING_SETTINGS.defaultMarginPercent, 0, 95),
     invoiceCostPercent: norm(o.invoiceCostPercent, DEFAULT_PRICING_SETTINGS.invoiceCostPercent, 0, 95),
     cardFeeTable,
+    wholesaleMarginPercent: norm(o.wholesaleMarginPercent, DEFAULT_PRICING_SETTINGS.wholesaleMarginPercent, 0, 95),
   };
 }
 
@@ -82,6 +85,28 @@ export function precoVendaDoProduto(
     margemPercent,
     notaFiscalPercent: settings.invoiceCostPercent,
     taxaCartaoPercent,
+    custoJaIncluiNotaFiscal: produto.costIncludesInvoice,
+  });
+}
+
+/**
+ * Preço de atacado (técnico/lojista) de um produto: mesma lógica do preço de
+ * venda, mas com a margem de atacado (normalmente menor) e SEM taxa de
+ * cartão — venda de atacado costuma ser combinada fora do cartão (pix,
+ * transferência, boleto). Usa a margem de atacado própria do produto se
+ * houver, senão a margem de atacado padrão da loja.
+ */
+export function precoAtacadoDoProduto(
+  produto: { costPrice: number | null; costIncludesInvoice: boolean; wholesaleMarginPercentOverride: number | null },
+  settings: PricingSettings,
+): number | null {
+  if (produto.costPrice == null || !Number.isFinite(produto.costPrice) || produto.costPrice <= 0) return null;
+  const margemPercent = produto.wholesaleMarginPercentOverride ?? settings.wholesaleMarginPercent;
+  return calcularPrecoVenda({
+    custo: produto.costPrice,
+    margemPercent,
+    notaFiscalPercent: settings.invoiceCostPercent,
+    taxaCartaoPercent: 0,
     custoJaIncluiNotaFiscal: produto.costIncludesInvoice,
   });
 }

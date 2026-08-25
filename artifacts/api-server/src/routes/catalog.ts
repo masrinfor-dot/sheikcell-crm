@@ -12,6 +12,7 @@ import {
   catalogCategoriesTable,
   appSettingsTable,
   tenantsTable,
+  type CatalogCategory,
 } from "@workspace/db";
 import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
@@ -19,6 +20,7 @@ import { requirePerm } from "../lib/permissions";
 import {
   sanitizePricingSettings,
   precoVendaDoProduto,
+  precoAtacadoDoProduto,
   type PricingSettings,
 } from "../lib/catalogPricing";
 import { CATALOG_CONDITIONS, type CatalogCondition } from "@workspace/db";
@@ -133,6 +135,7 @@ type VariantInput = {
   marginPercentOverride: number | null;
   salePrice: number | null;
   wholesalePrice: number | null;
+  wholesaleMarginPercentOverride: number | null;
   stockQty: number;
 };
 
@@ -145,7 +148,8 @@ function cleanVariantInput(raw: unknown): VariantInput {
     costIncludesInvoice: o.costIncludesInvoice === true,
     marginPercentOverride: toNumberOrNull(o.marginPercentOverride),
     salePrice: "salePrice" in o ? toNumberOrNull(o.salePrice) : null,
-    wholesalePrice: toNumberOrNull(o.wholesalePrice),
+    wholesalePrice: "wholesalePrice" in o ? toNumberOrNull(o.wholesalePrice) : null,
+    wholesaleMarginPercentOverride: toNumberOrNull(o.wholesaleMarginPercentOverride),
     stockQty: Number.isInteger(o.stockQty) ? Math.max(0, o.stockQty as number) : 1,
   };
 }
@@ -155,6 +159,19 @@ async function resolveVariantSalePrice(v: VariantInput, settings: PricingSetting
   if (v.costPrice == null) return null;
   const computed = precoVendaDoProduto(
     { costPrice: v.costPrice, costIncludesInvoice: v.costIncludesInvoice, marginPercentOverride: v.marginPercentOverride },
+    settings,
+  );
+  return computed != null ? String(computed) : null;
+}
+
+// Preço de atacado: se o lojista digitou um valor exato, usa ele; senão
+// calcula automaticamente a partir do custo (ver precoAtacadoDoProduto) —
+// mesmo comportamento de "em branco = calcula do custo" do preço de venda.
+async function resolveVariantWholesalePrice(v: VariantInput, settings: PricingSettings): Promise<string | null> {
+  if (v.wholesalePrice != null) return String(v.wholesalePrice);
+  if (v.costPrice == null) return null;
+  const computed = precoAtacadoDoProduto(
+    { costPrice: v.costPrice, costIncludesInvoice: v.costIncludesInvoice, wholesaleMarginPercentOverride: v.wholesaleMarginPercentOverride },
     settings,
   );
   return computed != null ? String(computed) : null;
@@ -172,13 +189,15 @@ async function replaceVariants(tenantId: number, productId: number, rawVariants:
 
   for (const [i, v] of inputs.entries()) {
     const salePrice = await resolveVariantSalePrice(v, settings);
+    const wholesalePrice = await resolveVariantWholesalePrice(v, settings);
     const values = {
       storage: v.storage,
       costPrice: v.costPrice != null ? String(v.costPrice) : null,
       costIncludesInvoice: v.costIncludesInvoice,
       marginPercentOverride: v.marginPercentOverride != null ? String(v.marginPercentOverride) : null,
       salePrice,
-      wholesalePrice: v.wholesalePrice != null ? String(v.wholesalePrice) : null,
+      wholesalePrice,
+      wholesaleMarginPercentOverride: v.wholesaleMarginPercentOverride != null ? String(v.wholesaleMarginPercentOverride) : null,
       stockQty: v.stockQty,
       sortOrder: i,
       updatedAt: new Date(),
@@ -498,14 +517,20 @@ router.put("/catalog/pricing-settings", requireAdmin, async (req, res): Promise<
 router.post("/catalog/pricing-settings/simulate", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const settings = await getPricingSettings(tenantId);
-  const { costPrice, costIncludesInvoice, marginPercentOverride } = req.body as { costPrice?: unknown; costIncludesInvoice?: unknown; marginPercentOverride?: unknown };
+  const { costPrice, costIncludesInvoice, marginPercentOverride, wholesaleMarginPercentOverride } = req.body as {
+    costPrice?: unknown; costIncludesInvoice?: unknown; marginPercentOverride?: unknown; wholesaleMarginPercentOverride?: unknown;
+  };
   const custo = toNumberOrNull(costPrice);
   if (custo == null || custo <= 0) { res.status(400).json({ error: "Informe o custo do aparelho" }); return; }
   const salePrice = precoVendaDoProduto(
     { costPrice: custo, costIncludesInvoice: costIncludesInvoice === true, marginPercentOverride: toNumberOrNull(marginPercentOverride) },
     settings,
   );
-  res.json({ salePrice, settings });
+  const wholesalePrice = precoAtacadoDoProduto(
+    { costPrice: custo, costIncludesInvoice: costIncludesInvoice === true, wholesaleMarginPercentOverride: toNumberOrNull(wholesaleMarginPercentOverride) },
+    settings,
+  );
+  res.json({ salePrice, wholesalePrice, settings });
 });
 
 // ─── Link público e contato (WhatsApp) da vitrine ───────────────────────────
@@ -581,6 +606,13 @@ type ParsedItem = {
   status: "approved" | "pending";
   issue: string | null;
   rawLine: string;
+  // Categoria/subcategoria sugerida pela IA (ex.: ["Celulares","Samsung"]).
+  // categoryId preenchido = já existe exatamente essa categoria/subcategoria
+  // na loja (aplicada direto). categoryPath preenchido = sugestão que NÃO
+  // bate com nenhuma categoria existente — precisa de autorização do lojista
+  // pra criar (ver banner de "novas categorias sugeridas" no import).
+  categoryId: number | null;
+  categoryPath: string[] | null;
 };
 
 function extractJsonArray(raw: string): unknown[] | null {
@@ -605,11 +637,47 @@ function cleanParsedVariants(raw: unknown): ParsedVariant[] {
   return list.length > 0 ? list : [{ storage: null, costPrice: null }];
 }
 
+// Interpreta a sugestão de categoria da IA (ex.: ["Celulares","Samsung"]).
+// Casa contra as categorias já cadastradas na loja, nível por nível
+// (case-insensitive). Se o caminho inteiro já existe, devolve o id direto —
+// nenhuma categoria nova precisa ser criada. Se faltar algum nível, devolve
+// categoryPath com o caminho completo sugerido, pra pedir autorização do
+// lojista antes de criar (a criação em si acontece no front, reaproveitando
+// o CRUD de categorias já existente).
+function cleanCategoryPath(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null;
+  const names = raw.map((v) => clean(v, 60)).filter(Boolean).slice(0, 2); // só 2 níveis (categoria > subcategoria)
+  return names.length > 0 ? names : null;
+}
+
+function matchCategoryPath(categories: CatalogCategory[], pathNames: string[] | null): { categoryId: number | null; categoryPath: string[] | null } {
+  if (!pathNames || pathNames.length === 0) return { categoryId: null, categoryPath: null };
+  const norm = (s: string) => s.trim().toLowerCase();
+  let parentId: number | null = null;
+  for (const name of pathNames) {
+    const found = categories.find((c) => norm(c.name) === norm(name) && c.parentId === parentId);
+    if (!found) return { categoryId: null, categoryPath: pathNames };
+    parentId = found.id;
+  }
+  return { categoryId: parentId, categoryPath: null };
+}
+
 router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rawText = typeof (req.body as { rawText?: unknown }).rawText === "string" ? (req.body as { rawText: string }).rawText : "";
   const text = rawText.trim().slice(0, 12000);
   if (!text) { res.status(400).json({ error: "Cole a lista de aparelhos" }); return; }
+
+  const existingCategories = await db.select().from(catalogCategoriesTable)
+    .where(eq(catalogCategoriesTable.tenantId, tenantId))
+    .orderBy(catalogCategoriesTable.sortOrder, catalogCategoriesTable.id);
+  const categoryList = existingCategories
+    .filter((c) => c.parentId == null)
+    .map((top) => {
+      const subs = existingCategories.filter((c) => c.parentId === top.id).map((s) => s.name);
+      return subs.length > 0 ? `${top.name} (subcategorias: ${subs.join(", ")})` : top.name;
+    })
+    .join("; ");
 
   const prompt = [
     `Você organiza listas de fornecedores de celulares (mercado brasileiro) em dados estruturados.`,
@@ -617,11 +685,14 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
     `Ignore emojis, cabeçalhos, informações de garantia/contato/endereço — extraia SÓ os aparelhos.`,
     `IMPORTANTE: quando o MESMO modelo (mesma condição, mesmas cores) aparecer na lista com mais de um armazenamento/memória, agrupe num ÚNICO item, com um array "variants" contendo um {"storage","costPrice"} por armazenamento — não crie um item separado por armazenamento.`,
     ``,
+    `Categorias/subcategorias já cadastradas nessa loja (reaproveite pelo nome EXATO sempre que fizer sentido, em vez de inventar uma parecida): ${categoryList || "(nenhuma cadastrada ainda)"}.`,
+    `Pra cada aparelho, sugira também "categoryPath": um array com 1 ou 2 níveis indicando a aba/sub-aba da vitrine pública onde ele se encaixa (ex.: ["Celulares","Samsung"] ou ["Peças de celular"]). Prefira sempre reaproveitar um nome já cadastrado acima; só sugira um nome novo quando não existir nada parecido. Se não tiver confiança nenhuma pra sugerir, use null.`,
+    ``,
     `Lista:`,
     text,
     ``,
     `Responda SOMENTE com um JSON array válido, sem markdown, um objeto por aparelho (família modelo+condição+cor), neste formato:`,
-    `[{"model":"iPhone 15 Pro Max","condition":"excelente","colors":["Preto","Azul"],"variants":[{"storage":"256GB","costPrice":3850},{"storage":"512GB","costPrice":4200}],"rawLine":"trecho original correspondente"}]`,
+    `[{"model":"iPhone 15 Pro Max","condition":"excelente","colors":["Preto","Azul"],"variants":[{"storage":"256GB","costPrice":3850},{"storage":"512GB","costPrice":4200}],"categoryPath":["Celulares","Apple"],"rawLine":"trecho original correspondente"}]`,
     `"condition" deve ser um destes: excelente, muito_bom, bom, outlet (use "bom" se não estiver claro).`,
     `Se não conseguir identificar o modelo ou nenhum preço de custo com confiança, ainda inclua o item com o que conseguir e deixe os campos faltantes null.`,
   ].join("\n");
@@ -644,6 +715,7 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
       const variants = cleanParsedVariants(o.variants);
       const hasPrice = variants.some((v) => v.costPrice != null);
       const missing = !model || !hasPrice;
+      const { categoryId, categoryPath } = matchCategoryPath(existingCategories, cleanCategoryPath(o.categoryPath));
       return {
         model: model || "(modelo não identificado)",
         condition: cleanCondition(o.condition),
@@ -652,9 +724,22 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
         status: missing ? "pending" : "approved",
         issue: missing ? (!model ? "Modelo não identificado" : "Preço não identificado") : null,
         rawLine: clean(o.rawLine, 300),
+        categoryId,
+        categoryPath,
       };
     });
-    res.json({ items });
+    // Caminhos de categoria sugeridos que ainda não existem na loja, deduplicados —
+    // o front pede autorização do lojista antes de criar qualquer um deles.
+    const seen = new Set<string>();
+    const newCategoryPaths: string[][] = [];
+    for (const it of items) {
+      if (!it.categoryPath) continue;
+      const key = it.categoryPath.join(" > ").toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      newCategoryPaths.push(it.categoryPath);
+    }
+    res.json({ items, newCategoryPaths });
   } catch (err) {
     req.log.error({ err }, "Catalog AI import failed");
     res.status(503).json({ error: "A IA está indisponível no momento. Tente novamente em instantes." });
@@ -667,17 +752,24 @@ router.post("/catalog/import/confirm", requireAuth, async (req, res): Promise<vo
   if (!Array.isArray(items) || items.length === 0) { res.status(400).json({ error: "Nenhum item para importar" }); return; }
 
   const settings = await getPricingSettings(tenantId);
-  const toImport = items.slice(0, 200).map((raw) => {
+  const toImportRaw = items.slice(0, 200).map((raw) => {
     const o = (raw ?? {}) as Record<string, unknown>;
-    return { model: clean(o.model, 120), condition: cleanCondition(o.condition), colors: cleanColors(o.colors), variants: cleanParsedVariants(o.variants) };
+    return {
+      model: clean(o.model, 120), condition: cleanCondition(o.condition), colors: cleanColors(o.colors),
+      variants: cleanParsedVariants(o.variants), categoryIdRaw: o.categoryId,
+    };
   }).filter((p) => p.model);
 
-  if (toImport.length === 0) { res.status(400).json({ error: "Nenhum item válido para importar" }); return; }
+  if (toImportRaw.length === 0) { res.status(400).json({ error: "Nenhum item válido para importar" }); return; }
+  // categoryId já vem resolvido pelo front (categoria existente escolhida
+  // manualmente, ou criada com autorização a partir da sugestão da IA) — só
+  // valida que a categoria realmente pertence a essa loja.
+  const toImport = await Promise.all(toImportRaw.map(async (p) => ({ ...p, categoryId: await cleanCategoryId(tenantId, p.categoryIdRaw) })));
 
   const createdProducts: (typeof catalogProductsTable.$inferSelect)[] = [];
   for (const item of toImport) {
     const [product] = await db.insert(catalogProductsTable).values({
-      tenantId, model: item.model, condition: item.condition, colors: item.colors, createdBy: req.session.userId ?? null,
+      tenantId, model: item.model, condition: item.condition, colors: item.colors, categoryId: item.categoryId, createdBy: req.session.userId ?? null,
     }).returning();
     await replaceVariants(tenantId, product.id, item.variants.map((v) => ({ storage: v.storage, costPrice: v.costPrice })), settings);
     createdProducts.push(product);

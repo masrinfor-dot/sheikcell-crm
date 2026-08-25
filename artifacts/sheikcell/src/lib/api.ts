@@ -285,9 +285,12 @@ export type CatalogProductVariant = {
   costIncludesInvoice: boolean;
   marginPercentOverride: string | null;
   salePrice: string | null;
-  // Preço de atacado, digitado na mão — só sai na vitrine pública pra quem
-  // desbloqueou com o código de acesso (ver api.catalog.getWholesaleCode).
+  // Preço de atacado — calculado a partir do custo (margem de atacado
+  // própria ou padrão da loja), com opção de digitar um valor exato pra
+  // sobrescrever. Só sai na vitrine pública pra quem desbloqueou com o
+  // código de acesso (ver api.catalog.getWholesaleCode).
   wholesalePrice: string | null;
+  wholesaleMarginPercentOverride: string | null;
   stockQty: number;
   sortOrder: number;
 };
@@ -302,6 +305,7 @@ export type CatalogVariantInput = {
   marginPercentOverride: number | null;
   salePrice?: number | null;
   wholesalePrice?: number | null;
+  wholesaleMarginPercentOverride?: number | null;
   stockQty: number;
 };
 
@@ -324,6 +328,7 @@ export type CatalogPricingSettings = {
   defaultMarginPercent: number;
   invoiceCostPercent: number;
   cardFeeTable: Record<string, number>;
+  wholesaleMarginPercent: number;
 };
 
 export type CatalogPublicVariant = {
@@ -352,6 +357,12 @@ export type CatalogImportItem = {
   status: "approved" | "pending";
   issue: string | null;
   rawLine: string;
+  // Categoria sugerida pela IA. categoryId = já existe, aplicada direto.
+  // categoryPath = sugestão nova (ex.: ["Celulares","Samsung"]), sem id
+  // ainda — precisa de autorização do lojista antes de criar (ver o banner
+  // "categorias novas sugeridas" na tela de importação).
+  categoryId: number | null;
+  categoryPath: string[] | null;
 };
 
 export type CatalogPhotoSearchResult = { title: string; imageUrl: string; thumbnailUrl: string; sourceUrl: string };
@@ -1860,8 +1871,8 @@ export const api = {
       req<CatalogPhoto>(`/catalog/products/${productId}/photos/from-url`, { method: "POST", body: JSON.stringify({ url }) }),
     pricingSettings: () => req<CatalogPricingSettings>("/catalog/pricing-settings"),
     savePricingSettings: (data: CatalogPricingSettings) => req<CatalogPricingSettings>("/catalog/pricing-settings", { method: "PUT", body: JSON.stringify(data) }),
-    simulatePrice: (data: { costPrice: number; costIncludesInvoice?: boolean; marginPercentOverride?: number | null }) =>
-      req<{ salePrice: number | null; settings: CatalogPricingSettings }>("/catalog/pricing-settings/simulate", { method: "POST", body: JSON.stringify(data) }),
+    simulatePrice: (data: { costPrice: number; costIncludesInvoice?: boolean; marginPercentOverride?: number | null; wholesaleMarginPercentOverride?: number | null }) =>
+      req<{ salePrice: number | null; wholesalePrice: number | null; settings: CatalogPricingSettings }>("/catalog/pricing-settings/simulate", { method: "POST", body: JSON.stringify(data) }),
     getSlug: () => req<{ slug: string | null }>("/catalog/slug"),
     setSlug: (slug: string) => req<{ slug: string | null }>("/catalog/slug", { method: "PUT", body: JSON.stringify({ slug }) }),
     getWhatsapp: () => req<{ whatsapp: string | null }>("/catalog/whatsapp"),
@@ -1873,7 +1884,7 @@ export const api = {
     updateCategory: (id: number, data: { name?: string; parentId?: number | null; sortOrder?: number }) =>
       req<CatalogCategory>(`/catalog/categories/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     removeCategory: (id: number) => req<{ ok: boolean }>(`/catalog/categories/${id}`, { method: "DELETE" }),
-    importParse: (rawText: string) => req<{ items: CatalogImportItem[] }>("/catalog/import/parse", { method: "POST", body: JSON.stringify({ rawText }) }),
+    importParse: (rawText: string) => req<{ items: CatalogImportItem[]; newCategoryPaths: string[][] }>("/catalog/import/parse", { method: "POST", body: JSON.stringify({ rawText }) }),
     importConfirm: (items: CatalogImportItem[]) => req<{ imported: number; products: CatalogProduct[] }>("/catalog/import/confirm", { method: "POST", body: JSON.stringify({ items }) }),
     public: (slug: string, code?: string) =>
       req<{

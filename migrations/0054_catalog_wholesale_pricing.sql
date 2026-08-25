@@ -1,0 +1,11 @@
+-- Preço de atacado (técnico/lojista) calculado automaticamente a partir do
+-- custo, com margem própria (separada da margem de varejo) — em vez de só
+-- digitado na mão. Ver artifacts/api-server/src/lib/catalogPricing.ts
+-- (precoAtacadoDoProduto) e artifacts/api-server/src/routes/catalog.ts
+-- (resolveVariantWholesalePrice).
+--
+-- Não precisa de bloco DO $$ / EXECUTE dinâmico aqui: ao contrário da
+-- migration 0052, esta coluna nunca é removida em nenhum passo desta
+-- migration, então o Postgres consegue validar a query normalmente tanto na
+-- primeira quanto nas execuções seguintes (idempotente via IF NOT EXISTS).
+ALTER TABLE catalog_product_variants ADD COLUMN IF NOT EXISTS wholesale_margin_percent_override numeric;
