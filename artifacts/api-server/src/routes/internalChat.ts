@@ -551,6 +551,93 @@ router.post("/internal-chat/conversations/:id/messages", requireAuth, async (req
   res.json(message);
 });
 
+// ─── Editar / apagar mensagem (só quem enviou, ou admin/supervisor) ───────
+// Mesmo padrão do chat de clientes (ver chat.ts): edita/apaga só o REGISTRO
+// aqui dentro do sistema. Diferente do chat de clientes, aqui não existe
+// "revogar no WhatsApp" — chat interno é só entre usuários do próprio
+// sistema, então não há nenhuma contraparte externa pra sincronizar.
+async function loadOwnInternalMessageForEdit(
+  id: number, tenantId: number, req: Request, res: Response,
+): Promise<{ msg: typeof internalMessagesTable.$inferSelect; conv: typeof internalConversationsTable.$inferSelect } | null> {
+  const [msg] = await db.select().from(internalMessagesTable)
+    .where(and(eq(internalMessagesTable.id, id), eq(internalMessagesTable.tenantId, tenantId))).limit(1);
+  if (!msg) { res.status(404).json({ error: "Mensagem não encontrada" }); return null; }
+  const userId = req.session.userId!;
+  const isOwner = msg.senderId === userId;
+  const isModerator = req.session.userRole === "admin" || req.session.userRole === "supervisor";
+  if (!isOwner && !isModerator) {
+    res.status(403).json({ error: "Só quem enviou (ou admin/supervisor) pode editar/apagar" });
+    return null;
+  }
+  const [conv] = await db.select().from(internalConversationsTable)
+    .where(and(eq(internalConversationsTable.id, msg.conversationId), eq(internalConversationsTable.tenantId, tenantId))).limit(1);
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return null; }
+  // Moderador (admin/supervisor) pode agir mesmo sem ser membro da conversa —
+  // mesma regra de moderação global do chat de clientes. Quem não é
+  // moderador só chega até aqui se for o dono da mensagem, o que já implica
+  // ter sido (ou ainda ser) membro da conversa.
+  if (!isModerator) {
+    const accessible = await getAccessibleConversation(msg.conversationId, userId, tenantId);
+    if (!accessible) { res.status(403).json({ error: "Acesso negado" }); return null; }
+  }
+  return { msg, conv };
+}
+
+router.patch("/internal-chat/messages/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Mensagem inválida" }); return; }
+  const { content } = req.body as { content?: string };
+  const clean = typeof content === "string" ? content.trim().slice(0, 4096) : "";
+  if (!clean) { res.status(400).json({ error: "Mensagem vazia" }); return; }
+
+  const loaded = await loadOwnInternalMessageForEdit(id, tenantId, req, res);
+  if (!loaded) return;
+  const { msg, conv } = loaded;
+  if (msg.type !== "text") { res.status(400).json({ error: "Só é possível editar mensagens de texto" }); return; }
+  if (msg.deletedAt) { res.status(400).json({ error: "Mensagem apagada não pode ser editada" }); return; }
+
+  const [updated] = await db.update(internalMessagesTable)
+    .set({ content: clean, editedAt: new Date() })
+    .where(eq(internalMessagesTable.id, id))
+    .returning();
+
+  // senderName/replyTo não vêm da tabela — são enriquecidos por join na
+  // listagem (GET .../messages), então repete aqui pro shape bater com o que
+  // o front-end (InternalMessage) espera.
+  const [sender] = await db.select({ name: usersTable.name }).from(usersTable).where(eq(usersTable.id, updated!.senderId)).limit(1);
+  const { replyTo } = await resolveReplyTo(updated!.replyToId ?? undefined, updated!.conversationId, tenantId);
+  const outMsg = { ...updated!, senderName: sender?.name ?? "", replyTo };
+
+  const recipients = await recipientsFor(conv);
+  broadcastInternal("internal_message_updated", { conversationId: msg.conversationId, messageId: id, content: outMsg.content, editedAt: outMsg.editedAt }, tenantId, recipients);
+  res.json(outMsg);
+});
+
+router.delete("/internal-chat/messages/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Mensagem inválida" }); return; }
+
+  const loaded = await loadOwnInternalMessageForEdit(id, tenantId, req, res);
+  if (!loaded) return;
+  const { msg, conv } = loaded;
+
+  const [sender] = await db.select({ name: usersTable.name }).from(usersTable).where(eq(usersTable.id, msg.senderId)).limit(1);
+  const { replyTo } = await resolveReplyTo(msg.replyToId ?? undefined, msg.conversationId, tenantId);
+  if (msg.deletedAt) { res.json({ ...msg, senderName: sender?.name ?? "", replyTo }); return; }
+
+  const [updated] = await db.update(internalMessagesTable)
+    .set({ deletedAt: new Date() })
+    .where(eq(internalMessagesTable.id, id))
+    .returning();
+  const outMsg = { ...updated!, senderName: sender?.name ?? "", replyTo };
+
+  const recipients = await recipientsFor(conv);
+  broadcastInternal("internal_message_updated", { conversationId: msg.conversationId, messageId: id, deletedAt: outMsg.deletedAt }, tenantId, recipients);
+  res.json(outMsg);
+});
+
 // ─── Enviar mídia (foto, áudio ou documento) ───────────────────────────────
 // Mesmo padrão do chat de clientes (base64 no corpo, validado por assinatura
 // do arquivo — ver POST /chat/conversations/:id/media): sem multer, o front

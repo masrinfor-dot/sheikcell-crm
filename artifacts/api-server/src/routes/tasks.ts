@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { db, tasksTable, sectorsTable, usersTable, taskCommentsTable, taskSubtasksTable, taskNotificationsTable, taskAssigneesTable } from "@workspace/db";
+import { db, tasksTable, sectorsTable, usersTable, taskCommentsTable, taskSubtasksTable, taskNotificationsTable, taskAssigneesTable, crmContactsTable, taskRemindersTable } from "@workspace/db";
 import { eq, and, desc, asc, inArray, sql } from "drizzle-orm";
 import { requireAuth, isGlobalRole, requireTenant } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
@@ -65,6 +65,27 @@ async function setTaskAssignees(taskId: number, tenantId: number, assigneeIds: n
   }
 }
 
+// Confere que o cliente informado (Agenda: compromisso vinculado a um
+// cliente do CRM) realmente existe e é da mesma loja — mesmo espírito do
+// cleanCategoryId em catalog.ts.
+async function resolveContactId(tenantId: number, raw: unknown): Promise<number | null | { error: string }> {
+  if (raw == null || raw === "") return null;
+  const id = Number(raw);
+  if (!Number.isInteger(id) || id <= 0) return { error: "Cliente inválido" };
+  const [row] = await db.select({ id: crmContactsTable.id }).from(crmContactsTable)
+    .where(and(eq(crmContactsTable.id, id), eq(crmContactsTable.tenantId, tenantId))).limit(1);
+  return row ? id : { error: "Cliente não encontrado" };
+}
+
+// Duração e alerta prévio: minutos, dentro de faixas razoáveis (evita valor
+// absurdo digitado errado virar um lembrete que nunca dispara ou dispara sem parar).
+function cleanMinutes(raw: unknown, max: number): number | null {
+  if (raw == null || raw === "") return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.min(Math.round(n), max);
+}
+
 const router: IRouter = Router();
 
 // Módulo "tarefas" contratado pela loja e liberado pro usuário.
@@ -80,11 +101,16 @@ async function enrichTask(t: typeof tasksTable.$inferSelect) {
   const sectorMap = Object.fromEntries(sectors.map((s) => [s.id, s]));
   const userMap = Object.fromEntries(users.map((u) => [u.id, u]));
   const assigneeIds = await getAssigneeIds(t.id);
+  const contact = t.contactId
+    ? (await db.select({ id: crmContactsTable.id, name: crmContactsTable.name, contact: crmContactsTable.contact })
+        .from(crmContactsTable).where(eq(crmContactsTable.id, t.contactId)).limit(1))[0] ?? null
+    : null;
   return {
     ...t,
     sector: t.sectorId ? (sectorMap[t.sectorId] ?? null) : null,
     assignees: assigneeIds.map((id) => userMap[id]).filter((u): u is { id: number; name: string } => u != null),
     createdBy: t.createdById ? (userMap[t.createdById] ?? null) : null,
+    contact,
   };
 }
 
@@ -169,11 +195,19 @@ router.get("/tasks", requireAuth, async (req, res): Promise<void> => {
   const subMap = Object.fromEntries(subCounts.map((s) => [s.taskId, s]));
   const comMap = Object.fromEntries(comCounts.map((c) => [c.taskId, c.total]));
 
+  const contactIds = [...new Set(visible.map((t) => t.contactId).filter((id): id is number => id != null))];
+  const contacts = contactIds.length > 0
+    ? await db.select({ id: crmContactsTable.id, name: crmContactsTable.name, contact: crmContactsTable.contact })
+        .from(crmContactsTable).where(inArray(crmContactsTable.id, contactIds))
+    : [];
+  const contactMap = Object.fromEntries(contacts.map((c) => [c.id, c]));
+
   res.json(visible.map((t) => ({
     ...t,
     sector: t.sectorId ? (sectorMap[t.sectorId] ?? null) : null,
     assignees: (assigneeMap.get(t.id) ?? []).map((id) => userMap[id]).filter((u): u is { id: number; name: string } => u != null),
     createdBy: t.createdById ? (userMap[t.createdById] ?? null) : null,
+    contact: t.contactId ? (contactMap[t.contactId] ?? null) : null,
     subtaskTotal: subMap[t.id]?.total ?? 0,
     subtaskDone: subMap[t.id]?.done ?? 0,
     commentCount: comMap[t.id] ?? 0,
@@ -319,6 +353,33 @@ router.post("/tasks/:id/notifications/read", requireAuth, async (req, res): Prom
   res.json({ ok: true });
 });
 
+// ─── Lembretes de compromisso da Agenda (alerta por horário) ────────────────
+router.get("/tasks/reminders/unread", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rows = await db.select().from(taskRemindersTable)
+    .where(and(
+      eq(taskRemindersTable.tenantId, tenantId),
+      eq(taskRemindersTable.recipientUserId, req.session.userId!),
+      eq(taskRemindersTable.read, false),
+    ))
+    .orderBy(desc(taskRemindersTable.createdAt))
+    .limit(20);
+  res.json(rows);
+});
+
+router.post("/tasks/reminders/:id/read", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  await db.update(taskRemindersTable).set({ read: true })
+    .where(and(
+      eq(taskRemindersTable.tenantId, tenantId),
+      eq(taskRemindersTable.id, id),
+      eq(taskRemindersTable.recipientUserId, req.session.userId!),
+    ));
+  res.json({ ok: true });
+});
+
 // ─── Subtarefas (checklist) ─────────────────────────────────────────────────
 router.get("/tasks/:id/subtasks", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
@@ -384,9 +445,10 @@ router.delete("/tasks/:id/subtasks/:subId", requireAuth, async (req, res): Promi
 // ─── Create task ─────────────────────────────────────────────────────────────
 router.post("/tasks", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { title, description, status, priority, assigneeIds, sectorId, dueDate } = req.body as {
+  const { title, description, status, priority, assigneeIds, sectorId, dueDate, contactId, durationMinutes, alertMinutesBefore } = req.body as {
     title?: string; description?: string; status?: string; priority?: string;
     assigneeIds?: number[] | null; sectorId?: number | null; dueDate?: string | null;
+    contactId?: number | null; durationMinutes?: number | null; alertMinutesBefore?: number | null;
   };
   if (!title || !title.trim()) { res.status(400).json({ error: "Título é obrigatório" }); return; }
   const userRole = req.session.userRole!;
@@ -396,6 +458,8 @@ router.post("/tasks", requireAuth, async (req, res): Promise<void> => {
   // Responsáveis só podem ser usuários da mesma loja (tenant).
   const resolvedAssignees = await resolveAssigneeIds(assigneeIds ?? undefined, tenantId);
   if ("error" in resolvedAssignees) { res.status(400).json({ error: resolvedAssignees.error }); return; }
+  const resolvedContact = await resolveContactId(tenantId, contactId);
+  if (resolvedContact != null && typeof resolvedContact === "object") { res.status(400).json({ error: resolvedContact.error }); return; }
   const [created] = await db.insert(tasksTable).values({
     tenantId,
     title: title.trim(),
@@ -405,6 +469,9 @@ router.post("/tasks", requireAuth, async (req, res): Promise<void> => {
     createdById: req.session.userId ?? null,
     sectorId: effectiveSectorId,
     dueDate: dueDate ? new Date(dueDate) : null,
+    contactId: resolvedContact,
+    durationMinutes: cleanMinutes(durationMinutes, 24 * 60),
+    alertMinutesBefore: cleanMinutes(alertMinutesBefore, 7 * 24 * 60),
   }).returning();
   if (resolvedAssignees.length > 0) await setTaskAssignees(created!.id, tenantId, resolvedAssignees);
   res.status(201).json(await enrichTask(created!));
@@ -418,10 +485,11 @@ router.patch("/tasks/:id", requireAuth, async (req, res): Promise<void> => {
   const existing = await loadTaskWithAccess(id, tenantId, req.session, res);
   if (!existing) return;
   const userRole = req.session.userRole!;
-  const { title, description, status, priority, assigneeIds, sectorId, dueDate, position, isArchived } = req.body as {
+  const { title, description, status, priority, assigneeIds, sectorId, dueDate, position, isArchived, contactId, durationMinutes, alertMinutesBefore } = req.body as {
     title?: string; description?: string; status?: string; priority?: string;
     assigneeIds?: number[] | null; sectorId?: number | null; dueDate?: string | null;
     position?: number; isArchived?: boolean;
+    contactId?: number | null; durationMinutes?: number | null; alertMinutesBefore?: number | null;
   };
   // Qualquer um dos responsáveis pode marcar a tarefa como concluída.
   // (Tarefas sem responsável podem ser concluídas por qualquer pessoa com acesso.)
@@ -446,6 +514,13 @@ router.patch("/tasks/:id", requireAuth, async (req, res): Promise<void> => {
   if (dueDate !== undefined) update.dueDate = dueDate ? new Date(dueDate) : null;
   if (position !== undefined) update.position = position;
   if (isArchived !== undefined) update.isArchived = isArchived;
+  if (contactId !== undefined) {
+    const resolvedContact = await resolveContactId(tenantId, contactId);
+    if (resolvedContact != null && typeof resolvedContact === "object") { res.status(400).json({ error: resolvedContact.error }); return; }
+    update.contactId = resolvedContact;
+  }
+  if (durationMinutes !== undefined) update.durationMinutes = cleanMinutes(durationMinutes, 24 * 60);
+  if (alertMinutesBefore !== undefined) update.alertMinutesBefore = cleanMinutes(alertMinutesBefore, 7 * 24 * 60);
   const [updated] = await db.update(tasksTable).set(update)
     .where(and(eq(tasksTable.id, id), eq(tasksTable.tenantId, tenantId))).returning();
   if (resolvedAssignees !== null) await setTaskAssignees(id, tenantId, resolvedAssignees);

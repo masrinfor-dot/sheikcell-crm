@@ -1,12 +1,39 @@
 import { Router, type IRouter } from "express";
-import { db, crmContactsTable, crmPurchasesTable, crmInternalNotesTable, crmCustomFieldsTable, sectorsTable, usersTable, attendanceLogsTable } from "@workspace/db";
+import { db, crmContactsTable, crmPurchasesTable, crmInternalNotesTable, crmCustomFieldsTable, sectorsTable, usersTable, attendanceLogsTable, conversationsTable } from "@workspace/db";
 import { eq, and, desc, asc, ilike, or, inArray } from "drizzle-orm";
 import { requireAuth, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import { isValidStoreName } from "./stores";
 import { broadcast } from "../lib/sseEmitter";
 import { normalizePhone, phoneVariants } from "../lib/phone";
+import { isPotentialConversation, restrictedRecipients } from "../lib/conversationScope";
 import type { Request } from "express";
+
+// Mantém o nome do Atendimento em sincronia quando o nome do cliente é
+// editado na ficha do CRM ("Informações"). Ficha do CRM e conversa do
+// Atendimento são registros separados (o histórico de atendimento não
+// depende do CRM), então sem isso o atendente edita o nome aqui e o
+// Atendimento continua mostrando o nome antigo (ex.: o nome que veio do
+// WhatsApp na primeira mensagem). Casa por telefone (todas as variantes —
+// com/sem 9º dígito, com/sem DDI) dentro da mesma loja.
+async function syncConversationNames(tenantId: number, phone: string | null, name: string): Promise<void> {
+  if (!phone) return;
+  const variants = phoneVariants(phone);
+  if (variants.length === 0) return;
+  const updated = await db.update(conversationsTable)
+    .set({ name, updatedAt: new Date() })
+    .where(and(eq(conversationsTable.tenantId, tenantId), inArray(conversationsTable.phone, variants)))
+    .returning();
+  for (const conv of updated) {
+    broadcast("conversation_updated", conv, {
+      tenantId: conv.tenantId,
+      sectorId: conv.sectorId,
+      sessionKey: conv.sessionKey,
+      isPotential: isPotentialConversation(conv),
+      restrictedTo: await restrictedRecipients(conv),
+    });
+  }
+}
 
 const router: IRouter = Router();
 
@@ -395,6 +422,11 @@ router.patch("/crm/:id", requireAuth, async (req, res): Promise<void> => {
     .where(and(eq(crmContactsTable.id, id), eq(crmContactsTable.tenantId, tenantId))).returning();
   const enriched = await enrichContact(updated);
   res.json(enriched);
+  // Nome editado aqui em "Informações" → reflete na conversa do Atendimento
+  // ligada ao mesmo telefone (ver syncConversationNames acima).
+  if (name !== undefined && name !== existing.name) {
+    void syncConversationNames(updated.tenantId, updated.phone, name).catch(() => {});
+  }
   // Archiving via PATCH is a removal for open boards.
   if (updated.isArchived) {
     broadcastContact("crm_contact_deleted", { id, sectorId: updated.sectorId }, updated.tenantId, updated.sectorId);

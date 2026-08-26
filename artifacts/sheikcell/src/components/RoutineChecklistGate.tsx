@@ -16,6 +16,12 @@ type Justification = { motivo: string; pendencia: string; comunicarA: string };
 const wantsEvidence = (q: PendingRoutine["questions"][number]) =>
   q.requiresEvidence || q.type === "photo" || q.type === "document";
 
+// Rotinas com mais de um horário por dia: um mesmo checklist pode aparecer
+// mais de uma vez em `pending` (uma por ocorrência ainda não respondida no
+// dia) — chave composta id+occurrenceTime em vez de só id, senão dispensar
+// ou responder uma ocorrência afetaria as outras do mesmo checklist.
+const occKey = (p: Pick<PendingRoutine, "id" | "occurrenceTime">) => `${p.id}:${p.occurrenceTime}`;
+
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -37,7 +43,7 @@ export default function RoutineChecklistGate() {
   const { toast } = useToast();
   const guard = useActivityGuard();
   const [pending, setPending] = useState<PendingRoutine[]>([]);
-  const [dismissed, setDismissed] = useState<Set<number>>(new Set());
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const [urgentUntil, setUrgentUntil] = useState<Record<number, number>>({});
   const [step, setStep] = useState<"password" | "questions">("password");
   const [password, setPassword] = useState("");
@@ -64,7 +70,7 @@ export default function RoutineChecklistGate() {
   }, [refresh]);
 
   const now = Date.now();
-  const current = pending.find((p) => !dismissed.has(p.id) && !(urgentUntil[p.id] > now));
+  const current = pending.find((p) => !dismissed.has(occKey(p)) && !(urgentUntil[p.id] > now));
   const waitingOnGuard = !!current?.mandatory && guard.isBusy();
 
   useEffect(() => {
@@ -77,7 +83,7 @@ export default function RoutineChecklistGate() {
     setJustifications({});
     setEvidenceFiles({});
     setEvidenceError({});
-  }, [current?.id]);
+  }, [current && occKey(current)]);
 
   useEffect(() => {
     // Checklist obrigatório com operação crítica em andamento: não trava
@@ -139,9 +145,11 @@ export default function RoutineChecklistGate() {
           ? { value, motivo: justifications[q.id]?.motivo ?? "", pendencia: justifications[q.id]?.pendencia || null, comunicarA: justifications[q.id]?.comunicarA || null }
           : value;
       }
-      await api.rotinas.respond(current.id, payload, evidenceFiles);
+      await api.rotinas.respond(current.id, payload, evidenceFiles, current.occurrenceTime);
       toast({ title: "Checklist enviado. Obrigado!" });
-      setPending((prev) => prev.filter((p) => p.id !== current.id));
+      // Só remove a ocorrência respondida — checklist com múltiplos
+      // horários pode ter outra ocorrência ainda pendente no mesmo dia.
+      setPending((prev) => prev.filter((p) => occKey(p) !== occKey(current)));
     } catch (err) {
       if (err instanceof ApiError && err.code === "REAUTH_REQUIRED") {
         // Confirmação expirou (passaram os 5 min) — pede a senha de novo.
@@ -156,7 +164,7 @@ export default function RoutineChecklistGate() {
     }
   };
 
-  const handleDismiss = () => setDismissed((prev) => new Set(prev).add(current.id));
+  const handleDismiss = () => setDismissed((prev) => new Set(prev).add(occKey(current)));
 
   const handleUrgentBypass = async () => {
     if (bypassing) return;
@@ -194,6 +202,9 @@ export default function RoutineChecklistGate() {
             <div className="flex items-center gap-2 mb-1">
               <KeyRound className="w-5 h-5 text-primary" />
               <h3 className="font-bold">{current.name}</h3>
+              {current.occurrenceTime && (
+                <span className="text-[11px] font-semibold text-primary bg-primary/10 rounded-full px-2 py-0.5">{current.occurrenceTime}</span>
+              )}
             </div>
             <p className="text-xs text-muted-foreground mb-4">
               {current.message || "Confirme sua senha pra responder este checklist."}
@@ -216,6 +227,9 @@ export default function RoutineChecklistGate() {
             <div className="flex items-center gap-2 mb-1">
               <ListChecks className="w-5 h-5 text-primary" />
               <h3 className="font-bold">{current.name}</h3>
+              {current.occurrenceTime && (
+                <span className="text-[11px] font-semibold text-primary bg-primary/10 rounded-full px-2 py-0.5">{current.occurrenceTime}</span>
+              )}
             </div>
             <p className="text-xs text-muted-foreground mb-4">
               {pending.length - dismissed.size > 1 ? `${pending.length - dismissed.size} pendentes` : "Preencha o checklist abaixo."}

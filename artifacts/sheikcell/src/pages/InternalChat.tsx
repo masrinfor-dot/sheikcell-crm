@@ -9,7 +9,7 @@ const INTERNAL_CHAT_EVENTS_URL = "/api/internal-chat/events";
 import {
   Users, Send, Plus, X, Search, MessagesSquare, ChevronLeft, SquareKanban, ClipboardPlus, Trash2, Pencil,
   Paperclip, Mic, Square, Reply, Forward, FileText, Volume2, Loader2, SpellCheck, RefreshCw, Pin, PinOff,
-  FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Image,
+  FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Image, Check, Ban,
 } from "lucide-react";
 import TaskBoard from "./TaskBoard";
 
@@ -437,10 +437,17 @@ export default function InternalChat({ docked = false, onActiveConversationChang
     // como patch parcial, não a mensagem inteira.
     const onMessageUpdated = (e: Event) => {
       const payload = JSON.parse((e as MessageEvent).data) as
-        { conversationId: number; messageId: number; transcript?: string; metadata?: MessageMetadata };
+        { conversationId: number; messageId: number; transcript?: string; metadata?: MessageMetadata; content?: string; editedAt?: string | null; deletedAt?: string | null };
       if (activeIdRef.current === payload.conversationId) {
         setMessages((prev) => prev.map((m) => (m.id === payload.messageId
-          ? { ...m, ...(payload.transcript !== undefined ? { transcript: payload.transcript } : {}), ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}) }
+          ? {
+              ...m,
+              ...(payload.transcript !== undefined ? { transcript: payload.transcript } : {}),
+              ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
+              ...(payload.content !== undefined ? { content: payload.content } : {}),
+              ...(payload.editedAt !== undefined ? { editedAt: payload.editedAt } : {}),
+              ...(payload.deletedAt !== undefined ? { deletedAt: payload.deletedAt } : {}),
+            }
           : m)));
       }
     };
@@ -818,6 +825,39 @@ export default function InternalChat({ docked = false, onActiveConversationChang
       toast({ title: "Erro ao desafixar mensagem", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     } finally { setPinning(false); }
   };
+
+  // ── Editar/apagar mensagem própria (igual ao Atendimento) — só o registro
+  // aqui dentro do sistema; ver comentário no backend (internalChat.ts).
+  // setMessages aqui é só um fallback imediato: o SSE internal_message_updated
+  // já aplica a mesma atualização pra qualquer aba/dispositivo aberto.
+  const [editingMsgId, setEditingMsgId] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
+  const startEditMsg = (m: InternalMessage) => { setEditingMsgId(m.id); setEditDraft(m.content); };
+  const cancelEditMsg = () => setEditingMsgId(null);
+  const saveEditMsg = async (id: number) => {
+    const trimmed = editDraft.trim();
+    if (!trimmed) return;
+    const current = messages.find((m) => m.id === id);
+    if (current && trimmed === current.content) { setEditingMsgId(null); return; }
+    setSavingEdit(true);
+    try {
+      const updated = await api.internalChat.editMessage(id, trimmed);
+      setMessages((prev) => prev.map((m) => (m.id === id ? updated : m)));
+      setEditingMsgId(null);
+    } catch (err) {
+      toast({ title: "Erro ao editar mensagem", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    } finally { setSavingEdit(false); }
+  };
+  const handleDeleteMsg = async (id: number) => {
+    if (!window.confirm("Apagar esta mensagem? Ela vira \"mensagem apagada\" pra quem já estiver na conversa.")) return;
+    try {
+      const updated = await api.internalChat.deleteMessage(id);
+      setMessages((prev) => prev.map((m) => (m.id === id ? updated : m)));
+    } catch (err) {
+      toast({ title: "Erro ao apagar mensagem", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    }
+  };
   // Responder direto à mensagem fixada: abre a citação sem precisar achar a
   // mensagem original na lista — se ainda estiver carregada, cita com dados
   // completos; senão monta uma citação mínima só com o que o banner já tem.
@@ -1030,6 +1070,13 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                 {messages.map((m) => {
                   const mine = m.senderId === user?.id;
                   const caption = m.type !== "text" ? extractCaption(m.content) : "";
+                  // Editar/apagar (igual ao Atendimento): só quem enviou — chat
+                  // interno não tem admin/supervisor "moderando" mensagem de
+                  // outro membro na tela, só o backend permite isso caso um dia
+                  // seja preciso (ver internalChat.ts).
+                  const isEditingThis = editingMsgId === m.id;
+                  const canManageMsg = mine && !m.deletedAt;
+                  const canEditText = canManageMsg && m.type === "text";
                   const toolbar = (
                     <div className="opacity-0 group-hover:opacity-100 transition flex items-center gap-0.5 shrink-0">
                       {canEditModule(user, "tarefas") && (
@@ -1071,6 +1118,26 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                           </button>
                         </>
                       )}
+                      {canEditText && !isEditingThis && (
+                        <button
+                          onClick={() => startEditMsg(m)}
+                          data-testid={`button-edit-msg-${m.id}`}
+                          title="Editar mensagem"
+                          className="p-1.5 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      {canManageMsg && !isEditingThis && (
+                        <button
+                          onClick={() => handleDeleteMsg(m.id)}
+                          data-testid={`button-delete-msg-${m.id}`}
+                          title="Apagar mensagem"
+                          className="p-1.5 rounded-md text-muted-foreground hover:text-red-600 hover:bg-red-50"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
                   );
                   return (
@@ -1105,22 +1172,57 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                             <div className={`text-xs truncate ${mine ? "text-white/80" : "text-muted-foreground"}`}>{replyPreviewText(m.replyTo)}</div>
                           </button>
                         )}
-                        {m.type !== "text" && m.mediaUrl && <InternalMediaContent msg={m} onTranscribed={onTranscribed} />}
-                        {m.type !== "text" && !m.mediaUrl && (
-                          <div className={`flex items-center gap-2 text-sm italic ${mine ? "text-white/80" : "text-muted-foreground"}`}>
-                            {m.type === "image" && <Image className="w-4 h-4 shrink-0" />}
-                            {m.type === "audio" && <Volume2 className="w-4 h-4 shrink-0" />}
-                            {m.type === "doc" && <FileText className="w-4 h-4 shrink-0" />}
-                            <span>Enviando…{caption ? ` ${caption}` : ""}</span>
+                        {isEditingThis ? (
+                          <div className="space-y-1.5">
+                            <textarea
+                              value={editDraft}
+                              onChange={(e) => setEditDraft(e.target.value)}
+                              autoFocus
+                              rows={2}
+                              data-testid={`textarea-edit-${m.id}`}
+                              className="w-full text-sm border border-border rounded-lg px-2 py-1.5 outline-none focus:ring-2 focus:ring-primary/30 resize-none bg-white text-foreground"
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void saveEditMsg(m.id); }
+                                if (e.key === "Escape") { e.preventDefault(); cancelEditMsg(); }
+                              }}
+                            />
+                            <div className="flex items-center justify-end gap-1.5">
+                              <button type="button" onClick={cancelEditMsg} disabled={savingEdit} data-testid={`button-cancel-edit-${m.id}`}
+                                className={`p-1.5 rounded-full transition disabled:opacity-40 ${mine ? "text-white/80 hover:bg-white/10" : "text-muted-foreground hover:bg-black/5"}`}>
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                              <button type="button" onClick={() => saveEditMsg(m.id)} disabled={savingEdit || !editDraft.trim()} data-testid={`button-save-edit-${m.id}`}
+                                className={`p-1.5 rounded-full transition disabled:opacity-40 ${mine ? "text-white hover:bg-white/10" : "text-primary hover:bg-primary/10"}`}>
+                                {savingEdit ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                              </button>
+                            </div>
                           </div>
-                        )}
-                        {(m.type === "text" || (caption && m.mediaUrl)) && (
-                          <div className="text-sm whitespace-pre-wrap break-words">
-                            {renderWithMentions(m.type === "text" ? m.content : caption, teamNames, user?.name, mine)}
+                        ) : m.deletedAt ? (
+                          <div className={`flex items-center gap-1.5 text-sm italic ${mine ? "text-white/70" : "text-muted-foreground"}`}>
+                            <Ban className="w-3.5 h-3.5 shrink-0" />
+                            <span>Mensagem apagada</span>
                           </div>
+                        ) : (
+                          <>
+                            {m.type !== "text" && m.mediaUrl && <InternalMediaContent msg={m} onTranscribed={onTranscribed} />}
+                            {m.type !== "text" && !m.mediaUrl && (
+                              <div className={`flex items-center gap-2 text-sm italic ${mine ? "text-white/80" : "text-muted-foreground"}`}>
+                                {m.type === "image" && <Image className="w-4 h-4 shrink-0" />}
+                                {m.type === "audio" && <Volume2 className="w-4 h-4 shrink-0" />}
+                                {m.type === "doc" && <FileText className="w-4 h-4 shrink-0" />}
+                                <span>Enviando…{caption ? ` ${caption}` : ""}</span>
+                              </div>
+                            )}
+                            {(m.type === "text" || (caption && m.mediaUrl)) && (
+                              <div className="text-sm whitespace-pre-wrap break-words">
+                                {renderWithMentions(m.type === "text" ? m.content : caption, teamNames, user?.name, mine)}
+                              </div>
+                            )}
+                            {m.type === "text" && m.metadata?.linkPreview && <LinkPreviewCard preview={m.metadata.linkPreview} />}
+                          </>
                         )}
-                        {m.type === "text" && m.metadata?.linkPreview && <LinkPreviewCard preview={m.metadata.linkPreview} />}
                         <div className={`flex items-center justify-end gap-1 text-[10px] mt-0.5 ${mine ? "text-white/70" : "text-muted-foreground"}`}>
+                          {m.editedAt && !m.deletedAt && <span className="italic mr-1">editado</span>}
                           {timeLabel(m.createdAt)}
                         </div>
                       </div>
@@ -1213,17 +1315,26 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                         insertMention(mentionOptions[0].name);
                         return;
                       }
-                      // Enter e Shift+Enter só quebram linha (comportamento padrão do
-                      // textarea); enviar é só pelo botão ou Ctrl/Cmd+Enter.
-                      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                      // Igual ao Atendimento: Enter envia, Shift+Enter quebra linha.
+                      if (e.key === "Enter" && !e.shiftKey) {
                         e.preventDefault();
                         handleSend();
                         return;
                       }
                       if (e.key === "Escape") setMentionQuery(null);
                     }}
-                    placeholder="Escreva uma mensagem... (Enter quebra linha, Ctrl+Enter envia)"
-                    title="Enter quebra linha. Envie pelo botão ou com Ctrl+Enter."
+                    onPaste={(e) => {
+                      const images = Array.from(e.clipboardData.items)
+                        .filter((item) => item.type.startsWith("image/"))
+                        .map((item) => item.getAsFile())
+                        .filter((f): f is File => f != null);
+                      if (images.length > 0) {
+                        e.preventDefault();
+                        pickAttachment(images[0]!);
+                      }
+                    }}
+                    placeholder="Escreva uma mensagem... (Enter envia, Shift+Enter quebra linha)"
+                    title="Enter envia. Shift+Enter quebra linha."
                     spellCheck
                     lang="pt-BR"
                     rows={1}

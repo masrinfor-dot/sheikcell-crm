@@ -3,7 +3,7 @@ import {
   employeesTable, usersTable,
 } from "@workspace/db";
 import { eq, and, isNotNull } from "drizzle-orm";
-import { todayInfo, isDueToday, resolveUserContext, scopeMatchesUser, isOnLeaveToday } from "./routinesShared";
+import { todayInfo, isDueToday, resolveUserContext, scopeMatchesUser, isOnLeaveToday, checklistOccurrences } from "./routinesShared";
 import { broadcast } from "./sseEmitter";
 import { logger } from "./logger";
 
@@ -51,16 +51,19 @@ export async function generateRoutineAlerts(): Promise<number> {
   let created = 0;
 
   // ── Gatilho 1: atraso ────────────────────────────────────────────────
+  // Rotinas com mais de um horário por dia: cada ocorrência atrasada gera
+  // seu próprio alerta (dedupeKey inclui o horário só quando o checklist
+  // tem de fato múltiplos horários — occurrenceTime="" pro caso de horário
+  // único mantém o dedupeKey idêntico a antes, nenhum alerta duplica).
   const mandatoryChecklists = await db.select().from(routineChecklistsTable)
     .where(and(eq(routineChecklistsTable.active, true), eq(routineChecklistsTable.mandatory, true)));
-  const lateToday = mandatoryChecklists.filter((c) => {
-    if (c.recurrence === "continuous" || !c.scheduledTime) return false; // sem horário fixo, não "atrasa"
-    if (!isDueToday(c, info)) return false;
-    const deadline = parseInt(c.scheduledTime.slice(0, 2), 10) * 60 + parseInt(c.scheduledTime.slice(3, 5), 10) + c.toleranceMinutes;
-    return info.nowMinutes > deadline;
-  });
 
-  for (const c of lateToday) {
+  for (const c of mandatoryChecklists) {
+    if (c.recurrence === "continuous" || !c.scheduledTime) continue; // sem horário fixo, não "atrasa"
+    if (!isDueToday(c, info)) continue;
+    const lateOccs = checklistOccurrences(c).filter((occ) => occ.minutes != null && info.nowMinutes > occ.minutes + c.toleranceMinutes);
+    if (!lateOccs.length) continue;
+
     try {
       const scopes = await db.select().from(routineChecklistScopesTable).where(eq(routineChecklistScopesTable.checklistId, c.id));
       if (!scopes.length) continue;
@@ -71,22 +74,26 @@ export async function generateRoutineAlerts(): Promise<number> {
         const ctx = await resolveUserContext(c.tenantId, emp.userId);
         if (!scopes.some((s) => scopeMatchesUser(s, ctx, emp.userId!))) continue;
         if (await isOnLeaveToday(c.tenantId, ctx.employeeId, info.dateKey)) continue;
-        const [resp] = await db.select({ id: routineResponsesTable.id }).from(routineResponsesTable)
-          .where(and(
-            eq(routineResponsesTable.tenantId, c.tenantId), eq(routineResponsesTable.checklistId, c.id),
-            eq(routineResponsesTable.userId, emp.userId), eq(routineResponsesTable.periodKey, info.dateKey),
-          ));
-        if (resp) continue;
 
-        const recipients = await recipientsForStore(c.tenantId, ctx.storeId);
-        for (const recipientUserId of recipients) {
-          const ok = await createAlert({
-            tenantId: c.tenantId, recipientUserId, employeeUserId: emp.userId, employeeName: emp.name,
-            checklistId: c.id, checklistName: c.name, kind: "atraso",
-            message: `${emp.name} não respondeu "${c.name}" dentro do prazo hoje.`,
-            dedupeKey: `${recipientUserId}:${emp.userId}:${c.id}:atraso:${info.dateKey}`,
-          });
-          if (ok) created++;
+        for (const occ of lateOccs) {
+          const [resp] = await db.select({ id: routineResponsesTable.id }).from(routineResponsesTable)
+            .where(and(
+              eq(routineResponsesTable.tenantId, c.tenantId), eq(routineResponsesTable.checklistId, c.id),
+              eq(routineResponsesTable.userId, emp.userId), eq(routineResponsesTable.periodKey, info.dateKey),
+              eq(routineResponsesTable.occurrenceTime, occ.occurrenceTime),
+            ));
+          if (resp) continue;
+
+          const recipients = await recipientsForStore(c.tenantId, ctx.storeId);
+          for (const recipientUserId of recipients) {
+            const ok = await createAlert({
+              tenantId: c.tenantId, recipientUserId, employeeUserId: emp.userId, employeeName: emp.name,
+              checklistId: c.id, checklistName: c.name, kind: "atraso",
+              message: `${emp.name} não respondeu "${c.name}"${occ.occurrenceTime ? ` (${occ.occurrenceTime})` : ""} dentro do prazo hoje.`,
+              dedupeKey: `${recipientUserId}:${emp.userId}:${c.id}:atraso:${info.dateKey}${occ.occurrenceTime ? `:${occ.occurrenceTime}` : ""}`,
+            });
+            if (ok) created++;
+          }
         }
       }
     } catch (err) {

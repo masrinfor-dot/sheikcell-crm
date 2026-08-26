@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, Fragment } from "react";
 import { createPortal } from "react-dom";
 import { api, can, ApiError, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -12,7 +12,7 @@ import {
   Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX, Zap, CalendarClock, AlertTriangle,
   Pin, PinOff, Reply, StickyNote, Star, StarOff, ChevronLeft, ChevronRight,
   MapPin, ShoppingBag, CreditCard, BarChart3, Ban, UserPlus, ExternalLink,
-  FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Download, Maximize2,
+  FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Download, Maximize2, Pencil,
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -145,6 +145,30 @@ function timeAgo(iso: string | null): string {
 
 function msgTime(iso: string): string {
   return new Date(iso).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+}
+
+// ─── Agrupamento de mensagens por dia (Hoje/Ontem) ──────────────────────────
+// Usa o mesmo fuso fixo que o resto do sistema já usa em toda parte (Rotinas,
+// Ponto etc. — ver routinesShared.ts no backend): hoje não existe fuso
+// configurável por loja no schema, então repetir "America/Sao_Paulo" aqui
+// mantém uma única fonte de verdade de "que dia é hoje" em vez de inventar
+// uma segunda regra só pro chat. Calculado no fuso do NEGÓCIO (não no fuso do
+// navegador de quem está vendo), pra que dois atendentes em fusos diferentes
+// vejam sempre a mesma separação de dia na mesma conversa.
+const TENANT_TIMEZONE = "America/Sao_Paulo";
+
+function msgDayKey(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-CA", { timeZone: TENANT_TIMEZONE });
+}
+
+function msgDayLabel(iso: string): string {
+  const key = msgDayKey(iso);
+  const now = new Date();
+  const todayKey = now.toLocaleDateString("en-CA", { timeZone: TENANT_TIMEZONE });
+  const yesterdayKey = new Date(now.getTime() - 86_400_000).toLocaleDateString("en-CA", { timeZone: TENANT_TIMEZONE });
+  if (key === todayKey) return "Hoje";
+  if (key === yesterdayKey) return "Ontem";
+  return new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", timeZone: TENANT_TIMEZONE });
 }
 
 // ─── Avatar ────────────────────────────────────────────────────────────────
@@ -707,15 +731,42 @@ function IconTextCard({ icon: Icon, content }: { icon: typeof CreditCard; conten
 }
 
 // ─── Message bubble ─────────────────────────────────────────────────────────
-function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConversation }: {
+function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConversation, currentUserId, isModerator, onEdit, onDelete }: {
   msg: ChatMessage;
   onReply: (m: ChatMessage) => void;
   highlighted: boolean;
   onJumpTo: (id: number) => void;
   isGroup: boolean;
   onStartConversation?: (c: { name: string; phone: string | null }) => void;
+  currentUserId?: number;
+  isModerator?: boolean;
+  onEdit: (id: number, content: string) => Promise<void>;
+  onDelete: (id: number) => Promise<void>;
 }) {
   const out = msg.direction === "outbound";
+  // Editar/apagar (igual WhatsApp): só quem enviou, ou admin/supervisor —
+  // e só o registro aqui dentro do sistema (ver comentário em chat.ts).
+  const canManage = out && !msg.deletedAt && ((currentUserId != null && msg.senderId === currentUserId) || !!isModerator);
+  const canEditText = canManage && msg.type === "text";
+  const [editing, setEditing] = useState(false);
+  const [editDraft, setEditDraft] = useState(msg.content);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const startEdit = () => { setEditDraft(msg.content); setEditing(true); };
+  const saveEdit = async () => {
+    const trimmed = editDraft.trim();
+    if (!trimmed) return;
+    if (trimmed === msg.content) { setEditing(false); return; }
+    setSavingEdit(true);
+    try {
+      await onEdit(msg.id, trimmed);
+      setEditing(false);
+    } catch { /* toast já disparado pelo pai; mantém aberto pra tentar de novo */ }
+    finally { setSavingEdit(false); }
+  };
+  const confirmDelete = () => {
+    if (!window.confirm("Apagar esta mensagem? Ela some do seu histórico e vira \"mensagem apagada\" pra quem já estiver na conversa.")) return;
+    onDelete(msg.id).catch(() => {});
+  };
   const isMedia = msg.type === "image" || msg.type === "video" || msg.type === "audio" || msg.type === "doc" || msg.type === "sticker";
   const mediaCaption = isMedia ? extractMediaCaption(msg.content) : "";
   const showCaption = isMedia && msg.mediaUrl && mediaCaption.length > 0;
@@ -755,12 +806,37 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConver
     </button>
   );
 
+  // Editar/apagar (igual WhatsApp) — só aparece com hover, do lado da
+  // conversa igual ao botão de responder; some enquanto está editando.
+  const manageButtons = canManage && !editing ? (
+    <>
+      {canEditText && (
+        <button
+          onClick={startEdit}
+          data-testid={`button-edit-msg-${msg.id}`}
+          title="Editar mensagem"
+          className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-full text-gray-500 hover:text-primary hover:bg-black/5 shrink-0"
+        >
+          <Pencil className="w-3.5 h-3.5" />
+        </button>
+      )}
+      <button
+        onClick={confirmDelete}
+        data-testid={`button-delete-msg-${msg.id}`}
+        title="Apagar mensagem"
+        className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-full text-gray-500 hover:text-red-600 hover:bg-red-50 shrink-0"
+      >
+        <Trash2 className="w-3.5 h-3.5" />
+      </button>
+    </>
+  ) : null;
+
   return (
     <div
       id={`chat-msg-${msg.id}`}
       className={`group flex items-center gap-1 mb-1 transition-colors duration-500 rounded-lg ${out ? "justify-end" : "justify-start"} ${highlighted ? "bg-amber-200/60" : ""}`}
     >
-      {out && replyButton}
+      {out && <>{manageButtons}{replyButton}</>}
       <div className={`max-w-[75%] rounded-2xl px-3 py-2 shadow-sm ${out ? "bg-[#dcf8c6] rounded-br-sm" : "bg-white rounded-bl-sm border border-border"}`}>
         {!out && msg.senderName && (
           isGroup && msg.senderPhone && onStartConversation ? (
@@ -792,7 +868,32 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConver
             <div className="text-xs text-gray-600 truncate">{msg.replyTo.content}</div>
           </button>
         )}
-        {msg.deletedAt ? (
+        {editing ? (
+          <div className="space-y-1.5">
+            <textarea
+              value={editDraft}
+              onChange={(e) => setEditDraft(e.target.value)}
+              autoFocus
+              rows={2}
+              data-testid={`textarea-edit-${msg.id}`}
+              className="w-full text-sm border border-border rounded-lg px-2 py-1.5 outline-none focus:ring-2 focus:ring-primary/30 resize-none bg-white"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveEdit(); }
+                if (e.key === "Escape") { e.preventDefault(); setEditing(false); }
+              }}
+            />
+            <div className="flex items-center justify-end gap-1.5">
+              <button type="button" onClick={() => setEditing(false)} disabled={savingEdit} data-testid={`button-cancel-edit-${msg.id}`}
+                className="p-1.5 rounded-full text-gray-500 hover:bg-black/5 transition disabled:opacity-40">
+                <X className="w-3.5 h-3.5" />
+              </button>
+              <button type="button" onClick={saveEdit} disabled={savingEdit || !editDraft.trim()} data-testid={`button-save-edit-${msg.id}`}
+                className="p-1.5 rounded-full text-primary hover:bg-primary/10 transition disabled:opacity-40">
+                {savingEdit ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+              </button>
+            </div>
+          </div>
+        ) : msg.deletedAt ? (
           <div className="flex items-center gap-1.5 text-sm text-gray-400 italic">
             <Ban className="w-3.5 h-3.5 shrink-0" />
             <span>Esta mensagem foi apagada</span>
@@ -992,6 +1093,9 @@ export default function ChatCenter({
   const [nowTick, setNowTick] = useState(() => Date.now());
   const alertedRef = useRef<Set<number>>(new Set());
   // Finalizar atendimento: modal para capturar o motivo da finalização.
+  // Opções editáveis pelo admin em Configurações → Aparência (api.settings) —
+  // começa com o padrão embutido e é substituída assim que /settings carrega.
+  const [finalizeReasonOptions, setFinalizeReasonOptions] = useState<string[]>([...FINALIZE_REASONS]);
   const [finalizeTarget, setFinalizeTarget] = useState<number | null>(null);
   const [finalizeReason, setFinalizeReason] = useState<string>(FINALIZE_REASONS[0]);
   const [finalizeDetail, setFinalizeDetail] = useState("");
@@ -1025,6 +1129,9 @@ export default function ChatCenter({
 
   const [filePreview, setFilePreview] = useState<FilePreviewItem[] | null>(null);
   const [caption, setCaption] = useState("");
+  // Arrastar arquivo da área de trabalho direto pra janela do Atendimento.
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const dragCounter = useRef(0);
   // { current, total } enquanto envia um lote de vários arquivos em sequência
   // (a API só manda uma mídia por mensagem — não existe "álbum" de verdade
   // no envio, cada foto vira uma mensagem própria, uma atrás da outra).
@@ -1656,6 +1763,9 @@ export default function ChatCenter({
     api.settings.get().then((s) => {
       setAlertEnabled(s.alertUnansweredEnabled); setAlertMinutes(s.alertUnansweredMinutes);
       setCfgOutboundHourly(s.outboundHourlyLimit); setCfgOutboundDaily(s.outboundDailyLimit);
+      // "Outro" nunca vem do backend — é sempre a última opção fixa aqui,
+      // porque a UI depende dela pra abrir o campo de descrição livre.
+      setFinalizeReasonOptions([...s.finalizeReasons, "Outro"]);
     }).catch(() => {});
     api.chat.quickReplies.list().then(setQuickReplies).catch(() => {});
     api.chat.labels.list().then(setLabels).catch(() => {});
@@ -1746,6 +1856,28 @@ export default function ChatCenter({
       setReplyTarget(replyingTo);
       toast({ title: isNote ? "Erro ao salvar nota" : "Erro ao enviar mensagem", variant: "destructive" });
     } finally { setSending(false); guard.unregister("send-text"); }
+  };
+
+  // Editar/apagar mensagem própria — só o registro aqui dentro do sistema
+  // (ver comentário em chat.ts sobre não revogar no WhatsApp do cliente).
+  // setMessages aqui é só um fallback imediato: o SSE message_updated já
+  // aplica a mesma atualização pra qualquer aba/dispositivo aberto.
+  const handleEditMessage = async (messageId: number, content: string) => {
+    try {
+      const updated = await api.chat.editMessage(messageId, content);
+      setMessages((prev) => prev.map((m) => (m.id === messageId ? updated : m)));
+    } catch (err) {
+      toast({ title: "Erro ao editar mensagem", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+      throw err;
+    }
+  };
+  const handleDeleteMessage = async (messageId: number) => {
+    try {
+      const updated = await api.chat.deleteMessage(messageId);
+      setMessages((prev) => prev.map((m) => (m.id === messageId ? updated : m)));
+    } catch (err) {
+      toast({ title: "Erro ao apagar mensagem", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    }
   };
 
   // ── Send one file (image, video, audio ou documento) — usado tanto pra um
@@ -1961,6 +2093,38 @@ export default function ChatCenter({
     }
   };
 
+  // ── Arrastar arquivo da área de trabalho pra dentro da janela do chat ──
+  // Usa um contador (em vez de um booleano simples) porque o navegador
+  // dispara dragEnter/dragLeave pra cada elemento filho sobrevoado — sem
+  // contar, a barrinha de "solte aqui" pisca ao passar por cima dos filhos.
+  const handleDragEnter = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault();
+    dragCounter.current += 1;
+    setIsDraggingFile(true);
+  };
+  const handleDragOver = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault();
+  };
+  const handleDragLeave = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault();
+    dragCounter.current = Math.max(0, dragCounter.current - 1);
+    if (dragCounter.current === 0) setIsDraggingFile(false);
+  };
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounter.current = 0;
+    setIsDraggingFile(false);
+    if (!can(user, "enviar_midia")) {
+      toast({ title: "Você não tem permissão para enviar arquivos", variant: "destructive" });
+      return;
+    }
+    const files = Array.from(e.dataTransfer.files ?? []);
+    if (files.length > 0) handleFilesSelected(files);
+  };
+
   const handleRemoveFilePreview = (file: File) => {
     setFilePreview((prev) => {
       const target = prev?.find((p) => p.file === file);
@@ -2076,7 +2240,7 @@ export default function ChatCenter({
 
   const handleFinalize = (id: number) => {
     setFinalizeTarget(id);
-    setFinalizeReason(FINALIZE_REASONS[0]);
+    setFinalizeReason(finalizeReasonOptions[0] ?? FINALIZE_REASONS[0]);
     setFinalizeDetail("");
     setFinalizeHadSale(null);
     setFinalizeSaleAmount("");
@@ -2866,7 +3030,21 @@ export default function ChatCenter({
         </div>
       ) : (
         <div className="flex-1 flex min-w-0">
-        <div className="flex-1 flex flex-col min-w-0">
+        <div
+          className="flex-1 flex flex-col min-w-0 relative"
+          onDragEnter={handleDragEnter}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+        >
+          {isDraggingFile && (
+            <div className="absolute inset-0 z-50 flex items-center justify-center bg-primary/10 border-4 border-dashed border-primary/50 pointer-events-none">
+              <div className="bg-white rounded-2xl shadow-lg px-6 py-4 flex items-center gap-3">
+                <Paperclip className="w-6 h-6 text-primary" />
+                <span className="font-semibold text-sm text-foreground">Solte o arquivo aqui para enviar</span>
+              </div>
+            </div>
+          )}
           {/* Chat header */}
           <div className="bg-[#ededed] border-b border-border px-2 md:px-4 py-2.5 flex items-center gap-2 md:gap-3 flex-wrap md:flex-nowrap">
             <button
@@ -3197,17 +3375,33 @@ export default function ChatCenter({
                     </button>
                   </div>
                 )}
-                {messages.map((msg) => (
-                  <MsgBubble
-                    key={msg.id}
-                    msg={msg}
-                    onReply={setReplyTarget}
-                    highlighted={highlightedMsgId === msg.id}
-                    onJumpTo={scrollToMessage}
-                    isGroup={!!activeConv && isGroupConv(activeConv)}
-                    onStartConversation={can(user, "criar_atendimento") ? startConversationWith : undefined}
-                  />
-                ))}
+                {messages.map((msg, msgIdx) => {
+                  const prevMsg = messages[msgIdx - 1];
+                  const showDaySeparator = !prevMsg || msgDayKey(msg.createdAt) !== msgDayKey(prevMsg.createdAt);
+                  return (
+                    <Fragment key={msg.id}>
+                      {showDaySeparator && (
+                        <div className="flex justify-center my-2" data-testid={`day-separator-${msgDayKey(msg.createdAt)}`}>
+                          <span className="text-[11px] font-medium text-muted-foreground bg-white/90 px-3 py-1 rounded-full shadow-sm border border-border">
+                            {msgDayLabel(msg.createdAt)}
+                          </span>
+                        </div>
+                      )}
+                      <MsgBubble
+                        msg={msg}
+                        onReply={setReplyTarget}
+                        highlighted={highlightedMsgId === msg.id}
+                        onJumpTo={scrollToMessage}
+                        isGroup={!!activeConv && isGroupConv(activeConv)}
+                        onStartConversation={can(user, "criar_atendimento") ? startConversationWith : undefined}
+                        currentUserId={user?.id}
+                        isModerator={user?.role === "admin" || user?.role === "supervisor"}
+                        onEdit={handleEditMessage}
+                        onDelete={handleDeleteMessage}
+                      />
+                    </Fragment>
+                  );
+                })}
                 <div ref={msgsEndRef} />
               </>
             )}
@@ -4155,7 +4349,7 @@ export default function ChatCenter({
               <select value={finalizeReason} onChange={(e) => setFinalizeReason(e.target.value)}
                 data-testid="select-finalize-reason"
                 className="w-full px-3 py-2 rounded-xl border border-border text-sm">
-                {FINALIZE_REASONS.map((r) => <option key={r} value={r}>{r}</option>)}
+                {finalizeReasonOptions.map((r) => <option key={r} value={r}>{r}</option>)}
               </select>
             </div>
             {finalizeReason === "Outro" && (

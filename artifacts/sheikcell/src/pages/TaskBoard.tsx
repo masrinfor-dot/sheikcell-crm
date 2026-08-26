@@ -1,13 +1,17 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { api, canEditModule, type Task, type TaskStatus, type TaskPriority, type Sector, type TaskComment, type TaskSubtask, type TaskReportBucket } from "@/lib/api";
+import { api, canEditModule, type Task, type TaskStatus, type TaskPriority, type Sector, type TaskComment, type TaskSubtask, type TaskReportBucket, type TaskReminder, type CrmContact } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
+import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
 import {
   Plus, X, RefreshCw, Trash2, ChevronRight, ChevronLeft,
   User, Calendar, Flag, ListTodo, Pencil, AlertCircle,
   MessageSquare, CheckSquare, Send, BarChart3,
   ChevronUp, ChevronDown, Paperclip, FileText, Clock,
+  Bell, Search, Users2,
 } from "lucide-react";
+
+const EVENTS_URL = "/api/chat/events";
 
 const COLUMNS = [
   { key: "todo"  as const, label: "A Fazer",       color: "bg-slate-400",  light: "bg-slate-50",  border: "border-slate-200",  text: "text-slate-700"  },
@@ -26,12 +30,59 @@ type TeamUser = { id: number; name: string; role: string };
 type TaskFormData = {
   title: string; description: string; status: TaskStatus; priority: TaskPriority;
   assigneeIds: number[]; sectorId: string; dueDate: string;
+  // Agenda: cliente vinculado (id + rótulo pra mostrar no campo de busca),
+  // duração em minutos e alerta prévio em minutos (string vazia = sem alerta).
+  contactId: string; contactLabel: string; durationMinutes: string; alertMinutesBefore: string;
 };
 
 const emptyForm: TaskFormData = {
   title: "", description: "", status: "todo", priority: "media",
   assigneeIds: [], sectorId: "", dueDate: "",
+  contactId: "", contactLabel: "", durationMinutes: "", alertMinutesBefore: "15",
 };
+
+const DURATION_OPTIONS = [15, 30, 45, 60, 90, 120] as const;
+const ALERT_OPTIONS = [
+  { value: "", label: "Sem alerta" },
+  { value: "5", label: "5 min antes" },
+  { value: "15", label: "15 min antes" },
+  { value: "30", label: "30 min antes" },
+  { value: "60", label: "1 hora antes" },
+  { value: "1440", label: "1 dia antes" },
+] as const;
+
+// dueDate vem do banco em ISO (UTC); <input type="datetime-local"> precisa
+// de "YYYY-MM-DDTHH:mm" no fuso LOCAL do navegador — sem isso o horário
+// mostrado no formulário fica errado (deslocado pelo fuso).
+function toDatetimeLocal(iso: string): string {
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function fmtTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+}
+
+function dayKey(iso: string): string {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// Rótulo amigável do dia: Hoje / Amanhã / Ontem, senão dia da semana + data.
+function dayLabel(key: string): string {
+  const [y, m, d] = key.split("-").map(Number);
+  const target = new Date(y!, m! - 1, d!);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diffDays = Math.round((target.getTime() - today.getTime()) / 86_400_000);
+  if (diffDays === 0) return "Hoje";
+  if (diffDays === 1) return "Amanhã";
+  if (diffDays === -1) return "Ontem";
+  const weekday = target.toLocaleDateString("pt-BR", { weekday: "long" });
+  const date = target.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
+  return `${weekday.charAt(0).toUpperCase()}${weekday.slice(1)}, ${date}`;
+}
 
 function PriorityBadge({ priority }: { priority: TaskPriority }) {
   const m = PRIORITY_META[priority] ?? PRIORITY_META.media;
@@ -47,33 +98,41 @@ function fmtDate(iso: string): string {
   return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
 }
 
+// Agora que a Agenda expõe horário de verdade (não só data), compara com o
+// instante atual em vez de "meia-noite de hoje" — um compromisso às 9h fica
+// atrasado às 9h01, não só no dia seguinte.
 function isOverdue(iso: string, status: TaskStatus): boolean {
   if (status === "done") return false;
-  const d = new Date(iso);
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  return d < today;
+  return new Date(iso) < new Date();
 }
 
 function TaskCard({
-  task, onMove, onEdit, onDelete, colIdx, canComplete, onOpenDetail, hasUnread, canEdit,
+  task, onMove, onEdit, onDelete, canComplete, onOpenDetail, hasUnread, canEdit,
 }: {
   task: Task;
   onMove: (id: number, status: TaskStatus) => void;
   onEdit: (t: Task) => void;
   onDelete: (id: number) => void;
-  colIdx: number;
   canComplete: boolean;
   onOpenDetail: (t: Task) => void;
   hasUnread: boolean;
   canEdit: boolean;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
-  const prev = canEdit ? COLUMNS[colIdx - 1] : undefined;
+  // Fase atual calculada a partir do STATUS da tarefa (não mais da coluna
+  // onde o cartão está renderizado — a Agenda agrupa por dia, não por fase).
+  const curIdx = COLUMNS.findIndex((c) => c.key === task.status);
+  const prev = canEdit ? COLUMNS[curIdx - 1] : undefined;
   // Só o responsável pode mover a tarefa para "Concluído".
-  const nextCol = canEdit ? COLUMNS[colIdx + 1] : undefined;
+  const nextCol = canEdit ? COLUMNS[curIdx + 1] : undefined;
   const next = nextCol?.key === "done" && !canComplete ? undefined : nextCol;
+  // No menu (⋮) mostra TODAS as outras fases, não só a vizinha — permite
+  // pular direto de "A Fazer" pra "Concluído", por exemplo.
+  const otherStatuses = canEdit
+    ? COLUMNS.filter((c) => c.key !== task.status && (c.key !== "done" || canComplete))
+    : [];
   const overdue = task.dueDate ? isOverdue(task.dueDate, task.status) : false;
+  const statusMeta = COLUMNS.find((c) => c.key === task.status) ?? COLUMNS[0]!;
 
   return (
     <div
@@ -100,16 +159,12 @@ function TaskCard({
                   <button onClick={() => { onEdit(task); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
                     <Pencil className="w-3 h-3" /> Editar
                   </button>
-                  {prev && (
-                    <button onClick={() => { onMove(task.id, prev.key); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
-                      <ChevronLeft className="w-3 h-3" /> Mover para {prev.label}
+                  {otherStatuses.map((col) => (
+                    <button key={col.key} onClick={() => { onMove(task.id, col.key); setMenuOpen(false); }}
+                      className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
+                      <div className={`w-2 h-2 rounded-full ${col.color}`} /> Mover para {col.label}
                     </button>
-                  )}
-                  {next && (
-                    <button onClick={() => { onMove(task.id, next.key); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
-                      <ChevronRight className="w-3 h-3" /> Mover para {next.label}
-                    </button>
-                  )}
+                  ))}
                   <button onClick={() => { onDelete(task.id); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg text-destructive hover:bg-destructive/10 transition">
                     <Trash2 className="w-3 h-3" /> Excluir
                   </button>
@@ -129,11 +184,20 @@ function TaskCard({
       )}
 
       <div className="flex items-center gap-1.5 flex-wrap">
+        <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold border ${statusMeta.light} ${statusMeta.text} ${statusMeta.border}`}>
+          <div className={`w-1.5 h-1.5 rounded-full ${statusMeta.color}`} /> {statusMeta.label}
+        </span>
         <PriorityBadge priority={task.priority} />
         {task.dueDate && (
           <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold border ${overdue ? "bg-red-100 text-red-700 border-red-200" : "bg-slate-100 text-slate-600 border-slate-200"}`}>
-            {overdue ? <AlertCircle className="w-2.5 h-2.5" /> : <Calendar className="w-2.5 h-2.5" />}
-            {fmtDate(task.dueDate)}
+            {overdue ? <AlertCircle className="w-2.5 h-2.5" /> : <Clock className="w-2.5 h-2.5" />}
+            {fmtDate(task.dueDate)} · {fmtTime(task.dueDate)}
+            {task.durationMinutes ? ` (${task.durationMinutes}min)` : ""}
+          </span>
+        )}
+        {task.contact && (
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold border bg-violet-50 text-violet-700 border-violet-200">
+            <User className="w-2.5 h-2.5" /> {task.contact.name}
           </span>
         )}
         {task.sector && (
@@ -206,9 +270,19 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
   const [showForm, setShowForm] = useState(false);
   const [editTarget, setEditTarget] = useState<Task | null>(null);
   const [form, setForm] = useState<TaskFormData>(emptyForm);
-  // Filtros do quadro: por setor e por responsável (vendedor).
+  // Filtros da agenda: por setor, responsável (vendedor) e fase.
   const [filterSector, setFilterSector] = useState("");
   const [filterAssignee, setFilterAssignee] = useState("");
+  const [filterStatus, setFilterStatus] = useState("");
+  // Busca de cliente do CRM pra vincular ao compromisso (dropdown de resultados).
+  const [contactQuery, setContactQuery] = useState("");
+  const [contactResults, setContactResults] = useState<CrmContact[]>([]);
+  const [contactSearching, setContactSearching] = useState(false);
+  const [contactDropdownOpen, setContactDropdownOpen] = useState(false);
+  const contactSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Lembretes de compromisso (Agenda) recebidos em tempo real via SSE +
+  // carregados na entrada (pra quem perdeu o evento por estar offline).
+  const [reminders, setReminders] = useState<TaskReminder[]>([]);
   // Detalhe da tarefa: subtarefas (checklist) + chat de comentários.
   const [detailTask, setDetailTask] = useState<Task | null>(null);
   const [subtasks, setSubtasks] = useState<TaskSubtask[]>([]);
@@ -238,11 +312,54 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
     api.sectors.list().then(setSectors).catch(() => {});
     api.chatUsers().then(setTeam).catch(() => {});
     api.tasks.notifications.unread().then((r) => setUnreadTaskIds(new Set(r.taskIds))).catch(() => {});
+    api.tasks.reminders.unread().then(setReminders).catch(() => {});
   }, [fetchTasks]);
+
+  // Lembrete de compromisso em tempo real: chega via SSE (mesmo canal que o
+  // resto do sistema já usa — sseEmitter.ts no backend) assim que o job
+  // periódico do servidor detecta que está perto do horário marcado.
+  useEffect(() => {
+    const es = acquireSharedEventSource(EVENTS_URL);
+    const onReminder = (ev: MessageEvent) => {
+      try {
+        const data = JSON.parse(ev.data) as { taskId: number; title: string; dueDate: string };
+        setReminders((prev) => (prev.some((r) => r.taskId === data.taskId) ? prev : [
+          { id: -data.taskId, taskId: data.taskId, title: data.title, dueDate: data.dueDate, read: false, createdAt: new Date().toISOString() },
+          ...prev,
+        ]));
+        toast({ title: "⏰ Compromisso chegando", description: `${data.title} às ${fmtTime(data.dueDate)}` });
+      } catch { /* evento mal formado, ignora */ }
+    };
+    es.addEventListener("task_reminder", onReminder);
+    return () => {
+      es.removeEventListener("task_reminder", onReminder);
+      releaseSharedEventSource(EVENTS_URL);
+    };
+  }, [toast]);
+
+  const dismissReminder = (r: TaskReminder) => {
+    setReminders((prev) => prev.filter((x) => x.id !== r.id));
+    if (r.id > 0) api.tasks.reminders.markRead(r.id).catch(() => {});
+  };
+
+  // Busca de cliente do CRM com debounce simples (evita bater na API a cada tecla).
+  useEffect(() => {
+    if (contactSearchTimer.current) clearTimeout(contactSearchTimer.current);
+    if (!contactQuery.trim()) { setContactResults([]); return; }
+    setContactSearching(true);
+    contactSearchTimer.current = setTimeout(() => {
+      api.crm.list({ search: contactQuery.trim() })
+        .then((r) => setContactResults(r.slice(0, 8)))
+        .catch(() => setContactResults([]))
+        .finally(() => setContactSearching(false));
+    }, 300);
+    return () => { if (contactSearchTimer.current) clearTimeout(contactSearchTimer.current); };
+  }, [contactQuery]);
 
   const openAdd = () => {
     setEditTarget(null);
     setForm({ ...emptyForm, sectorId: user?.sectorId ? String(user.sectorId) : "" });
+    setContactQuery("");
     setShowForm(true);
   };
 
@@ -255,8 +372,13 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
       priority: t.priority,
       assigneeIds: t.assignees.map((a) => a.id),
       sectorId: t.sectorId ? String(t.sectorId) : "",
-      dueDate: t.dueDate ? t.dueDate.slice(0, 10) : "",
+      dueDate: t.dueDate ? toDatetimeLocal(t.dueDate) : "",
+      contactId: t.contactId ? String(t.contactId) : "",
+      contactLabel: t.contact?.name ?? "",
+      durationMinutes: t.durationMinutes ? String(t.durationMinutes) : "",
+      alertMinutesBefore: t.alertMinutesBefore != null ? String(t.alertMinutesBefore) : "",
     });
+    setContactQuery("");
     setShowForm(true);
   };
 
@@ -408,6 +530,9 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
       assigneeIds: form.assigneeIds,
       sectorId: form.sectorId ? Number(form.sectorId) : null,
       dueDate: form.dueDate ? new Date(form.dueDate).toISOString() : null,
+      contactId: form.contactId ? Number(form.contactId) : null,
+      durationMinutes: form.durationMinutes ? Number(form.durationMinutes) : null,
+      alertMinutesBefore: form.dueDate && form.alertMinutesBefore ? Number(form.alertMinutesBefore) : null,
     };
     try {
       if (editTarget) {
@@ -425,21 +550,30 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
     }
   };
 
-  // Aplica os filtros de setor/responsável e ordena por prioridade
-  // (Alta → Média → Baixa) e, dentro da mesma prioridade, pelo prazo mais próximo.
+  // Aplica os filtros de setor/responsável/fase.
   const PRIORITY_ORDER: Record<string, number> = { alta: 0, media: 1, baixa: 2 };
   const visibleTasks = tasks.filter((t) =>
     (!filterSector || String(t.sectorId ?? "") === filterSector) &&
-    (!filterAssignee || t.assignees.some((a) => String(a.id) === filterAssignee)));
-  const byStatus = (status: TaskStatus) => visibleTasks
-    .filter((t) => t.status === status)
-    .sort((a, b) => {
-      const pd = (PRIORITY_ORDER[a.priority] ?? 1) - (PRIORITY_ORDER[b.priority] ?? 1);
-      if (pd !== 0) return pd;
-      const ad = a.dueDate ? new Date(a.dueDate).getTime() : Infinity;
-      const bd = b.dueDate ? new Date(b.dueDate).getTime() : Infinity;
-      return ad - bd;
-    });
+    (!filterAssignee || t.assignees.some((a) => String(a.id) === filterAssignee)) &&
+    (!filterStatus || t.status === filterStatus));
+  const byStatus = (status: TaskStatus) => visibleTasks.filter((t) => t.status === status);
+
+  // Agenda: separa quem tem horário marcado (compromisso) de quem não tem
+  // (backlog comum, continua funcionando como antes) — e agrupa os
+  // compromissos por dia, em ordem cronológica.
+  const scheduled = visibleTasks
+    .filter((t) => t.dueDate)
+    .sort((a, b) => new Date(a.dueDate!).getTime() - new Date(b.dueDate!).getTime());
+  const backlog = visibleTasks
+    .filter((t) => !t.dueDate)
+    .sort((a, b) => (PRIORITY_ORDER[a.priority] ?? 1) - (PRIORITY_ORDER[b.priority] ?? 1));
+  const dayGroups: { key: string; tasks: Task[] }[] = [];
+  for (const t of scheduled) {
+    const key = dayKey(t.dueDate!);
+    const group = dayGroups.find((g) => g.key === key);
+    if (group) group.tasks.push(t);
+    else dayGroups.push({ key, tasks: [t] });
+  }
 
   return (
     <div className="space-y-4">
@@ -447,11 +581,17 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h2 className="font-bold text-foreground flex items-center gap-2">
-            <ListTodo className="w-5 h-5 text-primary" /> Quadro de Tarefas
+            <ListTodo className="w-5 h-5 text-primary" /> Agenda
           </h2>
-          <p className="text-xs text-muted-foreground mt-0.5">Organize as tarefas do atendimento entre a equipe</p>
+          <p className="text-xs text-muted-foreground mt-0.5">Compromissos e tarefas da equipe, organizados por dia</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}
+            data-testid="filter-task-status"
+            className="px-2.5 py-2 rounded-xl border border-border text-xs bg-white">
+            <option value="">Todas as fases</option>
+            {COLUMNS.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+          </select>
           <select value={filterSector} onChange={(e) => setFilterSector(e.target.value)}
             data-testid="filter-task-sector"
             className="px-2.5 py-2 rounded-xl border border-border text-xs bg-white">
@@ -497,53 +637,107 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
         ))}
       </div>
 
-      {/* Kanban */}
-      {/* Em telas médias as 3 colunas lado a lado ficavam espremidas e ilegíveis;
-          agora só abre em 3 colunas quando há espaço de verdade (xl). */}
-      <div className={`grid gap-4 items-start ${compact ? "grid-cols-1" : "grid-cols-1 md:grid-cols-2 xl:grid-cols-3"}`}>
-        {COLUMNS.map((col, colIdx) => {
-          const cards = byStatus(col.key);
-          return (
-            <div key={col.key} className={`rounded-2xl ${col.light} border ${col.border} p-4`} data-testid={`task-col-${col.key}`}>
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-2">
-                  <div className={`w-2.5 h-2.5 rounded-full ${col.color}`} />
-                  <span className={`text-sm font-bold ${col.text}`}>{col.label}</span>
-                </div>
-                <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${col.light} ${col.text} border ${col.border}`}>
-                  {loading ? "…" : cards.length}
+      {/* Lembretes de compromisso chegando (alerta em tempo real) */}
+      {reminders.length > 0 && (
+        <div className="space-y-1.5" data-testid="reminders-banner">
+          {reminders.map((r) => (
+            <div key={r.id} className="flex items-center gap-2.5 bg-amber-50 border border-amber-200 rounded-xl px-3.5 py-2.5">
+              <Bell className="w-4 h-4 text-amber-600 shrink-0" />
+              <div className="flex-1 min-w-0 text-xs">
+                <span className="font-semibold text-amber-900">{r.title}</span>
+                <span className="text-amber-700"> · {fmtTime(r.dueDate)}</span>
+              </div>
+              <button onClick={() => dismissReminder(r)} data-testid={`button-dismiss-reminder-${r.id}`}
+                className="p-1 rounded-lg text-amber-600 hover:bg-amber-100 transition shrink-0">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Agenda: compromissos com horário, agrupados por dia (cronológico) */}
+      {loading ? (
+        <div className="space-y-3">
+          <div className="h-24 rounded-2xl bg-white/60 animate-pulse" />
+          <div className="h-24 rounded-2xl bg-white/60 animate-pulse" />
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {dayGroups.length === 0 && backlog.length === 0 && (
+            <div className="text-center py-10 text-sm text-muted-foreground bg-white rounded-2xl border border-border">
+              <p>Nenhum compromisso ou tarefa por aqui</p>
+              {canEdit && (
+                <button onClick={openAdd} className="mt-2 text-primary font-semibold underline underline-offset-2">
+                  Adicionar
+                </button>
+              )}
+            </div>
+          )}
+
+          {dayGroups.map((group) => (
+            <div key={group.key} className="rounded-2xl bg-white border border-border p-4" data-testid={`agenda-day-${group.key}`}>
+              <div className="flex items-center gap-2 mb-3">
+                <Calendar className="w-3.5 h-3.5 text-primary" />
+                <span className="text-sm font-bold text-foreground">{dayLabel(group.key)}</span>
+                <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-secondary text-muted-foreground">
+                  {group.tasks.length}
                 </span>
               </div>
-              <div className="space-y-3">
-                {loading ? (
-                  <div className="h-20 rounded-xl bg-white/60 animate-pulse" />
-                ) : cards.length === 0 ? (
-                  <div className="text-center py-8 text-xs text-muted-foreground">
-                    <p>Nenhuma tarefa aqui</p>
-                    {canEdit && (
-                      <button onClick={openAdd} className={`mt-2 ${col.text} font-semibold underline underline-offset-2`}>
-                        Adicionar
-                      </button>
-                    )}
-                  </div>
-                ) : (
-                  cards.map((t) => (
+              <div className={`grid gap-3 items-start ${compact ? "grid-cols-1" : "grid-cols-1 lg:grid-cols-2"}`}>
+                {group.tasks.map((t) => (
+                  <TaskCard
+                    key={t.id} task={t} onMove={handleMove}
+                    onEdit={openEdit} onDelete={handleDelete}
+                    canComplete={t.assignees.length === 0 || t.assignees.some((a) => a.id === user?.id)}
+                    onOpenDetail={openDetail}
+                    hasUnread={unreadTaskIds.has(t.id)}
+                    canEdit={canEdit}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
+
+          {/* Backlog: tarefas sem horário marcado — continua funcionando igual antes. */}
+          {(backlog.length > 0 || dayGroups.length === 0) && (
+            <div className="rounded-2xl bg-slate-50 border border-slate-200 p-4" data-testid="agenda-backlog">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <ListTodo className="w-3.5 h-3.5 text-slate-500" />
+                  <span className="text-sm font-bold text-slate-700">Sem horário marcado</span>
+                </div>
+                <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-white text-slate-600 border border-slate-200">
+                  {backlog.length}
+                </span>
+              </div>
+              {backlog.length === 0 ? (
+                <div className="text-center py-6 text-xs text-muted-foreground">
+                  <p>Nenhuma tarefa sem horário</p>
+                  {canEdit && (
+                    <button onClick={openAdd} className="mt-2 text-slate-600 font-semibold underline underline-offset-2">
+                      Adicionar
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className={`grid gap-3 items-start ${compact ? "grid-cols-1" : "grid-cols-1 lg:grid-cols-2"}`}>
+                  {backlog.map((t) => (
                     <TaskCard
                       key={t.id} task={t} onMove={handleMove}
                       onEdit={openEdit} onDelete={handleDelete}
-                      colIdx={colIdx}
                       canComplete={t.assignees.length === 0 || t.assignees.some((a) => a.id === user?.id)}
                       onOpenDetail={openDetail}
                       hasUnread={unreadTaskIds.has(t.id)}
                       canEdit={canEdit}
                     />
-                  ))
-                )}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
-          );
-        })}
-      </div>
+          )}
+        </div>
+      )}
 
       {/* Detalhe: subtarefas + chat de comentários */}
       {detailTask && (
@@ -826,9 +1020,73 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
                 </div>
               )}
               <div>
-                <label className="text-xs font-medium mb-1 block">Prazo</label>
-                <input type="date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })}
+                <label className="text-xs font-medium mb-1 block">Horário do compromisso</label>
+                <input type="datetime-local" value={form.dueDate} data-testid="input-task-duedate"
+                  onChange={(e) => setForm({ ...form, dueDate: e.target.value })}
                   className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                <p className="text-[11px] text-muted-foreground mt-1">Deixe em branco pra uma tarefa comum, sem horário marcado — ela entra na lista "Sem horário marcado".</p>
+              </div>
+              {form.dueDate && (
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-xs font-medium mb-1 block">Duração</label>
+                    <select value={form.durationMinutes} data-testid="select-task-duration"
+                      onChange={(e) => setForm({ ...form, durationMinutes: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl border border-border text-sm bg-white">
+                      <option value="">—</option>
+                      {DURATION_OPTIONS.map((m) => <option key={m} value={m}>{m} min</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium mb-1 block">Alerta</label>
+                    <select value={form.alertMinutesBefore} data-testid="select-task-alert"
+                      onChange={(e) => setForm({ ...form, alertMinutesBefore: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl border border-border text-sm bg-white">
+                      {ALERT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                  </div>
+                </div>
+              )}
+              <div className="relative">
+                <label className="text-xs font-medium mb-1 block">Cliente (opcional)</label>
+                {form.contactId ? (
+                  <div className="flex items-center gap-2 px-3 py-2 rounded-xl border border-border text-sm bg-secondary/30" data-testid="selected-task-contact">
+                    <Users2 className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                    <span className="flex-1 truncate">{form.contactLabel}</span>
+                    <button type="button" onClick={() => setForm((f) => ({ ...f, contactId: "", contactLabel: "" }))}
+                      data-testid="button-clear-task-contact">
+                      <X className="w-3.5 h-3.5 text-muted-foreground" />
+                    </button>
+                  </div>
+                ) : (
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+                    <input
+                      value={contactQuery}
+                      onChange={(e) => { setContactQuery(e.target.value); setContactDropdownOpen(true); }}
+                      onFocus={() => setContactDropdownOpen(true)}
+                      onBlur={() => setTimeout(() => setContactDropdownOpen(false), 150)}
+                      placeholder="Buscar cliente por nome ou telefone..."
+                      data-testid="input-task-contact-search"
+                      className="w-full pl-8 pr-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                    {contactDropdownOpen && contactQuery.trim() && (
+                      <div className="absolute z-30 top-full left-0 right-0 mt-1 bg-white border border-border rounded-xl shadow-lg max-h-48 overflow-y-auto">
+                        {contactSearching ? (
+                          <p className="px-3 py-2 text-xs text-muted-foreground">Buscando...</p>
+                        ) : contactResults.length === 0 ? (
+                          <p className="px-3 py-2 text-xs text-muted-foreground">Nenhum cliente encontrado</p>
+                        ) : contactResults.map((c) => (
+                          <button key={c.id} type="button" data-testid={`option-task-contact-${c.id}`}
+                            onClick={() => { setForm((f) => ({ ...f, contactId: String(c.id), contactLabel: c.name })); setContactQuery(""); setContactDropdownOpen(false); }}
+                            className="w-full text-left px-3 py-2 text-xs hover:bg-secondary/40 transition border-b border-border/50 last:border-0">
+                            <p className="font-medium truncate">{c.name}</p>
+                            {c.contact && <p className="text-muted-foreground truncate">{c.contact}</p>}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="flex gap-2 pt-1">
                 <button type="button" onClick={() => setShowForm(false)}

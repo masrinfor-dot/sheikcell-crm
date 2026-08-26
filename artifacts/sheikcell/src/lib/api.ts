@@ -281,6 +281,9 @@ export type CatalogProductVariant = {
   id: number;
   productId: number;
   storage: string | null;
+  // Cor específica dessa combinação (null = variante não distingue cor —
+  // usa as cores do produto só como informação, ver CatalogProduct.colors).
+  color: string | null;
   costPrice: string | null;
   costIncludesInvoice: boolean;
   marginPercentOverride: string | null;
@@ -300,6 +303,7 @@ export type CatalogProductVariant = {
 export type CatalogVariantInput = {
   id?: number;
   storage: string | null;
+  color: string | null;
   costPrice: number | null;
   costIncludesInvoice: boolean;
   marginPercentOverride: number | null;
@@ -332,7 +336,7 @@ export type CatalogPricingSettings = {
 };
 
 export type CatalogPublicVariant = {
-  id: number; storage: string | null; salePrice: string | null; inStock: boolean;
+  id: number; storage: string | null; color: string | null; salePrice: string | null; inStock: boolean;
   wholesalePrice: string | null;
 };
 
@@ -347,7 +351,7 @@ export type CatalogPublicProduct = {
   variants: CatalogPublicVariant[];
 };
 
-export type CatalogImportVariant = { storage: string | null; costPrice: number | null };
+export type CatalogImportVariant = { storage: string | null; color: string | null; costPrice: number | null };
 
 export type CatalogImportItem = {
   model: string;
@@ -409,6 +413,8 @@ export type InternalMessage = {
   replyTo: { id: number; senderName: string; content: string; type: "text" | "image" | "audio" | "doc" } | null;
   metadata?: MessageMetadata | null;
   createdAt: string;
+  editedAt?: string | null;
+  deletedAt?: string | null;
 };
 
 export type FinanceVendedorRow = {
@@ -604,6 +610,10 @@ export type Task = {
   createdById: number | null;
   sectorId: number | null;
   dueDate: string | null;
+  // Agenda: cliente vinculado ao compromisso, duração e alerta prévio.
+  contactId: number | null;
+  durationMinutes: number | null;
+  alertMinutesBefore: number | null;
   position: number;
   isArchived: boolean;
   createdAt: string;
@@ -611,6 +621,7 @@ export type Task = {
   sector: Sector | null;
   assignees: { id: number; name: string }[];
   createdBy: { id: number; name: string } | null;
+  contact: { id: number; name: string; contact: string | null } | null;
   subtaskTotal?: number;
   subtaskDone?: number;
   commentCount?: number;
@@ -624,6 +635,13 @@ export type TaskComment = {
 
 export type TaskSubtask = {
   id: number; taskId: number; title: string; isDone: boolean; position: number; createdAt: string;
+};
+
+// Agenda: lembrete de compromisso (dueDate + alertMinutesBefore), gerado
+// automaticamente pelo servidor e entregue em tempo real via SSE
+// ("task_reminder") + listado aqui pra quem perdeu o evento (offline).
+export type TaskReminder = {
+  id: number; taskId: number; title: string; dueDate: string; read: boolean; createdAt: string;
 };
 
 // ── Quadro de Sistema (Dev) ── problemas/atualizações/implementações do
@@ -714,6 +732,11 @@ export type RoutineChecklistScope = {
 export type RoutineRecurrence = "daily" | "weekdays" | "specific_days" | "weekly" | "monthly" | "specific_date" | "continuous";
 export type RoutineChecklist = {
   id: number; name: string; message: string | null; scheduledTime: string | null;
+  // Rotinas com mais de um horário por dia (ex.: conferência de caixa
+  // 3x/dia) — null/vazio pro caso normal de horário único (scheduledTime
+  // sozinho já resolve). Preenchido com 2+ horários quando o admin
+  // configura múltiplos horários pro mesmo checklist.
+  scheduledTimes: string[] | null;
   recurrence: RoutineRecurrence; recurrenceDays: number[] | null; specificDate: string | null;
   toleranceMinutes: number; mandatory: boolean; active: boolean; version: number;
   createdByUserId: number | null; createdAt: string; updatedAt: string;
@@ -770,6 +793,13 @@ export type PendingRoutineQuestion = {
 };
 export type PendingRoutine = {
   id: number; name: string; message: string | null; mandatory: boolean; periodKey: string;
+  // "" pro checklist de horário único (comportamento de sempre); quando o
+  // checklist tem múltiplos horários (Rotinas com mais de um horário por
+  // dia), vira o "HH:MM" da ocorrência específica pendente — precisa ser
+  // reenviado em respond() pra identificar qual ocorrência está sendo
+  // respondida (um mesmo checklist pode aparecer mais de uma vez na lista
+  // de pendentes, uma por horário ainda não respondido).
+  occurrenceTime: string;
   questions: PendingRoutineQuestion[];
 };
 // Justificativa estruturada (Fase 3.5) gravada quando a resposta é negativa
@@ -1006,6 +1036,7 @@ export type AppSettings = {
   outboundHourlyLimit: number;
   outboundDailyLimit: number;
   attendantNameVisibleToCustomer: boolean;
+  finalizeReasons: string[];
   branding: Branding;
 };
 
@@ -1091,6 +1122,9 @@ export type ChatMessage = {
   type: string;
   status: string;
   senderName: string | null;
+  // Id do usuário do sistema que enviou (só preenchido em mensagens outbound) —
+  // usado só pra decidir quem pode editar/apagar a mensagem.
+  senderId?: number | null;
   // Telefone de quem enviou DENTRO de uma conversa de grupo (participante),
   // diferente do "phone" da conversa (que é o JID do grupo em si). Só
   // preenchido pra mensagens de grupo — permite abrir uma conversa 1:1 com
@@ -1348,6 +1382,10 @@ export const api = {
       req<ChatMessage>(`/chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content, replyToId }) }),
     sendNote: (id: number, content: string) =>
       req<ChatMessage>(`/chat/conversations/${id}/notes`, { method: "POST", body: JSON.stringify({ content }) }),
+    editMessage: (messageId: number, content: string) =>
+      req<ChatMessage>(`/chat/messages/${messageId}`, { method: "PATCH", body: JSON.stringify({ content }) }),
+    deleteMessage: (messageId: number) =>
+      req<ChatMessage>(`/chat/messages/${messageId}`, { method: "DELETE" }),
     suggestReply: (id: number) =>
       req<{ suggestion: string }>(`/chat/conversations/${id}/suggest-reply`, { method: "POST" }),
     transcribe: (messageId: number) =>
@@ -1429,6 +1467,10 @@ export const api = {
     messages: (id: number) => req<InternalMessage[]>(`/internal-chat/conversations/${id}/messages`),
     send: (id: number, content: string, replyToId?: number) =>
       req<InternalMessage>(`/internal-chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content, replyToId }) }),
+    editMessage: (messageId: number, content: string) =>
+      req<InternalMessage>(`/internal-chat/messages/${messageId}`, { method: "PATCH", body: JSON.stringify({ content }) }),
+    deleteMessage: (messageId: number) =>
+      req<InternalMessage>(`/internal-chat/messages/${messageId}`, { method: "DELETE" }),
     markRead: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}/read`, { method: "POST" }),
     deleteGroup: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}`, { method: "DELETE" }),
     deleteGeneral: () => req<{ ok: boolean }>("/internal-chat/general", { method: "DELETE" }),
@@ -1529,8 +1571,12 @@ export const api = {
     jobFunctions: () => req<string[]>("/rotinas/job-functions"),
     scopeOptions: () => req<RoutineScopeOptions>("/rotinas/scope-options"),
     pending: () => req<PendingRoutine[]>("/rotinas/pending"),
-    respond: (id: number, answers: Record<string, RoutineAnswerValue>, evidence?: Record<string, RoutineEvidenceUpload>) =>
-      req<{ id: number }>(`/rotinas/checklists/${id}/respond`, { method: "POST", body: JSON.stringify({ answers, evidence }) }),
+    // occurrenceTime: "" (padrão) pro checklist de horário único; pra quem
+    // tem múltiplos horários, passe o mesmo occurrenceTime que veio no item
+    // de pending() (senão o backend responde 404 — não está pendente pra
+    // aquela ocorrência).
+    respond: (id: number, answers: Record<string, RoutineAnswerValue>, evidence?: Record<string, RoutineEvidenceUpload>, occurrenceTime?: string) =>
+      req<{ id: number }>(`/rotinas/checklists/${id}/respond`, { method: "POST", body: JSON.stringify({ answers, evidence, occurrenceTime }) }),
     responses: (id: number) => req<RoutineResponse[]>(`/rotinas/checklists/${id}/responses`),
     evidenceFileUrl: (evidenceId: number) => `${API_BASE}/rotinas/evidence/${evidenceId}/file`,
     closures: (params?: { employeeId?: number; periodMonth?: string }) => {
@@ -1799,6 +1845,10 @@ export const api = {
       update: (data: Partial<Branding>) =>
         req<Branding>("/settings/branding", { method: "PATCH", body: JSON.stringify(data) }),
     },
+    finalizeReasons: {
+      update: (reasons: string[]) =>
+        req<{ finalizeReasons: string[] }>("/settings/finalize-reasons", { method: "PATCH", body: JSON.stringify({ reasons }) }),
+    },
     ai: {
       get: () => req<AiCredentialsStatus>("/settings/ai"),
       save: (data: { apiKey?: string; useOwnKey?: boolean }) =>
@@ -1811,11 +1861,13 @@ export const api = {
     create: (data: {
       title: string; description?: string; status?: TaskStatus; priority?: TaskPriority;
       assigneeIds?: number[]; sectorId?: number | null; dueDate?: string | null;
+      contactId?: number | null; durationMinutes?: number | null; alertMinutesBefore?: number | null;
     }) => req<Task>("/tasks", { method: "POST", body: JSON.stringify(data) }),
     update: (id: number, data: Partial<{
       title: string; description: string; status: TaskStatus; priority: TaskPriority;
       assigneeIds: number[]; sectorId: number | null; dueDate: string | null;
       position: number; isArchived: boolean;
+      contactId: number | null; durationMinutes: number | null; alertMinutesBefore: number | null;
     }>) => req<Task>(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     report: () => req<{ bySector: TaskReportBucket[]; byUser: TaskReportBucket[] }>("/tasks/report"),
     comments: (id: number) => req<TaskComment[]>(`/tasks/${id}/comments`),
@@ -1832,6 +1884,10 @@ export const api = {
     notifications: {
       unread: () => req<{ taskIds: number[] }>("/tasks/notifications/unread"),
       markRead: (id: number) => req<{ ok: boolean }>(`/tasks/${id}/notifications/read`, { method: "POST" }),
+    },
+    reminders: {
+      unread: () => req<TaskReminder[]>("/tasks/reminders/unread"),
+      markRead: (id: number) => req<{ ok: boolean }>(`/tasks/reminders/${id}/read`, { method: "POST" }),
     },
   },
   systemBoard: {
@@ -1862,6 +1918,7 @@ export const api = {
     create: (data: Record<string, unknown>) => req<CatalogProduct>("/catalog/products", { method: "POST", body: JSON.stringify(data) }),
     update: (id: number, data: Record<string, unknown>) => req<CatalogProduct>(`/catalog/products/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/catalog/products/${id}`, { method: "DELETE" }),
+    bulkRemove: (ids: number[]) => req<{ ok: boolean; deleted: number }>("/catalog/products/bulk-delete", { method: "POST", body: JSON.stringify({ ids }) }),
     addPhoto: (productId: number, file: File) => readAsAttachment(file).then((att) =>
       req<CatalogPhoto>(`/catalog/products/${productId}/photos`, { method: "POST", body: JSON.stringify({ mimeType: att?.mimetype, data: att?.base64 }) })),
     removePhoto: (productId: number, photoId: number) => req<{ ok: boolean }>(`/catalog/products/${productId}/photos/${photoId}`, { method: "DELETE" }),
@@ -1877,6 +1934,8 @@ export const api = {
     setSlug: (slug: string) => req<{ slug: string | null }>("/catalog/slug", { method: "PUT", body: JSON.stringify({ slug }) }),
     getWhatsapp: () => req<{ whatsapp: string | null }>("/catalog/whatsapp"),
     setWhatsapp: (whatsapp: string) => req<{ whatsapp: string | null }>("/catalog/whatsapp", { method: "PUT", body: JSON.stringify({ whatsapp }) }),
+    getWhatsappWholesale: () => req<{ whatsapp: string | null }>("/catalog/whatsapp-wholesale"),
+    setWhatsappWholesale: (whatsapp: string) => req<{ whatsapp: string | null }>("/catalog/whatsapp-wholesale", { method: "PUT", body: JSON.stringify({ whatsapp }) }),
     getWholesaleCode: () => req<{ hasCode: boolean; code: string | null }>("/catalog/wholesale-code"),
     setWholesaleCode: (code: string) => req<{ hasCode: boolean; code: string | null }>("/catalog/wholesale-code", { method: "PUT", body: JSON.stringify({ code }) }),
     categories: () => req<{ categories: CatalogCategory[] }>("/catalog/categories"),
@@ -1888,7 +1947,7 @@ export const api = {
     importConfirm: (items: CatalogImportItem[]) => req<{ imported: number; products: CatalogProduct[] }>("/catalog/import/confirm", { method: "POST", body: JSON.stringify({ items }) }),
     public: (slug: string, code?: string) =>
       req<{
-        storeName: string; whatsapp: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
+        storeName: string; whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
         categories: CatalogCategory[]; products: CatalogPublicProduct[];
       }>(`/catalog-public/${slug}${code ? `?code=${encodeURIComponent(code)}` : ""}`),
   },

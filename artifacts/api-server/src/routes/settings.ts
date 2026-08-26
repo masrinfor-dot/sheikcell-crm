@@ -23,7 +23,23 @@ const DEFAULTS: Record<string, string> = {
   // veio ligado ("*Nome:*" antes da mensagem no WhatsApp) — default "true"
   // preserva esse comportamento pra quem nunca configurou nada.
   attendant_name_visible_to_customer: "true",
+  // Motivos do modal "Finalizar atendimento" (ChatCenter.tsx) — editável pelo
+  // admin em Configurações → Aparência. "Outro" NÃO faz parte dessa lista: o
+  // frontend sempre acrescenta como última opção fixa, porque o próprio
+  // código depende dele pra abrir o campo de descrição livre.
+  finalize_reasons: JSON.stringify([
+    "Venda realizada", "Orçamento enviado", "Cliente vai pensar", "Sem interesse",
+    "Sem resposta do cliente", "Dúvida esclarecida", "Problema resolvido",
+  ]),
 };
+
+function parseFinalizeReasons(raw: string): string[] {
+  try {
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr) && arr.every((x) => typeof x === "string") && arr.length > 0) return arr;
+  } catch { /* cai no padrão */ }
+  return JSON.parse(DEFAULTS.finalize_reasons!) as string[];
+}
 
 function brandingOf(map: Record<string, string>) {
   return {
@@ -46,6 +62,7 @@ router.get("/settings", requireAuth, async (req, res): Promise<void> => {
     outboundHourlyLimit: Math.max(1, parseInt(map.outbound_hourly_limit, 10) || 10),
     outboundDailyLimit: Math.max(1, parseInt(map.outbound_daily_limit, 10) || 40),
     attendantNameVisibleToCustomer: map.attendant_name_visible_to_customer !== "false",
+    finalizeReasons: parseFinalizeReasons(map.finalize_reasons),
     branding: brandingOf(map),
   });
 });
@@ -107,8 +124,33 @@ router.patch("/settings", requireAdminOrSupervisor, async (req, res): Promise<vo
     outboundHourlyLimit: Math.max(1, parseInt(map.outbound_hourly_limit, 10) || 10),
     outboundDailyLimit: Math.max(1, parseInt(map.outbound_daily_limit, 10) || 40),
     attendantNameVisibleToCustomer: map.attendant_name_visible_to_customer !== "false",
+    finalizeReasons: parseFinalizeReasons(map.finalize_reasons),
     branding: brandingOf(map),
   });
+});
+
+// Motivos de finalização de atendimento (não inclui "Outro" — fixo no
+// frontend). Endpoint dedicado (como o de branding) porque é uma lista, não
+// um valor único como os outros campos de /settings.
+router.patch("/settings/finalize-reasons", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { reasons } = req.body as { reasons?: unknown };
+  if (!Array.isArray(reasons) || reasons.length === 0 || reasons.length > 20) {
+    res.status(400).json({ error: "Envie de 1 a 20 motivos" });
+    return;
+  }
+  const clean: string[] = [];
+  const seen = new Set<string>();
+  for (const r of reasons) {
+    const s = typeof r === "string" ? r.trim().slice(0, 60) : "";
+    if (!s || s.toLowerCase() === "outro" || seen.has(s)) continue;
+    seen.add(s);
+    clean.push(s);
+  }
+  if (clean.length === 0) { res.status(400).json({ error: "Nenhum motivo válido informado" }); return; }
+  await db.insert(appSettingsTable).values({ tenantId, key: "finalize_reasons", value: JSON.stringify(clean), updatedAt: new Date() })
+    .onConflictDoUpdate({ target: [appSettingsTable.tenantId, appSettingsTable.key], set: { value: JSON.stringify(clean), updatedAt: new Date() } });
+  res.json({ finalizeReasons: clean });
 });
 
 // ── Aparência (logo, nome da empresa, cor principal) — só admin da loja ──────

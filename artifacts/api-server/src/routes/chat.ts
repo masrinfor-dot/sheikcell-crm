@@ -490,6 +490,7 @@ router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Pr
       type: messagesTable.type,
       status: messagesTable.status,
       senderName: messagesTable.senderName,
+      senderId: messagesTable.senderId,
       senderPhone: messagesTable.senderPhone,
       mediaUrl: messagesTable.mediaUrl,
       transcript: messagesTable.transcript,
@@ -521,6 +522,82 @@ router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Pr
   // array puro. O cabeçalho X-Has-More indica se existe bloco mais antigo.
   res.setHeader("X-Has-More", hasMore ? "1" : "0");
   res.json(msgs);
+});
+
+// ─── Editar / apagar mensagem (só quem enviou, ou admin/supervisor) ───────
+// IMPORTANTE: isso edita/apaga só o REGISTRO aqui dentro do sistema — não
+// reenvia uma revogação pro WhatsApp do cliente. Fazer isso de verdade (igual
+// o "apagar para todos" do WhatsApp) exigiria guardar a chave da mensagem do
+// Baileys no envio e chamar a ponte pra revogar/editar do lado do protocolo,
+// o que ainda não existe hoje. Enquanto isso não é construído, "editado" e
+// "mensagem apagada" aparecem só pra quem usa o sistema — o cliente continua
+// vendo o texto original no aparelho dele.
+async function loadOwnMessageForEdit(
+  id: number, tenantId: number, req: import("express").Request, res: import("express").Response,
+): Promise<{ msg: typeof messagesTable.$inferSelect; conv: typeof conversationsTable.$inferSelect } | null> {
+  const [msg] = await db.select().from(messagesTable)
+    .where(and(eq(messagesTable.id, id), eq(messagesTable.tenantId, tenantId))).limit(1);
+  if (!msg) { res.status(404).json({ error: "Mensagem não encontrada" }); return null; }
+  if (msg.direction !== "outbound") {
+    res.status(400).json({ error: "Só é possível editar/apagar mensagens enviadas por nós" });
+    return null;
+  }
+  const isOwner = msg.senderId === req.session.userId;
+  const isModerator = req.session.userRole === "admin" || req.session.userRole === "supervisor";
+  if (!isOwner && !isModerator) {
+    res.status(403).json({ error: "Só quem enviou (ou admin/supervisor) pode editar/apagar" });
+    return null;
+  }
+  const [conv] = await db.select().from(conversationsTable)
+    .where(and(eq(conversationsTable.id, msg.conversationId), eq(conversationsTable.tenantId, tenantId))).limit(1);
+  if (!conv || !(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return null; }
+  return { msg, conv };
+}
+
+router.patch("/chat/messages/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const { content } = req.body as { content?: string };
+  const clean = typeof content === "string" ? content.trim().slice(0, 4096) : "";
+  if (!clean) { res.status(400).json({ error: "Mensagem vazia" }); return; }
+
+  const loaded = await loadOwnMessageForEdit(id, tenantId, req, res);
+  if (!loaded) return;
+  const { msg, conv } = loaded;
+  if (msg.type !== "text") { res.status(400).json({ error: "Só é possível editar mensagens de texto" }); return; }
+  if (msg.deletedAt) { res.status(400).json({ error: "Mensagem apagada não pode ser editada" }); return; }
+
+  const [updated] = await db.update(messagesTable)
+    .set({ content: clean, editedAt: new Date() })
+    .where(eq(messagesTable.id, id))
+    .returning();
+  const { replyTo } = await resolveReplyTo(updated!.replyToId ?? undefined, updated!.conversationId, tenantId);
+  const outMsg = { ...updated!, replyTo };
+  broadcast("message_updated", { conversationId: msg.conversationId, message: outMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  res.json(outMsg);
+});
+
+router.delete("/chat/messages/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+
+  const loaded = await loadOwnMessageForEdit(id, tenantId, req, res);
+  if (!loaded) return;
+  const { msg, conv } = loaded;
+  if (msg.deletedAt) {
+    const { replyTo } = await resolveReplyTo(msg.replyToId ?? undefined, msg.conversationId, tenantId);
+    res.json({ ...msg, replyTo });
+    return;
+  }
+
+  const [updated] = await db.update(messagesTable)
+    .set({ deletedAt: new Date() })
+    .where(eq(messagesTable.id, id))
+    .returning();
+  const { replyTo } = await resolveReplyTo(updated!.replyToId ?? undefined, updated!.conversationId, tenantId);
+  const outMsg = { ...updated!, replyTo };
+  broadcast("message_updated", { conversationId: msg.conversationId, message: outMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  res.json(outMsg);
 });
 
 // ─── Send media ────────────────────────────────────────────────────────────

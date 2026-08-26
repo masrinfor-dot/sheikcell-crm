@@ -9,7 +9,7 @@ import { eq, and, desc, asc, isNotNull, inArray, gte, lte } from "drizzle-orm";
 import { requireAuth, requireTenant, requireModule, requireAdminOrSupervisor, tenantIdOf } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import { isPasswordRecentlyVerified, clearPasswordVerified } from "./auth";
-import { todayInfo, isDueToday, resolveUserContext, scopeMatchesUser, isOnLeaveToday, computePontoRelative } from "../lib/routinesShared";
+import { todayInfo, isDueToday, resolveUserContext, scopeMatchesUser, isOnLeaveToday, computePontoRelative, checklistOccurrences } from "../lib/routinesShared";
 import { generateRoutineClosuresForMonth, previousMonthKey, currentMonthKey } from "../lib/routineClosures";
 import { getScoreWeights, computeRoutineScore } from "../lib/routineScore";
 import { generateRoutineAlerts } from "../lib/routineAlerts";
@@ -217,6 +217,19 @@ router.post("/rotinas/checklists", requireModuleAccess("rotinas"), async (req, r
     scheduledTime = typeof b.scheduledTime === "string" && /^\d{2}:\d{2}$/.test(b.scheduledTime) ? b.scheduledTime : "";
     if (!scheduledTime) { res.status(400).json({ error: "Horário inválido (use HH:MM)" }); return; }
   }
+  // Rotinas com mais de um horário por dia (opcional) — quando informado,
+  // vira a lista de ocorrências do dia (ver checklistOccurrences), e o
+  // primeiro horário (ordenado) também assume scheduledTime, pra telas que
+  // só leem esse campo continuarem funcionando.
+  let scheduledTimes: string[] | null = null;
+  if (recurrence !== "continuous" && Array.isArray(b.scheduledTimes) && b.scheduledTimes.length > 0) {
+    const times = b.scheduledTimes.filter((t): t is string => typeof t === "string" && /^\d{2}:\d{2}$/.test(t));
+    if (times.length !== b.scheduledTimes.length || times.length > 10) {
+      res.status(400).json({ error: "Horários inválidos (use HH:MM, até 10)" }); return;
+    }
+    scheduledTimes = Array.from(new Set(times)).sort();
+    scheduledTime = scheduledTimes[0]!;
+  }
   const recurrenceDays = sanitizeRecurrenceDays(recurrence, b.recurrenceDays);
   const specificDate = recurrence === "specific_date" && typeof b.specificDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(b.specificDate)
     ? b.specificDate : null;
@@ -231,7 +244,7 @@ router.post("/rotinas/checklists", requireModuleAccess("rotinas"), async (req, r
     const [checklist] = await tx.insert(routineChecklistsTable).values({
       tenantId, name,
       message: typeof b.message === "string" ? b.message.trim().slice(0, 1000) || null : null,
-      scheduledTime, recurrence, recurrenceDays, specificDate,
+      scheduledTime, scheduledTimes, recurrence, recurrenceDays, specificDate,
       toleranceMinutes,
       mandatory: b.mandatory !== false,
       active: b.active !== false,
@@ -277,12 +290,29 @@ router.patch("/rotinas/checklists/:id", requireModuleAccess("rotinas"), async (r
   // outra recorrência exige informar um horário (não sobra um scheduledTime
   // nulo herdado de antes).
   if (recurrence === "continuous") {
-    if (b.recurrence !== undefined) update.scheduledTime = null;
+    if (b.recurrence !== undefined) { update.scheduledTime = null; update.scheduledTimes = null; }
   } else if (b.scheduledTime !== undefined) {
     if (typeof b.scheduledTime !== "string" || !/^\d{2}:\d{2}$/.test(b.scheduledTime)) { res.status(400).json({ error: "Horário inválido (use HH:MM)" }); return; }
     update.scheduledTime = b.scheduledTime;
   } else if (b.recurrence !== undefined && !existing.scheduledTime) {
     res.status(400).json({ error: "Informe um horário pra sair de 'contínuo'" }); return;
+  }
+  // Rotinas com mais de um horário por dia — mesma regra do POST: array
+  // não-vazio e válido vira a lista de ocorrências (e o 1º horário também
+  // assume scheduledTime); [] ou omitido explicitamente com b.scheduledTimes
+  // presente (mas vazio/null) volta pro horário único.
+  if (recurrence !== "continuous" && b.scheduledTimes !== undefined) {
+    if (Array.isArray(b.scheduledTimes) && b.scheduledTimes.length > 0) {
+      const times = b.scheduledTimes.filter((t): t is string => typeof t === "string" && /^\d{2}:\d{2}$/.test(t));
+      if (times.length !== b.scheduledTimes.length || times.length > 10) {
+        res.status(400).json({ error: "Horários inválidos (use HH:MM, até 10)" }); return;
+      }
+      const sorted = Array.from(new Set(times)).sort();
+      update.scheduledTimes = sorted;
+      update.scheduledTime = sorted[0]!;
+    } else {
+      update.scheduledTimes = null;
+    }
   }
   if (b.recurrenceDays !== undefined || b.recurrence !== undefined) update.recurrenceDays = sanitizeRecurrenceDays(recurrence, b.recurrenceDays ?? existing.recurrenceDays);
   if (b.specificDate !== undefined) {
@@ -381,7 +411,12 @@ router.get("/rotinas/scope-options", requireModuleAccess("rotinas"), async (req,
 // Funções de escopo/data compartilhadas com routineClosures.ts (Fase 5) —
 // ver lib/routinesShared.ts.
 
-type PendingRoutine = RoutineChecklist & { questions: RoutineChecklistQuestion[]; periodKey: string };
+// occurrenceTime é "" pro checklist de horário único (mesma chave de toda
+// resposta histórica) e vira o "HH:MM" real só quando o checklist tem
+// múltiplos horários — ver checklistOccurrences() em lib/routinesShared.ts.
+// Um mesmo checklist pode aparecer mais de uma vez na lista de pendentes
+// (uma entrada por ocorrência ainda não respondida no dia).
+type PendingRoutine = RoutineChecklist & { questions: RoutineChecklistQuestion[]; periodKey: string; occurrenceTime: string };
 
 async function getPendingRoutines(tenantId: number, userId: number): Promise<PendingRoutine[]> {
   const info = todayInfo();
@@ -390,29 +425,37 @@ async function getPendingRoutines(tenantId: number, userId: number): Promise<Pen
 
   const checklists = await db.select().from(routineChecklistsTable)
     .where(and(eq(routineChecklistsTable.tenantId, tenantId), eq(routineChecklistsTable.active, true)));
-  const due = checklists.filter((c) => {
-    if (!isDueToday(c, info)) return false;
-    if (c.recurrence === "continuous" || !c.scheduledTime) return true; // devido o expediente inteiro
-    return info.nowMinutes >= parseInt(c.scheduledTime.slice(0, 2), 10) * 60 + parseInt(c.scheduledTime.slice(3, 5), 10);
-  });
-  if (due.length === 0) return [];
+  const dueToday = checklists.filter((c) => isDueToday(c, info));
+  if (dueToday.length === 0) return [];
 
   const allScopes = await db.select().from(routineChecklistScopesTable)
     .where(eq(routineChecklistScopesTable.tenantId, tenantId));
   const scopesByChecklist = new Map<number, RoutineChecklistScope[]>();
   for (const s of allScopes) scopesByChecklist.set(s.checklistId, [...(scopesByChecklist.get(s.checklistId) ?? []), s]);
 
-  const applicable = due.filter((c) => {
+  const applicable = dueToday.filter((c) => {
     const scopes = scopesByChecklist.get(c.id) ?? [];
     return scopes.some((s) => scopeMatchesUser(s, ctx, userId));
   });
   if (applicable.length === 0) return [];
 
-  const answered = await db.select({ checklistId: routineResponsesTable.checklistId })
+  // Desdobra cada checklist aplicável em (checklist, horário de ocorrência) —
+  // uma ocorrência sem horário fixo pro "continuous" (devido o expediente
+  // inteiro), senão uma por horário já vencido (>= agora), sem limite
+  // superior (fica pendente pro resto do dia, igual ao comportamento antigo).
+  const occurrences: { checklist: RoutineChecklist; occurrenceTime: string }[] = [];
+  for (const c of applicable) {
+    for (const occ of checklistOccurrences(c)) {
+      if (occ.minutes == null || info.nowMinutes >= occ.minutes) occurrences.push({ checklist: c, occurrenceTime: occ.occurrenceTime });
+    }
+  }
+  if (occurrences.length === 0) return [];
+
+  const answered = await db.select({ checklistId: routineResponsesTable.checklistId, occurrenceTime: routineResponsesTable.occurrenceTime })
     .from(routineResponsesTable)
     .where(and(eq(routineResponsesTable.userId, userId), eq(routineResponsesTable.periodKey, info.dateKey)));
-  const answeredIds = new Set(answered.map((a) => a.checklistId));
-  const pending = applicable.filter((c) => !answeredIds.has(c.id));
+  const answeredKeys = new Set(answered.map((a) => `${a.checklistId}:${a.occurrenceTime}`));
+  const pending = occurrences.filter((o) => !answeredKeys.has(`${o.checklist.id}:${o.occurrenceTime}`));
   if (pending.length === 0) return [];
 
   const questions = await db.select().from(routineChecklistQuestionsTable)
@@ -421,14 +464,16 @@ async function getPendingRoutines(tenantId: number, userId: number): Promise<Pen
   const questionsByChecklist = new Map<number, RoutineChecklistQuestion[]>();
   for (const q of questions) questionsByChecklist.set(q.checklistId, [...(questionsByChecklist.get(q.checklistId) ?? []), q]);
 
-  return pending.map((c) => ({ ...c, questions: questionsByChecklist.get(c.id) ?? [], periodKey: info.dateKey }));
+  return pending.map((o) => ({
+    ...o.checklist, questions: questionsByChecklist.get(o.checklist.id) ?? [], periodKey: info.dateKey, occurrenceTime: o.occurrenceTime,
+  }));
 }
 
 router.get("/rotinas/pending", requireAuth, requireModule("rotinas"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const pending = await getPendingRoutines(tenantId, req.session.userId!);
   res.json(pending.map((p) => ({
-    id: p.id, name: p.name, message: p.message, mandatory: p.mandatory, periodKey: p.periodKey,
+    id: p.id, name: p.name, message: p.message, mandatory: p.mandatory, periodKey: p.periodKey, occurrenceTime: p.occurrenceTime,
     questions: p.questions.map((q) => ({
       id: q.id, label: q.label, type: q.type, required: q.required, requiresEvidence: q.requiresEvidence, evidenceType: q.evidenceType,
       requiresJustificationOnNo: q.requiresJustificationOnNo, requiresJustificationOnYes: q.requiresJustificationOnYes, alertLevel: q.alertLevel,
@@ -448,11 +493,16 @@ router.post("/rotinas/checklists/:id/respond", requireAuth, requireModule("rotin
     return;
   }
 
+  const body = (req.body ?? {}) as { answers?: Record<string, unknown>; occurrenceTime?: unknown };
+  // "" (default) casa com checklist de horário único — mesmo comportamento
+  // de sempre pra quem não usa múltiplos horários; só quando o checklist tem
+  // 2+ horários é que o front precisa mandar qual ocorrência está
+  // respondendo (ver checklistOccurrences em lib/routinesShared.ts).
+  const occurrenceTime = typeof body.occurrenceTime === "string" ? body.occurrenceTime : "";
   const pending = await getPendingRoutines(tenantId, userId);
-  const target = pending.find((p) => p.id === id);
+  const target = pending.find((p) => p.id === id && p.occurrenceTime === occurrenceTime);
   if (!target) { res.status(404).json({ error: "Checklist não está pendente pra você agora" }); return; }
 
-  const body = (req.body ?? {}) as { answers?: Record<string, unknown> };
   const raw = body.answers && typeof body.answers === "object" ? body.answers : {};
   const answers: Record<string, string | RoutineNoJustification> = {};
   for (const q of target.questions) {
@@ -505,7 +555,7 @@ router.post("/rotinas/checklists/:id/respond", requireAuth, requireModule("rotin
 
   try {
     const [saved] = await db.insert(routineResponsesTable).values({
-      tenantId, checklistId: id, userId, periodKey: target.periodKey, answers,
+      tenantId, checklistId: id, userId, periodKey: target.periodKey, occurrenceTime: target.occurrenceTime, answers,
       questionsSnapshot: target.questions.map((q) => ({
         id: q.id, label: q.label, type: q.type, required: q.required, requiresEvidence: q.requiresEvidence, evidenceType: q.evidenceType,
         requiresJustificationOnNo: q.requiresJustificationOnNo, requiresJustificationOnYes: q.requiresJustificationOnYes, alertLevel: q.alertLevel,
