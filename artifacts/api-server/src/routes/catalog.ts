@@ -130,6 +130,7 @@ async function variantsByProductIds(tenantId: number, productIds: number[]) {
 type VariantInput = {
   id?: number;
   storage: string | null;
+  color: string | null;
   costPrice: number | null;
   costIncludesInvoice: boolean;
   marginPercentOverride: number | null;
@@ -144,6 +145,7 @@ function cleanVariantInput(raw: unknown): VariantInput {
   return {
     id: Number.isInteger(o.id) ? (o.id as number) : undefined,
     storage: clean(o.storage, 40) || null,
+    color: clean(o.color, 40) || null,
     costPrice: toNumberOrNull(o.costPrice),
     costIncludesInvoice: o.costIncludesInvoice === true,
     marginPercentOverride: toNumberOrNull(o.marginPercentOverride),
@@ -192,6 +194,7 @@ async function replaceVariants(tenantId: number, productId: number, rawVariants:
     const wholesalePrice = await resolveVariantWholesalePrice(v, settings);
     const values = {
       storage: v.storage,
+      color: v.color,
       costPrice: v.costPrice != null ? String(v.costPrice) : null,
       costIncludesInvoice: v.costIncludesInvoice,
       marginPercentOverride: v.marginPercentOverride != null ? String(v.marginPercentOverride) : null,
@@ -359,6 +362,32 @@ router.delete("/catalog/products/:id", requireAuth, async (req, res): Promise<vo
     if (existsSync(filepath)) await unlink(filepath).catch(() => {});
   }
   res.json({ ok: true });
+});
+
+// Exclusão em massa — seleção manual de vários cards de uma vez (o front
+// filtra por categoria/status/busca antes de selecionar, aqui só recebe a
+// lista final de ids). Mesmo nível de permissão do DELETE individual acima.
+router.post("/catalog/products/bulk-delete", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rawIds = (req.body as { ids?: unknown }).ids;
+  const ids = Array.isArray(rawIds)
+    ? [...new Set(rawIds.map((v) => Number(v)).filter((n) => Number.isInteger(n) && n > 0))].slice(0, 500)
+    : [];
+  if (ids.length === 0) { res.status(400).json({ error: "Nenhum produto selecionado" }); return; }
+
+  const owned = await db.select({ id: catalogProductsTable.id }).from(catalogProductsTable)
+    .where(and(inArray(catalogProductsTable.id, ids), eq(catalogProductsTable.tenantId, tenantId)));
+  const ownedIds = owned.map((r) => r.id);
+  if (ownedIds.length === 0) { res.status(404).json({ error: "Nenhum produto encontrado" }); return; }
+
+  const photoRows = await db.select().from(catalogProductPhotosTable)
+    .where(and(inArray(catalogProductPhotosTable.productId, ownedIds), eq(catalogProductPhotosTable.tenantId, tenantId)));
+  await db.delete(catalogProductsTable).where(and(inArray(catalogProductsTable.id, ownedIds), eq(catalogProductsTable.tenantId, tenantId)));
+  for (const p of photoRows) {
+    const filepath = path.join(CATALOG_MEDIA_DIR, path.basename(p.storedName));
+    if (existsSync(filepath)) await unlink(filepath).catch(() => {});
+  }
+  res.json({ ok: true, deleted: ownedIds.length });
 });
 
 // ─── Fotos ───────────────────────────────────────────────────────────────────
@@ -577,6 +606,25 @@ router.put("/catalog/whatsapp", requireAdmin, async (req, res): Promise<void> =>
   res.json({ whatsapp: digits || null });
 });
 
+// WhatsApp de atacado — número separado mostrado só pra quem desbloqueou o
+// preço de atacado com o código de acesso. Null = a vitrine pública cai no
+// mesmo número de varejo pra todo mundo (comportamento de antes desse campo
+// existir).
+router.get("/catalog/whatsapp-wholesale", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const [tenant] = await db.select({ whatsapp: tenantsTable.catalogWhatsappWholesale }).from(tenantsTable).where(eq(tenantsTable.id, tenantId)).limit(1);
+  res.json({ whatsapp: tenant?.whatsapp ?? null });
+});
+
+router.put("/catalog/whatsapp-wholesale", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const raw = (req.body as { whatsapp?: unknown }).whatsapp;
+  const digits = typeof raw === "string" ? raw.replace(/\D/g, "").slice(0, 15) : "";
+  if (raw && !digits) { res.status(400).json({ error: "Número inválido" }); return; }
+  await db.update(tenantsTable).set({ catalogWhatsappWholesale: digits || null }).where(eq(tenantsTable.id, tenantId));
+  res.json({ whatsapp: digits || null });
+});
+
 // Código de acesso ao preço de atacado — senha única compartilhada com
 // técnicos/lojistas de confiança (não é um login individual). Nunca é
 // devolvido em texto puro pra ninguém além do admin da própria loja aqui;
@@ -597,7 +645,7 @@ router.put("/catalog/wholesale-code", requireAdmin, async (req, res): Promise<vo
 
 // ─── Importação de lista do fornecedor via IA ───────────────────────────────
 
-type ParsedVariant = { storage: string | null; costPrice: number | null };
+type ParsedVariant = { storage: string | null; color: string | null; costPrice: number | null };
 type ParsedItem = {
   model: string;
   condition: CatalogCondition;
@@ -632,9 +680,9 @@ function cleanParsedVariants(raw: unknown): ParsedVariant[] {
   const arr = Array.isArray(raw) ? raw : [];
   const list = arr.slice(0, 20).map((v) => {
     const o = (v ?? {}) as Record<string, unknown>;
-    return { storage: clean(o.storage, 40) || null, costPrice: toNumberOrNull(o.costPrice) };
+    return { storage: clean(o.storage, 40) || null, color: clean(o.color, 40) || null, costPrice: toNumberOrNull(o.costPrice) };
   });
-  return list.length > 0 ? list : [{ storage: null, costPrice: null }];
+  return list.length > 0 ? list : [{ storage: null, color: null, costPrice: null }];
 }
 
 // Interpreta a sugestão de categoria da IA (ex.: ["Celulares","Samsung"]).
@@ -683,7 +731,7 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
     `Você organiza listas de fornecedores de celulares (mercado brasileiro) em dados estruturados.`,
     `Cada linha ou bloco da lista abaixo descreve um aparelho: modelo, armazenamento, cor(es) e preço de CUSTO (preço do fornecedor pra loja, não o preço de venda ao cliente final).`,
     `Ignore emojis, cabeçalhos, informações de garantia/contato/endereço — extraia SÓ os aparelhos.`,
-    `IMPORTANTE: quando o MESMO modelo (mesma condição, mesmas cores) aparecer na lista com mais de um armazenamento/memória, agrupe num ÚNICO item, com um array "variants" contendo um {"storage","costPrice"} por armazenamento — não crie um item separado por armazenamento.`,
+    `IMPORTANTE — agrupamento: quando o MESMO modelo com a MESMA condição aparecer na lista várias vezes com armazenamentos e/ou cores diferentes, agrupe TUDO num ÚNICO item (uma família), nunca crie um item separado por armazenamento ou por cor. Dentro desse item, o array "variants" tem uma entrada {"storage","color","costPrice"} pra CADA combinação de armazenamento+cor encontrada (ex.: 128GB Preto, 128GB Azul e 256GB Preto do mesmo modelo/condição viram 3 variantes dentro do mesmo item). Se o preço de custo for igual pra todas as cores de um armazenamento, ainda assim crie uma variante por cor (repita o mesmo costPrice). Se a lista não menciona cor nenhuma pra um armazenamento, deixe "color": null.`,
     ``,
     `Categorias/subcategorias já cadastradas nessa loja (reaproveite pelo nome EXATO sempre que fizer sentido, em vez de inventar uma parecida): ${categoryList || "(nenhuma cadastrada ainda)"}.`,
     `Pra cada aparelho, sugira também "categoryPath": um array com 1 ou 2 níveis indicando a aba/sub-aba da vitrine pública onde ele se encaixa (ex.: ["Celulares","Samsung"] ou ["Peças de celular"]). Prefira sempre reaproveitar um nome já cadastrado acima; só sugira um nome novo quando não existir nada parecido. Se não tiver confiança nenhuma pra sugerir, use null.`,
@@ -691,8 +739,9 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
     `Lista:`,
     text,
     ``,
-    `Responda SOMENTE com um JSON array válido, sem markdown, um objeto por aparelho (família modelo+condição+cor), neste formato:`,
-    `[{"model":"iPhone 15 Pro Max","condition":"excelente","colors":["Preto","Azul"],"variants":[{"storage":"256GB","costPrice":3850},{"storage":"512GB","costPrice":4200}],"categoryPath":["Celulares","Apple"],"rawLine":"trecho original correspondente"}]`,
+    `Responda SOMENTE com um JSON array válido, sem markdown, um objeto por aparelho (família modelo+condição, independente de cor/armazenamento), neste formato:`,
+    `[{"model":"iPhone 15 Pro Max","condition":"excelente","colors":["Preto","Azul"],"variants":[{"storage":"256GB","color":"Preto","costPrice":3850},{"storage":"256GB","color":"Azul","costPrice":3850},{"storage":"512GB","color":"Preto","costPrice":4200}],"categoryPath":["Celulares","Apple"],"rawLine":"trecho original correspondente"}]`,
+    `"colors" no nível do item é só a lista resumida de todas as cores encontradas pra esse modelo (informativo); o detalhe por combinação fica em "variants".`,
     `"condition" deve ser um destes: excelente, muito_bom, bom, outlet (use "bom" se não estiver claro).`,
     `Se não conseguir identificar o modelo ou nenhum preço de custo com confiança, ainda inclua o item com o que conseguir e deixe os campos faltantes null.`,
   ].join("\n");
@@ -771,7 +820,7 @@ router.post("/catalog/import/confirm", requireAuth, async (req, res): Promise<vo
     const [product] = await db.insert(catalogProductsTable).values({
       tenantId, model: item.model, condition: item.condition, colors: item.colors, categoryId: item.categoryId, createdBy: req.session.userId ?? null,
     }).returning();
-    await replaceVariants(tenantId, product.id, item.variants.map((v) => ({ storage: v.storage, costPrice: v.costPrice })), settings);
+    await replaceVariants(tenantId, product.id, item.variants.map((v) => ({ storage: v.storage, color: v.color, costPrice: v.costPrice })), settings);
     createdProducts.push(product);
   }
   res.status(201).json({ imported: createdProducts.length, products: createdProducts });
@@ -809,9 +858,14 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
   const sentCode = clean((req.query as Record<string, unknown>).code, 40);
   const wholesaleUnlocked = !!tenant.catalogWholesaleCode && sentCode === tenant.catalogWholesaleCode;
 
+  const retailWa = tenant.catalogWhatsapp ?? tenant.contactPhone ?? null;
   res.json({
     storeName: tenant.name,
-    whatsapp: tenant.catalogWhatsapp ?? tenant.contactPhone ?? null,
+    whatsapp: retailWa,
+    // Só faz sentido mandar o número de atacado pra quem já desbloqueou —
+    // sem código bloqueado nem chega a aparecer no front. Cai no número de
+    // varejo se a loja não configurou um número de atacado próprio.
+    whatsappWholesale: wholesaleUnlocked ? (tenant.catalogWhatsappWholesale ?? retailWa) : null,
     hasWholesale: !!tenant.catalogWholesaleCode,
     wholesaleUnlocked,
     categories: categories.map((c) => ({ id: c.id, name: c.name, parentId: c.parentId, sortOrder: c.sortOrder })),
@@ -829,7 +883,7 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
         variants: (variants.get(r.id) ?? [])
           .filter((v) => v.salePrice != null)
           .map((v) => ({
-            id: v.id, storage: v.storage, salePrice: v.salePrice, inStock: v.stockQty > 0,
+            id: v.id, storage: v.storage, color: v.color, salePrice: v.salePrice, inStock: v.stockQty > 0,
             wholesalePrice: wholesaleUnlocked ? v.wholesalePrice : null,
           })),
       }))

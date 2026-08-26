@@ -281,6 +281,9 @@ export type CatalogProductVariant = {
   id: number;
   productId: number;
   storage: string | null;
+  // Cor específica dessa combinação (null = variante não distingue cor —
+  // usa as cores do produto só como informação, ver CatalogProduct.colors).
+  color: string | null;
   costPrice: string | null;
   costIncludesInvoice: boolean;
   marginPercentOverride: string | null;
@@ -300,6 +303,7 @@ export type CatalogProductVariant = {
 export type CatalogVariantInput = {
   id?: number;
   storage: string | null;
+  color: string | null;
   costPrice: number | null;
   costIncludesInvoice: boolean;
   marginPercentOverride: number | null;
@@ -332,7 +336,7 @@ export type CatalogPricingSettings = {
 };
 
 export type CatalogPublicVariant = {
-  id: number; storage: string | null; salePrice: string | null; inStock: boolean;
+  id: number; storage: string | null; color: string | null; salePrice: string | null; inStock: boolean;
   wholesalePrice: string | null;
 };
 
@@ -347,7 +351,7 @@ export type CatalogPublicProduct = {
   variants: CatalogPublicVariant[];
 };
 
-export type CatalogImportVariant = { storage: string | null; costPrice: number | null };
+export type CatalogImportVariant = { storage: string | null; color: string | null; costPrice: number | null };
 
 export type CatalogImportItem = {
   model: string;
@@ -604,6 +608,10 @@ export type Task = {
   createdById: number | null;
   sectorId: number | null;
   dueDate: string | null;
+  // Agenda: cliente vinculado ao compromisso, duração e alerta prévio.
+  contactId: number | null;
+  durationMinutes: number | null;
+  alertMinutesBefore: number | null;
   position: number;
   isArchived: boolean;
   createdAt: string;
@@ -611,6 +619,7 @@ export type Task = {
   sector: Sector | null;
   assignees: { id: number; name: string }[];
   createdBy: { id: number; name: string } | null;
+  contact: { id: number; name: string; contact: string | null } | null;
   subtaskTotal?: number;
   subtaskDone?: number;
   commentCount?: number;
@@ -624,6 +633,13 @@ export type TaskComment = {
 
 export type TaskSubtask = {
   id: number; taskId: number; title: string; isDone: boolean; position: number; createdAt: string;
+};
+
+// Agenda: lembrete de compromisso (dueDate + alertMinutesBefore), gerado
+// automaticamente pelo servidor e entregue em tempo real via SSE
+// ("task_reminder") + listado aqui pra quem perdeu o evento (offline).
+export type TaskReminder = {
+  id: number; taskId: number; title: string; dueDate: string; read: boolean; createdAt: string;
 };
 
 // ── Quadro de Sistema (Dev) ── problemas/atualizações/implementações do
@@ -1823,11 +1839,13 @@ export const api = {
     create: (data: {
       title: string; description?: string; status?: TaskStatus; priority?: TaskPriority;
       assigneeIds?: number[]; sectorId?: number | null; dueDate?: string | null;
+      contactId?: number | null; durationMinutes?: number | null; alertMinutesBefore?: number | null;
     }) => req<Task>("/tasks", { method: "POST", body: JSON.stringify(data) }),
     update: (id: number, data: Partial<{
       title: string; description: string; status: TaskStatus; priority: TaskPriority;
       assigneeIds: number[]; sectorId: number | null; dueDate: string | null;
       position: number; isArchived: boolean;
+      contactId: number | null; durationMinutes: number | null; alertMinutesBefore: number | null;
     }>) => req<Task>(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     report: () => req<{ bySector: TaskReportBucket[]; byUser: TaskReportBucket[] }>("/tasks/report"),
     comments: (id: number) => req<TaskComment[]>(`/tasks/${id}/comments`),
@@ -1844,6 +1862,10 @@ export const api = {
     notifications: {
       unread: () => req<{ taskIds: number[] }>("/tasks/notifications/unread"),
       markRead: (id: number) => req<{ ok: boolean }>(`/tasks/${id}/notifications/read`, { method: "POST" }),
+    },
+    reminders: {
+      unread: () => req<TaskReminder[]>("/tasks/reminders/unread"),
+      markRead: (id: number) => req<{ ok: boolean }>(`/tasks/reminders/${id}/read`, { method: "POST" }),
     },
   },
   systemBoard: {
@@ -1874,6 +1896,7 @@ export const api = {
     create: (data: Record<string, unknown>) => req<CatalogProduct>("/catalog/products", { method: "POST", body: JSON.stringify(data) }),
     update: (id: number, data: Record<string, unknown>) => req<CatalogProduct>(`/catalog/products/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/catalog/products/${id}`, { method: "DELETE" }),
+    bulkRemove: (ids: number[]) => req<{ ok: boolean; deleted: number }>("/catalog/products/bulk-delete", { method: "POST", body: JSON.stringify({ ids }) }),
     addPhoto: (productId: number, file: File) => readAsAttachment(file).then((att) =>
       req<CatalogPhoto>(`/catalog/products/${productId}/photos`, { method: "POST", body: JSON.stringify({ mimeType: att?.mimetype, data: att?.base64 }) })),
     removePhoto: (productId: number, photoId: number) => req<{ ok: boolean }>(`/catalog/products/${productId}/photos/${photoId}`, { method: "DELETE" }),
@@ -1889,6 +1912,8 @@ export const api = {
     setSlug: (slug: string) => req<{ slug: string | null }>("/catalog/slug", { method: "PUT", body: JSON.stringify({ slug }) }),
     getWhatsapp: () => req<{ whatsapp: string | null }>("/catalog/whatsapp"),
     setWhatsapp: (whatsapp: string) => req<{ whatsapp: string | null }>("/catalog/whatsapp", { method: "PUT", body: JSON.stringify({ whatsapp }) }),
+    getWhatsappWholesale: () => req<{ whatsapp: string | null }>("/catalog/whatsapp-wholesale"),
+    setWhatsappWholesale: (whatsapp: string) => req<{ whatsapp: string | null }>("/catalog/whatsapp-wholesale", { method: "PUT", body: JSON.stringify({ whatsapp }) }),
     getWholesaleCode: () => req<{ hasCode: boolean; code: string | null }>("/catalog/wholesale-code"),
     setWholesaleCode: (code: string) => req<{ hasCode: boolean; code: string | null }>("/catalog/wholesale-code", { method: "PUT", body: JSON.stringify({ code }) }),
     categories: () => req<{ categories: CatalogCategory[] }>("/catalog/categories"),
@@ -1900,7 +1925,7 @@ export const api = {
     importConfirm: (items: CatalogImportItem[]) => req<{ imported: number; products: CatalogProduct[] }>("/catalog/import/confirm", { method: "POST", body: JSON.stringify({ items }) }),
     public: (slug: string, code?: string) =>
       req<{
-        storeName: string; whatsapp: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
+        storeName: string; whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
         categories: CatalogCategory[]; products: CatalogPublicProduct[];
       }>(`/catalog-public/${slug}${code ? `?code=${encodeURIComponent(code)}` : ""}`),
   },

@@ -24,6 +24,7 @@ const INSTALLMENT_OPTIONS = [1, 2, 3, 4, 6, 10, 12, 18];
 type VariantFormRow = {
   id?: number;
   storage: string;
+  color: string;
   costPrice: string;
   costIncludesInvoice: boolean;
   marginPercentOverride: string;
@@ -34,7 +35,7 @@ type VariantFormRow = {
 };
 
 const emptyVariant: VariantFormRow = {
-  storage: "", costPrice: "", costIncludesInvoice: false, marginPercentOverride: "", salePrice: "",
+  storage: "", color: "", costPrice: "", costIncludesInvoice: false, marginPercentOverride: "", salePrice: "",
   wholesalePrice: "", wholesaleMarginPercentOverride: "", stockQty: "1",
 };
 
@@ -77,6 +78,13 @@ export default function VitrineAparelhos() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [filterStatus, setFilterStatus] = useState<"active" | "all">("active");
+  const [filterCategory, setFilterCategory] = useState<number | "all">("all");
+
+  // Seleção em massa (excluir vários de uma vez, geralmente depois de
+  // filtrar por categoria/busca/status pra achar só o que quer apagar).
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<CatalogProduct | null>(null);
@@ -116,6 +124,10 @@ export default function VitrineAparelhos() {
   const [whatsappInput, setWhatsappInput] = useState("");
   const [savingWhatsapp, setSavingWhatsapp] = useState(false);
 
+  const [whatsappWholesale, setWhatsappWholesale] = useState<string | null>(null);
+  const [whatsappWholesaleInput, setWhatsappWholesaleInput] = useState("");
+  const [savingWhatsappWholesale, setSavingWhatsappWholesale] = useState(false);
+
   const [hasWholesaleCode, setHasWholesaleCode] = useState(false);
   const [wholesaleCodeInput, setWholesaleCodeInput] = useState("");
   const [savingWholesaleCode, setSavingWholesaleCode] = useState(false);
@@ -128,11 +140,15 @@ export default function VitrineAparelhos() {
 
   const load = () => {
     setLoading(true);
-    Promise.all([api.catalog.list(), api.catalog.getSlug(), api.catalog.getWhatsapp(), api.catalog.categories(), api.catalog.getWholesaleCode()])
-      .then(([l, s, w, cats, wc]) => {
+    Promise.all([
+      api.catalog.list(), api.catalog.getSlug(), api.catalog.getWhatsapp(), api.catalog.getWhatsappWholesale(),
+      api.catalog.categories(), api.catalog.getWholesaleCode(),
+    ])
+      .then(([l, s, w, ww, cats, wc]) => {
         setProducts(l.products); setSettings(l.settings);
         setSlug(s.slug); setSlugInput(s.slug ?? "");
         setWhatsapp(w.whatsapp); setWhatsappInput(w.whatsapp ?? "");
+        setWhatsappWholesale(ww.whatsapp); setWhatsappWholesaleInput(ww.whatsapp ?? "");
         setCategories(cats.categories);
         setHasWholesaleCode(wc.hasCode); setWholesaleCodeInput(wc.code ?? "");
       })
@@ -204,8 +220,38 @@ export default function VitrineAparelhos() {
 
   const filtered = products.filter((p) =>
     (filterStatus === "all" || p.status === "active") &&
+    (filterCategory === "all" || p.categoryId === filterCategory) &&
     (!search || p.model.toLowerCase().includes(search.toLowerCase()) || storagesLabel(p).toLowerCase().includes(search.toLowerCase()))
   );
+
+  const toggleSelectMode = () => { setSelectMode((v) => !v); setSelectedIds(new Set()); };
+  const toggleSelected = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const selectAllFiltered = () => setSelectedIds(new Set(filtered.map((p) => p.id)));
+  const clearSelection = () => setSelectedIds(new Set());
+
+  const handleBulkDelete = async () => {
+    if (bulkDeleting || selectedIds.size === 0) return;
+    if (!confirm(`Excluir ${selectedIds.size} aparelho(s) selecionado(s)? As fotos também serão apagadas. Essa ação não pode ser desfeita.`)) return;
+    setBulkDeleting(true);
+    try {
+      const ids = [...selectedIds];
+      const r = await api.catalog.bulkRemove(ids);
+      setProducts((prev) => prev.filter((p) => !selectedIds.has(p.id)));
+      setSelectedIds(new Set());
+      setSelectMode(false);
+      toast({ title: `${r.deleted} aparelho(s) excluído(s)` });
+    } catch (err) {
+      toast({ title: "Erro ao excluir em massa", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
 
   // ─── Formulário de produto ─────────────────────────────────────────────
   const openCreate = () => { setEditing(null); setForm({ ...emptyForm, variants: [{ ...emptyVariant }] }); setShowConditionInfo(false); setShowForm(true); };
@@ -216,7 +262,7 @@ export default function VitrineAparelhos() {
       description: p.description ?? "", status: p.status, categoryId: p.categoryId,
       variants: p.variants.length > 0
         ? p.variants.map((v) => ({
-            id: v.id, storage: v.storage ?? "", costPrice: v.costPrice ?? "", costIncludesInvoice: v.costIncludesInvoice,
+            id: v.id, storage: v.storage ?? "", color: v.color ?? "", costPrice: v.costPrice ?? "", costIncludesInvoice: v.costIncludesInvoice,
             marginPercentOverride: v.marginPercentOverride ?? "", salePrice: v.salePrice ?? "", wholesalePrice: v.wholesalePrice ?? "",
             wholesaleMarginPercentOverride: v.wholesaleMarginPercentOverride ?? "",
             stockQty: String(v.stockQty),
@@ -268,6 +314,7 @@ export default function VitrineAparelhos() {
       variants: form.variants.map((v) => ({
         id: v.id,
         storage: v.storage.trim() || null,
+        color: v.color.trim() || null,
         costPrice: v.costPrice ? Number(v.costPrice) : null,
         costIncludesInvoice: v.costIncludesInvoice,
         marginPercentOverride: v.marginPercentOverride ? Number(v.marginPercentOverride) : null,
@@ -375,7 +422,10 @@ export default function VitrineAparelhos() {
     p.colors.length ? `🎨 Cores: ${p.colors.join(", ")}` : null,
     ...p.variants
       .filter((v) => v.salePrice != null)
-      .map((v) => `💰 ${v.storage ? `${v.storage}: ` : ""}${formatBRL(v.salePrice)}${v.stockQty <= 0 ? " (sem estoque)" : ""}`),
+      .map((v) => {
+        const label = [v.storage, v.color].filter(Boolean).join(" ");
+        return `💰 ${label ? `${label}: ` : ""}${formatBRL(v.salePrice)}${v.stockQty <= 0 ? " (sem estoque)" : ""}`;
+      }),
   ].filter(Boolean).join("\n");
 
   const copyMessage = async (text: string) => {
@@ -421,7 +471,7 @@ export default function VitrineAparelhos() {
     setImportItems((prev) => prev && prev.map((it, i) => (i === idx ? { ...it, variants: it.variants.map((v, j) => (j === vIdx ? { ...v, ...patch } : v)) } : it)));
   };
   const addImportVariant = (idx: number) => {
-    setImportItems((prev) => prev && prev.map((it, i) => (i === idx ? { ...it, variants: [...it.variants, { storage: null, costPrice: null }] } : it)));
+    setImportItems((prev) => prev && prev.map((it, i) => (i === idx ? { ...it, variants: [...it.variants, { storage: null, color: null, costPrice: null }] } : it)));
   };
   const removeImportVariant = (idx: number, vIdx: number) => {
     setImportItems((prev) => prev && prev.map((it, i) => (i === idx ? { ...it, variants: it.variants.length > 1 ? it.variants.filter((_, j) => j !== vIdx) : it.variants } : it)));
@@ -534,6 +584,20 @@ export default function VitrineAparelhos() {
     }
   };
 
+  const handleSaveWhatsappWholesale = async () => {
+    if (savingWhatsappWholesale) return;
+    setSavingWhatsappWholesale(true);
+    try {
+      const r = await api.catalog.setWhatsappWholesale(whatsappWholesaleInput.trim());
+      setWhatsappWholesale(r.whatsapp);
+      toast({ title: r.whatsapp ? "WhatsApp de atacado atualizado" : "WhatsApp de atacado removido (volta a usar o de varejo)" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar WhatsApp de atacado", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    } finally {
+      setSavingWhatsappWholesale(false);
+    }
+  };
+
   const publicUrl = slug ? `${window.location.origin}/vitrine/${slug}` : null;
 
   return (
@@ -615,6 +679,24 @@ export default function VitrineAparelhos() {
         )}
         {canManage && (
           <div className="flex flex-wrap items-center gap-3 pt-3 border-t">
+            <MessageCircle className="w-4 h-4 text-amber-600 shrink-0" />
+            <div className="flex-1 min-w-[220px]">
+              <p className="text-xs font-semibold text-muted-foreground mb-1">WhatsApp de atacado (técnicos/lojistas com código de acesso) — em branco usa o mesmo número do varejo</p>
+              <div className="flex items-center gap-2">
+                <input value={whatsappWholesaleInput} onChange={(e) => setWhatsappWholesaleInput(e.target.value.replace(/[^\d]/g, ""))}
+                  placeholder="Ex.: 5511999997777 (DDI+DDD+número)" data-testid="input-catalog-whatsapp-wholesale"
+                  className="flex-1 min-w-[160px] rounded-lg border px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
+                <button onClick={handleSaveWhatsappWholesale} disabled={savingWhatsappWholesale} data-testid="button-save-whatsapp-wholesale"
+                  className="px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary/90 disabled:opacity-50 transition">
+                  {savingWhatsappWholesale ? "Salvando..." : "Salvar"}
+                </button>
+              </div>
+              {!whatsappWholesale && <p className="text-[10px] text-muted-foreground mt-1">Cliente que desbloquear o preço de atacado vai falar no mesmo WhatsApp do varejo, {whatsapp ?? "o número de contato administrativo"}.</p>}
+            </div>
+          </div>
+        )}
+        {canManage && (
+          <div className="flex flex-wrap items-center gap-3 pt-3 border-t">
             <KeyRound className="w-4 h-4 text-amber-600 shrink-0" />
             <div className="flex-1 min-w-[220px]">
               <p className="text-xs font-semibold text-muted-foreground mb-1">Código de acesso ao preço de atacado (pra técnicos e lojistas)</p>
@@ -645,6 +727,14 @@ export default function VitrineAparelhos() {
             data-testid="input-catalog-search"
             className="w-full pl-9 pr-3 py-2 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
         </div>
+        {categories.length > 0 && (
+          <select value={filterCategory === "all" ? "" : filterCategory} onChange={(e) => setFilterCategory(e.target.value ? Number(e.target.value) : "all")}
+            data-testid="select-filter-category"
+            className="rounded-full border px-3 py-1.5 text-xs font-semibold bg-white text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40">
+            <option value="">Todas as categorias</option>
+            {categories.map((c) => <option key={c.id} value={c.id}>{categoryPathLabel(categories, c.id)}</option>)}
+          </select>
+        )}
         <button onClick={() => setFilterStatus(filterStatus === "active" ? "all" : "active")}
           data-testid="button-toggle-status-filter"
           className={`px-3 py-1.5 rounded-full text-xs font-semibold transition ${filterStatus === "active" ? "bg-primary text-white" : "bg-secondary text-muted-foreground"}`}>
@@ -656,7 +746,29 @@ export default function VitrineAparelhos() {
             <MessageCircle className="w-3.5 h-3.5" /> Copiar catálogo pro WhatsApp
           </button>
         )}
+        {canManage && products.length > 0 && (
+          <button onClick={toggleSelectMode} data-testid="button-toggle-select-mode"
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition ${selectMode ? "bg-red-100 text-red-700" : "bg-secondary text-muted-foreground hover:bg-secondary/70"}`}>
+            <Check className="w-3.5 h-3.5" /> {selectMode ? "Cancelar seleção" : "Selecionar"}
+          </button>
+        )}
       </div>
+
+      {selectMode && (
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-dashed bg-secondary/30 px-3 py-2">
+          <span className="text-xs font-semibold text-muted-foreground">{selectedIds.size} selecionado(s) de {filtered.length} exibido(s)</span>
+          <button onClick={selectAllFiltered} data-testid="button-select-all-filtered"
+            className="text-xs font-semibold text-primary hover:underline">Selecionar todos os filtrados</button>
+          {selectedIds.size > 0 && (
+            <button onClick={clearSelection} data-testid="button-clear-selection"
+              className="text-xs font-semibold text-muted-foreground hover:underline">Limpar seleção</button>
+          )}
+          <button onClick={handleBulkDelete} disabled={selectedIds.size === 0 || bulkDeleting} data-testid="button-bulk-delete"
+            className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-red-600 text-white text-xs font-semibold hover:bg-red-700 disabled:opacity-40 transition">
+            <Trash2 className="w-3.5 h-3.5" /> {bulkDeleting ? "Excluindo..." : `Excluir selecionados (${selectedIds.size})`}
+          </button>
+        </div>
+      )}
 
       {/* Grade de produtos */}
       {loading ? (
@@ -672,8 +784,15 @@ export default function VitrineAparelhos() {
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
           {filtered.map((p) => (
-            <div key={p.id} data-testid={`product-card-${p.id}`} className="bg-white rounded-xl border border-border overflow-hidden flex flex-col">
-              <div className="aspect-square bg-neutral-100 flex items-center justify-center overflow-hidden">
+            <div key={p.id} data-testid={`product-card-${p.id}`}
+              onClick={() => selectMode && toggleSelected(p.id)}
+              className={`bg-white rounded-xl border overflow-hidden flex flex-col ${selectMode ? "cursor-pointer" : ""} ${selectMode && selectedIds.has(p.id) ? "border-primary ring-2 ring-primary/40" : "border-border"}`}>
+              <div className="relative aspect-square bg-neutral-100 flex items-center justify-center overflow-hidden">
+                {selectMode && (
+                  <div className={`absolute top-1.5 left-1.5 z-10 w-5 h-5 rounded-md border-2 flex items-center justify-center ${selectedIds.has(p.id) ? "bg-primary border-primary" : "bg-white/90 border-neutral-300"}`}>
+                    {selectedIds.has(p.id) && <Check className="w-3.5 h-3.5 text-white" />}
+                  </div>
+                )}
                 {p.photos[0] ? (
                   <img src={api.catalog.photoUrl(p.photos[0].id)} alt={p.model} className="w-full h-full object-cover" />
                 ) : (
@@ -695,8 +814,9 @@ export default function VitrineAparelhos() {
                 <p className="text-sm font-semibold leading-tight">{p.model}</p>
                 {storagesLabel(p) && <p className="text-xs text-muted-foreground">{storagesLabel(p)}</p>}
                 {p.variants.length > 1 && <p className="text-[10px] text-muted-foreground">{p.variants.length} variantes</p>}
-                {canManage && (
+                {canManage && !selectMode && (
                   <select value={p.categoryId ?? ""} onChange={(e) => handleQuickCategoryChange(p, e.target.value ? Number(e.target.value) : null)}
+                    onClick={(e) => e.stopPropagation()}
                     data-testid={`select-quick-category-${p.id}`} title="Mudar categoria"
                     className="text-[10px] rounded border px-1.5 py-1 bg-white text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/40">
                     <option value="">Sem categoria</option>
@@ -704,18 +824,20 @@ export default function VitrineAparelhos() {
                   </select>
                 )}
                 <p className="text-sm font-bold mt-auto">{priceRangeLabel(p)}</p>
-                <div className="flex items-center gap-1 pt-1">
-                  <button onClick={() => copyMessage(productMessage(p))} title="Copiar mensagem" data-testid={`button-copy-product-${p.id}`}
-                    className="p-1.5 rounded-lg hover:bg-emerald-50 text-emerald-600"><MessageCircle className="w-3.5 h-3.5" /></button>
-                  {canManage && (
-                    <>
-                      <button onClick={() => openEdit(p)} data-testid={`button-edit-product-${p.id}`}
-                        className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground"><Pencil className="w-3.5 h-3.5" /></button>
-                      <button onClick={() => handleDelete(p)} data-testid={`button-delete-product-${p.id}`}
-                        className="p-1.5 rounded-lg hover:bg-red-50 text-red-600 ml-auto"><Trash2 className="w-3.5 h-3.5" /></button>
-                    </>
-                  )}
-                </div>
+                {!selectMode && (
+                  <div className="flex items-center gap-1 pt-1">
+                    <button onClick={() => copyMessage(productMessage(p))} title="Copiar mensagem" data-testid={`button-copy-product-${p.id}`}
+                      className="p-1.5 rounded-lg hover:bg-emerald-50 text-emerald-600"><MessageCircle className="w-3.5 h-3.5" /></button>
+                    {canManage && (
+                      <>
+                        <button onClick={() => openEdit(p)} data-testid={`button-edit-product-${p.id}`}
+                          className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground"><Pencil className="w-3.5 h-3.5" /></button>
+                        <button onClick={() => handleDelete(p)} data-testid={`button-delete-product-${p.id}`}
+                          className="p-1.5 rounded-lg hover:bg-red-50 text-red-600 ml-auto"><Trash2 className="w-3.5 h-3.5" /></button>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           ))}
@@ -776,7 +898,7 @@ export default function VitrineAparelhos() {
               {/* Variantes de armazenamento */}
               <div className="rounded-lg border border-dashed p-3 space-y-3 bg-secondary/30">
                 <div className="flex items-center justify-between">
-                  <p className="text-xs font-semibold text-muted-foreground">Variantes (armazenamento/memória) — preço e estoque próprios de cada uma</p>
+                  <p className="text-xs font-semibold text-muted-foreground">Variantes (armazenamento + cor) — preço e estoque próprios de cada combinação</p>
                   <button type="button" onClick={addVariant} data-testid="button-add-variant"
                     className="flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline">
                     <Plus className="w-3 h-3" /> Adicionar variante
@@ -787,6 +909,9 @@ export default function VitrineAparelhos() {
                     <div className="flex items-center gap-2">
                       <input value={v.storage} onChange={(e) => updateVariant(idx, { storage: e.target.value })}
                         placeholder="Ex.: 256GB" data-testid={`input-variant-storage-${idx}`}
+                        className="flex-1 rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                      <input value={v.color} onChange={(e) => updateVariant(idx, { color: e.target.value })}
+                        placeholder="Cor (opcional)" data-testid={`input-variant-color-${idx}`}
                         className="flex-1 rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40" />
                       {form.variants.length > 1 && (
                         <button type="button" onClick={() => removeVariant(idx)} data-testid={`button-remove-variant-${idx}`}
@@ -997,6 +1122,8 @@ export default function VitrineAparelhos() {
                             <div key={vIdx} className="flex items-center gap-2">
                               <input value={v.storage ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { storage: e.target.value || null })}
                                 className="flex-1 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Armazenamento" />
+                              <input value={v.color ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { color: e.target.value || null })}
+                                className="flex-1 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Cor" />
                               <input type="number" value={v.costPrice ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { costPrice: e.target.value ? Number(e.target.value) : null })}
                                 className="flex-1 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Custo R$" />
                               {it.variants.length > 1 && (

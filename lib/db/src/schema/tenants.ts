@@ -57,6 +57,11 @@ export const tenantsTable = pgTable("tenants", {
   // que é o telefone de contato administrativo cadastrado pelo superadmin).
   // Null = a vitrine cai no fallback de contactPhone.
   catalogWhatsapp: text("catalog_whatsapp"),
+  // WhatsApp de atacado — mostrado no lugar do catalogWhatsapp (varejo)
+  // quando o visitante desbloqueou o preço de atacado com o código de
+  // acesso (ver catalogWholesaleCode). Null = usa o mesmo número do varejo
+  // pra todo mundo, atacado incluso.
+  catalogWhatsappWholesale: text("catalog_whatsapp_wholesale"),
   // Código de acesso ao preço de atacado da Vitrine pública — compartilhado
   // com técnicos/lojistas de confiança (não é login individual, é uma senha
   // única). Null = preço de atacado desligado (ninguém vê, nem com código).

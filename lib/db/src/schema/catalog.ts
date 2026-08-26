@@ -107,6 +107,12 @@ export const catalogProductVariantsTable = pgTable("catalog_product_variants", {
   id: serial("id").primaryKey(),
   productId: integer("product_id").notNull().references(() => catalogProductsTable.id, { onDelete: "cascade" }),
   storage: text("storage"), // ex.: "256GB" (texto livre — varia por fornecedor); null = não varia por armazenamento
+  // Cor desta variante específica (texto livre) — permite unificar no MESMO
+  // produto (mesmo modelo+condição) aparelhos que só diferem por
+  // armazenamento e/ou cor, cada combinação com seu próprio preço/estoque.
+  // Null = essa variante não distingue cor (usa as cores do produto, ver
+  // catalogProductsTable.colors, só como texto informativo na vitrine).
+  color: text("color"),
   costPrice: numeric("cost_price"),
   costIncludesInvoice: boolean("cost_includes_invoice").notNull().default(false),
   marginPercentOverride: numeric("margin_percent_override"), // null = usa a margem padrão da loja
