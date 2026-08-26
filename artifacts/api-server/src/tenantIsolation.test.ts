@@ -27,7 +27,7 @@ if (process.env["DATABASE_URL"]!.includes("prod") || process.env["DATABASE_URL"]
 const {
   db, tenantsTable, usersTable, conversationsTable, messagesTable, crmContactsTable,
   tasksTable, internalConversationsTable, internalConversationMembersTable, internalMessagesTable,
-  saasTicketsTable, saasTicketMessagesTable, accessLogsTable,
+  saasTicketsTable, saasTicketMessagesTable, accessLogsTable, OPTIONAL_MODULES,
 } = await import("@workspace/db");
 const { eq, inArray } = await import("drizzle-orm");
 const { default: app } = await import("./app.ts");
@@ -101,7 +101,12 @@ async function wipeTestTenants(): Promise<void> {
 }
 
 async function seedStore(label: "A" | "B"): Promise<Omit<Store, "conversationId" | "messageId" | "crmContactId" | "taskId" | "internalConversationId" | "internalMessageId" | "ticketId">> {
-  const [tenant] = await db.insert(tenantsTable).values({ name: `${MARK}_${label}` }).returning();
+  // enabledModules explícito: sem isso, o insert cai no default da COLUNA no
+  // banco (não no default do schema TS) — um default antigo, gravado numa
+  // migration de quando só existiam os módulos "extras" (equipe/chat/crm
+  // etc. eram sempre ligados, fora da lista). O admin de teste nascia sem
+  // acesso a "equipe" e toda rota de chat interno virava 403 em cascata.
+  const [tenant] = await db.insert(tenantsTable).values({ name: `${MARK}_${label}`, enabledModules: [...OPTIONAL_MODULES] }).returning();
   const email = `${MARK.toLowerCase()}-${label.toLowerCase()}@isolation-test.invalid`;
   const password = "SenhaForte123!";
   const passwordHash = await bcrypt.hash(password, 10);
