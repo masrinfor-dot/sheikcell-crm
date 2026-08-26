@@ -413,6 +413,8 @@ export type InternalMessage = {
   replyTo: { id: number; senderName: string; content: string; type: "text" | "image" | "audio" | "doc" } | null;
   metadata?: MessageMetadata | null;
   createdAt: string;
+  editedAt?: string | null;
+  deletedAt?: string | null;
 };
 
 export type FinanceVendedorRow = {
@@ -1453,6 +1455,10 @@ export const api = {
     messages: (id: number) => req<InternalMessage[]>(`/internal-chat/conversations/${id}/messages`),
     send: (id: number, content: string, replyToId?: number) =>
       req<InternalMessage>(`/internal-chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content, replyToId }) }),
+    editMessage: (messageId: number, content: string) =>
+      req<InternalMessage>(`/internal-chat/messages/${messageId}`, { method: "PATCH", body: JSON.stringify({ content }) }),
+    deleteMessage: (messageId: number) =>
+      req<InternalMessage>(`/internal-chat/messages/${messageId}`, { method: "DELETE" }),
     markRead: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}/read`, { method: "POST" }),
     deleteGroup: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}`, { method: "DELETE" }),
     deleteGeneral: () => req<{ ok: boolean }>("/internal-chat/general", { method: "DELETE" }),

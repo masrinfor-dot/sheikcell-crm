@@ -63,6 +63,10 @@ export const internalMessagesTable = pgTable(
     replyToId: integer("reply_to_id"),
     metadata: jsonb("metadata").$type<MessageMetadata>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // Editar/apagar mensagem (igual ao Atendimento) — ver rotas PATCH/DELETE
+    // /internal-chat/messages/:id em internalChat.ts.
+    editedAt: timestamp("edited_at", { withTimezone: true }),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
   },
   (t) => [
     // "set null" em vez de cascade: apagar a mensagem original não deve apagar
