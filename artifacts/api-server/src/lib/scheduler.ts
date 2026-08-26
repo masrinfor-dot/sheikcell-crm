@@ -313,5 +313,12 @@ export function startScheduler(): void {
     void import("./tvBoxMessaging").then((m) => m.sendTvBoxReminders()).catch(() => {});
     void import("./tvBoxMessaging").then((m) => m.sendTvBoxCharges()).catch(() => {});
   }, 30 * 60_000);
+  // Lembretes de compromisso da Agenda (Quadro de Tarefas com horário +
+  // alerta configurado): checa a cada minuto — granularidade fina porque é
+  // horário marcado de verdade, não uma janela de dia inteiro (idempotente
+  // via dedupeKey, então checar de novo a cada minuto é seguro).
+  setInterval(() => {
+    void import("./taskReminders").then((m) => m.runTaskReminders()).catch(() => {});
+  }, 60_000);
   logger.info("Agendador de mensagens iniciado (tick 30s)");
 }
