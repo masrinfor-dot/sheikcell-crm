@@ -18,12 +18,28 @@ export class ApiError extends Error {
   }
 }
 
-async function req<T>(path: string, opts?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    credentials: "include",
-    headers: { "Content-Type": "application/json", ...opts?.headers },
-    ...opts,
-  });
+// timeoutMs é opcional — usado só por chamadas que dependem de uma IA externa
+// (ex.: importação de lista, busca de fotos), onde sem ele um proxy/rede
+// travada deixa o spinner girando pra sempre em vez de mostrar um erro.
+// Chamadas normais (sem timeoutMs) mantêm o comportamento de sempre.
+async function req<T>(path: string, opts?: RequestInit & { timeoutMs?: number }): Promise<T> {
+  const { timeoutMs, ...init } = opts ?? {};
+  const controller = timeoutMs ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      credentials: "include",
+      headers: { "Content-Type": "application/json", ...init.headers },
+      ...init,
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+  } catch (err) {
+    if (controller?.signal.aborted) throw new ApiError("Tempo esgotado — tente novamente.");
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new ApiError(
@@ -1943,7 +1959,10 @@ export const api = {
     updateCategory: (id: number, data: { name?: string; parentId?: number | null; sortOrder?: number }) =>
       req<CatalogCategory>(`/catalog/categories/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     removeCategory: (id: number) => req<{ ok: boolean }>(`/catalog/categories/${id}`, { method: "DELETE" }),
-    importParse: (rawText: string) => req<{ items: CatalogImportItem[]; newCategoryPaths: string[][] }>("/catalog/import/parse", { method: "POST", body: JSON.stringify({ rawText }) }),
+    // timeoutMs um pouco acima do pior caso do backend (25s da chamada à IA
+    // + 1 retry ≈ até 50s) — sem isso, uma rede/proxy travados deixavam o
+    // botão "Analisar" girando pra sempre sem nunca mostrar erro.
+    importParse: (rawText: string) => req<{ items: CatalogImportItem[]; newCategoryPaths: string[][] }>("/catalog/import/parse", { method: "POST", body: JSON.stringify({ rawText }), timeoutMs: 55_000 }),
     importConfirm: (items: CatalogImportItem[]) => req<{ imported: number; products: CatalogProduct[] }>("/catalog/import/confirm", { method: "POST", body: JSON.stringify({ items }) }),
     public: (slug: string, code?: string) =>
       req<{
