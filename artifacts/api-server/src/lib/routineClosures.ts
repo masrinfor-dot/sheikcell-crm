@@ -4,7 +4,7 @@ import {
   type RoutineChecklist, type RoutineChecklistScope, type RoutineNoJustification,
 } from "@workspace/db";
 import { eq, and, gte, lte, isNotNull } from "drizzle-orm";
-import { dateInfoFor, isDueToday, resolveUserContext, scopeMatchesUser, isOnLeaveToday } from "./routinesShared";
+import { dateInfoFor, isDueToday, resolveUserContext, scopeMatchesUser, isOnLeaveToday, checklistOccurrences } from "./routinesShared";
 import { previousMonthKey, currentMonthKey } from "./timeBankClosures";
 import { logger } from "./logger";
 
@@ -73,13 +73,16 @@ export async function generateRoutineClosuresForMonth(periodMonth: string, tenan
 
       const responses = await db.select({
         checklistId: routineResponsesTable.checklistId, periodKey: routineResponsesTable.periodKey,
+        occurrenceTime: routineResponsesTable.occurrenceTime,
         createdAt: routineResponsesTable.createdAt, answers: routineResponsesTable.answers,
         respondedRelativeToPonto: routineResponsesTable.respondedRelativeToPonto,
       }).from(routineResponsesTable).where(and(
         eq(routineResponsesTable.tenantId, emp.tenantId), eq(routineResponsesTable.userId, emp.userId),
         gte(routineResponsesTable.periodKey, days[0]!), lte(routineResponsesTable.periodKey, days[days.length - 1]!),
       ));
-      const responseByKey = new Map(responses.map((r) => [`${r.checklistId}:${r.periodKey}`, r]));
+      // occurrenceTime é "" pro checklist de horário único (mesma chave de
+      // toda resposta histórica) — ver checklistOccurrences em routinesShared.ts.
+      const responseByKey = new Map(responses.map((r) => [`${r.checklistId}:${r.periodKey}:${r.occurrenceTime}`, r]));
 
       let totalDue = 0, totalAnswered = 0, totalOnTime = 0, totalWithPendency = 0;
       let pontoBeforeEntry = 0, pontoAfterEntry = 0, pontoNoRecord = 0;
@@ -91,24 +94,31 @@ export async function generateRoutineClosuresForMonth(periodMonth: string, tenan
           if (!isDueToday(c, info)) continue;
           const scopes = scopesByChecklist.get(c.id) ?? [];
           if (!scopes.some((s) => scopeMatchesUser(s, ctx, emp.userId!))) continue;
-          totalDue++;
 
-          const resp = responseByKey.get(`${c.id}:${dateKey}`);
-          if (!resp) continue;
-          totalAnswered++;
+          // Rotinas com mais de um horário por dia: cada ocorrência conta
+          // separado (totalDue soma 1 por horário configurado, não 1 por
+          // checklist) — checklist de horário único colapsa numa ocorrência
+          // só, comportamento idêntico a antes.
+          for (const occ of checklistOccurrences(c)) {
+            totalDue++;
 
-          if (c.recurrence === "continuous" || !c.scheduledTime) {
-            totalOnTime++; // sem horário fixo — qualquer resposta no dia conta como "no prazo"
-          } else {
-            const scheduled = new Date(`${dateKey}T${c.scheduledTime}:00-03:00`);
-            const deadline = new Date(scheduled.getTime() + c.toleranceMinutes * 60_000);
-            if (resp.createdAt.getTime() <= deadline.getTime()) totalOnTime++;
+            const resp = responseByKey.get(`${c.id}:${dateKey}:${occ.occurrenceTime}`);
+            if (!resp) continue;
+            totalAnswered++;
+
+            if (occ.time == null) {
+              totalOnTime++; // sem horário fixo — qualquer resposta no dia conta como "no prazo"
+            } else {
+              const scheduled = new Date(`${dateKey}T${occ.time}:00-03:00`);
+              const deadline = new Date(scheduled.getTime() + c.toleranceMinutes * 60_000);
+              if (resp.createdAt.getTime() <= deadline.getTime()) totalOnTime++;
+            }
+
+            if (Object.values(resp.answers).some(hasPendency)) totalWithPendency++;
+            if (resp.respondedRelativeToPonto === "antes_entrada") pontoBeforeEntry++;
+            else if (resp.respondedRelativeToPonto === "depois_entrada") pontoAfterEntry++;
+            else if (resp.respondedRelativeToPonto === "sem_ponto_no_dia") pontoNoRecord++;
           }
-
-          if (Object.values(resp.answers).some(hasPendency)) totalWithPendency++;
-          if (resp.respondedRelativeToPonto === "antes_entrada") pontoBeforeEntry++;
-          else if (resp.respondedRelativeToPonto === "depois_entrada") pontoAfterEntry++;
-          else if (resp.respondedRelativeToPonto === "sem_ponto_no_dia") pontoNoRecord++;
         }
       }
 

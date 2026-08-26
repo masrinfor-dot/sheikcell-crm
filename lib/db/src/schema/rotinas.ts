@@ -30,6 +30,14 @@ export const routineChecklistsTable = pgTable("routine_checklists", {
   // "08:00" — null quando recurrence="continuous" (sem horário fixo, devido
   // o expediente inteiro).
   scheduledTime: text("scheduled_time"),
+  // Rotinas com mais de um horário por dia (ex.: conferência de caixa 3x/dia)
+  // — null/vazio pro caso normal de horário único (scheduledTime sozinho já
+  // resolve, comportamento 100% igual a antes). Quando preenchido com 2+
+  // horários, scheduledTime continua guardando o PRIMEIRO deles (telas que
+  // só leem scheduledTime, ex. ordenação/listagem, seguem funcionando), e
+  // cada horário desta lista vira uma ocorrência própria — ver
+  // checklistOccurrences() em lib/routinesShared.ts.
+  scheduledTimes: jsonb("scheduled_times").$type<string[]>(),
   // "daily" | "weekdays" (seg-sex) | "specific_days" | "weekly" | "monthly" | "specific_date" | "continuous"
   recurrence: text("recurrence").notNull().default("daily"),
   // dias da semana (0=domingo..6=sábado) pra specific_days/weekly, OU dia do
@@ -106,6 +114,13 @@ export const routineResponsesTable = pgTable("routine_responses", {
   checklistId: integer("checklist_id").notNull().references(() => routineChecklistsTable.id, { onDelete: "cascade" }),
   userId: integer("user_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }),
   periodKey: text("period_key").notNull(), // "YYYY-MM-DD" — uma resposta por dia por usuário/checklist
+  // Rotinas com mais de um horário por dia: "" (default, mesmo valor de toda
+  // resposta histórica) pra checklist de ocorrência única no dia, ou o
+  // horário ("HH:MM") da ocorrência específica respondida quando o checklist
+  // tem múltiplos horários configurados — ver checklistOccurrences() em
+  // lib/routinesShared.ts. Junto com periodKey, é o que diferencia as
+  // várias respostas do mesmo checklist/usuário/dia (ver índice único abaixo).
+  occurrenceTime: text("occurrence_time").notNull().default(""),
   // { [questionId]: valor simples, ou objeto de justificativa quando a
   // pergunta exige motivo pra resposta negativa (Fase 3.5) }
   answers: jsonb("answers").$type<Record<string, string | RoutineNoJustification>>().notNull(),
@@ -128,7 +143,7 @@ export const routineResponsesTable = pgTable("routine_responses", {
   pendencyReviewNote: text("pendency_review_note"),
   pendencyReviewedAt: timestamp("pendency_reviewed_at", { withTimezone: true }),
 }, (t) => [
-  uniqueIndex("routine_responses_unique").on(t.checklistId, t.userId, t.periodKey),
+  uniqueIndex("routine_responses_unique").on(t.checklistId, t.userId, t.periodKey, t.occurrenceTime),
   index("routine_responses_user_idx").on(t.userId),
 ]);
 

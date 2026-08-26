@@ -11,7 +11,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Button, Modal, Select } from "@/components/kit";
 import {
   ListChecks, Plus, Trash2, Pencil, CalendarClock, Users2, Bell, Eye, FolderOpen, ChevronRight, FileText, Image as ImageIcon,
-  BarChart3, Clock, Building2, Trophy, CheckCircle2, ShieldQuestion, LayoutDashboard, AlertTriangle, RefreshCw,
+  BarChart3, Clock, Building2, Trophy, CheckCircle2, ShieldQuestion, LayoutDashboard, AlertTriangle, RefreshCw, X,
 } from "lucide-react";
 
 const WEEKDAYS = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
@@ -48,6 +48,10 @@ const EMPTY_QUESTION: FormQuestion = {
 const EMPTY_SCOPE: FormScope = { storeId: null, sectorId: null, jobFunction: "", userId: null };
 const EMPTY_FORM = {
   name: "", message: "", scheduledTime: "08:00",
+  // Rotinas com mais de um horário por dia (opcional, ex.: conferência de
+  // caixa 3x/dia) — horários ALÉM do "Horário" principal acima. Vazio =
+  // checklist de horário único, comportamento de sempre.
+  extraTimes: [] as string[],
   recurrence: "daily" as RoutineRecurrence, recurrenceDays: [] as number[], specificDate: "",
   toleranceMinutes: 0, mandatory: true, active: true,
   questions: [{ ...EMPTY_QUESTION }] as FormQuestion[],
@@ -68,6 +72,7 @@ export default function RotinasProdutividade() {
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<RoutineChecklistFull | null>(null);
   const [form, setForm] = useState(EMPTY_FORM);
+  const [newExtraTime, setNewExtraTime] = useState("");
   const [saving, setSaving] = useState(false);
   const [viewing, setViewing] = useState<RoutineChecklist | null>(null);
   const [responses, setResponses] = useState<RoutineResponse[]>([]);
@@ -81,6 +86,7 @@ export default function RotinasProdutividade() {
   }, []);
 
   const openForm = async (c?: RoutineChecklist) => {
+    setNewExtraTime("");
     if (!c) {
       setEditing(null);
       setForm({ ...EMPTY_FORM, questions: [{ ...EMPTY_QUESTION }], scopes: [{ ...EMPTY_SCOPE }] });
@@ -90,8 +96,11 @@ export default function RotinasProdutividade() {
     try {
       const full = await api.rotinas.get(c.id);
       setEditing(full);
+      // scheduledTimes vem ordenado com o 1º = scheduledTime (garantido pelo
+      // backend) — extraTimes é só o resto, os horários "a mais".
+      const extraTimes = (full.scheduledTimes ?? []).filter((t) => t !== full.scheduledTime);
       setForm({
-        name: full.name, message: full.message ?? "", scheduledTime: full.scheduledTime ?? "08:00",
+        name: full.name, message: full.message ?? "", scheduledTime: full.scheduledTime ?? "08:00", extraTimes,
         recurrence: full.recurrence, recurrenceDays: full.recurrenceDays ?? [], specificDate: full.specificDate ?? "",
         toleranceMinutes: full.toleranceMinutes, mandatory: full.mandatory, active: full.active,
         questions: full.questions.length
@@ -125,6 +134,9 @@ export default function RotinasProdutividade() {
     const payload: Partial<RoutineChecklistFull> = {
       name: form.name, message: form.message || null,
       scheduledTime: form.recurrence === "continuous" ? null : form.scheduledTime,
+      // [] explícito reverte pra horário único (backend interpreta array
+      // vazio como "sem múltiplos horários") — ver PATCH /rotinas/checklists/:id.
+      scheduledTimes: form.recurrence === "continuous" ? null : (form.extraTimes.length ? [form.scheduledTime, ...form.extraTimes] : []),
       recurrence: form.recurrence,
       recurrenceDays: ["specific_days", "weekly", "monthly"].includes(form.recurrence) ? form.recurrenceDays : null,
       specificDate: form.recurrence === "specific_date" ? form.specificDate : null,
@@ -247,7 +259,9 @@ export default function RotinasProdutividade() {
                 </div>
                 <div className="flex items-center gap-3 mt-1 text-[11px] text-muted-foreground flex-wrap">
                   <span className="flex items-center gap-1">
-                    <CalendarClock className="w-3 h-3" /> {c.scheduledTime ? `${c.scheduledTime} · ` : ""}{RECURRENCE_LABELS[c.recurrence]}
+                    <CalendarClock className="w-3 h-3" />
+                    {c.scheduledTimes && c.scheduledTimes.length > 1 ? `${c.scheduledTimes.join(", ")} · ` : c.scheduledTime ? `${c.scheduledTime} · ` : ""}
+                    {RECURRENCE_LABELS[c.recurrence]}
                   </span>
                   <span className="flex items-center gap-1"><Bell className="w-3 h-3" />{TOLERANCE_OPTIONS.find((t) => t.value === c.toleranceMinutes)?.label}</span>
                   <span className="flex items-center gap-1"><Users2 className="w-3 h-3" />{c.scopeCount ?? 0} regra(s) de escopo</span>
@@ -301,6 +315,38 @@ export default function RotinasProdutividade() {
                     <input type="time" value={form.scheduledTime} onChange={(e) => setForm((f) => ({ ...f, scheduledTime: e.target.value }))}
                       data-testid="input-routine-time"
                       className="w-full px-3 py-2 rounded-xl border border-border text-sm" />
+                  </div>
+                )}
+                {form.recurrence !== "continuous" && (
+                  <div className="col-span-2">
+                    <label className="text-xs font-medium mb-1 block">
+                      Horários adicionais (opcional) — pra checklist com mais de uma vez por dia, ex.: conferência de caixa 3x/dia
+                    </label>
+                    {form.extraTimes.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mb-1.5">
+                        {form.extraTimes.map((t, i) => (
+                          <span key={`${t}-${i}`} className="flex items-center gap-1 text-xs font-semibold bg-secondary rounded-full pl-2.5 pr-1 py-1">
+                            {t}
+                            <button type="button" onClick={() => setForm((f) => ({ ...f, extraTimes: f.extraTimes.filter((_, idx) => idx !== i) }))}
+                              data-testid={`button-remove-extra-time-${i}`} className="p-0.5 rounded-full hover:bg-black/10">
+                              <X className="w-3 h-3" />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <div className="flex gap-1.5">
+                      <input type="time" value={newExtraTime} onChange={(e) => setNewExtraTime(e.target.value)}
+                        data-testid="input-routine-extra-time"
+                        className="px-3 py-2 rounded-xl border border-border text-sm" />
+                      <Button type="button" variant="secondary" data-testid="button-add-extra-time" onClick={() => {
+                        if (!newExtraTime || newExtraTime === form.scheduledTime || form.extraTimes.includes(newExtraTime)) return;
+                        setForm((f) => ({ ...f, extraTimes: [...f.extraTimes, newExtraTime].sort() }));
+                        setNewExtraTime("");
+                      }}>
+                        + Adicionar horário
+                      </Button>
+                    </div>
                   </div>
                 )}
                 <div>

@@ -732,6 +732,11 @@ export type RoutineChecklistScope = {
 export type RoutineRecurrence = "daily" | "weekdays" | "specific_days" | "weekly" | "monthly" | "specific_date" | "continuous";
 export type RoutineChecklist = {
   id: number; name: string; message: string | null; scheduledTime: string | null;
+  // Rotinas com mais de um horário por dia (ex.: conferência de caixa
+  // 3x/dia) — null/vazio pro caso normal de horário único (scheduledTime
+  // sozinho já resolve). Preenchido com 2+ horários quando o admin
+  // configura múltiplos horários pro mesmo checklist.
+  scheduledTimes: string[] | null;
   recurrence: RoutineRecurrence; recurrenceDays: number[] | null; specificDate: string | null;
   toleranceMinutes: number; mandatory: boolean; active: boolean; version: number;
   createdByUserId: number | null; createdAt: string; updatedAt: string;
@@ -788,6 +793,13 @@ export type PendingRoutineQuestion = {
 };
 export type PendingRoutine = {
   id: number; name: string; message: string | null; mandatory: boolean; periodKey: string;
+  // "" pro checklist de horário único (comportamento de sempre); quando o
+  // checklist tem múltiplos horários (Rotinas com mais de um horário por
+  // dia), vira o "HH:MM" da ocorrência específica pendente — precisa ser
+  // reenviado em respond() pra identificar qual ocorrência está sendo
+  // respondida (um mesmo checklist pode aparecer mais de uma vez na lista
+  // de pendentes, uma por horário ainda não respondido).
+  occurrenceTime: string;
   questions: PendingRoutineQuestion[];
 };
 // Justificativa estruturada (Fase 3.5) gravada quando a resposta é negativa
@@ -1559,8 +1571,12 @@ export const api = {
     jobFunctions: () => req<string[]>("/rotinas/job-functions"),
     scopeOptions: () => req<RoutineScopeOptions>("/rotinas/scope-options"),
     pending: () => req<PendingRoutine[]>("/rotinas/pending"),
-    respond: (id: number, answers: Record<string, RoutineAnswerValue>, evidence?: Record<string, RoutineEvidenceUpload>) =>
-      req<{ id: number }>(`/rotinas/checklists/${id}/respond`, { method: "POST", body: JSON.stringify({ answers, evidence }) }),
+    // occurrenceTime: "" (padrão) pro checklist de horário único; pra quem
+    // tem múltiplos horários, passe o mesmo occurrenceTime que veio no item
+    // de pending() (senão o backend responde 404 — não está pendente pra
+    // aquela ocorrência).
+    respond: (id: number, answers: Record<string, RoutineAnswerValue>, evidence?: Record<string, RoutineEvidenceUpload>, occurrenceTime?: string) =>
+      req<{ id: number }>(`/rotinas/checklists/${id}/respond`, { method: "POST", body: JSON.stringify({ answers, evidence, occurrenceTime }) }),
     responses: (id: number) => req<RoutineResponse[]>(`/rotinas/checklists/${id}/responses`),
     evidenceFileUrl: (evidenceId: number) => `${API_BASE}/rotinas/evidence/${evidenceId}/file`,
     closures: (params?: { employeeId?: number; periodMonth?: string }) => {

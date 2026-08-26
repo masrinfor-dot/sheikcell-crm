@@ -46,6 +46,31 @@ export function isDueToday(c: RoutineChecklist, info: DateInfo): boolean {
   }
 }
 
+// Rotinas com mais de um horário por checklist no mesmo dia (ex.: conferência
+// de caixa 3x/dia, em vez de só 1x). "occurrenceTime" é a CHAVE gravada em
+// routine_responses.occurrence_time — fica "" (mesmo valor de TODAS as
+// respostas históricas, e o default da coluna) sempre que o checklist só tem
+// UMA ocorrência no dia (continuous, ou um scheduledTime só, sem
+// scheduledTimes/com só 1 item), e só vira o horário real ("HH:MM") quando o
+// checklist tem de fato mais de um horário configurado (scheduledTimes com
+// 2+ itens). Isso garante que nenhum checklist/resposta existente muda de
+// comportamento com esta feature — só quem tem múltiplos horários de verdade
+// passa a "desdobrar" em várias ocorrências por dia.
+export type ChecklistOccurrence = { occurrenceTime: string; time: string | null; minutes: number | null };
+
+export function checklistOccurrences(
+  c: Pick<RoutineChecklist, "recurrence" | "scheduledTime" | "scheduledTimes">,
+): ChecklistOccurrence[] {
+  if (c.recurrence === "continuous" || !c.scheduledTime) return [{ occurrenceTime: "", time: null, minutes: null }];
+  const times = c.scheduledTimes && c.scheduledTimes.length ? c.scheduledTimes : [c.scheduledTime];
+  const multi = times.length > 1;
+  return times.map((t) => ({
+    occurrenceTime: multi ? t : "",
+    time: t,
+    minutes: parseInt(t.slice(0, 2), 10) * 60 + parseInt(t.slice(3, 5), 10),
+  }));
+}
+
 export type UserRoutineContext = { storeId: number | null; sectorId: number | null; jobFunction: string | null; employeeId: number | null };
 
 export async function resolveUserContext(tenantId: number, userId: number): Promise<UserRoutineContext> {
