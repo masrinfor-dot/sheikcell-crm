@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, Fragment } from "react";
 import { createPortal } from "react-dom";
 import { api, can, ApiError, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -145,6 +145,30 @@ function timeAgo(iso: string | null): string {
 
 function msgTime(iso: string): string {
   return new Date(iso).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+}
+
+// ─── Agrupamento de mensagens por dia (Hoje/Ontem) ──────────────────────────
+// Usa o mesmo fuso fixo que o resto do sistema já usa em toda parte (Rotinas,
+// Ponto etc. — ver routinesShared.ts no backend): hoje não existe fuso
+// configurável por loja no schema, então repetir "America/Sao_Paulo" aqui
+// mantém uma única fonte de verdade de "que dia é hoje" em vez de inventar
+// uma segunda regra só pro chat. Calculado no fuso do NEGÓCIO (não no fuso do
+// navegador de quem está vendo), pra que dois atendentes em fusos diferentes
+// vejam sempre a mesma separação de dia na mesma conversa.
+const TENANT_TIMEZONE = "America/Sao_Paulo";
+
+function msgDayKey(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-CA", { timeZone: TENANT_TIMEZONE });
+}
+
+function msgDayLabel(iso: string): string {
+  const key = msgDayKey(iso);
+  const now = new Date();
+  const todayKey = now.toLocaleDateString("en-CA", { timeZone: TENANT_TIMEZONE });
+  const yesterdayKey = new Date(now.getTime() - 86_400_000).toLocaleDateString("en-CA", { timeZone: TENANT_TIMEZONE });
+  if (key === todayKey) return "Hoje";
+  if (key === yesterdayKey) return "Ontem";
+  return new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", timeZone: TENANT_TIMEZONE });
 }
 
 // ─── Avatar ────────────────────────────────────────────────────────────────
@@ -3351,21 +3375,33 @@ export default function ChatCenter({
                     </button>
                   </div>
                 )}
-                {messages.map((msg) => (
-                  <MsgBubble
-                    key={msg.id}
-                    msg={msg}
-                    onReply={setReplyTarget}
-                    highlighted={highlightedMsgId === msg.id}
-                    onJumpTo={scrollToMessage}
-                    isGroup={!!activeConv && isGroupConv(activeConv)}
-                    onStartConversation={can(user, "criar_atendimento") ? startConversationWith : undefined}
-                    currentUserId={user?.id}
-                    isModerator={user?.role === "admin" || user?.role === "supervisor"}
-                    onEdit={handleEditMessage}
-                    onDelete={handleDeleteMessage}
-                  />
-                ))}
+                {messages.map((msg, msgIdx) => {
+                  const prevMsg = messages[msgIdx - 1];
+                  const showDaySeparator = !prevMsg || msgDayKey(msg.createdAt) !== msgDayKey(prevMsg.createdAt);
+                  return (
+                    <Fragment key={msg.id}>
+                      {showDaySeparator && (
+                        <div className="flex justify-center my-2" data-testid={`day-separator-${msgDayKey(msg.createdAt)}`}>
+                          <span className="text-[11px] font-medium text-muted-foreground bg-white/90 px-3 py-1 rounded-full shadow-sm border border-border">
+                            {msgDayLabel(msg.createdAt)}
+                          </span>
+                        </div>
+                      )}
+                      <MsgBubble
+                        msg={msg}
+                        onReply={setReplyTarget}
+                        highlighted={highlightedMsgId === msg.id}
+                        onJumpTo={scrollToMessage}
+                        isGroup={!!activeConv && isGroupConv(activeConv)}
+                        onStartConversation={can(user, "criar_atendimento") ? startConversationWith : undefined}
+                        currentUserId={user?.id}
+                        isModerator={user?.role === "admin" || user?.role === "supervisor"}
+                        onEdit={handleEditMessage}
+                        onDelete={handleDeleteMessage}
+                      />
+                    </Fragment>
+                  );
+                })}
                 <div ref={msgsEndRef} />
               </>
             )}
