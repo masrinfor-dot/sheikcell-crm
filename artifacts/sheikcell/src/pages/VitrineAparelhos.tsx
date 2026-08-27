@@ -525,7 +525,8 @@ export default function VitrineAparelhos() {
       });
       const r = await api.catalog.importConfirm(resolved);
       setProducts((prev) => [...r.products.map((p) => ({ ...p, photos: [], variants: [] as CatalogProduct["variants"] })), ...prev]);
-      toast({ title: `${r.imported} aparelho(s) importado(s)! Recarregando lista...` });
+      const photoNote = r.photosAttached ? ` ${r.photosAttached} já com foto encontrada na internet.` : "";
+      toast({ title: `${r.imported} aparelho(s) importado(s)! Recarregando lista...${photoNote}` });
       setShowImport(false);
       load();
     } catch (err) {

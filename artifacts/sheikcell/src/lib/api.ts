@@ -1963,7 +1963,10 @@ export const api = {
     // + 1 retry ≈ até 50s) — sem isso, uma rede/proxy travados deixavam o
     // botão "Analisar" girando pra sempre sem nunca mostrar erro.
     importParse: (rawText: string) => req<{ items: CatalogImportItem[]; newCategoryPaths: string[][] }>("/catalog/import/parse", { method: "POST", body: JSON.stringify({ rawText }), timeoutMs: 55_000 }),
-    importConfirm: (items: CatalogImportItem[]) => req<{ imported: number; products: CatalogProduct[] }>("/catalog/import/confirm", { method: "POST", body: JSON.stringify({ items }) }),
+    // timeoutMs maior que importParse: além de gravar os produtos, agora
+    // também tenta buscar 1 foto por produto na internet (melhor esforço,
+    // com timeout próprio por produto — ver autoAttachPhotosOnImport no backend).
+    importConfirm: (items: CatalogImportItem[]) => req<{ imported: number; products: CatalogProduct[]; photosAttached?: number }>("/catalog/import/confirm", { method: "POST", body: JSON.stringify({ items }), timeoutMs: 90_000 }),
     public: (slug: string, code?: string) =>
       req<{
         storeName: string; whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
