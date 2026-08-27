@@ -795,6 +795,86 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
   }
 });
 
+// Busca best-effort de fotos pra anexar automaticamente ao importar por IA —
+// mesma API do Google Custom Search da busca manual (rota /catalog/photo-search
+// abaixo), mas nunca propaga erro: sem GOOGLE_CSE_API_KEY/CX configuradas, ou
+// se a busca falhar por qualquer motivo (ex.: conta de faturamento do Google
+// Cloud não vinculada — ver diagnóstico do lojista), o produto simplesmente
+// importa sem foto, exatamente como já acontecia antes dessa feature existir.
+async function autoPhotoSearchUrls(query: string): Promise<string[]> {
+  const apiKey = process.env["GOOGLE_CSE_API_KEY"];
+  const cx = process.env["GOOGLE_CSE_CX"];
+  if (!apiKey || !cx) return [];
+  try {
+    const url = new URL("https://www.googleapis.com/customsearch/v1");
+    url.searchParams.set("key", apiKey);
+    url.searchParams.set("cx", cx);
+    url.searchParams.set("q", query);
+    url.searchParams.set("searchType", "image");
+    url.searchParams.set("num", "3");
+    url.searchParams.set("safe", "active");
+    url.searchParams.set("imgSize", "large");
+    const r = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    if (!r.ok) return [];
+    const json = (await r.json()) as { items?: { link?: string }[] };
+    return (json.items ?? []).map((it) => (typeof it.link === "string" ? it.link : "")).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+// Baixa e anexa uma foto ao produto — mesma validação da rota manual
+// /catalog/products/:id/photos/from-url, mas devolve boolean em vez de
+// responder HTTP (uso interno, best-effort, nunca derruba a importação).
+async function autoAttachPhoto(tenantId: number, productId: number, imageUrl: string): Promise<boolean> {
+  try {
+    const parsed = new URL(imageUrl);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+    const r = await fetch(parsed, { signal: AbortSignal.timeout(12_000), headers: { "User-Agent": "SheikCellVitrineBot/1.0" } });
+    if (!r.ok) return false;
+    const contentLength = Number(r.headers.get("content-length") ?? "0");
+    if (contentLength > MAX_PHOTO_SIZE) return false;
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (buf.length === 0 || buf.length > MAX_PHOTO_SIZE) return false;
+    const mime = sniffImageMime(buf);
+    const ext = mime ? PHOTO_MIME[mime] : null;
+    if (!ext) return false;
+
+    await mkdir(CATALOG_MEDIA_DIR, { recursive: true });
+    const storedName = `${randomUUID()}.${ext}`;
+    await writeFile(path.join(CATALOG_MEDIA_DIR, storedName), buf);
+    await db.insert(catalogProductPhotosTable).values({ tenantId, productId, storedName, sourceUrl: parsed.toString(), sortOrder: 0 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Protege contra imports enormes deixando o confirm lento — acima disso, os
+// produtos ainda importam normalmente, só não tentam foto automática (dá pra
+// buscar manualmente depois, um por um, na tela de edição).
+const AUTO_IMPORT_PHOTO_LIMIT = 40;
+
+// Uma tentativa de foto por produto recém-importado (busca + primeira que
+// baixar certo), tudo em paralelo. Melhor esforço: nunca lança erro, nunca
+// atrasa a resposta além do timeout de uma busca+download (rodam junto, não
+// somados por produto).
+async function autoAttachPhotosOnImport(
+  tenantId: number,
+  products: (typeof catalogProductsTable.$inferSelect)[],
+): Promise<number> {
+  if (!process.env["GOOGLE_CSE_API_KEY"] || !process.env["GOOGLE_CSE_CX"]) return 0;
+  const targets = products.slice(0, AUTO_IMPORT_PHOTO_LIMIT);
+  const outcomes = await Promise.allSettled(targets.map(async (p) => {
+    const urls = await autoPhotoSearchUrls(p.model);
+    for (const url of urls) {
+      if (await autoAttachPhoto(tenantId, p.id, url)) return true;
+    }
+    return false;
+  }));
+  return outcomes.filter((o) => o.status === "fulfilled" && o.value === true).length;
+}
+
 router.post("/catalog/import/confirm", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const items = (req.body as { items?: unknown }).items;
@@ -823,7 +903,12 @@ router.post("/catalog/import/confirm", requireAuth, async (req, res): Promise<vo
     await replaceVariants(tenantId, product.id, item.variants.map((v) => ({ storage: v.storage, color: v.color, costPrice: v.costPrice })), settings);
     createdProducts.push(product);
   }
-  res.status(201).json({ imported: createdProducts.length, products: createdProducts });
+  // Melhor esforço: tenta puxar 1 foto por produto recém-criado (mesma busca
+  // usada no botão manual). Se a busca não estiver liberada (ex.: falta
+  // vincular conta de faturamento no Google Cloud) ou falhar, os produtos já
+  // foram importados normalmente — só ficam sem foto, como sempre.
+  const photosAttached = await autoAttachPhotosOnImport(tenantId, createdProducts);
+  res.status(201).json({ imported: createdProducts.length, products: createdProducts, photosAttached });
 });
 
 export default router;
