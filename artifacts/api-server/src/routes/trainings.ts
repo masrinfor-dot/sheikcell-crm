@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
-import { db, trainingsTable, trainingCompletionsTable, usersTable } from "@workspace/db";
-import { eq, desc, and, inArray } from "drizzle-orm";
+import { db, trainingsTable, trainingCompletionsTable, trainingProgressTable, usersTable } from "@workspace/db";
+import { eq, desc, and, inArray, sql } from "drizzle-orm";
 import { requireAuth, requireAdminOrSupervisor, requireTenant, tenantIdOf } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 
@@ -66,7 +66,58 @@ export async function getPendingTrainings(uid: number, role: string, tenantId: n
       inArray(trainingCompletionsTable.trainingId, target.map((t) => t.id)),
     ));
   const doneSet = new Set(done.map((d) => d.trainingId));
-  return target.filter((t) => !doneSet.has(t.id)).map(stripAnswers);
+  const pending = target.filter((t) => !doneSet.has(t.id));
+  if (pending.length === 0) return [];
+  // Rascunho em andamento ("Continuar de onde parou") mesmo dentro da trava
+  // de obrigatório — sem isso, um quiz longo interrompido reiniciaria do zero.
+  const drafts = await db.select({ trainingId: trainingProgressTable.trainingId, answers: trainingProgressTable.answers })
+    .from(trainingProgressTable)
+    .where(and(eq(trainingProgressTable.userId, uid), inArray(trainingProgressTable.trainingId, pending.map((t) => t.id))));
+  const draftMap = new Map(drafts.map((d) => [d.trainingId, d.answers]));
+  return pending.map((t) => ({ ...stripAnswers(t), draftAnswers: draftMap.get(t.id) ?? null }));
+}
+
+// Estatísticas de tentativas do próprio usuário, por treinamento — usado
+// pela lista (myScore/attemptCount/bestScore/etc.) e pela Central de
+// Treinamentos. Repetir nunca apaga nada, então isso é sempre um agregado
+// sobre TODAS as linhas de training_completions daquele usuário.
+type TrainingStats = {
+  attemptCount: number; bestScore: number | null; lastScore: number | null;
+  firstCompletedAt: Date; lastCompletedAt: Date;
+};
+async function getMyTrainingStats(userId: number): Promise<Map<number, TrainingStats>> {
+  const rows = await db.select({
+    trainingId: trainingCompletionsTable.trainingId,
+    quizScore: trainingCompletionsTable.quizScore,
+    createdAt: trainingCompletionsTable.createdAt,
+  }).from(trainingCompletionsTable).where(eq(trainingCompletionsTable.userId, userId));
+  const map = new Map<number, TrainingStats>();
+  // Ordena por data pra garantir que "última" tentativa é sempre a mais recente,
+  // mesmo que as linhas não venham ordenadas do banco.
+  for (const r of [...rows].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())) {
+    const cur = map.get(r.trainingId);
+    if (!cur) {
+      map.set(r.trainingId, {
+        attemptCount: 1, bestScore: r.quizScore, lastScore: r.quizScore,
+        firstCompletedAt: r.createdAt, lastCompletedAt: r.createdAt,
+      });
+    } else {
+      cur.attemptCount++;
+      cur.lastScore = r.quizScore;
+      cur.lastCompletedAt = r.createdAt;
+      if (r.quizScore != null && (cur.bestScore == null || r.quizScore > cur.bestScore)) cur.bestScore = r.quizScore;
+    }
+  }
+  return map;
+}
+
+// Rascunho ("Continuar de onde parou") do próprio usuário, por treinamento.
+async function getMyDrafts(userId: number): Promise<Map<number, Record<string, number>>> {
+  const rows = await db.select({
+    trainingId: trainingProgressTable.trainingId,
+    answers: trainingProgressTable.answers,
+  }).from(trainingProgressTable).where(eq(trainingProgressTable.userId, userId));
+  return new Map(rows.map((r) => [r.trainingId, (r.answers ?? {}) as Record<string, number>]));
 }
 
 const blockCache = new Map<number, { until: number; blocked: boolean }>();
@@ -79,6 +130,9 @@ export const GATE_ALLOWLIST = [
   /^\/auth\//,
   /^\/checklists\/pending$/, /^\/checklists\/\d+\/respond$/,
   /^\/trainings\/pending$/, /^\/trainings\/\d+\/complete$/,
+  // "Continuar de onde parou" e "Ver progresso" precisam funcionar mesmo com
+  // o treinamento obrigatório travando o resto do sistema.
+  /^\/trainings\/\d+\/progress$/, /^\/trainings\/\d+\/attempts$/,
 ];
 
 export async function enforceMandatoryTrainings(
@@ -125,15 +179,23 @@ router.get("/trainings", requireAuth, requireModuleAccess("treinamentos"), async
   const all = await db.select().from(trainingsTable)
     .where(eq(trainingsTable.tenantId, tenantId)).orderBy(desc(trainingsTable.createdAt));
   const visible = isManager ? all : all.filter((t) => t.active && (t.targetRoles as string[]).includes(role));
-  const done = await db.select({ trainingId: trainingCompletionsTable.trainingId, quizScore: trainingCompletionsTable.quizScore })
-    .from(trainingCompletionsTable)
-    .where(eq(trainingCompletionsTable.userId, req.session.userId!));
-  const doneMap = new Map(done.map((d) => [d.trainingId, d.quizScore]));
-  res.json(visible.map((t) => ({
-    ...(isManager ? { ...stripAnswers(t), quiz: t.quiz, targetRoles: t.targetRoles, active: t.active, createdAt: t.createdAt } : stripAnswers(t)),
-    completed: doneMap.has(t.id),
-    myScore: doneMap.get(t.id) ?? null,
-  })));
+  const [statsMap, draftsMap] = await Promise.all([
+    getMyTrainingStats(req.session.userId!),
+    getMyDrafts(req.session.userId!),
+  ]);
+  res.json(visible.map((t) => {
+    const s = statsMap.get(t.id);
+    return {
+      ...(isManager ? { ...stripAnswers(t), quiz: t.quiz, targetRoles: t.targetRoles, active: t.active, createdAt: t.createdAt } : stripAnswers(t)),
+      completed: !!s,
+      myScore: s?.lastScore ?? null,
+      attemptCount: s?.attemptCount ?? 0,
+      bestScore: s?.bestScore ?? null,
+      firstCompletedAt: s?.firstCompletedAt ?? null,
+      lastCompletedAt: s?.lastCompletedAt ?? null,
+      draftAnswers: draftsMap.get(t.id) ?? null,
+    };
+  }));
 });
 
 // Concluir treinamento (texto/vídeo: direto; quiz: corrige e exige nota mínima).
@@ -171,19 +233,92 @@ router.post("/trainings/:id/complete", requireAuth, async (req, res): Promise<vo
     }
   }
 
-  try {
-    await db.insert(trainingCompletionsTable).values({
-      tenantId, trainingId: id, userId: req.session.userId!, quizScore, answers,
-    });
-  } catch (err) {
-    if ((err as { code?: string })?.code === "23505") {
-      res.status(409).json({ error: "Você já concluiu este treinamento" }); return;
+  // Repetir treinamento grava uma NOVA tentativa (não sobrescreve nem apaga
+  // as anteriores) — attemptNumber é "maior existente + 1". Duas abas
+  // enviando ao mesmo tempo podem calcular o mesmo número; se isso colidir
+  // no índice único, tenta de novo uma vez com o número seguinte antes de
+  // desistir (corrida rara, não vale travar o usuário por causa dela).
+  const uid = req.session.userId!;
+  let attemptNumber: number | null = null;
+  for (let tries = 0; tries < 2 && attemptNumber === null; tries++) {
+    const [{ max }] = await db.select({ max: sql<number>`coalesce(max(${trainingCompletionsTable.attemptNumber}), 0)` })
+      .from(trainingCompletionsTable)
+      .where(and(eq(trainingCompletionsTable.trainingId, id), eq(trainingCompletionsTable.userId, uid)));
+    const next = (max ?? 0) + 1;
+    try {
+      await db.insert(trainingCompletionsTable).values({
+        tenantId, trainingId: id, userId: uid, attemptNumber: next, quizScore, answers,
+      });
+      attemptNumber = next;
+    } catch (err) {
+      if ((err as { code?: string })?.code === "23505" && tries === 0) continue; // corrida: tenta o próximo número
+      req.log.error({ err }, "training completion insert failed");
+      res.status(500).json({ error: "Erro ao registrar a conclusão. Tente novamente." }); return;
     }
-    req.log.error({ err }, "training completion insert failed");
+  }
+  if (attemptNumber === null) {
     res.status(500).json({ error: "Erro ao registrar a conclusão. Tente novamente." }); return;
   }
-  invalidateTrainingBlock(req.session.userId!);
-  res.status(201).json({ ok: true, score: quizScore });
+  // A tentativa foi enviada — o rascunho de "onde parou" não faz mais sentido.
+  await db.delete(trainingProgressTable)
+    .where(and(eq(trainingProgressTable.trainingId, id), eq(trainingProgressTable.userId, uid)));
+  invalidateTrainingBlock(uid);
+  res.status(201).json({ ok: true, score: quizScore, attemptNumber });
+});
+
+// Salva rascunho de respostas do quiz em andamento ("Continuar de onde
+// parou"). Sobrescreve o rascunho anterior — não é histórico, é só "onde eu
+// estava" antes de enviar de fato.
+router.post("/trainings/:id/progress", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const [t] = await db.select({ id: trainingsTable.id, targetRoles: trainingsTable.targetRoles }).from(trainingsTable)
+    .where(and(eq(trainingsTable.id, id), eq(trainingsTable.tenantId, tenantId)));
+  if (!t) { res.status(404).json({ error: "Treinamento não encontrado" }); return; }
+  if (!(t.targetRoles as string[]).includes(req.session.userRole ?? "")) {
+    res.status(403).json({ error: "Este treinamento não é para a sua função" }); return;
+  }
+  const raw = ((req.body ?? {}) as { answers?: Record<string, number> }).answers ?? {};
+  const answers: Record<string, number> = {};
+  for (const [k, v] of Object.entries(raw)) if (typeof v === "number") answers[k.slice(0, 40)] = Math.floor(v);
+  await db.insert(trainingProgressTable)
+    .values({ tenantId, trainingId: id, userId: req.session.userId!, answers })
+    .onConflictDoUpdate({
+      target: [trainingProgressTable.trainingId, trainingProgressTable.userId],
+      set: { answers, updatedAt: new Date() },
+    });
+  res.json({ ok: true });
+});
+
+// "Recomeçar do início": descarta o rascunho em andamento.
+router.delete("/trainings/:id/progress", requireAuth, async (req, res): Promise<void> => {
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  await db.delete(trainingProgressTable)
+    .where(and(eq(trainingProgressTable.trainingId, id), eq(trainingProgressTable.userId, req.session.userId!)));
+  res.json({ ok: true });
+});
+
+// Histórico de TENTATIVAS do próprio usuário nesse treinamento — "Ver
+// progresso" / "Ver resultado" na Central de Treinamentos. Nunca apaga nada:
+// cada linha é uma conclusão passada, mais antiga primeiro (Tentativa 1, 2, 3...).
+router.get("/trainings/:id/attempts", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const [t] = await db.select({ id: trainingsTable.id }).from(trainingsTable)
+    .where(and(eq(trainingsTable.id, id), eq(trainingsTable.tenantId, tenantId)));
+  if (!t) { res.status(404).json({ error: "Treinamento não encontrado" }); return; }
+  const rows = await db.select({
+    id: trainingCompletionsTable.id,
+    attemptNumber: trainingCompletionsTable.attemptNumber,
+    quizScore: trainingCompletionsTable.quizScore,
+    createdAt: trainingCompletionsTable.createdAt,
+  }).from(trainingCompletionsTable)
+    .where(and(eq(trainingCompletionsTable.trainingId, id), eq(trainingCompletionsTable.userId, req.session.userId!)))
+    .orderBy(trainingCompletionsTable.attemptNumber);
+  res.json(rows);
 });
 
 // ── Gestão (admin ou supervisor) ───────────────────────────────────────────
@@ -283,7 +418,10 @@ router.delete("/trainings/:id", requireAdminOrSupervisor, requireModuleAccess("t
   res.json({ ok: true });
 });
 
-// Quem concluiu (admin/supervisor).
+// Quem concluiu (admin/supervisor) — agora mostra TODAS as tentativas de
+// todo mundo (não só a mais recente por pessoa), já que repetir não apaga
+// histórico. attemptNumber deixa claro quando é a 2ª, 3ª... tentativa da
+// mesma pessoa.
 router.get("/trainings/:id/completions", requireAdminOrSupervisor, requireModuleAccess("treinamentos"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
@@ -297,6 +435,7 @@ router.get("/trainings/:id/completions", requireAdminOrSupervisor, requireModule
       id: trainingCompletionsTable.id,
       userId: trainingCompletionsTable.userId,
       userName: usersTable.name,
+      attemptNumber: trainingCompletionsTable.attemptNumber,
       quizScore: trainingCompletionsTable.quizScore,
       createdAt: trainingCompletionsTable.createdAt,
     })

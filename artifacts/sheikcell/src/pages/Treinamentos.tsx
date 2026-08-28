@@ -1,10 +1,10 @@
 import { useState, useEffect } from "react";
-import { api, canEditModule, type Training, type TrainingCompletion, type QuizQuestion } from "@/lib/api";
+import { api, canEditModule, type Training, type TrainingCompletion, type TrainingAttempt, type QuizQuestion } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import TrainingViewer from "@/components/TrainingViewer";
 import {
-  GraduationCap, Plus, X, Trash2, Pencil, Eye, CheckCircle, FileText, PlayCircle, HelpCircle,
+  GraduationCap, Plus, X, Trash2, Pencil, Eye, CheckCircle, FileText, PlayCircle, HelpCircle, History,
 } from "lucide-react";
 
 const ROLE_LABELS: Record<string, string> = { admin: "Admin", supervisor: "Supervisor", vendedor: "Vendedor" };
@@ -32,15 +32,36 @@ export default function Treinamentos() {
   const [items, setItems] = useState<Training[]>([]);
   const [loading, setLoading] = useState(true);
   const [opened, setOpened] = useState<Training | null>(null);
+  // Rascunho pra retomar ("Continuar de onde parou") — null = tentativa nova/do zero.
+  const [openedInitialAnswers, setOpenedInitialAnswers] = useState<Record<string, number> | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Training | null>(null);
   const [form, setForm] = useState(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [viewing, setViewing] = useState<Training | null>(null);
   const [completions, setCompletions] = useState<TrainingCompletion[]>([]);
+  // "Aprender esta tela": qual card tem o menu de ajuda aberto.
+  const [helpMenuFor, setHelpMenuFor] = useState<number | null>(null);
+  // Confirmação antes de repetir (repetir não apaga a tentativa concluída).
+  const [confirmRepeat, setConfirmRepeat] = useState<Training | null>(null);
+  // "Ver progresso" / "Ver resultado": histórico de tentativas do PRÓPRIO usuário.
+  const [historyOf, setHistoryOf] = useState<Training | null>(null);
+  const [historyRows, setHistoryRows] = useState<TrainingAttempt[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   const fetchItems = () => api.trainings.list().then(setItems).catch(() => {}).finally(() => setLoading(false));
   useEffect(() => { fetchItems(); }, []);
+
+  const openTrainingFresh = (t: Training) => { setOpenedInitialAnswers(null); setOpened(t); };
+  const openTrainingContinue = (t: Training) => { setOpenedInitialAnswers(t.draftAnswers ?? null); setOpened(t); };
+  const closeOpened = () => { setOpened(null); setOpenedInitialAnswers(null); fetchItems(); };
+
+  const openHistory = async (t: Training) => {
+    setHistoryOf(t);
+    setHistoryRows([]);
+    setHistoryLoading(true);
+    try { setHistoryRows(await api.trainings.attempts(t.id)); } catch { /* noop */ } finally { setHistoryLoading(false); }
+  };
 
   const openForm = (t?: Training) => {
     setEditing(t ?? null);
@@ -134,6 +155,10 @@ export default function Treinamentos() {
         <div className="space-y-2">
           {items.map((t) => {
             const Meta = TYPE_META[t.type] ?? TYPE_META.text;
+            const hasHistory = (t.attemptCount ?? 0) > 0;
+            const hasDraft = !!t.draftAnswers && Object.keys(t.draftAnswers).length > 0;
+            const answeredCount = hasDraft ? Object.keys(t.draftAnswers ?? {}).length : 0;
+            const totalQuestions = t.quiz?.length ?? 0;
             return (
               <div key={t.id} className="shk-card p-4 flex items-start gap-3" data-testid={`training-${t.id}`}>
                 <div className="w-9 h-9 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
@@ -145,22 +170,87 @@ export default function Treinamentos() {
                     <span className="text-[10px] font-bold bg-blue-50 text-blue-600 border border-blue-100 px-2 py-0.5 rounded-full">{Meta.label}</span>
                     {t.mandatory && <span className="text-[10px] font-bold bg-red-50 text-red-600 border border-red-100 px-2 py-0.5 rounded-full">Obrigatório</span>}
                     {canManage && t.active === false && <span className="text-[10px] font-bold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inativo</span>}
-                    {t.completed && (
+                    {hasHistory ? (
                       <span className="text-[10px] font-bold bg-green-50 text-green-700 border border-green-100 px-2 py-0.5 rounded-full flex items-center gap-1">
                         <CheckCircle className="w-3 h-3" /> Concluído{t.myScore != null ? ` (${t.myScore}%)` : ""}
                       </span>
+                    ) : hasDraft && (
+                      <span className="text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-100 px-2 py-0.5 rounded-full">Em andamento</span>
                     )}
                   </div>
                   {t.description && <p className="text-xs text-muted-foreground mt-0.5 break-words">{t.description}</p>}
                   {canManage && t.targetRoles && (
                     <p className="text-[11px] text-muted-foreground mt-1">Para: {t.targetRoles.map((r) => ROLE_LABELS[r] ?? r).join(", ")}</p>
                   )}
+                  {/* Central de Treinamentos: continua mostrando status/progresso/nota mesmo já concluído. */}
+                  {hasHistory && (
+                    <p className="text-[11px] text-muted-foreground mt-1">
+                      Status: Concluído · Progresso: 100%{t.myScore != null && ` · Nota: ${t.myScore}%`}
+                      {t.attemptCount != null && t.attemptCount > 1 && ` · Tentativas: ${t.attemptCount}`}
+                      {t.bestScore != null && t.myScore != null && t.bestScore !== t.myScore && ` · Melhor: ${t.bestScore}%`}
+                    </p>
+                  )}
+                  {!hasHistory && hasDraft && (
+                    <p className="text-[11px] text-muted-foreground mt-1">
+                      Status: Em andamento{totalQuestions > 0 ? ` · Progresso: ${answeredCount}/${totalQuestions} perguntas` : ""}
+                    </p>
+                  )}
                 </div>
-                <div className="flex gap-1 shrink-0">
-                  <button onClick={() => setOpened(t)} data-testid={`button-open-training-${t.id}`}
-                    className="px-3 py-1.5 rounded-xl bg-primary/10 text-primary text-xs font-bold hover:bg-primary/20 transition">
-                    {t.completed ? "Rever" : "Fazer"}
-                  </button>
+                <div className="flex items-center gap-1 shrink-0 relative">
+                  {!hasHistory && !hasDraft && (
+                    <button onClick={() => openTrainingFresh(t)} data-testid={`button-open-training-${t.id}`}
+                      className="px-3 py-1.5 rounded-xl bg-primary/10 text-primary text-xs font-bold hover:bg-primary/20 transition">
+                      Fazer
+                    </button>
+                  )}
+                  {hasDraft && (
+                    <button onClick={() => openTrainingContinue(t)} data-testid={`button-continue-training-${t.id}`}
+                      className="px-3 py-1.5 rounded-xl bg-primary text-white text-xs font-bold hover:bg-primary/90 transition">
+                      Continuar
+                    </button>
+                  )}
+                  {hasHistory && (
+                    <button onClick={() => setConfirmRepeat(t)} data-testid={`button-repeat-training-${t.id}`}
+                      className="px-3 py-1.5 rounded-xl bg-primary/10 text-primary text-xs font-bold hover:bg-primary/20 transition">
+                      Repetir
+                    </button>
+                  )}
+                  {hasHistory && (
+                    <button onClick={() => openHistory(t)} data-testid={`button-history-training-${t.id}`}
+                      className="px-3 py-1.5 rounded-xl border border-border text-xs font-bold hover:bg-secondary transition">
+                      Ver resultado
+                    </button>
+                  )}
+                  {(hasHistory || hasDraft) && (
+                    <div className="relative">
+                      <button onClick={() => setHelpMenuFor(helpMenuFor === t.id ? null : t.id)} title="Aprender esta tela"
+                        data-testid={`button-help-training-${t.id}`}
+                        className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground transition"><HelpCircle className="w-3.5 h-3.5" /></button>
+                      {helpMenuFor === t.id && (
+                        <div className="absolute right-0 top-8 z-10 w-56 shk-card p-1.5 bg-white shadow-lg">
+                          <p className="px-3 pt-1.5 pb-1 text-[10px] font-bold text-muted-foreground uppercase">Aprender esta tela</p>
+                          {hasDraft && (
+                            <button onClick={() => { setHelpMenuFor(null); openTrainingContinue(t); }}
+                              className="w-full text-left px-3 py-2 rounded-lg text-xs font-semibold hover:bg-secondary transition">
+                              Continuar treinamento
+                            </button>
+                          )}
+                          {hasHistory && (
+                            <button onClick={() => { setHelpMenuFor(null); setConfirmRepeat(t); }}
+                              className="w-full text-left px-3 py-2 rounded-lg text-xs font-semibold hover:bg-secondary transition">
+                              Repetir treinamento
+                            </button>
+                          )}
+                          {hasHistory && (
+                            <button onClick={() => { setHelpMenuFor(null); openHistory(t); }}
+                              className="w-full text-left px-3 py-2 rounded-lg text-xs font-semibold hover:bg-secondary transition">
+                              Ver progresso
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {canManage && (
                     <>
                       <button onClick={() => openCompletions(t)} title="Quem concluiu"
@@ -178,33 +268,65 @@ export default function Treinamentos() {
         </div>
       )}
 
-      {/* Modal fazer/rever treinamento */}
+      {/* Modal fazer/repetir/continuar treinamento */}
       {opened && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 overflow-y-auto">
           <div className="shk-card w-full max-w-lg p-6 my-8 bg-white">
             <div className="flex items-center justify-between mb-3">
               <h3 className="font-bold">{opened.title}</h3>
-              <button onClick={() => setOpened(null)}><X className="w-5 h-5 text-muted-foreground" /></button>
+              <button onClick={closeOpened}><X className="w-5 h-5 text-muted-foreground" /></button>
             </div>
-            {opened.completed ? (
-              <div className="space-y-3">
-                {opened.description && <p className="text-xs text-muted-foreground">{opened.description}</p>}
-                {opened.type === "video" && opened.content && (
-                  <a href={opened.content} target="_blank" rel="noopener noreferrer"
-                    className="flex items-center gap-2 px-4 py-3 rounded-xl border border-border text-sm font-semibold text-primary hover:bg-secondary transition">
-                    <PlayCircle className="w-5 h-5" /> Assistir novamente
-                  </a>
-                )}
-                {opened.content && opened.type !== "video" && (
-                  <div className="text-sm whitespace-pre-wrap bg-secondary/40 rounded-xl p-4 max-h-80 overflow-y-auto">{opened.content}</div>
-                )}
-                <p className="text-xs font-semibold text-green-700 flex items-center gap-1">
-                  <CheckCircle className="w-4 h-4" /> Você já concluiu este treinamento{opened.myScore != null ? ` com ${opened.myScore}% de acerto` : ""}.
-                </p>
-              </div>
-            ) : (
-              <TrainingViewer training={opened} onCompleted={() => { setOpened(null); fetchItems(); }} />
-            )}
+            <TrainingViewer training={opened} initialAnswers={openedInitialAnswers}
+              onCompleted={closeOpened} onExit={closeOpened} />
+          </div>
+        </div>
+      )}
+
+      {/* Confirmação antes de repetir — repetir não apaga a tentativa concluída. */}
+      {confirmRepeat && (
+        <div className="fixed inset-0 bg-black/40 z-[60] flex items-center justify-center p-4">
+          <div className="shk-card w-full max-w-sm p-5 bg-white">
+            <p className="text-sm font-semibold mb-4">Você deseja repetir este treinamento desde o início?</p>
+            <div className="flex gap-2">
+              <button onClick={() => setConfirmRepeat(null)}
+                className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold border border-border hover:bg-secondary transition">
+                Cancelar
+              </button>
+              <button onClick={() => { const t = confirmRepeat; setConfirmRepeat(null); openTrainingFresh(t); }}
+                data-testid="button-confirm-repeat"
+                className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold bg-primary text-white transition">
+                Repetir treinamento
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Ver progresso / Ver resultado — histórico de tentativas do próprio usuário */}
+      {historyOf && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="shk-card w-full max-w-md p-6 my-8 bg-white">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-bold flex items-center gap-2"><History className="w-4 h-4 text-primary" /> {historyOf.title}</h3>
+              <button onClick={() => setHistoryOf(null)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-1">
+              {historyLoading ? (
+                <div className="h-16 rounded-xl bg-secondary/40 animate-pulse" />
+              ) : historyRows.length === 0 ? (
+                <p className="text-xs text-muted-foreground text-center py-4">Nenhuma tentativa registrada ainda.</p>
+              ) : historyRows.map((r) => (
+                <div key={r.id} className="flex items-center justify-between border-b border-border/50 pb-2 last:border-0">
+                  <p className="text-xs font-bold">Tentativa {r.attemptNumber}</p>
+                  <div className="text-right">
+                    {r.quizScore != null && <span className="text-xs font-bold text-green-700 mr-2">Nota {r.quizScore}%</span>}
+                    <span className="text-[10px] text-muted-foreground">
+                      Concluído em {new Date(r.createdAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       )}
@@ -364,7 +486,7 @@ export default function Treinamentos() {
                 <p className="text-xs text-muted-foreground text-center py-4">Ninguém concluiu ainda.</p>
               ) : completions.map((c) => (
                 <div key={c.id} className="flex items-center justify-between border-b border-border/50 pb-2 last:border-0">
-                  <p className="text-xs font-bold">{c.userName ?? "—"}</p>
+                  <p className="text-xs font-bold">{c.userName ?? "—"}{c.attemptNumber != null && c.attemptNumber > 1 ? ` · tentativa ${c.attemptNumber}` : ""}</p>
                   <div className="text-right">
                     {c.quizScore != null && <span className="text-xs font-bold text-green-700 mr-2">{c.quizScore}%</span>}
                     <span className="text-[10px] text-muted-foreground">
