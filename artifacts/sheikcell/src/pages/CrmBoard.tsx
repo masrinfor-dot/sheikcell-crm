@@ -10,6 +10,7 @@ import {
   Plus, X, Phone, Tag, StickyNote, RefreshCw, Archive, MapPin,
   ChevronRight, ChevronLeft, Crown, Star, UserPlus, UserMinus,
   Search, Filter, ExternalLink, ShoppingBag, SlidersHorizontal, Trash2, GripVertical,
+  Kanban, BookUser, Mail,
 } from "lucide-react";
 
 const FIELD_TYPES: { value: CrmCustomFieldType; label: string }[] = [
@@ -208,6 +209,11 @@ export default function CrmBoard() {
   const [detailId, setDetailId] = useState<number | null>(null);
   const [autoImporting, setAutoImporting] = useState(false);
   const [showFieldsManager, setShowFieldsManager] = useState(false);
+  // "Agenda de Contatos": mesma lista/filtros do Quadro, só que como
+  // diretório simples (nome/telefone/e-mail) em vez de pipeline por status —
+  // útil pra achar rápido o contato de alguém sem precisar procurar em qual
+  // coluna do Kanban ele está.
+  const [viewMode, setViewMode] = useState<"board" | "agenda">("board");
   // Conversas finalizadas (atendimentos resolvidos no chat) — o servidor já
   // aplica o escopo por papel/setor, então basta contar o retorno.
   const [finalizadasCount, setFinalizadasCount] = useState(0);
@@ -490,9 +496,73 @@ export default function CrmBoard() {
             ))}
           </select>
         </div>
+        {/* Quadro (pipeline por status) x Agenda (diretório simples de contatos) */}
+        <div className="flex items-center gap-1 border border-border rounded-xl p-0.5 ml-auto">
+          <button onClick={() => setViewMode("board")} data-testid="button-crm-view-board"
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition ${
+              viewMode === "board" ? "bg-primary text-white" : "text-muted-foreground hover:bg-secondary"
+            }`}>
+            <Kanban className="w-3.5 h-3.5" /> Quadro
+          </button>
+          <button onClick={() => setViewMode("agenda")} data-testid="button-crm-view-agenda"
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition ${
+              viewMode === "agenda" ? "bg-primary text-white" : "text-muted-foreground hover:bg-secondary"
+            }`}>
+            <BookUser className="w-3.5 h-3.5" /> Agenda
+          </button>
+        </div>
       </div>
 
+      {/* Agenda de Contatos: diretório simples, ordenado por nome, com busca/filtro
+          idênticos ao Quadro acima (mesma lista visibleContacts). */}
+      {viewMode === "agenda" && (
+        loading ? (
+          <div className="h-40 rounded-xl bg-secondary/40 animate-pulse" />
+        ) : visibleContacts.length === 0 ? (
+          <div className="shk-card p-10 text-center">
+            <BookUser className="w-8 h-8 mx-auto text-muted-foreground mb-2 opacity-40" />
+            <p className="text-muted-foreground text-sm">Nenhum contato encontrado</p>
+          </div>
+        ) : (
+          <div className="shk-card overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-secondary/50">
+                  <tr>
+                    {["Nome", "Telefone", "E-mail", "Setor", "Atendente", "Loja", "Perfil", ""].map((h) => (
+                      <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground whitespace-nowrap">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...visibleContacts].sort((a, b) => a.name.localeCompare(b.name, "pt-BR")).map((c, i) => (
+                    <tr key={c.id} className={`${i % 2 === 0 ? "bg-white" : "bg-secondary/20"} hover:bg-secondary/40 cursor-pointer transition`}
+                      onClick={() => setDetailId(c.id)} data-testid={`row-agenda-${c.id}`}>
+                      <td className="px-4 py-3 font-medium whitespace-nowrap">{c.name}</td>
+                      <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">
+                        {(c.phone || c.contact) ? (
+                          <span className="flex items-center gap-1"><Phone className="w-3 h-3" /> {c.phone ?? c.contact}</span>
+                        ) : "—"}
+                      </td>
+                      <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">
+                        {c.email ? <span className="flex items-center gap-1"><Mail className="w-3 h-3" /> {c.email}</span> : "—"}
+                      </td>
+                      <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{c.sector?.name ?? "—"}</td>
+                      <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{c.attendant?.name ?? "—"}</td>
+                      <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{c.serviceStore ?? "—"}</td>
+                      <td className="px-4 py-3 whitespace-nowrap"><ProfileBadge profile={c.profile} /></td>
+                      <td className="px-4 py-3 text-right"><ExternalLink className="w-3.5 h-3.5 text-muted-foreground" /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )
+      )}
+
       {/* Kanban */}
+      {viewMode === "board" && (
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-start">
         {COLUMNS.map((col, colIdx) => {
           const cards = byStatus(col.key);
@@ -534,6 +604,7 @@ export default function CrmBoard() {
           );
         })}
       </div>
+      )}
 
       {/* Add/Edit form modal */}
       {showForm && (
