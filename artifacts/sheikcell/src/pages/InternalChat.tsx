@@ -8,7 +8,7 @@ import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/shared
 const INTERNAL_CHAT_EVENTS_URL = "/api/internal-chat/events";
 import {
   Users, Send, Plus, X, Search, MessagesSquare, ChevronLeft, SquareKanban, ClipboardPlus, Trash2, Pencil,
-  Paperclip, Mic, Square, Reply, Forward, FileText, Volume2, Loader2, SpellCheck, RefreshCw, Pin, PinOff,
+  Paperclip, Mic, Square, Reply, Forward, FileText, Volume2, VolumeX, Bell, BellOff, Loader2, SpellCheck, RefreshCw, Pin, PinOff,
   FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Image, Check, Ban,
 } from "lucide-react";
 import TaskBoard from "./TaskBoard";
@@ -361,6 +361,74 @@ export default function InternalChat({ docked = false, onActiveConversationChang
     el.style.height = `${el.scrollHeight}px`;
   }, [draft]);
 
+  // Som e notificação do navegador quando chega mensagem nova de outra
+  // conversa (ou a aba está em segundo plano) — mesmo padrão do Atendimento
+  // (ChatCenter.tsx), preferência salva à parte (chave própria) pra poder
+  // ligar/desligar independente do som do Atendimento.
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
+    try { return localStorage.getItem("internalChat.alertSound") !== "off"; } catch { return true; }
+  });
+  const [desktopEnabled, setDesktopEnabled] = useState<boolean>(() => {
+    try { return localStorage.getItem("internalChat.alertDesktop") === "on"; } catch { return false; }
+  });
+  const soundEnabledRef = useRef(soundEnabled);
+  const desktopEnabledRef = useRef(desktopEnabled);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  useEffect(() => {
+    soundEnabledRef.current = soundEnabled;
+    try { localStorage.setItem("internalChat.alertSound", soundEnabled ? "on" : "off"); } catch { /* ignore */ }
+  }, [soundEnabled]);
+  useEffect(() => {
+    desktopEnabledRef.current = desktopEnabled;
+    try { localStorage.setItem("internalChat.alertDesktop", desktopEnabled ? "on" : "off"); } catch { /* ignore */ }
+  }, [desktopEnabled]);
+
+  const playAlertSound = useCallback(() => {
+    try {
+      const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!Ctx) return;
+      let ctx = audioCtxRef.current;
+      if (!ctx) { ctx = new Ctx(); audioCtxRef.current = ctx; }
+      if (ctx.state === "suspended") ctx.resume().catch(() => {});
+      const notes: [number, number][] = [[880, 0.12], [660, 0.24]];
+      const now = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      let t = now;
+      let total = 0;
+      for (const [freq, dur] of notes) { osc.frequency.setValueAtTime(freq, t); t += dur; total += dur; }
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(0.15, now + 0.02);
+      gain.gain.setValueAtTime(0.15, now + total - 0.08);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + total);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + total + 0.02);
+    } catch { /* ignore */ }
+  }, []);
+
+  const showDesktopNotification = useCallback((title: string, body: string, conversationId: number) => {
+    try {
+      if (!("Notification" in window) || Notification.permission !== "granted") return;
+      const n = new Notification(title, { body: body || "Nova mensagem", tag: `internal-conv-${conversationId}`, icon: "/favicon.ico" });
+      n.onclick = () => { window.focus(); setActiveId(conversationId); n.close(); };
+    } catch { /* ignore */ }
+  }, []);
+
+  const toggleDesktop = useCallback(async () => {
+    if (desktopEnabled) { setDesktopEnabled(false); return; }
+    if (!("Notification" in window)) {
+      toast({ title: "Notificações não suportadas neste navegador", variant: "destructive" });
+      return;
+    }
+    let perm = Notification.permission;
+    if (perm === "default") { try { perm = await Notification.requestPermission(); } catch { /* ignore */ } }
+    if (perm === "granted") setDesktopEnabled(true);
+    else toast({ title: "Permissão de notificação negada pelo navegador", variant: "destructive" });
+  }, [desktopEnabled, toast]);
+
   // Real-time updates.
   useEffect(() => {
     const es = acquireSharedEventSource(INTERNAL_CHAT_EVENTS_URL);
@@ -401,6 +469,18 @@ export default function InternalChat({ docked = false, onActiveConversationChang
           };
         });
       });
+      // Som e/ou notificação do navegador: mensagem de outra pessoa chegando
+      // numa conversa que não está aberta agora (ou com a aba em segundo
+      // plano) — mesmo critério do Atendimento.
+      if (payload.message.senderId !== user?.id) {
+        const notLooking = document.hidden || !isActive;
+        if (notLooking) {
+          if (soundEnabledRef.current) playAlertSound();
+          if (desktopEnabledRef.current && document.hidden) {
+            showDesktopNotification(payload.message.senderName, payload.message.content, payload.conversationId);
+          }
+        }
+      }
     };
     es.addEventListener("internal_message", onInternalMessage);
     // When the reconnection gap is larger than the server's replay buffer (or
@@ -914,8 +994,28 @@ export default function InternalChat({ docked = false, onActiveConversationChang
             <div className="flex items-center gap-2 font-semibold text-sm">
               <MessagesSquare className="w-4 h-4 text-primary" /> Chat Interno
             </div>
-            {canEdit && (
-              <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setSoundEnabled((v) => !v)}
+                data-testid="button-toggle-internal-sound"
+                title={soundEnabled ? "Som ligado — clique para desligar" : "Som desligado — clique para ligar"}
+                className="p-1 rounded hover:bg-secondary/60 transition"
+              >
+                {soundEnabled
+                  ? <Volume2 className="w-3.5 h-3.5 text-primary" />
+                  : <VolumeX className="w-3.5 h-3.5 text-muted-foreground" />}
+              </button>
+              <button
+                onClick={toggleDesktop}
+                data-testid="button-toggle-internal-desktop"
+                title={desktopEnabled ? "Notificações do navegador ligadas — clique para desligar" : "Notificações do navegador desligadas — clique para ligar"}
+                className="p-1 rounded hover:bg-secondary/60 transition"
+              >
+                {desktopEnabled
+                  ? <Bell className="w-3.5 h-3.5 text-primary" />
+                  : <BellOff className="w-3.5 h-3.5 text-muted-foreground" />}
+              </button>
+              {canEdit && (
                 <button
                   onClick={openNew}
                   data-testid="button-new-internal-chat"
@@ -923,8 +1023,8 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                 >
                   <Plus className="w-3.5 h-3.5" /> Novo
                 </button>
-              </div>
-            )}
+              )}
+            </div>
           </div>
           <div className="flex-1 overflow-y-auto">
             {conversations.length === 0 && (
