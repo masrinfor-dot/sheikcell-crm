@@ -144,3 +144,26 @@ export function parcelamento12xDoProduto(
   const total = precoVendaDoProduto(produto, settings, 12);
   return total != null ? { total, parcela: parcelaCartao(total, 12) } : null;
 }
+
+/**
+ * Preço de atacado a prazo em até 12x no cartão: mesma ideia do parcelamento
+ * de varejo (parcelamento12xDoProduto), só que com a margem de atacado do
+ * produto — pra mostrar "atacado à vista: R$X · ou 12x de R$Y" junto do
+ * preço de atacado já existente (que já é o valor à vista, sem cartão).
+ */
+export function parcelamento12xAtacadoDoProduto(
+  produto: { costPrice: number | null; costIncludesInvoice: boolean; wholesaleMarginPercentOverride: number | null },
+  settings: PricingSettings,
+): { total: number; parcela: number } | null {
+  if (produto.costPrice == null || !Number.isFinite(produto.costPrice) || produto.costPrice <= 0) return null;
+  const margemPercent = produto.wholesaleMarginPercentOverride ?? settings.wholesaleMarginPercent;
+  const taxaCartaoPercent = settings.cardFeeTable["12"] ?? 0;
+  const total = calcularPrecoVenda({
+    custo: produto.costPrice,
+    margemPercent,
+    notaFiscalPercent: settings.invoiceCostPercent,
+    taxaCartaoPercent,
+    custoJaIncluiNotaFiscal: produto.costIncludesInvoice,
+  });
+  return { total, parcela: parcelaCartao(total, 12) };
+}

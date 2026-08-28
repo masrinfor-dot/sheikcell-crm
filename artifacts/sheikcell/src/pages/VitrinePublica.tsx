@@ -50,6 +50,13 @@ function installment12Label(v: { installment12Value?: number | null } | null | u
   return value ? `ou 12x de ${value} no cartão` : null;
 }
 
+// Mesma ideia, pro parcelamento em 12x do preço de atacado — só sai
+// preenchido junto do wholesalePrice (ou seja, só pra quem já desbloqueou).
+function wholesaleInstallment12Label(v: { wholesaleInstallment12Value?: number | null } | null | undefined): string | null {
+  const value = formatBRL(v?.wholesaleInstallment12Value ?? null);
+  return value ? `ou 12x de ${value} no cartão` : null;
+}
+
 function waLink(phone: string | null, text: string): string | null {
   if (!phone) return null;
   let digits = phone.replace(/\D/g, "");
@@ -77,6 +84,7 @@ function ProductCard({
   const retailPrice = formatBRL(selected?.priceCash ?? selected?.salePrice ?? null);
   const installmentLabel = installment12Label(selected);
   const wholesalePrice = wholesaleUnlocked ? formatBRL(selected?.wholesalePrice ?? null) : null;
+  const wholesaleInstallmentLabel = wholesaleUnlocked ? wholesaleInstallment12Label(selected) : null;
   const inStock = selected?.inStock ?? false;
   const criteria = CATALOG_CONDITION_CRITERIA[p.condition]?.criteria ?? [];
 
@@ -133,7 +141,10 @@ function ProductCard({
           {retailPrice && <p className="text-[10px] text-neutral-400">à vista (Pix)</p>}
           {installmentLabel && <p className="text-[11px] text-neutral-500">{installmentLabel}</p>}
           {wholesalePrice && (
-            <p className="text-xs font-bold text-amber-700 flex items-center gap-1"><Lock className="w-3 h-3" /> Atacado: {wholesalePrice}</p>
+            <>
+              <p className="text-xs font-bold text-amber-700 flex items-center gap-1"><Lock className="w-3 h-3" /> Atacado à vista: {wholesalePrice}</p>
+              {wholesaleInstallmentLabel && <p className="text-[11px] text-amber-600">{wholesaleInstallmentLabel}</p>}
+            </>
           )}
           <button type="button" disabled={!inStock || !selected}
             onClick={() => selected && onAddToCart({
@@ -182,6 +193,7 @@ function ProductDetailModal({
   const retailPrice = formatBRL(selected?.priceCash ?? selected?.salePrice ?? null);
   const installmentLabel = installment12Label(selected);
   const wholesalePrice = wholesaleUnlocked ? formatBRL(selected?.wholesalePrice ?? null) : null;
+  const wholesaleInstallmentLabel = wholesaleUnlocked ? wholesaleInstallment12Label(selected) : null;
   const inStock = selected?.inStock ?? false;
   const criteria = CATALOG_CONDITION_CRITERIA[p.condition]?.criteria ?? [];
 
@@ -263,7 +275,10 @@ function ProductDetailModal({
             {retailPrice && <p className="text-xs text-neutral-400">à vista (Pix)</p>}
             {installmentLabel && <p className="text-sm text-neutral-500">{installmentLabel}</p>}
             {wholesalePrice && (
-              <p className="text-sm font-bold text-amber-700 flex items-center gap-1"><Lock className="w-3.5 h-3.5" /> Atacado: {wholesalePrice}</p>
+              <>
+                <p className="text-sm font-bold text-amber-700 flex items-center gap-1"><Lock className="w-3.5 h-3.5" /> Atacado à vista: {wholesalePrice}</p>
+                {wholesaleInstallmentLabel && <p className="text-xs text-amber-600">{wholesaleInstallmentLabel}</p>}
+              </>
             )}
             <button type="button" disabled={!inStock || !selected}
               onClick={() => selected && onAddToCart({
