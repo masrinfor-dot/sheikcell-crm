@@ -641,6 +641,9 @@ export type CrmContact = {
   totalPurchases: string;
   customFields: Record<string, string>;
   isArchived: boolean;
+  isBlocked: boolean;
+  blockedReason: string | null;
+  blockedAt: string | null;
   createdAt: string;
   updatedAt: string;
   sector: Sector | null;
@@ -1505,7 +1508,7 @@ export const api = {
       req<{ ok: boolean }>(`/chat/conversations/${id}`, { method: "DELETE" }),
     outboundUsage: (assigneeId?: number) =>
       req<OutboundUsage>(`/chat/outbound-usage${assigneeId ? `?assigneeId=${assigneeId}` : ""}`),
-    createConversation: (data: { phone: string; name: string; channel?: string; sectorId?: number; assigneeId?: number }) =>
+    createConversation: (data: { phone: string; name: string; channel?: string; sectorId?: number; assigneeId?: number; sessionKey?: string }) =>
       req<Conversation>("/chat/conversations", { method: "POST", body: JSON.stringify(data) }),
     claimConversation: (id: number) =>
       req<Conversation>(`/chat/conversations/${id}/claim`, { method: "POST" }),

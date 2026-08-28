@@ -79,12 +79,9 @@ function isRestrictedConv(c: Conversation): boolean {
 
 function isVisibleToMe(c: Conversation, user: User | null): boolean {
   if (!user) return false;
-  if (user.role === "admin") return true;
-  if (user.role === "supervisor") {
-    // Supervisor com setor: só o próprio setor + potenciais (sem setor = global).
-    if (user.sectorId == null || c.sectorId === user.sectorId) return true;
-    return conversationCategory(c) === "potenciais";
-  }
+  // Admin e supervisor enxergam tudo, em qualquer setor, sem restrição —
+  // privacidade entre vendedores continua valendo só para o papel vendedor.
+  if (user.role === "admin" || user.role === "supervisor") return true;
   if (isRestrictedConv(c)) {
     if (c.assigneeId === user.id) return true;
     // Eventos SSE trazem a linha crua (sem participants); nesse caso não dá
@@ -1145,7 +1142,7 @@ export default function ChatCenter({
   const [schedForm, setSchedForm] = useState<{ kind: "mensagem" | "retorno"; content: string; sendAt: string }>({ kind: "mensagem", content: "", sendAt: "" });
   const [schedSaving, setSchedSaving] = useState(false);
   const [waSessions, setWaSessions] = useState<WaSessionInfo[]>([]);
-  const [newForm, setNewForm] = useState({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "" });
+  const [newForm, setNewForm] = useState({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "", sessionKey: "default" });
   // Uso atual da trava anti-disparo em massa (Atendimento ativo), consultado
   // ao abrir o modal de Nova Conversa — mostra o risco ANTES de tentar criar.
   const [outboundUsage, setOutboundUsage] = useState<OutboundUsage | null>(null);
@@ -1725,13 +1722,11 @@ export default function ChatCenter({
     // de quem não está na lista de autorizados. Evento leve: só id + keepFor.
     const onConversationHidden = (e: Event) => {
       try {
-        const { id, keepFor, sectorId } = JSON.parse((e as MessageEvent).data) as { id: number; keepFor: number[]; sectorId: number | null };
+        const { id, keepFor } = JSON.parse((e as MessageEvent).data) as { id: number; keepFor: number[]; sectorId: number | null };
         if (!user) return;
-        if (user.role === "admin") return;
-        if (user.role === "supervisor") {
-          // Supervisor com setor: só mantém conversas restritas do próprio setor.
-          if (user.sectorId == null || sectorId === user.sectorId) return;
-        } else if (keepFor.includes(user.id)) {
+        // Admin e supervisor sempre mantêm — visão global, sem restrição por setor.
+        if (user.role === "admin" || user.role === "supervisor") return;
+        if (keepFor.includes(user.id)) {
           return;
         }
         setConvs((prev) => prev.filter((c) => c.id !== id));
@@ -2213,7 +2208,7 @@ export default function ChatCenter({
   // ── Ativo → Resolvida (finalizar atendimento) ──
   // Abre o modal para o vendedor escolher o motivo antes de finalizar.
   const handleDeleteConv = async (id: number, name: string) => {
-    if (!window.confirm(`Excluir o atendimento de "${name}"? As mensagens serão apagadas de vez.`)) return;
+    if (!window.confirm(`Excluir o atendimento de "${name}"? Todo o histórico de mensagens dessa conversa será apagado de vez (a ficha do cliente no CRM não é afetada). Essa ação não pode ser desfeita.`)) return;
     try {
       await api.chat.deleteConversation(id);
       setConvs((prev) => prev.filter((c) => c.id !== id));
@@ -2534,6 +2529,11 @@ export default function ChatCenter({
         phone: newForm.phone, name: newForm.name, channel: newForm.channel,
         sectorId: newForm.sectorId ? Number(newForm.sectorId) : undefined,
         assigneeId: newForm.assigneeId ? Number(newForm.assigneeId) : undefined,
+        // Linha de WhatsApp (canal): só faz sentido quando o canal é WhatsApp e
+        // a loja tem mais de uma conexão — permite abrir atendimento numa linha
+        // (ex.: varejo) mesmo com o mesmo número já em atendimento em outra
+        // (ex.: atacado), já que são canais independentes.
+        sessionKey: newForm.channel === "whatsapp" ? newForm.sessionKey : undefined,
       });
       // O insert no backend não devolve o objeto assignee (só assigneeId) —
       // preenche localmente com o que já temos em chatUsers pra não ficar
@@ -2552,7 +2552,7 @@ export default function ChatCenter({
       // Abre a aba onde a conversa realmente caiu (vendedor: já sai em Ativos).
       setCategory(conversationCategory(conv));
       setShowNewConv(false);
-      setNewForm({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "" });
+      setNewForm({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "", sessionKey: "default" });
     } catch (err: unknown) {
       toast({ title: "Erro", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     }
@@ -3151,7 +3151,7 @@ export default function ChatCenter({
                       {crmLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <IdCard className="w-3.5 h-3.5 text-muted-foreground" />}
                       Abrir ficha do cliente no CRM
                     </button>
-                    {user?.role === "admin" && activeCategory === "potenciais" && (
+                    {user?.role === "admin" && (
                       <button
                         onClick={() => { handleDeleteConv(activeConv.id, activeConv.name); setShowMobileMore(false); }}
                         data-testid="button-delete-conv-mobile"
@@ -3174,8 +3174,8 @@ export default function ChatCenter({
               >
                 {activeConv.pinned ? <Star className="w-3.5 h-3.5 fill-amber-500" /> : <StarOff className="w-3.5 h-3.5" />}
               </button>
-              {/* Excluir atendimento — só admin e só em Potenciais. No celular mora no menu "⋮". */}
-              {user?.role === "admin" && activeCategory === "potenciais" && (
+              {/* Excluir atendimento — só admin, em qualquer categoria/status. No celular mora no menu "⋮". */}
+              {user?.role === "admin" && (
                 <button
                   onClick={() => handleDeleteConv(activeConv.id, activeConv.name)}
                   data-testid="button-delete-conv"
@@ -3597,7 +3597,7 @@ export default function ChatCenter({
                 <Zap className="w-4 h-4" />
               </button>
               {showQuickReplies && (
-                <div className="absolute bottom-11 left-0 bg-white border border-border rounded-xl shadow-lg z-30 w-80 max-h-80 overflow-y-auto">
+                <div className="absolute bottom-11 left-0 bg-white border border-border rounded-xl shadow-lg z-30 w-80 max-w-[90vw] max-h-80 overflow-y-auto">
                   <div className="px-3 py-2 border-b border-border sticky top-0 bg-white">
                     <p className="text-xs font-semibold text-muted-foreground mb-1.5">Mensagens rápidas</p>
                     <input autoFocus value={quickSearch} onChange={(e) => setQuickSearch(e.target.value)}
@@ -3629,18 +3629,20 @@ export default function ChatCenter({
             </div>
             )}
             {can(user, "usar_ia") && (<>
+            {/* Ícone só (sem texto) -- com o painel de Informações e/ou o Chat
+                Interno abertos ao lado, a coluna do meio fica estreita e os
+                rótulos "Sugerir (IA)"/"Corrigir" espremiam a área de digitar. */}
             <button
               type="button"
               onClick={handleSuggestReply}
               disabled={sending || suggesting}
               title="Sugerir resposta com IA (revise antes de enviar)"
               data-testid="button-suggest-reply"
-              className="h-9 px-3 rounded-full flex items-center gap-1.5 text-xs font-semibold text-primary bg-primary/10 hover:bg-primary/20 transition shrink-0 disabled:opacity-40"
+              className="w-9 h-9 rounded-full flex items-center justify-center text-primary bg-primary/10 hover:bg-primary/20 transition shrink-0 disabled:opacity-40"
             >
               {suggesting
                 ? <RefreshCw className="w-4 h-4 animate-spin" />
                 : <Sparkles className="w-4 h-4" />}
-              <span className="hidden sm:inline">Sugerir (IA)</span>
             </button>
             <button
               type="button"
@@ -3648,12 +3650,11 @@ export default function ChatCenter({
               disabled={!msgText.trim() || correcting || sending}
               title="Corrigir ortografia com IA"
               data-testid="button-correct-text"
-              className="h-9 px-3 rounded-full flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-100 hover:bg-emerald-200 transition shrink-0 disabled:opacity-40"
+              className="w-9 h-9 rounded-full flex items-center justify-center text-emerald-700 bg-emerald-100 hover:bg-emerald-200 transition shrink-0 disabled:opacity-40"
             >
               {correcting
                 ? <RefreshCw className="w-4 h-4 animate-spin" />
                 : <SpellCheck className="w-4 h-4" />}
-              <span className="hidden sm:inline">Corrigir</span>
             </button>
             </>)}
             <textarea
@@ -3665,7 +3666,7 @@ export default function ChatCenter({
               lang="pt-BR"
               rows={1}
               data-testid="input-message"
-              className="flex-1 min-w-0 resize-none bg-white rounded-2xl px-4 py-2 text-sm border border-border outline-none focus:ring-2 focus:ring-primary/20 max-h-32 overflow-y-auto"
+              className="flex-1 min-w-0 resize-none bg-white rounded-2xl px-4 py-2.5 text-sm border border-border outline-none focus:ring-2 focus:ring-primary/20 max-h-40 overflow-y-auto"
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(e); } }}
               onPaste={(e) => {
                 if (can(user, "enviar_midia")) {
@@ -4282,6 +4283,21 @@ export default function ChatCenter({
                   <option value="manual">Manual</option>
                 </select>
               </div>
+              {newForm.channel === "whatsapp" && waSessions.length > 1 && (
+                <div>
+                  <label className="text-xs font-medium mb-1 block">Linha de WhatsApp</label>
+                  <select value={newForm.sessionKey} onChange={(e) => setNewForm({ ...newForm, sessionKey: e.target.value })}
+                    data-testid="select-new-conv-session"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                    {waSessions.map((s) => (
+                      <option key={s.sessionKey} value={s.sessionKey}>{waSessionLabel(s.sessionKey, waSessions)}</option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    Cada linha é um canal independente — o mesmo número pode ter um atendimento aberto em cada uma ao mesmo tempo (ex.: atacado e varejo).
+                  </p>
+                </div>
+              )}
               <div>
                 <label className="text-xs font-medium mb-1 block">Setor</label>
                 <select value={newForm.sectorId} onChange={(e) => setNewForm({ ...newForm, sectorId: e.target.value })}
