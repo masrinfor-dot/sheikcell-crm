@@ -1444,6 +1444,15 @@ export default function ChatCenter({
     persistScheduleReads(notifications);
     setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
   };
+  // Apaga tudo da lista (não só marca como lida) — pedido explícito do
+  // cliente, a lista ficava lotada de avisos antigos. Persiste a leitura no
+  // servidor primeiro (retorno/falha de envio agendados são recarregados do
+  // backend a cada abertura da Central se continuarem "não lidos" lá — sem
+  // isso, eles voltariam a aparecer depois de limpos aqui).
+  const clearAllNotifications = () => {
+    persistScheduleReads(notifications);
+    setNotifications([]);
+  };
 
   // ── Fetch conversations ──
   const fetchConvs = useCallback(async () => {
@@ -2802,10 +2811,15 @@ export default function ChatCenter({
                         </button>
                       </div>
                     </div>
-                    {unreadNotifications > 0 && (
-                      <div className="px-3 pb-2 -mt-0.5">
-                        <button onClick={markAllNotificationsRead} className="text-xs text-primary hover:underline">
-                          Marcar todas como lidas
+                    {notifications.length > 0 && (
+                      <div className="px-3 pb-2 -mt-0.5 flex items-center gap-3">
+                        {unreadNotifications > 0 && (
+                          <button onClick={markAllNotificationsRead} className="text-xs text-primary hover:underline">
+                            Marcar todas como lidas
+                          </button>
+                        )}
+                        <button onClick={clearAllNotifications} data-testid="button-clear-notifications" className="text-xs text-muted-foreground hover:text-red-600 hover:underline">
+                          Limpar tudo
                         </button>
                       </div>
                     )}
