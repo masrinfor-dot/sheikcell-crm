@@ -118,7 +118,7 @@ export type User = {
 export const OPTIONAL_MODULES = [
   "chat", "crm", "equipe", "financeiro", "diretorio", "tarefas", "resultados", "history",
   "avaliacao", "financeiras", "rh", "treinamentos", "questionarios", "sorteios", "documentos", "robo",
-  "relatorios", "tvbox", "rotinas", "vitrine",
+  "relatorios", "tvbox", "rotinas", "vitrine", "pagamentos",
 ] as const;
 export type OptionalModule = typeof OPTIONAL_MODULES[number];
 
@@ -151,6 +151,7 @@ export const MODULE_LABELS: Record<OptionalModule, string> = {
   tvbox: "TV Box",
   rotinas: "Rotinas e Produtividade",
   vitrine: "Vitrine Aparelhos",
+  pagamentos: "Pagamentos entre Filiais",
 };
 // "Básico" = o conjunto padrão do CRM (o que antes era núcleo sempre ligado);
 // "Completo" = básico + todos os módulos de negócio adicionais.
@@ -201,6 +202,46 @@ export type Store = {
   name: string;
   isActive: boolean;
   createdAt: string;
+};
+
+// ─── Pagamentos entre Filiais ────────────────────────────────────────────────
+// Cadastro manual de banco/maquininha por filial — sem integração bancária
+// nenhuma (ver comentário em lib/db/src/schema/finance_payments.ts).
+export type FinanceBankAccount = {
+  id: number;
+  storeId: number;
+  bankName: string;
+  label: string | null;
+  isActive: boolean;
+  createdAt: string;
+};
+
+export type FinancePaymentAllocation = {
+  storeId: number;
+  percent: string | null;
+  amount: string;
+};
+
+export type FinancePayment = {
+  id: number;
+  paymentDate: string;
+  description: string;
+  supplier: string | null;
+  payingBankAccountId: number;
+  payingStoreId: number;
+  splitType: "rateada" | "direta";
+  splitMode: "percent" | "value";
+  totalAmount: string;
+  status: "aberto" | "pago";
+  paidAt: string | null;
+  createdBy: number | null;
+  createdAt: string;
+  updatedAt: string;
+  allocations: FinancePaymentAllocation[];
+};
+
+export type FinancePaymentSummary = {
+  stores: { storeId: number; storeName: string; pago: number; aberto: number }[];
 };
 
 export type TeamStatusRow = {
@@ -1721,6 +1762,41 @@ export const api = {
   finance: {
     summary: (days: number, sectorId?: number | null, store?: string | null) =>
       req<FinanceSummary>(`/finance/summary?days=${days}${sectorId ? `&sectorId=${sectorId}` : ""}${store ? `&store=${encodeURIComponent(store)}` : ""}`),
+  },
+  financePayments: {
+    bankAccounts: {
+      list: (storeId?: number | null) => req<FinanceBankAccount[]>(`/finance/bank-accounts${storeId ? `?storeId=${storeId}` : ""}`),
+      create: (data: { storeId: number; bankName: string; label?: string }) =>
+        req<FinanceBankAccount>("/finance/bank-accounts", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<{ bankName: string; label: string; isActive: boolean }>) =>
+        req<FinanceBankAccount>(`/finance/bank-accounts/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    },
+    list: (params?: { storeId?: number | null; bankAccountId?: number | null; status?: "aberto" | "pago" | null; from?: string | null; to?: string | null }) => {
+      const qs = new URLSearchParams();
+      if (params?.storeId) qs.set("storeId", String(params.storeId));
+      if (params?.bankAccountId) qs.set("bankAccountId", String(params.bankAccountId));
+      if (params?.status) qs.set("status", params.status);
+      if (params?.from) qs.set("from", params.from);
+      if (params?.to) qs.set("to", params.to);
+      const qsStr = qs.toString();
+      return req<FinancePayment[]>(`/finance/payments${qsStr ? `?${qsStr}` : ""}`);
+    },
+    summary: (from?: string | null, to?: string | null) => {
+      const qs = new URLSearchParams();
+      if (from) qs.set("from", from);
+      if (to) qs.set("to", to);
+      const qsStr = qs.toString();
+      return req<FinancePaymentSummary>(`/finance/payments/summary${qsStr ? `?${qsStr}` : ""}`);
+    },
+    create: (data: {
+      paymentDate: string; description: string; supplier?: string;
+      payingBankAccountId: number; payingStoreId: number;
+      splitType: "rateada" | "direta"; splitMode: "percent" | "value"; totalAmount: number;
+      allocations: { storeId: number; percent?: number | null; amount?: number | null }[];
+    }) => req<FinancePayment>("/finance/payments", { method: "POST", body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<{ description: string; supplier: string; status: "aberto" | "pago" }>) =>
+      req<FinancePayment>(`/finance/payments/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/finance/payments/${id}`, { method: "DELETE" }),
   },
   bot: {
     settings: () => req<BotSettings>("/bot/settings"),

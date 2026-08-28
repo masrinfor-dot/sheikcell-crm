@@ -26,6 +26,7 @@ import Suporte from "./Suporte";
 import Sorteios from "./Sorteios";
 import Robo from "./Robo";
 import Financeiro from "./Financeiro";
+import PagamentosFiliais from "./PagamentosFiliais";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
 import MySessionsModal from "@/components/MySessionsModal";
 import ChecklistGate from "@/components/ChecklistGate";
@@ -45,13 +46,13 @@ import {
   PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck,
   AlertTriangle, WifiOff,
   FolderArchive, Headphones, BarChart3, SlidersHorizontal, Palette, ChevronDown, Wrench,
-  ArrowRight, Filter, BookUser, LifeBuoy, FileBarChart2, Plug, Tv, ListChecks, PanelTop,
+  ArrowRight, Filter, BookUser, LifeBuoy, FileBarChart2, Plug, Tv, ListChecks, PanelTop, ArrowLeftRight,
 } from "lucide-react";
 import Resultados from "./Resultados";
 import Relatorios from "./Relatorios";
 import TvBox from "./TvBox";
 
-type Tab = "dashboard" | "resultados" | "relatorios" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "vitrine" | "questionarios" | "treinamentos" | "documentos" | "rh" | "meuponto" | "sorteios" | "robo" | "financeiro" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "integracoes" | "sistema" | "diretorio" | "suporte" | "tvbox" | "rotinas";
+type Tab = "dashboard" | "resultados" | "relatorios" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "vitrine" | "questionarios" | "treinamentos" | "documentos" | "rh" | "meuponto" | "sorteios" | "robo" | "financeiro" | "pagamentos" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "integracoes" | "sistema" | "diretorio" | "suporte" | "tvbox" | "rotinas";
 
 // Categorias colapsáveis do menu lateral — cada aba pertence a um único grupo.
 type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabIds: Tab[] };
@@ -61,7 +62,7 @@ type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabI
 const TAB_GROUPS: TabGroup[] = [
   { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["dashboard", "chat", "equipe", "crm", "avaliacao", "vitrine", "financeiras"] },
   { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["resultados", "relatorios", "tarefas", "documentos", "history", "rotinas", "diretorio", "meuponto", "rh", "treinamentos", "questionarios", "sorteios"] },
-  { key: "administracao", label: "Administração", icon: Settings, tabIds: ["users", "sectors", "financeiro", "quickreplies", "whatsapp", "robo", "tvbox"] },
+  { key: "administracao", label: "Administração", icon: Settings, tabIds: ["users", "sectors", "financeiro", "pagamentos", "quickreplies", "whatsapp", "robo", "tvbox"] },
   { key: "configuracoes", label: "Configurações", icon: SlidersHorizontal, tabIds: ["aparencia", "integracoes"] },
   { key: "sistema", label: "Sistema (Dev)", icon: Wrench, tabIds: ["sistema"] },
 ];
@@ -468,6 +469,7 @@ export default function AdminDashboard() {
     { id: "tarefas" as Tab, label: "Tarefas", icon: ListTodo, adminOnly: false, module: "tarefas" as OptionalModule },
     { id: "crm" as Tab, label: "CRM", icon: Kanban, adminOnly: false, module: "crm" as OptionalModule },
     { id: "financeiro" as Tab, label: "Financeiro", icon: BadgeDollarSign, adminOnly: true, module: "financeiro" as OptionalModule },
+    { id: "pagamentos" as Tab, label: "Pagamentos entre Filiais", icon: ArrowLeftRight, adminOnly: true, module: "pagamentos" as OptionalModule },
     { id: "financeiras" as Tab, label: "Financeiras", icon: Landmark, adminOnly: false, module: "financeiras" as OptionalModule },
     { id: "avaliacao" as Tab, label: "Avaliação de Usados", icon: BadgeDollarSign, adminOnly: false, module: "avaliacao" as OptionalModule },
     { id: "vitrine" as Tab, label: "Vitrine Aparelhos", icon: Smartphone, adminOnly: false, module: "vitrine" as OptionalModule },
@@ -875,6 +877,8 @@ export default function AdminDashboard() {
         {tab === "robo" && <Robo />}
 
         {tab === "financeiro" && <Financeiro />}
+
+        {tab === "pagamentos" && <PagamentosFiliais />}
 
         {tab === "aparencia" && <ConfiguracoesAparencia />}
         {tab === "integracoes" && <ConfiguracoesIntegracoes />}
