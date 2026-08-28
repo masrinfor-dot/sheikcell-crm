@@ -31,7 +31,7 @@ import Documentos from "./Documentos";
 import {
   LogOut, KeyRound, Clock, PhoneCall, CheckCircle,
   ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, BadgeDollarSign, GraduationCap, Gift, Bot, UserSearch, ClipboardList, TrendingUp,
-  FolderArchive, BookUser, LifeBuoy, Tv, Smartphone,
+  FolderArchive, BookUser, LifeBuoy, Tv, Smartphone, ChevronsRight, ChevronsLeft,
 } from "lucide-react";
 import Resultados from "./Resultados";
 import TeamDirectory from "./TeamDirectory";
@@ -106,6 +106,18 @@ export default function AttendantDashboard() {
     return () => mq.removeEventListener("change", h);
   }, []);
   const internalChatUnread = useInternalChatNotifier(user?.id, isDesktop || mainTab === "equipe", moduleGranted("equipe"));
+  // Minimizar a coluna do Chat Interno (só desktop) -- pedido explícito do
+  // cliente, a coluna "sempre aberta" tomava espaço da tela de Atendimento.
+  // Só esconde por CSS (nunca desmonta o InternalChat), senão o contador de
+  // não lidas para de atualizar com a coluna minimizada (ver comentário
+  // acima sobre isDesktop no useInternalChatNotifier). Lembra a preferência
+  // entre sessões.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem("sheikcell.internalChatSidebarCollapsed") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("sheikcell.internalChatSidebarCollapsed", sidebarCollapsed ? "1" : "0"); } catch { /* ignore */ }
+  }, [sidebarCollapsed]);
 
   // Alarme de sem resposta clicado em outra aba → volta para o chat.
   useEffect(() => {
@@ -559,11 +571,47 @@ export default function AttendantDashboard() {
       </>}
         </div>
 
-        {/* Chat Interno — coluna lateral sempre aberta (somente desktop) */}
+        {/* Chat Interno — coluna lateral (só desktop), agora minimizável.
+            O InternalChat fica SEMPRE montado (só escondido por CSS quando
+            minimizado) -- senão o contador de não lidas para de atualizar. */}
         {moduleGranted("equipe") && (
-          <aside className="hidden md:flex w-[300px] xl:w-[360px] shrink-0 flex-col border-l border-border bg-card sticky top-14 self-start h-[calc(100vh-3.5rem)]">
-            <InternalChat key={focusInternalRequestId} docked initialConversationId={focusInternalConversationId} />
-          </aside>
+          sidebarCollapsed ? (
+            <aside className="hidden md:flex w-10 shrink-0 flex-col items-center border-l border-border bg-card sticky top-14 self-start h-[calc(100vh-3.5rem)] py-3">
+              <button
+                onClick={() => setSidebarCollapsed(false)}
+                data-testid="button-expand-internal-chat-sidebar"
+                title="Mostrar Chat Interno"
+                className="relative p-1.5 rounded-lg text-muted-foreground hover:text-primary hover:bg-secondary transition"
+              >
+                <ChevronsLeft className="w-4 h-4" />
+                {internalChatUnread > 0 && (
+                  <span className="absolute -top-1 -right-1 min-w-[15px] h-[15px] px-0.5 rounded-full bg-red-500 text-white text-[9px] font-bold leading-none flex items-center justify-center">
+                    {internalChatUnread > 99 ? "99+" : internalChatUnread}
+                  </span>
+                )}
+              </button>
+              <span className="mt-2 text-[10px] text-muted-foreground [writing-mode:vertical-rl]">Chat Interno</span>
+              <div className="hidden">
+                <InternalChat key={focusInternalRequestId} docked initialConversationId={focusInternalConversationId} />
+              </div>
+            </aside>
+          ) : (
+            <aside className="hidden md:flex w-[300px] xl:w-[360px] shrink-0 flex-col border-l border-border bg-card sticky top-14 self-start h-[calc(100vh-3.5rem)]">
+              <div className="flex items-center justify-end px-2 py-1 border-b border-border shrink-0">
+                <button
+                  onClick={() => setSidebarCollapsed(true)}
+                  data-testid="button-collapse-internal-chat-sidebar"
+                  title="Minimizar Chat Interno"
+                  className="p-1 rounded-lg text-muted-foreground hover:text-primary hover:bg-secondary transition"
+                >
+                  <ChevronsRight className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="flex-1 min-h-0 flex flex-col">
+                <InternalChat key={focusInternalRequestId} docked initialConversationId={focusInternalConversationId} />
+              </div>
+            </aside>
+          )
         )}
       </div>
 

@@ -275,7 +275,7 @@ router.patch("/rh/candidates/:id", requireModuleAccess("rh"), async (req, res): 
   const { status, notes } = (req.body ?? {}) as { status?: string; notes?: string };
   const update: Record<string, unknown> = {};
   if (status !== undefined) {
-    if (!["novo", "aprovado", "reprovado"].includes(status)) { res.status(400).json({ error: "Status inválido" }); return; }
+    if (!["novo", "pre_aprovado", "aprovado", "reprovado"].includes(status)) { res.status(400).json({ error: "Status inválido" }); return; }
     update.status = status;
   }
   if (notes !== undefined) update.notes = typeof notes === "string" ? notes.trim().slice(0, 5000) || null : null;

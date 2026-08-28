@@ -13,6 +13,7 @@ import {
   Pin, PinOff, Reply, StickyNote, Star, StarOff, ChevronLeft, ChevronRight,
   MapPin, ShoppingBag, CreditCard, BarChart3, Ban, UserPlus, ExternalLink,
   FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Download, Maximize2, Pencil,
+  MoreVertical,
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -78,12 +79,9 @@ function isRestrictedConv(c: Conversation): boolean {
 
 function isVisibleToMe(c: Conversation, user: User | null): boolean {
   if (!user) return false;
-  if (user.role === "admin") return true;
-  if (user.role === "supervisor") {
-    // Supervisor com setor: só o próprio setor + potenciais (sem setor = global).
-    if (user.sectorId == null || c.sectorId === user.sectorId) return true;
-    return conversationCategory(c) === "potenciais";
-  }
+  // Admin e supervisor enxergam tudo, em qualquer setor, sem restrição —
+  // privacidade entre vendedores continua valendo só para o papel vendedor.
+  if (user.role === "admin" || user.role === "supervisor") return true;
   if (isRestrictedConv(c)) {
     if (c.assigneeId === user.id) return true;
     // Eventos SSE trazem a linha crua (sem participants); nesse caso não dá
@@ -217,7 +215,12 @@ function HeaderAvatar({ name, src }: { name: string; src?: string | null }) {
 
 // Conexão de WhatsApp (número de atendimento) — usada para etiquetar de qual
 // número a conversa está chegando quando há mais de uma conexão pareada.
-type WaSessionInfo = { sessionKey: string; displayName: string | null; phoneNumber: string | null };
+// color/icon: identidade visual configurada em Administração › WhatsApp,
+// pra distinguir de qual número vem cada atendimento e evitar responder
+// pelo número errado.
+type WaSessionInfo = { sessionKey: string; displayName: string | null; phoneNumber: string | null; color?: string | null; icon?: string | null };
+
+const WA_SESSION_DEFAULT_COLOR = "#10b981"; // mesmo verde que era fixo antes, agora só o fallback
 
 function waSessionLabel(key: string, sessions: WaSessionInfo[]): string {
   const s = sessions.find((x) => x.sessionKey === key);
@@ -226,8 +229,16 @@ function waSessionLabel(key: string, sessions: WaSessionInfo[]): string {
   return key === "default" ? "Principal" : key;
 }
 
+function waSessionColor(key: string, sessions: WaSessionInfo[]): string {
+  return sessions.find((x) => x.sessionKey === key)?.color || WA_SESSION_DEFAULT_COLOR;
+}
+
+function waSessionIcon(key: string, sessions: WaSessionInfo[]): string | null {
+  return sessions.find((x) => x.sessionKey === key)?.icon || null;
+}
+
 // ─── Conversation list item ─────────────────────────────────────────────────
-function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, overdue }: { conv: Conversation; active: boolean; onClick: () => void; onTogglePin: () => void; sessionBadge?: string | null; overdue?: boolean }) {
+function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, sessionColor, sessionIcon, overdue }: { conv: Conversation; active: boolean; onClick: () => void; onTogglePin: () => void; sessionBadge?: string | null; sessionColor?: string | null; sessionIcon?: string | null; overdue?: boolean }) {
   return (
     <button
       onClick={onClick}
@@ -269,7 +280,12 @@ function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, overdue }:
               </span>
             )}
             {sessionBadge && (
-              <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full font-semibold truncate max-w-[90px]" title={`Recebida pelo número: ${sessionBadge}`}>
+              <span
+                className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold truncate max-w-[90px]"
+                style={{ backgroundColor: `${sessionColor ?? WA_SESSION_DEFAULT_COLOR}26`, color: sessionColor ?? WA_SESSION_DEFAULT_COLOR }}
+                title={`Recebida pelo número: ${sessionBadge}`}
+              >
+                {sessionIcon && <span className="mr-0.5">{sessionIcon}</span>}
                 {sessionBadge}
               </span>
             )}
@@ -1067,6 +1083,10 @@ export default function ChatCenter({
   const [showTransferPicker, setShowTransferPicker] = useState(false);
   const [showParticipantPicker, setShowParticipantPicker] = useState(false);
   const [showStatusPicker, setShowStatusPicker] = useState(false);
+  // Menu "mais ações" — só aparece no celular, agrupa os botões menos usados
+  // do cabeçalho da conversa (favoritar, excluir, transferir, participantes,
+  // CRM) pra não estourar a largura da tela.
+  const [showMobileMore, setShowMobileMore] = useState(false);
   const [showFilter, setShowFilter] = useState(false);
   const [onlyUnanswered, setOnlyUnanswered] = useState(false);
   // Filtros avançados da lista: vendedor, setor e nível do cliente no CRM.
@@ -1122,7 +1142,7 @@ export default function ChatCenter({
   const [schedForm, setSchedForm] = useState<{ kind: "mensagem" | "retorno"; content: string; sendAt: string }>({ kind: "mensagem", content: "", sendAt: "" });
   const [schedSaving, setSchedSaving] = useState(false);
   const [waSessions, setWaSessions] = useState<WaSessionInfo[]>([]);
-  const [newForm, setNewForm] = useState({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "" });
+  const [newForm, setNewForm] = useState({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "", sessionKey: "default" });
   // Uso atual da trava anti-disparo em massa (Atendimento ativo), consultado
   // ao abrir o modal de Nova Conversa — mostra o risco ANTES de tentar criar.
   const [outboundUsage, setOutboundUsage] = useState<OutboundUsage | null>(null);
@@ -1424,6 +1444,15 @@ export default function ChatCenter({
     persistScheduleReads(notifications);
     setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
   };
+  // Apaga tudo da lista (não só marca como lida) — pedido explícito do
+  // cliente, a lista ficava lotada de avisos antigos. Persiste a leitura no
+  // servidor primeiro (retorno/falha de envio agendados são recarregados do
+  // backend a cada abertura da Central se continuarem "não lidos" lá — sem
+  // isso, eles voltariam a aparecer depois de limpos aqui).
+  const clearAllNotifications = () => {
+    persistScheduleReads(notifications);
+    setNotifications([]);
+  };
 
   // ── Fetch conversations ──
   const fetchConvs = useCallback(async () => {
@@ -1702,13 +1731,11 @@ export default function ChatCenter({
     // de quem não está na lista de autorizados. Evento leve: só id + keepFor.
     const onConversationHidden = (e: Event) => {
       try {
-        const { id, keepFor, sectorId } = JSON.parse((e as MessageEvent).data) as { id: number; keepFor: number[]; sectorId: number | null };
+        const { id, keepFor } = JSON.parse((e as MessageEvent).data) as { id: number; keepFor: number[]; sectorId: number | null };
         if (!user) return;
-        if (user.role === "admin") return;
-        if (user.role === "supervisor") {
-          // Supervisor com setor: só mantém conversas restritas do próprio setor.
-          if (user.sectorId == null || sectorId === user.sectorId) return;
-        } else if (keepFor.includes(user.id)) {
+        // Admin e supervisor sempre mantêm — visão global, sem restrição por setor.
+        if (user.role === "admin" || user.role === "supervisor") return;
+        if (keepFor.includes(user.id)) {
           return;
         }
         setConvs((prev) => prev.filter((c) => c.id !== id));
@@ -1797,7 +1824,7 @@ export default function ChatCenter({
     } catch { toast({ title: "Erro ao excluir etiqueta", variant: "destructive" }); }
   };
 
-  useEffect(() => { setShowParticipantPicker(false); setShowStatusPicker(false); setCrmContactId(null); }, [activeId]);
+  useEffect(() => { setShowParticipantPicker(false); setShowStatusPicker(false); setCrmContactId(null); setShowMobileMore(false); }, [activeId]);
 
   // Salva o rascunho da conversa que está sendo deixada e restaura o
   // rascunho (ou vazio) da conversa que está sendo aberta.
@@ -2190,7 +2217,7 @@ export default function ChatCenter({
   // ── Ativo → Resolvida (finalizar atendimento) ──
   // Abre o modal para o vendedor escolher o motivo antes de finalizar.
   const handleDeleteConv = async (id: number, name: string) => {
-    if (!window.confirm(`Excluir o atendimento de "${name}"? As mensagens serão apagadas de vez.`)) return;
+    if (!window.confirm(`Excluir o atendimento de "${name}"? Todo o histórico de mensagens dessa conversa será apagado de vez (a ficha do cliente no CRM não é afetada). Essa ação não pode ser desfeita.`)) return;
     try {
       await api.chat.deleteConversation(id);
       setConvs((prev) => prev.filter((c) => c.id !== id));
@@ -2511,6 +2538,11 @@ export default function ChatCenter({
         phone: newForm.phone, name: newForm.name, channel: newForm.channel,
         sectorId: newForm.sectorId ? Number(newForm.sectorId) : undefined,
         assigneeId: newForm.assigneeId ? Number(newForm.assigneeId) : undefined,
+        // Linha de WhatsApp (canal): só faz sentido quando o canal é WhatsApp e
+        // a loja tem mais de uma conexão — permite abrir atendimento numa linha
+        // (ex.: varejo) mesmo com o mesmo número já em atendimento em outra
+        // (ex.: atacado), já que são canais independentes.
+        sessionKey: newForm.channel === "whatsapp" ? newForm.sessionKey : undefined,
       });
       // O insert no backend não devolve o objeto assignee (só assigneeId) —
       // preenche localmente com o que já temos em chatUsers pra não ficar
@@ -2529,7 +2561,7 @@ export default function ChatCenter({
       // Abre a aba onde a conversa realmente caiu (vendedor: já sai em Ativos).
       setCategory(conversationCategory(conv));
       setShowNewConv(false);
-      setNewForm({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "" });
+      setNewForm({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "", sessionKey: "default" });
     } catch (err: unknown) {
       toast({ title: "Erro", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     }
@@ -2779,10 +2811,15 @@ export default function ChatCenter({
                         </button>
                       </div>
                     </div>
-                    {unreadNotifications > 0 && (
-                      <div className="px-3 pb-2 -mt-0.5">
-                        <button onClick={markAllNotificationsRead} className="text-xs text-primary hover:underline">
-                          Marcar todas como lidas
+                    {notifications.length > 0 && (
+                      <div className="px-3 pb-2 -mt-0.5 flex items-center gap-3">
+                        {unreadNotifications > 0 && (
+                          <button onClick={markAllNotificationsRead} className="text-xs text-primary hover:underline">
+                            Marcar todas como lidas
+                          </button>
+                        )}
+                        <button onClick={clearAllNotifications} data-testid="button-clear-notifications" className="text-xs text-muted-foreground hover:text-red-600 hover:underline">
+                          Limpar tudo
                         </button>
                       </div>
                     )}
@@ -3013,6 +3050,8 @@ export default function ChatCenter({
                     ? waSessionLabel(conv.sessionKey, waSessions)
                     : null
                 }
+                sessionColor={conv.channel === "whatsapp" ? waSessionColor(conv.sessionKey, waSessions) : null}
+                sessionIcon={conv.channel === "whatsapp" ? waSessionIcon(conv.sessionKey, waSessions) : null}
               />
             ))
           )}
@@ -3064,7 +3103,12 @@ export default function ChatCenter({
                 {channelIcon(activeConv.channel, isGroupConv(activeConv))}
                 <span>{isGroupConv(activeConv) ? "Grupo do WhatsApp" : activeConv.phone}</span>
                 {activeConv.channel === "whatsapp" && (waSessions.length > 1 || activeConv.sessionKey !== "default") && (
-                  <span className="px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-semibold truncate max-w-[140px]" style={{ fontSize: "10px" }} title="Número de atendimento pelo qual esta conversa chega">
+                  <span
+                    className="px-1.5 py-0.5 rounded-full font-semibold truncate max-w-[140px]"
+                    style={{ fontSize: "10px", backgroundColor: `${waSessionColor(activeConv.sessionKey, waSessions)}26`, color: waSessionColor(activeConv.sessionKey, waSessions) }}
+                    title="Número de atendimento pelo qual esta conversa chega"
+                  >
+                    {waSessionIcon(activeConv.sessionKey, waSessions) && <span className="mr-0.5">{waSessionIcon(activeConv.sessionKey, waSessions)}</span>}
                     via {waSessionLabel(activeConv.sessionKey, waSessions)}
                   </span>
                 )}
@@ -3089,22 +3133,67 @@ export default function ChatCenter({
                 )}
               </div>
             </div>
-            <div className="flex items-center gap-1 shrink-0">
-              {/* Favoritar/desfavoritar contato — fica marcado só para você, some no topo e na aba Favoritos */}
+            <div className="flex items-center gap-1 flex-wrap justify-end max-w-full shrink-0">
+              {/* Menu "mais ações" — só no celular. Agrupa favoritar/excluir/CRM
+                  (as ações menos usadas) pra não estourar a largura da tela.
+                  No desktop esse botão some e as ações voltam a aparecer soltas. */}
+              <div className="relative md:hidden">
+                <button
+                  onClick={() => setShowMobileMore((v) => !v)}
+                  data-testid="button-mobile-more-actions"
+                  title="Mais ações"
+                  className={`p-2 rounded-lg border transition ${showMobileMore ? "bg-secondary border-border" : "bg-white border-border hover:bg-secondary"}`}
+                >
+                  <MoreVertical className="w-3.5 h-3.5 text-muted-foreground" />
+                </button>
+                {showMobileMore && (
+                  <div className="absolute right-0 top-11 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden min-w-[200px]">
+                    <button
+                      onClick={() => { handleTogglePin(activeConv); setShowMobileMore(false); }}
+                      data-testid="button-pin-conv-mobile"
+                      className="w-full text-left flex items-center gap-2 text-xs px-3 py-2.5 hover:bg-secondary transition"
+                    >
+                      {activeConv.pinned ? <Star className="w-3.5 h-3.5 fill-amber-500 text-amber-500" /> : <StarOff className="w-3.5 h-3.5 text-muted-foreground" />}
+                      {activeConv.pinned ? "Remover dos favoritos" : "Favoritar este contato"}
+                    </button>
+                    <button
+                      onClick={() => { handleOpenCrm(); setShowMobileMore(false); }}
+                      disabled={crmLoading}
+                      data-testid="button-open-crm-mobile"
+                      className="w-full text-left flex items-center gap-2 text-xs px-3 py-2.5 hover:bg-secondary transition disabled:opacity-50"
+                    >
+                      {crmLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <IdCard className="w-3.5 h-3.5 text-muted-foreground" />}
+                      Abrir ficha do cliente no CRM
+                    </button>
+                    {user?.role === "admin" && (
+                      <button
+                        onClick={() => { handleDeleteConv(activeConv.id, activeConv.name); setShowMobileMore(false); }}
+                        data-testid="button-delete-conv-mobile"
+                        className="w-full text-left flex items-center gap-2 text-xs px-3 py-2.5 hover:bg-red-50 text-red-600 transition border-t border-border"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        Excluir atendimento
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+              {/* Favoritar/desfavoritar contato — fica marcado só para você, some no topo e na aba Favoritos.
+                  No celular esta ação mora no menu "⋮" acima; aqui só aparece a partir do md. */}
               <button
                 onClick={() => handleTogglePin(activeConv)}
                 data-testid="button-pin-conv"
-                className={`p-2 rounded-lg border transition ${activeConv.pinned ? "text-amber-500 bg-amber-50 border-amber-300 hover:bg-amber-100" : "text-muted-foreground bg-white border-border hover:bg-secondary"}`}
+                className={`hidden md:inline-flex p-2 rounded-lg border transition ${activeConv.pinned ? "text-amber-500 bg-amber-50 border-amber-300 hover:bg-amber-100" : "text-muted-foreground bg-white border-border hover:bg-secondary"}`}
                 title={activeConv.pinned ? "Remover dos favoritos" : "Favoritar este contato"}
               >
                 {activeConv.pinned ? <Star className="w-3.5 h-3.5 fill-amber-500" /> : <StarOff className="w-3.5 h-3.5" />}
               </button>
-              {/* Excluir atendimento — só admin e só em Potenciais */}
-              {user?.role === "admin" && activeCategory === "potenciais" && (
+              {/* Excluir atendimento — só admin, em qualquer categoria/status. No celular mora no menu "⋮". */}
+              {user?.role === "admin" && (
                 <button
                   onClick={() => handleDeleteConv(activeConv.id, activeConv.name)}
                   data-testid="button-delete-conv"
-                  className="p-2 rounded-lg text-red-600 bg-white border border-border hover:bg-red-50 transition"
+                  className="hidden md:inline-flex p-2 rounded-lg text-red-600 bg-white border border-border hover:bg-red-50 transition"
                   title="Excluir atendimento"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
@@ -3315,7 +3404,7 @@ export default function ChatCenter({
                 onClick={handleOpenCrm}
                 disabled={crmLoading}
                 data-testid="button-open-crm"
-                className="p-2 rounded-lg bg-white border border-border hover:bg-secondary transition disabled:opacity-50"
+                className="hidden md:inline-flex p-2 rounded-lg bg-white border border-border hover:bg-secondary transition disabled:opacity-50"
                 title="Abrir ficha do cliente no CRM"
               >
                 {crmLoading
@@ -3522,7 +3611,7 @@ export default function ChatCenter({
                 <Zap className="w-4 h-4" />
               </button>
               {showQuickReplies && (
-                <div className="absolute bottom-11 left-0 bg-white border border-border rounded-xl shadow-lg z-30 w-80 max-h-80 overflow-y-auto">
+                <div className="absolute bottom-11 left-0 bg-white border border-border rounded-xl shadow-lg z-30 w-80 max-w-[90vw] max-h-80 overflow-y-auto">
                   <div className="px-3 py-2 border-b border-border sticky top-0 bg-white">
                     <p className="text-xs font-semibold text-muted-foreground mb-1.5">Mensagens rápidas</p>
                     <input autoFocus value={quickSearch} onChange={(e) => setQuickSearch(e.target.value)}
@@ -3554,18 +3643,20 @@ export default function ChatCenter({
             </div>
             )}
             {can(user, "usar_ia") && (<>
+            {/* Ícone só (sem texto) -- com o painel de Informações e/ou o Chat
+                Interno abertos ao lado, a coluna do meio fica estreita e os
+                rótulos "Sugerir (IA)"/"Corrigir" espremiam a área de digitar. */}
             <button
               type="button"
               onClick={handleSuggestReply}
               disabled={sending || suggesting}
               title="Sugerir resposta com IA (revise antes de enviar)"
               data-testid="button-suggest-reply"
-              className="h-9 px-3 rounded-full flex items-center gap-1.5 text-xs font-semibold text-primary bg-primary/10 hover:bg-primary/20 transition shrink-0 disabled:opacity-40"
+              className="w-9 h-9 rounded-full flex items-center justify-center text-primary bg-primary/10 hover:bg-primary/20 transition shrink-0 disabled:opacity-40"
             >
               {suggesting
                 ? <RefreshCw className="w-4 h-4 animate-spin" />
                 : <Sparkles className="w-4 h-4" />}
-              <span className="hidden sm:inline">Sugerir (IA)</span>
             </button>
             <button
               type="button"
@@ -3573,12 +3664,11 @@ export default function ChatCenter({
               disabled={!msgText.trim() || correcting || sending}
               title="Corrigir ortografia com IA"
               data-testid="button-correct-text"
-              className="h-9 px-3 rounded-full flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-100 hover:bg-emerald-200 transition shrink-0 disabled:opacity-40"
+              className="w-9 h-9 rounded-full flex items-center justify-center text-emerald-700 bg-emerald-100 hover:bg-emerald-200 transition shrink-0 disabled:opacity-40"
             >
               {correcting
                 ? <RefreshCw className="w-4 h-4 animate-spin" />
                 : <SpellCheck className="w-4 h-4" />}
-              <span className="hidden sm:inline">Corrigir</span>
             </button>
             </>)}
             <textarea
@@ -3590,7 +3680,7 @@ export default function ChatCenter({
               lang="pt-BR"
               rows={1}
               data-testid="input-message"
-              className="flex-1 min-w-0 resize-none bg-white rounded-2xl px-4 py-2 text-sm border border-border outline-none focus:ring-2 focus:ring-primary/20 max-h-32 overflow-y-auto"
+              className="flex-1 min-w-0 resize-none bg-white rounded-2xl px-4 py-2.5 text-sm border border-border outline-none focus:ring-2 focus:ring-primary/20 max-h-40 overflow-y-auto"
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(e); } }}
               onPaste={(e) => {
                 if (can(user, "enviar_midia")) {
@@ -4207,6 +4297,21 @@ export default function ChatCenter({
                   <option value="manual">Manual</option>
                 </select>
               </div>
+              {newForm.channel === "whatsapp" && waSessions.length > 1 && (
+                <div>
+                  <label className="text-xs font-medium mb-1 block">Linha de WhatsApp</label>
+                  <select value={newForm.sessionKey} onChange={(e) => setNewForm({ ...newForm, sessionKey: e.target.value })}
+                    data-testid="select-new-conv-session"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                    {waSessions.map((s) => (
+                      <option key={s.sessionKey} value={s.sessionKey}>{waSessionLabel(s.sessionKey, waSessions)}</option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    Cada linha é um canal independente — o mesmo número pode ter um atendimento aberto em cada uma ao mesmo tempo (ex.: atacado e varejo).
+                  </p>
+                </div>
+              )}
               <div>
                 <label className="text-xs font-medium mb-1 block">Setor</label>
                 <select value={newForm.sectorId} onChange={(e) => setNewForm({ ...newForm, sectorId: e.target.value })}

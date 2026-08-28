@@ -39,6 +39,8 @@ export interface AdminWAState extends BridgeWAState {
   displayName: string | null;
   lastHeartbeatAt: string | null;
   bridgeAvailable: boolean;
+  color: string;
+  icon: string | null;
 }
 
 async function persistSessionState(tenantId: number, key: string, state: BridgeWAState): Promise<void> {
@@ -117,6 +119,8 @@ function offlineState(
     errorMessage: "WhatsApp Bridge indisponível — reconectando…",
     lastHeartbeatAt: row?.lastHeartbeatAt?.toISOString() ?? null,
     bridgeAvailable: false,
+    color: row?.color ?? "#10b981",
+    icon: row?.icon ?? null,
   };
 }
 
@@ -159,6 +163,8 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         displayName: row?.displayName ?? null,
         lastHeartbeatAt: row?.lastHeartbeatAt?.toISOString() ?? null,
         bridgeAvailable: true,
+        color: row?.color ?? "#10b981",
+        icon: row?.icon ?? null,
       });
     } else if (bridgeAvailable) {
       // Bridge is up but doesn't know this session yet — ask it to start it.
@@ -173,6 +179,8 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         errorMessage: null,
         lastHeartbeatAt: row?.lastHeartbeatAt?.toISOString() ?? null,
         bridgeAvailable: true,
+        color: row?.color ?? "#10b981",
+        icon: row?.icon ?? null,
       });
       void fetchFromBridge("/whatsapp/sessions", "POST", { session: key }).catch(() => {});
     } else {
@@ -248,6 +256,35 @@ router.post("/whatsapp/sessions/:key/rename", requireFeature("whatsapp"), async 
     .returning();
   if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
   res.json({ ok: true });
+});
+
+// ─── Change appearance (color/icon) ────────────────────────────────────────
+// Identidade visual da conexão na Central — cor de fundo da etiqueta
+// "via <número>" e um emoji opcional, pra distinguir de qual número vem
+// cada atendimento sem depender só do nome.
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+router.post("/whatsapp/sessions/:key/appearance", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const b = (req.body ?? {}) as { color?: string; icon?: string | null };
+  const update: { color?: string; icon?: string | null; updatedAt: Date } = { updatedAt: new Date() };
+  if ("color" in b) {
+    if (typeof b.color !== "string" || !HEX_COLOR.test(b.color)) {
+      res.status(400).json({ error: "Cor inválida (use #rrggbb)" }); return;
+    }
+    update.color = b.color;
+  }
+  if ("icon" in b) {
+    update.icon = typeof b.icon === "string" && b.icon.trim() ? b.icon.trim().slice(0, 8) : null;
+  }
+  // Só muda a aparência se a conexão for da loja do usuário (fail closed).
+  const [updated] = await db
+    .update(whatsappSessionsTable)
+    .set(update)
+    .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId)))
+    .returning();
+  if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+  res.json({ ok: true, color: updated.color, icon: updated.icon });
 });
 
 // ─── Remove a connection ────────────────────────────────────────────────────
@@ -326,6 +363,8 @@ router.get("/whatsapp/status", requireFeature("whatsapp"), async (req, res): Pro
         displayName: row?.displayName ?? null,
         lastHeartbeatAt: row?.lastHeartbeatAt?.toISOString() ?? null,
         bridgeAvailable: true,
+        color: row?.color ?? "#10b981",
+        icon: row?.icon ?? null,
       };
       res.json(result);
       return;

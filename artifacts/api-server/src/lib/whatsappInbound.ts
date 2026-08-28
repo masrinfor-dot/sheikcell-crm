@@ -1,6 +1,6 @@
 import {
   db, conversationsTable, messagesTable, sectorsTable, attendanceLogsTable, whatsappSessionsTable,
-  tenantsTable, employeesTable, workShiftsTable, timeClockEntriesTable,
+  tenantsTable, employeesTable, workShiftsTable, timeClockEntriesTable, crmContactsTable,
 } from "@workspace/db";
 import { eq, and, desc, asc, gte, lte, sql, inArray } from "drizzle-orm";
 import { nextPunchKind, dayKeySaoPaulo } from "./timeBank";
@@ -88,6 +88,16 @@ export interface InboundWAMessageContent {
   // tipo (interactiveResponseMessage) era tratada; o cartão em si caía direto
   // no fallback "não suportado".
   interactiveMessage?: { body?: { text?: string }; header?: { title?: string } };
+  // Mensagem de lista "de ida" (cartão com um menu de opções pra escolher —
+  // conta Business/Cloud API). Antes só a RESPOSTA (listResponseMessage, o
+  // que o cliente escolheu) era tratada; o cartão em si caía no fallback
+  // "não suportado" (mesmo caso já resolvido pra interactiveMessage acima).
+  listMessage?: {
+    title?: string;
+    description?: string;
+    buttonText?: string;
+    sections?: Array<{ title?: string; rows?: Array<{ title?: string; description?: string }> }>;
+  };
   // Convite de grupo.
   groupInviteMessage?: { groupJid?: string; groupName?: string; inviteCode?: string };
   // Produto de catálogo compartilhado (loja do WhatsApp Business).
@@ -261,6 +271,25 @@ async function upsertConversation(
   // Grupos: mantém o nome da conversa sincronizado com o nome do grupo.
   syncName: boolean = false,
 ) {
+  // Bloqueio de contato (spam, envio de mensagem indesejado etc.): número
+  // marcado como bloqueado no CRM (ver crm.ts PATCH /crm/:id) é descartado
+  // AQUI, antes de criar/atualizar qualquer conversa ou mensagem -- o
+  // contato nunca vê confirmação de entrega nem gera notificação pra loja.
+  // Grupo nunca é bloqueado por esta via (é o JID do grupo, não uma pessoa).
+  if (!phone.includes("@g.us")) {
+    const variants = phoneVariants(phone);
+    if (variants.length > 0) {
+      const [blocked] = await db.select({ id: crmContactsTable.id }).from(crmContactsTable)
+        .where(and(
+          eq(crmContactsTable.tenantId, tenantId),
+          eq(crmContactsTable.isBlocked, true),
+          inArray(crmContactsTable.phone, variants),
+        ))
+        .limit(1);
+      if (blocked) return null;
+    }
+  }
+
   // Grupos: o "telefone" é o próprio JID (já único/canônico) — não passa por
   // normalização de número de pessoa física.
   const isGroupJid = phone.includes("@g.us");
@@ -275,15 +304,24 @@ async function upsertConversation(
   // Same customer talking to two different WhatsApp numbers = two separate
   // conversations, so replies always go out through the number the customer
   // contacted. Multi-loja: sempre escopado pela loja (tenant) da sessão.
+  //
+  // Grupo é diferente: o JID do grupo já é único no WhatsApp inteiro, e se os
+  // dois números da loja forem membros do MESMO grupo, cada um recebe sua
+  // própria cópia do webhook — sem isto, isso criava uma conversa duplicada
+  // por número (mesmo grupo aparecendo duas vezes na Central, cada uma com
+  // metade das mensagens). Pra grupo, não filtra por sessionKey: qualquer
+  // mensagem do grupo cai na conversa já existente, não importa qual dos
+  // números da loja entregou o webhook.
+  const conditions = [
+    eq(conversationsTable.tenantId, tenantId),
+    inArray(conversationsTable.phone, matchCandidates),
+    eq(conversationsTable.isArchived, false),
+  ];
+  if (!isGroupJid) conditions.push(eq(conversationsTable.sessionKey, sessionKey));
   let [conv] = await db
     .select()
     .from(conversationsTable)
-    .where(and(
-      eq(conversationsTable.tenantId, tenantId),
-      inArray(conversationsTable.phone, matchCandidates),
-      eq(conversationsTable.sessionKey, sessionKey),
-      eq(conversationsTable.isArchived, false),
-    ))
+    .where(and(...conditions))
     .orderBy(desc(conversationsTable.lastMessageAt))
     .limit(1);
 
@@ -827,6 +865,14 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     (msgContent?.interactiveMessage?.body?.text
       ? `🔘 ${msgContent.interactiveMessage.header?.title ? `${msgContent.interactiveMessage.header.title}: ` : ""}${msgContent.interactiveMessage.body.text}`
       : null) ??
+    (msgContent?.listMessage
+      ? (() => {
+          const lm = msgContent.listMessage!;
+          const rows = (lm.sections ?? []).flatMap((sec) => sec.rows ?? []);
+          const rowsText = rows.length ? `\n${rows.map((r) => `• ${r.title ?? ""}`).join("\n")}` : "";
+          return `🔘 ${lm.title ?? lm.description ?? "Lista de opções"}${rowsText}`;
+        })()
+      : null) ??
     "";
 
   const externalId = body.data?.key?.id ?? body.messageId ?? null;
@@ -978,6 +1024,8 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     tenantId, phone, convName, displayContent, sessionKey, body.data?.avatarUrl,
     isGroup && !!body.data?.groupSubject,
   );
+  // Contato bloqueado (spam etc.) -- mensagem descartada, sem conversa/log.
+  if (!conv) return;
 
   const metadata = mediaType === "doc" && (docFileName || docFileSize || mediaMimeType)
     ? { fileName: docFileName ?? undefined, fileSize: docFileSize, mimeType: mediaMimeType ?? undefined }
@@ -1155,6 +1203,8 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
         if (surveyHandled) continue;
 
         const conv = await upsertConversation(tenantId, phone, pushName, displayContent);
+        // Contato bloqueado (spam etc.) -- mensagem descartada, sem conversa/log.
+        if (!conv) continue;
 
         const [saved] = await db
           .insert(messagesTable)

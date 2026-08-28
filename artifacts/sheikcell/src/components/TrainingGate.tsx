@@ -33,7 +33,8 @@ export default function TrainingGate() {
           Treinamento obrigatório — conclua para liberar o uso do sistema.
           {pending.length > 1 && ` (${pending.length} pendentes)`}
         </p>
-        <TrainingViewer training={current} onCompleted={() => setPending((prev) => prev.slice(1))} />
+        <TrainingViewer training={current} initialAnswers={current.draftAnswers}
+          onCompleted={() => setPending((prev) => prev.slice(1))} />
       </div>
     </div>
   );

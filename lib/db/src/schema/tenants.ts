@@ -13,7 +13,7 @@ import { usersTable } from "./users";
 export const OPTIONAL_MODULES = [
   "chat", "crm", "equipe", "financeiro", "diretorio", "tarefas", "resultados", "history",
   "avaliacao", "financeiras", "rh", "treinamentos", "questionarios", "sorteios", "documentos", "robo",
-  "relatorios", "tvbox", "rotinas", "vitrine",
+  "relatorios", "tvbox", "rotinas", "vitrine", "pagamentos",
 ] as const;
 export type OptionalModule = typeof OPTIONAL_MODULES[number];
 

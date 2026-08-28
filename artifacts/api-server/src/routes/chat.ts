@@ -74,11 +74,9 @@ router.get("/chat/events", requireAuth, async (req: Request, res: Response): Pro
     // Sem loja na sessão (superadmin / sessão antiga) = não recebe nada.
     if (sessionTenantId == null || ev.tenantId !== sessionTenantId) return false;
     if (userRole === "admin") return true;
-    if (userRole === "supervisor") {
-      // Supervisor com setor: só eventos do próprio setor + potenciais.
-      if (userSectorId == null || ev.sectorId === userSectorId) return true;
-      return ev.restrictedTo == null && ev.isPotential === true;
-    }
+    // Supervisor: enxerga tudo, em qualquer setor, sem restrição — a
+    // privacidade entre vendedores continua valendo só para o papel vendedor.
+    if (userRole === "supervisor") return true;
     // Vendedor com restrição de linha de WhatsApp: evento ligado a uma
     // conversa fora das linhas liberadas nunca chega, seja lá o que mais for.
     if (allowedSessionKeys != null && ev.sessionKey != null && !allowedSessionKeys.includes(ev.sessionKey)) return false;
@@ -188,11 +186,11 @@ async function canAccessConversation(
   if (userRole === "admin") return true;
   const userId = req.session.userId!;
   const userSectorId = req.session.userSectorId;
-  if (userRole === "supervisor") {
-    // Supervisor com setor: acesso apenas ao próprio setor + potenciais.
-    if (userSectorId == null || conv.sectorId === userSectorId) return true;
-    return isPotentialConversation(conv);
-  }
+  // Supervisor: acesso irrestrito a qualquer conversa, em qualquer setor
+  // (inclusive já assumidas/finalizadas por outro vendedor). A privacidade
+  // entre vendedores foi mantida de propósito — só admin/supervisor têm
+  // visão global.
+  if (userRole === "supervisor") return true;
   // Vendedor com restrição de linha de WhatsApp (allowedSessionKeys): fora
   // das linhas liberadas, nem potencial nem conversa do próprio setor conta.
   const allowedSessionKeys = req.session.allowedSessionKeys;
@@ -231,22 +229,11 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
     inArray(conversationsTable.status, ["resolved", "archived"]),
   )!;
 
-  if (userRole === "admin") {
-    if (sectorId) conditions.push(eq(conversationsTable.sectorId, Number(sectorId)));
-  } else if (userRole === "supervisor") {
-    // Supervisor com setor: só vê o próprio setor (pendentes, ativas e
-    // resolvidas), além dos potenciais (leads novos, cross-sector).
-    // Supervisor sem setor definido permanece global (não há como escopar).
-    if (userSectorId) {
-      const potencialSup = and(
-        isNull(conversationsTable.assigneeId),
-        notInArray(conversationsTable.status, [...POTENTIAL_EXCLUDED_STATUSES]),
-      )!;
-      conditions.push(or(
-        eq(conversationsTable.sectorId, userSectorId),
-        potencialSup,
-      )!);
-    }
+  if (userRole === "admin" || userRole === "supervisor") {
+    // Admin e supervisor enxergam tudo (qualquer setor, qualquer status,
+    // inclusive já assumidas/resolvidas por outro vendedor). O filtro de
+    // setor abaixo é só o filtro OPCIONAL escolhido na tela, não uma
+    // restrição de visibilidade.
     if (sectorId) conditions.push(eq(conversationsTable.sectorId, Number(sectorId)));
   } else {
     // Vendedores are ALWAYS sector-scoped and must never see every conversation.
@@ -1423,6 +1410,8 @@ router.get("/chat/wa-sessions", requireAuth, async (req, res): Promise<void> => 
       sessionKey: whatsappSessionsTable.sessionKey,
       displayName: whatsappSessionsTable.displayName,
       phoneNumber: whatsappSessionsTable.phoneNumber,
+      color: whatsappSessionsTable.color,
+      icon: whatsappSessionsTable.icon,
     })
     .from(whatsappSessionsTable)
     .where(eq(whatsappSessionsTable.tenantId, tenantId))
@@ -1431,27 +1420,35 @@ router.get("/chat/wa-sessions", requireAuth, async (req, res): Promise<void> => 
 });
 
 // ─── Excluir atendimento (somente admin) ───────────────────────────────────
-// Remove definitivamente a conversa (mensagens e participantes juntos).
-// Restrito a POTENCIAIS (lead novo sem dono): conversas já assumidas ou
-// finalizadas fazem parte do histórico e não podem ser apagadas por aqui.
+// Remove definitivamente a conversa (mensagens, participantes, agendamentos
+// e histórico de início de atendimento juntos). Antes só era permitido em
+// Potenciais (lead novo sem dono) — agora admin pode excluir de qualquer
+// categoria (Pendentes/Ativos/Resolvidas também), a pedido explícito do
+// cliente ("ADM com opção de excluir atendimento em qualquer parte"). Ação
+// irreversível: some o histórico de mensagens da conversa, mas NÃO apaga a
+// ficha do cliente no CRM (isso é só a conversa/atendimento em si).
 router.delete("/chat/conversations/:id", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
-  if (!isPotentialConversation(conv)) {
-    res.status(409).json({ error: "Só é possível excluir atendimentos em Potenciais (sem responsável e não finalizados)" });
-    return;
-  }
+  const wasPotential = isPotentialConversation(conv);
+  const recipients = await restrictedRecipients(conv);
 
   await db.transaction(async (tx) => {
     await tx.delete(messagesTable).where(eq(messagesTable.conversationId, id));
     await tx.delete(conversationParticipantsTable).where(eq(conversationParticipantsTable.conversationId, id));
+    await tx.delete(conversationPinsTable).where(eq(conversationPinsTable.conversationId, id));
+    // scheduled_messages não tem cascade -- sem isso a exclusão falharia
+    // (violação de FK) sempre que a conversa tivesse um agendamento pendente.
+    await tx.delete(scheduledMessagesTable).where(eq(scheduledMessagesTable.conversationId, id));
+    await tx.delete(attendanceStartEventsTable).where(eq(attendanceStartEventsTable.conversationId, id));
     await tx.delete(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
   });
 
-  // Potenciais são visíveis a todos DA LOJA — o evento de remoção também precisa ser.
-  broadcast("conversation_deleted", { id }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: true });
+  // Potenciais são visíveis a todos DA LOJA; conversas já assumidas/resolvidas
+  // são restritas a quem podia vê-las antes (setor/participantes/responsável).
+  broadcast("conversation_deleted", { id }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: wasPotential, restrictedTo: wasPotential ? null : recipients });
   res.json({ ok: true });
 });
 
@@ -1493,25 +1490,42 @@ router.get("/chat/outbound-usage", requireAuth, async (req, res): Promise<void> 
 // ─── Create conversation manually ─────────────────────────────────────────
 router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { phone, name, channel, sectorId, assigneeId: requestedAssigneeId } = req.body as {
-    phone?: string; name?: string; channel?: string; sectorId?: number; assigneeId?: number;
+  const { phone, name, channel, sectorId, assigneeId: requestedAssigneeId, sessionKey: requestedSessionKey } = req.body as {
+    phone?: string; name?: string; channel?: string; sectorId?: number; assigneeId?: number; sessionKey?: string;
   };
   if (!phone || !name) { res.status(400).json({ error: "Telefone e nome obrigatórios" }); return; }
 
-  // Atendimento criado manualmente sempre nasce na linha "default" (a criação
-  // manual não deixa escolher linha ainda). Vendedor restrito a outras linhas
-  // ficaria trancado fora da conversa que ele mesmo acabou de criar — barra
-  // antes, com uma mensagem clara, em vez de deixar um atendimento órfão.
+  // Linha de WhatsApp (canal) do atendimento manual: antes sempre nascia na
+  // linha "default", então o mesmo número (ex.: atacado vs. varejo, duas
+  // conexões de WhatsApp diferentes) não conseguia ter um segundo atendimento
+  // criado manualmente enquanto o primeiro estivesse em andamento. Agora quem
+  // cria escolhe a linha (quando a loja tem mais de uma conectada); "default"
+  // continua sendo o valor padrão quando não é informado.
+  const tenantSessions = await db.select({ sessionKey: whatsappSessionsTable.sessionKey })
+    .from(whatsappSessionsTable).where(eq(whatsappSessionsTable.tenantId, tenantId));
+  const validSessionKeys = new Set(["default", ...tenantSessions.map((s) => s.sessionKey)]);
+  if (requestedSessionKey != null && !validSessionKeys.has(requestedSessionKey)) {
+    res.status(400).json({ error: "Linha de WhatsApp inválida." });
+    return;
+  }
+  const targetSessionKey = requestedSessionKey ?? "default";
+
+  // Vendedor restrito a outras linhas ficaria trancado fora da conversa que
+  // ele mesmo acabou de criar — barra antes, com uma mensagem clara, em vez
+  // de deixar um atendimento órfão.
   const allowedSessionKeys = req.session.allowedSessionKeys;
-  if (allowedSessionKeys != null && !allowedSessionKeys.includes("default")) {
-    res.status(403).json({ error: "Você não tem acesso à linha de WhatsApp usada para criar atendimentos manuais. Fale com o administrador." });
+  if (allowedSessionKeys != null && !allowedSessionKeys.includes(targetSessionKey)) {
+    res.status(403).json({ error: "Você não tem acesso a essa linha de WhatsApp para criar atendimentos manuais. Fale com o administrador." });
     return;
   }
 
   // Bloqueia atendimento duplicado: se já existe conversa EM ANDAMENTO (não
-  // finalizada/arquivada) para esse número, não cria outra. Compara contra
-  // todas as variações plausíveis (com/sem DDI, com/sem o 9º dígito), pois o
-  // número salvo pode ter formato diferente do digitado.
+  // finalizada/arquivada) para esse número NA MESMA LINHA de WhatsApp, não
+  // cria outra. Duas linhas diferentes (ex.: atacado e varejo) são canais
+  // independentes — o mesmo cliente pode ter um atendimento aberto em cada
+  // uma ao mesmo tempo. Compara contra todas as variações plausíveis do
+  // número (com/sem DDI, com/sem o 9º dígito), pois o valor salvo pode ter
+  // formato diferente do digitado.
   const digits = phone.replace(/\D/g, "");
   const dupCandidates = phoneVariants(phone);
   if (digits && dupCandidates.length > 0) {
@@ -1526,12 +1540,13 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
         eq(conversationsTable.tenantId, tenantId),
         notInArray(conversationsTable.status, ["resolved", "archived"]),
         inArray(conversationsTable.phone, dupCandidates),
+        eq(conversationsTable.sessionKey, targetSessionKey),
       ))
       .limit(1);
     if (dup) {
       const quem = dup.assigneeId != null ? "já está em atendimento" : "já está na fila aguardando atendimento";
       res.status(409).json({
-        error: `Este número ${quem} (${dup.name}). Abra a conversa existente em vez de criar outra.`,
+        error: `Este número ${quem} nesta linha de WhatsApp (${dup.name}). Abra a conversa existente em vez de criar outra.`,
         conversationId: dup.id,
       });
       return;
@@ -1635,6 +1650,7 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
     tenantId,
     phone: normalizePhone(phone) || phone, name,
     channel: channel ?? "manual",
+    sessionKey: targetSessionKey,
     sectorId: effectiveSectorId,
     status: "open",
     assigneeId: targetAssigneeId,

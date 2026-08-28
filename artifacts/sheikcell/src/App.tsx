@@ -13,7 +13,6 @@ import Candidatura from "@/pages/Candidatura";
 import ForgotPassword from "@/pages/ForgotPassword";
 import ResetPassword from "@/pages/ResetPassword";
 import VitrinePublica from "@/pages/VitrinePublica";
-import GlobalChatWidget from "@/components/GlobalChatWidget";
 import { useVisualViewportVar } from "@/hooks/useVisualViewportVar";
 
 const queryClient = new QueryClient();
@@ -81,15 +80,6 @@ function AppRoutes() {
   );
 }
 
-// Balão de chat flutuante: fica fora do <Switch> de rotas (sobrevive à
-// navegação entre páginas), só aparece autenticado e fora do painel do
-// superadmin (gestão de tenants SaaS, sem contexto de loja).
-function GlobalChatWidgetGate() {
-  const { user } = useAuth();
-  if (!user || user.role === "superadmin") return null;
-  return <GlobalChatWidget />;
-}
-
 function App() {
   useVisualViewportVar();
   return (
@@ -100,7 +90,6 @@ function App() {
             <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
               <AppRoutes />
             </WouterRouter>
-            <GlobalChatWidgetGate />
             <Toaster />
           </BrandingProvider>
         </AuthProvider>

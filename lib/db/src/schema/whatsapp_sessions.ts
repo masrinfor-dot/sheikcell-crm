@@ -10,6 +10,11 @@ export const whatsappSessionsTable = pgTable("whatsapp_sessions", {
   phoneId: text("phone_id"),
   errorMessage: text("error_message"),
   lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
+  // Identidade visual da conexão na Central de Atendimento — cada número
+  // (sessionKey) ganha uma cor própria pra etiqueta "via <número>", pra
+  // reduzir erro de responder pelo número errado quando há mais de um.
+  color: text("color").notNull().default("#10b981"),
+  icon: text("icon"), // emoji opcional (ex.: "🏬"), mostrado junto da etiqueta
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

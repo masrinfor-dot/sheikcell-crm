@@ -315,7 +315,12 @@ router.post("/internal-chat/conversations/group", requireAdmin, async (req, res)
 });
 
 // ─── Start (or fetch) a direct 1:1 conversation ────────────────────────────
-router.post("/internal-chat/conversations/direct", requireAuth, async (req, res): Promise<void> => {
+// Restrito a admin (mesma regra do grupo, acima): a pedido do cliente, o
+// Chat Interno só permite comunicação por grupos criados pelo admin —
+// funcionário comum não inicia conversa 1:1 com colega por conta própria.
+// Conversas diretas já existentes (criadas antes desta regra) continuam
+// acessíveis normalmente pelas rotas de mensagens/listagem, que não mudam.
+router.post("/internal-chat/conversations/direct", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const userId = req.session.userId!;
   const { userId: targetIdRaw } = req.body as { userId?: number };

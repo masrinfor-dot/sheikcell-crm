@@ -35,13 +35,21 @@ export async function syncCrmAttendant(conv: {
   isArchived?: boolean | null;
 }): Promise<void> {
   try {
-    if ((conv.phone ?? "").includes("@g.us")) return;
-    const variants = phoneVariants(conv.phone);
-    if (variants.length === 0) return;
-
+    const isGroup = (conv.phone ?? "").includes("@g.us");
     const sectorCondition = conv.sectorId != null
       ? eq(crmContactsTable.sectorId, conv.sectorId)
       : isNull(crmContactsTable.sectorId);
+    // Grupo/comunidade: não tem telefone de verdade pra comparar por
+    // variações — casa pelo JID cru guardado em "contact" (ver
+    // ensureCrmContactForConversation, que é quem cria essa ficha).
+    const identityCondition = isGroup
+      ? eq(crmContactsTable.contact, conv.phone ?? "")
+      : (() => {
+          const variants = phoneVariants(conv.phone);
+          return variants.length > 0 ? inArray(crmContactsTable.phone, variants) : null;
+        })();
+    if (!identityCondition) return;
+
     // Multi-loja: só sincroniza com o contato do CRM da MESMA loja. Compara
     // por todas as variações plausíveis do número (com/sem DDI, com/sem o 9º
     // dígito) pra não perder o contato salvo num formato antigo.
@@ -49,7 +57,7 @@ export async function syncCrmAttendant(conv: {
       .where(and(
         eq(crmContactsTable.tenantId, conv.tenantId),
         eq(crmContactsTable.isArchived, false),
-        inArray(crmContactsTable.phone, variants),
+        identityCondition,
         sectorCondition,
       ))
       .limit(1);
@@ -97,15 +105,22 @@ export async function ensureCrmContactForConversation(conv: {
   isArchived?: boolean | null;
 }): Promise<void> {
   try {
-    // Grupos/comunidades do WhatsApp não são clientes — não entram no CRM.
-    if ((conv.phone ?? "").includes("@g.us")) return;
-    const normalizedPhone = normalizePhone(conv.phone);
-    const variants = phoneVariants(conv.phone);
-    if (!normalizedPhone || variants.length === 0) return;
+    const isGroup = (conv.phone ?? "").includes("@g.us");
+    // Grupo/comunidade do WhatsApp: não tem telefone de cliente único pra
+    // normalizar, mas o pedido é ter ficha mesmo assim (ex.: acompanhar o
+    // grupo de revenda de uma loja parceira). Identifica pelo JID cru
+    // ("...@g.us") guardado em "contact" -- "phone" fica sempre null pra não
+    // gerar número falso a partir dos dígitos do JID.
+    const normalizedPhone = isGroup ? null : normalizePhone(conv.phone);
+    const variants = isGroup ? [] : phoneVariants(conv.phone);
+    if (!isGroup && (!normalizedPhone || variants.length === 0)) return;
 
     const sectorCondition = conv.sectorId != null
       ? eq(crmContactsTable.sectorId, conv.sectorId)
       : isNull(crmContactsTable.sectorId);
+    const identityCondition = isGroup
+      ? eq(crmContactsTable.contact, conv.phone ?? "")
+      : inArray(crmContactsTable.phone, variants);
 
     // Multi-loja: busca/cria o contato do CRM sempre dentro da loja da conversa.
     // Compara por todas as variações plausíveis (com/sem DDI, com/sem o 9º
@@ -115,7 +130,7 @@ export async function ensureCrmContactForConversation(conv: {
       .where(and(
         eq(crmContactsTable.tenantId, conv.tenantId),
         eq(crmContactsTable.isArchived, false),
-        inArray(crmContactsTable.phone, variants),
+        identityCondition,
         sectorCondition,
       ))
       .limit(1);
@@ -129,12 +144,14 @@ export async function ensureCrmContactForConversation(conv: {
       await db.update(crmContactsTable)
         .set({
           updatedAt: new Date(),
+          // Nome do grupo pode mudar no WhatsApp (renomear o grupo) — acompanha.
+          ...(isGroup && existing.name !== conv.name ? { name: conv.name } : {}),
           // Conversa já nasce com responsável (ex.: criada por vendedor):
           // reflete no cartão do CRM sem apagar um atendente já definido.
           ...(conv.assigneeId != null ? { attendantId: conv.assigneeId } : {}),
           ...(stage != null ? { status: stage } : {}),
           // Convergência gradual pra forma canônica (ver comentário acima).
-          ...(existing.phone !== normalizedPhone ? { phone: normalizedPhone } : {}),
+          ...(!isGroup && existing.phone !== normalizedPhone ? { phone: normalizedPhone } : {}),
         })
         .where(eq(crmContactsTable.id, existing.id));
     } else {
@@ -147,7 +164,7 @@ export async function ensureCrmContactForConversation(conv: {
         attendantId: conv.assigneeId ?? null,
         status: stage ?? "active",
         profile: "Novo",
-        attendanceSource: conv.channel === "whatsapp" ? "WhatsApp" : null,
+        attendanceSource: conv.channel === "whatsapp" ? (isGroup ? "WhatsApp (grupo)" : "WhatsApp") : null,
       });
     }
   } catch (err) {
