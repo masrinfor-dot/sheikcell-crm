@@ -23,6 +23,7 @@ import {
   precoAtacadoDoProduto,
   precoAVistaDoProduto,
   parcelamento12xDoProduto,
+  parcelamento12xAtacadoDoProduto,
   type PricingSettings,
 } from "../lib/catalogPricing";
 import { CATALOG_CONDITIONS, type CatalogCondition } from "@workspace/db";
@@ -116,6 +117,23 @@ function withInstallmentPricing<
     priceCash: precoAVistaDoProduto(produto, settings),
     installment12Value: installment?.parcela ?? null,
   };
+}
+
+// Mesma ideia acima, só que pro preço de atacado: o preço de atacado
+// (wholesalePrice) já É o valor à vista (sem taxa de cartão, ver
+// precoAtacadoDoProduto) — só falta calcular o valor da parcela em 12x pra
+// mostrar "atacado à vista: R$X · ou 12x de R$Y" pra quem desbloqueou com o
+// código de acesso.
+function withWholesaleInstallmentPricing<
+  T extends { costPrice: string | number | null; costIncludesInvoice: boolean; wholesaleMarginPercentOverride: string | number | null },
+>(v: T, settings: PricingSettings): { wholesaleInstallment12Value: number | null } {
+  const produto = {
+    costPrice: toNumberOrNull(v.costPrice),
+    costIncludesInvoice: v.costIncludesInvoice,
+    wholesaleMarginPercentOverride: toNumberOrNull(v.wholesaleMarginPercentOverride),
+  };
+  const installment = parcelamento12xAtacadoDoProduto(produto, settings);
+  return { wholesaleInstallment12Value: installment?.parcela ?? null };
 }
 
 async function photosByProductIds(tenantId: number, productIds: number[]) {
@@ -316,7 +334,10 @@ router.get("/catalog/products", requireAuth, async (req, res): Promise<void> => 
       photos: photos.get(r.id) ?? [],
       // priceCash/installment12Value calculados na hora (ver withInstallmentPricing)
       // pra mostrar "à vista" e "12x" no card/edição sem duplicar preço no banco.
-      variants: (variants.get(r.id) ?? []).map((v) => ({ ...v, ...withInstallmentPricing(v, settings) })),
+      // Atacado (admin sempre vê, sem código de acesso) ganha o mesmo tratamento.
+      variants: (variants.get(r.id) ?? []).map((v) => ({
+        ...v, ...withInstallmentPricing(v, settings), ...withWholesaleInstallmentPricing(v, settings),
+      })),
     })),
   });
 });
@@ -343,7 +364,9 @@ router.post("/catalog/products", requireAuth, async (req, res): Promise<void> =>
   const variants = await variantsByProductIds(tenantId, [product.id]);
   res.status(201).json({
     ...product, photos: [],
-    variants: (variants.get(product.id) ?? []).map((v) => ({ ...v, ...withInstallmentPricing(v, settings) })),
+    variants: (variants.get(product.id) ?? []).map((v) => ({
+      ...v, ...withInstallmentPricing(v, settings), ...withWholesaleInstallmentPricing(v, settings),
+    })),
   });
 });
 
@@ -375,7 +398,9 @@ router.patch("/catalog/products/:id", requireAuth, async (req, res): Promise<voi
   const [photos, variants] = await Promise.all([photosByProductIds(tenantId, [id]), variantsByProductIds(tenantId, [id])]);
   res.json({
     ...updated, photos: photos.get(id) ?? [],
-    variants: (variants.get(id) ?? []).map((v) => ({ ...v, ...withInstallmentPricing(v, settings) })),
+    variants: (variants.get(id) ?? []).map((v) => ({
+      ...v, ...withInstallmentPricing(v, settings), ...withWholesaleInstallmentPricing(v, settings),
+    })),
   });
 });
 
@@ -595,7 +620,9 @@ router.post("/catalog/pricing-settings/simulate", requireAuth, async (req, res):
   const produtoVarejo = { costPrice: custo, costIncludesInvoice: costIncludesInvoice === true, marginPercentOverride: toNumberOrNull(marginPercentOverride) };
   const priceCash = precoAVistaDoProduto(produtoVarejo, settings);
   const installment12 = parcelamento12xDoProduto(produtoVarejo, settings);
-  res.json({ salePrice, wholesalePrice, priceCash, installment12, settings });
+  const produtoAtacado = { costPrice: custo, costIncludesInvoice: costIncludesInvoice === true, wholesaleMarginPercentOverride: toNumberOrNull(wholesaleMarginPercentOverride) };
+  const wholesaleInstallment12 = parcelamento12xAtacadoDoProduto(produtoAtacado, settings);
+  res.json({ salePrice, wholesalePrice, priceCash, installment12, wholesaleInstallment12, settings });
 });
 
 // ─── Link público e contato (WhatsApp) da vitrine ───────────────────────────
@@ -1009,6 +1036,9 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
             wholesalePrice: wholesaleUnlocked ? v.wholesalePrice : null,
             // à vista/12x calculados na hora, nunca expõe custo/margem (ver withInstallmentPricing).
             ...withInstallmentPricing(v, pricingSettings),
+            // 12x de atacado só sai junto do preço de atacado, ou seja, só pra
+            // quem já desbloqueou com o código (mesma regra do wholesalePrice acima).
+            wholesaleInstallment12Value: wholesaleUnlocked ? withWholesaleInstallmentPricing(v, pricingSettings).wholesaleInstallment12Value : null,
           })),
       }))
       .filter((p) => p.variants.length > 0),

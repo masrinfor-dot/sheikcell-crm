@@ -328,6 +328,9 @@ export type CatalogProductVariant = {
   // valor de cada parcela pagando em até 12x no cartão.
   priceCash?: number | null;
   installment12Value?: number | null;
+  // Mesma ideia, só que pro preço de atacado — o wholesalePrice já É o valor
+  // à vista (sem taxa de cartão); isso aqui é só o valor da parcela em 12x.
+  wholesaleInstallment12Value?: number | null;
 };
 
 // Input de variante enviado pro backend (form de cadastro/edição) — id
@@ -372,6 +375,9 @@ export type CatalogPublicVariant = {
   wholesalePrice: string | null;
   priceCash?: number | null;
   installment12Value?: number | null;
+  // Só vem preenchido junto com wholesalePrice, ou seja, só pra quem já
+  // desbloqueou com o código de acesso de atacado.
+  wholesaleInstallment12Value?: number | null;
 };
 
 export type CatalogPublicProduct = {
@@ -1984,6 +1990,9 @@ export const api = {
         // priceCash = à vista (Pix/dinheiro, sem taxa de cartão); installment12
         // = total e valor de cada parcela pagando em até 12x no cartão.
         priceCash: number | null; installment12: { total: number; parcela: number } | null;
+        // Mesma ideia pro atacado — wholesalePrice já é o valor à vista;
+        // wholesaleInstallment12 traz o total e a parcela em 12x de atacado.
+        wholesaleInstallment12: { total: number; parcela: number } | null;
         settings: CatalogPricingSettings;
       }>("/catalog/pricing-settings/simulate", { method: "POST", body: JSON.stringify(data) }),
     getSlug: () => req<{ slug: string | null }>("/catalog/slug"),
