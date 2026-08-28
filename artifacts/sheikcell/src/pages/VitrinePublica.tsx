@@ -43,6 +43,13 @@ function conditionLabel(c: string): string {
   return CATALOG_CONDITIONS.find((x) => x.value === c)?.label ?? c;
 }
 
+// Valor de cada parcela pagando em até 12x no cartão, já formatado (ou null
+// se o backend não conseguiu calcular — aparelho sem custo cadastrado).
+function installment12Label(v: { installment12Value?: number | null } | null | undefined): string | null {
+  const value = formatBRL(v?.installment12Value ?? null);
+  return value ? `ou 12x de ${value} no cartão` : null;
+}
+
 function waLink(phone: string | null, text: string): string | null {
   if (!phone) return null;
   let digits = phone.replace(/\D/g, "");
@@ -65,7 +72,10 @@ function ProductCard({
   const [selectedId, setSelectedId] = useState(p.variants[0]?.id ?? null);
   const [showCriteria, setShowCriteria] = useState(false);
   const selected = p.variants.find((v) => v.id === selectedId) ?? p.variants[0] ?? null;
-  const retailPrice = formatBRL(selected?.salePrice ?? null);
+  // À vista (Pix/dinheiro, sem taxa de cartão) é o preço principal mostrado;
+  // cai pro salePrice antigo se o backend não mandar priceCash (compatibilidade).
+  const retailPrice = formatBRL(selected?.priceCash ?? selected?.salePrice ?? null);
+  const installmentLabel = installment12Label(selected);
   const wholesalePrice = wholesaleUnlocked ? formatBRL(selected?.wholesalePrice ?? null) : null;
   const inStock = selected?.inStock ?? false;
   const criteria = CATALOG_CONDITION_CRITERIA[p.condition]?.criteria ?? [];
@@ -120,6 +130,8 @@ function ProductCard({
 
         <div className="mt-auto pt-1">
           <p className="text-base font-bold text-neutral-900">{retailPrice ?? "Sob consulta"}</p>
+          {retailPrice && <p className="text-[10px] text-neutral-400">à vista (Pix)</p>}
+          {installmentLabel && <p className="text-[11px] text-neutral-500">{installmentLabel}</p>}
           {wholesalePrice && (
             <p className="text-xs font-bold text-amber-700 flex items-center gap-1"><Lock className="w-3 h-3" /> Atacado: {wholesalePrice}</p>
           )}
@@ -167,7 +179,8 @@ function ProductDetailModal({
   };
 
   const selected = p.variants.find((v) => v.id === selectedId) ?? p.variants[0] ?? null;
-  const retailPrice = formatBRL(selected?.salePrice ?? null);
+  const retailPrice = formatBRL(selected?.priceCash ?? selected?.salePrice ?? null);
+  const installmentLabel = installment12Label(selected);
   const wholesalePrice = wholesaleUnlocked ? formatBRL(selected?.wholesalePrice ?? null) : null;
   const inStock = selected?.inStock ?? false;
   const criteria = CATALOG_CONDITION_CRITERIA[p.condition]?.criteria ?? [];
@@ -247,6 +260,8 @@ function ProductDetailModal({
 
           <div className="pt-1">
             <p className="text-xl font-bold text-neutral-900">{retailPrice ?? "Sob consulta"}</p>
+            {retailPrice && <p className="text-xs text-neutral-400">à vista (Pix)</p>}
+            {installmentLabel && <p className="text-sm text-neutral-500">{installmentLabel}</p>}
             {wholesalePrice && (
               <p className="text-sm font-bold text-amber-700 flex items-center gap-1"><Lock className="w-3.5 h-3.5" /> Atacado: {wholesalePrice}</p>
             )}

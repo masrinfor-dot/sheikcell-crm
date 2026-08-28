@@ -32,6 +32,11 @@ type VariantFormRow = {
   wholesalePrice: string;
   wholesaleMarginPercentOverride: string;
   stockQty: string;
+  // Só pra exibir depois de clicar em "calcular" — não é salvo (à vista/12x
+  // são derivados do custo/margem na hora de exibir, ver withInstallmentPricing
+  // no backend), mas ajuda o lojista a ver a composição antes de salvar.
+  priceCashPreview?: string;
+  installment12Preview?: string;
 };
 
 const emptyVariant: VariantFormRow = {
@@ -295,6 +300,8 @@ export default function VitrineAparelhos() {
       const patch: Partial<VariantFormRow> = {};
       if (r.salePrice != null) patch.salePrice = String(r.salePrice);
       if (r.wholesalePrice != null) patch.wholesalePrice = String(r.wholesalePrice);
+      patch.priceCashPreview = r.priceCash != null ? formatBRL(r.priceCash) : undefined;
+      patch.installment12Preview = r.installment12 != null ? `12x de ${formatBRL(r.installment12.parcela)}` : undefined;
       updateVariant(idx, patch);
     } catch { toast({ title: "Erro ao calcular preço", variant: "destructive" }); }
   };
@@ -943,6 +950,13 @@ export default function VitrineAparelhos() {
                         <input type="number" value={v.salePrice} onChange={(e) => updateVariant(idx, { salePrice: e.target.value })}
                           placeholder="0,00" data-testid={`input-variant-sale-price-${idx}`}
                           className="mt-0.5 w-full rounded border px-2 py-1.5 text-sm font-semibold focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                        {(v.priceCashPreview || v.installment12Preview) && (
+                          <p className="mt-0.5 text-[10px] text-muted-foreground">
+                            {v.priceCashPreview && <>à vista: <b>{v.priceCashPreview}</b></>}
+                            {v.priceCashPreview && v.installment12Preview && " · "}
+                            {v.installment12Preview && <>ou <b>{v.installment12Preview}</b></>}
+                          </p>
+                        )}
                       </div>
                       <button type="button" onClick={() => calcVariantPrice(idx)} title="Calcular a partir do custo" data-testid={`button-calc-variant-${idx}`}
                         className="p-2 rounded border hover:bg-secondary text-muted-foreground"><Calculator className="w-3.5 h-3.5" /></button>

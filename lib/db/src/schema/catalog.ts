@@ -12,13 +12,23 @@ import { usersTable } from "./users";
 // (tela, lateral, traseira, bateria, acessórios; Outlet também cobre o
 // leitor de digital/facial). Mostrado tanto no cadastro quanto na vitrine
 // pública, pra o cliente final saber exatamente o que esperar do aparelho.
-export const CATALOG_CONDITIONS = ["excelente", "muito_bom", "bom", "outlet"] as const;
+export const CATALOG_CONDITIONS = ["novo", "excelente", "muito_bom", "bom", "outlet"] as const;
 export type CatalogCondition = (typeof CATALOG_CONDITIONS)[number];
 
 export const CATALOG_CONDITION_CRITERIA: Record<
   CatalogCondition,
   { label: string; criteria: { label: string; text: string }[] }
 > = {
+  novo: {
+    label: "Novo",
+    criteria: [
+      { label: "Tela", text: "Lacrado de fábrica, nunca utilizado — sem nenhum sinal de uso" },
+      { label: "Lateral", text: "Lacrado de fábrica, sem nenhum sinal de uso" },
+      { label: "Traseira", text: "Lacrado de fábrica, sem nenhum sinal de uso" },
+      { label: "Bateria", text: "100% da capacidade da bateria" },
+      { label: "Acessórios", text: "Acompanha todos os acessórios originais de fábrica, lacrados" },
+    ],
+  },
   excelente: {
     label: "Excelente",
     criteria: [
