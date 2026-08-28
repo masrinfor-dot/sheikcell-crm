@@ -10,7 +10,7 @@ import {
   Plus, X, Phone, Tag, StickyNote, RefreshCw, Archive, MapPin,
   ChevronRight, ChevronLeft, Crown, Star, UserPlus, UserMinus,
   Search, Filter, ExternalLink, ShoppingBag, SlidersHorizontal, Trash2, GripVertical,
-  Kanban, BookUser, Mail,
+  Kanban, BookUser, Mail, Users,
 } from "lucide-react";
 
 const FIELD_TYPES: { value: CrmCustomFieldType; label: string }[] = [
@@ -540,7 +540,12 @@ export default function CrmBoard() {
                       onClick={() => setDetailId(c.id)} data-testid={`row-agenda-${c.id}`}>
                       <td className="px-4 py-3 font-medium whitespace-nowrap">{c.name}</td>
                       <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">
-                        {(c.phone || c.contact) ? (
+                        {/* Ficha de grupo/comunidade do WhatsApp: "contact" guarda o JID
+                            (...@g.us), não um telefone de pessoa física -- mostra o rótulo
+                            em vez do JID cru. */}
+                        {(c.contact ?? "").includes("@g.us") ? (
+                          <span className="flex items-center gap-1"><Users className="w-3 h-3" /> Grupo do WhatsApp</span>
+                        ) : (c.phone || c.contact) ? (
                           <span className="flex items-center gap-1"><Phone className="w-3 h-3" /> {c.phone ?? c.contact}</span>
                         ) : "—"}
                       </td>

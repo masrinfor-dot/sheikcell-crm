@@ -1015,7 +1015,11 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                   ? <Bell className="w-3.5 h-3.5 text-primary" />
                   : <BellOff className="w-3.5 h-3.5 text-muted-foreground" />}
               </button>
-              {canEdit && (
+              {/* Criar conversa nova (grupo ou 1:1) — só admin. A pedido do
+                  cliente, o Chat Interno só permite comunicação por grupos
+                  criados pelo admin; funcionário comum participa dos grupos
+                  que já está, mas não inicia conversa nova por conta própria. */}
+              {user?.role === "admin" && (
                 <button
                   onClick={openNew}
                   data-testid="button-new-internal-chat"
