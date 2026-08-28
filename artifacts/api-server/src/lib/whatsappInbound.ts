@@ -275,15 +275,24 @@ async function upsertConversation(
   // Same customer talking to two different WhatsApp numbers = two separate
   // conversations, so replies always go out through the number the customer
   // contacted. Multi-loja: sempre escopado pela loja (tenant) da sessão.
+  //
+  // Grupo é diferente: o JID do grupo já é único no WhatsApp inteiro, e se os
+  // dois números da loja forem membros do MESMO grupo, cada um recebe sua
+  // própria cópia do webhook — sem isto, isso criava uma conversa duplicada
+  // por número (mesmo grupo aparecendo duas vezes na Central, cada uma com
+  // metade das mensagens). Pra grupo, não filtra por sessionKey: qualquer
+  // mensagem do grupo cai na conversa já existente, não importa qual dos
+  // números da loja entregou o webhook.
+  const conditions = [
+    eq(conversationsTable.tenantId, tenantId),
+    inArray(conversationsTable.phone, matchCandidates),
+    eq(conversationsTable.isArchived, false),
+  ];
+  if (!isGroupJid) conditions.push(eq(conversationsTable.sessionKey, sessionKey));
   let [conv] = await db
     .select()
     .from(conversationsTable)
-    .where(and(
-      eq(conversationsTable.tenantId, tenantId),
-      inArray(conversationsTable.phone, matchCandidates),
-      eq(conversationsTable.sessionKey, sessionKey),
-      eq(conversationsTable.isArchived, false),
-    ))
+    .where(and(...conditions))
     .orderBy(desc(conversationsTable.lastMessageAt))
     .limit(1);
 
