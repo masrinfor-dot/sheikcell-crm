@@ -13,6 +13,7 @@ import {
   Pin, PinOff, Reply, StickyNote, Star, StarOff, ChevronLeft, ChevronRight,
   MapPin, ShoppingBag, CreditCard, BarChart3, Ban, UserPlus, ExternalLink,
   FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Download, Maximize2, Pencil,
+  MoreVertical,
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -1085,6 +1086,10 @@ export default function ChatCenter({
   const [showTransferPicker, setShowTransferPicker] = useState(false);
   const [showParticipantPicker, setShowParticipantPicker] = useState(false);
   const [showStatusPicker, setShowStatusPicker] = useState(false);
+  // Menu "mais ações" — só aparece no celular, agrupa os botões menos usados
+  // do cabeçalho da conversa (favoritar, excluir, transferir, participantes,
+  // CRM) pra não estourar a largura da tela.
+  const [showMobileMore, setShowMobileMore] = useState(false);
   const [showFilter, setShowFilter] = useState(false);
   const [onlyUnanswered, setOnlyUnanswered] = useState(false);
   // Filtros avançados da lista: vendedor, setor e nível do cliente no CRM.
@@ -1815,7 +1820,7 @@ export default function ChatCenter({
     } catch { toast({ title: "Erro ao excluir etiqueta", variant: "destructive" }); }
   };
 
-  useEffect(() => { setShowParticipantPicker(false); setShowStatusPicker(false); setCrmContactId(null); }, [activeId]);
+  useEffect(() => { setShowParticipantPicker(false); setShowStatusPicker(false); setCrmContactId(null); setShowMobileMore(false); }, [activeId]);
 
   // Salva o rascunho da conversa que está sendo deixada e restaura o
   // rascunho (ou vazio) da conversa que está sendo aberta.
@@ -3114,22 +3119,67 @@ export default function ChatCenter({
                 )}
               </div>
             </div>
-            <div className="flex items-center gap-1 shrink-0">
-              {/* Favoritar/desfavoritar contato — fica marcado só para você, some no topo e na aba Favoritos */}
+            <div className="flex items-center gap-1 flex-wrap justify-end max-w-full shrink-0">
+              {/* Menu "mais ações" — só no celular. Agrupa favoritar/excluir/CRM
+                  (as ações menos usadas) pra não estourar a largura da tela.
+                  No desktop esse botão some e as ações voltam a aparecer soltas. */}
+              <div className="relative md:hidden">
+                <button
+                  onClick={() => setShowMobileMore((v) => !v)}
+                  data-testid="button-mobile-more-actions"
+                  title="Mais ações"
+                  className={`p-2 rounded-lg border transition ${showMobileMore ? "bg-secondary border-border" : "bg-white border-border hover:bg-secondary"}`}
+                >
+                  <MoreVertical className="w-3.5 h-3.5 text-muted-foreground" />
+                </button>
+                {showMobileMore && (
+                  <div className="absolute right-0 top-11 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden min-w-[200px]">
+                    <button
+                      onClick={() => { handleTogglePin(activeConv); setShowMobileMore(false); }}
+                      data-testid="button-pin-conv-mobile"
+                      className="w-full text-left flex items-center gap-2 text-xs px-3 py-2.5 hover:bg-secondary transition"
+                    >
+                      {activeConv.pinned ? <Star className="w-3.5 h-3.5 fill-amber-500 text-amber-500" /> : <StarOff className="w-3.5 h-3.5 text-muted-foreground" />}
+                      {activeConv.pinned ? "Remover dos favoritos" : "Favoritar este contato"}
+                    </button>
+                    <button
+                      onClick={() => { handleOpenCrm(); setShowMobileMore(false); }}
+                      disabled={crmLoading}
+                      data-testid="button-open-crm-mobile"
+                      className="w-full text-left flex items-center gap-2 text-xs px-3 py-2.5 hover:bg-secondary transition disabled:opacity-50"
+                    >
+                      {crmLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <IdCard className="w-3.5 h-3.5 text-muted-foreground" />}
+                      Abrir ficha do cliente no CRM
+                    </button>
+                    {user?.role === "admin" && activeCategory === "potenciais" && (
+                      <button
+                        onClick={() => { handleDeleteConv(activeConv.id, activeConv.name); setShowMobileMore(false); }}
+                        data-testid="button-delete-conv-mobile"
+                        className="w-full text-left flex items-center gap-2 text-xs px-3 py-2.5 hover:bg-red-50 text-red-600 transition border-t border-border"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        Excluir atendimento
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+              {/* Favoritar/desfavoritar contato — fica marcado só para você, some no topo e na aba Favoritos.
+                  No celular esta ação mora no menu "⋮" acima; aqui só aparece a partir do md. */}
               <button
                 onClick={() => handleTogglePin(activeConv)}
                 data-testid="button-pin-conv"
-                className={`p-2 rounded-lg border transition ${activeConv.pinned ? "text-amber-500 bg-amber-50 border-amber-300 hover:bg-amber-100" : "text-muted-foreground bg-white border-border hover:bg-secondary"}`}
+                className={`hidden md:inline-flex p-2 rounded-lg border transition ${activeConv.pinned ? "text-amber-500 bg-amber-50 border-amber-300 hover:bg-amber-100" : "text-muted-foreground bg-white border-border hover:bg-secondary"}`}
                 title={activeConv.pinned ? "Remover dos favoritos" : "Favoritar este contato"}
               >
                 {activeConv.pinned ? <Star className="w-3.5 h-3.5 fill-amber-500" /> : <StarOff className="w-3.5 h-3.5" />}
               </button>
-              {/* Excluir atendimento — só admin e só em Potenciais */}
+              {/* Excluir atendimento — só admin e só em Potenciais. No celular mora no menu "⋮". */}
               {user?.role === "admin" && activeCategory === "potenciais" && (
                 <button
                   onClick={() => handleDeleteConv(activeConv.id, activeConv.name)}
                   data-testid="button-delete-conv"
-                  className="p-2 rounded-lg text-red-600 bg-white border border-border hover:bg-red-50 transition"
+                  className="hidden md:inline-flex p-2 rounded-lg text-red-600 bg-white border border-border hover:bg-red-50 transition"
                   title="Excluir atendimento"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
@@ -3340,7 +3390,7 @@ export default function ChatCenter({
                 onClick={handleOpenCrm}
                 disabled={crmLoading}
                 data-testid="button-open-crm"
-                className="p-2 rounded-lg bg-white border border-border hover:bg-secondary transition disabled:opacity-50"
+                className="hidden md:inline-flex p-2 rounded-lg bg-white border border-border hover:bg-secondary transition disabled:opacity-50"
                 title="Abrir ficha do cliente no CRM"
               >
                 {crmLoading
