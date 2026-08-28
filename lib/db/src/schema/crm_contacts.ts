@@ -20,6 +20,12 @@ export const crmContactsTable = pgTable("crm_contacts", {
   notes: text("notes"),
   tags: text("tags"),
   totalPurchases: numeric("total_purchases").notNull().default("0"),
+  // Bloqueio de contato (spam, envio de mensagem indesejado etc.): mensagem
+  // inbound de um telefone bloqueado é descartada silenciosamente antes de
+  // virar conversa (ver whatsappInbound.ts).
+  isBlocked: boolean("is_blocked").notNull().default(false),
+  blockedReason: text("blocked_reason"),
+  blockedAt: timestamp("blocked_at"),
   // Customizable per-contact field values, keyed by crm_custom_fields.id (as string).
   customFields: jsonb("custom_fields").$type<Record<string, string>>().notNull().default({}),
   isArchived: boolean("is_archived").notNull().default(false),

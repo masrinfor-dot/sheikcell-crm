@@ -8,7 +8,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   X, Crown, Star, UserPlus, UserMinus, ShoppingBag, MessageSquare,
   StickyNote, Phone, Mail, Pencil, Trash2, Plus, Check, Clock,
-  ChevronDown, Package, Sparkles, MapPin, Store, Compass,
+  ChevronDown, Package, Sparkles, MapPin, Store, Compass, Ban, ShieldCheck,
 } from "lucide-react";
 
 const PROFILES: { key: CrmContact["profile"]; label: string; color: string; Icon: React.ElementType }[] = [
@@ -156,6 +156,35 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
     } catch { toast({ title: "Erro ao alterar perfil", variant: "destructive" }); }
   };
 
+  // Bloqueio de contato (spam, envio de mensagem indesejado etc.): mensagem
+  // de número bloqueado é descartada silenciosamente antes de virar conversa
+  // (whatsappInbound.ts) — o cliente não recebe confirmação de entrega.
+  const handleToggleBlock = async () => {
+    if (!contact) return;
+    if (contact.isBlocked) {
+      if (!window.confirm(`Desbloquear "${contact.name}"? As mensagens desse número voltam a chegar normalmente.`)) return;
+      try {
+        const updated = await api.crm.update(contact.id, { isBlocked: false });
+        setContact(updated);
+        onContactUpdated(updated);
+        toast({ title: "Contato desbloqueado" });
+      } catch (err: unknown) {
+        toast({ title: "Erro", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+      }
+      return;
+    }
+    const reason = window.prompt(`Bloquear "${contact.name}"? As mensagens desse número param de chegar (sem aviso pro contato). Motivo (opcional):`, "Spam / mensagem indesejada");
+    if (reason === null) return; // cancelou
+    try {
+      const updated = await api.crm.update(contact.id, { isBlocked: true, blockedReason: reason });
+      setContact(updated);
+      onContactUpdated(updated);
+      toast({ title: "Contato bloqueado" });
+    } catch (err: unknown) {
+      toast({ title: "Erro", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
+  };
+
   const handleAddPurchase = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!purchaseForm.description) return;
@@ -259,11 +288,29 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
                 {contact.sector && (
                   <span className="text-xs bg-white/20 px-2 py-0.5 rounded-full">{contact.sector.name}</span>
                 )}
+                {contact.isBlocked && (
+                  <span className="inline-flex items-center gap-1 text-xs bg-red-500/90 px-2 py-0.5 rounded-full font-semibold" title={contact.blockedReason ?? undefined}>
+                    <Ban className="w-3 h-3" /> Bloqueado
+                  </span>
+                )}
               </div>
             </div>
-            <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-white/20 transition ml-2 shrink-0">
-              <X className="w-5 h-5" />
-            </button>
+            <div className="flex items-center gap-1 ml-2 shrink-0">
+              {/* Bloquear/desbloquear — moderação (spam etc.), só admin/supervisor. */}
+              {(user?.role === "admin" || user?.role === "supervisor") && (
+                <button
+                  onClick={handleToggleBlock}
+                  data-testid="button-toggle-block-contact"
+                  title={contact.isBlocked ? "Desbloquear contato" : "Bloquear contato (spam, mensagem indesejada)"}
+                  className={`p-1.5 rounded-lg transition ${contact.isBlocked ? "bg-white/20 hover:bg-white/30" : "hover:bg-white/20"}`}
+                >
+                  {contact.isBlocked ? <ShieldCheck className="w-4 h-4" /> : <Ban className="w-4 h-4" />}
+                </button>
+              )}
+              <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-white/20 transition">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
           </div>
 
           {/* Stats row */}

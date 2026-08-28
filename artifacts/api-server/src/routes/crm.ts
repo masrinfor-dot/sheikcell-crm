@@ -387,12 +387,13 @@ router.patch("/crm/:id", requireAuth, async (req, res): Promise<void> => {
   const existing = await loadContactWithAccess(id, tenantId, req.session, res);
   if (!existing) return;
   const userRole = req.session.userRole!;
-  const { name, contact, phone, email, sectorId, attendantId, status, profile, isNew, city, serviceStore, attendanceSource, notes, tags, customFields, isArchived } = req.body as {
+  const { name, contact, phone, email, sectorId, attendantId, status, profile, isNew, city, serviceStore, attendanceSource, notes, tags, customFields, isArchived, isBlocked, blockedReason } = req.body as {
     name?: string; contact?: string; phone?: string; email?: string; sectorId?: number;
     attendantId?: number; status?: string; profile?: string;
     isNew?: boolean; city?: string; serviceStore?: string; attendanceSource?: string;
     notes?: string; tags?: string;
     customFields?: Record<string, string>; isArchived?: boolean;
+    isBlocked?: boolean; blockedReason?: string;
   };
   const update: Record<string, unknown> = { updatedAt: new Date() };
   if (name !== undefined) update.name = name;
@@ -418,6 +419,14 @@ router.patch("/crm/:id", requireAuth, async (req, res): Promise<void> => {
   if (tags !== undefined) update.tags = tags;
   if (customFields !== undefined) update.customFields = sanitizeCustomFields(customFields);
   if (isArchived !== undefined) update.isArchived = isArchived;
+  // Bloquear/desbloquear contato (spam, envio de mensagem indesejado etc.) —
+  // moderação, só admin/supervisor. Mensagem de número bloqueado é
+  // descartada silenciosamente antes de virar conversa (whatsappInbound.ts).
+  if (isBlocked !== undefined && (userRole === "admin" || userRole === "supervisor")) {
+    update.isBlocked = isBlocked;
+    update.blockedReason = isBlocked ? ((blockedReason ?? "").trim().slice(0, 300) || null) : null;
+    update.blockedAt = isBlocked ? new Date() : null;
+  }
   const [updated] = await db.update(crmContactsTable).set(update)
     .where(and(eq(crmContactsTable.id, id), eq(crmContactsTable.tenantId, tenantId))).returning();
   const enriched = await enrichContact(updated);
