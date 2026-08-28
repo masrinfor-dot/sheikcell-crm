@@ -17,14 +17,28 @@ type PunchKind = (typeof PUNCH_KINDS)[number];
 const CONTRACT_TYPES = ["clt", "pj", "estagio"] as const;
 const LEAVE_KINDS = ["ferias", "atestado", "falta_justificada", "falta_injustificada", "outro"] as const;
 
+// Aceita: "YYYY-MM-DD" (usa início/fim do dia), "YYYY-MM-DDTHH:MM:SS" sem
+// offset (interpreta no fuso America/Sao_Paulo, igual ao resto do sistema —
+// nunca como hora local do servidor, que normalmente roda em UTC), ou uma
+// data ISO completa com offset/Z (respeita o instante exato informado).
+// Antes, "from=2026-08-01" virava meia-noite UTC = 2026-07-31 21h em SP,
+// cortando as 3 primeiras horas do dia do relatório/banco de horas.
 function parseDateRange(req: Request, res: Response): { from: Date; to: Date } | null {
-  const parseDate = (v: unknown): Date | null => {
+  const parseDate = (v: unknown, boundary: "start" | "end"): Date | null => {
     if (typeof v !== "string" || !v) return null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+      const d = new Date(`${v}T${boundary === "start" ? "00:00:00" : "23:59:59"}-03:00`);
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(v)) {
+      const d = new Date(`${v}-03:00`);
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
     const d = new Date(v);
     return Number.isNaN(d.getTime()) ? null : d;
   };
-  const to = parseDate(req.query.to) ?? new Date();
-  const from = parseDate(req.query.from) ?? new Date(to.getTime() - 30 * 86_400_000);
+  const to = parseDate(req.query.to, "end") ?? new Date();
+  const from = parseDate(req.query.from, "start") ?? new Date(to.getTime() - 30 * 86_400_000);
   if (from > to) { res.status(400).json({ error: "Período inválido" }); return null; }
   return { from, to };
 }
@@ -123,16 +137,30 @@ router.post("/rh-dp/me/punch", requireAuth, async (req, res): Promise<void> => {
   const todayKey = dayKeySaoPaulo(new Date());
   const dayStart = new Date(`${todayKey}T00:00:00-03:00`);
   const dayEnd = new Date(`${todayKey}T23:59:59-03:00`);
-  const todayEntries = await db.select().from(timeClockEntriesTable)
+  // Turno noturno cruzando a meia-noite: uma entrada batida ontem à noite
+  // sem saída ainda não fechou o turno, mesmo que o "hoje" civil já tenha
+  // virado — olha até 20h pra trás pra achar esse turno em aberto. Sem isso,
+  // a consulta só de "hoje" não via a entrada de ontem e deixava o
+  // colaborador bater "entrada" de novo em vez de intervalo/saída.
+  const lookbackStart = new Date(dayStart.getTime() - 20 * 3600_000);
+  const recentEntries = await db.select().from(timeClockEntriesTable)
     .where(and(
       eq(timeClockEntriesTable.employeeId, employee.id),
       eq(timeClockEntriesTable.tenantId, tenantId),
-      gte(timeClockEntriesTable.at, dayStart),
+      gte(timeClockEntriesTable.at, lookbackStart),
       lte(timeClockEntriesTable.at, dayEnd),
     ))
     .orderBy(asc(timeClockEntriesTable.at));
+  const todayEntries = recentEntries.filter((e) => dayKeySaoPaulo(e.at) === todayKey);
+  const lastEntry = recentEntries[recentEntries.length - 1];
+  // Se a última batida (mesmo de ontem) não foi "saída", o turno está aberto
+  // cruzando a virada do dia — continua a partir dela. Senão (turno já
+  // fechado ou sem nenhuma batida recente), considera só as batidas de hoje.
+  const effectiveEntries = lastEntry && lastEntry.kind !== "out" && dayKeySaoPaulo(lastEntry.at) !== todayKey
+    ? recentEntries
+    : todayEntries;
 
-  const kind = nextPunchKind(todayEntries, hasBreak);
+  const kind = nextPunchKind(effectiveEntries, hasBreak);
   if (!kind) { res.status(409).json({ error: "Você já bateu todos os pontos de hoje." }); return; }
 
   const [created] = await db.insert(timeClockEntriesTable).values({
@@ -343,12 +371,21 @@ router.get("/rh-dp/shifts", requireModuleAccess("rh"), async (req, res): Promise
   res.json(rows);
 });
 
+// Antes, endTime <= startTime era rejeitado como "escala inconsistente" —
+// impedia cadastrar qualquer escala noturna (ex.: 22:00-06:00). Agora trata
+// esse caso como turno cruzando a meia-noite: a duração é o que falta até
+// 24:00 mais o que já passou desde 00:00. O intervalo (breakStart/breakEnd),
+// quando informado, é entendido como dentro da MESMA noite: se breakEnd for
+// "menor" que breakStart, ele também cruzou a meia-noite.
 function computeExpectedMinutes(startTime: number, endTime: number, breakStart: number | null, breakEnd: number | null): number | null {
-  if (endTime <= startTime) return null;
-  let total = endTime - startTime;
+  const overnight = endTime <= startTime;
+  const shiftEnd = overnight ? endTime + 1440 : endTime;
+  let total = shiftEnd - startTime;
+  if (total <= 0) return null;
   if (breakStart != null && breakEnd != null) {
-    if (breakEnd <= breakStart || breakStart < startTime || breakEnd > endTime) return null;
-    total -= breakEnd - breakStart;
+    const breakEndAdj = breakEnd <= breakStart ? breakEnd + 1440 : breakEnd;
+    if (breakEndAdj <= breakStart || breakStart < startTime || breakEndAdj > shiftEnd) return null;
+    total -= breakEndAdj - breakStart;
   }
   return total;
 }

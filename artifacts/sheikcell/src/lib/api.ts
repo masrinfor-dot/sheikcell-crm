@@ -935,7 +935,7 @@ export type RhQuestion = { id: string; label: string; type: "text" | "longtext" 
 export type RhStage = { id: string; title: string; description: string; type: "form" | "video"; enabled: boolean; questions: RhQuestion[]; maxVideoSeconds?: number | null };
 export type RhCandidate = {
   id: number; name: string; phone: string; email: string | null;
-  status: "novo" | "aprovado" | "reprovado";
+  status: "novo" | "pre_aprovado" | "aprovado" | "reprovado";
   answers: Record<string, Record<string, string>>;
   stagesSnapshot: RhStage[] | null;
   notes: string | null; hasVideo: boolean; createdAt: string;
@@ -1006,6 +1006,7 @@ export type TimeBankDay = {
   workedMinutes: number;
   expectedMinutes: number;
   complete: boolean;
+  leaveKind: "ferias" | "atestado" | "falta_justificada" | null;
   entries: { kind: string; at: string }[];
 };
 
@@ -1442,7 +1443,7 @@ export const api = {
   },
   chat: {
     // Conexões de WhatsApp (números de atendimento) — para etiquetar conversas.
-    waSessions: () => req<{ sessionKey: string; displayName: string | null; phoneNumber: string | null }[]>("/chat/wa-sessions"),
+    waSessions: () => req<{ sessionKey: string; displayName: string | null; phoneNumber: string | null; color: string; icon: string | null }[]>("/chat/wa-sessions"),
     conversations: (params?: { search?: string; status?: string; label?: string; sectorId?: number }) => {
       const qs = new URLSearchParams();
       if (params?.search) qs.set("search", params.search);

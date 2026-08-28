@@ -10,11 +10,12 @@ import { useToast } from "@/hooks/use-toast";
 import {
   Users, Settings2, Copy, RefreshCw, Plus, Trash2, X, CheckCircle, XCircle,
   Video, ChevronDown, ChevronUp, Save, Link2, UserSquare2, CalendarClock, Clock, Wallet, Pencil, Archive, PlayCircle,
-  AlertTriangle, Image as ImageIcon, Smartphone,
+  AlertTriangle, Image as ImageIcon, Smartphone, Printer, Star,
 } from "lucide-react";
 
 const STATUS_META: Record<RhCandidate["status"], { label: string; cls: string }> = {
   novo: { label: "Novo", cls: "bg-blue-50 text-blue-600 border-blue-100" },
+  pre_aprovado: { label: "Pré-aprovado", cls: "bg-indigo-50 text-indigo-600 border-indigo-100" },
   aprovado: { label: "Aprovado", cls: "bg-green-50 text-green-700 border-green-100" },
   reprovado: { label: "Reprovado", cls: "bg-red-50 text-red-600 border-red-100" },
 };
@@ -244,6 +245,52 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
     } catch { toast({ title: "Erro", variant: "destructive" }); }
   };
 
+  // Imprime a entrevista: abre uma aba só com o conteúdo formatado (em vez de
+  // brigar com o CSS do dashboard inteiro via @media print) e já chama a
+  // caixa de impressão do navegador.
+  const printCandidate = (c: RhCandidate) => {
+    const stagesToRender = c.stagesSnapshot ?? stages;
+    const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const sections = stagesToRender.map((s) => {
+      if (s.type === "video") return "";
+      const ans = c.answers?.[s.id];
+      if (!ans) return "";
+      const rows = s.questions.map((q) => `
+        <div class="q">
+          <p class="label">${esc(q.label)}</p>
+          <p class="answer">${esc(ans[q.id] ?? "—")}</p>
+        </div>`).join("");
+      return `<h2>${esc(s.title)}</h2>${rows}`;
+    }).join("");
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Entrevista — ${esc(c.name)}</title>
+      <style>
+        body { font-family: Arial, Helvetica, sans-serif; color: #111; padding: 32px; max-width: 720px; margin: 0 auto; }
+        h1 { font-size: 20px; margin-bottom: 4px; }
+        .meta { color: #555; font-size: 12px; margin-bottom: 4px; }
+        .status { display: inline-block; font-size: 11px; font-weight: bold; padding: 3px 10px; border-radius: 999px; border: 1px solid #ccc; margin-top: 8px; }
+        h2 { font-size: 14px; margin-top: 24px; margin-bottom: 8px; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
+        .q { margin-bottom: 10px; }
+        .label { font-size: 11px; color: #666; margin: 0 0 2px; }
+        .answer { font-size: 13px; margin: 0; white-space: pre-wrap; }
+        .notes { margin-top: 24px; padding: 12px; background: #f5f5f5; border-radius: 8px; }
+        .notes p.label { margin-bottom: 4px; }
+        @media print { body { padding: 0; } }
+      </style></head><body>
+      <h1>${esc(c.name)}</h1>
+      <p class="meta">${esc(c.phone)}${c.email ? ` · ${esc(c.email)}` : ""}</p>
+      <p class="meta">Candidatura em ${new Date(c.createdAt).toLocaleString("pt-BR")}</p>
+      <span class="status">${esc(STATUS_META[c.status].label)}</span>
+      ${sections}
+      ${c.notes ? `<div class="notes"><p class="label">Anotações internas</p><p class="answer">${esc(c.notes)}</p></div>` : ""}
+    </body></html>`;
+    const win = window.open("", "_blank");
+    if (!win) { toast({ title: "Não foi possível abrir a janela de impressão — verifique o bloqueador de pop-ups", variant: "destructive" }); return; }
+    win.document.write(html);
+    win.document.close();
+    win.focus();
+    win.print();
+  };
+
   const removeCandidate = async (c: RhCandidate) => {
     if (!window.confirm(`Excluir a candidatura de ${c.name}?`)) return;
     try {
@@ -312,7 +359,7 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
       {view === "candidatos" ? (
         <>
           <div className="flex gap-1.5">
-            {(["todos", "novo", "aprovado", "reprovado"] as const).map((f) => (
+            {(["todos", "novo", "pre_aprovado", "aprovado", "reprovado"] as const).map((f) => (
               <button key={f} onClick={() => setFilter(f)}
                 className={`px-3 py-1.5 rounded-full text-xs font-semibold border capitalize ${filter === f ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
                 {f === "todos" ? "Todos" : STATUS_META[f].label}
@@ -490,7 +537,11 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
             </div>
             <p className="text-xs text-muted-foreground mb-3">{opened.phone}{opened.email ? ` · ${opened.email}` : ""} · {new Date(opened.createdAt).toLocaleString("pt-BR")}</p>
 
-            <div className="flex gap-1.5 mb-4">
+            <div className="flex gap-1.5 mb-4 flex-wrap">
+              <button onClick={() => setStatus(opened, "pre_aprovado")} data-testid="button-preapprove-candidate" disabled={!canEdit}
+                className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border disabled:opacity-40 ${opened.status === "pre_aprovado" ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-indigo-600 border-indigo-200"}`}>
+                <Star className="w-3.5 h-3.5" /> Pré-aprovar
+              </button>
               <button onClick={() => setStatus(opened, "aprovado")} data-testid="button-approve-candidate" disabled={!canEdit}
                 className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border disabled:opacity-40 ${opened.status === "aprovado" ? "bg-green-600 text-white border-green-600" : "bg-white text-green-700 border-green-200"}`}>
                 <CheckCircle className="w-3.5 h-3.5" /> Aprovar
@@ -498,6 +549,10 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
               <button onClick={() => setStatus(opened, "reprovado")} disabled={!canEdit}
                 className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border disabled:opacity-40 ${opened.status === "reprovado" ? "bg-red-600 text-white border-red-600" : "bg-white text-red-600 border-red-200"}`}>
                 <XCircle className="w-3.5 h-3.5" /> Reprovar
+              </button>
+              <button onClick={() => printCandidate(opened)} data-testid="button-print-candidate"
+                className="flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border bg-white text-muted-foreground border-border hover:bg-secondary transition">
+                <Printer className="w-3.5 h-3.5" /> Imprimir
               </button>
               <button onClick={() => removeCandidate(opened)} disabled={!canEdit}
                 className="ml-auto p-1.5 rounded-lg hover:bg-red-50 text-red-400 disabled:opacity-40"><Trash2 className="w-4 h-4" /></button>
@@ -1337,10 +1392,12 @@ function BancoHoras({ canEdit }: { canEdit: boolean }) {
               )
             )}
             <div className="max-h-[40vh] overflow-y-auto space-y-1">
-              {detail.result.days.filter((d) => d.entries.length > 0 || d.expectedMinutes > 0).map((d) => (
+              {detail.result.days.filter((d) => d.entries.length > 0 || d.expectedMinutes > 0 || d.leaveKind).map((d) => (
                 <div key={d.date} className="flex items-center justify-between text-[11px] bg-secondary/30 rounded-lg px-3 py-1.5">
                   <span>{new Date(`${d.date}T12:00:00`).toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit", month: "2-digit" })}</span>
-                  <span className={!d.complete ? "text-amber-600 font-semibold" : ""}>{!d.complete ? "incompleto" : `${formatMinutes(d.workedMinutes)} / ${formatMinutes(d.expectedMinutes)}`}</span>
+                  <span className={!d.complete ? "text-amber-600 font-semibold" : d.leaveKind ? "text-blue-600 font-semibold" : ""}>
+                    {!d.complete ? "incompleto (falta batida)" : d.leaveKind ? LEAVE_LABELS[d.leaveKind] : `${formatMinutes(d.workedMinutes)} / ${formatMinutes(d.expectedMinutes)}`}
+                  </span>
                 </div>
               ))}
             </div>
