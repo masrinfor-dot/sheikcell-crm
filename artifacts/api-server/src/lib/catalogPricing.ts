@@ -110,3 +110,37 @@ export function precoAtacadoDoProduto(
     custoJaIncluiNotaFiscal: produto.costIncludesInvoice,
   });
 }
+
+/**
+ * Preço à vista (Pix/dinheiro) de um produto: mesma lógica do preço de venda
+ * (mesma margem de varejo do produto), mas SEM taxa de cartão — pra mostrar
+ * junto do preço a prazo, em vez de um preço único "de cartão" pra tudo.
+ */
+export function precoAVistaDoProduto(
+  produto: { costPrice: number | null; costIncludesInvoice: boolean; marginPercentOverride: number | null },
+  settings: PricingSettings,
+): number | null {
+  if (produto.costPrice == null || !Number.isFinite(produto.costPrice) || produto.costPrice <= 0) return null;
+  const margemPercent = produto.marginPercentOverride ?? settings.defaultMarginPercent;
+  return calcularPrecoVenda({
+    custo: produto.costPrice,
+    margemPercent,
+    notaFiscalPercent: settings.invoiceCostPercent,
+    taxaCartaoPercent: 0,
+    custoJaIncluiNotaFiscal: produto.costIncludesInvoice,
+  });
+}
+
+/**
+ * Preço a prazo em até 12x no cartão: preço total já com a taxa de 12
+ * parcelas embutida (mesma fórmula de precoVendaDoProduto, só que fixando a
+ * referência em 12 parcelas em vez do padrão de 1x) e o valor de cada
+ * parcela — pra mostrar "ou 12x de R$X" ao lado do preço à vista.
+ */
+export function parcelamento12xDoProduto(
+  produto: { costPrice: number | null; costIncludesInvoice: boolean; marginPercentOverride: number | null },
+  settings: PricingSettings,
+): { total: number; parcela: number } | null {
+  const total = precoVendaDoProduto(produto, settings, 12);
+  return total != null ? { total, parcela: parcelaCartao(total, 12) } : null;
+}

@@ -21,6 +21,8 @@ import {
   sanitizePricingSettings,
   precoVendaDoProduto,
   precoAtacadoDoProduto,
+  precoAVistaDoProduto,
+  parcelamento12xDoProduto,
   type PricingSettings,
 } from "../lib/catalogPricing";
 import { CATALOG_CONDITIONS, type CatalogCondition } from "@workspace/db";
@@ -95,6 +97,25 @@ function toNumberOrNull(v: unknown): number | null {
   if (v === null || v === undefined || v === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+// Acrescenta o preço à vista e o valor da parcela em 12x a uma variante, a
+// partir do custo/margem gravados — em vez de guardar mais 2 preços fixos no
+// banco, calcula na hora de exibir (mesma fórmula usada em todo o resto do
+// preço, sempre em sincronia se a margem/tabela de cartão mudar depois).
+function withInstallmentPricing<
+  T extends { costPrice: string | number | null; costIncludesInvoice: boolean; marginPercentOverride: string | number | null },
+>(v: T, settings: PricingSettings): { priceCash: number | null; installment12Value: number | null } {
+  const produto = {
+    costPrice: toNumberOrNull(v.costPrice),
+    costIncludesInvoice: v.costIncludesInvoice,
+    marginPercentOverride: toNumberOrNull(v.marginPercentOverride),
+  };
+  const installment = parcelamento12xDoProduto(produto, settings);
+  return {
+    priceCash: precoAVistaDoProduto(produto, settings),
+    installment12Value: installment?.parcela ?? null,
+  };
 }
 
 async function photosByProductIds(tenantId: number, productIds: number[]) {
@@ -290,7 +311,13 @@ router.get("/catalog/products", requireAuth, async (req, res): Promise<void> => 
   const settings = await getPricingSettings(tenantId);
   res.json({
     settings,
-    products: rows.map((r) => ({ ...r, photos: photos.get(r.id) ?? [], variants: variants.get(r.id) ?? [] })),
+    products: rows.map((r) => ({
+      ...r,
+      photos: photos.get(r.id) ?? [],
+      // priceCash/installment12Value calculados na hora (ver withInstallmentPricing)
+      // pra mostrar "à vista" e "12x" no card/edição sem duplicar preço no banco.
+      variants: (variants.get(r.id) ?? []).map((v) => ({ ...v, ...withInstallmentPricing(v, settings) })),
+    })),
   });
 });
 
@@ -314,7 +341,10 @@ router.post("/catalog/products", requireAuth, async (req, res): Promise<void> =>
   const settings = await getPricingSettings(tenantId);
   await replaceVariants(tenantId, product.id, body.variants, settings);
   const variants = await variantsByProductIds(tenantId, [product.id]);
-  res.status(201).json({ ...product, photos: [], variants: variants.get(product.id) ?? [] });
+  res.status(201).json({
+    ...product, photos: [],
+    variants: (variants.get(product.id) ?? []).map((v) => ({ ...v, ...withInstallmentPricing(v, settings) })),
+  });
 });
 
 router.patch("/catalog/products/:id", requireAuth, async (req, res): Promise<void> => {
@@ -337,13 +367,16 @@ router.patch("/catalog/products/:id", requireAuth, async (req, res): Promise<voi
     updatedAt: new Date(),
   }).where(and(eq(catalogProductsTable.id, id), eq(catalogProductsTable.tenantId, tenantId))).returning();
 
+  const settings = await getPricingSettings(tenantId);
   if ("variants" in body) {
-    const settings = await getPricingSettings(tenantId);
     await replaceVariants(tenantId, id, body.variants, settings);
   }
 
   const [photos, variants] = await Promise.all([photosByProductIds(tenantId, [id]), variantsByProductIds(tenantId, [id])]);
-  res.json({ ...updated, photos: photos.get(id) ?? [], variants: variants.get(id) ?? [] });
+  res.json({
+    ...updated, photos: photos.get(id) ?? [],
+    variants: (variants.get(id) ?? []).map((v) => ({ ...v, ...withInstallmentPricing(v, settings) })),
+  });
 });
 
 router.delete("/catalog/products/:id", requireAuth, async (req, res): Promise<void> => {
@@ -559,7 +592,10 @@ router.post("/catalog/pricing-settings/simulate", requireAuth, async (req, res):
     { costPrice: custo, costIncludesInvoice: costIncludesInvoice === true, wholesaleMarginPercentOverride: toNumberOrNull(wholesaleMarginPercentOverride) },
     settings,
   );
-  res.json({ salePrice, wholesalePrice, settings });
+  const produtoVarejo = { costPrice: custo, costIncludesInvoice: costIncludesInvoice === true, marginPercentOverride: toNumberOrNull(marginPercentOverride) };
+  const priceCash = precoAVistaDoProduto(produtoVarejo, settings);
+  const installment12 = parcelamento12xDoProduto(produtoVarejo, settings);
+  res.json({ salePrice, wholesalePrice, priceCash, installment12, settings });
 });
 
 // ─── Link público e contato (WhatsApp) da vitrine ───────────────────────────
@@ -742,7 +778,7 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
     `Responda SOMENTE com um JSON array válido, sem markdown, um objeto por aparelho (família modelo+condição, independente de cor/armazenamento), neste formato:`,
     `[{"model":"iPhone 15 Pro Max","condition":"excelente","colors":["Preto","Azul"],"variants":[{"storage":"256GB","color":"Preto","costPrice":3850},{"storage":"256GB","color":"Azul","costPrice":3850},{"storage":"512GB","color":"Preto","costPrice":4200}],"categoryPath":["Celulares","Apple"],"rawLine":"trecho original correspondente"}]`,
     `"colors" no nível do item é só a lista resumida de todas as cores encontradas pra esse modelo (informativo); o detalhe por combinação fica em "variants".`,
-    `"condition" deve ser um destes: excelente, muito_bom, bom, outlet (use "bom" se não estiver claro).`,
+    `"condition" deve ser um destes: novo, excelente, muito_bom, bom, outlet (use "bom" se não estiver claro). Use "novo" quando a lista indicar que o aparelho é lacrado/lacrado de fábrica/nunca usado (ex.: "lacrado", "novo", "sealed") — não confunda com "excelente", que é pra seminovo em ótimo estado.`,
     `Se não conseguir identificar o modelo ou nenhum preço de custo com confiança, ainda inclua o item com o que conseguir e deixe os campos faltantes null.`,
   ].join("\n");
 
@@ -931,10 +967,11 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
     .where(and(eq(catalogProductsTable.tenantId, tenant.id), eq(catalogProductsTable.status, "active")))
     .orderBy(catalogProductsTable.sortOrder, desc(catalogProductsTable.createdAt));
   const ids = rows.map((r) => r.id);
-  const [photos, variants, categories] = await Promise.all([
+  const [photos, variants, categories, pricingSettings] = await Promise.all([
     photosByProductIds(tenant.id, ids),
     variantsByProductIds(tenant.id, ids),
     db.select().from(catalogCategoriesTable).where(eq(catalogCategoriesTable.tenantId, tenant.id)).orderBy(catalogCategoriesTable.sortOrder, catalogCategoriesTable.id),
+    getPricingSettings(tenant.id),
   ]);
 
   // Preço de atacado só sai na resposta se o código enviado bater com o
@@ -970,6 +1007,8 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
           .map((v) => ({
             id: v.id, storage: v.storage, color: v.color, salePrice: v.salePrice, inStock: v.stockQty > 0,
             wholesalePrice: wholesaleUnlocked ? v.wholesalePrice : null,
+            // à vista/12x calculados na hora, nunca expõe custo/margem (ver withInstallmentPricing).
+            ...withInstallmentPricing(v, pricingSettings),
           })),
       }))
       .filter((p) => p.variants.length > 0),
