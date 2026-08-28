@@ -19,7 +19,7 @@ export const rhCandidatesTable = pgTable("rh_candidates", {
   name: text("name").notNull(),
   phone: text("phone").notNull(),
   email: text("email"),
-  status: text("status").notNull().default("novo"), // novo | aprovado | reprovado
+  status: text("status").notNull().default("novo"), // novo | pre_aprovado | aprovado | reprovado
   // { [stageId]: { [questionId]: string } }
   answers: jsonb("answers").notNull(),
   // Cópia das etapas no momento da candidatura — assim editar o processo
