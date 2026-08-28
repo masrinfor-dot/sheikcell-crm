@@ -1423,6 +1423,8 @@ router.get("/chat/wa-sessions", requireAuth, async (req, res): Promise<void> => 
       sessionKey: whatsappSessionsTable.sessionKey,
       displayName: whatsappSessionsTable.displayName,
       phoneNumber: whatsappSessionsTable.phoneNumber,
+      color: whatsappSessionsTable.color,
+      icon: whatsappSessionsTable.icon,
     })
     .from(whatsappSessionsTable)
     .where(eq(whatsappSessionsTable.tenantId, tenantId))

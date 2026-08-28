@@ -78,6 +78,8 @@ type WASession = {
   lastHeartbeatAt: string | null;
   errorMessage: string | null;
   bridgeAvailable: boolean;
+  color: string;
+  icon: string | null;
 };
 
 type UserRow = {
@@ -927,6 +929,44 @@ export default function AdminDashboard() {
                       className="p-1 text-muted-foreground hover:text-foreground rounded transition shrink-0">
                       <Pencil className="w-3.5 h-3.5" />
                     </button>
+                    {/* Cor e ícone da etiqueta "via <número>" na Central — ajuda a
+                        distinguir de qual número vem cada atendimento e evitar erro
+                        de responder pela conexão errada. */}
+                    <input
+                      type="color"
+                      title="Cor de identificação desta conexão na Central"
+                      value={s.color}
+                      onChange={async (e) => {
+                        const color = e.target.value;
+                        await fetch(`/api/whatsapp/sessions/${s.sessionKey}/appearance`, {
+                          method: "POST", credentials: "include",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ color }),
+                        });
+                        fetchWAStatus();
+                      }}
+                      className="w-6 h-6 rounded-md border border-border shrink-0 cursor-pointer"
+                      data-testid={`input-wa-color-${s.sessionKey}`}
+                    />
+                    <input
+                      type="text"
+                      title="Ícone (emoji) desta conexão na Central"
+                      placeholder="🏬"
+                      defaultValue={s.icon ?? ""}
+                      onBlur={async (e) => {
+                        const icon = e.target.value.trim();
+                        if (icon === (s.icon ?? "")) return;
+                        await fetch(`/api/whatsapp/sessions/${s.sessionKey}/appearance`, {
+                          method: "POST", credentials: "include",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ icon: icon || null }),
+                        });
+                        fetchWAStatus();
+                      }}
+                      maxLength={4}
+                      className="w-9 px-1 py-1 rounded-md border border-border text-center text-sm shrink-0"
+                      data-testid={`input-wa-icon-${s.sessionKey}`}
+                    />
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     {s.status === "connected" && (

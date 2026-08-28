@@ -217,7 +217,12 @@ function HeaderAvatar({ name, src }: { name: string; src?: string | null }) {
 
 // Conexão de WhatsApp (número de atendimento) — usada para etiquetar de qual
 // número a conversa está chegando quando há mais de uma conexão pareada.
-type WaSessionInfo = { sessionKey: string; displayName: string | null; phoneNumber: string | null };
+// color/icon: identidade visual configurada em Administração › WhatsApp,
+// pra distinguir de qual número vem cada atendimento e evitar responder
+// pelo número errado.
+type WaSessionInfo = { sessionKey: string; displayName: string | null; phoneNumber: string | null; color?: string | null; icon?: string | null };
+
+const WA_SESSION_DEFAULT_COLOR = "#10b981"; // mesmo verde que era fixo antes, agora só o fallback
 
 function waSessionLabel(key: string, sessions: WaSessionInfo[]): string {
   const s = sessions.find((x) => x.sessionKey === key);
@@ -226,8 +231,16 @@ function waSessionLabel(key: string, sessions: WaSessionInfo[]): string {
   return key === "default" ? "Principal" : key;
 }
 
+function waSessionColor(key: string, sessions: WaSessionInfo[]): string {
+  return sessions.find((x) => x.sessionKey === key)?.color || WA_SESSION_DEFAULT_COLOR;
+}
+
+function waSessionIcon(key: string, sessions: WaSessionInfo[]): string | null {
+  return sessions.find((x) => x.sessionKey === key)?.icon || null;
+}
+
 // ─── Conversation list item ─────────────────────────────────────────────────
-function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, overdue }: { conv: Conversation; active: boolean; onClick: () => void; onTogglePin: () => void; sessionBadge?: string | null; overdue?: boolean }) {
+function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, sessionColor, sessionIcon, overdue }: { conv: Conversation; active: boolean; onClick: () => void; onTogglePin: () => void; sessionBadge?: string | null; sessionColor?: string | null; sessionIcon?: string | null; overdue?: boolean }) {
   return (
     <button
       onClick={onClick}
@@ -269,7 +282,12 @@ function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, overdue }:
               </span>
             )}
             {sessionBadge && (
-              <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full font-semibold truncate max-w-[90px]" title={`Recebida pelo número: ${sessionBadge}`}>
+              <span
+                className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold truncate max-w-[90px]"
+                style={{ backgroundColor: `${sessionColor ?? WA_SESSION_DEFAULT_COLOR}26`, color: sessionColor ?? WA_SESSION_DEFAULT_COLOR }}
+                title={`Recebida pelo número: ${sessionBadge}`}
+              >
+                {sessionIcon && <span className="mr-0.5">{sessionIcon}</span>}
                 {sessionBadge}
               </span>
             )}
@@ -3013,6 +3031,8 @@ export default function ChatCenter({
                     ? waSessionLabel(conv.sessionKey, waSessions)
                     : null
                 }
+                sessionColor={conv.channel === "whatsapp" ? waSessionColor(conv.sessionKey, waSessions) : null}
+                sessionIcon={conv.channel === "whatsapp" ? waSessionIcon(conv.sessionKey, waSessions) : null}
               />
             ))
           )}
@@ -3064,7 +3084,12 @@ export default function ChatCenter({
                 {channelIcon(activeConv.channel, isGroupConv(activeConv))}
                 <span>{isGroupConv(activeConv) ? "Grupo do WhatsApp" : activeConv.phone}</span>
                 {activeConv.channel === "whatsapp" && (waSessions.length > 1 || activeConv.sessionKey !== "default") && (
-                  <span className="px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-semibold truncate max-w-[140px]" style={{ fontSize: "10px" }} title="Número de atendimento pelo qual esta conversa chega">
+                  <span
+                    className="px-1.5 py-0.5 rounded-full font-semibold truncate max-w-[140px]"
+                    style={{ fontSize: "10px", backgroundColor: `${waSessionColor(activeConv.sessionKey, waSessions)}26`, color: waSessionColor(activeConv.sessionKey, waSessions) }}
+                    title="Número de atendimento pelo qual esta conversa chega"
+                  >
+                    {waSessionIcon(activeConv.sessionKey, waSessions) && <span className="mr-0.5">{waSessionIcon(activeConv.sessionKey, waSessions)}</span>}
                     via {waSessionLabel(activeConv.sessionKey, waSessions)}
                   </span>
                 )}
