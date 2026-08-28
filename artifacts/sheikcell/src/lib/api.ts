@@ -229,8 +229,9 @@ export type DocumentItem = {
 // ─── Vitrine Aparelhos ───────────────────────────────────────────────────────
 // Selo de qualidade padrão SheikCell — mesma lista/critério de
 // CATALOG_CONDITION_CRITERIA em lib/db/src/schema/catalog.ts (mantenha em sincronia).
-export type CatalogCondition = "excelente" | "muito_bom" | "bom" | "outlet";
+export type CatalogCondition = "novo" | "excelente" | "muito_bom" | "bom" | "outlet";
 export const CATALOG_CONDITIONS: { value: CatalogCondition; label: string }[] = [
+  { value: "novo", label: "Novo" },
   { value: "excelente", label: "Excelente" },
   { value: "muito_bom", label: "Muito Bom" },
   { value: "bom", label: "Bom" },
@@ -241,6 +242,16 @@ export const CATALOG_CONDITION_CRITERIA: Record<
   CatalogCondition,
   { label: string; criteria: { label: string; text: string }[] }
 > = {
+  novo: {
+    label: "Novo",
+    criteria: [
+      { label: "Tela", text: "Lacrado de fábrica, nunca utilizado — sem nenhum sinal de uso" },
+      { label: "Lateral", text: "Lacrado de fábrica, sem nenhum sinal de uso" },
+      { label: "Traseira", text: "Lacrado de fábrica, sem nenhum sinal de uso" },
+      { label: "Bateria", text: "100% da capacidade da bateria" },
+      { label: "Acessórios", text: "Acompanha todos os acessórios originais de fábrica, lacrados" },
+    ],
+  },
   excelente: {
     label: "Excelente",
     criteria: [
@@ -312,6 +323,11 @@ export type CatalogProductVariant = {
   wholesaleMarginPercentOverride: string | null;
   stockQty: number;
   sortOrder: number;
+  // Calculados na hora pelo backend a partir do custo/margem (não são
+  // colunas próprias) — preço à vista (Pix/dinheiro, sem taxa de cartão) e o
+  // valor de cada parcela pagando em até 12x no cartão.
+  priceCash?: number | null;
+  installment12Value?: number | null;
 };
 
 // Input de variante enviado pro backend (form de cadastro/edição) — id
@@ -354,6 +370,8 @@ export type CatalogPricingSettings = {
 export type CatalogPublicVariant = {
   id: number; storage: string | null; color: string | null; salePrice: string | null; inStock: boolean;
   wholesalePrice: string | null;
+  priceCash?: number | null;
+  installment12Value?: number | null;
 };
 
 export type CatalogPublicProduct = {
@@ -696,10 +714,20 @@ export type Training = {
   quiz: QuizQuestion[] | null; mandatory: boolean;
   targetRoles?: string[]; active?: boolean; createdAt?: string;
   completed?: boolean; myScore?: number | null;
+  // Repetir treinamento: nada disso apaga tentativa anterior — são agregados
+  // sobre o histórico inteiro do usuário nesse treinamento.
+  attemptCount?: number; bestScore?: number | null;
+  firstCompletedAt?: string | null; lastCompletedAt?: string | null;
+  // Rascunho de respostas do quiz em andamento ("Continuar de onde parou").
+  draftAnswers?: Record<string, number> | null;
 };
 export type TrainingCompletion = {
   id: number; userId: number; userName: string | null;
-  quizScore: number | null; createdAt: string;
+  attemptNumber?: number; quizScore: number | null; createdAt: string;
+};
+// Histórico de tentativas do PRÓPRIO usuário num treinamento (Ver progresso/resultado).
+export type TrainingAttempt = {
+  id: number; attemptNumber: number; quizScore: number | null; createdAt: string;
 };
 
 export type ChecklistQuestion = { id: string; label: string; type: "text" | "options" | "rating"; options?: string[] };
@@ -1562,11 +1590,17 @@ export const api = {
     pending: () => req<Training[]>("/trainings/pending"),
     list: () => req<Training[]>("/trainings"),
     complete: (id: number, answers?: Record<string, number>) =>
-      req<{ ok: boolean; score: number | null }>(`/trainings/${id}/complete`, { method: "POST", body: JSON.stringify({ answers }) }),
+      req<{ ok: boolean; score: number | null; attemptNumber: number }>(`/trainings/${id}/complete`, { method: "POST", body: JSON.stringify({ answers }) }),
     create: (data: Partial<Training>) => req<Training>("/trainings", { method: "POST", body: JSON.stringify(data) }),
     update: (id: number, data: Partial<Training>) => req<Training>(`/trainings/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/trainings/${id}`, { method: "DELETE" }),
     completions: (id: number) => req<TrainingCompletion[]>(`/trainings/${id}/completions`),
+    // Histórico de tentativas do usuário logado nesse treinamento ("Ver progresso").
+    attempts: (id: number) => req<TrainingAttempt[]>(`/trainings/${id}/attempts`),
+    // "Continuar de onde parou": salva/descarta o rascunho do quiz em andamento.
+    saveProgress: (id: number, answers: Record<string, number>) =>
+      req<{ ok: boolean }>(`/trainings/${id}/progress`, { method: "POST", body: JSON.stringify({ answers }) }),
+    clearProgress: (id: number) => req<{ ok: boolean }>(`/trainings/${id}/progress`, { method: "DELETE" }),
   },
   checklists: {
     pending: () => req<PendingChecklist[]>("/checklists/pending"),
@@ -1945,7 +1979,13 @@ export const api = {
     pricingSettings: () => req<CatalogPricingSettings>("/catalog/pricing-settings"),
     savePricingSettings: (data: CatalogPricingSettings) => req<CatalogPricingSettings>("/catalog/pricing-settings", { method: "PUT", body: JSON.stringify(data) }),
     simulatePrice: (data: { costPrice: number; costIncludesInvoice?: boolean; marginPercentOverride?: number | null; wholesaleMarginPercentOverride?: number | null }) =>
-      req<{ salePrice: number | null; wholesalePrice: number | null; settings: CatalogPricingSettings }>("/catalog/pricing-settings/simulate", { method: "POST", body: JSON.stringify(data) }),
+      req<{
+        salePrice: number | null; wholesalePrice: number | null;
+        // priceCash = à vista (Pix/dinheiro, sem taxa de cartão); installment12
+        // = total e valor de cada parcela pagando em até 12x no cartão.
+        priceCash: number | null; installment12: { total: number; parcela: number } | null;
+        settings: CatalogPricingSettings;
+      }>("/catalog/pricing-settings/simulate", { method: "POST", body: JSON.stringify(data) }),
     getSlug: () => req<{ slug: string | null }>("/catalog/slug"),
     setSlug: (slug: string) => req<{ slug: string | null }>("/catalog/slug", { method: "PUT", body: JSON.stringify({ slug }) }),
     getWhatsapp: () => req<{ whatsapp: string | null }>("/catalog/whatsapp"),
