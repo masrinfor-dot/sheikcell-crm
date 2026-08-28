@@ -37,6 +37,9 @@ type VariantFormRow = {
   // no backend), mas ajuda o lojista a ver a composição antes de salvar.
   priceCashPreview?: string;
   installment12Preview?: string;
+  // Mesma ideia, só que pro preço de atacado (wholesalePrice já é o valor à
+  // vista de atacado — isso aqui é só a prévia da parcela em 12x de atacado).
+  wholesaleInstallment12Preview?: string;
 };
 
 const emptyVariant: VariantFormRow = {
@@ -302,6 +305,7 @@ export default function VitrineAparelhos() {
       if (r.wholesalePrice != null) patch.wholesalePrice = String(r.wholesalePrice);
       patch.priceCashPreview = r.priceCash != null ? formatBRL(r.priceCash) : undefined;
       patch.installment12Preview = r.installment12 != null ? `12x de ${formatBRL(r.installment12.parcela)}` : undefined;
+      patch.wholesaleInstallment12Preview = r.wholesaleInstallment12 != null ? `12x de ${formatBRL(r.wholesaleInstallment12.parcela)}` : undefined;
       updateVariant(idx, patch);
     } catch { toast({ title: "Erro ao calcular preço", variant: "destructive" }); }
   };
@@ -980,9 +984,16 @@ export default function VitrineAparelhos() {
                           <input type="number" value={v.wholesalePrice} onChange={(e) => updateVariant(idx, { wholesalePrice: e.target.value })}
                             placeholder="0,00" data-testid={`input-variant-wholesale-price-${idx}`}
                             className="mt-0.5 w-full rounded border px-2 py-1.5 text-sm font-semibold focus:outline-none focus:ring-1 focus:ring-amber-400/60" />
+                          {(v.wholesalePrice || v.wholesaleInstallment12Preview) && (
+                            <p className="mt-0.5 text-[10px] text-amber-700">
+                              {v.wholesalePrice && <>à vista: <b>{formatBRL(Number(v.wholesalePrice))}</b></>}
+                              {v.wholesalePrice && v.wholesaleInstallment12Preview && " · "}
+                              {v.wholesaleInstallment12Preview && <>ou <b>{v.wholesaleInstallment12Preview}</b></>}
+                            </p>
+                          )}
                         </div>
                       </div>
-                      <p className="text-[10px] text-muted-foreground">Clique em <Calculator className="w-2.5 h-2.5 inline" /> acima pra calcular o preço de venda e o de atacado juntos a partir do custo.</p>
+                      <p className="text-[10px] text-muted-foreground">Clique em <Calculator className="w-2.5 h-2.5 inline" /> acima pra calcular o preço de venda e o de atacado (à vista e 12x) juntos a partir do custo.</p>
                     </div>
                   </div>
                 ))}
