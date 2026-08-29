@@ -38,3 +38,4 @@ export * from "./password_reset_tokens";
 export * from "./tv_box";
 export * from "./catalog";
 export * from "./finance_payments";
+export * from "./promoGallery";

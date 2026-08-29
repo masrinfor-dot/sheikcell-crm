@@ -118,7 +118,7 @@ export type User = {
 export const OPTIONAL_MODULES = [
   "chat", "crm", "equipe", "financeiro", "diretorio", "tarefas", "resultados", "history",
   "avaliacao", "financeiras", "rh", "treinamentos", "questionarios", "sorteios", "documentos", "robo",
-  "relatorios", "tvbox", "rotinas", "vitrine", "pagamentos",
+  "relatorios", "tvbox", "rotinas", "vitrine", "pagamentos", "promocoes",
 ] as const;
 export type OptionalModule = typeof OPTIONAL_MODULES[number];
 
@@ -152,6 +152,7 @@ export const MODULE_LABELS: Record<OptionalModule, string> = {
   rotinas: "Rotinas e Produtividade",
   vitrine: "Vitrine Aparelhos",
   pagamentos: "Pagamentos entre Filiais",
+  promocoes: "Banco de Promoções",
 };
 // "Básico" = o conjunto padrão do CRM (o que antes era núcleo sempre ligado);
 // "Completo" = básico + todos os módulos de negócio adicionais.
@@ -337,6 +338,10 @@ export const CATALOG_CONDITION_CRITERIA: Record<
 };
 
 export type CatalogPhoto = { id: number; storedName: string; sourceUrl?: string | null; sortOrder: number };
+
+// Banco de Promoções — galeria de fotos prontas pra reenvio rápido no
+// Atendimento (ver artifacts/api-server/src/routes/promoGallery.ts).
+export type PromoItem = { id: number; tenantId: number; title: string; storedName: string; sortOrder: number; createdBy: number | null; createdAt: string };
 
 // Categoria/aba personalizável (Celulares > Samsung/Apple, Peças de
 // celular...) — a loja cria/edita/apaga livremente. parentId null = aba
@@ -2101,6 +2106,26 @@ export const api = {
         storeName: string; whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
         categories: CatalogCategory[]; products: CatalogPublicProduct[];
       }>(`/catalog-public/${slug}${code ? `?code=${encodeURIComponent(code)}` : ""}`),
+  },
+  promoGallery: {
+    list: () => req<PromoItem[]>("/promo-gallery"),
+    // Só admin/supervisor tem acesso de verdade (backend recusa pra outros
+    // papéis) — o botão de cadastrar já vem escondido pra quem não pode.
+    add: (title: string, file: File) => readAsAttachment(file).then((att) =>
+      req<PromoItem>("/promo-gallery", { method: "POST", body: JSON.stringify({ title, mimeType: att?.mimetype, data: att?.base64 }) })),
+    remove: (id: number) => req<{ ok: boolean }>(`/promo-gallery/${id}`, { method: "DELETE" }),
+    fileUrl: (id: number) => `${BASE}/promo-gallery/${id}/file`,
+    // Baixa a imagem já enviada pro banco e devolve como File, pronto pra
+    // passar direto em api.chat.sendMedia(convId, file, title) — assim
+    // "enviar" no Atendimento reaproveita o mesmo caminho de envio de mídia
+    // do WhatsApp que já existe, sem duplicar lógica.
+    asFile: async (item: PromoItem): Promise<File> => {
+      const res = await fetch(api.promoGallery.fileUrl(item.id), { credentials: "include" });
+      if (!res.ok) throw new Error("Não consegui baixar essa imagem");
+      const blob = await res.blob();
+      const ext = item.storedName.split(".").pop() ?? "jpg";
+      return new File([blob], `${item.title || "promocao"}.${ext}`, { type: blob.type });
+    },
   },
   meetings: {
     list: () => req<MeetingItem[]>("/meetings"),

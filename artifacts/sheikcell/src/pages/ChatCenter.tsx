@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, Fragment } from "react";
 import { createPortal } from "react-dom";
-import { api, can, ApiError, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata } from "@/lib/api";
+import { api, can, ApiError, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata, type PromoItem } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useActivityGuard } from "@/lib/activityGuard";
 import { useToast } from "@/hooks/use-toast";
@@ -19,6 +19,7 @@ import CrmContactDetail from "@/components/CrmContactDetail";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
 import { MediaLightboxProvider, useMediaLightbox } from "@/components/MediaLightbox";
 import { PdfBubble } from "@/components/PdfPreview";
+import PromoGallery from "./PromoGallery";
 
 const CHAT_EVENTS_URL = "/api/chat/events";
 
@@ -1128,6 +1129,7 @@ export default function ChatCenter({
   const [chatUsers, setChatUsers] = useState<{ id: number; name: string; role: string; sectorId?: number | null }[]>([]);
   const [quickReplies, setQuickReplies] = useState<QuickReply[]>([]);
   const [showQuickReplies, setShowQuickReplies] = useState(false);
+  const [showPromoGallery, setShowPromoGallery] = useState(false);
   const [quickSearch, setQuickSearch] = useState("");
   // Preview de mensagem rápida: mostra o texto já com {{nome}}/{{loja}}/{{atendente}}
   // substituídos antes de jogar no campo de mensagem — evita mandar variável crua.
@@ -1934,6 +1936,24 @@ export default function ChatCenter({
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
       toast({ title: `Erro ao enviar ${file.name}`, variant: "destructive" });
     }
+  };
+
+  // ── Banco de Promoções: baixa a imagem já cadastrada e reenvia pelo mesmo
+  // caminho de mídia do WhatsApp (sendOneFile acima) — sem duplicar lógica de
+  // otimista/erro/toast. ──
+  const handleSendPromoItem = async (item: PromoItem) => {
+    try {
+      const file = await api.promoGallery.asFile(item);
+      await sendOneFile(file, item.title, null);
+    } catch (err) {
+      toast({ title: "Erro ao enviar", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    }
+  };
+  const handleSendAllPromoItems = async (items: PromoItem[]) => {
+    for (const item of items) {
+      await handleSendPromoItem(item);
+    }
+    setShowPromoGallery(false);
   };
 
   // ── Send file(s) — lote enviado em sequência (a API só aceita uma mídia
@@ -3597,6 +3617,31 @@ export default function ChatCenter({
             >
               <Paperclip className="w-4 h-4" />
             </button>
+            )}
+            {can(user, "enviar_midia") && (
+            <div className="relative shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowPromoGallery((v) => !v)}
+                disabled={sending}
+                title="Banco de Promoções"
+                data-testid="button-promo-gallery"
+                className="w-9 h-9 rounded-full flex items-center justify-center text-muted-foreground hover:bg-secondary transition shrink-0 disabled:opacity-40"
+              >
+                <Image className="w-4 h-4" />
+              </button>
+              {showPromoGallery && (
+                <div className="absolute bottom-11 left-0 bg-white border border-border rounded-xl shadow-lg z-30 w-80 max-w-[90vw] max-h-96 overflow-y-auto">
+                  <div className="px-3 py-2 border-b border-border sticky top-0 bg-white flex items-center justify-between">
+                    <p className="text-xs font-semibold text-muted-foreground">Banco de Promoções</p>
+                    <button type="button" onClick={() => setShowPromoGallery(false)}><X className="w-3.5 h-3.5" /></button>
+                  </div>
+                  <div className="p-2">
+                    <PromoGallery onSend={handleSendPromoItem} onSendAll={handleSendAllPromoItems} sending={sending} />
+                  </div>
+                </div>
+              )}
+            </div>
             )}
             {quickReplies.length > 0 && (
             <div className="relative shrink-0">

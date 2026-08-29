@@ -13,6 +13,7 @@ import TaskBoard from "./TaskBoard";
 import Financeiras from "./Financeiras";
 import Avaliacao from "./Avaliacao";
 import VitrineAparelhos from "./VitrineAparelhos";
+import PromoGallery from "./PromoGallery";
 import TvBox from "./TvBox";
 import ChecklistGate from "@/components/ChecklistGate";
 import PontoGate from "@/components/PontoGate";
@@ -31,13 +32,13 @@ import Documentos from "./Documentos";
 import {
   LogOut, KeyRound, Clock, PhoneCall, CheckCircle,
   ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, BadgeDollarSign, GraduationCap, Gift, Bot, UserSearch, ClipboardList, TrendingUp,
-  FolderArchive, BookUser, LifeBuoy, Tv, Smartphone, ChevronsRight, ChevronsLeft,
+  FolderArchive, BookUser, LifeBuoy, Tv, Smartphone, ChevronsRight, ChevronsLeft, Image,
 } from "lucide-react";
 import Resultados from "./Resultados";
 import TeamDirectory from "./TeamDirectory";
 import Suporte from "./Suporte";
 
-type MainTab = "queue" | "resultados" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "avaliacao" | "vitrine" | "treinamentos" | "documentos" | "financeiro" | "sorteios" | "robo" | "rh" | "meuponto" | "questionarios" | "diretorio" | "suporte" | "tvbox";
+type MainTab = "queue" | "resultados" | "chat" | "crm" | "tarefas" | "equipe" | "financeiras" | "avaliacao" | "vitrine" | "promocoes" | "treinamentos" | "documentos" | "financeiro" | "sorteios" | "robo" | "rh" | "meuponto" | "questionarios" | "diretorio" | "suporte" | "tvbox";
 
 // Todas as abas que dependem de módulo — visibilidade decidida por
 // moduleGranted() (loja contratou E usuário tem acesso), ver mais abaixo.
@@ -51,6 +52,7 @@ const MAIN_TABS: { id: MainTab; label: string; icon: typeof PhoneCall; module?: 
   { id: "financeiras" as MainTab, label: "Financeiras", icon: Landmark, module: "financeiras" },
   { id: "avaliacao" as MainTab, label: "Avaliação", icon: BadgeDollarSign, module: "avaliacao" },
   { id: "vitrine" as MainTab, label: "Vitrine Aparelhos", icon: Smartphone, module: "vitrine" },
+  { id: "promocoes" as MainTab, label: "Banco de Promoções", icon: Image, module: "promocoes" },
   { id: "tvbox" as MainTab, label: "TV Box", icon: Tv, module: "tvbox" },
   { id: "treinamentos" as MainTab, label: "Treinamentos", icon: GraduationCap, module: "treinamentos" },
   { id: "documentos" as MainTab, label: "Documentos", icon: FolderArchive, module: "documentos" },
@@ -389,6 +391,7 @@ export default function AttendantDashboard() {
       )}
 
       {mainTab === "vitrine" && <VitrineAparelhos />}
+      {mainTab === "promocoes" && <PromoGallery />}
 
 
       {mainTab === "financeiras" && (
