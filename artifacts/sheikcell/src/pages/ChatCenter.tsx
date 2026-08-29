@@ -1088,6 +1088,13 @@ export default function ChatCenter({
   // do cabeçalho da conversa (favoritar, excluir, transferir, participantes,
   // CRM) pra não estourar a largura da tela.
   const [showMobileMore, setShowMobileMore] = useState(false);
+  // Editar o nome do contato direto no cabeçalho da conversa (o nome que o
+  // WhatsApp mandou nem sempre é o real — dá pra corrigir aqui sem precisar
+  // ir no CRM). Reaproveita o mesmo PATCH /chat/conversations/:id que já
+  // existia pra outros campos (labels, setor etc.).
+  const [editingConvName, setEditingConvName] = useState(false);
+  const [convNameDraft, setConvNameDraft] = useState("");
+  const [savingConvName, setSavingConvName] = useState(false);
   const [showFilter, setShowFilter] = useState(false);
   const [onlyUnanswered, setOnlyUnanswered] = useState(false);
   // Filtros avançados da lista: vendedor, setor e nível do cliente no CRM.
@@ -1374,6 +1381,9 @@ export default function ChatCenter({
   useEffect(() => {
     onActiveConversationChange?.(activeId);
   }, [activeId, onActiveConversationChange]);
+  // Troca de conversa fecha a edição de nome pendente da conversa anterior
+  // (sem salvar) — evita mostrar um rascunho de outra conversa por engano.
+  useEffect(() => { setEditingConvName(false); setConvNameDraft(""); }, [activeId]);
   useEffect(() => {
     if (focusConversationId != null) setActiveId(focusConversationId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2539,6 +2549,30 @@ export default function ChatCenter({
     } catch { toast({ title: "Erro ao salvar etiqueta", variant: "destructive" }); }
   };
 
+  // ── Editar nome do contato (cabeçalho da conversa) ──
+  const startEditConvName = () => {
+    if (!activeConv) return;
+    setConvNameDraft(activeConv.name);
+    setEditingConvName(true);
+  };
+  const cancelEditConvName = () => { setEditingConvName(false); setConvNameDraft(""); };
+  const saveConvName = async () => {
+    if (!activeConv) return;
+    const name = convNameDraft.trim();
+    if (!name || name === activeConv.name) { cancelEditConvName(); return; }
+    setSavingConvName(true);
+    try {
+      await api.chat.updateConversation(activeConv.id, { name });
+      setConvs((prev) => prev.map((c) => c.id === activeConv.id ? { ...c, name } : c));
+      setEditingConvName(false);
+      toast({ title: "Nome atualizado" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar nome", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    } finally {
+      setSavingConvName(false);
+    }
+  };
+
   // Mostra o uso da trava anti-disparo em massa assim que dá pra saber quem
   // vai ser o responsável (self para vendedor; escolhido para admin/supervisor).
   useEffect(() => {
@@ -3118,7 +3152,36 @@ export default function ChatCenter({
               <HeaderAvatar name={activeConv.name} src={activeConv.avatarUrl} />
             </MediaLightboxProvider>
             <div className="flex-1 min-w-0">
-              <p className="font-bold text-sm text-foreground truncate">{activeConv.name}</p>
+              {editingConvName ? (
+                <div className="flex items-center gap-1 max-w-xs">
+                  <input
+                    autoFocus
+                    value={convNameDraft}
+                    onChange={(e) => setConvNameDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") { e.preventDefault(); void saveConvName(); }
+                      if (e.key === "Escape") { e.preventDefault(); cancelEditConvName(); }
+                    }}
+                    disabled={savingConvName}
+                    data-testid="input-conv-name"
+                    className="font-bold text-sm text-foreground bg-white border border-primary/40 rounded-md px-1.5 py-0.5 flex-1 min-w-0 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  />
+                  <button type="button" onClick={saveConvName} disabled={savingConvName} title="Salvar" data-testid="button-save-conv-name"
+                    className="p-1 rounded-md text-primary hover:bg-primary/10 transition shrink-0">
+                    <Check className="w-4 h-4" />
+                  </button>
+                  <button type="button" onClick={cancelEditConvName} disabled={savingConvName} title="Cancelar" data-testid="button-cancel-conv-name"
+                    className="p-1 rounded-md text-muted-foreground hover:bg-secondary transition shrink-0">
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              ) : (
+                <button type="button" onClick={startEditConvName} title="Editar nome do contato" data-testid="button-edit-conv-name"
+                  className="group flex items-center gap-1.5 max-w-full text-left">
+                  <p className="font-bold text-sm text-foreground truncate">{activeConv.name}</p>
+                  <Pencil className="w-3 h-3 text-muted-foreground opacity-0 group-hover:opacity-100 transition shrink-0" />
+                </button>
+              )}
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 {channelIcon(activeConv.channel, isGroupConv(activeConv))}
                 <span>{isGroupConv(activeConv) ? "Grupo do WhatsApp" : activeConv.phone}</span>
