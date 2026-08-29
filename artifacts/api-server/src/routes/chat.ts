@@ -7,6 +7,7 @@ import { eq, desc, and, or, lt, gte, ilike, sql, inArray, notInArray, isNull, as
 import { alias } from "drizzle-orm/pg-core";
 import { requireAuth, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
 import { checkPerm, requirePerm } from "../lib/permissions";
+import { requireChatAccess } from "../lib/moduleAccess";
 import {
   broadcast,
   sseEmitter,
@@ -36,7 +37,7 @@ import {
 const router: IRouter = Router();
 
 // ─── SSE real-time stream ──────────────────────────────────────────────────
-router.get("/chat/events", requireAuth, async (req: Request, res: Response): Promise<void> => {
+router.get("/chat/events", requireAuth, requireChatAccess(), async (req: Request, res: Response): Promise<void> => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
@@ -211,7 +212,7 @@ async function canAccessConversation(
 }
 
 // ─── List conversations ────────────────────────────────────────────────────
-router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> => {
+router.get("/chat/conversations", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { search, label, status, sectorId } = req.query as Record<string, string | undefined>;
 
@@ -355,7 +356,7 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
 });
 
 // ─── Get single conversation ───────────────────────────────────────────────
-router.get("/chat/conversations/:id", requireAuth, async (req, res): Promise<void> => {
+router.get("/chat/conversations/:id", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
@@ -365,7 +366,7 @@ router.get("/chat/conversations/:id", requireAuth, async (req, res): Promise<voi
 });
 
 // ─── Fixar / desafixar conversa (por usuário) ──────────────────────────────
-router.post("/chat/conversations/:id/pin", requireAuth, async (req, res): Promise<void> => {
+router.post("/chat/conversations/:id/pin", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
@@ -377,7 +378,7 @@ router.post("/chat/conversations/:id/pin", requireAuth, async (req, res): Promis
   res.json({ ok: true, pinned: true });
 });
 
-router.delete("/chat/conversations/:id/pin", requireAuth, async (req, res): Promise<void> => {
+router.delete("/chat/conversations/:id/pin", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
@@ -422,7 +423,7 @@ async function isAttendantNameVisibleToCustomer(tenantId: number): Promise<boole
 }
 
 // ─── Get messages ──────────────────────────────────────────────────────────
-router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Promise<void> => {
+router.get("/chat/conversations/:id/messages", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
 
@@ -541,7 +542,7 @@ async function loadOwnMessageForEdit(
   return { msg, conv };
 }
 
-router.patch("/chat/messages/:id", requireAuth, async (req, res): Promise<void> => {
+router.patch("/chat/messages/:id", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const { content } = req.body as { content?: string };
@@ -564,7 +565,7 @@ router.patch("/chat/messages/:id", requireAuth, async (req, res): Promise<void> 
   res.json(outMsg);
 });
 
-router.delete("/chat/messages/:id", requireAuth, async (req, res): Promise<void> => {
+router.delete("/chat/messages/:id", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
 
@@ -588,7 +589,7 @@ router.delete("/chat/messages/:id", requireAuth, async (req, res): Promise<void>
 });
 
 // ─── Send media ────────────────────────────────────────────────────────────
-router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_midia"), async (req, res): Promise<void> => {
+router.post("/chat/conversations/:id/media", requireAuth, requireChatAccess(), requirePerm("enviar_midia"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const { base64, mimetype: rawMimetype, filename, caption, ptt, replyToId: replyToIdRaw } = req.body as {
@@ -774,7 +775,7 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
 // Visível só para a equipe, nunca enviada ao WhatsApp do cliente. Por isso não
 // atualiza lastMessage/lastMessageDirection da conversa (não conta como
 // resposta ao cliente para a lógica de "aguardando").
-router.post("/chat/conversations/:id/notes", requireAuth, async (req, res): Promise<void> => {
+router.post("/chat/conversations/:id/notes", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const { content } = req.body as { content?: string };
@@ -802,7 +803,7 @@ router.post("/chat/conversations/:id/notes", requireAuth, async (req, res): Prom
 });
 
 // ─── Send message ──────────────────────────────────────────────────────────
-router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): Promise<void> => {
+router.post("/chat/conversations/:id/messages", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const { content, replyToId: replyToIdRaw } = req.body as { content?: string; replyToId?: number };
@@ -1070,7 +1071,7 @@ async function syncResolvedConversation(
 }
 
 // ─── Update conversation ───────────────────────────────────────────────────
-router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<void> => {
+router.patch("/chat/conversations/:id", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const { status, labels, sectorId, assigneeId, name, isArchived, resolutionReason, hadSale, saleAmount, saleDescription } = req.body as {
@@ -1326,7 +1327,7 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
 // to themselves, moving it from "Pendentes" (queue) to "Ativos". This is a
 // sector-scoped self-assignment, so it is safe for vendedores who cannot
 // otherwise change assigneeId via the PATCH route.
-router.post("/chat/conversations/:id/claim", requireAuth, async (req, res): Promise<void> => {
+router.post("/chat/conversations/:id/claim", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
 
@@ -1455,7 +1456,7 @@ router.delete("/chat/conversations/:id", requireAdminOrSupervisor, async (req, r
 // ─── Uso atual da trava anti-disparo em massa (Atendimento ativo) ─────────
 // Deixa o front avisar ANTES de tentar criar ("você já usou 8/10 essa hora"),
 // em vez de só descobrir o limite quando a criação é recusada com 429.
-router.get("/chat/outbound-usage", requireAuth, async (req, res): Promise<void> => {
+router.get("/chat/outbound-usage", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const requested = parseInt(String(req.query["assigneeId"] ?? ""), 10);
   const userRole = req.session.userRole!;
@@ -1488,7 +1489,7 @@ router.get("/chat/outbound-usage", requireAuth, async (req, res): Promise<void> 
 });
 
 // ─── Create conversation manually ─────────────────────────────────────────
-router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento"), async (req, res): Promise<void> => {
+router.post("/chat/conversations", requireAuth, requireChatAccess(), requirePerm("criar_atendimento"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { phone, name, channel, sectorId, assigneeId: requestedAssigneeId, sessionKey: requestedSessionKey } = req.body as {
     phone?: string; name?: string; channel?: string; sectorId?: number; assigneeId?: number; sessionKey?: string;
@@ -1672,7 +1673,7 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
 // ─── Etiquetas (chat labels) management ───────────────────────────────────
 // ─── Agendamentos (mensagem agendada / retorno ao cliente) ─────────────────
 // Cria também uma tarefa espelho no quadro de Tarefas com o mesmo prazo.
-router.post("/chat/conversations/:id/schedules", requireAuth, async (req, res): Promise<void> => {
+router.post("/chat/conversations/:id/schedules", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const { kind, content, sendAt } = req.body as { kind?: string; content?: string; sendAt?: string };
@@ -1725,7 +1726,7 @@ router.post("/chat/conversations/:id/schedules", requireAuth, async (req, res): 
   res.status(201).json(created);
 });
 
-router.get("/chat/conversations/:id/schedules", requireAuth, async (req, res): Promise<void> => {
+router.get("/chat/conversations/:id/schedules", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
@@ -1737,7 +1738,7 @@ router.get("/chat/conversations/:id/schedules", requireAuth, async (req, res): P
   res.json(rows);
 });
 
-router.delete("/chat/schedules/:schedId", requireAuth, async (req, res): Promise<void> => {
+router.delete("/chat/schedules/:schedId", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const schedId = parseInt(Array.isArray(req.params.schedId) ? req.params.schedId[0] : req.params.schedId, 10);
   const [item] = await db.select().from(scheduledMessagesTable).where(and(eq(scheduledMessagesTable.id, schedId), eq(scheduledMessagesTable.tenantId, tenantId))).limit(1);
@@ -1756,7 +1757,7 @@ router.delete("/chat/schedules/:schedId", requireAuth, async (req, res): Promise
 // ─── Notificações persistentes do sino ─────────────────────────────────────
 // Avisos de retorno vencido e de falha em envio agendado, gravados pelo
 // agendador. Cada usuário vê SOMENTE os próprios avisos (fail closed).
-router.get("/chat/notifications", requireAuth, async (req, res): Promise<void> => {
+router.get("/chat/notifications", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const userId = req.session.userId!;
   const rows = await db.select().from(chatNotificationsTable)
@@ -1772,7 +1773,7 @@ router.get("/chat/notifications", requireAuth, async (req, res): Promise<void> =
 
 // Marca como lidos: todos os avisos do usuário, ou só os de uma conversa
 // (quando o vendedor abre a conversa a partir do sino).
-router.post("/chat/notifications/read", requireAuth, async (req, res): Promise<void> => {
+router.post("/chat/notifications/read", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const userId = req.session.userId!;
   const conversationId = typeof req.body?.conversationId === "number" ? req.body.conversationId : null;
@@ -1895,7 +1896,7 @@ router.get("/chat/users", requireAuth, async (req, res): Promise<void> => {
 });
 
 // ─── Conversation participants ─────────────────────────────────────────────
-router.post("/chat/conversations/:id/participants", requireAuth, async (req, res): Promise<void> => {
+router.post("/chat/conversations/:id/participants", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const { userId } = req.body as { userId?: number };
@@ -1953,7 +1954,7 @@ router.post("/chat/conversations/:id/participants", requireAuth, async (req, res
   res.status(201).json({ ok: true });
 });
 
-router.delete("/chat/conversations/:id/participants/:userId", requireAuth, async (req, res): Promise<void> => {
+router.delete("/chat/conversations/:id/participants/:userId", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const userId = parseInt(Array.isArray(req.params.userId) ? req.params.userId[0] : req.params.userId, 10);
@@ -1978,7 +1979,7 @@ router.delete("/chat/conversations/:id/participants/:userId", requireAuth, async
 });
 
 // ─── Transcrever áudio (Whisper) ───────────────────────────────────────────
-router.post("/chat/messages/:id/transcribe", requireAuth, async (req: Request, res: Response): Promise<void> => {
+router.post("/chat/messages/:id/transcribe", requireAuth, requireChatAccess(), async (req: Request, res: Response): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const msgId = parseInt(req.params.id as string, 10);
   if (!Number.isFinite(msgId)) { res.status(400).json({ error: "ID inválido" }); return; }
@@ -2001,7 +2002,7 @@ router.post("/chat/messages/:id/transcribe", requireAuth, async (req: Request, r
 });
 
 // ─── Serve saved media files ───────────────────────────────────────────────
-router.get("/chat/media/:filename", requireAuth, async (req: Request, res: Response): Promise<void> => {
+router.get("/chat/media/:filename", requireAuth, requireChatAccess(), async (req: Request, res: Response): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const filename = path.basename(req.params.filename as string);
   const filepath = path.join(MEDIA_DIR, filename);
@@ -2171,7 +2172,7 @@ router.post("/chat/webhook/whatsapp", async (req: Request, res: Response): Promi
 // conversation. Human always reviews/edits; nothing is sent automatically.
 // Fails clearly (503) when the AI provider is unavailable so the rest of the
 // attendance keeps working.
-router.post("/chat/conversations/:id/suggest-reply", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
+router.post("/chat/conversations/:id/suggest-reply", requireAuth, requireChatAccess(), requirePerm("usar_ia"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
 
@@ -2273,7 +2274,7 @@ router.post("/chat/conversations/:id/suggest-reply", requireAuth, requirePerm("u
 
 // ── AI text correction ───────────────────────────────────────────────────
 // Corrects spelling/grammar of a drafted message without changing its meaning.
-router.post("/chat/correct-text", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
+router.post("/chat/correct-text", requireAuth, requireChatAccess(), requirePerm("usar_ia"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
   if (!text) { res.status(400).json({ error: "Texto vazio" }); return; }

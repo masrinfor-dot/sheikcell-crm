@@ -101,7 +101,9 @@ export type User = {
   adminAccess?: string[] | null;
   // Módulos da loja que este vendedor/supervisor pode ver (e em que nível —
   // "view"/"edit" dão o mesmo acesso completo por enquanto). Ausência de
-  // chave = sem acesso àquele módulo. Nunca inclui "chat" (Atendimento).
+  // chave = sem acesso àquele módulo — EXCETO "chat" (Atendimento), que tem
+  // regra invertida: ausência = liberado, só bloqueia com "none" explícito
+  // (ver chatAccessLevel abaixo). Só um admin pode gravar essa chave.
   moduleAccess?: UserModuleAccess | null;
   accessHours?: { start: string; end: string; days: number[] } | null;
   sector: Sector | null;
@@ -123,12 +125,18 @@ export const OPTIONAL_MODULES = [
 export type OptionalModule = typeof OPTIONAL_MODULES[number];
 
 // Módulos que dá pra restringir por USUÁRIO (vendedor/supervisor) — todos
-// menos "chat": Atendimento é sempre liberado pra todo mundo da loja, sem
-// essa granularidade (mesma decisão do backend, ver lib/moduleAccess.ts).
+// menos "chat": Atendimento tem regra própria (ver ChatAccessLevel logo
+// abaixo), com UI e sanitização à parte, porque o padrão dela é o oposto
+// dos demais módulos (ausência = liberado, não sem acesso).
 export type UserGrantableModule = Exclude<OptionalModule, "chat">;
 export const USER_GRANTABLE_MODULES = OPTIONAL_MODULES.filter((m): m is UserGrantableModule => m !== "chat");
 export type ModuleAccessLevel = "view" | "edit";
-export type UserModuleAccess = Partial<Record<UserGrantableModule, ModuleAccessLevel>>;
+// Atendimento (chat): "none" bloqueia de verdade; "view"/"edit" iguais aos
+// demais; ausência da chave = liberado (compatibilidade com toda conta já
+// existente). Só um admin (nunca supervisor) pode gravar essa chave — ver
+// a checagem `isAdmin` no formulário de permissões em AdminDashboard.tsx.
+export type ChatAccessLevel = "none" | "view" | "edit";
+export type UserModuleAccess = Partial<Record<UserGrantableModule, ModuleAccessLevel>> & { chat?: ChatAccessLevel };
 
 export const MODULE_LABELS: Record<OptionalModule, string> = {
   chat: "Atendimento",
@@ -184,6 +192,20 @@ export function moduleLevel(user: User | null, m: UserGrantableModule): ModuleAc
 // (requireModuleAccess bloqueia POST/PATCH/PUT/DELETE sem nível "edit").
 export function canEditModule(user: User | null, m: UserGrantableModule): boolean {
   return moduleLevel(user, m) === "edit";
+}
+
+// Nível de acesso do usuário ao Atendimento — admin sempre "edit"; demais
+// papéis usam o que um admin configurou (moduleAccess.chat), com default
+// "edit" (liberado) se nunca foi configurado, pra não quebrar conta
+// existente. Mesma regra do backend (checkChatAccess em lib/moduleAccess.ts).
+export function chatAccessLevel(user: User | null): ChatAccessLevel {
+  if (!user) return "none";
+  if (user.role === "admin") return "edit";
+  if (user.enabledModules != null && !user.enabledModules.includes("chat")) return "none";
+  return user.moduleAccess?.chat ?? "edit";
+}
+export function canUseChat(user: User | null): boolean {
+  return chatAccessLevel(user) !== "none";
 }
 
 export type InternalConversation = {

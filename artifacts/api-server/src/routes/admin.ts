@@ -4,7 +4,7 @@ import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, 
 import { eq, sql, desc, asc, and, gte, lt, isNull, isNotNull, notInArray, inArray, or, ilike } from "drizzle-orm";
 import { requireAdmin, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
 import { sanitizePermissions } from "../lib/permissions";
-import { requireModuleAccess, sanitizeModuleAccess, type ModuleAccessMap, type UserGrantableModule } from "../lib/moduleAccess";
+import { requireModuleAccess, sanitizeModuleAccess, type FullModuleAccessMap, type UserGrantableModule, type ChatAccessLevel } from "../lib/moduleAccess";
 import { getPresence } from "../lib/sseEmitter";
 import { isValidStoreName } from "./stores";
 import { syncCrmAttendant } from "../lib/crmSync";
@@ -367,11 +367,13 @@ async function tenantEnabledModules(tenantId: number): Promise<Set<string>> {
   return new Set(row?.enabledModules ?? []);
 }
 
-function intersectModuleAccess(access: ModuleAccessMap | null, tenantModules: Set<string>): ModuleAccessMap | null {
+function intersectModuleAccess(access: FullModuleAccessMap | null, tenantModules: Set<string>): FullModuleAccessMap | null {
   if (!access) return null;
-  const out: ModuleAccessMap = {};
+  const out: FullModuleAccessMap = {};
   for (const [key, level] of Object.entries(access)) {
-    if (tenantModules.has(key)) out[key as UserGrantableModule] = level;
+    if (!tenantModules.has(key)) continue;
+    if (key === "chat") out.chat = level as ChatAccessLevel;
+    else out[key as UserGrantableModule] = level as FullModuleAccessMap[UserGrantableModule];
   }
   return Object.keys(out).length ? out : null;
 }

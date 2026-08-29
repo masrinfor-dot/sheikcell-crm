@@ -502,11 +502,16 @@ export default function AdminDashboard() {
   // Módulo opcional não contratado pela loja: some do menu (e a API já
   // bloqueia direto, ver requireModule no backend).
   const enabledModules = user?.enabledModules ?? null;
-  // Módulo restrito por USUÁRIO (admin sempre vê tudo; Atendimento nunca
-  // entra nessa granularidade — ver lib/moduleAccess.ts no backend).
+  // Módulo restrito por USUÁRIO (admin sempre vê tudo). Atendimento é
+  // opcional por usuário, com default liberado (ausência de config =
+  // acesso) — só um admin pode restringir, ver lib/moduleAccess.ts no backend.
   const userModuleAccess = user?.moduleAccess ?? null;
-  const moduleGranted = (m: OptionalModule | undefined): boolean =>
-    !m || m === "chat" || isAdmin || (userModuleAccess != null && m in userModuleAccess);
+  const moduleGranted = (m: OptionalModule | undefined): boolean => {
+    if (!m) return true;
+    if (isAdmin) return true;
+    if (m === "chat") return userModuleAccess?.chat !== "none";
+    return userModuleAccess != null && m in userModuleAccess;
+  };
   const tabs = allTabs.filter((t) =>
     (!t.adminOnly || isAdmin || granted.includes(t.id)) &&
     (!t.module || enabledModules == null || enabledModules.includes(t.module)) &&
@@ -1819,6 +1824,29 @@ export default function AdminDashboard() {
                     <label className="text-xs font-medium mb-1 block">Módulos e nível de acesso</label>
                     <p className="text-[10px] text-muted-foreground mb-2">Só os módulos que a loja já contratou aparecem aqui. Sem marcar, o usuário não vê a aba.</p>
                     <div className="space-y-1">
+                      {/* Atendimento é opcional por usuário (default liberado se nunca
+                          configurado) e só um admin pode mexer nessa opção — nunca
+                          supervisor, mesmo que ele tenha acesso a esta tela. */}
+                      {isAdmin && (user?.enabledModules == null || user.enabledModules.includes("chat")) && (
+                        <div className="flex items-center justify-between gap-2 py-1 mb-1.5 pb-2.5 border-b border-dashed border-border">
+                          <span className="text-xs text-foreground">
+                            {MODULE_LABELS.chat}
+                            <span className="block text-[10px] text-muted-foreground font-normal">Só admin define esta opção</span>
+                          </span>
+                          <div className="flex gap-1 shrink-0">
+                            {([["none", "Sem acesso"], ["view", "Visualizar"], ["edit", "Ver + editar"]] as const).map(([v, label]) => {
+                              const current = userForm.moduleAccess.chat ?? "edit";
+                              return (
+                                <button type="button" key={label} data-testid={`module-access-chat-${v}`}
+                                  onClick={() => setUserForm({ ...userForm, moduleAccess: { ...userForm.moduleAccess, chat: v } })}
+                                  className={`px-2 py-1 rounded-lg border text-[11px] font-medium transition ${current === v ? "bg-primary text-white border-primary" : "border-border text-muted-foreground bg-white hover:bg-secondary"}`}>
+                                  {label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
                       {USER_GRANTABLE_MODULES.filter((m) => user?.enabledModules == null || user.enabledModules.includes(m)).map((m) => {
                         const level = userForm.moduleAccess[m];
                         const setLevel = (v: "view" | "edit" | undefined) => {

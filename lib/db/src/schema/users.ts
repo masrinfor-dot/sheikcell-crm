@@ -35,11 +35,19 @@ export const usersTable = pgTable("users", {
   adminAccess: jsonb("admin_access").$type<string[] | null>(),
   // Módulos da loja que este vendedor/supervisor pode ver, e em que nível
   // (por enquanto "view" e "edit" dão o mesmo acesso completo à tela — o
-  // bloqueio real de escrita em nível "view" é uma fase futura). Nunca
-  // inclui "chat" (Atendimento é sempre liberado pra todo mundo da loja).
+  // bloqueio real de escrita em nível "view" é uma fase futura).
   // null/chave ausente = SEM acesso àquele módulo (fail closed) — admin
   // ignora isto (sempre tem edit em tudo).
-  moduleAccess: jsonb("module_access").$type<Partial<Record<Exclude<OptionalModule, "chat">, "view" | "edit">> | null>(),
+  // "chat" (Atendimento) é a ÚNICA exceção, com semântica invertida: chave
+  // ausente = LIBERADO (compatibilidade com todas as contas já existentes,
+  // que nunca tiveram essa opção), e o único jeito de restringir é gravar
+  // "none" explicitamente. Só um admin (nunca supervisor) pode definir essa
+  // chave — ver a rota de usuários no api-server, sempre atrás de
+  // requireAdmin. Ver lib/moduleAccess.ts (backend) pra a checagem em runtime.
+  moduleAccess: jsonb("module_access").$type<
+    | (Partial<Record<Exclude<OptionalModule, "chat">, "view" | "edit">> & { chat?: "none" | "view" | "edit" })
+    | null
+  >(),
   // Horário de acesso (só vendedor): fora dele o login/uso é bloqueado.
   // null = sem restrição. days: 0=domingo ... 6=sábado
   accessHours: jsonb("access_hours").$type<{ start: string; end: string; days: number[] } | null>(),
