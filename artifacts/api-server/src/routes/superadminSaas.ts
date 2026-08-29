@@ -8,6 +8,7 @@ import {
   saasTicketMessagesTable,
   saasSettingsTable,
   usersTable,
+  whatsappSessionsTable,
 } from "@workspace/db";
 import { eq, and, asc, desc, sql, lt } from "drizzle-orm";
 import { requireSuperadmin } from "../middlewares/auth";
@@ -77,6 +78,157 @@ router.get("/superadmin/saas/overview", async (_req, res): Promise<void> => {
     openTickets: Number(openTickets?.n ?? 0),
     newContractsMonth: Number(newContractsMonth?.n ?? 0),
     renewalsMonthCount: Number(renewMonth?.n ?? 0),
+  });
+});
+
+// ------------------------------------------------------ Aba "Visão Geral"
+// Junta contagem de lojas por situação, WhatsApp conectado/total e uma lista
+// de itens que "precisam de atenção" (WhatsApp caído, mensalidade atrasada,
+// contrato vencendo, chamado urgente parado) — tudo pra alimentar a home do
+// painel do superadmin sem ele ter que abrir aba por aba pra notar problema.
+const ATTENTION_RENEWAL_WINDOW_DAYS = 30;
+const ATTENTION_ITEM_LIMIT = 20;
+
+router.get("/superadmin/saas/attention", async (_req, res): Promise<void> => {
+  const today = todayISO();
+  const renewalCutoff = new Date();
+  renewalCutoff.setDate(renewalCutoff.getDate() + ATTENTION_RENEWAL_WINDOW_DAYS);
+  const renewalCutoffISO = renewalCutoff.toISOString().slice(0, 10);
+
+  const [
+    tenants,
+    disconnected,
+    overdueInvoices,
+    renewingContracts,
+    urgentTickets,
+    [wsTotal],
+    [wsConnected],
+    [criticalTicketCount],
+  ] = await Promise.all([
+    db.select({ id: tenantsTable.id, isActive: tenantsTable.isActive, saasStatus: tenantsTable.saasStatus })
+      .from(tenantsTable),
+    // WhatsApp que não está conectado, em loja não cancelada — ordenado pelo
+    // que está caído há mais tempo primeiro.
+    db.select({
+      tenantId: whatsappSessionsTable.tenantId,
+      tenantName: tenantsTable.name,
+      sessionLabel: sql<string>`COALESCE(${whatsappSessionsTable.displayName}, ${whatsappSessionsTable.sessionKey})`,
+      updatedAt: whatsappSessionsTable.updatedAt,
+    })
+      .from(whatsappSessionsTable)
+      .innerJoin(tenantsTable, eq(whatsappSessionsTable.tenantId, tenantsTable.id))
+      .where(and(sql`${whatsappSessionsTable.status} <> 'connected'`, sql`${tenantsTable.saasStatus} <> 'cancelado'`))
+      .orderBy(asc(whatsappSessionsTable.updatedAt))
+      .limit(ATTENTION_ITEM_LIMIT),
+    // Mensalidades pendentes já vencidas — mais antigas primeiro.
+    db.select({
+      tenantId: saasInvoicesTable.tenantId,
+      tenantName: tenantsTable.name,
+      amountCents: saasInvoicesTable.amountCents,
+      dueDate: saasInvoicesTable.dueDate,
+    })
+      .from(saasInvoicesTable)
+      .innerJoin(tenantsTable, eq(saasInvoicesTable.tenantId, tenantsTable.id))
+      .where(and(eq(saasInvoicesTable.status, "pendente"), lt(saasInvoicesTable.dueDate, today)))
+      .orderBy(asc(saasInvoicesTable.dueDate))
+      .limit(ATTENTION_ITEM_LIMIT),
+    // Contratos ativos (loja não cancelada) vencendo nos próximos 30 dias
+    // (ou já vencidos e ainda não renovados) — mais urgente primeiro.
+    db.select({
+      tenantId: saasContractsTable.tenantId,
+      tenantName: tenantsTable.name,
+      renewalDate: saasContractsTable.renewalDate,
+    })
+      .from(saasContractsTable)
+      .innerJoin(tenantsTable, eq(saasContractsTable.tenantId, tenantsTable.id))
+      .where(and(
+        eq(saasContractsTable.isActive, true),
+        sql`${tenantsTable.saasStatus} <> 'cancelado'`,
+        sql`${saasContractsTable.renewalDate} IS NOT NULL`,
+        sql`${saasContractsTable.renewalDate} <= ${renewalCutoffISO}::date`,
+      ))
+      .orderBy(asc(saasContractsTable.renewalDate))
+      .limit(ATTENTION_ITEM_LIMIT),
+    // Chamados urgentes ainda não resolvidos/fechados — mais antigos primeiro.
+    db.select({
+      id: saasTicketsTable.id,
+      tenantId: saasTicketsTable.tenantId,
+      tenantName: tenantsTable.name,
+      title: saasTicketsTable.title,
+      createdAt: saasTicketsTable.createdAt,
+      firstRespondedAt: saasTicketsTable.firstRespondedAt,
+    })
+      .from(saasTicketsTable)
+      .innerJoin(tenantsTable, eq(saasTicketsTable.tenantId, tenantsTable.id))
+      .where(and(
+        eq(saasTicketsTable.priority, "urgente"),
+        sql`${saasTicketsTable.status} <> 'resolvido'`,
+        sql`${saasTicketsTable.status} <> 'fechado'`,
+      ))
+      .orderBy(asc(saasTicketsTable.createdAt))
+      .limit(ATTENTION_ITEM_LIMIT),
+    // WhatsApp conectado/total, só de lojas não canceladas.
+    db.select({ n: sql<number>`COUNT(*)` })
+      .from(whatsappSessionsTable)
+      .innerJoin(tenantsTable, eq(whatsappSessionsTable.tenantId, tenantsTable.id))
+      .where(sql`${tenantsTable.saasStatus} <> 'cancelado'`),
+    db.select({ n: sql<number>`COUNT(*)` })
+      .from(whatsappSessionsTable)
+      .innerJoin(tenantsTable, eq(whatsappSessionsTable.tenantId, tenantsTable.id))
+      .where(and(eq(whatsappSessionsTable.status, "connected"), sql`${tenantsTable.saasStatus} <> 'cancelado'`)),
+    // Contagem real (não limitada pelo .limit() da lista de itens acima).
+    db.select({ n: sql<number>`COUNT(*)` })
+      .from(saasTicketsTable)
+      .where(and(
+        eq(saasTicketsTable.priority, "urgente"),
+        sql`${saasTicketsTable.status} <> 'resolvido'`,
+        sql`${saasTicketsTable.status} <> 'fechado'`,
+      )),
+  ]);
+
+  // Contagem por situação — mesma precedência usada em GET /superadmin/tenants
+  // (cancelado > suspensa > em implantação > inadimplente > ativo), pra bater
+  // com o que a tabela de Lojistas mostra.
+  const overdueTenantIds = new Set(overdueInvoices.map((i) => i.tenantId));
+  const counts = { total: tenants.length, ativo: 0, suspensas: 0, emImplantacao: 0, cancelado: 0, inadimplente: 0 };
+  for (const t of tenants) {
+    if (t.saasStatus === "cancelado") { counts.cancelado++; continue; }
+    if (!t.isActive) { counts.suspensas++; continue; }
+    if (t.saasStatus === "em_implantacao") { counts.emImplantacao++; continue; }
+    if (overdueTenantIds.has(t.id)) { counts.inadimplente++; continue; }
+    counts.ativo++;
+  }
+
+  const now = Date.now();
+  const items = [
+    ...disconnected.map((d) => ({
+      type: "whatsapp_disconnected" as const,
+      tenantId: d.tenantId, tenantName: d.tenantName, sessionLabel: d.sessionLabel,
+      hoursOffline: Math.floor((now - new Date(d.updatedAt).getTime()) / 3600000),
+    })),
+    ...overdueInvoices.map((i) => ({
+      type: "invoice_overdue" as const,
+      tenantId: i.tenantId, tenantName: i.tenantName, amountCents: i.amountCents,
+      daysOverdue: Math.floor((now - new Date(i.dueDate).getTime()) / 86400000),
+    })),
+    ...renewingContracts.map((c) => ({
+      type: "contract_renewing" as const,
+      tenantId: c.tenantId, tenantName: c.tenantName, renewalDate: c.renewalDate!,
+      daysUntil: Math.round((new Date(c.renewalDate! + "T00:00:00").getTime() - new Date(today + "T00:00:00").getTime()) / 86400000),
+    })),
+    ...urgentTickets.map((t) => ({
+      type: "ticket_urgent" as const,
+      tenantId: t.tenantId, tenantName: t.tenantName, ticketId: t.id, title: t.title,
+      hoursOpen: Math.floor((now - new Date(t.createdAt).getTime()) / 3600000),
+      responded: !!t.firstRespondedAt,
+    })),
+  ];
+
+  res.json({
+    counts,
+    whatsapp: { connected: Number(wsConnected?.n ?? 0), total: Number(wsTotal?.n ?? 0) },
+    criticalTickets: Number(criticalTicketCount?.n ?? 0),
+    items,
   });
 });
 

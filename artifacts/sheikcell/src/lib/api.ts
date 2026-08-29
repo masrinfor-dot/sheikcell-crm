@@ -1320,7 +1320,7 @@ export type TenantSummary = {
   id: number;
   name: string;
   isActive: boolean;
-  saasStatus: "ativo" | "inadimplente" | "cancelado";
+  saasStatus: "ativo" | "inadimplente" | "cancelado" | "em_implantacao";
   contactName: string | null;
   contactPhone: string | null;
   contactEmail: string | null;
@@ -1332,7 +1332,25 @@ export type TenantSummary = {
   userCount: number;
   conversationCount: number;
   whatsappCount: number;
+  whatsappConnectedCount: number;
+  openTicketCount: number;
   admins: { id: number; name: string; email: string; isActive: boolean }[];
+};
+
+// "Visão Geral": contagens de lojas por situação + itens que precisam de
+// atenção do superadmin (WhatsApp caído, mensalidade atrasada, contrato
+// vencendo, chamado urgente parado) — tudo pronto pra montar a home do painel.
+export type AttentionItem =
+  | { type: "whatsapp_disconnected"; tenantId: number; tenantName: string; sessionLabel: string; hoursOffline: number }
+  | { type: "invoice_overdue"; tenantId: number; tenantName: string; amountCents: number; daysOverdue: number }
+  | { type: "contract_renewing"; tenantId: number; tenantName: string; renewalDate: string; daysUntil: number }
+  | { type: "ticket_urgent"; tenantId: number; tenantName: string; ticketId: number; title: string; hoursOpen: number; responded: boolean };
+
+export type SaasAttention = {
+  counts: { total: number; ativo: number; suspensas: number; emImplantacao: number; cancelado: number; inadimplente: number };
+  whatsapp: { connected: number; total: number };
+  criticalTickets: number;
+  items: AttentionItem[];
 };
 export const api = {
   superadmin: {
@@ -1347,7 +1365,7 @@ export const api = {
       req<{ ok: boolean }>(`/superadmin/tenants/${tenantId}/impersonate/${userId}`, { method: "POST" }),
     sessions: () => req<{ sessions: AuditedSession[] }>("/superadmin/sessions"),
     updateTenant: (id: number, data: {
-      name?: string; isActive?: boolean; saasStatus?: "ativo" | "cancelado";
+      name?: string; isActive?: boolean; saasStatus?: "ativo" | "cancelado" | "em_implantacao";
       contactName?: string | null; contactPhone?: string | null; contactEmail?: string | null;
       enabledModules?: OptionalModule[];
     }) =>
@@ -1355,6 +1373,7 @@ export const api = {
     upsertTenantAdmin: (id: number, data: { name?: string; email: string; password: string }) =>
       req<{ admin: { id: number; name: string; email: string } | null }>(`/superadmin/tenants/${id}/admin`, { method: "POST", body: JSON.stringify(data) }),
     saasOverview: () => req<SaasOverview>("/superadmin/saas/overview"),
+    saasAttention: () => req<SaasAttention>("/superadmin/saas/attention"),
     listContracts: () => req<{ contracts: SaasContract[] }>("/superadmin/saas/contracts"),
     saveContract: (tenantId: number, data: {
       plan?: string; monthlyValueCents?: number; startDate?: string | null;
