@@ -567,7 +567,9 @@ export default function InternalChat({ docked = false, onActiveConversationChang
 
   const openNew = async () => {
     setShowNew(true);
-    setNewMode("direct");
+    // Supervisor só cria grupo (conversa direta continua exclusiva de admin)
+    // — abre direto no modo grupo pra não cair numa aba que não pode usar.
+    setNewMode(user?.role === "admin" ? "direct" : "group");
     setGroupName("");
     setGroupMembers([]);
   };
@@ -1015,11 +1017,13 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                   ? <Bell className="w-3.5 h-3.5 text-primary" />
                   : <BellOff className="w-3.5 h-3.5 text-muted-foreground" />}
               </button>
-              {/* Criar conversa nova (grupo ou 1:1) — só admin. A pedido do
-                  cliente, o Chat Interno só permite comunicação por grupos
-                  criados pelo admin; funcionário comum participa dos grupos
-                  que já está, mas não inicia conversa nova por conta própria. */}
-              {user?.role === "admin" && (
+              {/* Criar conversa nova (grupo ou 1:1) — admin/supervisor. A
+                  pedido do cliente, o Chat Interno só permite comunicação por
+                  grupos criados por admin/supervisor; funcionário comum
+                  participa dos grupos que já está, mas não inicia conversa
+                  nova por conta própria. Conversa direta 1:1 segue restrita a
+                  admin (ver o gate da aba "Conversa" dentro do modal). */}
+              {(user?.role === "admin" || user?.role === "supervisor") && (
                 <button
                   onClick={openNew}
                   data-testid="button-new-internal-chat"
@@ -1638,13 +1642,17 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                   <X className="w-4 h-4" />
                 </button>
               </div>
-              {/* Conversa direta ou grupo */}
+              {/* Conversa direta (1:1) continua exclusiva de admin; grupo
+                  agora libera admin e supervisor (ver gate do botão "Novo",
+                  acima). Supervisor nunca vê a aba "Conversa". */}
               <div className="flex gap-1 p-2 border-b">
-                <button onClick={() => setNewMode("direct")} data-testid="tab-new-direct"
-                  className={`flex-1 text-xs font-semibold rounded-lg px-3 py-2 transition ${newMode === "direct" ? "bg-primary text-white" : "text-muted-foreground hover:bg-muted/60"}`}>
-                  Conversa
-                </button>
                 {user?.role === "admin" && (
+                  <button onClick={() => setNewMode("direct")} data-testid="tab-new-direct"
+                    className={`flex-1 text-xs font-semibold rounded-lg px-3 py-2 transition ${newMode === "direct" ? "bg-primary text-white" : "text-muted-foreground hover:bg-muted/60"}`}>
+                    Conversa
+                  </button>
+                )}
+                {(user?.role === "admin" || user?.role === "supervisor") && (
                   <button onClick={() => setNewMode("group")} data-testid="tab-new-group"
                     className={`flex-1 text-xs font-semibold rounded-lg px-3 py-2 transition ${newMode === "group" ? "bg-violet-600 text-white" : "text-muted-foreground hover:bg-muted/60"}`}>
                     <Users className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />Grupo
