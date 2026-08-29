@@ -1,7 +1,11 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { db, tenantsTable, usersTable, sectorsTable, conversationsTable, whatsappSessionsTable, saasContractsTable, saasInvoicesTable, impersonationLogTable, OPTIONAL_MODULES, type OptionalModule } from "@workspace/db";
+import { db, tenantsTable, usersTable, sectorsTable, conversationsTable, whatsappSessionsTable, saasContractsTable, saasInvoicesTable, saasTicketsTable, impersonationLogTable, OPTIONAL_MODULES, type OptionalModule } from "@workspace/db";
 import { eq, and, count, desc, lt, inArray, sql } from "drizzle-orm";
+
+// Chamados que ainda pedem atenção (mesmo grupo usado na aba Suporte do
+// painel) — usado aqui só pra contar quantos uma loja tem em aberto.
+const OPEN_TICKET_STATUSES = ["aberto", "em_analise", "em_andamento"] as const;
 import { requireSuperadmin, invalidateTenantCache } from "../middlewares/auth";
 import { validateCpfCnpj } from "../lib/cpfCnpj";
 import { parseUserAgent } from "../lib/sessions";
@@ -23,10 +27,12 @@ router.get("/superadmin/tenants", async (_req, res): Promise<void> => {
   const tenants = await db.select().from(tenantsTable).orderBy(desc(tenantsTable.createdAt));
   const result = await Promise.all(
     tenants.map(async (t) => {
-      const [[u], [c], [w]] = await Promise.all([
+      const [[u], [c], [w], [wc], [ot]] = await Promise.all([
         db.select({ n: count() }).from(usersTable).where(and(eq(usersTable.tenantId, t.id), eq(usersTable.isActive, true))),
         db.select({ n: count() }).from(conversationsTable).where(eq(conversationsTable.tenantId, t.id)),
         db.select({ n: count() }).from(whatsappSessionsTable).where(eq(whatsappSessionsTable.tenantId, t.id)),
+        db.select({ n: count() }).from(whatsappSessionsTable).where(and(eq(whatsappSessionsTable.tenantId, t.id), eq(whatsappSessionsTable.status, "connected"))),
+        db.select({ n: count() }).from(saasTicketsTable).where(and(eq(saasTicketsTable.tenantId, t.id), inArray(saasTicketsTable.status, OPEN_TICKET_STATUSES))),
       ]);
       const admins = await db
         .select({ id: usersTable.id, name: usersTable.name, email: usersTable.email, isActive: usersTable.isActive })
@@ -39,8 +45,11 @@ router.get("/superadmin/tenants", async (_req, res): Promise<void> => {
           .where(and(eq(saasInvoicesTable.tenantId, t.id), eq(saasInvoicesTable.status, "pendente"), lt(saasInvoicesTable.dueDate, today))),
       ]);
       const overdueCount = Number(overdue?.n ?? 0);
-      // Situação comercial: cancelado (manual) > inadimplente (derivada) > ativo
-      const saasStatus = t.saasStatus === "cancelado" ? "cancelado" : overdueCount > 0 ? "inadimplente" : "ativo";
+      // Situação comercial: cancelado (manual) > em implantação (manual) >
+      // inadimplente (derivada) > ativo
+      const saasStatus = t.saasStatus === "cancelado" ? "cancelado"
+        : t.saasStatus === "em_implantacao" ? "em_implantacao"
+        : overdueCount > 0 ? "inadimplente" : "ativo";
       return {
         ...t,
         saasStatus,
@@ -49,6 +58,8 @@ router.get("/superadmin/tenants", async (_req, res): Promise<void> => {
         userCount: Number(u?.n ?? 0),
         conversationCount: Number(c?.n ?? 0),
         whatsappCount: Number(w?.n ?? 0),
+        whatsappConnectedCount: Number(wc?.n ?? 0),
+        openTicketCount: Number(ot?.n ?? 0),
         admins,
       };
     }),
@@ -143,8 +154,9 @@ router.patch("/superadmin/tenants/:id", async (req, res): Promise<void> => {
   if (typeof name === "string" && name.trim()) updates.name = name.trim();
   if (typeof isActive === "boolean") updates.isActive = isActive;
   if (typeof saasStatus === "string") {
-    // "inadimplente" é derivada das mensalidades — só ativo/cancelado é manual
-    if (!["ativo", "cancelado"].includes(saasStatus)) { res.status(400).json({ error: "Situação inválida" }); return; }
+    // "inadimplente" é derivada das mensalidades — só ativo/em implantação/
+    // cancelado são manuais (o superadmin escolhe direto na tela).
+    if (!["ativo", "cancelado", "em_implantacao"].includes(saasStatus)) { res.status(400).json({ error: "Situação inválida" }); return; }
     updates.saasStatus = saasStatus;
     // Cancelar o contrato também suspende o acesso da loja (fail closed)
     if (saasStatus === "cancelado") updates.isActive = false;

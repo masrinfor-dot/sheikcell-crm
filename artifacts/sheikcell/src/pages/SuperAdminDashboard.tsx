@@ -11,6 +11,8 @@ import {
   type TicketPriority,
   type TicketCategory,
   type SaasOverview,
+  type SaasAttention,
+  type AttentionItem,
   type OptionalModule,
   OPTIONAL_MODULES,
   MODULE_LABELS,
@@ -28,12 +30,19 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import {
+  Table, TableHeader, TableBody, TableRow, TableHead, TableCell,
+} from "@/components/ui/table";
+import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator,
+} from "@/components/ui/dropdown-menu";
 import { useToast } from "@/hooks/use-toast";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
 import {
-  Building2, LogOut, Plus, Users, MessageSquare, Smartphone, KeyRound, Ban,
+  Building2, LogOut, Plus, KeyRound, Ban,
   CheckCircle2, DollarSign, FileText, Wrench, Pencil, AlertTriangle, Trash2,
   Bug, HelpCircle, Sparkles, Clock, Send, LogIn, LayoutGrid, UserCog,
+  LayoutDashboard, Search, MoreVertical, WifiOff, HardHat, ArrowRight,
 } from "lucide-react";
 
 // Compara duas listas de módulos ignorando ordem (usado pra destacar o botão
@@ -149,9 +158,47 @@ function slaBadge(tk: SaasTicket) {
   return <Badge className={className}><Clock className="w-3 h-3 mr-1" /> {label}</Badge>;
 }
 
-type Tab = "lojistas" | "financeiro" | "contratos" | "suporte" | "meucadastro";
+// Cada item do feed "Precisa da sua atenção" (Visão Geral) tem seu próprio
+// formato de mensagem — monta o texto certo conforme o tipo do item.
+function attentionItemLabel(item: AttentionItem) {
+  switch (item.type) {
+    case "whatsapp_disconnected":
+      return (
+        <p className="text-sm flex items-center gap-1.5">
+          <WifiOff className="w-4 h-4 text-red-500 shrink-0" />
+          <span><strong>{item.tenantName}</strong> · WhatsApp "{item.sessionLabel}" desconectado{item.hoursOffline >= 1 ? ` há ${item.hoursOffline}h` : ""}</span>
+        </p>
+      );
+    case "invoice_overdue":
+      return (
+        <p className="text-sm flex items-center gap-1.5">
+          <DollarSign className="w-4 h-4 text-red-500 shrink-0" />
+          <span><strong>{item.tenantName}</strong> · mensalidade de {brl(item.amountCents)} vencida há {item.daysOverdue} dia{item.daysOverdue === 1 ? "" : "s"}</span>
+        </p>
+      );
+    case "contract_renewing":
+      return (
+        <p className="text-sm flex items-center gap-1.5">
+          <FileText className="w-4 h-4 text-amber-500 shrink-0" />
+          <span><strong>{item.tenantName}</strong> · contrato {item.daysUntil < 0 ? `venceu há ${-item.daysUntil} dia(s)` : item.daysUntil === 0 ? "vence hoje" : `vence em ${item.daysUntil} dia(s)`}</span>
+        </p>
+      );
+    case "ticket_urgent":
+      return (
+        <p className="text-sm flex items-center gap-1.5">
+          <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" />
+          <span><strong>{item.tenantName}</strong> · chamado urgente "{item.title}" {item.responded ? "aguardando retorno" : "sem resposta"} há {item.hoursOpen}h</span>
+        </p>
+      );
+    default:
+      return null;
+  }
+}
+
+type Tab = "visaogeral" | "lojistas" | "financeiro" | "contratos" | "suporte" | "meucadastro";
 
 const TABS: { id: Tab; label: string; icon: typeof Building2 }[] = [
+  { id: "visaogeral", label: "Visão Geral", icon: LayoutDashboard },
   { id: "lojistas", label: "Lojistas", icon: Building2 },
   { id: "financeiro", label: "Financeiro", icon: DollarSign },
   { id: "contratos", label: "Contratos", icon: FileText },
@@ -159,10 +206,20 @@ const TABS: { id: Tab; label: string; icon: typeof Building2 }[] = [
   { id: "meucadastro", label: "Meu Cadastro", icon: UserCog },
 ];
 
+// Situação da loja: rótulo curto + estilo do badge, usado na tabela de
+// Lojistas e na Visão Geral. "inadimplente" é sempre derivada (nunca
+// escolhida manualmente); as outras três o superadmin escolhe direto.
+const TENANT_STATUS_META: Record<TenantSummary["saasStatus"], { label: string; className: string }> = {
+  ativo: { label: "Ativo", className: "bg-green-100 text-green-700 hover:bg-green-100" },
+  em_implantacao: { label: "Em implantação", className: "bg-blue-100 text-blue-700 hover:bg-blue-100" },
+  inadimplente: { label: "Inadimplente", className: "" }, // usa variant="destructive"
+  cancelado: { label: "Cancelado", className: "" }, // usa variant="outline"
+};
+
 export default function SuperAdminDashboard() {
   const { user, logout, setUser } = useAuth();
   const { toast } = useToast();
-  const [tab, setTab] = useState<Tab>("lojistas");
+  const [tab, setTab] = useState<Tab>("visaogeral");
 
   // Meu Cadastro: edição do próprio nome/e-mail (PATCH /auth/me — nunca um
   // id de outra conta) + troca de senha (reaproveita o mesmo modal usado no
@@ -191,12 +248,20 @@ export default function SuperAdminDashboard() {
   };
   const [tenants, setTenants] = useState<TenantSummary[]>([]);
   const [overview, setOverview] = useState<SaasOverview | null>(null);
+  const [attention, setAttention] = useState<SaasAttention | null>(null);
   const [invoices, setInvoices] = useState<SaasInvoice[]>([]);
   const [contracts, setContracts] = useState<SaasContract[]>([]);
   const [tickets, setTickets] = useState<SaasTicket[]>([]);
   const [template, setTemplate] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+
+  // Lojistas: busca por nome/contato + filtro rápido por situação —
+  // substituem os cards por uma tabela compacta que aguenta muitas lojas.
+  const [lojistaSearch, setLojistaSearch] = useState("");
+  const [lojistaFilter, setLojistaFilter] = useState<
+    "todas" | "ativas" | "suspensas" | "em_implantacao" | "inadimplentes" | "whatsapp_desconectado" | "com_chamado"
+  >("todas");
 
   // Diálogos
   const [createOpen, setCreateOpen] = useState(false);
@@ -239,6 +304,7 @@ export default function SuperAdminDashboard() {
     Promise.all([
       api.superadmin.listTenants().then((r) => setTenants(r.tenants)),
       api.superadmin.saasOverview().then(setOverview),
+      api.superadmin.saasAttention().then(setAttention),
       api.superadmin.listInvoices().then((r) => setInvoices(r.invoices)),
       api.superadmin.listContracts().then((r) => setContracts(r.contracts)),
       api.superadmin.getContractTemplate().then((r) => setTemplate(r.template)),
@@ -373,10 +439,48 @@ export default function SuperAdminDashboard() {
   const statusBadge = (t: TenantSummary) => {
     if (t.saasStatus === "cancelado") return <Badge variant="outline" className="text-muted-foreground">Cancelado</Badge>;
     if (t.saasStatus === "inadimplente") return <Badge variant="destructive">Inadimplente</Badge>;
+    if (t.saasStatus === "em_implantacao") return <Badge className={TENANT_STATUS_META.em_implantacao.className}>Em implantação</Badge>;
     return <Badge variant="secondary" className="text-green-700">Ativo</Badge>;
   };
 
   const activeTenants = tenants.filter((t) => t.saasStatus !== "cancelado");
+
+  // Tabela de Lojistas: busca por nome/contato + o filtro rápido selecionado.
+  const filteredTenants = tenants.filter((t) => {
+    if (lojistaSearch.trim()) {
+      const q = lojistaSearch.trim().toLowerCase();
+      const haystack = `${t.name} ${t.contactName ?? ""} ${t.contactEmail ?? ""}`.toLowerCase();
+      if (!haystack.includes(q)) return false;
+    }
+    switch (lojistaFilter) {
+      case "ativas": return t.saasStatus === "ativo";
+      case "suspensas": return !t.isActive && t.saasStatus !== "cancelado";
+      case "em_implantacao": return t.saasStatus === "em_implantacao";
+      case "inadimplentes": return t.saasStatus === "inadimplente";
+      case "whatsapp_desconectado": return t.whatsappCount > t.whatsappConnectedCount;
+      case "com_chamado": return t.openTicketCount > 0;
+      default: return true;
+    }
+  });
+
+  // "Ver X" do feed de atenção: leva direto pra Lojistas (com o nome já
+  // filtrado) ou pra Suporte (com prioridade urgente + a loja já filtrada).
+  const viewTenantFromAttention = (tenantName: string) => {
+    setTab("lojistas");
+    setLojistaFilter("todas");
+    setLojistaSearch(tenantName);
+  };
+  const viewTicketFromAttention = (tenantId: number) => {
+    setTab("suporte");
+    setTicketView("ativos");
+    setTicketFilters({ status: "", priority: "urgente", category: "", tenantId: String(tenantId) });
+  };
+
+  // Alterna entre "em implantação" e "ativo" — usado enquanto a loja ainda
+  // está sendo configurada, antes de virar cliente ativo de fato.
+  const toggleImplantacao = (t: TenantSummary) =>
+    run(() => api.superadmin.updateTenant(t.id, { saasStatus: t.saasStatus === "em_implantacao" ? "ativo" : "em_implantacao" }),
+      t.saasStatus === "em_implantacao" ? "Loja marcada como ativa" : "Loja marcada como em implantação");
 
   return (
     <div className="min-h-screen bg-background">
@@ -411,89 +515,201 @@ export default function SuperAdminDashboard() {
           <p className="text-muted-foreground text-sm">Carregando...</p>
         ) : (
           <>
+            {/* --------------------------------------------- VISÃO GERAL */}
+            {tab === "visaogeral" && (
+              <>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {[
+                    { label: "Lojas cadastradas", value: String(attention?.counts.total ?? tenants.length) },
+                    { label: "Ativas", value: String(attention?.counts.ativo ?? 0) },
+                    { label: "Suspensas", value: String(attention?.counts.suspensas ?? 0), red: (attention?.counts.suspensas ?? 0) > 0 },
+                    { label: "Em implantação", value: String(attention?.counts.emImplantacao ?? 0) },
+                    { label: "Inadimplentes", value: String(attention?.counts.inadimplente ?? 0), red: (attention?.counts.inadimplente ?? 0) > 0 },
+                    { label: "Receita mensal", value: overview ? brl(overview.mrrCents) : "—" },
+                    { label: "Em atraso", value: overview ? brl(overview.overdueCents) : "—", red: (overview?.overdueCount ?? 0) > 0 },
+                    { label: "WhatsApp conectados", value: attention ? `${attention.whatsapp.connected}/${attention.whatsapp.total}` : "—", red: !!attention && attention.whatsapp.connected < attention.whatsapp.total },
+                    { label: "Chamados críticos", value: String(attention?.criticalTickets ?? 0), red: (attention?.criticalTickets ?? 0) > 0 },
+                  ].map((s) => (
+                    <Card key={s.label}>
+                      <CardContent className="pt-4">
+                        <p className="text-xs text-muted-foreground">{s.label}</p>
+                        <p className={`text-xl font-bold ${s.red ? "text-red-600" : ""}`}>{s.value}</p>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-base flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-500" /> Precisa da sua atenção
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-1">
+                    {!attention || attention.items.length === 0 ? (
+                      <p className="text-sm text-muted-foreground py-2">Nenhum ponto de atenção no momento — tudo em dia.</p>
+                    ) : (
+                      attention.items.map((item, i) => (
+                        <div key={i} className="flex items-center justify-between gap-2 py-2 border-b last:border-0 flex-wrap">
+                          {attentionItemLabel(item)}
+                          {item.type === "ticket_urgent" ? (
+                            <Button size="sm" variant="outline" onClick={() => viewTicketFromAttention(item.tenantId)}>
+                              Ver chamado <ArrowRight className="w-3.5 h-3.5 ml-1" />
+                            </Button>
+                          ) : (
+                            <Button size="sm" variant="outline" onClick={() => viewTenantFromAttention(item.tenantName)}>
+                              Ver loja <ArrowRight className="w-3.5 h-3.5 ml-1" />
+                            </Button>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </CardContent>
+                </Card>
+              </>
+            )}
+
             {/* ------------------------------------------------ LOJISTAS */}
             {tab === "lojistas" && (
               <>
-                <div className="flex justify-end">
+                <div className="flex justify-between items-center gap-2 flex-wrap">
+                  <div className="flex gap-2 flex-wrap items-center flex-1 min-w-[240px]">
+                    <div className="relative w-full max-w-xs">
+                      <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                      <Input value={lojistaSearch} onChange={(e) => setLojistaSearch(e.target.value)}
+                        placeholder="Buscar loja ou contato..." className="pl-8" data-testid="input-lojista-search" />
+                    </div>
+                    <Select value={lojistaFilter} onValueChange={(v) => setLojistaFilter(v as typeof lojistaFilter)}>
+                      <SelectTrigger className="w-[200px]" data-testid="filter-lojista"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="todas">Todas as lojas</SelectItem>
+                        <SelectItem value="ativas">Ativas</SelectItem>
+                        <SelectItem value="suspensas">Suspensas</SelectItem>
+                        <SelectItem value="em_implantacao">Em implantação</SelectItem>
+                        <SelectItem value="inadimplentes">Inadimplentes</SelectItem>
+                        <SelectItem value="whatsapp_desconectado">WhatsApp desconectado</SelectItem>
+                        <SelectItem value="com_chamado">Com chamado aberto</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                   <Button size="sm" onClick={() => setCreateOpen(true)} data-testid="button-create-tenant">
                     <Plus className="w-4 h-4 mr-1" /> Nova loja
                   </Button>
                 </div>
-                {tenants.length === 0 && <p className="text-muted-foreground text-sm">Nenhuma loja cadastrada ainda.</p>}
-                {tenants.map((t) => (
-                  <Card key={t.id} data-testid={`card-tenant-${t.id}`}>
-                    <CardHeader className="pb-2 flex flex-row items-center justify-between space-y-0 flex-wrap gap-2">
-                      <CardTitle className="text-base flex items-center gap-2 flex-wrap">
-                        {t.name}
-                        {statusBadge(t)}
-                        {!t.isActive && <Badge variant="destructive">Acesso suspenso</Badge>}
-                        {t.overdueCount > 0 && (
-                          <span className="text-xs text-red-600 flex items-center gap-1">
-                            <AlertTriangle className="w-3.5 h-3.5" /> {t.overdueCount} mensalidade(s) em atraso
-                          </span>
-                        )}
-                      </CardTitle>
-                      <div className="flex gap-2 flex-wrap">
-                        <Button size="sm" variant="outline" onClick={() => {
-                          setContactFor(t);
-                          setContactForm({ contactName: t.contactName ?? "", contactPhone: t.contactPhone ?? "", contactEmail: t.contactEmail ?? "" });
-                        }} data-testid={`button-contact-${t.id}`}>
-                          <Pencil className="w-4 h-4 mr-1" /> Contato
-                        </Button>
-                        <Button size="sm" variant="outline" onClick={() => {
-                          setModulesFor(t);
-                          setModulesForm([...t.enabledModules]);
-                        }} data-testid={`button-modules-${t.id}`}>
-                          <LayoutGrid className="w-4 h-4 mr-1" /> Módulos
-                        </Button>
-                        <Button size="sm" variant="outline" onClick={() => { setAdminFor(t); setAdminForm({ name: "", email: t.admins[0]?.email ?? "", password: "" }); }} data-testid={`button-admin-${t.id}`}>
-                          <KeyRound className="w-4 h-4 mr-1" /> Admin
-                        </Button>
-                        <Button size="sm" variant="outline" disabled={!t.admins.some((a) => a.isActive)}
-                          title={!t.admins.some((a) => a.isActive) ? "Cadastre um admin ativo primeiro" : undefined}
-                          onClick={() => openImpersonate(t)} data-testid={`button-impersonate-${t.id}`}>
-                          <LogIn className="w-4 h-4 mr-1" /> Entrar como
-                        </Button>
-                        <Button size="sm" variant={t.isActive ? "destructive" : "default"}
-                          onClick={() => run(() => api.superadmin.updateTenant(t.id, { isActive: !t.isActive }), t.isActive ? "Loja suspensa" : "Loja reativada")}
-                          data-testid={`button-toggle-${t.id}`}>
-                          {t.isActive ? <><Ban className="w-4 h-4 mr-1" /> Suspender</> : <><CheckCircle2 className="w-4 h-4 mr-1" /> Reativar</>}
-                        </Button>
-                        {t.saasStatus !== "cancelado" ? (
-                          <Button size="sm" variant="ghost" className="text-muted-foreground"
-                            onClick={() => {
-                              if (window.confirm(`Cancelar o contrato da loja "${t.name}"? O acesso dela será suspenso.`))
-                                void run(() => api.superadmin.updateTenant(t.id, { saasStatus: "cancelado" }), "Contrato cancelado");
-                            }}
-                            data-testid={`button-cancel-${t.id}`}>
-                            Cancelar contrato
-                          </Button>
-                        ) : (
-                          <Button size="sm" variant="ghost"
-                            onClick={() => run(() => api.superadmin.updateTenant(t.id, { saasStatus: "ativo", isActive: true }), "Lojista reativado")}
-                            data-testid={`button-uncancel-${t.id}`}>
-                            Reativar contrato
-                          </Button>
-                        )}
-                      </div>
-                    </CardHeader>
-                    <CardContent className="text-sm text-muted-foreground space-y-1">
-                      <div className="flex flex-wrap gap-4">
-                        <span className="flex items-center gap-1"><Users className="w-4 h-4" /> {t.userCount} usuários</span>
-                        <span className="flex items-center gap-1"><MessageSquare className="w-4 h-4" /> {t.conversationCount} conversas</span>
-                        <span className="flex items-center gap-1"><Smartphone className="w-4 h-4" /> {t.whatsappCount} WhatsApp</span>
-                        <span>Cliente desde {fmtDate(t.createdAt)}</span>
-                      </div>
-                      <div className="flex flex-wrap gap-4">
-                        {t.contactName && <span>Contato: {t.contactName}</span>}
-                        {t.contactPhone && <span>Tel: {t.contactPhone}</span>}
-                        {t.contactEmail && <span>E-mail: {t.contactEmail}</span>}
-                        {t.contract && <span>Plano: {t.contract.plan} · {brl(t.contract.monthlyValueCents)}/mês</span>}
-                        {t.admins.length > 0 && <span>Admin: {t.admins.map((a) => `${a.name} (${a.email})`).join(", ")}</span>}
-                      </div>
-                    </CardContent>
+
+                {tenants.length === 0 ? (
+                  <p className="text-muted-foreground text-sm">Nenhuma loja cadastrada ainda.</p>
+                ) : filteredTenants.length === 0 ? (
+                  <p className="text-muted-foreground text-sm">Nenhuma loja encontrada com esse filtro.</p>
+                ) : (
+                  <Card>
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Loja</TableHead>
+                          <TableHead>Status</TableHead>
+                          <TableHead>Plano</TableHead>
+                          <TableHead>Usuários</TableHead>
+                          <TableHead>WhatsApp</TableHead>
+                          <TableHead>Conversas</TableHead>
+                          <TableHead>Financeiro</TableHead>
+                          <TableHead>Suporte</TableHead>
+                          <TableHead className="text-right">Ações</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {filteredTenants.map((t) => (
+                          <TableRow key={t.id} data-testid={`row-tenant-${t.id}`}>
+                            <TableCell>
+                              <div className="font-medium">{t.name}</div>
+                              <div className="text-xs text-muted-foreground">{t.contactName || t.contactEmail || "—"}</div>
+                            </TableCell>
+                            <TableCell>
+                              <div className="flex flex-col gap-1 items-start">
+                                {statusBadge(t)}
+                                {!t.isActive && <Badge variant="destructive" className="text-[10px]">Acesso suspenso</Badge>}
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-sm">
+                              {t.contract ? <>{t.contract.plan}<br /><span className="text-xs text-muted-foreground">{brl(t.contract.monthlyValueCents)}/mês</span></> : "—"}
+                            </TableCell>
+                            <TableCell className="text-sm">{t.userCount}</TableCell>
+                            <TableCell className="text-sm">
+                              <span className={t.whatsappCount > 0 && t.whatsappConnectedCount < t.whatsappCount ? "text-red-600 flex items-center gap-1" : ""}>
+                                {t.whatsappCount > 0 && t.whatsappConnectedCount < t.whatsappCount && <WifiOff className="w-3.5 h-3.5" />}
+                                {t.whatsappConnectedCount}/{t.whatsappCount}
+                              </span>
+                            </TableCell>
+                            <TableCell className="text-sm">{t.conversationCount}</TableCell>
+                            <TableCell className="text-sm">
+                              {t.overdueCount > 0 ? (
+                                <span className="text-red-600 flex items-center gap-1"><AlertTriangle className="w-3.5 h-3.5" /> {t.overdueCount} atrasada(s)</span>
+                              ) : "Em dia"}
+                            </TableCell>
+                            <TableCell className="text-sm">
+                              {t.openTicketCount > 0 ? `${t.openTicketCount} aberto(s)` : "—"}
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <div className="flex justify-end gap-1">
+                                <Button size="sm" variant="outline" disabled={!t.admins.some((a) => a.isActive)}
+                                  title={!t.admins.some((a) => a.isActive) ? "Cadastre um admin ativo primeiro" : undefined}
+                                  onClick={() => openImpersonate(t)} data-testid={`button-impersonate-${t.id}`}>
+                                  <LogIn className="w-4 h-4 mr-1" /> Entrar como
+                                </Button>
+                                <DropdownMenu>
+                                  <DropdownMenuTrigger asChild>
+                                    <Button size="sm" variant="ghost" data-testid={`button-menu-${t.id}`}><MoreVertical className="w-4 h-4" /></Button>
+                                  </DropdownMenuTrigger>
+                                  <DropdownMenuContent align="end">
+                                    <DropdownMenuItem onClick={() => {
+                                      setContactFor(t);
+                                      setContactForm({ contactName: t.contactName ?? "", contactPhone: t.contactPhone ?? "", contactEmail: t.contactEmail ?? "" });
+                                    }} data-testid={`button-contact-${t.id}`}>
+                                      <Pencil className="w-4 h-4 mr-2" /> Contato
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem onClick={() => { setModulesFor(t); setModulesForm([...t.enabledModules]); }} data-testid={`button-modules-${t.id}`}>
+                                      <LayoutGrid className="w-4 h-4 mr-2" /> Módulos
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem onClick={() => { setAdminFor(t); setAdminForm({ name: "", email: t.admins[0]?.email ?? "", password: "" }); }} data-testid={`button-admin-${t.id}`}>
+                                      <KeyRound className="w-4 h-4 mr-2" /> Admin
+                                    </DropdownMenuItem>
+                                    <DropdownMenuSeparator />
+                                    {t.saasStatus !== "cancelado" && (
+                                      <DropdownMenuItem onClick={() => toggleImplantacao(t)} data-testid={`button-implantacao-${t.id}`}>
+                                        <HardHat className="w-4 h-4 mr-2" /> {t.saasStatus === "em_implantacao" ? "Marcar como ativa" : "Marcar em implantação"}
+                                      </DropdownMenuItem>
+                                    )}
+                                    <DropdownMenuItem onClick={() => run(() => api.superadmin.updateTenant(t.id, { isActive: !t.isActive }), t.isActive ? "Loja suspensa" : "Loja reativada")}
+                                      data-testid={`button-toggle-${t.id}`}>
+                                      {t.isActive ? <><Ban className="w-4 h-4 mr-2" /> Suspender</> : <><CheckCircle2 className="w-4 h-4 mr-2" /> Reativar</>}
+                                    </DropdownMenuItem>
+                                    <DropdownMenuSeparator />
+                                    {t.saasStatus !== "cancelado" ? (
+                                      <DropdownMenuItem className="text-muted-foreground"
+                                        onClick={() => {
+                                          if (window.confirm(`Cancelar o contrato da loja "${t.name}"? O acesso dela será suspenso.`))
+                                            void run(() => api.superadmin.updateTenant(t.id, { saasStatus: "cancelado" }), "Contrato cancelado");
+                                        }}
+                                        data-testid={`button-cancel-${t.id}`}>
+                                        Cancelar contrato
+                                      </DropdownMenuItem>
+                                    ) : (
+                                      <DropdownMenuItem
+                                        onClick={() => run(() => api.superadmin.updateTenant(t.id, { saasStatus: "ativo", isActive: true }), "Lojista reativado")}
+                                        data-testid={`button-uncancel-${t.id}`}>
+                                        Reativar contrato
+                                      </DropdownMenuItem>
+                                    )}
+                                  </DropdownMenuContent>
+                                </DropdownMenu>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
                   </Card>
-                ))}
+                )}
               </>
             )}
 
