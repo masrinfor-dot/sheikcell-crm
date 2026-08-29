@@ -2,7 +2,7 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import { db, internalConversationsTable, internalConversationMembersTable, internalMessagesTable, usersTable, tenantsTable } from "@workspace/db";
 import { eq, and, asc, inArray, sql, ne } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { requireAuth, requireAdmin, requireTenant, isTenantSuspended } from "../middlewares/auth";
+import { requireAuth, requireAdmin, requireAdminOrSupervisor, requireTenant, isTenantSuspended } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import {
   sseEmitter,
@@ -273,11 +273,12 @@ router.get("/internal-chat/conversations", requireAuth, async (req, res): Promis
 });
 
 // ─── Create a group conversation (grupo do chat interno) ───────────────────
-// Any staff user may create a group, naming it and escolhendo os participantes.
+// Só admin/supervisor cria grupo, escolhendo o nome e os participantes — a
+// pedido do cliente, pra centralizar a comunicação em grupo com quem tem
+// visão de equipe (conversa direta 1:1 continua regra à parte, ver abaixo).
 // O criador sempre entra como membro. Grupos usam o mesmo escopo dos diretos:
 // só membros veem, recebem eventos e podem enviar mensagens.
-// Só admin cria grupos (conversas diretas continuam liberadas para todos).
-router.post("/internal-chat/conversations/group", requireAdmin, async (req, res): Promise<void> => {
+router.post("/internal-chat/conversations/group", requireAdminOrSupervisor, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const userId = req.session.userId!;
   const { name, memberIds } = req.body as { name?: string; memberIds?: number[] };
@@ -315,8 +316,7 @@ router.post("/internal-chat/conversations/group", requireAdmin, async (req, res)
 });
 
 // ─── Start (or fetch) a direct 1:1 conversation ────────────────────────────
-// Restrito a admin (mesma regra do grupo, acima): a pedido do cliente, o
-// Chat Interno só permite comunicação por grupos criados pelo admin —
+// Restrito a admin (diferente do grupo, acima, que também libera supervisor):
 // funcionário comum não inicia conversa 1:1 com colega por conta própria.
 // Conversas diretas já existentes (criadas antes desta regra) continuam
 // acessíveis normalmente pelas rotas de mensagens/listagem, que não mudam.
