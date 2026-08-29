@@ -5,7 +5,7 @@ import path from "path";
 import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, attendanceLogsTable, attendanceStartEventsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, taskAssigneesTable, crmPurchasesTable, appSettingsTable } from "@workspace/db";
 import { eq, desc, and, or, lt, gte, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { requireAuth, requireAdmin, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
+import { requireAuth, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
 import { checkPerm, requirePerm } from "../lib/permissions";
 import {
   broadcast,
@@ -1419,15 +1419,15 @@ router.get("/chat/wa-sessions", requireAuth, async (req, res): Promise<void> => 
   res.json(rows);
 });
 
-// ─── Excluir atendimento (somente admin) ───────────────────────────────────
+// ─── Excluir atendimento (admin ou supervisor) ─────────────────────────────
 // Remove definitivamente a conversa (mensagens, participantes, agendamentos
 // e histórico de início de atendimento juntos). Antes só era permitido em
-// Potenciais (lead novo sem dono) — agora admin pode excluir de qualquer
-// categoria (Pendentes/Ativos/Resolvidas também), a pedido explícito do
-// cliente ("ADM com opção de excluir atendimento em qualquer parte"). Ação
-// irreversível: some o histórico de mensagens da conversa, mas NÃO apaga a
-// ficha do cliente no CRM (isso é só a conversa/atendimento em si).
-router.delete("/chat/conversations/:id", requireAdmin, async (req, res): Promise<void> => {
+// Potenciais (lead novo sem dono), depois virou admin em qualquer categoria
+// (Pendentes/Ativos/Resolvidas) e agora também libera supervisor (a pedido
+// explícito do cliente). Ação irreversível: some o histórico de mensagens da
+// conversa, mas NÃO apaga a ficha do cliente no CRM (isso é só a
+// conversa/atendimento em si).
+router.delete("/chat/conversations/:id", requireAdminOrSupervisor, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);

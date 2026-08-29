@@ -13,7 +13,7 @@ import {
   Pin, PinOff, Reply, StickyNote, Star, StarOff, ChevronLeft, ChevronRight,
   MapPin, ShoppingBag, CreditCard, BarChart3, Ban, UserPlus, ExternalLink,
   FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Download, Maximize2, Pencil,
-  MoreVertical,
+  MoreVertical, RotateCcw,
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -2304,6 +2304,20 @@ export default function ChatCenter({
     setFinalizeSaleDesc("");
   };
 
+  // ── Resolvida → Ativos/Pendentes (reabrir/reiniciar o atendimento) ──
+  // Se ainda tem vendedor responsável, volta pra "Ativos" com ele (continua
+  // de onde parou); sem responsável (ex.: conversa arquivada antiga), volta
+  // pra fila em "Pendentes". isArchived: false garante que sai de fato da
+  // categoria "Resolvidas" mesmo que tenha sido arquivada por outro caminho.
+  const handleReopenConv = async (id: number, assigneeId: number | null | undefined) => {
+    const status = assigneeId != null ? "open" : "pending";
+    try {
+      const updated = await api.chat.updateConversation(id, { status, isArchived: false });
+      setConvs((prev) => prev.map((c) => c.id === id ? { ...c, ...updated, status, isArchived: false } : c));
+      toast({ title: "Atendimento reaberto" });
+    } catch { toast({ title: "Erro ao reabrir atendimento", variant: "destructive" }); }
+  };
+
   const submitFinalize = async () => {
     if (finalizeTarget == null) return;
     const id = finalizeTarget;
@@ -3248,7 +3262,7 @@ export default function ChatCenter({
                       {crmLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <IdCard className="w-3.5 h-3.5 text-muted-foreground" />}
                       Abrir ficha do cliente no CRM
                     </button>
-                    {user?.role === "admin" && (
+                    {(user?.role === "admin" || user?.role === "supervisor") && (
                       <button
                         onClick={() => { handleDeleteConv(activeConv.id, activeConv.name); setShowMobileMore(false); }}
                         data-testid="button-delete-conv-mobile"
@@ -3271,8 +3285,8 @@ export default function ChatCenter({
               >
                 {activeConv.pinned ? <Star className="w-3.5 h-3.5 fill-amber-500" /> : <StarOff className="w-3.5 h-3.5" />}
               </button>
-              {/* Excluir atendimento — só admin, em qualquer categoria/status. No celular mora no menu "⋮". */}
-              {user?.role === "admin" && (
+              {/* Excluir atendimento — admin ou supervisor, em qualquer categoria/status. No celular mora no menu "⋮". */}
+              {(user?.role === "admin" || user?.role === "supervisor") && (
                 <button
                   onClick={() => handleDeleteConv(activeConv.id, activeConv.name)}
                   data-testid="button-delete-conv"
@@ -3316,6 +3330,21 @@ export default function ChatCenter({
                 >
                   <CheckCheck className="w-3.5 h-3.5" />
                   <span className="hidden lg:inline">Finalizar</span>
+                </button>
+              )}
+              {/* Reabrir atendimento — só na aba Resolvidas (já é admin/supervisor
+                  só por estarem vendo essa aba). Volta com o mesmo vendedor pra
+                  Ativos, ou pra fila em Pendentes se não tiver mais responsável. */}
+              {activeCategory === "resolvidas" && (user?.role === "admin" || user?.role === "supervisor") && (
+                <button
+                  onClick={() => handleReopenConv(activeConv.id, activeConv.assigneeId)}
+                  data-testid="button-reopen-conv"
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-white text-xs font-semibold transition hover:opacity-90"
+                  style={{ backgroundColor: "#16a34a" }}
+                  title="Reabrir atendimento"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span className="hidden lg:inline">Reabrir</span>
                 </button>
               )}
               {/* Status quick-set */}
