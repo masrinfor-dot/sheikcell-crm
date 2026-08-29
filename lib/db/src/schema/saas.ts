@@ -1,6 +1,7 @@
-import { pgTable, serial, text, integer, boolean, timestamp, date, uniqueIndex, index } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, boolean, timestamp, date, jsonb, uniqueIndex, index } from "drizzle-orm/pg-core";
 import { tenantsTable } from "./tenants";
 import { usersTable } from "./users";
+import { plansTable, type PlanLimits } from "./plans";
 
 // Tabelas do "negócio SaaS" do dono do sistema (superadmin). Nada aqui é
 // visível para as lojas — só o superadmin acessa via rotas /superadmin/*.
@@ -17,6 +18,18 @@ export const saasContractsTable = pgTable(
     startDate: date("start_date"),
     renewalDate: date("renewal_date"),
     notes: text("notes"),
+    // Plano de limites (Fase 3 — Planos & Limites). Null = loja ainda sem
+    // plano de limites atribuído (nenhum bloqueio se aplica, tudo ilimitado).
+    planId: integer("plan_id").references(() => plansTable.id),
+    // false (padrão) = usa os limites do plano acima tal como cadastrado.
+    // true = ignora o plano nesse(s) recurso(s) e usa customLimits — a
+    // negociação combinada com esse cliente específico, sem afetar o plano
+    // nem as demais lojas que usam o mesmo plano.
+    usesCustomLimits: boolean("uses_custom_limits").notNull().default(false),
+    // Só chaves customizadas ficam aqui (parcial) — o que não está presente
+    // cai de volta no valor do plano. Só tem efeito quando usesCustomLimits
+    // é true.
+    customLimits: jsonb("custom_limits").$type<Partial<PlanLimits>>(),
     isActive: boolean("is_active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

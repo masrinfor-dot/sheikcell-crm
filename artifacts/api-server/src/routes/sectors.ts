@@ -2,6 +2,7 @@ import { Router, type IRouter } from "express";
 import { db, sectorsTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
+import { assertWithinLimit } from "../lib/planLimits";
 
 const router: IRouter = Router();
 
@@ -35,6 +36,9 @@ router.post("/sectors", requireAdmin, async (req, res): Promise<void> => {
     res.status(400).json({ error: "Nome é obrigatório" });
     return;
   }
+  // Limite do plano (Fase 3 — Planos & Limites): teto de setores.
+  const limitCheck = await assertWithinLimit(tenantId, "maxSectors");
+  if (!limitCheck.ok) { res.status(400).json({ error: limitCheck.error }); return; }
   const [sector] = await db
     .insert(sectorsTable)
     .values({ tenantId, name, description, icon: icon ?? "smartphone", color: color ?? "#1a2e6e" })

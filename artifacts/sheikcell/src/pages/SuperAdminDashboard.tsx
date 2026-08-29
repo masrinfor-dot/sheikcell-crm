@@ -15,9 +15,14 @@ import {
   type AttentionItem,
   type SuperadminAuditEntry,
   type OptionalModule,
+  type Plan,
+  type LimitField,
+  type PlanUsage,
   OPTIONAL_MODULES,
   MODULE_LABELS,
   MODULE_PACKAGES,
+  LIMIT_FIELDS,
+  LIMIT_LABELS,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -44,6 +49,7 @@ import {
   CheckCircle2, DollarSign, FileText, Wrench, Pencil, AlertTriangle, Trash2,
   Bug, HelpCircle, Sparkles, Clock, Send, LogIn, LayoutGrid, UserCog,
   LayoutDashboard, Search, MoreVertical, WifiOff, HardHat, ArrowRight, History,
+  Gauge,
 } from "lucide-react";
 
 // Compara duas listas de módulos ignorando ordem (usado pra destacar o botão
@@ -196,11 +202,12 @@ function attentionItemLabel(item: AttentionItem) {
   }
 }
 
-type Tab = "visaogeral" | "lojistas" | "financeiro" | "contratos" | "suporte" | "auditoria";
+type Tab = "visaogeral" | "lojistas" | "planos" | "financeiro" | "contratos" | "suporte" | "auditoria";
 
 const TABS: { id: Tab; label: string; icon: typeof Building2 }[] = [
   { id: "visaogeral", label: "Visão Geral", icon: LayoutDashboard },
   { id: "lojistas", label: "Lojistas", icon: Building2 },
+  { id: "planos", label: "Planos & Limites", icon: Gauge },
   { id: "financeiro", label: "Financeiro", icon: DollarSign },
   { id: "contratos", label: "Contratos", icon: FileText },
   { id: "suporte", label: "Suporte", icon: Wrench },
@@ -260,6 +267,7 @@ export default function SuperAdminDashboard() {
   const [contracts, setContracts] = useState<SaasContract[]>([]);
   const [tickets, setTickets] = useState<SaasTicket[]>([]);
   const [auditEntries, setAuditEntries] = useState<SuperadminAuditEntry[]>([]);
+  const [plans, setPlans] = useState<Plan[]>([]);
   const [template, setTemplate] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -308,6 +316,69 @@ export default function SuperAdminDashboard() {
   const [contactForm, setContactForm] = useState({ contactName: "", contactPhone: "", contactEmail: "" });
   const [modulesFor, setModulesFor] = useState<TenantSummary | null>(null);
   const [modulesForm, setModulesForm] = useState<OptionalModule[]>([]);
+
+  // Catálogo de planos (Fase 3 — Planos & Limites): CRUD dos modelos de
+  // plano (Start/Pro/Premium/...). Campo vazio = ilimitado nesse recurso.
+  const [planFor, setPlanFor] = useState<Plan | "new" | null>(null);
+  const [planForm, setPlanForm] = useState<{ name: string; isActive: boolean } & Record<LimitField, string>>(
+    { name: "", isActive: true, ...(Object.fromEntries(LIMIT_FIELDS.map((f) => [f, ""])) as Record<LimitField, string>) },
+  );
+  const openNewPlan = () => {
+    setPlanFor("new");
+    setPlanForm({ name: "", isActive: true, ...(Object.fromEntries(LIMIT_FIELDS.map((f) => [f, ""])) as Record<LimitField, string>) });
+  };
+  const openEditPlan = (p: Plan) => {
+    setPlanFor(p);
+    setPlanForm({
+      name: p.name, isActive: p.isActive,
+      ...(Object.fromEntries(LIMIT_FIELDS.map((f) => [f, p[f] == null ? "" : String(p[f])])) as Record<LimitField, string>),
+    });
+  };
+  const savePlan = () => {
+    const body: { name: string; isActive: boolean } & Partial<Record<LimitField, number | null>> = {
+      name: planForm.name.trim(), isActive: planForm.isActive,
+    };
+    for (const f of LIMIT_FIELDS) body[f] = planForm[f].trim() === "" ? null : Number(planForm[f]);
+    const isNew = planFor === "new";
+    void run(
+      () => (isNew ? api.superadmin.createPlan(body) : api.superadmin.updatePlan((planFor as Plan).id, body)),
+      isNew ? "Plano criado" : "Plano atualizado",
+      () => setPlanFor(null),
+    );
+  };
+
+  // Plano & Limites de UMA loja: escolher o plano dela e, se precisar,
+  // personalizar os limites só pra ela (negociação diferente do padrão).
+  const [limitsFor, setLimitsFor] = useState<TenantSummary | null>(null);
+  const [limitsForm, setLimitsForm] = useState<{ planId: string; usesCustomLimits: boolean } & Record<LimitField, string>>(
+    { planId: "", usesCustomLimits: false, ...(Object.fromEntries(LIMIT_FIELDS.map((f) => [f, ""])) as Record<LimitField, string>) },
+  );
+  const openLimits = (t: TenantSummary) => {
+    setLimitsFor(t);
+    const usage = t.planUsage;
+    setLimitsForm({
+      planId: t.contract?.planId != null ? String(t.contract.planId) : "",
+      usesCustomLimits: usage?.isCustom ?? false,
+      ...(Object.fromEntries(LIMIT_FIELDS.map((f) => {
+        const item = usage?.items.find((i) => i.field === f);
+        return [f, item?.limit == null ? "" : String(item.limit)];
+      })) as Record<LimitField, string>),
+    });
+  };
+  const saveLimits = () => {
+    if (!limitsFor) return;
+    const customLimits: Partial<Record<LimitField, number | null>> = {};
+    for (const f of LIMIT_FIELDS) customLimits[f] = limitsForm[f].trim() === "" ? null : Number(limitsForm[f]);
+    void run(
+      () => api.superadmin.updateTenantPlan(limitsFor.id, {
+        planId: limitsForm.planId ? Number(limitsForm.planId) : null,
+        usesCustomLimits: limitsForm.usesCustomLimits,
+        customLimits: limitsForm.usesCustomLimits ? customLimits : undefined,
+      }),
+      "Plano e limites atualizados",
+      () => setLimitsFor(null),
+    );
+  };
   const [contractForm, setContractForm] = useState({ plan: "Mensal", monthlyValue: "", startDate: "", renewalDate: "", notes: "" });
   const [invoiceForm, setInvoiceForm] = useState({ tenantId: "", description: "Mensalidade", amount: "", dueDate: "" });
   const [ticketForm, setTicketForm] = useState({ tenantId: "", title: "", description: "" });
@@ -324,6 +395,7 @@ export default function SuperAdminDashboard() {
       api.superadmin.listContracts().then((r) => setContracts(r.contracts)),
       api.superadmin.getContractTemplate().then((r) => setTemplate(r.template)),
       api.superadmin.auditLog().then((r) => setAuditEntries(r.entries)),
+      api.superadmin.listPlans().then((r) => setPlans(r.plans)),
     ])
       .catch(fail("Erro ao carregar dados"))
       .finally(() => setLoading(false));
@@ -715,6 +787,9 @@ export default function SuperAdminDashboard() {
                                     <DropdownMenuItem onClick={() => { setModulesFor(t); setModulesForm([...t.enabledModules]); }} data-testid={`button-modules-${t.id}`}>
                                       <LayoutGrid className="w-4 h-4 mr-2" /> Módulos
                                     </DropdownMenuItem>
+                                    <DropdownMenuItem onClick={() => openLimits(t)} data-testid={`button-limits-${t.id}`}>
+                                      <Gauge className="w-4 h-4 mr-2" /> Plano & Limites
+                                    </DropdownMenuItem>
                                     <DropdownMenuItem onClick={() => { setAdminFor(t); setAdminForm({ name: "", email: t.admins[0]?.email ?? "", password: "" }); }} data-testid={`button-admin-${t.id}`}>
                                       <KeyRound className="w-4 h-4 mr-2" /> Admin
                                     </DropdownMenuItem>
@@ -754,6 +829,53 @@ export default function SuperAdminDashboard() {
                       </TableBody>
                     </Table>
                   </Card>
+                )}
+              </>
+            )}
+
+            {/* ------------------------------------------ PLANOS & LIMITES */}
+            {tab === "planos" && (
+              <>
+                <div className="flex justify-between items-center gap-2 flex-wrap">
+                  <p className="text-sm text-muted-foreground max-w-2xl">
+                    Modelos de plano (Start, Pro, Premium...) com um teto por recurso. Cada loja usa os limites
+                    do plano contratado, ou você personaliza só pra ela em "Plano & Limites" na aba Lojistas —
+                    sem afetar as demais lojas do mesmo plano.
+                  </p>
+                  <Button size="sm" onClick={openNewPlan} data-testid="button-create-plan">
+                    <Plus className="w-4 h-4 mr-1" /> Novo plano
+                  </Button>
+                </div>
+                {plans.length === 0 ? (
+                  <p className="text-muted-foreground text-sm">Nenhum plano cadastrado ainda.</p>
+                ) : (
+                  <div className="grid md:grid-cols-2 gap-3">
+                    {plans.map((p) => (
+                      <Card key={p.id} data-testid={`card-plan-${p.id}`} className={p.isActive ? "" : "opacity-60"}>
+                        <CardHeader className="pb-2">
+                          <CardTitle className="text-base flex items-center justify-between gap-2">
+                            <span className="flex items-center gap-2">
+                              {p.name}
+                              {!p.isActive && <Badge variant="outline" className="text-[10px]">Arquivado</Badge>}
+                            </span>
+                            <Button size="sm" variant="ghost" onClick={() => openEditPlan(p)} data-testid={`button-edit-plan-${p.id}`}>
+                              <Pencil className="w-4 h-4" />
+                            </Button>
+                          </CardTitle>
+                        </CardHeader>
+                        <CardContent>
+                          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+                            {LIMIT_FIELDS.map((f) => (
+                              <div key={f} className="flex justify-between gap-2 text-muted-foreground">
+                                <span>{LIMIT_LABELS[f]}</span>
+                                <span className="font-medium text-foreground">{p[f] == null ? "Ilimitado" : p[f]}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </CardContent>
+                      </Card>
+                    ))}
+                  </div>
                 )}
               </>
             )}
@@ -1250,6 +1372,110 @@ export default function SuperAdminDashboard() {
                 enabledModules: modulesForm,
               }), "Módulos atualizados", () => setModulesFor(null))}>
               Salvar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Plano & Limites de UMA loja (Fase 3) */}
+      <Dialog open={!!limitsFor} onOpenChange={(o) => { if (!o) setLimitsFor(null); }}>
+        <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
+          <DialogHeader><DialogTitle>Plano & Limites · {limitsFor?.name}</DialogTitle></DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label>Plano</Label>
+              <Select value={limitsForm.planId || "none"} onValueChange={(v) => setLimitsForm({ ...limitsForm, planId: v === "none" ? "" : v })}>
+                <SelectTrigger data-testid="select-tenant-plan"><SelectValue placeholder="Sem plano (tudo ilimitado)" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">Sem plano (tudo ilimitado)</SelectItem>
+                  {plans.filter((p) => p.isActive).map((p) => <SelectItem key={p.id} value={String(p.id)}>{p.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={limitsForm.usesCustomLimits}
+                onChange={(e) => setLimitsForm({ ...limitsForm, usesCustomLimits: e.target.checked })}
+                data-testid="checkbox-custom-limits" />
+              Personalizar limites pra esta loja (negociação diferente do padrão do plano)
+            </label>
+
+            {limitsForm.usesCustomLimits && (
+              <div className="grid grid-cols-2 gap-2 border rounded-lg p-3 bg-muted/20">
+                {LIMIT_FIELDS.map((f) => (
+                  <div key={f}>
+                    <Label className="text-xs">{LIMIT_LABELS[f]}</Label>
+                    <Input type="number" min={0} placeholder="Ilimitado" value={limitsForm[f]}
+                      onChange={(e) => setLimitsForm({ ...limitsForm, [f]: e.target.value })}
+                      data-testid={`input-custom-limit-${f}`} />
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {limitsFor?.planUsage && (
+              <div className="border-t pt-3 space-y-1.5">
+                <Label className="text-xs text-muted-foreground">Uso atual</Label>
+                {limitsFor.planUsage.items.map((it) => {
+                  const pct = it.limit == null ? 0 : Math.min(100, (it.used / Math.max(it.limit, 1)) * 100);
+                  const near = it.limit != null && it.used >= it.limit * 0.8;
+                  return (
+                    <div key={it.field} className="text-xs">
+                      <div className="flex justify-between">
+                        <span className={near ? "text-amber-600 font-medium" : "text-muted-foreground"}>{it.label}</span>
+                        <span className={near ? "text-amber-600 font-medium" : ""}>{it.used} de {it.limit ?? "∞"}{!it.enforced ? " (não bloqueado ainda)" : ""}</span>
+                      </div>
+                      {it.limit != null && (
+                        <div className="h-1.5 rounded-full bg-muted mt-0.5 overflow-hidden">
+                          <div className={`h-full ${it.used >= it.limit ? "bg-red-500" : near ? "bg-amber-500" : "bg-primary"}`} style={{ width: `${pct}%` }} />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setLimitsFor(null)}>Cancelar</Button>
+            <Button disabled={busy} data-testid="button-save-limits" onClick={saveLimits}>Salvar</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Criar/editar plano do catálogo (Fase 3) */}
+      <Dialog open={!!planFor} onOpenChange={(o) => { if (!o) setPlanFor(null); }}>
+        <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
+          <DialogHeader><DialogTitle>{planFor === "new" ? "Novo plano" : `Editar plano · ${(planFor as Plan | null)?.name ?? ""}`}</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <Label>Nome do plano</Label>
+              <Input value={planForm.name} onChange={(e) => setPlanForm({ ...planForm, name: e.target.value })} placeholder="Ex.: Pro" data-testid="input-plan-name" />
+            </div>
+            <p className="text-xs text-muted-foreground">Deixe um campo em branco para "Ilimitado" nesse recurso.</p>
+            <div className="grid grid-cols-2 gap-2">
+              {LIMIT_FIELDS.map((f) => (
+                <div key={f}>
+                  <Label className="text-xs">{LIMIT_LABELS[f]}</Label>
+                  <Input type="number" min={0} placeholder="Ilimitado" value={planForm[f]}
+                    onChange={(e) => setPlanForm({ ...planForm, [f]: e.target.value })}
+                    data-testid={`input-plan-${f}`} />
+                </div>
+              ))}
+            </div>
+            {planFor !== "new" && (
+              <label className="flex items-center gap-2 text-sm pt-2 border-t">
+                <input type="checkbox" checked={planForm.isActive}
+                  onChange={(e) => setPlanForm({ ...planForm, isActive: e.target.checked })}
+                  data-testid="checkbox-plan-active" />
+                Plano ativo (aparece como opção pra novas lojas)
+              </label>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPlanFor(null)}>Cancelar</Button>
+            <Button disabled={busy || !planForm.name.trim()} data-testid="button-save-plan" onClick={savePlan}>
+              {planFor === "new" ? "Criar plano" : "Salvar"}
             </Button>
           </DialogFooter>
         </DialogContent>

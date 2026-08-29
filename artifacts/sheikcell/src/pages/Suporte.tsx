@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { api, type SaasTicket, type TicketMessage, type TicketCategory, type TicketPriority } from "@/lib/api";
+import { api, type SaasTicket, type TicketMessage, type TicketCategory, type TicketPriority, type PlanUsage } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
-import { LifeBuoy, Plus, X, ChevronLeft, Send, Paperclip, Bug, HelpCircle, Sparkles } from "lucide-react";
+import { LifeBuoy, Plus, X, ChevronLeft, Send, Paperclip, Bug, HelpCircle, Sparkles, Gauge } from "lucide-react";
 
 // Suporte técnico: a loja abre chamados (bug, dúvida, melhoria) e conversa
 // com quem está atendendo (superadmin/técnico) numa timeline própria — não
@@ -57,6 +57,13 @@ export default function Suporte() {
     api.tickets.list().then((r) => setTickets(r.tickets)).catch(() => setTickets([]));
   }, []);
   useEffect(loadTickets, [loadTickets]);
+
+  // Uso do plano (Fase 3 — Planos & Limites): mostra pra loja quanto já usou
+  // de cada recurso — o mesmo dado que o backend usa pra bloquear a criação
+  // de mais admin/supervisor/atendente/WhatsApp/filial/setor. Se der erro
+  // (ex.: usuário não é admin), simplesmente não mostra o card.
+  const [planUsage, setPlanUsage] = useState<PlanUsage | null>(null);
+  useEffect(() => { api.admin.planUsage().then(setPlanUsage).catch(() => setPlanUsage(null)); }, []);
 
   const loadThread = useCallback(() => {
     if (activeId == null) return;
@@ -192,6 +199,37 @@ export default function Suporte() {
           <Plus className="w-4 h-4" /> Novo chamado
         </button>
       </div>
+
+      {planUsage && (
+        <div className="shk-card p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Gauge className="w-4 h-4 text-primary" />
+            <h3 className="font-semibold text-sm">Meu plano{planUsage.planName ? ` · ${planUsage.planName}` : ""}</h3>
+          </div>
+          <div className="grid sm:grid-cols-2 gap-x-6 gap-y-2">
+            {planUsage.items.filter((it) => it.limit != null || it.used > 0).map((it) => {
+              const pct = it.limit == null ? 0 : Math.min(100, (it.used / Math.max(it.limit, 1)) * 100);
+              const near = it.limit != null && it.used >= it.limit * 0.8;
+              return (
+                <div key={it.field} className="text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">{it.label}</span>
+                    <span className={near ? "text-amber-600 font-semibold" : "text-foreground"}>{it.used} de {it.limit ?? "∞"}</span>
+                  </div>
+                  {it.limit != null && (
+                    <div className="h-1.5 rounded-full bg-secondary mt-0.5 overflow-hidden">
+                      <div className={`h-full ${it.used >= it.limit ? "bg-red-500" : near ? "bg-amber-500" : "bg-primary"}`} style={{ width: `${pct}%` }} />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {planUsage.items.some((it) => it.limit != null && it.used >= it.limit * 0.8) && (
+            <p className="text-[11px] text-amber-600 mt-2">Algum limite do seu plano está quase no teto — abra um chamado abaixo pra falar sobre aumentar.</p>
+          )}
+        </div>
+      )}
 
       {!tickets ? (
         <div className="text-sm text-muted-foreground py-12 text-center">Carregando...</div>

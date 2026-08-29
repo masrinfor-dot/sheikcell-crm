@@ -8,6 +8,7 @@ import { requireModuleAccess, sanitizeModuleAccess, type ModuleAccessMap, type U
 import { getPresence } from "../lib/sseEmitter";
 import { isValidStoreName } from "./stores";
 import { syncCrmAttendant } from "../lib/crmSync";
+import { assertWithinLimit, getLimitsAndUsage, type LimitField } from "../lib/planLimits";
 
 const router: IRouter = Router();
 
@@ -396,6 +397,15 @@ async function resolveStoreId(name: string | null, tenantId: number): Promise<nu
   return store?.id ?? null;
 }
 
+// Uso do plano da própria loja (Fase 3 — Planos & Limites): mostra pro
+// admin quanto já usou de cada recurso, mesmo dado que o backend usa pra
+// bloquear (ver planLimits.ts) — dá pra avisar antes de bater no limite.
+router.get("/admin/plan-usage", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const usage = await getLimitsAndUsage(tenantId);
+  res.json(usage);
+});
+
 router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { name, email, password, role, sectorId, storeName, extension, adminAccess, accessHours, allowedSessionKeys, moduleAccess } = req.body as {
@@ -424,6 +434,17 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
     res.status(400).json({ error: "Função inválida" });
     return;
   }
+
+  // Limite do plano (Fase 3 — Planos & Limites): checa tanto o teto do
+  // cargo específico (admin/supervisor/atendente) quanto o de usuários
+  // totais da loja. Bloqueio real no backend, não só no botão da tela.
+  const ROLE_LIMIT_FIELD: Record<string, LimitField> = {
+    admin: "maxAdmins", supervisor: "maxSupervisors", vendedor: "maxAttendants",
+  };
+  const roleLimitCheck = await assertWithinLimit(tenantId, ROLE_LIMIT_FIELD[resolvedRole]);
+  if (!roleLimitCheck.ok) { res.status(400).json({ error: roleLimitCheck.error }); return; }
+  const totalLimitCheck = await assertWithinLimit(tenantId, "maxUsersTotal");
+  if (!totalLimitCheck.ok) { res.status(400).json({ error: totalLimitCheck.error }); return; }
 
   // Vendedores must be assigned to a real sector (da própria loja)
   if (resolvedRole === "vendedor" && !sectorId) {

@@ -2,6 +2,7 @@ import { Router, type IRouter } from "express";
 import { db, storesTable } from "@workspace/db";
 import { eq, and, asc } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
+import { assertWithinLimit } from "../lib/planLimits";
 
 const router: IRouter = Router();
 
@@ -21,6 +22,9 @@ router.post("/stores", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const name = typeof req.body?.name === "string" ? req.body.name.trim().slice(0, 120) : "";
   if (!name) { res.status(400).json({ error: "Informe o nome da loja" }); return; }
+  // Limite do plano (Fase 3 — Planos & Limites): teto de lojas/filiais.
+  const limitCheck = await assertWithinLimit(tenantId, "maxBranches");
+  if (!limitCheck.ok) { res.status(400).json({ error: limitCheck.error }); return; }
   try {
     const [store] = await db.insert(storesTable).values({ tenantId, name }).returning();
     res.status(201).json(store);

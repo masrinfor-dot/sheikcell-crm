@@ -1,7 +1,8 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { db, tenantsTable, usersTable, sectorsTable, conversationsTable, whatsappSessionsTable, saasContractsTable, saasInvoicesTable, saasTicketsTable, impersonationLogTable, superadminAuditLogTable, OPTIONAL_MODULES, type OptionalModule } from "@workspace/db";
+import { db, tenantsTable, usersTable, sectorsTable, conversationsTable, whatsappSessionsTable, saasContractsTable, saasInvoicesTable, saasTicketsTable, impersonationLogTable, superadminAuditLogTable, plansTable, OPTIONAL_MODULES, LIMIT_FIELDS, type OptionalModule, type LimitField, type PlanLimits } from "@workspace/db";
 import { eq, and, count, desc, lt, inArray, sql } from "drizzle-orm";
+import { getLimitsAndUsage } from "../lib/planLimits";
 
 // Chamados que ainda pedem atenção (mesmo grupo usado na aba Suporte do
 // painel) — usado aqui só pra contar quantos uma loja tem em aberto.
@@ -72,9 +73,10 @@ router.get("/superadmin/tenants", async (_req, res): Promise<void> => {
         .where(and(eq(usersTable.tenantId, t.id), eq(usersTable.role, "admin")));
       const today = new Date().toISOString().slice(0, 10);
       const [contract] = await db.select().from(saasContractsTable).where(eq(saasContractsTable.tenantId, t.id));
-      const [[overdue]] = await Promise.all([
+      const [[overdue], planUsage] = await Promise.all([
         db.select({ n: count() }).from(saasInvoicesTable)
           .where(and(eq(saasInvoicesTable.tenantId, t.id), eq(saasInvoicesTable.status, "pendente"), lt(saasInvoicesTable.dueDate, today))),
+        getLimitsAndUsage(t.id),
       ]);
       const overdueCount = Number(overdue?.n ?? 0);
       // Situação comercial: cancelado (manual) > em implantação (manual) >
@@ -87,6 +89,7 @@ router.get("/superadmin/tenants", async (_req, res): Promise<void> => {
         saasStatus,
         overdueCount,
         contract: contract ?? null,
+        planUsage,
         userCount: Number(u?.n ?? 0),
         conversationCount: Number(c?.n ?? 0),
         whatsappCount: Number(w?.n ?? 0),
@@ -251,6 +254,104 @@ router.patch("/superadmin/tenants/:id", async (req, res): Promise<void> => {
     });
   }
   res.json({ tenant });
+});
+
+// ─── Planos & Limites (Fase 3 do Painel do Sistema) ────────────────────────
+
+function sanitizeCustomLimits(v: unknown): Partial<PlanLimits> {
+  const out: Partial<PlanLimits> = {};
+  if (v == null || typeof v !== "object" || Array.isArray(v)) return out;
+  for (const field of LIMIT_FIELDS) {
+    const raw = (v as Record<string, unknown>)[field];
+    if (raw === null) { out[field] = null; continue; } // null = ilimitado, explícito
+    if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) out[field] = Math.floor(raw);
+  }
+  return out;
+}
+
+// Catálogo de planos (Start/Pro/Premium/Personalizado...) — cada um com um
+// teto por recurso. "Personalizado" não é um plano de verdade aqui: é a
+// loja marcando usesCustomLimits=true no próprio contrato (ver rota
+// /superadmin/tenants/:id/plan abaixo).
+router.get("/superadmin/plans", async (_req, res): Promise<void> => {
+  const plans = await db.select().from(plansTable).orderBy(plansTable.name);
+  res.json({ plans });
+});
+
+router.post("/superadmin/plans", async (req, res): Promise<void> => {
+  const { name, ...rest } = req.body as { name?: string } & Partial<PlanLimits>;
+  if (!name?.trim()) { res.status(400).json({ error: "Informe o nome do plano" }); return; }
+  const limits = sanitizeCustomLimits(rest);
+  try {
+    const [plan] = await db.insert(plansTable).values({ name: name.trim(), ...limits }).returning();
+    await logAudit({
+      superadminUserId: req.session.userId!,
+      action: "criar_plano",
+      description: `Criou o plano "${plan.name}"`,
+    });
+    res.status(201).json({ plan });
+  } catch (err) {
+    if ((err as { code?: string })?.code === "23505") { res.status(409).json({ error: "Já existe um plano com esse nome" }); return; }
+    req.log.error({ err }, "Falha ao criar plano");
+    res.status(500).json({ error: "Falha ao criar plano" });
+  }
+});
+
+router.patch("/superadmin/plans/:id", async (req, res): Promise<void> => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "Plano inválido" }); return; }
+  const { name, isActive, ...rest } = req.body as { name?: string; isActive?: boolean } & Partial<PlanLimits>;
+  const updates: Partial<typeof plansTable.$inferInsert> = { updatedAt: new Date() };
+  if (typeof name === "string" && name.trim()) updates.name = name.trim();
+  if (typeof isActive === "boolean") updates.isActive = isActive;
+  Object.assign(updates, sanitizeCustomLimits(rest));
+  const [plan] = await db.update(plansTable).set(updates).where(eq(plansTable.id, id)).returning();
+  if (!plan) { res.status(404).json({ error: "Plano não encontrado" }); return; }
+  await logAudit({
+    superadminUserId: req.session.userId!,
+    action: "atualizar_plano",
+    description: `Atualizou o plano "${plan.name}"`,
+    metadata: updates,
+  });
+  res.json({ plan });
+});
+
+// Vincula/personaliza o plano de UMA loja — não mexe no catálogo de planos
+// nem afeta nenhuma outra loja. usesCustomLimits=true junto com customLimits
+// é a "negociação diferente do padrão" (item pedido explicitamente pelo
+// cliente): cada chave customizada sobrepõe o valor do plano só pra essa
+// loja; o que não foi customizado continua caindo no valor do plano.
+router.patch("/superadmin/tenants/:id/plan", async (req, res): Promise<void> => {
+  const tenantId = Number(req.params.id);
+  if (!Number.isFinite(tenantId)) { res.status(400).json({ error: "Loja inválida" }); return; }
+  const { planId, usesCustomLimits, customLimits } = req.body as {
+    planId?: number | null; usesCustomLimits?: boolean; customLimits?: unknown;
+  };
+  const [tenant] = await db.select({ name: tenantsTable.name }).from(tenantsTable).where(eq(tenantsTable.id, tenantId));
+  if (!tenant) { res.status(404).json({ error: "Loja não encontrada" }); return; }
+  if (planId != null) {
+    const [plan] = await db.select({ id: plansTable.id }).from(plansTable).where(eq(plansTable.id, planId));
+    if (!plan) { res.status(400).json({ error: "Plano inválido" }); return; }
+  }
+  const updates: Partial<typeof saasContractsTable.$inferInsert> = { updatedAt: new Date() };
+  if (planId !== undefined) updates.planId = planId;
+  if (typeof usesCustomLimits === "boolean") updates.usesCustomLimits = usesCustomLimits;
+  if (customLimits !== undefined) updates.customLimits = sanitizeCustomLimits(customLimits);
+
+  const [existing] = await db.select({ id: saasContractsTable.id }).from(saasContractsTable).where(eq(saasContractsTable.tenantId, tenantId));
+  if (existing) {
+    await db.update(saasContractsTable).set(updates).where(eq(saasContractsTable.tenantId, tenantId));
+  } else {
+    await db.insert(saasContractsTable).values({ tenantId, ...updates });
+  }
+  await logAudit({
+    superadminUserId: req.session.userId!, tenantId,
+    action: "alterar_plano",
+    description: `Na loja "${tenant.name}": alterou o plano/limites`,
+    metadata: { planId, usesCustomLimits, customLimits: updates.customLimits },
+  });
+  const usage = await getLimitsAndUsage(tenantId);
+  res.json({ ok: true, usage });
 });
 
 // Cria (ou reseta a senha de) um admin para a loja

@@ -9,6 +9,7 @@ import { createHmac } from "node:crypto";
 import { requireFeature, requireTenant } from "../middlewares/auth";
 import { db, whatsappSessionsTable, conversationsTable } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
+import { assertWithinLimit } from "../lib/planLimits";
 
 const router: IRouter = Router();
 
@@ -199,6 +200,9 @@ router.post("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): 
     res.status(400).json({ error: "Informe um nome para a conexão (ex.: Vendas, Suporte)" });
     return;
   }
+  // Limite do plano (Fase 3 — Planos & Limites): teto de WhatsApps conectados.
+  const limitCheck = await assertWithinLimit(tenantId, "maxWhatsapps");
+  if (!limitCheck.ok) { res.status(400).json({ error: limitCheck.error }); return; }
 
   // Generate a key from the name: "Vendas 2" → "vendas-2"
   let slug = name

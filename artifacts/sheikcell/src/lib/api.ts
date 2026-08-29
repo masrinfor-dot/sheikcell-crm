@@ -1263,10 +1263,45 @@ export type SaasContract = {
   startDate: string | null;
   renewalDate: string | null;
   notes: string | null;
+  // Plano de limites (Fase 3 — Planos & Limites), separado do campo "plan"
+  // acima (que é só o texto livre de cobrança, ex.: "Mensal").
+  planId: number | null;
+  usesCustomLimits: boolean;
+  customLimits: Partial<Record<LimitField, number | null>> | null;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
   tenantName?: string;
+};
+
+// Planos & Limites (Fase 3 do Painel do Sistema) — teto configurável por
+// recurso, cadastrado pelo superadmin (Start/Pro/Premium/...). null num
+// campo = ilimitado nesse recurso.
+export const LIMIT_FIELDS = [
+  "maxAdmins", "maxSupervisors", "maxAttendants", "maxUsersTotal",
+  "maxWhatsapps", "maxBranches", "maxSectors",
+  "maxStorageGb", "maxConversationsMonthly", "maxAiBots",
+] as const;
+export type LimitField = typeof LIMIT_FIELDS[number];
+export const LIMIT_LABELS: Record<LimitField, string> = {
+  maxAdmins: "Administradores",
+  maxSupervisors: "Supervisores",
+  maxAttendants: "Atendentes",
+  maxUsersTotal: "Usuários totais",
+  maxWhatsapps: "WhatsApps conectados",
+  maxBranches: "Lojas/filiais",
+  maxSectors: "Setores",
+  maxStorageGb: "Armazenamento (GB)",
+  maxConversationsMonthly: "Conversas mensais",
+  maxAiBots: "Robôs/IA",
+};
+
+export type Plan = { id: number; name: string; isActive: boolean; createdAt: string; updatedAt: string } & Record<LimitField, number | null>;
+
+export type PlanUsage = {
+  planName: string | null;
+  isCustom: boolean;
+  items: { field: LimitField; label: string; limit: number | null; used: number; enforced: boolean }[];
 };
 
 export type SaasInvoice = {
@@ -1346,6 +1381,7 @@ export type TenantSummary = {
   enabledModules: OptionalModule[];
   overdueCount: number;
   contract: SaasContract | null;
+  planUsage: PlanUsage;
   createdAt: string;
   userCount: number;
   conversationCount: number;
@@ -1391,6 +1427,14 @@ export const api = {
       req<{ tenant: TenantSummary }>(`/superadmin/tenants/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     upsertTenantAdmin: (id: number, data: { name?: string; email: string; password: string }) =>
       req<{ admin: { id: number; name: string; email: string } | null }>(`/superadmin/tenants/${id}/admin`, { method: "POST", body: JSON.stringify(data) }),
+    // Planos & Limites (Fase 3): catálogo de planos + plano/limites de uma loja específica.
+    listPlans: () => req<{ plans: Plan[] }>("/superadmin/plans"),
+    createPlan: (data: { name: string; isActive?: boolean } & Partial<Record<LimitField, number | null>>) =>
+      req<{ plan: Plan }>("/superadmin/plans", { method: "POST", body: JSON.stringify(data) }),
+    updatePlan: (id: number, data: { name?: string; isActive?: boolean } & Partial<Record<LimitField, number | null>>) =>
+      req<{ plan: Plan }>(`/superadmin/plans/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    updateTenantPlan: (tenantId: number, data: { planId?: number | null; usesCustomLimits?: boolean; customLimits?: Partial<Record<LimitField, number | null>> }) =>
+      req<{ ok: boolean; usage: PlanUsage }>(`/superadmin/tenants/${tenantId}/plan`, { method: "PATCH", body: JSON.stringify(data) }),
     saasOverview: () => req<SaasOverview>("/superadmin/saas/overview"),
     saasAttention: () => req<SaasAttention>("/superadmin/saas/attention"),
     listContracts: () => req<{ contracts: SaasContract[] }>("/superadmin/saas/contracts"),
@@ -2182,6 +2226,9 @@ export const api = {
   admin: {
     summary: () => req<SectorSummary[]>("/admin/summary"),
     dashboardAttention: () => req<DashboardAttention>("/admin/dashboard-attention"),
+    // Uso do plano da própria loja (Fase 3 — Planos & Limites): mesmo dado
+    // que o backend usa pra bloquear, pra avisar a loja antes de bater no limite.
+    planUsage: () => req<PlanUsage>("/admin/plan-usage"),
     logs: (params?: { limit?: number; sectorId?: number; attendantId?: number; days?: number; outcome?: string; reason?: string; search?: string }) => {
       const qs = new URLSearchParams();
       if (params?.limit) qs.set("limit", String(params.limit));
