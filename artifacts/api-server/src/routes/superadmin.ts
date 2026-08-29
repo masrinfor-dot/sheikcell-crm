@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { db, tenantsTable, usersTable, sectorsTable, conversationsTable, whatsappSessionsTable, saasContractsTable, saasInvoicesTable, saasTicketsTable, impersonationLogTable, OPTIONAL_MODULES, type OptionalModule } from "@workspace/db";
+import { db, tenantsTable, usersTable, sectorsTable, conversationsTable, whatsappSessionsTable, saasContractsTable, saasInvoicesTable, saasTicketsTable, impersonationLogTable, superadminAuditLogTable, OPTIONAL_MODULES, type OptionalModule } from "@workspace/db";
 import { eq, and, count, desc, lt, inArray, sql } from "drizzle-orm";
 
 // Chamados que ainda pedem atenção (mesmo grupo usado na aba Suporte do
@@ -9,11 +9,43 @@ const OPEN_TICKET_STATUSES = ["aberto", "em_analise", "em_andamento"] as const;
 import { requireSuperadmin, invalidateTenantCache } from "../middlewares/auth";
 import { validateCpfCnpj } from "../lib/cpfCnpj";
 import { parseUserAgent } from "../lib/sessions";
+import { logger } from "../lib/logger";
 
 function sanitizeModules(v: unknown): OptionalModule[] {
   if (!Array.isArray(v)) return [];
   const valid = new Set<string>(OPTIONAL_MODULES);
   return v.filter((m): m is OptionalModule => typeof m === "string" && valid.has(m));
+}
+
+// Motivos fixos do "Entrar como" (item da Fase 2 do Painel do Sistema) —
+// "Outro" exige o texto livre em reasonDetail, virando o motivo final.
+const IMPERSONATE_REASONS = ["Suporte", "Configuração", "Treinamento", "Outro"] as const;
+
+// Auditoria global (Fase 2): grava toda ação relevante do superadmin, pra
+// depois listar em "Auditoria" no painel. Nunca deixa a ação principal
+// falhar por causa disso — auditoria é best-effort, um log perdido não pode
+// travar o superadmin de suspender/reativar uma loja de verdade.
+async function logAudit(opts: {
+  superadminUserId: number;
+  tenantId?: number | null;
+  action: string;
+  description: string;
+  reason?: string | null;
+  metadata?: Record<string, unknown>;
+}): Promise<void> {
+  try {
+    await db.insert(superadminAuditLogTable).values({
+      superadminUserId: opts.superadminUserId,
+      tenantId: opts.tenantId ?? null,
+      action: opts.action,
+      description: opts.description,
+      reason: opts.reason ?? null,
+      metadata: opts.metadata,
+    });
+  } catch (err) {
+    // best-effort — não propaga
+    logger.error({ err }, "Falha ao gravar auditoria do superadmin");
+  }
 }
 
 // Painel do superadmin (dono do sistema): cria/suspende lojas (tenants) e
@@ -130,6 +162,10 @@ router.post("/superadmin/tenants", async (req, res): Promise<void> => {
       }
       return { tenant, admin };
     });
+    await logAudit({
+      superadminUserId: req.session.userId!, tenantId: result.tenant.id,
+      action: "criar_loja", description: `Criou a loja "${result.tenant.name}"`,
+    });
     res.status(201).json(result);
   } catch (err) {
     req.log.error({ err }, "Falha ao criar loja");
@@ -190,6 +226,30 @@ router.patch("/superadmin/tenants/:id", async (req, res): Promise<void> => {
   });
   if (!tenant) { res.status(404).json({ error: "Loja não encontrada" }); return; }
   invalidateTenantCache();
+
+  // Auditoria: descreve cada tipo de mudança pedida nesta chamada (o mesmo
+  // PATCH acumula rename/suspender/cancelar contrato/módulos, então um
+  // registro só pode ter mais de uma frase).
+  const parts: string[] = [];
+  if (updates.name) parts.push(`renomeou pra "${updates.name}"`);
+  if (updates.saasStatus === "cancelado") parts.push("cancelou o contrato");
+  else if (updates.saasStatus === "em_implantacao") parts.push("marcou como em implantação");
+  else if (updates.saasStatus === "ativo") parts.push("marcou como ativa");
+  if (typeof updates.isActive === "boolean" && updates.saasStatus === undefined) {
+    parts.push(updates.isActive ? "reativou o acesso" : "suspendeu o acesso");
+  }
+  if (updates.enabledModules) parts.push("alterou os módulos habilitados");
+  if (updates.contactName !== undefined || updates.contactPhone !== undefined || updates.contactEmail !== undefined) {
+    parts.push("atualizou os dados de contato");
+  }
+  if (parts.length) {
+    await logAudit({
+      superadminUserId: req.session.userId!, tenantId: id,
+      action: "atualizar_loja",
+      description: `Na loja "${tenant.name}": ${parts.join("; ")}`,
+      metadata: updates,
+    });
+  }
   res.json({ tenant });
 });
 
@@ -213,6 +273,11 @@ router.post("/superadmin/tenants/:id/admin", async (req, res): Promise<void> => 
       return;
     }
     await db.update(usersTable).set({ passwordHash, mustChangePassword: true, isActive: true }).where(eq(usersTable.id, existing.id));
+    await logAudit({
+      superadminUserId: req.session.userId!, tenantId,
+      action: "resetar_senha_admin",
+      description: `Resetou a senha do admin ${existing.name} (loja "${tenant.name}")`,
+    });
     res.json({ admin: { id: existing.id, name: existing.name, email: existing.email }, reset: true });
     return;
   }
@@ -231,22 +296,47 @@ router.post("/superadmin/tenants/:id/admin", async (req, res): Promise<void> => 
     mustChangePassword: true,
     isActive: true,
   }).returning();
+  if (u) {
+    await logAudit({
+      superadminUserId: req.session.userId!, tenantId,
+      action: "criar_admin",
+      description: `Criou o admin ${u.name} (loja "${tenant.name}")`,
+    });
+  }
   res.status(201).json({ admin: u ? { id: u.id, name: u.name, email: u.email } : null });
 });
 
 // "Entrar como": o superadmin assume a sessão de um admin ativo da loja,
 // pra ver/usar o painel dela exatamente como ela vê. Guarda o próprio id
-// pra dar pra voltar (POST /auth/stop-impersonation) e registra no log.
+// pra dar pra voltar (POST /auth/stop-impersonation) e registra no log —
+// desde a Fase 2 do Painel do Sistema, com motivo obrigatório (item pedido
+// explicitamente pelo cliente).
 router.post("/superadmin/tenants/:tenantId/impersonate/:userId", async (req, res): Promise<void> => {
   const tenantId = Number(req.params.tenantId);
   const userId = Number(req.params.userId);
   if (!Number.isFinite(tenantId) || !Number.isFinite(userId)) { res.status(400).json({ error: "Loja ou usuário inválido" }); return; }
+  const { reason, reasonDetail } = req.body as { reason?: string; reasonDetail?: string };
+  if (!reason || !IMPERSONATE_REASONS.includes(reason as typeof IMPERSONATE_REASONS[number])) {
+    res.status(400).json({ error: "Informe o motivo de entrar como este admin" }); return;
+  }
+  const isOutro = reason === "Outro";
+  const detail = reasonDetail?.trim() || "";
+  if (isOutro && !detail) { res.status(400).json({ error: "Descreva o motivo" }); return; }
+  const finalReason = isOutro ? detail : reason;
+
   const [target] = await db.select().from(usersTable)
     .where(and(eq(usersTable.id, userId), eq(usersTable.tenantId, tenantId), eq(usersTable.role, "admin")));
   if (!target || !target.isActive) { res.status(404).json({ error: "Admin não encontrado ou inativo nesta loja" }); return; }
+  const [tenantRow] = await db.select({ name: tenantsTable.name }).from(tenantsTable).where(eq(tenantsTable.id, tenantId));
 
   const superadminId = req.session.userId!;
-  await db.insert(impersonationLogTable).values({ tenantId, superadminUserId: superadminId, targetUserId: target.id });
+  await db.insert(impersonationLogTable).values({ tenantId, superadminUserId: superadminId, targetUserId: target.id, reason: finalReason });
+  await logAudit({
+    superadminUserId: superadminId, tenantId,
+    action: "entrar_como",
+    description: `Entrou como ${target.name} (loja "${tenantRow?.name ?? tenantId}")`,
+    reason: finalReason,
+  });
 
   req.session.impersonatorId = superadminId;
   req.session.userId = target.id;
@@ -302,6 +392,33 @@ router.get("/superadmin/sessions", async (_req, res): Promise<void> => {
     };
   });
   res.json({ sessions });
+});
+
+// ─── Auditoria global do Painel do Sistema (Fase 2) ────────────────────────
+// Todo lance relevante feito pelo superadmin em qualquer loja: entrar como,
+// suspender/reativar, cancelar/reativar contrato, mudar módulos, criar
+// loja/admin. Mais recentes primeiro; limite alto porque ainda não temos
+// volume que justifique paginação de verdade.
+router.get("/superadmin/audit-log", async (req, res): Promise<void> => {
+  const tenantIdFilter = req.query.tenantId ? Number(req.query.tenantId) : undefined;
+  const base = db.select({
+    id: superadminAuditLogTable.id,
+    action: superadminAuditLogTable.action,
+    description: superadminAuditLogTable.description,
+    reason: superadminAuditLogTable.reason,
+    createdAt: superadminAuditLogTable.createdAt,
+    tenantId: superadminAuditLogTable.tenantId,
+    tenantName: tenantsTable.name,
+    superadminName: usersTable.name,
+  })
+    .from(superadminAuditLogTable)
+    .leftJoin(tenantsTable, eq(superadminAuditLogTable.tenantId, tenantsTable.id))
+    .leftJoin(usersTable, eq(superadminAuditLogTable.superadminUserId, usersTable.id));
+  const rows = await (tenantIdFilter && Number.isFinite(tenantIdFilter)
+    ? base.where(eq(superadminAuditLogTable.tenantId, tenantIdFilter))
+    : base
+  ).orderBy(desc(superadminAuditLogTable.createdAt)).limit(300);
+  res.json({ entries: rows });
 });
 
 export default router;

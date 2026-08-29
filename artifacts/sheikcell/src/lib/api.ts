@@ -1130,6 +1130,19 @@ export type AuditedSession = MySession & {
   tenantName: string | null;
 };
 
+// Auditoria global do Painel do Sistema (Fase 2) — uma linha por ação do
+// superadmin (entrar como, suspender/reativar loja, criar admin, etc.).
+export type SuperadminAuditEntry = {
+  id: number;
+  action: string;
+  description: string;
+  reason: string | null;
+  createdAt: string;
+  tenantId: number | null;
+  tenantName: string | null;
+  superadminName: string | null;
+};
+
 export type AppSettings = {
   alertUnansweredEnabled: boolean;
   alertUnansweredMinutes: number;
@@ -1366,9 +1379,10 @@ export const api = {
       cpfCnpj?: string; enabledModules?: OptionalModule[];
     }) =>
       req<{ tenant: TenantSummary }>("/superadmin/tenants", { method: "POST", body: JSON.stringify(data) }),
-    impersonate: (tenantId: number, userId: number) =>
-      req<{ ok: boolean }>(`/superadmin/tenants/${tenantId}/impersonate/${userId}`, { method: "POST" }),
+    impersonate: (tenantId: number, userId: number, reason: string, reasonDetail?: string) =>
+      req<{ ok: boolean }>(`/superadmin/tenants/${tenantId}/impersonate/${userId}`, { method: "POST", body: JSON.stringify({ reason, reasonDetail }) }),
     sessions: () => req<{ sessions: AuditedSession[] }>("/superadmin/sessions"),
+    auditLog: () => req<{ entries: SuperadminAuditEntry[] }>("/superadmin/audit-log"),
     updateTenant: (id: number, data: {
       name?: string; isActive?: boolean; saasStatus?: "ativo" | "cancelado" | "em_implantacao";
       contactName?: string | null; contactPhone?: string | null; contactEmail?: string | null;

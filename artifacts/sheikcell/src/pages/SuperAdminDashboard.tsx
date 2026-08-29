@@ -13,6 +13,7 @@ import {
   type SaasOverview,
   type SaasAttention,
   type AttentionItem,
+  type SuperadminAuditEntry,
   type OptionalModule,
   OPTIONAL_MODULES,
   MODULE_LABELS,
@@ -42,7 +43,7 @@ import {
   Building2, LogOut, Plus, KeyRound, Ban,
   CheckCircle2, DollarSign, FileText, Wrench, Pencil, AlertTriangle, Trash2,
   Bug, HelpCircle, Sparkles, Clock, Send, LogIn, LayoutGrid, UserCog,
-  LayoutDashboard, Search, MoreVertical, WifiOff, HardHat, ArrowRight,
+  LayoutDashboard, Search, MoreVertical, WifiOff, HardHat, ArrowRight, History,
 } from "lucide-react";
 
 // Compara duas listas de módulos ignorando ordem (usado pra destacar o botão
@@ -195,7 +196,7 @@ function attentionItemLabel(item: AttentionItem) {
   }
 }
 
-type Tab = "visaogeral" | "lojistas" | "financeiro" | "contratos" | "suporte" | "meucadastro";
+type Tab = "visaogeral" | "lojistas" | "financeiro" | "contratos" | "suporte" | "auditoria";
 
 const TABS: { id: Tab; label: string; icon: typeof Building2 }[] = [
   { id: "visaogeral", label: "Visão Geral", icon: LayoutDashboard },
@@ -203,8 +204,12 @@ const TABS: { id: Tab; label: string; icon: typeof Building2 }[] = [
   { id: "financeiro", label: "Financeiro", icon: DollarSign },
   { id: "contratos", label: "Contratos", icon: FileText },
   { id: "suporte", label: "Suporte", icon: Wrench },
-  { id: "meucadastro", label: "Meu Cadastro", icon: UserCog },
+  { id: "auditoria", label: "Auditoria", icon: History },
 ];
+
+// Motivos fixos do "Entrar como" (mesmos do backend) — "Outro" libera um
+// campo de texto livre que vira o motivo final gravado no log.
+const IMPERSONATE_REASONS = ["Suporte", "Configuração", "Treinamento", "Outro"] as const;
 
 // Situação da loja: rótulo curto + estilo do badge, usado na tabela de
 // Lojistas e na Visão Geral. "inadimplente" é sempre derivada (nunca
@@ -223,7 +228,9 @@ export default function SuperAdminDashboard() {
 
   // Meu Cadastro: edição do próprio nome/e-mail (PATCH /auth/me — nunca um
   // id de outra conta) + troca de senha (reaproveita o mesmo modal usado no
-  // resto do sistema).
+  // resto do sistema). Fase 2: saiu da barra de abas e virou um menu no
+  // canto (ver header), mais discreto pra uma ação que é rara.
+  const [showProfile, setShowProfile] = useState(false);
   const [profileForm, setProfileForm] = useState({ name: user?.name ?? "", email: user?.email ?? "" });
   const [savingProfile, setSavingProfile] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
@@ -252,6 +259,7 @@ export default function SuperAdminDashboard() {
   const [invoices, setInvoices] = useState<SaasInvoice[]>([]);
   const [contracts, setContracts] = useState<SaasContract[]>([]);
   const [tickets, setTickets] = useState<SaasTicket[]>([]);
+  const [auditEntries, setAuditEntries] = useState<SuperadminAuditEntry[]>([]);
   const [template, setTemplate] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -266,6 +274,13 @@ export default function SuperAdminDashboard() {
   // Diálogos
   const [createOpen, setCreateOpen] = useState(false);
   const [impersonateFor, setImpersonateFor] = useState<TenantSummary | null>(null);
+  // Fase 2: motivo obrigatório antes de "Entrar como" — mesmo diálogo serve
+  // pra escolher o admin (quando a loja tem mais de um) e pra informar o
+  // motivo (sempre).
+  const [impersonateAdminId, setImpersonateAdminId] = useState<number | null>(null);
+  const [impersonateReason, setImpersonateReason] = useState("");
+  const [impersonateReasonDetail, setImpersonateReasonDetail] = useState("");
+  const [impersonating, setImpersonating] = useState(false);
   const [adminFor, setAdminFor] = useState<TenantSummary | null>(null);
   const [contactFor, setContactFor] = useState<TenantSummary | null>(null);
   const [contractFor, setContractFor] = useState<TenantSummary | null>(null);
@@ -308,6 +323,7 @@ export default function SuperAdminDashboard() {
       api.superadmin.listInvoices().then((r) => setInvoices(r.invoices)),
       api.superadmin.listContracts().then((r) => setContracts(r.contracts)),
       api.superadmin.getContractTemplate().then((r) => setTemplate(r.template)),
+      api.superadmin.auditLog().then((r) => setAuditEntries(r.entries)),
     ])
       .catch(fail("Erro ao carregar dados"))
       .finally(() => setLoading(false));
@@ -418,22 +434,35 @@ export default function SuperAdminDashboard() {
     } finally { setBusy(false); }
   };
 
-  // "Entrar como": se só tem 1 admin ativo, entra direto; com mais de um,
-  // abre um seletor. A sessão já muda no backend — recarrega a página
-  // inteira pra o AuthProvider buscar a identidade nova do zero.
-  const doImpersonate = async (tenantId: number, userId: number) => {
-    try {
-      await api.superadmin.impersonate(tenantId, userId);
-      window.location.href = "/";
-    } catch (e) {
-      fail("Erro ao entrar como este admin")(e);
-    }
+  // "Entrar como": desde a Fase 2, sempre pede o motivo antes (item pedido
+  // explicitamente pelo cliente) — com mais de um admin ativo, o mesmo
+  // diálogo também pede qual admin. A sessão já muda no backend; recarrega
+  // a página inteira pra o AuthProvider buscar a identidade nova do zero.
+  const closeImpersonateDialog = () => {
+    setImpersonateFor(null);
+    setImpersonateAdminId(null);
+    setImpersonateReason("");
+    setImpersonateReasonDetail("");
   };
   const openImpersonate = (t: TenantSummary) => {
     const activeAdmins = t.admins.filter((a) => a.isActive);
     if (activeAdmins.length === 0) return;
-    if (activeAdmins.length === 1) { void doImpersonate(t.id, activeAdmins[0]!.id); return; }
     setImpersonateFor(t);
+    setImpersonateAdminId(activeAdmins.length === 1 ? activeAdmins[0]!.id : null);
+    setImpersonateReason("");
+    setImpersonateReasonDetail("");
+  };
+  const confirmImpersonate = async () => {
+    if (!impersonateFor || impersonateAdminId == null || !impersonateReason) return;
+    if (impersonateReason === "Outro" && !impersonateReasonDetail.trim()) return;
+    setImpersonating(true);
+    try {
+      await api.superadmin.impersonate(impersonateFor.id, impersonateAdminId, impersonateReason, impersonateReasonDetail.trim() || undefined);
+      window.location.href = "/";
+    } catch (e) {
+      fail("Erro ao entrar como este admin")(e);
+      setImpersonating(false);
+    }
   };
 
   const statusBadge = (t: TenantSummary) => {
@@ -492,9 +521,25 @@ export default function SuperAdminDashboard() {
             <p className="text-xs text-muted-foreground">Dono do sistema · {user?.name}</p>
           </div>
         </div>
-        <Button size="sm" variant="ghost" onClick={logout} data-testid="button-logout">
-          <LogOut className="w-4 h-4" />
-        </Button>
+        <div className="flex items-center gap-1">
+          {/* Meu Cadastro saiu da barra de abas na Fase 2 — ação rara, então
+              vira menu no canto em vez de disputar espaço com as abas do dia a dia. */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button size="sm" variant="ghost" data-testid="button-corner-menu">
+                <UserCog className="w-4 h-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={() => setShowProfile(true)} data-testid="menuitem-meu-cadastro">
+                <UserCog className="w-4 h-4 mr-2" /> Meu Cadastro
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <Button size="sm" variant="ghost" onClick={logout} data-testid="button-logout">
+            <LogOut className="w-4 h-4" />
+          </Button>
+        </div>
       </header>
 
       <nav className="border-b bg-card px-4 flex gap-1 overflow-x-auto">
@@ -926,47 +971,88 @@ export default function SuperAdminDashboard() {
               </>
             )}
 
-            {/* --------------------------------------------- MEU CADASTRO */}
-            {tab === "meucadastro" && (
-              <div className="max-w-lg space-y-4">
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="text-base">Meus dados</CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-3">
-                    <div>
-                      <Label>Nome</Label>
-                      <Input value={profileForm.name} onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })} data-testid="input-profile-name" />
-                    </div>
-                    <div>
-                      <Label>E-mail</Label>
-                      <Input type="email" value={profileForm.email} onChange={(e) => setProfileForm({ ...profileForm, email: e.target.value })} data-testid="input-profile-email" />
-                    </div>
-                    <div className="flex justify-end">
-                      <Button size="sm" disabled={savingProfile || !profileForm.name.trim() || !profileForm.email.trim()}
-                        onClick={saveProfile} data-testid="button-save-profile">
-                        {savingProfile ? "Salvando..." : "Salvar"}
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
-
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="text-base">Segurança</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <p className="text-xs text-muted-foreground mb-3">Troque sua senha de acesso ao painel do sistema.</p>
-                    <Button size="sm" variant="outline" onClick={() => setShowChangePassword(true)} data-testid="button-open-change-password">
-                      <KeyRound className="w-4 h-4 mr-1" /> Trocar senha
-                    </Button>
-                  </CardContent>
-                </Card>
-              </div>
+            {/* --------------------------------------------- AUDITORIA */}
+            {tab === "auditoria" && (
+              <>
+                <p className="text-sm text-muted-foreground">
+                  Toda ação relevante feita neste painel, em qualquer loja: entrar como, suspender/reativar,
+                  cancelar/reativar contrato, mudar módulos, criar loja ou admin. Mais recentes primeiro.
+                </p>
+                {auditEntries.length === 0 ? (
+                  <p className="text-muted-foreground text-sm">Nenhuma ação registrada ainda.</p>
+                ) : (
+                  <Card>
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Quando</TableHead>
+                          <TableHead>Loja</TableHead>
+                          <TableHead>Ação</TableHead>
+                          <TableHead>Motivo</TableHead>
+                          <TableHead>Superadmin</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {auditEntries.map((e) => (
+                          <TableRow key={e.id} data-testid={`row-audit-${e.id}`}>
+                            <TableCell className="text-xs whitespace-nowrap">{fmtDateTime(e.createdAt)}</TableCell>
+                            <TableCell className="text-sm">{e.tenantName ?? "—"}</TableCell>
+                            <TableCell className="text-sm">{e.description}</TableCell>
+                            <TableCell className="text-sm text-muted-foreground">{e.reason ?? "—"}</TableCell>
+                            <TableCell className="text-sm">{e.superadminName ?? "—"}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </Card>
+                )}
+              </>
             )}
           </>
         )}
       </main>
+
+      {/* Meu Cadastro — Fase 2: virou diálogo aberto pelo menu no canto do header. */}
+      <Dialog open={showProfile} onOpenChange={setShowProfile}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader><DialogTitle>Meu Cadastro</DialogTitle></DialogHeader>
+          <div className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Meus dados</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div>
+                  <Label>Nome</Label>
+                  <Input value={profileForm.name} onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })} data-testid="input-profile-name" />
+                </div>
+                <div>
+                  <Label>E-mail</Label>
+                  <Input type="email" value={profileForm.email} onChange={(e) => setProfileForm({ ...profileForm, email: e.target.value })} data-testid="input-profile-email" />
+                </div>
+                <div className="flex justify-end">
+                  <Button size="sm" disabled={savingProfile || !profileForm.name.trim() || !profileForm.email.trim()}
+                    onClick={saveProfile} data-testid="button-save-profile">
+                    {savingProfile ? "Salvando..." : "Salvar"}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Segurança</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-xs text-muted-foreground mb-3">Troque sua senha de acesso ao painel do sistema.</p>
+                <Button size="sm" variant="outline" onClick={() => setShowChangePassword(true)} data-testid="button-open-change-password">
+                  <KeyRound className="w-4 h-4 mr-1" /> Trocar senha
+                </Button>
+              </CardContent>
+            </Card>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Nova loja */}
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
@@ -1035,18 +1121,53 @@ export default function SuperAdminDashboard() {
         </DialogContent>
       </Dialog>
 
-      {/* Escolher qual admin, quando a loja tem mais de um ativo */}
-      <Dialog open={!!impersonateFor} onOpenChange={(o) => { if (!o) setImpersonateFor(null); }}>
+      {/* Entrar como: motivo obrigatório (Fase 2) + escolher qual admin,
+          quando a loja tem mais de um ativo. */}
+      <Dialog open={!!impersonateFor} onOpenChange={(o) => { if (!o) closeImpersonateDialog(); }}>
         <DialogContent>
-          <DialogHeader><DialogTitle>Entrar como qual admin de {impersonateFor?.name}?</DialogTitle></DialogHeader>
-          <div className="space-y-2">
-            {impersonateFor?.admins.filter((a) => a.isActive).map((a) => (
-              <Button key={a.id} variant="outline" className="w-full justify-start"
-                onClick={() => doImpersonate(impersonateFor.id, a.id)} data-testid={`button-impersonate-as-${a.id}`}>
-                {a.name} ({a.email})
-              </Button>
-            ))}
+          <DialogHeader><DialogTitle>Entrar como admin de {impersonateFor?.name}</DialogTitle></DialogHeader>
+          <div className="space-y-4">
+            {(() => {
+              const activeAdmins = impersonateFor?.admins.filter((a) => a.isActive) ?? [];
+              return activeAdmins.length > 1 ? (
+                <div className="space-y-2">
+                  <Label>Qual admin?</Label>
+                  {activeAdmins.map((a) => (
+                    <Button key={a.id} type="button"
+                      variant={impersonateAdminId === a.id ? "default" : "outline"}
+                      className="w-full justify-start"
+                      onClick={() => setImpersonateAdminId(a.id)} data-testid={`button-impersonate-as-${a.id}`}>
+                      {a.name} ({a.email})
+                    </Button>
+                  ))}
+                </div>
+              ) : null;
+            })()}
+            <div>
+              <Label>Motivo de entrar como este admin</Label>
+              <Select value={impersonateReason} onValueChange={setImpersonateReason}>
+                <SelectTrigger data-testid="select-impersonate-reason"><SelectValue placeholder="Selecione o motivo" /></SelectTrigger>
+                <SelectContent>
+                  {IMPERSONATE_REASONS.map((r) => <SelectItem key={r} value={r}>{r}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            {impersonateReason === "Outro" && (
+              <div>
+                <Label>Descreva o motivo</Label>
+                <Textarea value={impersonateReasonDetail} onChange={(e) => setImpersonateReasonDetail(e.target.value)}
+                  rows={2} data-testid="input-impersonate-reason-detail" />
+              </div>
+            )}
           </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeImpersonateDialog}>Cancelar</Button>
+            <Button
+              disabled={impersonating || impersonateAdminId == null || !impersonateReason || (impersonateReason === "Outro" && !impersonateReasonDetail.trim())}
+              onClick={confirmImpersonate} data-testid="button-confirm-impersonate">
+              {impersonating ? "Entrando..." : "Entrar"}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

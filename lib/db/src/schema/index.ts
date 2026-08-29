@@ -31,6 +31,7 @@ export * from "./quick_replies";
 export * from "./scheduled_messages";
 export * from "./chat_notifications";
 export * from "./tenants";
+export * from "./superadmin_audit";
 export * from "./saas";
 export * from "./system_board";
 export * from "./team_favorites";

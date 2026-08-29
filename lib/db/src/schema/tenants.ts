@@ -79,4 +79,8 @@ export const impersonationLogTable = pgTable("impersonation_log", {
   targetUserId: integer("target_user_id").notNull().references(() => usersTable.id),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   endedAt: timestamp("ended_at", { withTimezone: true }),
+  // Motivo obrigatório desde a Fase 2 do Painel do Sistema (Suporte /
+  // Configuração / Treinamento / Outro — "Outro" grava o texto livre direto
+  // aqui). Nullable só porque linhas antigas não tinham esse campo.
+  reason: text("reason"),
 });
