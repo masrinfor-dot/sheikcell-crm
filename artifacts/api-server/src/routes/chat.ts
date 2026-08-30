@@ -993,6 +993,7 @@ async function syncResolvedConversation(
     const [log] = await tx.insert(attendanceLogsTable).values({
       tenantId: conv.tenantId,
       queueEntryId: 0, // chat attendances have no queue entry
+      conversationId: conv.id,
       clientName: conv.name,
       clientContact: conv.phone,
       sectorId: effectiveSectorId,

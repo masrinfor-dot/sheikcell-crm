@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, PERMISSION_KEYS, PERMISSION_LABELS, MODULE_LABELS, USER_GRANTABLE_MODULES, OPTIONAL_MODULES, type SectorSummary, type AttendanceLog, type Sector, type QuickReply, type Store, type DashboardAttention, type InternalConversation, type OptionalModule, type UserGrantableModule, type UserModuleAccess } from "@/lib/api";
+import { api, PERMISSION_KEYS, PERMISSION_LABELS, MODULE_LABELS, USER_GRANTABLE_MODULES, OPTIONAL_MODULES, type SectorSummary, type AttendanceLog, type Sector, type QuickReply, type Store, type DashboardAttention, type InternalConversation, type OptionalModule, type UserGrantableModule, type UserModuleAccess, type ChatLabel } from "@/lib/api";
 import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
@@ -146,8 +146,10 @@ export default function AdminDashboard() {
   const [summary, setSummary] = useState<SectorSummary[]>([]);
   const [logs, setLogs] = useState<AttendanceLog[]>([]);
   // Filtros do histórico de atendimentos
-  const [logFilters, setLogFilters] = useState({ search: "", days: 0, sectorId: 0, attendantId: 0, outcome: "", reason: "" });
+  const [logFilters, setLogFilters] = useState({ search: "", days: 0, sectorId: 0, attendantId: 0, outcome: "", reason: "", label: "" });
   const [logAttendants, setLogAttendants] = useState<{ id: number; name: string }[]>([]);
+  const [logLabelOptions, setLogLabelOptions] = useState<ChatLabel[]>([]);
+  const [reopeningLogId, setReopeningLogId] = useState<number | null>(null);
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [stores, setStores] = useState<Store[]>([]);
   const [newStoreName, setNewStoreName] = useState("");
@@ -211,17 +213,49 @@ export default function AdminDashboard() {
         attendantId: f.attendantId || undefined,
         outcome: f.outcome || undefined,
         reason: f.reason || undefined,
+        label: f.label || undefined,
         search: f.search.trim() || undefined,
       });
       setLogs(l);
-      // Acumula vendedores conhecidos para o filtro (união dos resultados)
-      setLogAttendants((prev) => {
-        const map = new Map(prev.map((a) => [a.id, a.name]));
-        for (const log of l) if (log.attendantId && log.attendantName) map.set(log.attendantId, log.attendantName);
-        return [...map.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
-      });
     } catch { /* silent */ }
   }, []);
+
+  // Opções do filtro "Todos os vendedores": antes só juntava quem aparecia
+  // nos 200 resultados carregados (então quem não tinha atendimento recente
+  // nunca aparecia como opção) — agora busca todos os usuários ativos da
+  // loja de uma vez, igual à lista usada pra atribuir conversa no Atendimento.
+  const fetchLogFilterOptions = useCallback(async () => {
+    try {
+      const users = await api.chatUsers();
+      setLogAttendants(users.map((u) => ({ id: u.id, name: u.name })).sort((a, b) => a.name.localeCompare(b.name, "pt-BR")));
+    } catch { /* silent */ }
+    try {
+      setLogLabelOptions(await api.chat.labels.list());
+    } catch { /* silent */ }
+  }, []);
+  useEffect(() => {
+    if (tab === "history") void fetchLogFilterOptions();
+  }, [tab, fetchLogFilterOptions]);
+
+  // Reabre pelo Histórico: só existe quando o log tem conversationId (atendimentos
+  // de chat a partir da feature de etiquetas/reopen; logs antigos ou da fila
+  // legada não têm e por isso nunca mostram o botão). Sempre manda pra
+  // "pendente" (fila) em vez de reatribuir ao mesmo atendente de antes — o
+  // atendente do log é um retrato de quando finalizou, pode nem estar mais
+  // ativo, e reabrir pra fila deixa qualquer um assumir de novo (mesmo botão
+  // "Reabrir" que já existe no Atendimento > Resolvidas usa esse endpoint).
+  const handleReopenLog = async (log: AttendanceLog) => {
+    if (!log.conversationId) return;
+    setReopeningLogId(log.id);
+    try {
+      await api.chat.updateConversation(log.conversationId, { status: "pending", isArchived: false });
+      toast({ title: "Atendimento reaberto", description: "A conversa voltou pra fila de pendentes no Atendimento." });
+    } catch (err) {
+      toast({ title: "Não foi possível reabrir", description: err instanceof Error ? err.message : "Tente novamente", variant: "destructive" });
+    } finally {
+      setReopeningLogId(null);
+    }
+  };
 
   // Rebusca o histórico quando os filtros mudam (busca por texto com atraso)
   useEffect(() => {
@@ -1183,8 +1217,13 @@ export default function AdminDashboard() {
                   <option key={r} value={r}>{r}</option>
                 ))}
               </select>
-              {(logFilters.search || logFilters.days || logFilters.sectorId || logFilters.attendantId || logFilters.outcome || logFilters.reason) ? (
-                <button onClick={() => setLogFilters({ search: "", days: 0, sectorId: 0, attendantId: 0, outcome: "", reason: "" })}
+              <select value={logFilters.label} onChange={(e) => setLogFilters({ ...logFilters, label: e.target.value })}
+                data-testid="select-history-label" className="px-2 py-1.5 rounded-lg border border-border text-xs bg-white">
+                <option value="">Todas as etiquetas</option>
+                {logLabelOptions.map((l) => <option key={l.id} value={l.name}>{l.name}</option>)}
+              </select>
+              {(logFilters.search || logFilters.days || logFilters.sectorId || logFilters.attendantId || logFilters.outcome || logFilters.reason || logFilters.label) ? (
+                <button onClick={() => setLogFilters({ search: "", days: 0, sectorId: 0, attendantId: 0, outcome: "", reason: "", label: "" })}
                   data-testid="button-history-clear" className="text-xs text-primary font-semibold hover:underline">Limpar filtros</button>
               ) : null}
               <span className="ml-auto text-[11px] text-muted-foreground">{logs.length} resultado{logs.length === 1 ? "" : "s"}{logs.length === 200 ? " (máx.)" : ""}</span>
@@ -1200,7 +1239,7 @@ export default function AdminDashboard() {
                   <table className="w-full text-sm">
                     <thead className="bg-secondary/50">
                       <tr>
-                        {["Cliente", "Setor", "Atendente", "Canal", "Resultado", "Motivo", "Espera", "Atend.", "Hora"].map((h) => (
+                        {["Cliente", "Setor", "Atendente", "Canal", "Resultado", "Motivo", "Etiquetas", "Espera", "Atend.", "Hora", ""].map((h) => (
                           <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground whitespace-nowrap">{h}</th>
                         ))}
                       </tr>
@@ -1218,9 +1257,27 @@ export default function AdminDashboard() {
                             </span>
                           </td>
                           <td className="px-4 py-3 text-muted-foreground">{log.resolutionReason ?? "—"}</td>
+                          <td className="px-4 py-3">
+                            {log.labels ? (
+                              <div className="flex flex-wrap gap-1">
+                                {log.labels.split(",").map((t) => t.trim()).filter(Boolean).map((t) => (
+                                  <span key={t} className="text-[10px] px-1.5 py-0.5 rounded-full bg-secondary text-muted-foreground">{t}</span>
+                                ))}
+                              </div>
+                            ) : "—"}
+                          </td>
                           <td className="px-4 py-3 text-muted-foreground">{formatDuration(log.waitTimeSeconds)}</td>
                           <td className="px-4 py-3 text-muted-foreground">{formatDuration(log.serviceTimeSeconds)}</td>
                           <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{formatDate(log.createdAt)}</td>
+                          <td className="px-4 py-3 text-right whitespace-nowrap">
+                            {log.conversationId != null && (
+                              <button onClick={() => handleReopenLog(log)} disabled={reopeningLogId === log.id}
+                                data-testid={`button-reopen-log-${log.id}`}
+                                className="text-xs font-semibold text-primary hover:underline disabled:opacity-50">
+                                {reopeningLogId === log.id ? "Reabrindo..." : "Reabrir"}
+                              </button>
+                            )}
+                          </td>
                         </tr>
                       ))}
                     </tbody>

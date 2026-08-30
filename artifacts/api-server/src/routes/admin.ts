@@ -258,6 +258,7 @@ router.get("/admin/logs", requireAdminOrSupervisor, requireModuleAccess("history
   const days = req.query.days ? parseInt(String(req.query.days), 10) : null;
   const outcome = req.query.outcome ? String(req.query.outcome) : null;
   const reason = req.query.reason ? String(req.query.reason) : null;
+  const label = req.query.label ? String(req.query.label).trim() : null;
   const search = req.query.search ? String(req.query.search).trim() : null;
 
   const conds = [eq(attendanceLogsTable.tenantId, tenantId)];
@@ -272,15 +273,20 @@ router.get("/admin/logs", requireAdminOrSupervisor, requireModuleAccess("history
       ilike(attendanceLogsTable.clientContact, `%${search}%`),
     )!);
   }
+  // Etiqueta mora em conversations.labels (texto separado por vírgula), não em
+  // attendance_logs — join por conversationId (nulo em logs antigos/da fila
+  // legada, que então nunca batem o filtro, coerente com não terem etiqueta).
+  if (label) conds.push(sql`${conversationsTable.labels} ILIKE ${"%" + label + "%"}`);
 
-  const logs = await db
-    .select()
+  const rows = await db
+    .select({ log: attendanceLogsTable, labels: conversationsTable.labels })
     .from(attendanceLogsTable)
+    .leftJoin(conversationsTable, eq(attendanceLogsTable.conversationId, conversationsTable.id))
     .where(and(...conds))
     .orderBy(desc(attendanceLogsTable.createdAt))
     .limit(limit);
 
-  res.json(logs);
+  res.json(rows.map((r) => ({ ...r.log, labels: r.labels ?? null })));
 });
 
 // Users management

@@ -633,6 +633,10 @@ export type AttendanceLog = {
   waitTimeSeconds: number | null;
   serviceTimeSeconds: number | null;
   createdAt: string;
+  // Presentes só no retorno de /admin/logs (Histórico) — nulos em outros usos
+  // deste tipo (ex.: histórico de atendimento dentro do CRM).
+  conversationId?: number | null;
+  labels?: string | null;
 };
 
 export type SectorSummary = {
@@ -2293,7 +2297,7 @@ export const api = {
     // Uso do plano da própria loja (Fase 3 — Planos & Limites): mesmo dado
     // que o backend usa pra bloquear, pra avisar a loja antes de bater no limite.
     planUsage: () => req<PlanUsage>("/admin/plan-usage"),
-    logs: (params?: { limit?: number; sectorId?: number; attendantId?: number; days?: number; outcome?: string; reason?: string; search?: string }) => {
+    logs: (params?: { limit?: number; sectorId?: number; attendantId?: number; days?: number; outcome?: string; reason?: string; label?: string; search?: string }) => {
       const qs = new URLSearchParams();
       if (params?.limit) qs.set("limit", String(params.limit));
       if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
@@ -2301,6 +2305,7 @@ export const api = {
       if (params?.days) qs.set("days", String(params.days));
       if (params?.outcome) qs.set("outcome", params.outcome);
       if (params?.reason) qs.set("reason", params.reason);
+      if (params?.label) qs.set("label", params.label);
       if (params?.search) qs.set("search", params.search);
       return req<AttendanceLog[]>(`/admin/logs?${qs.toString()}`);
     },

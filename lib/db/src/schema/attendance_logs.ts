@@ -41,6 +41,13 @@ export const attendanceLogsTable = pgTable("attendance_logs", {
   // congelado que precisa sobreviver à exclusão da loja/usuário/setor de
   // origem, mesmo padrão já usado por sectorId/attendantId nesta tabela.
   storeId: integer("store_id"),
+  // Liga ao atendimento (chat) que originou este log — sem FK (mesmo motivo
+  // do storeId acima: fato histórico que sobrevive à exclusão da conversa).
+  // Nulo pra atendimentos antigos (antes desta coluna existir) e pra
+  // atendimentos via fila legada (queue_entries), que não têm conversa de
+  // chat associada. Usado pra "Reabrir pelo Histórico" e pro filtro por
+  // etiqueta (join em conversations.labels).
+  conversationId: integer("conversation_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
