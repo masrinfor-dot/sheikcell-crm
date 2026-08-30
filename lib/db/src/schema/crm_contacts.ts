@@ -11,7 +11,11 @@ export const crmContactsTable = pgTable("crm_contacts", {
   phone: text("phone"),           // normalized phone for auto-register matching
   sectorId: integer("sector_id").references(() => sectorsTable.id),
   attendantId: integer("attendant_id").references(() => usersTable.id),
-  status: text("status").notNull().default("potential"), // potential | pending | active
+  status: text("status").notNull().default("potential"), // potential | pending | active | finalized
+  // Motivo do último atendimento finalizado (espelha attendance_logs.resolution_reason
+  // / conversations PATCH resolutionReason) — some quando a conversa reabre.
+  lastResolutionReason: text("last_resolution_reason"),
+  finalizedAt: timestamp("finalized_at"),
   profile: text("profile").notNull().default("Novo"),    // Novo | Regular | VIP | Inativo
   isNew: boolean("is_new").notNull().default(true),       // cliente novo (true) ou recorrente (false)
   city: text("city"),                                     // cidade do cliente

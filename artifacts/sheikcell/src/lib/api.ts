@@ -662,7 +662,9 @@ export type CrmContact = {
   email: string | null;
   sectorId: number | null;
   attendantId: number | null;
-  status: "potential" | "pending" | "active";
+  status: "potential" | "pending" | "active" | "finalized";
+  lastResolutionReason: string | null;
+  finalizedAt: string | null;
   profile: "Novo" | "Regular" | "VIP" | "Inativo";
   isNew: boolean;
   city: string | null;

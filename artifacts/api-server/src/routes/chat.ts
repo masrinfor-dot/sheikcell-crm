@@ -1213,6 +1213,9 @@ router.patch("/chat/conversations/:id", requireAuth, requireChatAccess(), async 
   // "resolved" even under concurrent PATCH requests, and rolls back the status
   // change if the sync fails.
   let resolvedLogId: number | null = null;
+  // Motivo de finalização (quando esta chamada está resolvendo a conversa agora),
+  // lido fora da transação pra alimentar o card do CRM logo abaixo.
+  let resolutionReasonForCrm: string | null | undefined;
   const updated = await db.transaction(async (tx) => {
     const [locked] = await tx.select().from(conversationsTable)
       .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).for("update").limit(1);
@@ -1228,6 +1231,7 @@ router.patch("/chat/conversations/:id", requireAuth, requireChatAccess(), async 
     if (status === "resolved" && !wasResolved) {
       // Sanitize untrusted client input: only accept a string motive, capped.
       const cleanReason = typeof resolutionReason === "string" ? resolutionReason.slice(0, 500) : null;
+      resolutionReasonForCrm = cleanReason;
       // Venda informada no modal: sanitiza valor (número positivo) e descrição.
       const amountNum = Number(saleAmount);
       const sale = typeof hadSale === "boolean"
@@ -1304,7 +1308,7 @@ router.patch("/chat/conversations/:id", requireAuth, requireChatAccess(), async 
   // Espelha responsável E coluna no cartão do CRM (transferência, finalização,
   // reabertura etc.): qualquer mudança de dono ou status move o cartão junto.
   if (updated.assigneeId !== conv.assigneeId || updated.status !== conv.status || updated.isArchived !== conv.isArchived) {
-    await syncCrmAttendant(updated);
+    await syncCrmAttendant(updated, resolutionReasonForCrm);
   }
   broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey, isPotential: wasPotential || isPotentialConversation(updated), restrictedTo: recipients });
   // Transição para RESTRITA (ganhou responsável ou foi finalizada): quem via a

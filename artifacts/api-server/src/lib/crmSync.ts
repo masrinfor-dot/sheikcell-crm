@@ -6,16 +6,19 @@ import { normalizePhone, phoneVariants } from "./phone";
 
 // Coluna do quadro CRM correspondente ao estado da conversa no atendimento.
 // Espelha as categorias do ChatCenter: sem responsável e aberta = Potencial;
-// sem responsável em "pending" = Pendente; com responsável = Ativo. Conversa
-// finalizada mantém o cartão em "Ativos" (o cliente continua sendo cliente).
+// sem responsável em "pending" = Pendente; com responsável (ainda em
+// atendimento) = Ativo; conversa resolvida/arquivada = Finalizado (coluna
+// própria — antes ficava misturada em "Ativos", inflando essa métrica com
+// gente que já não está mais em atendimento).
 export function crmStageForConversation(conv: {
   assigneeId: number | null;
   status: string;
   isArchived?: boolean | null;
-}): "potential" | "pending" | "active" {
-  if (conv.assigneeId != null || conv.status === "resolved" || conv.status === "archived" || conv.isArchived) {
-    return "active";
+}): "potential" | "pending" | "active" | "finalized" {
+  if (conv.status === "resolved" || conv.status === "archived" || conv.isArchived) {
+    return "finalized";
   }
+  if (conv.assigneeId != null) return "active";
   return conv.status === "pending" ? "pending" : "potential";
 }
 
@@ -33,7 +36,7 @@ export async function syncCrmAttendant(conv: {
   assigneeId: number | null;
   status: string;
   isArchived?: boolean | null;
-}): Promise<void> {
+}, resolutionReason?: string | null): Promise<void> {
   try {
     const isGroup = (conv.phone ?? "").includes("@g.us");
     const sectorCondition = conv.sectorId != null
@@ -63,10 +66,20 @@ export async function syncCrmAttendant(conv: {
       .limit(1);
     if (!existing) return;
     const stage = crmStageForConversation(conv);
-    if (existing.attendantId === conv.assigneeId && existing.status === stage) return;
+    const reasonChanged = stage === "finalized" && resolutionReason !== undefined && resolutionReason !== existing.lastResolutionReason;
+    if (existing.attendantId === conv.assigneeId && existing.status === stage && !reasonChanged) return;
 
     const [updated] = await db.update(crmContactsTable)
-      .set({ attendantId: conv.assigneeId, status: stage, updatedAt: new Date() })
+      .set({
+        attendantId: conv.assigneeId,
+        status: stage,
+        updatedAt: new Date(),
+        // Motivo de finalização: grava quando a conversa acabou de ser resolvida
+        // (resolutionReason informado); some ao reabrir (voltou a não ser "finalized").
+        ...(stage === "finalized"
+          ? { ...(resolutionReason !== undefined ? { lastResolutionReason: resolutionReason } : {}), ...(existing.status !== "finalized" ? { finalizedAt: new Date() } : {}) }
+          : { lastResolutionReason: null, finalizedAt: null }),
+      })
       .where(eq(crmContactsTable.id, existing.id))
       .returning();
 
