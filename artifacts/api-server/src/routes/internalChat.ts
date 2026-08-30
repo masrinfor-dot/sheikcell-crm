@@ -2,7 +2,7 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import { db, internalConversationsTable, internalConversationMembersTable, internalMessagesTable, usersTable, tenantsTable } from "@workspace/db";
 import { eq, and, asc, inArray, sql, ne } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { requireAuth, requireAdmin, requireAdminOrSupervisor, requireTenant, isTenantSuspended } from "../middlewares/auth";
+import { requireAuth, requireAdmin, requireTenant, isTenantSuspended } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import {
   sseEmitter,
@@ -273,12 +273,14 @@ router.get("/internal-chat/conversations", requireAuth, async (req, res): Promis
 });
 
 // ─── Create a group conversation (grupo do chat interno) ───────────────────
-// Só admin/supervisor cria grupo, escolhendo o nome e os participantes — a
-// pedido do cliente, pra centralizar a comunicação em grupo com quem tem
-// visão de equipe (conversa direta 1:1 continua regra à parte, ver abaixo).
-// O criador sempre entra como membro. Grupos usam o mesmo escopo dos diretos:
-// só membros veem, recebem eventos e podem enviar mensagens.
-router.post("/internal-chat/conversations/group", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+// Só admin cria grupo, escolhendo o nome e os participantes — a pedido do
+// cliente (endurecido depois: supervisor cria grupo há um tempo, mas o pedido
+// mais recente foi "usuário sem ser admin não inicia conversa" — só participa
+// dos grupos que o admin já criou). Conversa direta 1:1 já era admin-only
+// (ver abaixo), então agora as duas seguem a mesma regra. O criador sempre
+// entra como membro. Grupos usam o mesmo escopo dos diretos: só membros veem,
+// recebem eventos e podem enviar mensagens.
+router.post("/internal-chat/conversations/group", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const userId = req.session.userId!;
   const { name, memberIds } = req.body as { name?: string; memberIds?: number[] };
@@ -911,9 +913,11 @@ router.delete("/internal-chat/conversations/:id/pin", requireAuth, async (req, r
   res.json({ ok: true });
 });
 
-// ─── Excluir grupo ──────────────────────────────────────────────────────────
-// Só grupos podem ser excluídos (nunca a sala geral nem conversas diretas).
-// Quem pode: somente admin (qualquer grupo) — sempre da MESMA loja.
+// ─── Excluir grupo ou conversa direta ───────────────────────────────────────
+// Grupos e conversas diretas (1:1) podem ser excluídos; a sala geral nunca
+// (tem rota própria abaixo, que desativa a recriação automática). Quem pode:
+// somente admin — sempre da MESMA loja. Pedido do lojista: além de excluir
+// grupo (já existia), também dar um jeito de apagar conversas 1:1 antigas.
 router.delete("/internal-chat/conversations/:id", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
@@ -921,18 +925,22 @@ router.delete("/internal-chat/conversations/:id", requireAdmin, async (req, res)
 
   const [conv] = await db.select().from(internalConversationsTable)
     .where(and(eq(internalConversationsTable.id, convId), eq(internalConversationsTable.tenantId, tenantId))).limit(1);
-  if (!conv) { res.status(404).json({ error: "Grupo não encontrado" }); return; }
-  if (conv.kind !== "group") { res.status(400).json({ error: "Só grupos podem ser excluídos" }); return; }
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (conv.kind !== "group" && conv.kind !== "direct") { res.status(400).json({ error: "Essa conversa não pode ser excluída" }); return; }
 
   // Captura os membros ANTES de apagar (depois não dá mais para saber quem eram)
-  // e só avisa se ESTA requisição realmente apagou o grupo (evita evento falso
-  // quando duas exclusões simultâneas disputam o mesmo grupo).
+  // e só avisa se ESTA requisição realmente apagou a conversa (evita evento
+  // falso quando duas exclusões simultâneas disputam a mesma conversa).
   const recipients = await recipientsFor(conv);
   const deleted = await db
     .delete(internalConversationsTable)
-    .where(and(eq(internalConversationsTable.id, convId), eq(internalConversationsTable.tenantId, tenantId), eq(internalConversationsTable.kind, "group")))
+    .where(and(
+      eq(internalConversationsTable.id, convId),
+      eq(internalConversationsTable.tenantId, tenantId),
+      inArray(internalConversationsTable.kind, ["group", "direct"]),
+    ))
     .returning({ id: internalConversationsTable.id }); // cascade apaga membros e mensagens
-  if (deleted.length === 0) { res.status(404).json({ error: "Grupo não encontrado" }); return; }
+  if (deleted.length === 0) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
   broadcastInternal("internal_conversation_removed", { id: convId }, tenantId, recipients);
   res.json({ ok: true });
 });

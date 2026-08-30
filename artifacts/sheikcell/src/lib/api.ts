@@ -1684,6 +1684,9 @@ export const api = {
       req<InternalMessage>(`/internal-chat/messages/${messageId}`, { method: "DELETE" }),
     markRead: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}/read`, { method: "POST" }),
     deleteGroup: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}`, { method: "DELETE" }),
+    // Mesma rota do deleteGroup acima (o backend agora aceita grupo OU
+    // direta) — nome próprio só pra deixar claro no call-site do 1:1.
+    deleteConversation: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}`, { method: "DELETE" }),
     deleteGeneral: () => req<{ ok: boolean }>("/internal-chat/general", { method: "DELETE" }),
     groupMembers: (id: number) => req<{ id: number; name: string; role: string }[]>(`/internal-chat/conversations/${id}/members`),
     updateGroup: (id: number, data: { name?: string; memberIds?: number[] }) =>
