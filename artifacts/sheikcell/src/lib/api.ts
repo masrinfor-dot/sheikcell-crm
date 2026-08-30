@@ -968,8 +968,13 @@ export type TradeInQuestionsConfig = { apple: TradeInQuestion[]; android: TradeI
 
 export type RhQuestion = { id: string; label: string; type: "text" | "longtext" | "options"; options?: string[] };
 export type RhStage = { id: string; title: string; description: string; type: "form" | "video"; enabled: boolean; questions: RhQuestion[]; maxVideoSeconds?: number | null };
+export type RhPosition = {
+  id: number; name: string; active: boolean; sortOrder: number; stages: RhStage[];
+  createdAt: string; updatedAt: string;
+};
 export type RhCandidate = {
   id: number; name: string; phone: string; email: string | null;
+  cpf: string | null; positionId: number | null; positionName: string | null;
   status: "novo" | "pre_aprovado" | "aprovado" | "reprovado";
   answers: Record<string, Record<string, string>>;
   stagesSnapshot: RhStage[] | null;
@@ -1974,15 +1979,27 @@ export const api = {
       req<{ draw: RaffleDraw; sent: boolean }>(`/raffles/${id}/draws/${drawId}/resend`, { method: "POST", body: JSON.stringify({ phone }) }),
   },
   rh: {
-    publicProcess: (token: string) => req<{ stages: RhStage[] }>(`/rh/public/${token}`),
+    // positions === null → loja sem cargo configurado, `stages` já vem pronto
+    // (processo único, comportamento de sempre). positions !== null → o
+    // candidato precisa escolher 1 vaga antes (ver publicPositionStages).
+    publicProcess: (token: string) => req<{ positions: { id: number; name: string }[] | null; stages: RhStage[] | null }>(`/rh/public/${token}`),
+    publicPositionStages: (token: string, positionId: number) =>
+      req<{ stages: RhStage[] }>(`/rh/public/${token}/position/${positionId}`),
     publicApply: (token: string, data: {
-      name: string; phone: string; email?: string;
+      name: string; phone: string; email?: string; cpf: string; positionId?: number;
       answers: Record<string, Record<string, string>>;
       videoData?: string; videoMime?: string;
     }) => req<{ ok: boolean; id: number }>(`/rh/public/${token}/apply`, { method: "POST", body: JSON.stringify(data) }),
     settings: () => req<{ publicToken: string; stages: RhStage[] }>("/rh/settings"),
     saveSettings: (stages: RhStage[]) => req<{ ok: boolean }>("/rh/settings", { method: "PUT", body: JSON.stringify({ stages }) }),
     regenerateToken: () => req<{ publicToken: string }>("/rh/settings/regenerate-token", { method: "POST" }),
+    positions: {
+      list: () => req<RhPosition[]>("/rh/positions"),
+      create: (data: { name: string; stages?: RhStage[] }) => req<RhPosition>("/rh/positions", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: { name?: string; active?: boolean; stages?: RhStage[] }) =>
+        req<RhPosition>(`/rh/positions/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/rh/positions/${id}`, { method: "DELETE" }),
+    },
     candidates: () => req<RhCandidate[]>("/rh/candidates"),
     updateCandidate: (id: number, data: { status?: string; notes?: string }) =>
       req<Pick<RhCandidate, "id" | "status" | "notes">>(`/rh/candidates/${id}`, { method: "PATCH", body: JSON.stringify(data) }),

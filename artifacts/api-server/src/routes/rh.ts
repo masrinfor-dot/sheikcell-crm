@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { randomBytes } from "crypto";
-import { db, rhSettingsTable, rhCandidatesTable } from "@workspace/db";
-import { eq, and, desc } from "drizzle-orm";
+import { db, rhSettingsTable, rhCandidatesTable, rhPositionsTable } from "@workspace/db";
+import { eq, and, desc, asc } from "drizzle-orm";
 import { requireTenant } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 
@@ -53,6 +53,23 @@ const DEFAULT_STAGES: RhStage[] = [
     questions: [], maxVideoSeconds: DEFAULT_VIDEO_SECONDS,
   },
 ];
+
+// Valida CPF de verdade (dígitos verificadores), não só a contagem de 11
+// números — é a chave que impede repetir o processo seletivo, então vale a
+// pena recusar CPF claramente inválido/inventado já na entrada.
+function isValidCpf(digits: string): boolean {
+  if (!/^\d{11}$/.test(digits)) return false;
+  if (/^(\d)\1{10}$/.test(digits)) return false; // todos os dígitos iguais (ex.: 00000000000)
+  const calcCheckDigit = (base: string, factor: number): number => {
+    let sum = 0;
+    for (const ch of base) sum += parseInt(ch, 10) * factor--;
+    const rest = sum % 11;
+    return rest < 2 ? 0 : 11 - rest;
+  };
+  const d1 = calcCheckDigit(digits.slice(0, 9), 10);
+  const d2 = calcCheckDigit(digits.slice(0, 9) + d1, 11);
+  return digits.slice(9) === `${d1}${d2}`;
+}
 
 // Detecta o tipo real do vídeo pelos primeiros bytes (magic numbers).
 // Só aceita webm/mkv (EBML), mp4/mov (ftyp) e ogg.
@@ -133,16 +150,56 @@ function sanitizeStages(input: unknown): RhStage[] | null {
   return out;
 }
 
+function sanitizePositionName(input: unknown): string | null {
+  const name = typeof input === "string" ? input.trim().slice(0, 80) : "";
+  return name || null;
+}
+
+// Cargos ativos da loja, na ordem configurada — usado tanto pela tela pública
+// (escolha da vaga) quanto pelo admin.
+async function getActivePositions(tenantId: number) {
+  return db.select({ id: rhPositionsTable.id, name: rhPositionsTable.name })
+    .from(rhPositionsTable)
+    .where(and(eq(rhPositionsTable.tenantId, tenantId), eq(rhPositionsTable.active, true)))
+    .orderBy(asc(rhPositionsTable.sortOrder), asc(rhPositionsTable.id));
+}
+
 // ── Público (candidato, sem login) ─────────────────────────────────────────
 
-// Etapas visíveis para o candidato (sem dados internos).
+// Etapas visíveis para o candidato (sem dados internos). Se a loja tem pelo
+// menos 1 cargo ativo configurado, devolve só a lista de cargos — o
+// candidato escolhe 1 (nunca vários) e o front busca as etapas daquele
+// cargo em seguida (rota abaixo). Loja sem nenhum cargo configurado (todo
+// mundo até criar esta feature) continua recebendo `stages` direto, do
+// jeito que já funcionava — o link que já foi compartilhado não muda.
 router.get("/rh/public/:token", async (req, res): Promise<void> => {
   // Rota pública (Candidatura, sem login): resolve a loja pelo token do link.
   const settings = await getSettingsByToken(req.params.token);
   if (!settings) {
     res.status(404).json({ error: "Link inválido ou expirado" }); return;
   }
+  const positions = await getActivePositions(settings.tenantId);
+  if (positions.length > 0) {
+    res.json({ positions, stages: null });
+    return;
+  }
   const stages = (settings.stages as RhStage[]).filter((s) => s.enabled);
+  res.json({ positions: null, stages });
+});
+
+// Etapas do cargo escolhido — só depois que o candidato seleciona a vaga.
+router.get("/rh/public/:token/position/:positionId", async (req, res): Promise<void> => {
+  const settings = await getSettingsByToken(req.params.token);
+  if (!settings) {
+    res.status(404).json({ error: "Link inválido ou expirado" }); return;
+  }
+  const positionId = parseInt(String(req.params.positionId), 10);
+  if (isNaN(positionId)) { res.status(400).json({ error: "Vaga inválida" }); return; }
+  const [position] = await db.select().from(rhPositionsTable)
+    .where(and(eq(rhPositionsTable.id, positionId), eq(rhPositionsTable.tenantId, settings.tenantId), eq(rhPositionsTable.active, true)))
+    .limit(1);
+  if (!position) { res.status(404).json({ error: "Vaga não encontrada — pode ter sido encerrada" }); return; }
+  const stages = (position.stages as RhStage[]).filter((s) => s.enabled);
   res.json({ stages });
 });
 
@@ -154,16 +211,49 @@ router.post("/rh/public/:token/apply", async (req, res): Promise<void> => {
   if (!settings) {
     res.status(404).json({ error: "Link inválido ou expirado" }); return;
   }
-  const stages = (settings.stages as RhStage[]).filter((s) => s.enabled);
   const body = (req.body ?? {}) as {
-    name?: string; phone?: string; email?: string;
+    name?: string; phone?: string; email?: string; cpf?: string; positionId?: number;
     answers?: Record<string, Record<string, string>>;
     videoData?: string; videoMime?: string;
   };
+
+  // Se a loja tem cargo(s) ativo(s), a vaga é obrigatória — 1 só, nunca
+  // várias (o candidato escolhe antes, ver rota GET .../position/:id).
+  // Loja sem cargo configurado continua no processo único de sempre.
+  const activePositions = await getActivePositions(settings.tenantId);
+  let stages: RhStage[];
+  let positionId: number | null = null;
+  let positionName: string | null = null;
+  if (activePositions.length > 0) {
+    const requestedId = typeof body.positionId === "number" ? body.positionId : NaN;
+    const [position] = await db.select().from(rhPositionsTable)
+      .where(and(eq(rhPositionsTable.id, requestedId), eq(rhPositionsTable.tenantId, settings.tenantId), eq(rhPositionsTable.active, true)))
+      .limit(1);
+    if (!position) { res.status(400).json({ error: "Escolha a vaga desejada" }); return; }
+    stages = (position.stages as RhStage[]).filter((s) => s.enabled);
+    positionId = position.id;
+    positionName = position.name;
+  } else {
+    stages = (settings.stages as RhStage[]).filter((s) => s.enabled);
+  }
+
   const name = typeof body.name === "string" ? body.name.trim().slice(0, 120) : "";
   const phone = typeof body.phone === "string" ? body.phone.trim().slice(0, 30) : "";
   if (!name || !phone) { res.status(400).json({ error: "Informe seu nome e telefone" }); return; }
+  const cpfDigits = typeof body.cpf === "string" ? body.cpf.replace(/\D/g, "") : "";
+  if (!isValidCpf(cpfDigits)) { res.status(400).json({ error: "Informe um CPF válido" }); return; }
   const email = typeof body.email === "string" ? body.email.trim().slice(0, 120) || null : null;
+
+  // Sem repetir o processo: 1 CPF só pode concluir a candidatura 1 vez nesta
+  // loja (independente do cargo). Índice único parcial em rh_candidates (ver
+  // migration 0067) é a rede de segurança contra corrida; esta checagem é só
+  // pra devolver uma mensagem amigável no caminho normal.
+  const [already] = await db.select({ id: rhCandidatesTable.id }).from(rhCandidatesTable)
+    .where(and(eq(rhCandidatesTable.tenantId, settings.tenantId), eq(rhCandidatesTable.cpf, cpfDigits))).limit(1);
+  if (already) {
+    res.status(409).json({ error: "Este CPF já concluiu o nosso processo seletivo anteriormente. Não é possível se candidatar de novo — se quiser, fale diretamente com a loja." });
+    return;
+  }
 
   // Valida respostas de cada etapa habilitada.
   const answers: Record<string, Record<string, string>> = {};
@@ -195,12 +285,23 @@ router.post("/rh/public/:token/apply", async (req, res): Promise<void> => {
     answers[stage.id] = clean;
   }
 
-  const [created] = await db.insert(rhCandidatesTable).values({
-    tenantId: settings.tenantId, // loja dona do processo (vem do token do link)
-    name, phone, email, answers, videoData, videoMime,
-    stagesSnapshot: stages, // congela as etapas do momento da candidatura
-  }).returning({ id: rhCandidatesTable.id });
-  res.status(201).json({ ok: true, id: created!.id });
+  try {
+    const [created] = await db.insert(rhCandidatesTable).values({
+      tenantId: settings.tenantId, // loja dona do processo (vem do token do link)
+      name, phone, email, cpf: cpfDigits, positionId, positionName, answers, videoData, videoMime,
+      stagesSnapshot: stages, // congela as etapas do momento da candidatura
+    }).returning({ id: rhCandidatesTable.id });
+    res.status(201).json({ ok: true, id: created!.id });
+  } catch (err) {
+    // Corrida rara (2 envios do mesmo CPF ao mesmo tempo) — o índice único
+    // parcial (migration 0067) barra o segundo; devolve a mesma mensagem
+    // amigável em vez do erro cru do Postgres.
+    if (err instanceof Error && /rh_candidates_tenant_cpf_uniq/.test(err.message)) {
+      res.status(409).json({ error: "Este CPF já concluiu o nosso processo seletivo anteriormente. Não é possível se candidatar de novo — se quiser, fale diretamente com a loja." });
+      return;
+    }
+    throw err;
+  }
 });
 
 // ── Admin ──────────────────────────────────────────────────────────────────
@@ -233,6 +334,67 @@ router.post("/rh/settings/regenerate-token", requireModuleAccess("rh"), async (r
   res.json({ publicToken });
 });
 
+// ── Cargos (processo seletivo por função) ───────────────────────────────────
+// Assim que a loja cadastra o primeiro cargo, o link público (que já existe,
+// não muda) passa a pedir a escolha da vaga antes do questionário — ver
+// GET /rh/public/:token acima.
+
+router.get("/rh/positions", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rows = await db.select().from(rhPositionsTable)
+    .where(eq(rhPositionsTable.tenantId, tenantId))
+    .orderBy(asc(rhPositionsTable.sortOrder), asc(rhPositionsTable.id));
+  res.json(rows);
+});
+
+router.post("/rh/positions", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const name = sanitizePositionName((req.body ?? {}).name);
+  if (!name) { res.status(400).json({ error: "Nome do cargo é obrigatório" }); return; }
+  const stages = sanitizeStages((req.body ?? {}).stages) ?? DEFAULT_STAGES;
+  const [{ max } = { max: 0 }] = await db.select({ max: rhPositionsTable.sortOrder }).from(rhPositionsTable)
+    .where(eq(rhPositionsTable.tenantId, tenantId)).orderBy(desc(rhPositionsTable.sortOrder)).limit(1);
+  const [created] = await db.insert(rhPositionsTable).values({
+    tenantId, name, stages, sortOrder: (max ?? 0) + 1,
+  }).returning();
+  res.status(201).json(created);
+});
+
+router.patch("/rh/positions/:id", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const body = (req.body ?? {}) as { name?: unknown; active?: unknown; stages?: unknown };
+  const update: Record<string, unknown> = { updatedAt: new Date() };
+  if (body.name !== undefined) {
+    const name = sanitizePositionName(body.name);
+    if (!name) { res.status(400).json({ error: "Nome do cargo é obrigatório" }); return; }
+    update.name = name;
+  }
+  if (body.active !== undefined) update.active = body.active === true;
+  if (body.stages !== undefined) {
+    const stages = sanitizeStages(body.stages);
+    if (!stages) { res.status(400).json({ error: "Etapas inválidas — cada etapa precisa de título e (se for formulário) de 1 a 30 perguntas; opções precisam de 2+ alternativas" }); return; }
+    update.stages = stages;
+  }
+  const [updated] = await db.update(rhPositionsTable).set(update)
+    .where(and(eq(rhPositionsTable.id, id), eq(rhPositionsTable.tenantId, tenantId)))
+    .returning();
+  if (!updated) { res.status(404).json({ error: "Cargo não encontrado" }); return; }
+  res.json(updated);
+});
+
+router.delete("/rh/positions/:id", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  await db.delete(rhPositionsTable)
+    .where(and(eq(rhPositionsTable.id, id), eq(rhPositionsTable.tenantId, tenantId)));
+  // Candidaturas já recebidas mantêm o nome do cargo congelado
+  // (positionName) — excluir o cargo não apaga o histórico de ninguém.
+  res.json({ ok: true });
+});
+
 router.get("/rh/candidates", requireModuleAccess("rh"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rows = await db.select({
@@ -240,6 +402,9 @@ router.get("/rh/candidates", requireModuleAccess("rh"), async (req, res): Promis
     name: rhCandidatesTable.name,
     phone: rhCandidatesTable.phone,
     email: rhCandidatesTable.email,
+    cpf: rhCandidatesTable.cpf,
+    positionId: rhCandidatesTable.positionId,
+    positionName: rhCandidatesTable.positionName,
     status: rhCandidatesTable.status,
     answers: rhCandidatesTable.answers,
     notes: rhCandidatesTable.notes,

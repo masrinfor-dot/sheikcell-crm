@@ -5,16 +5,29 @@ import { Video, CheckCircle, Circle, StopCircle, RotateCcw, Send } from "lucide-
 
 const DEFAULT_MAX_VIDEO_SECONDS = 60;
 
+function onlyDigits(v: string): string {
+  return v.replace(/\D/g, "");
+}
+
 // Página PÚBLICA do candidato (sem login): responde as etapas configuradas
 // pelo admin (pré-entrevista, teste de perfil, prova escrita, vídeo) e envia.
 export default function Candidatura() {
   const { token } = useParams<{ token: string }>();
+  // positions !== null → a loja configurou cargo(s); o candidato escolhe 1
+  // (nunca vários) antes de ver o questionário daquela vaga específica.
+  // Loja sem cargo configurado nunca passa por isso (positions fica null,
+  // stages já vem pronto) — mesmo comportamento de sempre.
+  const [positions, setPositions] = useState<{ id: number; name: string }[] | null>(null);
+  const [selectedPosition, setSelectedPosition] = useState<number | null>(null);
+  const [loadingPosition, setLoadingPosition] = useState(false);
+  const [positionError, setPositionError] = useState<string | null>(null);
   const [stages, setStages] = useState<RhStage[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [step, setStep] = useState(-1); // -1 = dados pessoais
+  const [step, setStep] = useState(-1); // -2 = escolher vaga, -1 = dados pessoais
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
+  const [cpf, setCpf] = useState("");
   const [answers, setAnswers] = useState<Record<string, Record<string, string>>>({});
   const [videoBlob, setVideoBlob] = useState<Blob | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
@@ -33,9 +46,27 @@ export default function Candidatura() {
   useEffect(() => {
     if (!token) { setError("Link inválido"); return; }
     api.rh.publicProcess(token)
-      .then((r) => setStages(r.stages))
+      .then((r) => {
+        if (r.positions) { setPositions(r.positions); setStep(-2); }
+        else setStages(r.stages);
+      })
       .catch((e) => setError(e instanceof Error ? e.message : "Link inválido ou expirado"));
   }, [token]);
+
+  const confirmPosition = async () => {
+    if (!token || selectedPosition == null || loadingPosition) return;
+    setLoadingPosition(true);
+    setPositionError(null);
+    try {
+      const r = await api.rh.publicPositionStages(token, selectedPosition);
+      setStages(r.stages);
+      setStep(-1);
+    } catch (e) {
+      setPositionError(e instanceof Error ? e.message : "Erro ao carregar o processo desta vaga");
+    } finally {
+      setLoadingPosition(false);
+    }
+  };
 
   const stopStream = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -101,7 +132,7 @@ export default function Candidatura() {
       </div>
     );
   }
-  if (!stages) {
+  if (positions === null && stages === null) {
     return <div className="min-h-screen flex items-center justify-center bg-background">
       <div className="w-10 h-10 rounded-full border-4 border-primary border-t-transparent animate-spin" />
     </div>;
@@ -138,7 +169,10 @@ export default function Candidatura() {
         videoData = btoa(bin);
         videoMime = videoBlob.type || "video/webm";
       }
-      await api.rh.publicApply(token, { name, phone, email: email || undefined, answers, videoData, videoMime });
+      await api.rh.publicApply(token, {
+        name, phone, email: email || undefined, cpf: onlyDigits(cpf),
+        positionId: selectedPosition ?? undefined, answers, videoData, videoMime,
+      });
       setDone(true);
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : "Erro ao enviar. Tente novamente.");
@@ -157,8 +191,13 @@ export default function Candidatura() {
 
         {/* progresso */}
         <div className="flex items-center justify-center gap-1.5 flex-wrap">
-          <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${step === -1 ? "bg-primary text-white" : "bg-green-100 text-green-700"}`}>Seus dados</span>
-          {stages.map((s, i) => (
+          {positions !== null && (
+            <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${step === -2 ? "bg-primary text-white" : "bg-green-100 text-green-700"}`}>Vaga</span>
+          )}
+          <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${
+            step === -1 ? "bg-primary text-white" : step > -1 ? "bg-green-100 text-green-700" : "bg-secondary text-muted-foreground"
+          }`}>Seus dados</span>
+          {(stages ?? []).map((s, i) => (
             <span key={s.id} className={`text-[10px] font-bold px-2 py-1 rounded-full ${
               i === step ? "bg-primary text-white" : i < step ? "bg-green-100 text-green-700" : "bg-secondary text-muted-foreground"
             }`}>{s.title}</span>
@@ -166,12 +205,41 @@ export default function Candidatura() {
         </div>
 
         <div className="shk-card p-6">
-          {step === -1 ? (
+          {step === -2 ? (
+            <div className="space-y-4">
+              <div>
+                <h2 className="font-bold text-sm">Qual vaga você quer concorrer?</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">Escolha 1 opção — o questionário vai ser voltado para essa função.</p>
+              </div>
+              <div className="space-y-1">
+                {(positions ?? []).map((p) => (
+                  <button key={p.id} onClick={() => setSelectedPosition(p.id)} data-testid={`button-position-${p.id}`}
+                    className={`w-full text-left px-3 py-2 rounded-xl text-xs font-medium border transition flex items-center gap-2 ${
+                      selectedPosition === p.id ? "bg-primary text-white border-primary" : "bg-white border-border hover:bg-secondary"
+                    }`}>
+                    {selectedPosition === p.id ? <CheckCircle className="w-3.5 h-3.5 shrink-0" /> : <Circle className="w-3.5 h-3.5 shrink-0 opacity-40" />}
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+              {positionError && <p className="text-xs font-semibold text-red-600">{positionError}</p>}
+              <button onClick={confirmPosition} disabled={selectedPosition == null || loadingPosition} data-testid="button-position-continue"
+                className="w-full px-4 py-3 rounded-xl bg-primary text-white text-sm font-bold disabled:opacity-40">
+                {loadingPosition ? "Carregando..." : "Continuar"}
+              </button>
+            </div>
+          ) : step === -1 ? (
             <div className="space-y-3">
               <div>
                 <label className="text-xs font-medium mb-1 block">Nome completo *</label>
                 <input value={name} onChange={(e) => setName(e.target.value)} data-testid="input-cand-name"
                   className="w-full px-3 py-2 rounded-xl border border-border text-sm" />
+              </div>
+              <div>
+                <label className="text-xs font-medium mb-1 block">CPF *</label>
+                <input value={cpf} onChange={(e) => setCpf(e.target.value)} placeholder="000.000.000-00" inputMode="numeric" data-testid="input-cand-cpf"
+                  className="w-full px-3 py-2 rounded-xl border border-border text-sm" />
+                <p className="text-[10px] text-muted-foreground mt-1">Usado só para identificar você — não é possível repetir o processo com o mesmo CPF.</p>
               </div>
               <div>
                 <label className="text-xs font-medium mb-1 block">Telefone / WhatsApp *</label>
@@ -183,7 +251,7 @@ export default function Candidatura() {
                 <input value={email} onChange={(e) => setEmail(e.target.value)}
                   className="w-full px-3 py-2 rounded-xl border border-border text-sm" />
               </div>
-              <button onClick={() => setStep(0)} disabled={!name.trim() || !phone.trim()} data-testid="button-cand-start"
+              <button onClick={() => setStep(0)} disabled={!name.trim() || !phone.trim() || onlyDigits(cpf).length !== 11} data-testid="button-cand-start"
                 className="w-full px-4 py-3 rounded-xl bg-primary text-white text-sm font-bold disabled:opacity-40">
                 Começar
               </button>
@@ -258,7 +326,7 @@ export default function Candidatura() {
               <div className="flex gap-2">
                 <button onClick={() => setStep((s) => s - 1)}
                   className="px-4 py-2.5 rounded-xl border border-border text-xs font-bold text-muted-foreground">Voltar</button>
-                {step < stages.length - 1 ? (
+                {step < (stages?.length ?? 0) - 1 ? (
                   <button onClick={() => setStep((s) => s + 1)} disabled={!stageComplete(current)} data-testid="button-cand-next"
                     className="flex-1 px-4 py-2.5 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
                     Próxima etapa

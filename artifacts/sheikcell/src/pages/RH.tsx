@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import {
   api, API_BASE, canEditModule,
-  type RhStage, type RhQuestion, type RhCandidate,
+  type RhStage, type RhQuestion, type RhCandidate, type RhPosition,
   type Employee, type WorkShift, type TimeClockEntry, type TimeBankResult, type TimeBankSummaryRow, type LeaveRecord, type TimeBankClosure,
   type Store, type User,
 } from "@/lib/api";
@@ -10,7 +11,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   Users, Settings2, Copy, RefreshCw, Plus, Trash2, X, CheckCircle, XCircle,
   Video, ChevronDown, ChevronUp, Save, Link2, UserSquare2, CalendarClock, Clock, Wallet, Pencil, Archive, PlayCircle,
-  AlertTriangle, Image as ImageIcon, Smartphone, Printer, Star,
+  AlertTriangle, Image as ImageIcon, Smartphone, Printer, Star, Briefcase,
 } from "lucide-react";
 
 const STATUS_META: Record<RhCandidate["status"], { label: string; cls: string }> = {
@@ -115,6 +116,11 @@ function onlyDigits(v: string): string {
 }
 
 function extractCpf(c: RhCandidate): string | null {
+  // CPF é obrigatório desde a personalização por cargo — candidaturas novas
+  // sempre têm a coluna preenchida. O scan abaixo é só fallback pra
+  // candidatura de antes desta feature, quando CPF era só mais uma pergunta
+  // solta no processo (se a loja tivesse configurado uma).
+  if (c.cpf && c.cpf.length === 11) return c.cpf;
   if (!c.stagesSnapshot) return null;
   for (const stage of c.stagesSnapshot) {
     for (const q of stage.questions) {
@@ -191,10 +197,83 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
   const [notesDraft, setNotesDraft] = useState("");
   const [expandedHistory, setExpandedHistory] = useState<Set<number>>(new Set());
 
+  // Cargos (item: processo seletivo personalizado por função). Sem nenhum
+  // cargo cadastrado, o processo é o único de sempre (stages acima). Assim
+  // que existe 1+ cargo, o link público passa a pedir a escolha da vaga.
+  const [positions, setPositions] = useState<RhPosition[]>([]);
+  const [editingPositionId, setEditingPositionId] = useState<number | null>(null);
+  const [positionDraft, setPositionDraft] = useState<{ name: string; active: boolean; stages: RhStage[] } | null>(null);
+  const [savingPosition, setSavingPosition] = useState(false);
+  const [newPositionName, setNewPositionName] = useState("");
+  const [creatingPosition, setCreatingPosition] = useState(false);
+
   useEffect(() => {
     api.rh.settings().then((s) => { setToken(s.publicToken); setStages(s.stages); }).catch(() => {});
     api.rh.candidates().then(setCandidates).catch(() => {});
+    api.rh.positions.list().then(setPositions).catch(() => {});
   }, []);
+
+  const setPositionDraftStages: Dispatch<SetStateAction<RhStage[]>> = (updater) => {
+    setPositionDraft((d) => {
+      if (!d) return d;
+      const nextStages = typeof updater === "function" ? (updater as (prev: RhStage[]) => RhStage[])(d.stages) : updater;
+      return { ...d, stages: nextStages };
+    });
+  };
+
+  const openPosition = (p: RhPosition) => {
+    setEditingPositionId(p.id);
+    setPositionDraft({ name: p.name, active: p.active, stages: p.stages });
+  };
+
+  const createPosition = async () => {
+    if (!newPositionName.trim() || creatingPosition) return;
+    setCreatingPosition(true);
+    try {
+      // O primeiro cargo já nasce com o processo atual (stages global) — não
+      // perde a personalização que a loja já tinha feito antes dos cargos.
+      const seedStages = positions.length === 0 ? stages : undefined;
+      const created = await api.rh.positions.create({ name: newPositionName.trim(), stages: seedStages });
+      setPositions((prev) => [...prev, created]);
+      setNewPositionName("");
+      openPosition(created);
+      toast({ title: "Cargo criado!" });
+    } catch (err) {
+      toast({ title: "Erro ao criar cargo", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setCreatingPosition(false);
+    }
+  };
+
+  const savePosition = async () => {
+    if (!positionDraft || editingPositionId == null || savingPosition) return;
+    setSavingPosition(true);
+    try {
+      const updated = await api.rh.positions.update(editingPositionId, {
+        name: positionDraft.name, active: positionDraft.active, stages: positionDraft.stages,
+      });
+      setPositions((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+      toast({ title: "Cargo salvo!" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSavingPosition(false);
+    }
+  };
+
+  const removePosition = async () => {
+    if (editingPositionId == null) return;
+    const p = positions.find((x) => x.id === editingPositionId);
+    if (!p) return;
+    if (!window.confirm(`Excluir o cargo "${p.name}"? As candidaturas já recebidas mantêm o nome do cargo, mas o processo dele será apagado.`)) return;
+    try {
+      await api.rh.positions.remove(editingPositionId);
+      setPositions((prev) => prev.filter((x) => x.id !== editingPositionId));
+      setEditingPositionId(null);
+      setPositionDraft(null);
+      toast({ title: "Cargo excluído" });
+    } catch { toast({ title: "Erro", variant: "destructive" }); }
+  };
 
   const publicUrl = `${window.location.origin}${import.meta.env.BASE_URL.replace(/\/$/, "")}/candidatura/${token}`;
 
@@ -223,19 +302,6 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
       toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     } finally { setSaving(false); }
   };
-
-  const setStage = (i: number, patch: Partial<RhStage>) =>
-    setStages((prev) => prev.map((s, j) => (j === i ? { ...s, ...patch } : s)));
-  const setQuestion = (si: number, qi: number, patch: Partial<RhQuestion>) =>
-    setStages((prev) => prev.map((s, j) => j !== si ? s : { ...s, questions: s.questions.map((q, k) => (k === qi ? { ...q, ...patch } : q)) }));
-  const move = (i: number, dir: -1 | 1) =>
-    setStages((prev) => {
-      const next = [...prev];
-      const j = i + dir;
-      if (j < 0 || j >= next.length) return prev;
-      [next[i], next[j]] = [next[j]!, next[i]!];
-      return next;
-    });
 
   const setStatus = async (c: RhCandidate, status: RhCandidate["status"]) => {
     try {
@@ -385,9 +451,14 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                         <div className="flex items-center gap-2 flex-wrap">
                           <p className="font-bold text-sm">{c.name}</p>
                           <span className={`text-[10px] font-bold border px-2 py-0.5 rounded-full ${STATUS_META[c.status].cls}`}>{STATUS_META[c.status].label}</span>
+                          {c.positionName && (
+                            <span className="text-[10px] font-bold border px-2 py-0.5 rounded-full bg-secondary text-muted-foreground border-border flex items-center gap-1">
+                              <Briefcase className="w-3 h-3" /> {c.positionName}
+                            </span>
+                          )}
                           {c.hasVideo && <Video className="w-3.5 h-3.5 text-primary" />}
                         </div>
-                        <p className="text-[11px] text-muted-foreground">{c.phone}{c.email ? ` · ${c.email}` : ""} · {new Date(c.createdAt).toLocaleDateString("pt-BR")}</p>
+                        <p className="text-[11px] text-muted-foreground">{c.phone}{c.email ? ` · ${c.email}` : ""}{c.cpf ? ` · CPF ${c.cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, "$1.$2.$3-$4")}` : ""} · {new Date(c.createdAt).toLocaleDateString("pt-BR")}</p>
                       </div>
                     </button>
                     {history.length > 0 && (
@@ -418,113 +489,72 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
           )}
         </>
       ) : (
-        /* Editor do processo — some visível pra "view" (mantendo tudo
-           navegável e legível), mas nenhum campo/botão aceita interação. */
-        <fieldset disabled={!canEdit} className="space-y-3 border-0 p-0 m-0">
+        /* Cargos + editor do processo — some visível pra "view" (mantendo
+           tudo navegável e legível), mas nenhum campo/botão aceita interação. */
+        <div className="space-y-3">
           {!canEdit && (
             <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
               Você só tem acesso de visualização ao RH — peça ao administrador para liberar edição.
             </p>
           )}
-          {stages.map((s, si) => (
-            <div key={si} className={`shk-card p-4 space-y-3 ${!s.enabled ? "opacity-60" : ""}`}>
+
+          <div className="shk-card p-4 space-y-3">
+            <p className="text-xs font-bold flex items-center gap-1.5"><Briefcase className="w-3.5 h-3.5 text-primary" /> Cargos com processo próprio</p>
+            <p className="text-[11px] text-muted-foreground">
+              Cadastre um cargo pra cada função (ex.: Vendedor, Administrativo, Gerente, Estoque). Assim que existir pelo menos 1 cargo, quem acessa o link escolhe a vaga antes de responder — 1 só, nunca várias — e o questionário mostrado é o daquela função.
+            </p>
+            {positions.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {positions.map((p) => (
+                  <button key={p.id} onClick={() => openPosition(p)} data-testid={`button-position-${p.id}`}
+                    className={`px-3 py-1.5 rounded-full text-xs font-semibold border ${
+                      editingPositionId === p.id ? "bg-primary text-white border-primary"
+                      : p.active ? "bg-white text-foreground border-border hover:bg-secondary"
+                      : "bg-secondary text-muted-foreground border-border opacity-60"
+                    }`}>
+                    {p.name}{!p.active ? " (inativo)" : ""}
+                  </button>
+                ))}
+              </div>
+            )}
+            {canEdit && (
+              <div className="flex gap-2">
+                <input value={newPositionName} onChange={(e) => setNewPositionName(e.target.value)} placeholder="Nome do cargo (ex.: Vendedor)"
+                  data-testid="input-new-position"
+                  className="flex-1 px-3 py-2 rounded-xl border border-border text-xs" />
+                <button onClick={createPosition} disabled={!newPositionName.trim() || creatingPosition} data-testid="button-create-position"
+                  className="flex items-center gap-1 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
+                  <Plus className="w-3.5 h-3.5" /> {creatingPosition ? "Criando..." : "Criar cargo"}
+                </button>
+              </div>
+            )}
+          </div>
+
+          {editingPositionId != null && positionDraft ? (
+            <div className="shk-card p-4 space-y-3">
               <div className="flex items-center gap-2">
-                <div className="flex flex-col">
-                  <button onClick={() => move(si, -1)} disabled={si === 0} className="disabled:opacity-20"><ChevronUp className="w-4 h-4 text-muted-foreground" /></button>
-                  <button onClick={() => move(si, 1)} disabled={si === stages.length - 1} className="disabled:opacity-20"><ChevronDown className="w-4 h-4 text-muted-foreground" /></button>
-                </div>
-                <input value={s.title} onChange={(e) => setStage(si, { title: e.target.value })}
-                  className="flex-1 px-3 py-2 rounded-xl border border-border text-sm font-bold" />
-                <select value={s.type} onChange={(e) => setStage(si, {
-                  type: e.target.value as RhStage["type"],
-                  questions: e.target.value === "video" ? [] : (s.questions.length ? s.questions : [{ id: "q1", label: "", type: "text" }]),
-                  ...(e.target.value === "video" ? { maxVideoSeconds: s.maxVideoSeconds ?? 60 } : {}),
-                })}
-                  className="px-2 py-2 rounded-xl border border-border text-xs">
-                  <option value="form">Perguntas</option>
-                  <option value="video">Vídeo gravado</option>
-                </select>
+                <input value={positionDraft.name} disabled={!canEdit}
+                  onChange={(e) => setPositionDraft((d) => (d ? { ...d, name: e.target.value } : d))}
+                  className="flex-1 px-3 py-2 rounded-xl border border-border text-sm font-bold disabled:opacity-60" />
                 <label className="flex items-center gap-1 text-[11px] font-medium shrink-0">
-                  <input type="checkbox" checked={s.enabled} onChange={(e) => setStage(si, { enabled: e.target.checked })} /> Ativa
+                  <input type="checkbox" checked={positionDraft.active} disabled={!canEdit}
+                    onChange={(e) => setPositionDraft((d) => (d ? { ...d, active: e.target.checked } : d))} /> Ativo
                 </label>
-                <button onClick={() => setStages((prev) => prev.filter((_, j) => j !== si))} disabled={stages.length === 1}
+                <button onClick={removePosition} disabled={!canEdit} data-testid="button-remove-position"
                   className="p-1.5 rounded-lg hover:bg-red-50 text-red-400 disabled:opacity-30"><Trash2 className="w-3.5 h-3.5" /></button>
               </div>
-              <textarea value={s.description} onChange={(e) => setStage(si, { description: e.target.value })}
-                rows={2} placeholder="Instruções para o candidato nesta etapa..."
-                className="w-full px-3 py-2 rounded-xl border border-border text-xs resize-none" />
-              {s.type === "video" && (
-                <div className="flex items-center gap-2 pl-2 border-l-2 border-border flex-wrap">
-                  <label className="text-[11px] font-medium shrink-0">Duração máxima do vídeo:</label>
-                  <select
-                    value={s.maxVideoSeconds === null ? "unlimited" : VIDEO_SECONDS_PRESETS.includes(s.maxVideoSeconds ?? 60) ? String(s.maxVideoSeconds ?? 60) : "custom"}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      if (v === "unlimited") setStage(si, { maxVideoSeconds: null });
-                      else if (v === "custom") setStage(si, { maxVideoSeconds: s.maxVideoSeconds ?? 60 });
-                      else setStage(si, { maxVideoSeconds: parseInt(v, 10) });
-                    }}
-                    className="px-2 py-1.5 rounded-xl border border-border text-[11px]">
-                    <option value="30">30 segundos</option>
-                    <option value="60">1 minuto</option>
-                    <option value="120">2 minutos</option>
-                    <option value="180">3 minutos</option>
-                    <option value="300">5 minutos</option>
-                    <option value="600">10 minutos</option>
-                    <option value="custom">Personalizado</option>
-                    <option value="unlimited">Sem limite</option>
-                  </select>
-                  {s.maxVideoSeconds != null && !VIDEO_SECONDS_PRESETS.includes(s.maxVideoSeconds) && (
-                    <input type="number" min={5} max={1800} value={s.maxVideoSeconds}
-                      onChange={(e) => setStage(si, { maxVideoSeconds: Math.max(5, Math.min(1800, parseInt(e.target.value, 10) || 60)) })}
-                      className="w-20 px-2 py-1.5 rounded-xl border border-border text-[11px]" />
-                  )}
-                </div>
-              )}
-              {s.type === "form" && (
-                <div className="space-y-2 pl-2 border-l-2 border-border">
-                  {s.questions.map((q, qi) => (
-                    <div key={qi} className="flex gap-2 items-start">
-                      <div className="flex-1 space-y-1">
-                        <input value={q.label} onChange={(e) => setQuestion(si, qi, { label: e.target.value })}
-                          placeholder={`Pergunta ${qi + 1}`} className="w-full px-3 py-1.5 rounded-xl border border-border text-xs" />
-                        {q.type === "options" && (
-                          <input value={(q.options ?? []).join(", ")}
-                            onChange={(e) => setQuestion(si, qi, { options: e.target.value.split(",").map((o) => o.trimStart()) })}
-                            onBlur={(e) => setQuestion(si, qi, { options: e.target.value.split(",").map((o) => o.trim()).filter(Boolean) })}
-                            placeholder="Opções separadas por vírgula"
-                            className="w-full px-3 py-1.5 rounded-xl border border-border text-[11px]" />
-                        )}
-                      </div>
-                      <select value={q.type} onChange={(e) => setQuestion(si, qi, { type: e.target.value as RhQuestion["type"], ...(e.target.value === "options" ? { options: q.options ?? [] } : {}) })}
-                        className="px-2 py-1.5 rounded-xl border border-border text-[11px]">
-                        <option value="text">Resposta curta</option>
-                        <option value="longtext">Resposta longa</option>
-                        <option value="options">Múltipla escolha</option>
-                      </select>
-                      <button onClick={() => setStage(si, { questions: s.questions.filter((_, k) => k !== qi) })} disabled={s.questions.length === 1}
-                        className="p-1.5 rounded-lg hover:bg-red-50 text-red-400 disabled:opacity-30"><Trash2 className="w-3 h-3" /></button>
-                    </div>
-                  ))}
-                  <button onClick={() => setStage(si, { questions: [...s.questions, { id: `q${s.questions.length + 1}`, label: "", type: "text" }] })}
-                    disabled={s.questions.length >= 30}
-                    className="flex items-center gap-1 text-[11px] font-semibold text-primary disabled:opacity-40"><Plus className="w-3 h-3" /> Pergunta</button>
-                </div>
-              )}
+              <StageEditor stages={positionDraft.stages} setStages={setPositionDraftStages}
+                canEdit={canEdit} onSave={savePosition} saving={savingPosition} saveLabel="Salvar cargo" />
             </div>
-          ))}
-          <div className="flex gap-2">
-            <button onClick={() => setStages((prev) => [...prev, { id: `s${prev.length + 1}`, title: "Nova etapa", description: "", type: "form", enabled: true, questions: [{ id: "q1", label: "", type: "text" }] }])}
-              disabled={stages.length >= 10}
-              className="flex items-center gap-1 px-3 py-2 rounded-xl border border-border text-xs font-semibold text-muted-foreground disabled:opacity-40">
-              <Plus className="w-3.5 h-3.5" /> Adicionar etapa
-            </button>
-            <button onClick={saveStages} disabled={saving} data-testid="button-save-rh"
-              className="flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
-              <Save className="w-3.5 h-3.5" /> {saving ? "Salvando..." : "Salvar processo"}
-            </button>
-          </div>
-        </fieldset>
+          ) : positions.length === 0 ? (
+            <>
+              <p className="text-[11px] text-muted-foreground">Sem nenhum cargo cadastrado, o processo abaixo vale pra qualquer pessoa que acessar o link — do jeito que já era.</p>
+              <StageEditor stages={stages} setStages={setStages} canEdit={canEdit} onSave={saveStages} saving={saving} />
+            </>
+          ) : (
+            <p className="text-[11px] text-muted-foreground">Clique num cargo acima pra editar o processo dele.</p>
+          )}
+        </div>
       )}
 
       {/* Modal do candidato */}
@@ -535,7 +565,14 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
               <h3 className="font-bold">{opened.name}</h3>
               <button onClick={() => setOpened(null)}><X className="w-5 h-5 text-muted-foreground" /></button>
             </div>
-            <p className="text-xs text-muted-foreground mb-3">{opened.phone}{opened.email ? ` · ${opened.email}` : ""} · {new Date(opened.createdAt).toLocaleString("pt-BR")}</p>
+            <div className="mb-3">
+              <p className="text-xs text-muted-foreground">
+                {opened.phone}{opened.email ? ` · ${opened.email}` : ""}{opened.cpf ? ` · CPF ${opened.cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, "$1.$2.$3-$4")}` : ""} · {new Date(opened.createdAt).toLocaleString("pt-BR")}
+              </p>
+              {opened.positionName && (
+                <p className="text-xs text-muted-foreground flex items-center gap-1 mt-0.5"><Briefcase className="w-3.5 h-3.5 text-primary" /> Vaga: <span className="font-semibold">{opened.positionName}</span></p>
+              )}
+            </div>
 
             <div className="flex gap-1.5 mb-4 flex-wrap">
               <button onClick={() => setStatus(opened, "pre_aprovado")} data-testid="button-preapprove-candidate" disabled={!canEdit}
@@ -598,6 +635,135 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
         </div>
       )}
     </div>
+  );
+}
+
+// Editor de etapas do processo seletivo — reaproveitado tanto pelo processo
+// "legado" (sem cargo, 1 só pra loja inteira) quanto pelo processo de cada
+// cargo individual (item: processo seletivo por função). `stages`/`setStages`
+// definem só ONDE o editor lê/escreve; o resto do editor é idêntico nos 2 casos.
+function StageEditor({ stages, setStages, canEdit, onSave, saving, saveLabel = "Salvar processo" }: {
+  stages: RhStage[];
+  setStages: Dispatch<SetStateAction<RhStage[]>>;
+  canEdit: boolean;
+  onSave: () => void;
+  saving: boolean;
+  saveLabel?: string;
+}) {
+  const setStage = (i: number, patch: Partial<RhStage>) =>
+    setStages((prev) => prev.map((s, j) => (j === i ? { ...s, ...patch } : s)));
+  const setQuestion = (si: number, qi: number, patch: Partial<RhQuestion>) =>
+    setStages((prev) => prev.map((s, j) => j !== si ? s : { ...s, questions: s.questions.map((q, k) => (k === qi ? { ...q, ...patch } : q)) }));
+  const move = (i: number, dir: -1 | 1) =>
+    setStages((prev) => {
+      const next = [...prev];
+      const j = i + dir;
+      if (j < 0 || j >= next.length) return prev;
+      [next[i], next[j]] = [next[j]!, next[i]!];
+      return next;
+    });
+
+  return (
+    <fieldset disabled={!canEdit} className="space-y-3 border-0 p-0 m-0">
+      {stages.map((s, si) => (
+        <div key={si} className={`shk-card p-4 space-y-3 ${!s.enabled ? "opacity-60" : ""}`}>
+          <div className="flex items-center gap-2">
+            <div className="flex flex-col">
+              <button onClick={() => move(si, -1)} disabled={si === 0} className="disabled:opacity-20"><ChevronUp className="w-4 h-4 text-muted-foreground" /></button>
+              <button onClick={() => move(si, 1)} disabled={si === stages.length - 1} className="disabled:opacity-20"><ChevronDown className="w-4 h-4 text-muted-foreground" /></button>
+            </div>
+            <input value={s.title} onChange={(e) => setStage(si, { title: e.target.value })}
+              className="flex-1 px-3 py-2 rounded-xl border border-border text-sm font-bold" />
+            <select value={s.type} onChange={(e) => setStage(si, {
+              type: e.target.value as RhStage["type"],
+              questions: e.target.value === "video" ? [] : (s.questions.length ? s.questions : [{ id: "q1", label: "", type: "text" }]),
+              ...(e.target.value === "video" ? { maxVideoSeconds: s.maxVideoSeconds ?? 60 } : {}),
+            })}
+              className="px-2 py-2 rounded-xl border border-border text-xs">
+              <option value="form">Perguntas</option>
+              <option value="video">Vídeo gravado</option>
+            </select>
+            <label className="flex items-center gap-1 text-[11px] font-medium shrink-0">
+              <input type="checkbox" checked={s.enabled} onChange={(e) => setStage(si, { enabled: e.target.checked })} /> Ativa
+            </label>
+            <button onClick={() => setStages((prev) => prev.filter((_, j) => j !== si))} disabled={stages.length === 1}
+              className="p-1.5 rounded-lg hover:bg-red-50 text-red-400 disabled:opacity-30"><Trash2 className="w-3.5 h-3.5" /></button>
+          </div>
+          <textarea value={s.description} onChange={(e) => setStage(si, { description: e.target.value })}
+            rows={2} placeholder="Instruções para o candidato nesta etapa..."
+            className="w-full px-3 py-2 rounded-xl border border-border text-xs resize-none" />
+          {s.type === "video" && (
+            <div className="flex items-center gap-2 pl-2 border-l-2 border-border flex-wrap">
+              <label className="text-[11px] font-medium shrink-0">Duração máxima do vídeo:</label>
+              <select
+                value={s.maxVideoSeconds === null ? "unlimited" : VIDEO_SECONDS_PRESETS.includes(s.maxVideoSeconds ?? 60) ? String(s.maxVideoSeconds ?? 60) : "custom"}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === "unlimited") setStage(si, { maxVideoSeconds: null });
+                  else if (v === "custom") setStage(si, { maxVideoSeconds: s.maxVideoSeconds ?? 60 });
+                  else setStage(si, { maxVideoSeconds: parseInt(v, 10) });
+                }}
+                className="px-2 py-1.5 rounded-xl border border-border text-[11px]">
+                <option value="30">30 segundos</option>
+                <option value="60">1 minuto</option>
+                <option value="120">2 minutos</option>
+                <option value="180">3 minutos</option>
+                <option value="300">5 minutos</option>
+                <option value="600">10 minutos</option>
+                <option value="custom">Personalizado</option>
+                <option value="unlimited">Sem limite</option>
+              </select>
+              {s.maxVideoSeconds != null && !VIDEO_SECONDS_PRESETS.includes(s.maxVideoSeconds) && (
+                <input type="number" min={5} max={1800} value={s.maxVideoSeconds}
+                  onChange={(e) => setStage(si, { maxVideoSeconds: Math.max(5, Math.min(1800, parseInt(e.target.value, 10) || 60)) })}
+                  className="w-20 px-2 py-1.5 rounded-xl border border-border text-[11px]" />
+              )}
+            </div>
+          )}
+          {s.type === "form" && (
+            <div className="space-y-2 pl-2 border-l-2 border-border">
+              {s.questions.map((q, qi) => (
+                <div key={qi} className="flex gap-2 items-start">
+                  <div className="flex-1 space-y-1">
+                    <input value={q.label} onChange={(e) => setQuestion(si, qi, { label: e.target.value })}
+                      placeholder={`Pergunta ${qi + 1}`} className="w-full px-3 py-1.5 rounded-xl border border-border text-xs" />
+                    {q.type === "options" && (
+                      <input value={(q.options ?? []).join(", ")}
+                        onChange={(e) => setQuestion(si, qi, { options: e.target.value.split(",").map((o) => o.trimStart()) })}
+                        onBlur={(e) => setQuestion(si, qi, { options: e.target.value.split(",").map((o) => o.trim()).filter(Boolean) })}
+                        placeholder="Opções separadas por vírgula"
+                        className="w-full px-3 py-1.5 rounded-xl border border-border text-[11px]" />
+                    )}
+                  </div>
+                  <select value={q.type} onChange={(e) => setQuestion(si, qi, { type: e.target.value as RhQuestion["type"], ...(e.target.value === "options" ? { options: q.options ?? [] } : {}) })}
+                    className="px-2 py-1.5 rounded-xl border border-border text-[11px]">
+                    <option value="text">Resposta curta</option>
+                    <option value="longtext">Resposta longa</option>
+                    <option value="options">Múltipla escolha</option>
+                  </select>
+                  <button onClick={() => setStage(si, { questions: s.questions.filter((_, k) => k !== qi) })} disabled={s.questions.length === 1}
+                    className="p-1.5 rounded-lg hover:bg-red-50 text-red-400 disabled:opacity-30"><Trash2 className="w-3 h-3" /></button>
+                </div>
+              ))}
+              <button onClick={() => setStage(si, { questions: [...s.questions, { id: `q${s.questions.length + 1}`, label: "", type: "text" }] })}
+                disabled={s.questions.length >= 30}
+                className="flex items-center gap-1 text-[11px] font-semibold text-primary disabled:opacity-40"><Plus className="w-3 h-3" /> Pergunta</button>
+            </div>
+          )}
+        </div>
+      ))}
+      <div className="flex gap-2">
+        <button onClick={() => setStages((prev) => [...prev, { id: `s${prev.length + 1}`, title: "Nova etapa", description: "", type: "form", enabled: true, questions: [{ id: "q1", label: "", type: "text" }] }])}
+          disabled={stages.length >= 10}
+          className="flex items-center gap-1 px-3 py-2 rounded-xl border border-border text-xs font-semibold text-muted-foreground disabled:opacity-40">
+          <Plus className="w-3.5 h-3.5" /> Adicionar etapa
+        </button>
+        <button onClick={onSave} disabled={saving} data-testid="button-save-rh"
+          className="flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
+          <Save className="w-3.5 h-3.5" /> {saving ? "Salvando..." : saveLabel}
+        </button>
+      </div>
+    </fieldset>
   );
 }
 
