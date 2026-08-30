@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, PERMISSION_KEYS, PERMISSION_LABELS, MODULE_LABELS, USER_GRANTABLE_MODULES, type SectorSummary, type AttendanceLog, type Sector, type QuickReply, type Store, type DashboardAttention, type InternalConversation, type OptionalModule, type UserGrantableModule, type UserModuleAccess } from "@/lib/api";
+import { api, PERMISSION_KEYS, PERMISSION_LABELS, MODULE_LABELS, USER_GRANTABLE_MODULES, OPTIONAL_MODULES, type SectorSummary, type AttendanceLog, type Sector, type QuickReply, type Store, type DashboardAttention, type InternalConversation, type OptionalModule, type UserGrantableModule, type UserModuleAccess } from "@/lib/api";
 import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
@@ -189,7 +189,7 @@ export default function AdminDashboard() {
   const [deletingUser, setDeletingUser] = useState(false);
 
   const [userForm, setUserForm] = useState<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; extension: string; adminAccess: string[]; moduleAccess: UserModuleAccess; ahEnabled: boolean; ahStart: string; ahEnd: string; ahDays: number[]; waEnabled: boolean; waKeys: string[] }>({ name: "", email: "", password: "", role: "vendedor", sectorId: 1, storeName: "", extension: "", adminAccess: [], moduleAccess: {}, ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [] });
-  const [sectorForm, setSectorForm] = useState({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true });
+  const [sectorForm, setSectorForm] = useState<{ name: string; description: string; icon: string; color: string; isActive: boolean; enabledModules: OptionalModule[] | null }>({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true, enabledModules: null });
 
   const fetchAll = useCallback(async () => {
     try {
@@ -368,12 +368,12 @@ export default function AdminDashboard() {
   // ---- Sector handlers ----
   const openAddSector = () => {
     setEditSector(null);
-    setSectorForm({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true });
+    setSectorForm({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true, enabledModules: null });
     setShowAddSector(true);
   };
   const openEditSector = (s: Sector) => {
     setEditSector(s);
-    setSectorForm({ name: s.name, description: s.description ?? "", icon: s.icon, color: s.color, isActive: s.isActive });
+    setSectorForm({ name: s.name, description: s.description ?? "", icon: s.icon, color: s.color, isActive: s.isActive, enabledModules: s.enabledModules ?? null });
     setShowAddSector(true);
   };
   const handleSaveSector = async (e: React.FormEvent) => {
@@ -1433,6 +1433,11 @@ export default function AdminDashboard() {
                   <span className={sector.isActive ? "shk-badge-done" : "shk-badge-waiting"}>
                     {sector.isActive ? "Ativo" : "Inativo"}
                   </span>
+                  {sector.enabledModules != null && (
+                    <span className="shk-badge-progress" title="Este setor só vê os módulos escolhidos, não tudo que a loja contratou">
+                      Módulos restritos
+                    </span>
+                  )}
                   <button onClick={() => openEditSector(sector)} data-testid={`button-edit-sector-${sector.id}`}
                     className="p-1.5 text-muted-foreground hover:text-primary hover:bg-blue-50 rounded-lg transition">
                     <Pencil className="w-3.5 h-3.5" />
@@ -1969,6 +1974,41 @@ export default function AdminDashboard() {
                   <label htmlFor="sectorActive" className="text-sm font-medium">Setor ativo</label>
                 </div>
               )}
+              <div className="pt-2 border-t border-border">
+                <label className="flex items-center gap-2 text-xs font-medium">
+                  <input type="checkbox" id="sectorRestrictModules" data-testid="toggle-sector-restrict-modules"
+                    checked={sectorForm.enabledModules != null}
+                    onChange={(e) => setSectorForm({
+                      ...sectorForm,
+                      enabledModules: e.target.checked
+                        ? [...OPTIONAL_MODULES].filter((m) => user?.enabledModules == null || user.enabledModules.includes(m))
+                        : null,
+                    })}
+                    className="w-4 h-4 rounded" />
+                  Restringir módulos deste setor
+                </label>
+                <p className="text-[10px] text-muted-foreground mt-1 mb-2">
+                  Sem marcar, este setor vê tudo que a loja já contratou (padrão de sempre). Marcando, escolha abaixo o que os vendedores desse setor podem ver — inclusive Atendimento, pra setores que só fazem comunicação interna.
+                </p>
+                {sectorForm.enabledModules != null && (
+                  <div className="space-y-1 max-h-48 overflow-y-auto pr-1">
+                    {OPTIONAL_MODULES.filter((m) => user?.enabledModules == null || user.enabledModules.includes(m)).map((m) => {
+                      const checked = sectorForm.enabledModules?.includes(m) ?? false;
+                      return (
+                        <label key={m} className="flex items-center gap-2 text-xs">
+                          <input type="checkbox" checked={checked} data-testid={`sector-module-${m}`}
+                            onChange={(e) => {
+                              const current = sectorForm.enabledModules ?? [];
+                              const next = e.target.checked ? [...current, m] : current.filter((x) => x !== m);
+                              setSectorForm({ ...sectorForm, enabledModules: next });
+                            }} />
+                          {MODULE_LABELS[m]}
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
               <div className="flex gap-2 pt-1">
                 <button type="button" onClick={() => setShowAddSector(false)}
                   className="flex-1 py-2 rounded-xl border border-border text-sm font-medium text-muted-foreground hover:bg-secondary transition">Cancelar</button>

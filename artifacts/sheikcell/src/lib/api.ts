@@ -593,6 +593,11 @@ export type Sector = {
   icon: string;
   color: string;
   isActive: boolean;
+  // Módulos opcionais que este setor pode ver (por cima do que a loja
+  // contratou). null = sem restrição (padrão, todo setor de sempre). Array
+  // explícito (mesmo [] de propósito) = só esses módulos aparecem pra quem
+  // é "vendedor" nesse setor — admin e supervisor não são afetados.
+  enabledModules?: OptionalModule[] | null;
 };
 
 export type QueueEntry = {

@@ -89,12 +89,18 @@ export default function AttendantDashboard() {
   }, [mainTab]);
   const enabledModules = user?.enabledModules ?? null;
   const userModuleAccess = user?.moduleAccess ?? null;
-  // Loja precisa ter contratado o módulo. Atendimento é o único módulo com
-  // default liberado (ausência de config = acesso) — só bloqueia se um
-  // admin restringiu explicitamente com "none"; os demais exigem grant.
+  // Módulos que o SETOR deste vendedor pode ver (item 1h do backlog) — uma
+  // restrição a mais, por cima da loja. null = sem restrição (setor de
+  // sempre, comportamento inalterado).
+  const sectorModules = user?.sector?.enabledModules ?? null;
+  // Loja precisa ter contratado o módulo E o setor precisa permitir.
+  // Atendimento é o único módulo com default liberado (ausência de config
+  // = acesso) — só bloqueia se um admin restringiu explicitamente com
+  // "none", ou se o setor não inclui "chat"; os demais exigem grant.
   const moduleGranted = (m: OptionalModule | undefined): boolean => {
     if (!m) return true;
     if (enabledModules != null && !enabledModules.includes(m)) return false;
+    if (sectorModules != null && !sectorModules.includes(m)) return false;
     if (m === "chat") return userModuleAccess?.chat !== "none";
     return userModuleAccess != null && m in userModuleAccess;
   };

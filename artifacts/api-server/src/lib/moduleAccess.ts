@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
-import { db, usersTable, OPTIONAL_MODULES, type OptionalModule } from "@workspace/db";
+import { db, usersTable, sectorsTable, OPTIONAL_MODULES, type OptionalModule } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { requireModule } from "../middlewares/auth";
 
@@ -50,21 +50,52 @@ async function getModuleAccess(req: Request): Promise<FullModuleAccessMap | null
   return row?.moduleAccess ?? null;
 }
 
+// ── Módulos habilitados por SETOR (item 1h do backlog) ─────────────────────
+// Setores que só fazem comunicação interna não precisam de Atendimento nem
+// de outras funções — um admin pode restringir, por setor, o que aparece.
+// Só vale pra "vendedor": admin sempre vê tudo, e supervisor não fica preso
+// a um setor só (já tem visão cruzada entre setores, feature separada).
+// null (sem config, todo setor já existente) = sem restrição adicional —
+// nenhuma conta perde acesso por causa disto. Cache curto (mesmo padrão de
+// getEnabledModules em middlewares/auth.ts) porque roda em quase toda rota.
+const sectorModulesCache = new Map<number, { at: number; modules: Set<string> | null }>();
+async function getSectorEnabledModules(sectorId: number): Promise<Set<string> | null> {
+  const cached = sectorModulesCache.get(sectorId);
+  const now = Date.now();
+  if (cached && now - cached.at < 30_000) return cached.modules;
+  const [row] = await db.select({ enabledModules: sectorsTable.enabledModules })
+    .from(sectorsTable).where(eq(sectorsTable.id, sectorId)).limit(1);
+  const modules = row?.enabledModules ? new Set<string>(row.enabledModules) : null;
+  sectorModulesCache.set(sectorId, { at: now, modules });
+  return modules;
+}
+
+/** true = o setor do usuário da sessão bloqueia esse módulo (só vale pra vendedor). */
+async function sectorBlocks(req: Request, moduleKey: string): Promise<boolean> {
+  if (req.session.userRole !== "vendedor") return false;
+  const sectorId = req.session.userSectorId;
+  if (sectorId == null) return false;
+  const allowed = await getSectorEnabledModules(sectorId);
+  return allowed != null && !allowed.has(moduleKey);
+}
+
 /** Nível de acesso do usuário da sessão a um módulo — admin sempre "edit". Ausência = sem acesso (fail closed). */
 export async function checkModuleAccess(req: Request, moduleKey: UserGrantableModule): Promise<ModuleAccessLevel | null> {
   if (req.session.userRole === "admin") return "edit";
+  if (await sectorBlocks(req, moduleKey)) return null;
   return (await getModuleAccess(req))?.[moduleKey] ?? null;
 }
 
 /**
  * Nível de acesso do usuário da sessão ao Atendimento — admin sempre "edit";
- * demais papéis usam o que um admin configurou em moduleAccess.chat, com
- * default "edit" (liberado) quando nunca foi configurado, pra não quebrar
- * nenhuma conta existente. Só bloqueia (ou restringe a "view") quem um
- * admin restringiu explicitamente.
+ * demais papéis usam o que um admin configurou em moduleAccess.chat (mais o
+ * setor, se restringido), com default "edit" (liberado) quando nunca foi
+ * configurado, pra não quebrar nenhuma conta existente. Só bloqueia (ou
+ * restringe a "view") quem um admin restringiu explicitamente.
  */
 export async function checkChatAccess(req: Request): Promise<ChatAccessLevel> {
   if (req.session.userRole === "admin") return "edit";
+  if (await sectorBlocks(req, "chat")) return "none";
   const level = (await getModuleAccess(req))?.chat;
   return level ?? "edit";
 }
