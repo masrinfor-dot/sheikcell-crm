@@ -17,6 +17,7 @@ import {
 import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import { requirePerm } from "../lib/permissions";
+import { logger } from "../lib/logger";
 import {
   sanitizePricingSettings,
   precoVendaDoProduto,
@@ -878,10 +879,19 @@ async function autoPhotoSearchUrls(query: string): Promise<string[]> {
     url.searchParams.set("safe", "active");
     url.searchParams.set("imgSize", "large");
     const r = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-    if (!r.ok) return [];
+    if (!r.ok) {
+      // Best-effort por design (importação nunca deve travar por causa da
+      // foto), mas SEM log isso fica invisível pra sempre — quem investiga
+      // "fotos não vêm automático" precisa dessa causa (ex.: 403 = conta de
+      // faturamento do Google Cloud não vinculada, 429 = cota diária estourada).
+      const body = await r.text().catch(() => "");
+      logger.warn({ status: r.status, body: body.slice(0, 300), query }, "Catalog auto photo search: Google CSE respondeu erro");
+      return [];
+    }
     const json = (await r.json()) as { items?: { link?: string }[] };
     return (json.items ?? []).map((it) => (typeof it.link === "string" ? it.link : "")).filter(Boolean);
-  } catch {
+  } catch (err) {
+    logger.warn({ err, query }, "Catalog auto photo search failed");
     return [];
   }
 }
@@ -971,7 +981,8 @@ router.post("/catalog/import/confirm", requireAuth, async (req, res): Promise<vo
   // vincular conta de faturamento no Google Cloud) ou falhar, os produtos já
   // foram importados normalmente — só ficam sem foto, como sempre.
   const photosAttached = await autoAttachPhotosOnImport(tenantId, createdProducts);
-  res.status(201).json({ imported: createdProducts.length, products: createdProducts, photosAttached });
+  const photoSearchConfigured = !!(process.env["GOOGLE_CSE_API_KEY"] && process.env["GOOGLE_CSE_CX"]);
+  res.status(201).json({ imported: createdProducts.length, products: createdProducts, photosAttached, photoSearchConfigured });
 });
 
 export default router;

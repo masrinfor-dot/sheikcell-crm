@@ -2223,7 +2223,7 @@ export const api = {
     // timeoutMs maior que importParse: além de gravar os produtos, agora
     // também tenta buscar 1 foto por produto na internet (melhor esforço,
     // com timeout próprio por produto — ver autoAttachPhotosOnImport no backend).
-    importConfirm: (items: CatalogImportItem[]) => req<{ imported: number; products: CatalogProduct[]; photosAttached?: number }>("/catalog/import/confirm", { method: "POST", body: JSON.stringify({ items }), timeoutMs: 90_000 }),
+    importConfirm: (items: CatalogImportItem[]) => req<{ imported: number; products: CatalogProduct[]; photosAttached?: number; photoSearchConfigured?: boolean }>("/catalog/import/confirm", { method: "POST", body: JSON.stringify({ items }), timeoutMs: 90_000 }),
     public: (slug: string, code?: string) =>
       req<{
         storeName: string; whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;

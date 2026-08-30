@@ -536,7 +536,14 @@ export default function VitrineAparelhos() {
       });
       const r = await api.catalog.importConfirm(resolved);
       setProducts((prev) => [...r.products.map((p) => ({ ...p, photos: [], variants: [] as CatalogProduct["variants"] })), ...prev]);
-      const photoNote = r.photosAttached ? ` ${r.photosAttached} já com foto encontrada na internet.` : "";
+      // Sem GOOGLE_CSE_API_KEY/CX configurada no servidor a busca automática
+      // nem roda — sem isso o lojista via "importado" sem nenhuma pista de
+      // por que as fotos nunca vêm sozinhas.
+      const photoNote = r.photoSearchConfigured === false
+        ? " Busca automática de fotos não está configurada no servidor — adicione as fotos manualmente ou peça pro suporte configurar."
+        : r.photosAttached
+          ? ` ${r.photosAttached} já com foto encontrada na internet.`
+          : " Nenhuma foto encontrada automaticamente — adicione manualmente na edição do produto.";
       toast({ title: `${r.imported} aparelho(s) importado(s)! Recarregando lista...${photoNote}` });
       setShowImport(false);
       load();
