@@ -2236,6 +2236,21 @@ export const api = {
     // papéis) — o botão de cadastrar já vem escondido pra quem não pode.
     add: (title: string, file: File) => readAsAttachment(file).then((att) =>
       req<PromoItem>("/promo-gallery", { method: "POST", body: JSON.stringify({ title, mimeType: att?.mimetype, data: att?.base64 }) })),
+    // Cadastro em lote: várias fotos de uma vez, com título editado na tela ou
+    // vindo de uma planilha .xlsx (coluna "Arquivo" casada pelo nome do
+    // arquivo + coluna "Título") — server usa a planilha só como fallback do
+    // que não foi digitado na tela.
+    bulk: async (entries: { file: File; title: string }[], titlesSheetFile?: File | null) => {
+      const items = await Promise.all(entries.map(async (e) => {
+        const att = await readAsAttachment(e.file);
+        return { filename: e.file.name, title: e.title, mimeType: att?.mimetype, data: att?.base64 };
+      }));
+      const titlesSheet = titlesSheetFile ? (await readAsAttachment(titlesSheetFile))?.base64 : undefined;
+      return req<{ created: PromoItem[]; failed: { filename: string; error: string }[] }>(
+        "/promo-gallery/bulk",
+        { method: "POST", body: JSON.stringify({ items, titlesSheet }), timeoutMs: 90_000 },
+      );
+    },
     remove: (id: number) => req<{ ok: boolean }>(`/promo-gallery/${id}`, { method: "DELETE" }),
     fileUrl: (id: number) => `${BASE}/promo-gallery/${id}/file`,
     // Baixa a imagem já enviada pro banco e devolve como File, pronto pra

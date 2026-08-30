@@ -4,8 +4,10 @@ import { randomUUID } from "crypto";
 import { existsSync } from "fs";
 import { mkdir, writeFile, unlink } from "fs/promises";
 import { eq, and, desc } from "drizzle-orm";
+import * as XLSX from "xlsx";
 import { db, promoItemsTable } from "@workspace/db";
 import { requireAuth, requireAdminOrSupervisor, requireTenant, requireModule } from "../middlewares/auth";
+import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
 // Exige o módulo contratado pela loja (teto por tenant, ver requireModule).
@@ -85,6 +87,97 @@ router.post("/promo-gallery", requireAdminOrSupervisor, async (req: Request, res
     createdBy: req.session.userId ?? null,
   }).returning();
   res.status(201).json(item);
+});
+
+// ─── Cadastrar em lote ───────────────────────────────────────────────────
+// Pedido do lojista: cadastrar várias promoções de uma vez (várias fotos
+// selecionadas juntas), com opção de trazer os títulos de uma planilha Excel
+// em vez de digitar um por um. A planilha é só um jeito de dar título — as
+// fotos em si sempre vêm no mesmo request, em base64 (mesmo formato do
+// cadastro individual acima).
+//
+// Normaliza um cabeçalho de coluna pra comparar sem se importar com acento/
+// maiúscula (ex.: "Título", "titulo", "TÍTULO" tudo bate igual).
+function normalizeHeader(v: unknown): string {
+  return String(v ?? "").normalize("NFD").replace(/\p{Diacritic}/gu, "").trim().toLowerCase();
+}
+
+// Lê a primeira aba da planilha e monta um mapa "nome do arquivo" -> "título",
+// aceitando várias variações de nome de coluna (pt/en). Nunca lança: planilha
+// mal formatada só faz o mapa sair vazio (as fotos ainda cadastram, só usam o
+// nome do arquivo como título de fallback).
+function parseTitlesSheet(buf: Buffer): Map<string, string> {
+  const map = new Map<string, string>();
+  try {
+    const wb = XLSX.read(buf, { type: "buffer" });
+    const sheetName = wb.SheetNames[0];
+    if (!sheetName) return map;
+    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[sheetName]!, { defval: "" });
+    for (const row of rows) {
+      let fileCol: string | null = null;
+      let titleCol: string | null = null;
+      for (const key of Object.keys(row)) {
+        const norm = normalizeHeader(key);
+        if (["arquivo", "foto", "imagem", "file", "filename"].includes(norm)) fileCol = key;
+        if (["titulo", "título", "legenda", "title", "caption"].includes(norm)) titleCol = key;
+      }
+      if (!fileCol || !titleCol) continue;
+      const filename = String(row[fileCol] ?? "").trim().toLowerCase();
+      const title = String(row[titleCol] ?? "").trim();
+      if (filename && title) map.set(filename, title);
+    }
+  } catch (err) {
+    logger.warn({ err }, "Banco de promoções: falha ao ler planilha de títulos (ignorada)");
+  }
+  return map;
+}
+
+router.post("/promo-gallery/bulk", requireAdminOrSupervisor, async (req: Request, res: Response): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { items, titlesSheet } = req.body as {
+    items?: { filename?: string; title?: string; mimeType?: string; data?: string }[];
+    titlesSheet?: string; // planilha .xlsx em base64 (opcional)
+  };
+  if (!Array.isArray(items) || items.length === 0) { res.status(400).json({ error: "Nenhuma foto selecionada" }); return; }
+  if (items.length > 60) { res.status(400).json({ error: "Máximo de 60 fotos por vez" }); return; }
+
+  const titleMap = titlesSheet ? parseTitlesSheet(Buffer.from(titlesSheet, "base64")) : new Map<string, string>();
+
+  await mkdir(PROMO_MEDIA_DIR, { recursive: true });
+  const created: (typeof promoItemsTable.$inferSelect)[] = [];
+  const failed: { filename: string; error: string }[] = [];
+
+  for (const it of items) {
+    const originalName = clean(it.filename, 200) || "arquivo";
+    try {
+      const mime = typeof it.mimeType === "string" ? it.mimeType.split(";")[0].trim() : "";
+      const ext = PHOTO_MIME[mime];
+      if (!ext) { failed.push({ filename: originalName, error: "Formato não permitido (use JPEG, PNG ou WEBP)" }); continue; }
+      if (typeof it.data !== "string" || !it.data) { failed.push({ filename: originalName, error: "Imagem vazia" }); continue; }
+      const buf = Buffer.from(it.data, "base64");
+      if (buf.length === 0 || buf.length > MAX_PHOTO_SIZE) { failed.push({ filename: originalName, error: "Imagem vazia ou maior que 8MB" }); continue; }
+      if (!photoContentMatchesMime(buf, mime)) { failed.push({ filename: originalName, error: "Conteúdo não corresponde ao tipo informado" }); continue; }
+
+      // Prioridade do título: o que o usuário digitou/editou na tela > o que
+      // veio da planilha (casado pelo nome do arquivo) > nome do arquivo sem
+      // extensão (nunca fica sem título nenhum).
+      const fromSheet = titleMap.get(originalName.toLowerCase());
+      const fallback = originalName.replace(/\.[^.]+$/, "");
+      const finalTitle = clean(it.title, 150) || fromSheet || fallback;
+
+      const storedName = `${randomUUID()}.${ext}`;
+      await writeFile(path.join(PROMO_MEDIA_DIR, storedName), buf);
+      const [item] = await db.insert(promoItemsTable).values({
+        tenantId, title: finalTitle, storedName, createdBy: req.session.userId ?? null,
+      }).returning();
+      created.push(item);
+    } catch (err) {
+      logger.error({ err, filename: originalName }, "Banco de promoções: falha ao cadastrar item do lote");
+      failed.push({ filename: originalName, error: "Falha inesperada ao salvar" });
+    }
+  }
+
+  res.status(created.length > 0 ? 201 : 400).json({ created, failed });
 });
 
 // ─── Apagar ──────────────────────────────────────────────────────────────
