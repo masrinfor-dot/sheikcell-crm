@@ -6,7 +6,7 @@ import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsT
 import { eq, desc, and, or, lt, gte, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { requireAuth, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
-import { checkPerm, requirePerm } from "../lib/permissions";
+import { checkPerm, requirePerm, getCurrentAllowedSessionKeys } from "../lib/permissions";
 import { requireChatAccess } from "../lib/moduleAccess";
 import {
   broadcast,
@@ -53,8 +53,13 @@ router.get("/chat/events", requireAuth, requireChatAccess(), async (req: Request
   // Permissões do vendedor: recarregadas a cada 30s para que uma revogação
   // feita pelo admin pare de vazar eventos de Potenciais sem exigir reconexão.
   let canSeePotenciais = await checkPerm(req, "ver_potenciais");
+  // Mesma lógica pro filtro de linha de WhatsApp: sem isso, um vendedor com
+  // stream já aberto continuava recebendo eventos de linhas que o admin
+  // acabou de revogar (ou não recebia as recém-liberadas) até reconectar.
+  let allowedSessionKeys = await getCurrentAllowedSessionKeys(req);
   const permRefresh = setInterval(() => {
     checkPerm(req, "ver_potenciais").then((v) => { canSeePotenciais = v; }).catch(() => {});
+    getCurrentAllowedSessionKeys(req).then((v) => { allowedSessionKeys = v; }).catch(() => {});
     // Loja suspensa: derruba streams já abertos (a suspensão não pode esperar
     // o usuário reconectar). Fecha a conexão — o EventSource do cliente tenta
     // reconectar e é barrado no requireAuth.
@@ -69,7 +74,6 @@ router.get("/chat/events", requireAuth, requireChatAccess(), async (req: Request
   //   supervisor só se o setor bater (supervisor sem setor = global);
   //   vendedor só se estiver na lista.
   // - Demais eventos: potenciais chegam a todos; o resto é escopado por setor.
-  const allowedSessionKeys = req.session.allowedSessionKeys;
   const allowed = (ev: { tenantId: number; sectorId: number | null; isPotential?: boolean; restrictedTo?: number[] | null; sessionKey?: string | null }): boolean => {
     // Fronteira de loja em primeiro lugar: só entrega eventos da MESMA loja.
     // Sem loja na sessão (superadmin / sessão antiga) = não recebe nada.
@@ -78,10 +82,16 @@ router.get("/chat/events", requireAuth, requireChatAccess(), async (req: Request
     // Supervisor: enxerga tudo, em qualquer setor, sem restrição — a
     // privacidade entre vendedores continua valendo só para o papel vendedor.
     if (userRole === "supervisor") return true;
-    // Vendedor com restrição de linha de WhatsApp: evento ligado a uma
-    // conversa fora das linhas liberadas nunca chega, seja lá o que mais for.
-    if (allowedSessionKeys != null && ev.sessionKey != null && !allowedSessionKeys.includes(ev.sessionKey)) return false;
+    // Conversa RESTRITA (já tem responsável/participante) sempre chega pra
+    // quem é responsável/participante, MESMO fora das linhas de WhatsApp
+    // liberadas — foi transferida de propósito pra esse vendedor. Checar
+    // isso ANTES do filtro de linha evita que um atendimento transferido
+    // pra fora da linha permitida suma de vez (nem pro antigo, nem pro novo
+    // responsável).
     if (ev.restrictedTo != null) return ev.restrictedTo.includes(userId);
+    // Vendedor com restrição de linha de WhatsApp: evento de potencial/setor
+    // fora das linhas liberadas nunca chega.
+    if (allowedSessionKeys != null && ev.sessionKey != null && !allowedSessionKeys.includes(ev.sessionKey)) return false;
     if (ev.isPotential && canSeePotenciais) return true;
     return ev.sectorId != null && ev.sectorId === userSectorId;
   };
@@ -192,11 +202,13 @@ async function canAccessConversation(
   // entre vendedores foi mantida de propósito — só admin/supervisor têm
   // visão global.
   if (userRole === "supervisor") return true;
-  // Vendedor com restrição de linha de WhatsApp (allowedSessionKeys): fora
-  // das linhas liberadas, nem potencial nem conversa do próprio setor conta.
-  const allowedSessionKeys = req.session.allowedSessionKeys;
-  if (allowedSessionKeys != null && !allowedSessionKeys.includes(conv.sessionKey)) return false;
   if (isRestrictedConversation(conv)) {
+    // Conversa já tem dono (ou foi finalizada): responsável/participante
+    // sempre acessa, MESMO fora das linhas de WhatsApp liberadas — foi
+    // transferida de propósito pra esse vendedor, não é uma "descoberta" de
+    // linha alheia. Checar isso ANTES do filtro de linha evita que um
+    // atendimento transferido pra fora da linha permitida suma de vez (nem
+    // pro antigo, nem pro novo responsável).
     if (conv.assigneeId === userId) return true;
     const [p] = await db.select({ userId: conversationParticipantsTable.userId })
       .from(conversationParticipantsTable)
@@ -207,6 +219,10 @@ async function canAccessConversation(
       .limit(1);
     return !!p;
   }
+  // Vendedor com restrição de linha de WhatsApp (allowedSessionKeys): fora
+  // das linhas liberadas, nem potencial nem conversa do próprio setor conta.
+  const allowedSessionKeys = await getCurrentAllowedSessionKeys(req);
+  if (allowedSessionKeys != null && !allowedSessionKeys.includes(conv.sessionKey)) return false;
   if (conv.sectorId != null && conv.sectorId === userSectorId) return true;
   return isPotentialConversation(conv) && (await checkPerm(req, "ver_potenciais"));
 }
@@ -247,19 +263,21 @@ router.get("/chat/conversations", requireAuth, requireChatAccess(), async (req, 
     // - conversas do próprio setor NÃO restritas (ex.: pendentes);
     // - conversas restritas apenas quando é o responsável ou participante.
     const userId = req.session.userId!;
-    // Restrição por linha de WhatsApp (allowedSessionKeys): aplicada ANTES de
-    // qualquer outro escopo — fora das linhas liberadas, nem potencial conta.
-    const userAllowedSessionKeys = req.session.allowedSessionKeys;
-    if (userAllowedSessionKeys != null) {
-      conditions.push(
-        userAllowedSessionKeys.length
-          ? inArray(conversationsTable.sessionKey, userAllowedSessionKeys)
-          : sql`FALSE`,
-      );
-    }
+    // Restrição por linha de WhatsApp (allowedSessionKeys, sempre fresca do
+    // banco — ver getCurrentAllowedSessionKeys): vale pra "descobrir" conversa
+    // por potencial/setor fora das linhas liberadas, mas NÃO deve esconder
+    // uma conversa que já é sua (responsável/participante) — por isso entra
+    // dentro de potencial/sectorUnrestricted abaixo, e não como condição
+    // solta que também pegaria "mine". Sem essa distinção, um atendimento
+    // transferido pra um vendedor de outra linha sumia de vez, sem aparecer
+    // nem pro antigo nem pro novo responsável.
+    const userAllowedSessionKeys = await getCurrentAllowedSessionKeys(req);
+    const sessionScope = userAllowedSessionKeys != null
+      ? (userAllowedSessionKeys.length ? inArray(conversationsTable.sessionKey, userAllowedSessionKeys) : sql`FALSE`)
+      : null;
     // Permissão "ver_potenciais" desligada: o vendedor não vê os leads novos
     // de outros setores (só o escopo do próprio setor).
-    const potencial = (await checkPerm(req, "ver_potenciais"))
+    let potencial = (await checkPerm(req, "ver_potenciais"))
       ? and(
           isNull(conversationsTable.assigneeId),
           notInArray(conversationsTable.status, [...POTENTIAL_EXCLUDED_STATUSES]),
@@ -269,9 +287,13 @@ router.get("/chat/conversations", requireAuth, requireChatAccess(), async (req, 
       eq(conversationsTable.assigneeId, userId),
       sql`EXISTS (SELECT 1 FROM ${conversationParticipantsTable} WHERE ${conversationParticipantsTable.conversationId} = ${conversationsTable.id} AND ${conversationParticipantsTable.userId} = ${userId})`,
     )!;
-    const sectorUnrestricted = userSectorId
+    let sectorUnrestricted = userSectorId
       ? and(eq(conversationsTable.sectorId, userSectorId), sql`NOT (${restricted})`)!
       : sql`FALSE`;
+    if (sessionScope) {
+      potencial = and(potencial, sessionScope)!;
+      sectorUnrestricted = and(sectorUnrestricted, sessionScope)!;
+    }
     conditions.push(or(potencial, mine, sectorUnrestricted)!);
     // Resolvidas só aparecem para admin/supervisor: vendedor não vê
     // conversas finalizadas, nem as que ele mesmo finalizou.
@@ -1524,7 +1546,7 @@ router.post("/chat/conversations", requireAuth, requireChatAccess(), requirePerm
   // Vendedor restrito a outras linhas ficaria trancado fora da conversa que
   // ele mesmo acabou de criar — barra antes, com uma mensagem clara, em vez
   // de deixar um atendimento órfão.
-  const allowedSessionKeys = req.session.allowedSessionKeys;
+  const allowedSessionKeys = await getCurrentAllowedSessionKeys(req);
   if (allowedSessionKeys != null && !allowedSessionKeys.includes(targetSessionKey)) {
     res.status(403).json({ error: "Você não tem acesso a essa linha de WhatsApp para criar atendimentos manuais. Fale com o administrador." });
     return;

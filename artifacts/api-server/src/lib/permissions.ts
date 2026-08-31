@@ -37,6 +37,22 @@ export async function checkPerm(req: Request, key: PermissionKey): Promise<boole
   return permAllowed(await getVendedorPermissions(req), key);
 }
 
+/** Busca as linhas de WhatsApp permitidas atuais do vendedor no banco
+ *  (sempre frescas — mudança do admin vale sem exigir novo login). Antes
+ *  isso vinha só de req.session.allowedSessionKeys, fixado no login: o admin
+ *  restringia/liberava uma linha e o vendedor já logado continuava vendo o
+ *  conjunto antigo até deslogar e logar de novo. Só vendedor é restrito;
+ *  outros papéis sempre veem todas as linhas (null = sem restrição). */
+export async function getCurrentAllowedSessionKeys(req: Request): Promise<string[] | null> {
+  if (req.session.userRole !== "vendedor") return null;
+  const [row] = await db
+    .select({ allowedSessionKeys: usersTable.allowedSessionKeys })
+    .from(usersTable)
+    .where(eq(usersTable.id, req.session.userId!))
+    .limit(1);
+  return row?.allowedSessionKeys ?? null;
+}
+
 /** Middleware: bloqueia vendedores sem a permissão. */
 export function requirePerm(key: PermissionKey) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
