@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import { api, type PromoItem } from "@/lib/api";
-import { Image as ImageIcon, Plus, Trash2, Loader2, X, Send, FileSpreadsheet } from "lucide-react";
+import { Image as ImageIcon, Plus, Trash2, Loader2, X, Send, FileSpreadsheet, Search } from "lucide-react";
 
 // Um arquivo escolhido pra cadastro em lote + o título editável (default =
 // nome do arquivo sem extensão; some pra dar lugar ao título vindo da
@@ -41,6 +41,9 @@ export default function PromoGallery({ onSend, onSendAll, sending }: Props) {
 
   const [items, setItems] = useState<PromoItem[]>([]);
   const [loading, setLoading] = useState(true);
+  // Busca por título — o lojista pediu um jeito de achar rápido um item já
+  // cadastrado sem precisar rolar a grade inteira (banco cresce com o tempo).
+  const [search, setSearch] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [photos, setPhotos] = useState<PendingPhoto[]>([]);
   const [titlesSheet, setTitlesSheet] = useState<File | null>(null);
@@ -58,6 +61,10 @@ export default function PromoGallery({ onSend, onSendAll, sending }: Props) {
     }
   }
   useEffect(() => { void load(); }, []);
+
+  const filteredItems = search.trim()
+    ? items.filter((i) => i.title.toLowerCase().includes(search.trim().toLowerCase()))
+    : items;
 
   function handlePickPhotos(files: FileList | null) {
     if (!files || files.length === 0) return;
@@ -162,12 +169,32 @@ export default function PromoGallery({ onSend, onSendAll, sending }: Props) {
         </div>
       )}
 
-      {pickerMode && items.length > 0 && onSendAll && (
+      {items.length > 0 && (
+        <div className="relative mb-3">
+          <Search className="w-3.5 h-3.5 text-muted-foreground absolute left-2.5 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Buscar por título..."
+            data-testid="input-promo-search"
+            className="w-full pl-8 pr-7 py-2 text-sm rounded-lg border border-border focus:outline-none focus:ring-2 focus:ring-primary/30"
+          />
+          {search && (
+            <button type="button" onClick={() => setSearch("")} title="Limpar busca"
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+      )}
+
+      {pickerMode && filteredItems.length > 0 && onSendAll && (
         <div className="flex justify-end mb-2">
-          <button type="button" onClick={() => onSendAll(items)} disabled={!!sending}
+          <button type="button" onClick={() => onSendAll(filteredItems)} disabled={!!sending}
             data-testid="button-send-all-promo"
             className="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-lg border border-border hover:bg-secondary transition disabled:opacity-40">
-            <Send className="w-3.5 h-3.5" /> Enviar todos ({items.length})
+            <Send className="w-3.5 h-3.5" /> Enviar todos ({filteredItems.length})
           </button>
         </div>
       )}
@@ -176,9 +203,11 @@ export default function PromoGallery({ onSend, onSendAll, sending }: Props) {
         <p className="text-sm text-muted-foreground text-center py-8">
           {canManage ? "Nenhum item cadastrado ainda. Clique em \"Adicionar\"." : "Nenhum item disponível ainda."}
         </p>
+      ) : filteredItems.length === 0 ? (
+        <p className="text-sm text-muted-foreground text-center py-8">Nenhum item encontrado para "{search}".</p>
       ) : (
         <div className={`grid gap-3 ${pickerMode ? "grid-cols-2 sm:grid-cols-3" : "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5"}`}>
-          {items.map((item) => (
+          {filteredItems.map((item) => (
             <div key={item.id} className="border border-border rounded-xl overflow-hidden bg-white group relative" data-testid={`card-promo-${item.id}`}>
               <img src={api.promoGallery.fileUrl(item.id)} alt={item.title} className="w-full aspect-square object-cover" loading="lazy" />
               <div className="p-2">

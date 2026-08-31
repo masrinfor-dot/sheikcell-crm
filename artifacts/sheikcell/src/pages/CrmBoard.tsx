@@ -1,16 +1,17 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { api, canEditModule, type CrmContact, type Sector, type CrmCustomField, type CrmCustomFieldType, type Store } from "@/lib/api";
+import { api, ApiError, canEditModule, type CrmContact, type Sector, type CrmCustomField, type CrmCustomFieldType, type Store } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import CrmContactDetail from "@/components/CrmContactDetail";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
+import { requestChatExpand } from "@/lib/chatWidgetBus";
 
 const CHAT_EVENTS_URL = "/api/chat/events";
 import {
   Plus, X, Phone, Tag, StickyNote, RefreshCw, Archive, MapPin,
   ChevronRight, ChevronLeft, Crown, Star, UserPlus, UserMinus,
   Search, Filter, ExternalLink, ShoppingBag, SlidersHorizontal, Trash2, GripVertical,
-  Kanban, BookUser, Mail, Users, Wrench,
+  Kanban, BookUser, Mail, Users, Wrench, MessageCircle, Loader2,
 } from "lucide-react";
 
 const FIELD_TYPES: { value: CrmCustomFieldType; label: string }[] = [
@@ -70,17 +71,23 @@ function fmtCurrency(val: string | number) {
 }
 
 function ContactCard({
-  contact, onMove, onEdit, onArchive, onOpen, colIdx, canEdit,
+  contact, onMove, onEdit, onArchive, onOpen, onGoToChat, goingToChatId, colIdx, canEdit,
 }: {
   contact: CrmContact;
   onMove: (id: number, status: Status) => void;
   onEdit: (c: CrmContact) => void;
   onArchive: (id: number) => void;
   onOpen: (c: CrmContact) => void;
+  onGoToChat: (c: CrmContact) => void;
+  goingToChatId: number | null;
   colIdx: number;
   canEdit: boolean;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  // Grupo/comunidade do WhatsApp não tem telefone de cliente — não dá pra
+  // abrir/criar atendimento individual a partir daqui (ver ensureCrmContactForConversation).
+  const isGroup = (contact.contact ?? "").includes("@g.us");
+  const hasPhone = !isGroup && !!(contact.phone ?? contact.contact);
   const prev = COLUMNS[colIdx - 1];
   const next = COLUMNS[colIdx + 1];
   const total = fmtCurrency(contact.totalPurchases ?? "0");
@@ -108,6 +115,17 @@ function ContactCard({
           )}
         </div>
         <div className="flex items-center gap-1">
+          {hasPhone && (
+            <button
+              onClick={() => onGoToChat(contact)}
+              disabled={goingToChatId === contact.id}
+              data-testid={`crm-card-goto-chat-${contact.id}`}
+              className="p-1.5 rounded-lg text-green-600 hover:bg-green-600 hover:text-white transition disabled:opacity-50"
+              title="Ir para o atendimento deste cliente"
+            >
+              {goingToChatId === contact.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <MessageCircle className="w-3.5 h-3.5" />}
+            </button>
+          )}
           <button
             onClick={() => onOpen(contact)}
             data-testid={`crm-card-open-${contact.id}`}
@@ -130,6 +148,11 @@ function ContactCard({
                 <button onClick={() => { onOpen(contact); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
                   <ExternalLink className="w-3 h-3" /> Ver perfil completo
                 </button>
+                {hasPhone && (
+                  <button onClick={() => { onGoToChat(contact); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
+                    <MessageCircle className="w-3 h-3" /> Ir para o atendimento
+                  </button>
+                )}
                 {canEdit && (
                   <>
                     <button onClick={() => { onEdit(contact); setMenuOpen(false); }} className="w-full text-left flex items-center gap-2 text-xs px-3 py-2 rounded-lg hover:bg-secondary transition">
@@ -224,6 +247,7 @@ export default function CrmBoard() {
   const [detailId, setDetailId] = useState<number | null>(null);
   const [autoImporting, setAutoImporting] = useState(false);
   const [reconciling, setReconciling] = useState(false);
+  const [goingToChatId, setGoingToChatId] = useState<number | null>(null);
   const [showFieldsManager, setShowFieldsManager] = useState(false);
   // "Agenda de Contatos": mesma lista/filtros do Quadro, só que como
   // diretório simples (nome/telefone/e-mail) em vez de pipeline por status —
@@ -239,11 +263,12 @@ export default function CrmBoard() {
   const fetchFinalizadas = useCallback(async () => {
     try {
       // Mesma regra do ChatCenter ("Resolvidas"): status resolved OU archived.
-      const [resolved, archived] = await Promise.all([
-        api.chat.conversations({ status: "resolved" }),
-        api.chat.conversations({ status: "archived" }),
-      ]);
-      setFinalizadasCount(resolved.length + archived.length);
+      // Usa a rota de CONTAGEM real (sem o teto de 100 conversas mais
+      // recentes que /chat/conversations tem) — antes esse número também
+      // ficava menor que o real numa loja com muitos atendimentos finalizados,
+      // igual o bug de "Ativos" divergente do Quadro do CRM.
+      const counts = await api.chat.conversationCounts();
+      setFinalizadasCount(counts.resolvidas);
     } catch { /* silent */ }
   }, []);
 
@@ -369,6 +394,35 @@ export default function CrmBoard() {
       setContacts((prev) => prev.filter((c) => c.id !== id));
       toast({ title: "Contato arquivado" });
     } catch { toast({ title: "Erro ao arquivar", variant: "destructive" }); }
+  };
+
+  // "Ir para o atendimento": abre a conversa deste cliente direto na Central
+  // de Atendimento sem sair do CRM pra procurar manualmente. Reaproveita a
+  // mesma rota de criação de conversa do Atendimento (POST /chat/conversations)
+  // — se já existir uma conversa em andamento pra esse número/setor, o
+  // servidor recusa com 409 e devolve o id dela (mesmo tratamento do "+" e do
+  // cartão de contato compartilhado); junto com o mesmo mecanismo de
+  // "expandir chat" que o balão flutuante usa, isso troca de aba e já foca a
+  // conversa certa, sem precisar duplicar a lógica de busca/abertura aqui.
+  const handleGoToChat = async (contact: CrmContact) => {
+    const phone = contact.phone ?? contact.contact;
+    if (!phone) { toast({ title: "Número não disponível para este contato", variant: "destructive" }); return; }
+    setGoingToChatId(contact.id);
+    try {
+      const conv = await api.chat.createConversation({
+        phone, name: contact.name, channel: "whatsapp",
+        ...(contact.sectorId != null ? { sectorId: contact.sectorId } : {}),
+      });
+      requestChatExpand("atendimento", conv.id);
+    } catch (err) {
+      if (err instanceof ApiError && err.conversationId != null) {
+        requestChatExpand("atendimento", err.conversationId);
+      } else {
+        toast({ title: "Erro ao abrir atendimento", description: err instanceof Error ? err.message : "Tente novamente", variant: "destructive" });
+      }
+    } finally {
+      setGoingToChatId(null);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -609,7 +663,22 @@ export default function CrmBoard() {
                       <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{c.attendant?.name ?? "—"}</td>
                       <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{c.serviceStore ?? "—"}</td>
                       <td className="px-4 py-3 whitespace-nowrap"><ProfileBadge profile={c.profile} /></td>
-                      <td className="px-4 py-3 text-right"><ExternalLink className="w-3.5 h-3.5 text-muted-foreground" /></td>
+                      <td className="px-4 py-3 text-right whitespace-nowrap">
+                        <div className="flex items-center justify-end gap-1">
+                          {!(c.contact ?? "").includes("@g.us") && (c.phone || c.contact) && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleGoToChat(c); }}
+                              disabled={goingToChatId === c.id}
+                              data-testid={`row-agenda-goto-chat-${c.id}`}
+                              className="p-1.5 rounded-lg text-green-600 hover:bg-green-600 hover:text-white transition disabled:opacity-50"
+                              title="Ir para o atendimento deste cliente"
+                            >
+                              {goingToChatId === c.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <MessageCircle className="w-3.5 h-3.5" />}
+                            </button>
+                          )}
+                          <ExternalLink className="w-3.5 h-3.5 text-muted-foreground" />
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -653,6 +722,7 @@ export default function CrmBoard() {
                       key={c.id} contact={c} onMove={handleMove}
                       onEdit={openEdit} onArchive={handleArchive}
                       onOpen={(contact) => setDetailId(contact.id)}
+                      onGoToChat={handleGoToChat} goingToChatId={goingToChatId}
                       colIdx={colIdx} canEdit={canEdit}
                     />
                   ))
