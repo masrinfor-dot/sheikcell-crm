@@ -59,12 +59,26 @@ type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabI
 // nenhum tabIds: ele é sempre renderizado à parte, fixo no fim de toda
 // lista de navegação (ver `suporteTab` mais abaixo).
 const TAB_GROUPS: TabGroup[] = [
-  { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["dashboard", "chat", "equipe", "crm", "avaliacao", "vitrine", "promocoes", "financeiras"] },
-  { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["resultados", "relatorios", "tarefas", "documentos", "history", "rotinas", "diretorio", "meuponto", "rh", "treinamentos", "sorteios"] },
+  { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["dashboard", "chat", "equipe", "crm", "avaliacao", "vitrine", "promocoes", "financeiras", "sorteios"] },
+  { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["relatorios", "tarefas", "documentos", "meuponto", "rh"] },
   { key: "administracao", label: "Administração", icon: Settings, tabIds: ["users", "sectors", "financeiro", "pagamentos", "quickreplies", "whatsapp", "robo", "tvbox"] },
   { key: "configuracoes", label: "Configurações", icon: SlidersHorizontal, tabIds: ["aparencia", "integracoes"] },
   { key: "sistema", label: "Sistema (Dev)", icon: Wrench, tabIds: ["sistema"] },
 ];
+
+// Fusão de abas do menu Gestão (31/08, a pedido do cliente — reduzir o
+// dropdown): "Relatórios" agora é um único item de menu que agrupa
+// Resultados/Relatórios/Histórico (sub-abas dentro da própria tela); "RH"
+// agrupa RH/Rotinas e Produtividade/Diretório/Treinamentos. Nada foi
+// removido — cada tela continua exatamente como era, só o menu encolheu.
+// "Sorteios" saiu de Gestão e foi para o grupo Atendimento (mesmo pedido).
+const RELATORIOS_GROUP_IDS: Tab[] = ["resultados", "relatorios", "history"];
+const RH_GROUP_IDS: Tab[] = ["rh", "rotinas", "diretorio", "treinamentos"];
+function tabMatchesNav(navId: Tab, currentTab: Tab): boolean {
+  if (navId === "relatorios") return RELATORIOS_GROUP_IDS.includes(currentTab);
+  if (navId === "rh") return RH_GROUP_IDS.includes(currentTab);
+  return currentTab === navId;
+}
 
 type WASession = {
   sessionKey: string;
@@ -497,10 +511,30 @@ export default function AdminDashboard() {
     } catch { toast({ title: "Erro ao excluir", variant: "destructive" }); }
   };
 
-  const allTabs = [
-    { id: "dashboard" as Tab, label: "Dashboard", icon: LayoutDashboard, adminOnly: false },
+  // Definição individual de cada tela que hoje mora dentro dos itens de menu
+  // fundidos "Relatórios" (Resultados/Relatórios/Histórico) e "RH" (RH/Rotinas
+  // e Produtividade/Diretório/Treinamentos) — usada só para decidir quais
+  // sub-abas aparecem pra cada pessoa (a mesma regra de sempre: adminOnly +
+  // módulo contratado pela loja + módulo liberado pro usuário).
+  const relSubDefs = [
     { id: "resultados" as Tab, label: "Resultados", icon: TrendingUp, adminOnly: false, module: "resultados" as OptionalModule },
     { id: "relatorios" as Tab, label: "Relatórios", icon: FileBarChart2, adminOnly: true, module: "relatorios" as OptionalModule },
+    { id: "history" as Tab, label: "Histórico", icon: ClipboardList, adminOnly: false, module: "history" as OptionalModule },
+  ];
+  const rhSubDefs = [
+    { id: "rh" as Tab, label: "RH", icon: UserSearch, adminOnly: true, module: "rh" as OptionalModule },
+    { id: "rotinas" as Tab, label: "Rotinas e Produtividade", icon: ListChecks, adminOnly: true, module: "rotinas" as OptionalModule },
+    { id: "diretorio" as Tab, label: "Diretório", icon: BookUser, adminOnly: false, module: "diretorio" as OptionalModule },
+    { id: "treinamentos" as Tab, label: "Treinamentos", icon: GraduationCap, adminOnly: false, module: "treinamentos" as OptionalModule },
+  ];
+
+  const allTabs = [
+    { id: "dashboard" as Tab, label: "Dashboard", icon: LayoutDashboard, adminOnly: false },
+    // "Relatórios" agora é o item único de menu que abre direto na sub-aba
+    // Relatórios (Resultados e Histórico ficam a um clique, dentro da tela —
+    // ver RELATORIOS_GROUP_IDS/tabMatchesNav acima). Visibilidade real do
+    // item é decidida abaixo por relVisibleSubs, não pelos campos aqui.
+    { id: "relatorios" as Tab, label: "Relatórios", icon: FileBarChart2, adminOnly: false },
     { id: "chat" as Tab, label: "Atendimento", icon: MessageCircle, adminOnly: false, module: "chat" as OptionalModule },
     { id: "equipe" as Tab, label: "Chat Interno", icon: MessagesSquare, adminOnly: false, module: "equipe" as OptionalModule },
     { id: "tarefas" as Tab, label: "Tarefas", icon: ListTodo, adminOnly: false, module: "tarefas" as OptionalModule },
@@ -512,16 +546,14 @@ export default function AdminDashboard() {
     { id: "vitrine" as Tab, label: "Vitrine Aparelhos", icon: Smartphone, adminOnly: false, module: "vitrine" as OptionalModule },
     { id: "promocoes" as Tab, label: "Banco de Promoções", icon: Image, adminOnly: false, module: "promocoes" as OptionalModule },
     { id: "tvbox" as Tab, label: "TV Box", icon: Tv, adminOnly: false, module: "tvbox" as OptionalModule },
-    { id: "rotinas" as Tab, label: "Rotinas e Produtividade", icon: ListChecks, adminOnly: true, module: "rotinas" as OptionalModule },
-    { id: "treinamentos" as Tab, label: "Treinamentos", icon: GraduationCap, adminOnly: false, module: "treinamentos" as OptionalModule },
     { id: "documentos" as Tab, label: "Documentos", icon: FolderArchive, adminOnly: false, module: "documentos" as OptionalModule },
-    { id: "diretorio" as Tab, label: "Diretório", icon: BookUser, adminOnly: false, module: "diretorio" as OptionalModule },
     { id: "suporte" as Tab, label: "Suporte", icon: LifeBuoy, adminOnly: false },
-    { id: "rh" as Tab, label: "RH", icon: UserSearch, adminOnly: true, module: "rh" as OptionalModule },
+    // "RH" é o item único de menu (ver RH_GROUP_IDS/tabMatchesNav acima);
+    // visibilidade real decidida abaixo por rhVisibleSubs.
+    { id: "rh" as Tab, label: "RH", icon: UserSearch, adminOnly: false },
     { id: "meuponto" as Tab, label: "Meu Ponto", icon: Clock, adminOnly: false },
     { id: "sorteios" as Tab, label: "Sorteios", icon: Gift, adminOnly: true, module: "sorteios" as OptionalModule },
     { id: "robo" as Tab, label: "Robô", icon: Bot, adminOnly: true, module: "robo" as OptionalModule },
-    { id: "history" as Tab, label: "Histórico", icon: ClipboardList, adminOnly: false, module: "history" as OptionalModule },
     { id: "users" as Tab, label: "Usuários", icon: Users, adminOnly: true },
     { id: "sectors" as Tab, label: "Setores", icon: Settings, adminOnly: true },
     { id: "quickreplies" as Tab, label: "Msgs Rápidas", icon: Zap, adminOnly: true },
@@ -545,10 +577,30 @@ export default function AdminDashboard() {
     if (m === "chat") return userModuleAccess?.chat !== "none";
     return userModuleAccess != null && m in userModuleAccess;
   };
-  const tabs = allTabs.filter((t) =>
+  const tabPredicate = (t: { id: Tab; adminOnly: boolean; module?: OptionalModule }): boolean =>
     (!t.adminOnly || isAdmin || granted.includes(t.id)) &&
     (!t.module || enabledModules == null || enabledModules.includes(t.module)) &&
-    moduleGranted(t.module));
+    moduleGranted(t.module);
+  // Sub-abas de cada item fundido, já filtradas por quem pode ver o quê —
+  // usadas tanto pra decidir se o item de menu aparece (abaixo) quanto pra
+  // desenhar a tirinha de sub-abas dentro da tela (mais abaixo, no conteúdo).
+  const relVisibleSubs = relSubDefs.filter(tabPredicate);
+  const rhVisibleSubs = rhSubDefs.filter(tabPredicate);
+  const tabs = allTabs
+    .filter(tabPredicate)
+    .filter((t) => t.id !== "relatorios" || relVisibleSubs.length > 0)
+    .filter((t) => t.id !== "rh" || rhVisibleSubs.length > 0);
+  // Clicar no item de menu fundido "Relatórios"/"RH" precisa cair numa
+  // sub-aba que a pessoa realmente pode ver — nem sempre é a própria
+  // Relatórios/RH (ex.: supervisor sem acesso a RH/Rotinas, mas com Diretório
+  // e Treinamentos liberados, deve cair em Diretório, não em RH). Usado nos
+  // cliques de navegação (sidebar, barra superior, painel mobile); a
+  // tirinha de sub-abas dentro da tela já usa ids específicos direto.
+  const navigateToTab = (id: Tab): void => {
+    if (id === "relatorios") { setTab(relVisibleSubs[0]?.id ?? "relatorios"); return; }
+    if (id === "rh") { setTab(rhVisibleSubs[0]?.id ?? "rh"); return; }
+    setTab(id);
+  };
   // Suporte é sempre fixo por último em toda lista de navegação (sidebar,
   // barra superior nova e painel "Mais" do celular) — nunca faz parte de
   // nenhum grupo do TAB_GROUPS, ver comentário acima da constante.
@@ -619,7 +671,7 @@ export default function AdminDashboard() {
       <RoutineChecklistGate />
 
       {navPreview && (
-        <AdminTopBar groups={topBarGroups} tab={tab} setTab={(id) => setTab(id as Tab)} internalChatUnread={internalChatUnread} supportTab={suporteTab} />
+        <AdminTopBar groups={topBarGroups} tab={RELATORIOS_GROUP_IDS.includes(tab) ? "relatorios" : RH_GROUP_IDS.includes(tab) ? "rh" : tab} setTab={(id) => navigateToTab(id as Tab)} internalChatUnread={internalChatUnread} supportTab={suporteTab} />
       )}
 
       {/* Left sidebar + content */}
@@ -646,9 +698,9 @@ export default function AdminDashboard() {
                   {!collapsed && (
                     <div className="flex flex-col gap-1 mt-1">
                       {groupTabs.map(({ id, label, icon: Icon }) => (
-                        <button key={id} onClick={() => setTab(id)} data-testid={`tab-${id}`}
+                        <button key={id} onClick={() => navigateToTab(id)} data-testid={`tab-${id}`}
                           className={`flex items-center gap-2 w-full pl-6 pr-3 py-2 rounded-lg text-xs font-semibold text-left transition-colors ${
-                            tab === id ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                            tabMatchesNav(id, tab) ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
                           }`}>
                           <Icon className="w-4 h-4 shrink-0" />{label}
                           {id === "equipe" && internalChatUnread > 0 && (
@@ -680,7 +732,19 @@ export default function AdminDashboard() {
           {/* O chat e o Chat Interno ocupam a largura toda; as demais abas ficam na coluna central */}
           <div className={tab === "chat" || tab === "equipe" ? "max-w-full px-0 py-0 md:px-4 md:py-4" : "max-w-5xl mx-auto px-4 py-6"}>
 
-        {/* === RESULTADOS TAB === */}
+        {/* === RESULTADOS / RELATÓRIOS / HISTÓRICO (fundidos em um só item de menu) === */}
+        {RELATORIOS_GROUP_IDS.includes(tab) && relVisibleSubs.length > 1 && (
+          <div className="flex items-center gap-2 mb-4 border-b border-border pb-2 overflow-x-auto" data-testid="subtabs-relatorios">
+            {relVisibleSubs.map((s) => (
+              <button key={s.id} onClick={() => setTab(s.id)} data-testid={`subtab-relatorios-${s.id}`}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition ${
+                  tab === s.id ? "bg-primary text-white" : "text-muted-foreground hover:bg-secondary"
+                }`}>
+                <s.icon className="w-3.5 h-3.5" />{s.label}
+              </button>
+            ))}
+          </div>
+        )}
         {tab === "resultados" && <Resultados />}
         {tab === "relatorios" && <Relatorios />}
 
@@ -899,6 +963,19 @@ export default function AdminDashboard() {
         {tab === "tvbox" && <TvBox />}
 
 
+        {/* === RH / ROTINAS E PRODUTIVIDADE / DIRETÓRIO / TREINAMENTOS (fundidos em um só item de menu) === */}
+        {RH_GROUP_IDS.includes(tab) && rhVisibleSubs.length > 1 && (
+          <div className="flex items-center gap-2 mb-4 border-b border-border pb-2 overflow-x-auto flex-wrap" data-testid="subtabs-rh">
+            {rhVisibleSubs.map((s) => (
+              <button key={s.id} onClick={() => setTab(s.id)} data-testid={`subtab-rh-${s.id}`}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition ${
+                  tab === s.id ? "bg-primary text-white" : "text-muted-foreground hover:bg-secondary"
+                }`}>
+                <s.icon className="w-3.5 h-3.5" />{s.label}
+              </button>
+            ))}
+          </div>
+        )}
         {tab === "rotinas" && <RotinasProdutividade />}
 
         {tab === "treinamentos" && <Treinamentos />}
@@ -2130,10 +2207,10 @@ export default function AdminDashboard() {
               {mobileMoreTabs.map(({ id, label, icon: Icon }) => (
                 <button
                   key={id}
-                  onClick={() => { setTab(id); setShowMoreNav(false); }}
+                  onClick={() => { navigateToTab(id); setShowMoreNav(false); }}
                   data-testid={`bottomnav-more-${id}`}
                   className={`relative flex flex-col items-center justify-center gap-1 py-3 rounded-xl text-[11px] font-semibold transition ${
-                    tab === id ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-secondary"
+                    tabMatchesNav(id, tab) ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-secondary"
                   }`}
                 >
                   <span className="relative">
@@ -2167,10 +2244,10 @@ export default function AdminDashboard() {
         {mobilePrimaryTabs.map(({ id, label, icon: Icon }) => (
           <button
             key={id}
-            onClick={() => { setTab(id); setShowMoreNav(false); }}
+            onClick={() => { navigateToTab(id); setShowMoreNav(false); }}
             data-testid={`bottomnav-${id}`}
             className={`relative flex-1 flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold transition ${
-              tab === id && !showMoreNav ? "text-primary" : "text-muted-foreground"
+              tabMatchesNav(id, tab) && !showMoreNav ? "text-primary" : "text-muted-foreground"
             }`}
           >
             <span className="relative">
@@ -2189,7 +2266,7 @@ export default function AdminDashboard() {
             onClick={() => setShowMoreNav((v) => !v)}
             data-testid="bottomnav-more"
             className={`flex-1 flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold transition ${
-              showMoreNav || mobileMoreTabs.some((t) => t.id === tab) || tab === "suporte" ? "text-primary" : "text-muted-foreground"
+              showMoreNav || mobileMoreTabs.some((t) => tabMatchesNav(t.id, tab)) || tab === "suporte" ? "text-primary" : "text-muted-foreground"
             }`}
           >
             <MoreHorizontal className="w-5 h-5" />
