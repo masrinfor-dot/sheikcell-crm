@@ -1300,6 +1300,18 @@ export type ChatMessage = {
   metadata?: MessageMetadata | null;
 };
 
+// "Marcar mensagem" no Atendimento (igual WhatsApp): compartilhado entre
+// quem atende, suporta várias mensagens fixadas por conversa.
+export type PinnedMessage = {
+  messageId: number;
+  pinnedBy: number;
+  pinnedAt: string;
+  content: string;
+  type: string;
+  senderName: string | null;
+  direction: "inbound" | "outbound";
+};
+
 export type SaasContract = {
   id: number;
   tenantId: number;
@@ -1585,6 +1597,11 @@ export const api = {
     },
     pinConversation: (id: number) => req<{ ok: boolean }>(`/chat/conversations/${id}/pin`, { method: "POST" }),
     unpinConversation: (id: number) => req<{ ok: boolean }>(`/chat/conversations/${id}/pin`, { method: "DELETE" }),
+    // "Marcar mensagem" (fixar uma mensagem já enviada, estilo WhatsApp) —
+    // diferente do pin/unpin de conversa acima.
+    pinnedMessages: (conversationId: number) => req<PinnedMessage[]>(`/chat/conversations/${conversationId}/pinned-messages`),
+    pinMessage: (messageId: number) => req<{ ok: boolean; pinned: PinnedMessage }>(`/chat/messages/${messageId}/pin`, { method: "POST" }),
+    unpinMessage: (messageId: number) => req<{ ok: boolean; messageId: number }>(`/chat/messages/${messageId}/pin`, { method: "DELETE" }),
     messages: (id: number) => req<ChatMessage[]>(`/chat/conversations/${id}/messages`),
     // Paginação por cursor: devolve o bloco de mensagens + flag de "tem mais
     // antigas" (cabeçalho X-Has-More). Sem `before`, é o bloco mais recente.

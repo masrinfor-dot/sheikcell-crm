@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
-import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, attendanceLogsTable, attendanceStartEventsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, taskAssigneesTable, crmPurchasesTable, appSettingsTable } from "@workspace/db";
+import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, messagePinsTable, attendanceLogsTable, attendanceStartEventsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, taskAssigneesTable, crmPurchasesTable, appSettingsTable } from "@workspace/db";
 import { eq, desc, and, or, lt, gte, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { requireAuth, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
@@ -414,6 +414,64 @@ router.delete("/chat/conversations/:id/pin", requireAuth, requireChatAccess(), a
   await db.delete(conversationPinsTable)
     .where(and(eq(conversationPinsTable.conversationId, id), eq(conversationPinsTable.userId, req.session.userId!)));
   res.json({ ok: true, pinned: false });
+});
+
+// ─── Fixar / desafixar MENSAGEM (compartilhado, estilo WhatsApp) ───────────
+// Diferente do /pin acima (favoritar a conversa inteira, por usuário): aqui é
+// marcar uma mensagem específica já enviada, visível pra todo mundo que abre
+// a conversa. Suporta várias mensagens fixadas ao mesmo tempo (message_pins é
+// uma tabela de junção, uma linha por mensagem fixada).
+router.get("/chat/conversations/:id/pinned-messages", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+  const rows = await db
+    .select({
+      messageId: messagePinsTable.messageId,
+      pinnedBy: messagePinsTable.pinnedBy,
+      pinnedAt: messagePinsTable.createdAt,
+      content: messagesTable.content,
+      type: messagesTable.type,
+      senderName: messagesTable.senderName,
+      direction: messagesTable.direction,
+    })
+    .from(messagePinsTable)
+    .innerJoin(messagesTable, eq(messagePinsTable.messageId, messagesTable.id))
+    .where(eq(messagePinsTable.conversationId, id))
+    .orderBy(desc(messagePinsTable.createdAt));
+  res.json(rows);
+});
+
+router.post("/chat/messages/:id/pin", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const [msg] = await db.select().from(messagesTable).where(and(eq(messagesTable.id, id), eq(messagesTable.tenantId, tenantId))).limit(1);
+  if (!msg) { res.status(404).json({ error: "Mensagem não encontrada" }); return; }
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, msg.conversationId), eq(conversationsTable.tenantId, tenantId))).limit(1);
+  if (!conv || !(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+  await db.insert(messagePinsTable)
+    .values({ tenantId, conversationId: conv.id, messageId: id, pinnedBy: req.session.userId! })
+    .onConflictDoNothing();
+  const pinned = {
+    messageId: msg.id, pinnedBy: req.session.userId!, pinnedAt: new Date().toISOString(),
+    content: msg.content, type: msg.type, senderName: msg.senderName, direction: msg.direction,
+  };
+  broadcast("message_pinned", { conversationId: conv.id, pinned }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  res.json({ ok: true, pinned });
+});
+
+router.delete("/chat/messages/:id/pin", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const [msg] = await db.select().from(messagesTable).where(and(eq(messagesTable.id, id), eq(messagesTable.tenantId, tenantId))).limit(1);
+  if (!msg) { res.status(404).json({ error: "Mensagem não encontrada" }); return; }
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, msg.conversationId), eq(conversationsTable.tenantId, tenantId))).limit(1);
+  if (!conv || !(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+  await db.delete(messagePinsTable).where(and(eq(messagePinsTable.messageId, id), eq(messagePinsTable.conversationId, conv.id)));
+  broadcast("message_unpinned", { conversationId: conv.id, messageId: id }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  res.json({ ok: true, messageId: id });
 });
 
 // Resolve o preview de "responder mensagem": só aceita citar uma mensagem da

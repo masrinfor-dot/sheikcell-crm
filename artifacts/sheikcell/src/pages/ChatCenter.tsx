@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef, useCallback, Fragment } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, Fragment } from "react";
 import { createPortal } from "react-dom";
-import { api, can, ApiError, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata, type PromoItem } from "@/lib/api";
+import { api, can, ApiError, type Conversation, type ChatMessage, type PinnedMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata, type PromoItem } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useActivityGuard } from "@/lib/activityGuard";
 import { useToast } from "@/hooks/use-toast";
@@ -749,7 +749,7 @@ function IconTextCard({ icon: Icon, content }: { icon: typeof CreditCard; conten
 }
 
 // ─── Message bubble ─────────────────────────────────────────────────────────
-function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConversation, currentUserId, isModerator, onEdit, onDelete }: {
+function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConversation, currentUserId, isModerator, onEdit, onDelete, isPinned, onPin, onUnpin }: {
   msg: ChatMessage;
   onReply: (m: ChatMessage) => void;
   highlighted: boolean;
@@ -760,6 +760,9 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConver
   isModerator?: boolean;
   onEdit: (id: number, content: string) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
+  isPinned?: boolean;
+  onPin?: (id: number) => void;
+  onUnpin?: (id: number) => void;
 }) {
   const out = msg.direction === "outbound";
   // Editar/apagar (igual WhatsApp): só quem enviou, ou admin/supervisor —
@@ -824,6 +827,22 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConver
     </button>
   );
 
+  // "Marcar mensagem" (igual WhatsApp): fixa/desafixa essa mensagem no topo da
+  // conversa, visível pra todo mundo que atende. Só aparece com hover, junto
+  // do botão de responder — exceto quando já fixada, aí fica sempre visível.
+  const pinButton = (onPin || onUnpin) && !msg.deletedAt ? (
+    <button
+      onClick={() => (isPinned ? onUnpin?.(msg.id) : onPin?.(msg.id))}
+      data-testid={`button-${isPinned ? "unpin" : "pin"}-msg-${msg.id}`}
+      title={isPinned ? "Desafixar mensagem" : "Fixar mensagem"}
+      className={`transition-opacity p-1.5 rounded-full hover:bg-black/5 shrink-0 ${
+        isPinned ? "opacity-100 text-amber-600" : "opacity-0 group-hover:opacity-100 text-gray-500 hover:text-amber-600"
+      }`}
+    >
+      {isPinned ? <PinOff className="w-3.5 h-3.5" /> : <Pin className="w-3.5 h-3.5" />}
+    </button>
+  ) : null;
+
   // Editar/apagar (igual WhatsApp) — só aparece com hover, do lado da
   // conversa igual ao botão de responder; some enquanto está editando.
   const manageButtons = canManage && !editing ? (
@@ -854,7 +873,7 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConver
       id={`chat-msg-${msg.id}`}
       className={`group flex items-center gap-1 mb-1 transition-colors duration-500 rounded-lg ${out ? "justify-end" : "justify-start"} ${highlighted ? "bg-amber-200/60" : ""}`}
     >
-      {out && <>{manageButtons}{replyButton}</>}
+      {out && <>{manageButtons}{pinButton}{replyButton}</>}
       <div className={`max-w-[75%] rounded-2xl px-3 py-2 shadow-sm ${out ? "bg-[#dcf8c6] rounded-br-sm" : "bg-white rounded-bl-sm border border-border"}`}>
         {!out && msg.senderName && (
           isGroup && msg.senderPhone && onStartConversation ? (
@@ -978,7 +997,7 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConver
           )}
         </div>
       </div>
-      {!out && replyButton}
+      {!out && <>{pinButton}{replyButton}</>}
     </div>
   );
 }
@@ -1067,6 +1086,9 @@ export default function ChatCenter({
   const [replyTarget, setReplyTarget] = useState<ChatMessage | null>(null);
   const [composerMode, setComposerMode] = useState<"message" | "note">("message");
   const [highlightedMsgId, setHighlightedMsgId] = useState<number | null>(null);
+  // "Marcar mensagem" — mensagens fixadas na conversa aberta (compartilhado).
+  const [pinnedMessages, setPinnedMessages] = useState<PinnedMessage[]>([]);
+  const pinnedMessageIdSet = useMemo(() => new Set(pinnedMessages.map((p) => p.messageId)), [pinnedMessages]);
   const [loadingConvs, setLoadingConvs] = useState(true);
   const [loadingMsgs, setLoadingMsgs] = useState(false);
   const [hasMoreOlder, setHasMoreOlder] = useState(false);
@@ -1508,6 +1530,15 @@ export default function ChatCenter({
     } catch { /* silent */ } finally { setLoadingMsgs(false); }
   }, []);
 
+  // ── Fetch pinned messages ("marcar mensagem") ──
+  const fetchPinnedMessages = useCallback(async (id: number) => {
+    try {
+      const data = await api.chat.pinnedMessages(id);
+      if (activeIdRef.current !== id) return; // trocou de conversa no meio
+      setPinnedMessages(data);
+    } catch { /* silent */ }
+  }, []);
+
   // ── Load older messages (cursor pagination) ──
   const loadOlderMsgs = useCallback(async () => {
     const id = activeId;
@@ -1544,8 +1575,14 @@ export default function ChatCenter({
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
 
   useEffect(() => {
-    if (activeId) { fetchMsgs(activeId); inputRef.current?.focus(); }
-  }, [activeId, fetchMsgs]);
+    if (activeId) {
+      fetchMsgs(activeId);
+      fetchPinnedMessages(activeId);
+      inputRef.current?.focus();
+    } else {
+      setPinnedMessages([]);
+    }
+  }, [activeId, fetchMsgs, fetchPinnedMessages]);
 
   // Opening a conversation clears its notification notices.
   useEffect(() => {
@@ -1583,7 +1620,7 @@ export default function ChatCenter({
       if (initialSyncedRef.current) return;
       initialSyncedRef.current = true;
       fetchConvs();
-      if (activeId != null) fetchMsgs(activeId);
+      if (activeId != null) { fetchMsgs(activeId); fetchPinnedMessages(activeId); }
     };
     if (es.readyState === EventSource.OPEN) onOpen();
     es.addEventListener("open", onOpen);
@@ -1784,6 +1821,24 @@ export default function ChatCenter({
       } catch { /* silent */ }
     };
     es.addEventListener("conversation_deleted", onConversationDeleted);
+    // "Marcar mensagem": fixar/desafixar é compartilhado — qualquer atendente
+    // vê a mudança na hora, sem precisar reabrir a conversa.
+    const onMessagePinned = (e: Event) => {
+      try {
+        const { conversationId, pinned } = JSON.parse((e as MessageEvent).data) as { conversationId: number; pinned: PinnedMessage };
+        if (conversationId !== activeIdRef.current) return;
+        setPinnedMessages((prev) => [pinned, ...prev.filter((p) => p.messageId !== pinned.messageId)]);
+      } catch { /* silent */ }
+    };
+    const onMessageUnpinned = (e: Event) => {
+      try {
+        const { conversationId, messageId } = JSON.parse((e as MessageEvent).data) as { conversationId: number; messageId: number };
+        if (conversationId !== activeIdRef.current) return;
+        setPinnedMessages((prev) => prev.filter((p) => p.messageId !== messageId));
+      } catch { /* silent */ }
+    };
+    es.addEventListener("message_pinned", onMessagePinned);
+    es.addEventListener("message_unpinned", onMessageUnpinned);
     // Participantes mudaram (fui adicionado/removido de uma conversa restrita):
     // a lista do servidor é a fonte da verdade — refetch.
     const onParticipantsUpdated = () => { fetchConvs(); };
@@ -1796,7 +1851,7 @@ export default function ChatCenter({
     // and lists stay correct without any extra work here.
     const onResync = () => {
       fetchConvs();
-      if (activeId != null) fetchMsgs(activeId);
+      if (activeId != null) { fetchMsgs(activeId); fetchPinnedMessages(activeId); }
     };
     es.addEventListener("resync", onResync);
     return () => {
@@ -1809,11 +1864,13 @@ export default function ChatCenter({
       es.removeEventListener("conversation_updated", onConversationUpdated);
       es.removeEventListener("conversation_hidden", onConversationHidden);
       es.removeEventListener("conversation_deleted", onConversationDeleted);
+      es.removeEventListener("message_pinned", onMessagePinned);
+      es.removeEventListener("message_unpinned", onMessageUnpinned);
       es.removeEventListener("participants_updated", onParticipantsUpdated);
       es.removeEventListener("resync", onResync);
       releaseSharedEventSource(CHAT_EVENTS_URL);
     };
-  }, [activeId, user, fetchConvs, fetchMsgs]);
+  }, [activeId, user, fetchConvs, fetchMsgs, fetchPinnedMessages]);
 
   useEffect(() => {
     api.sectors.list().then(setSectors).catch(() => {});
@@ -1877,6 +1934,25 @@ export default function ChatCenter({
     document.getElementById(`chat-msg-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
     setHighlightedMsgId(id);
     setTimeout(() => setHighlightedMsgId((cur) => (cur === id ? null : cur)), 1500);
+  };
+
+  // "Marcar mensagem" — fixar/desafixar (otimista; o SSE acima confirma pros
+  // outros atendentes vendo a mesma conversa).
+  const handlePinMessage = async (messageId: number) => {
+    try {
+      const { pinned } = await api.chat.pinMessage(messageId);
+      setPinnedMessages((prev) => [pinned, ...prev.filter((p) => p.messageId !== pinned.messageId)]);
+    } catch (err) {
+      toast({ title: "Erro ao fixar mensagem", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
+  };
+  const handleUnpinMessage = async (messageId: number) => {
+    try {
+      await api.chat.unpinMessage(messageId);
+      setPinnedMessages((prev) => prev.filter((p) => p.messageId !== messageId));
+    } catch (err) {
+      toast({ title: "Erro ao desafixar mensagem", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
   };
 
   const handleSend = async (e: React.FormEvent) => {
@@ -3590,6 +3666,35 @@ export default function ChatCenter({
             </div>
           )}
 
+          {/* Mensagens fixadas ("marcar mensagem", estilo WhatsApp) */}
+          {pinnedMessages.length > 0 && (
+            <div className="bg-amber-50 border-b border-amber-200 max-h-32 overflow-y-auto" data-testid="pinned-messages-bar">
+              {pinnedMessages.map((p) => (
+                <div key={p.messageId} className="group/pin flex items-center gap-2 px-4 py-1.5 border-b border-amber-100 last:border-b-0">
+                  <Pin className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                  <button
+                    onClick={() => scrollToMessage(p.messageId)}
+                    data-testid={`button-jump-pinned-${p.messageId}`}
+                    className="flex-1 min-w-0 text-left"
+                  >
+                    <div className="text-[11px] font-semibold text-amber-800">
+                      {p.direction === "outbound" ? (p.senderName ?? "Equipe") : (p.senderName ?? "Cliente")}
+                    </div>
+                    <div className="text-xs text-amber-900/80 truncate">{p.content}</div>
+                  </button>
+                  <button
+                    onClick={() => handleUnpinMessage(p.messageId)}
+                    data-testid={`button-unpin-bar-${p.messageId}`}
+                    title="Desafixar mensagem"
+                    className="opacity-0 group-hover/pin:opacity-100 transition-opacity p-1 rounded-full text-amber-600 hover:bg-amber-100 shrink-0"
+                  >
+                    <PinOff className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
           {/* Messages area — WhatsApp wallpaper */}
           <div
             ref={msgsContainerRef}
@@ -3642,6 +3747,9 @@ export default function ChatCenter({
                         isModerator={user?.role === "admin" || user?.role === "supervisor"}
                         onEdit={handleEditMessage}
                         onDelete={handleDeleteMessage}
+                        isPinned={pinnedMessageIdSet.has(msg.id)}
+                        onPin={handlePinMessage}
+                        onUnpin={handleUnpinMessage}
                       />
                     </Fragment>
                   );
