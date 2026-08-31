@@ -228,10 +228,20 @@ async function canAccessConversation(
 }
 
 // ─── List conversations ────────────────────────────────────────────────────
-router.get("/chat/conversations", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
-  const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { search, label, status, sectorId, assigneeId } = req.query as Record<string, string | undefined>;
-
+// Condições de VISIBILIDADE de conversas, compartilhadas entre a listagem
+// (GET /chat/conversations, paginada em 100) e a contagem real por categoria
+// (GET /chat/conversations/counts, sem paginação) — extraído pra um único
+// lugar depois de achar um bug onde os números das abinhas (Potenciais/
+// Pendentes/Ativos/Resolvidas) na Central de Atendimento eram calculados só
+// em cima do lote já limitado a 100 conversas mais recentes, então uma loja
+// com mais de 100 atendimentos em aberto via a contagem de "Ativos" muito
+// menor que a real (ex.: mostrava 53 quando na verdade eram 201) — sem bater
+// com o total do CRM, que sempre foi calculado sobre a base inteira.
+async function buildConversationVisibilityConditions(
+  req: Request,
+  tenantId: number,
+  opts: { sectorId?: number; assigneeId?: number },
+) {
   const userRole = req.session.userRole!;
   const userSectorId = req.session.userSectorId;
 
@@ -251,12 +261,12 @@ router.get("/chat/conversations", requireAuth, requireChatAccess(), async (req, 
     // inclusive já assumidas/resolvidas por outro vendedor). O filtro de
     // setor abaixo é só o filtro OPCIONAL escolhido na tela, não uma
     // restrição de visibilidade.
-    if (sectorId) conditions.push(eq(conversationsTable.sectorId, Number(sectorId)));
+    if (opts.sectorId) conditions.push(eq(conversationsTable.sectorId, opts.sectorId));
     // Filtro opcional por vendedor (assignee) na tela do admin/supervisor.
     // Sem isso, o filtro de vendedor era só client-side em cima do lote já
     // limitado a 100 (abaixo) — um vendedor com muitas conversas ativas
     // ficava com a contagem visivelmente menor do que a real.
-    if (assigneeId) conditions.push(eq(conversationsTable.assigneeId, Number(assigneeId)));
+    if (opts.assigneeId) conditions.push(eq(conversationsTable.assigneeId, opts.assigneeId));
   } else {
     // Vendedores are ALWAYS sector-scoped and must never see every conversation.
     // - potenciais (leads novos sem dono): visíveis a todos;
@@ -299,6 +309,18 @@ router.get("/chat/conversations", requireAuth, requireChatAccess(), async (req, 
     // conversas finalizadas, nem as que ele mesmo finalizou.
     conditions.push(notInArray(conversationsTable.status, ["resolved", "archived"]));
   }
+
+  return conditions;
+}
+
+router.get("/chat/conversations", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { search, label, status, sectorId, assigneeId } = req.query as Record<string, string | undefined>;
+
+  const conditions = await buildConversationVisibilityConditions(req, tenantId, {
+    sectorId: sectorId ? Number(sectorId) : undefined,
+    assigneeId: assigneeId ? Number(assigneeId) : undefined,
+  });
 
   if (status) conditions.push(eq(conversationsTable.status, status));
   if (search) {
@@ -380,6 +402,58 @@ router.get("/chat/conversations", requireAuth, requireChatAccess(), async (req, 
   });
 
   res.json(enriched);
+});
+
+// ─── Contagem real por categoria (Potenciais/Pendentes/Ativos/Resolvidas) ──
+// Usada pelos números das abinhas na Central de Atendimento. Roda sobre a
+// base INTEIRA (mesma visibilidade da listagem acima, sem o limit(100)) —
+// ver o comentário em buildConversationVisibilityConditions pra entender por
+// que isso existe: contar em cima do lote já paginado subestimava "Ativos"
+// numa loja com mais de 100 atendimentos em aberto.
+router.get("/chat/conversations/counts", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { search, label, sectorId, assigneeId } = req.query as Record<string, string | undefined>;
+
+  const conditions = await buildConversationVisibilityConditions(req, tenantId, {
+    sectorId: sectorId ? Number(sectorId) : undefined,
+    assigneeId: assigneeId ? Number(assigneeId) : undefined,
+  });
+  if (search) {
+    conditions.push(or(
+      ilike(conversationsTable.name, `%${search}%`),
+      ilike(conversationsTable.phone, `%${search}%`),
+    )!);
+  }
+  if (label) {
+    conditions.push(sql`${conversationsTable.labels} ILIKE ${'%' + label + '%'}`);
+  }
+
+  const userId = req.session.userId!;
+  const [row] = await db
+    .select({
+      // Espelha exatamente conversationCategory() do frontend (ChatCenter.tsx):
+      // isArchived já é sempre false aqui (condição de base), então "resolvidas"
+      // se reduz a checar o status.
+      ativos: sql<string>`count(*) filter (where ${conversationsTable.assigneeId} is not null and ${conversationsTable.status} not in ('resolved', 'archived'))`,
+      pendentes: sql<string>`count(*) filter (where ${conversationsTable.assigneeId} is null and ${conversationsTable.status} = 'pending')`,
+      potenciais: sql<string>`count(*) filter (where ${conversationsTable.assigneeId} is null and ${conversationsTable.status} not in ('pending', 'resolved', 'archived'))`,
+      resolvidas: sql<string>`count(*) filter (where ${conversationsTable.status} in ('resolved', 'archived'))`,
+      favoritos: sql<string>`count(*) filter (where exists (
+        select 1 from ${conversationPinsTable}
+        where ${conversationPinsTable.conversationId} = ${conversationsTable.id}
+          and ${conversationPinsTable.userId} = ${userId}
+      ))`,
+    })
+    .from(conversationsTable)
+    .where(and(...conditions));
+
+  res.json({
+    ativos: Number(row?.ativos ?? 0),
+    pendentes: Number(row?.pendentes ?? 0),
+    potenciais: Number(row?.potenciais ?? 0),
+    resolvidas: Number(row?.resolvidas ?? 0),
+    favoritos: Number(row?.favoritos ?? 0),
+  });
 });
 
 // ─── Get single conversation ───────────────────────────────────────────────

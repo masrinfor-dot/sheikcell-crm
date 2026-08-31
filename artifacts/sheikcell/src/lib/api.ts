@@ -1609,6 +1609,19 @@ export const api = {
       if (params?.assigneeId) qs.set("assigneeId", String(params.assigneeId));
       return req<Conversation[]>(`/chat/conversations?${qs.toString()}`);
     },
+    // Contagem REAL por categoria (não fica presa ao lote de 100 mais recentes
+    // que a listagem acima retorna) — usada pelos números das abinhas
+    // (Potenciais/Pendentes/Ativos/Resolvidas) na Central de Atendimento.
+    conversationCounts: (params?: { search?: string; label?: string; sectorId?: number; assigneeId?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.search) qs.set("search", params.search);
+      if (params?.label) qs.set("label", params.label);
+      if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      if (params?.assigneeId) qs.set("assigneeId", String(params.assigneeId));
+      return req<{ ativos: number; pendentes: number; potenciais: number; resolvidas: number; favoritos: number }>(
+        `/chat/conversations/counts?${qs.toString()}`,
+      );
+    },
     pinConversation: (id: number) => req<{ ok: boolean }>(`/chat/conversations/${id}/pin`, { method: "POST" }),
     unpinConversation: (id: number) => req<{ ok: boolean }>(`/chat/conversations/${id}/pin`, { method: "DELETE" }),
     // "Marcar mensagem" (fixar uma mensagem já enviada, estilo WhatsApp) —

@@ -1070,6 +1070,11 @@ export default function ChatCenter({
   const { toast } = useToast();
 
   const [convs, setConvs] = useState<Conversation[]>([]);
+  // Contagem REAL por categoria (servidor, sem o teto de 100 conversas mais
+  // recentes que a lista abaixo tem) — evita as abinhas mostrarem um número
+  // de "Ativos" bem menor que o real numa loja com mais de 100 atendimentos
+  // em aberto (foi assim que o Quadro do CRM ficou divergente do Atendimento).
+  const [serverCounts, setServerCounts] = useState<{ ativos: number; pendentes: number; potenciais: number; resolvidas: number; favoritos: number } | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
   const [search, setSearch] = useState("");
@@ -1513,8 +1518,14 @@ export default function ChatCenter({
       // ativas ficava com a contagem menor do que a real (ex.: 47 vs 14).
       if (filterVendedor) params.assigneeId = Number(filterVendedor);
       if (filterSetor) params.sectorId = Number(filterSetor);
-      const data = await api.chat.conversations(params);
+      const [data, counts] = await Promise.all([
+        api.chat.conversations(params),
+        // Best-effort: se a contagem real falhar por qualquer motivo, cai
+        // pro cálculo local (sobre a lista já carregada) — nunca trava a tela.
+        api.chat.conversationCounts(params).catch(() => null),
+      ]);
       setConvs(data);
+      if (counts) setServerCounts(counts);
     } catch { /* silent */ } finally { setLoadingConvs(false); }
   }, [search, labelFilter, filterVendedor, filterSetor]);
 
@@ -2837,11 +2848,20 @@ export default function ChatCenter({
   );
   const hasAdvancedFilter = !!(filterVendedor || filterSetor || filterNivel || filterSessionKey);
 
-  const counts: Record<Category, number> = { potenciais: 0, pendentes: 0, ativos: 0, resolvidas: 0, favoritos: 0 };
+  const clientCounts: Record<Category, number> = { potenciais: 0, pendentes: 0, ativos: 0, resolvidas: 0, favoritos: 0 };
   for (const c of visibleConvs) {
-    counts[conversationCategory(c)]++;
-    if (c.pinned) counts.favoritos++;
+    clientCounts[conversationCategory(c)]++;
+    if (c.pinned) clientCounts.favoritos++;
   }
+  // "Nível CRM" e "Número" (linha de WhatsApp) e "não respondidas" só existem
+  // como filtro client-side hoje (não vão pro servidor) — com um deles ativo,
+  // a contagem real do servidor não reflete o filtro, então cai pro cálculo
+  // local (sobre o lote carregado), igual sempre foi. Sem esses filtros, usa
+  // a contagem real do servidor — não fica presa ao teto de 100 mais recentes.
+  const hasClientOnlyFilter = onlyUnanswered || !!filterNivel || !!filterSessionKey;
+  const counts: Record<Category, number> = (serverCounts && !hasClientOnlyFilter)
+    ? { potenciais: serverCounts.potenciais, pendentes: serverCounts.pendentes, ativos: serverCounts.ativos, resolvidas: serverCounts.resolvidas, favoritos: serverCounts.favoritos }
+    : clientCounts;
 
   // Favoritos é ortogonal às outras categorias: mostra qualquer conversa
   // marcada, não importa o status. Fixadas (favoritas) sempre no topo dentro
