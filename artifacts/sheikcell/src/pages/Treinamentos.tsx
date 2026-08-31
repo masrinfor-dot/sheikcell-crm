@@ -1,11 +1,18 @@
 import { useState, useEffect } from "react";
-import { api, canEditModule, type Training, type TrainingCompletion, type TrainingAttempt, type QuizQuestion } from "@/lib/api";
+import { api, canEditModule, type Training, type TrainingCompletion, type TrainingAttempt, type TrainingPendingUser, type QuizQuestion } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import TrainingViewer from "@/components/TrainingViewer";
 import {
-  GraduationCap, Plus, X, Trash2, Pencil, Eye, CheckCircle, FileText, PlayCircle, HelpCircle, History,
+  GraduationCap, Plus, X, Trash2, Pencil, Eye, CheckCircle, FileText, PlayCircle, HelpCircle, History, CalendarClock, Unlock,
 } from "lucide-react";
+
+function formatDueDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("pt-BR");
+}
+function isOverdue(iso: string): boolean {
+  return new Date(iso).getTime() < Date.now();
+}
 
 const ROLE_LABELS: Record<string, string> = { admin: "Admin", supervisor: "Supervisor", vendedor: "Vendedor" };
 const TYPE_META = {
@@ -20,6 +27,7 @@ const EMPTY_FORM = {
   title: "", description: "", type: "text" as Training["type"], content: "",
   mandatory: true, active: true, targetRoles: ["vendedor"] as string[],
   quiz: [{ label: "", optionsText: "", correct: 0 }] as FormQuiz[],
+  dueDate: "", // yyyy-mm-dd (input type=date) — "" = sem prazo
 };
 
 // Aba "Treinamentos": admin/supervisor criam material (texto, vídeo ou quiz);
@@ -40,6 +48,8 @@ export default function Treinamentos() {
   const [saving, setSaving] = useState(false);
   const [viewing, setViewing] = useState<Training | null>(null);
   const [completions, setCompletions] = useState<TrainingCompletion[]>([]);
+  const [pendingUsers, setPendingUsers] = useState<TrainingPendingUser[]>([]);
+  const [unlockingId, setUnlockingId] = useState<number | null>(null);
   // "Aprender esta tela": qual card tem o menu de ajuda aberto.
   const [helpMenuFor, setHelpMenuFor] = useState<number | null>(null);
   // Confirmação antes de repetir (repetir não apaga a tentativa concluída).
@@ -71,6 +81,7 @@ export default function Treinamentos() {
       quiz: (t.quiz ?? []).length
         ? (t.quiz ?? []).map((q) => ({ label: q.label, optionsText: q.options.join(", "), correct: q.correct ?? 0 }))
         : [{ label: "", optionsText: "", correct: 0 }],
+      dueDate: t.dueDate ? t.dueDate.slice(0, 10) : "",
     } : { ...EMPTY_FORM, quiz: [{ label: "", optionsText: "", correct: 0 }] });
     setShowForm(true);
   };
@@ -88,6 +99,7 @@ export default function Treinamentos() {
     const payload: Partial<Training> = {
       title: form.title, description: form.description, type: form.type,
       content: form.content, mandatory: form.mandatory, active: form.active, targetRoles: form.targetRoles,
+      dueDate: form.dueDate || null,
       ...(form.type === "quiz" ? {
         quiz: form.quiz.map((q, i): QuizQuestion => ({
           id: `q${i + 1}`, label: q.label,
@@ -123,7 +135,26 @@ export default function Treinamentos() {
   const openCompletions = async (t: Training) => {
     setViewing(t);
     setCompletions([]);
+    setPendingUsers([]);
     try { setCompletions(await api.trainings.completions(t.id)); } catch { /* noop */ }
+    try { setPendingUsers(await api.trainings.pendingUsers(t.id)); } catch { /* noop */ }
+  };
+
+  // "Destravar sistema": pra quando o treinamento travou alguém e não dá pra
+  // esperar a conclusão de verdade (treinamento com problema, urgência etc.).
+  const handleForceUnlock = async (t: Training, u: TrainingPendingUser) => {
+    if (!window.confirm(`Destravar o sistema pra "${u.name}" sem ele concluir "${t.title}"? Fica registrado que foi liberado manualmente.`)) return;
+    setUnlockingId(u.id);
+    try {
+      await api.trainings.forceUnlock(t.id, u.id);
+      setPendingUsers((prev) => prev.filter((p) => p.id !== u.id));
+      setCompletions(await api.trainings.completions(t.id));
+      toast({ title: `Sistema destravado pra ${u.name}` });
+    } catch (err) {
+      toast({ title: "Erro ao destravar", description: err instanceof Error ? err.message : "Tente novamente", variant: "destructive" });
+    } finally {
+      setUnlockingId(null);
+    }
   };
 
   const setQz = (i: number, patch: Partial<FormQuiz>) =>
@@ -170,6 +201,13 @@ export default function Treinamentos() {
                     <span className="text-[10px] font-bold bg-blue-50 text-blue-600 border border-blue-100 px-2 py-0.5 rounded-full">{Meta.label}</span>
                     {t.mandatory && <span className="text-[10px] font-bold bg-red-50 text-red-600 border border-red-100 px-2 py-0.5 rounded-full">Obrigatório</span>}
                     {canManage && t.active === false && <span className="text-[10px] font-bold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inativo</span>}
+                    {t.dueDate && !t.completed && (
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border flex items-center gap-1 ${
+                        isOverdue(t.dueDate) ? "bg-red-50 text-red-600 border-red-100" : "bg-amber-50 text-amber-700 border-amber-100"
+                      }`}>
+                        <CalendarClock className="w-2.5 h-2.5" /> Prazo: {formatDueDate(t.dueDate)}{isOverdue(t.dueDate) ? " (vencido)" : ""}
+                      </span>
+                    )}
                     {hasHistory ? (
                       <span className="text-[10px] font-bold bg-green-50 text-green-700 border border-green-100 px-2 py-0.5 rounded-full flex items-center gap-1">
                         <CheckCircle className="w-3 h-3" /> Concluído{t.myScore != null ? ` (${t.myScore}%)` : ""}
@@ -449,7 +487,7 @@ export default function Treinamentos() {
                 </div>
               </div>
 
-              <div className="flex gap-4">
+              <div className="flex gap-4 flex-wrap">
                 <label className="flex items-center gap-2 text-xs font-medium">
                   <input type="checkbox" checked={form.mandatory} onChange={(e) => setForm((f) => ({ ...f, mandatory: e.target.checked }))} />
                   Obrigatório (trava o sistema até concluir)
@@ -458,6 +496,16 @@ export default function Treinamentos() {
                   <input type="checkbox" checked={form.active} onChange={(e) => setForm((f) => ({ ...f, active: e.target.checked }))} />
                   Ativo
                 </label>
+              </div>
+
+              <div>
+                <label className="text-xs font-medium mb-1 block">Data para realização (opcional)</label>
+                <input type="date" value={form.dueDate} data-testid="input-training-due-date"
+                  onChange={(e) => setForm((f) => ({ ...f, dueDate: e.target.value }))}
+                  className="px-3 py-2 rounded-xl border border-border text-sm" />
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  Só um prazo mostrado pra equipe — vencer não libera sozinho quem não concluiu; se precisar liberar antes da conclusão, use "Destravar sistema" na lista de quem concluiu.
+                </p>
               </div>
             </div>
 
@@ -486,7 +534,12 @@ export default function Treinamentos() {
                 <p className="text-xs text-muted-foreground text-center py-4">Ninguém concluiu ainda.</p>
               ) : completions.map((c) => (
                 <div key={c.id} className="flex items-center justify-between border-b border-border/50 pb-2 last:border-0">
-                  <p className="text-xs font-bold">{c.userName ?? "—"}{c.attemptNumber != null && c.attemptNumber > 1 ? ` · tentativa ${c.attemptNumber}` : ""}</p>
+                  <p className="text-xs font-bold">
+                    {c.userName ?? "—"}{c.attemptNumber != null && c.attemptNumber > 1 ? ` · tentativa ${c.attemptNumber}` : ""}
+                    {c.forcedByAdminId != null && (
+                      <span className="ml-1.5 text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-100 px-1.5 py-0.5 rounded-full">Liberado manualmente</span>
+                    )}
+                  </p>
                   <div className="text-right">
                     {c.quizScore != null && <span className="text-xs font-bold text-green-700 mr-2">{c.quizScore}%</span>}
                     <span className="text-[10px] text-muted-foreground">
@@ -496,6 +549,24 @@ export default function Treinamentos() {
                 </div>
               ))}
             </div>
+
+            {pendingUsers.length > 0 && (
+              <div className="mt-4 pt-4 border-t border-border">
+                <p className="text-xs font-bold mb-2">Ainda pendente ({pendingUsers.length})</p>
+                <div className="space-y-2 max-h-[30vh] overflow-y-auto pr-1">
+                  {pendingUsers.map((u) => (
+                    <div key={u.id} className="flex items-center justify-between gap-2">
+                      <span className="text-xs">{u.name} <span className="text-muted-foreground">({ROLE_LABELS[u.role] ?? u.role})</span></span>
+                      <button onClick={() => handleForceUnlock(viewing, u)} disabled={unlockingId === u.id}
+                        data-testid={`button-force-unlock-${u.id}`}
+                        className="flex items-center gap-1 text-[11px] font-semibold text-amber-700 hover:underline disabled:opacity-50 shrink-0">
+                        <Unlock className="w-3 h-3" /> {unlockingId === u.id ? "Destravando..." : "Destravar sistema"}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

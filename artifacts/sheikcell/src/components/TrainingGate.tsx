@@ -32,6 +32,7 @@ export default function TrainingGate() {
         <p className="text-xs text-muted-foreground mb-4">
           Treinamento obrigatório — conclua para liberar o uso do sistema.
           {pending.length > 1 && ` (${pending.length} pendentes)`}
+          {current.dueDate && ` Prazo: ${new Date(current.dueDate).toLocaleDateString("pt-BR")}.`}
         </p>
         <TrainingViewer training={current} initialAnswers={current.draftAnswers}
           onCompleted={() => setPending((prev) => prev.slice(1))} />

@@ -45,12 +45,21 @@ function sanitizeRoles(input: unknown): string[] | null {
   return roles.length ? Array.from(new Set(roles)) : null;
 }
 
+// Prazo pra concluir: aceita "" ou undefined como "sem prazo" (null); uma
+// data em formato inválido também vira null em vez de derrubar a request —
+// é um campo informativo, não vale travar o cadastro por causa dele.
+function sanitizeDueDate(input: unknown): Date | null {
+  if (typeof input !== "string" || !input.trim()) return null;
+  const d = new Date(input);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 // Remove o gabarito antes de mandar o quiz para quem vai responder.
 function stripAnswers(t: typeof trainingsTable.$inferSelect) {
   const quiz = Array.isArray(t.quiz)
     ? (t.quiz as QuizQuestion[]).map(({ id, label, options }) => ({ id, label, options }))
     : null;
-  return { id: t.id, title: t.title, description: t.description, type: t.type, content: t.content, quiz, mandatory: t.mandatory };
+  return { id: t.id, title: t.title, description: t.description, type: t.type, content: t.content, quiz, mandatory: t.mandatory, dueDate: t.dueDate };
 }
 
 // ── Pendências (compartilhado com o bloqueio do sistema) ───────────────────
@@ -324,7 +333,7 @@ router.get("/trainings/:id/attempts", requireAuth, async (req, res): Promise<voi
 // ── Gestão (admin ou supervisor) ───────────────────────────────────────────
 router.post("/trainings", requireAdminOrSupervisor, requireModuleAccess("treinamentos"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { title, description, type, content, quiz, targetRoles, mandatory, active } = req.body ?? {};
+  const { title, description, type, content, quiz, targetRoles, mandatory, active, dueDate } = req.body ?? {};
   const tt = typeof title === "string" ? title.trim().slice(0, 150) : "";
   if (!tt) { res.status(400).json({ error: "Informe o título" }); return; }
   const ty = VALID_TYPES.includes(type) ? type : "text";
@@ -351,6 +360,7 @@ router.post("/trainings", requireAdminOrSupervisor, requireModuleAccess("treinam
     description: typeof description === "string" ? description.trim().slice(0, 500) || null : null,
     type: ty, content: ct, quiz: qz, targetRoles: roles,
     mandatory: mandatory !== false, active: active !== false,
+    dueDate: sanitizeDueDate(dueDate),
     createdBy: req.session.userId!,
   }).returning();
   blockCache.clear();
@@ -361,8 +371,9 @@ router.patch("/trainings/:id", requireAdminOrSupervisor, requireModuleAccess("tr
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const { title, description, type, content, quiz, targetRoles, mandatory, active } = req.body ?? {};
+  const { title, description, type, content, quiz, targetRoles, mandatory, active, dueDate } = req.body ?? {};
   const update: Record<string, unknown> = {};
+  if (dueDate !== undefined) update.dueDate = sanitizeDueDate(dueDate);
   if (title !== undefined) {
     const tt = typeof title === "string" ? title.trim().slice(0, 150) : "";
     if (!tt) { res.status(400).json({ error: "Informe o título" }); return; }
@@ -437,6 +448,7 @@ router.get("/trainings/:id/completions", requireAdminOrSupervisor, requireModule
       userName: usersTable.name,
       attemptNumber: trainingCompletionsTable.attemptNumber,
       quizScore: trainingCompletionsTable.quizScore,
+      forcedByAdminId: trainingCompletionsTable.forcedByAdminId,
       createdAt: trainingCompletionsTable.createdAt,
     })
     .from(trainingCompletionsTable)
@@ -445,6 +457,59 @@ router.get("/trainings/:id/completions", requireAdminOrSupervisor, requireModule
     .orderBy(desc(trainingCompletionsTable.createdAt))
     .limit(500);
   res.json(rows);
+});
+
+// Quem ainda está pendente (da(s) função(ões)-alvo) — pra admin/supervisor
+// decidir quem precisa de um empurrão ou de um "destravar" manual (abaixo).
+router.get("/trainings/:id/pending-users", requireAdminOrSupervisor, requireModuleAccess("treinamentos"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const [t] = await db.select().from(trainingsTable)
+    .where(and(eq(trainingsTable.id, id), eq(trainingsTable.tenantId, tenantId)));
+  if (!t) { res.status(404).json({ error: "Treinamento não encontrado" }); return; }
+  const roles = t.targetRoles as string[];
+  const targetUsers = await db.select({ id: usersTable.id, name: usersTable.name, role: usersTable.role })
+    .from(usersTable)
+    .where(and(eq(usersTable.tenantId, tenantId), eq(usersTable.isActive, true), inArray(usersTable.role, roles)));
+  if (targetUsers.length === 0) { res.json([]); return; }
+  const done = await db.select({ userId: trainingCompletionsTable.userId }).from(trainingCompletionsTable)
+    .where(and(eq(trainingCompletionsTable.trainingId, id), inArray(trainingCompletionsTable.userId, targetUsers.map((u) => u.id))));
+  const doneSet = new Set(done.map((d) => d.userId));
+  res.json(targetUsers.filter((u) => !doneSet.has(u.id)));
+});
+
+// "Destravar sistema": libera UM usuário específico sem ele ter concluído de
+// verdade — grava uma conclusão marcada com forcedByAdminId pra ficar
+// rastreável (aparece na lista de conclusões com uma nota, ver frontend).
+// Pedido do lojista: precisa de uma saída manual pra quando o treinamento
+// travou alguém e não dá pra esperar a pessoa concluir (treinamento com
+// problema, urgência de acesso etc.).
+router.post("/trainings/:id/force-unlock", requireAdminOrSupervisor, requireModuleAccess("treinamentos"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const userId = parseInt(String((req.body ?? {}).userId), 10);
+  if (isNaN(userId)) { res.status(400).json({ error: "Escolha um usuário" }); return; }
+
+  const [t] = await db.select().from(trainingsTable)
+    .where(and(eq(trainingsTable.id, id), eq(trainingsTable.tenantId, tenantId)));
+  if (!t) { res.status(404).json({ error: "Treinamento não encontrado" }); return; }
+  const [target] = await db.select({ id: usersTable.id, role: usersTable.role }).from(usersTable)
+    .where(and(eq(usersTable.id, userId), eq(usersTable.tenantId, tenantId)));
+  if (!target) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
+
+  const [{ maxAttempt } = { maxAttempt: 0 }] = await db.select({ maxAttempt: sql<number>`coalesce(max(${trainingCompletionsTable.attemptNumber}), 0)` })
+    .from(trainingCompletionsTable)
+    .where(and(eq(trainingCompletionsTable.trainingId, id), eq(trainingCompletionsTable.userId, userId)));
+  await db.insert(trainingCompletionsTable).values({
+    tenantId, trainingId: id, userId,
+    attemptNumber: (maxAttempt ?? 0) + 1,
+    quizScore: null, answers: null,
+    forcedByAdminId: req.session.userId!,
+  });
+  invalidateTrainingBlock(userId);
+  res.json({ ok: true });
 });
 
 export default router;

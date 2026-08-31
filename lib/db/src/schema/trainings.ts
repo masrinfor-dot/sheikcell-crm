@@ -15,6 +15,10 @@ export const trainingsTable = pgTable("trainings", {
   targetRoles: jsonb("target_roles").notNull(), // ["vendedor","supervisor","admin"]
   mandatory: boolean("mandatory").notNull().default(true),
   active: boolean("active").notNull().default(true),
+  // Prazo pra concluir (opcional) — só informativo (mostrado no card e na
+  // trava), NÃO desliga a trava sozinho ao vencer (isso continua exigindo
+  // conclusão ou o "destravar" manual do admin abaixo).
+  dueDate: timestamp("due_date", { withTimezone: true }),
   createdBy: integer("created_by").references(() => usersTable.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
@@ -33,6 +37,10 @@ export const trainingCompletionsTable = pgTable("training_completions", {
   attemptNumber: integer("attempt_number").notNull().default(1),
   quizScore: integer("quiz_score"),   // % de acertos (só quiz)
   answers: jsonb("answers"),          // respostas do quiz (índices escolhidos)
+  // Preenchido só quando um admin/supervisor usa o botão "Destravar sistema"
+  // pra liberar alguém sem ele ter concluído de verdade (ex.: treinamento
+  // quebrado, urgência). Nulo = conclusão normal, feita pela própria pessoa.
+  forcedByAdminId: integer("forced_by_admin_id").references(() => usersTable.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 }, (t) => [
   uniqueIndex("training_completions_attempt_unique").on(t.trainingId, t.userId, t.attemptNumber),

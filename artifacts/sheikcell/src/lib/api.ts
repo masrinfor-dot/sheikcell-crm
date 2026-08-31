@@ -808,11 +808,17 @@ export type Training = {
   firstCompletedAt?: string | null; lastCompletedAt?: string | null;
   // Rascunho de respostas do quiz em andamento ("Continuar de onde parou").
   draftAnswers?: Record<string, number> | null;
+  // Prazo pra concluir (opcional, só informativo).
+  dueDate?: string | null;
 };
 export type TrainingCompletion = {
   id: number; userId: number; userName: string | null;
   attemptNumber?: number; quizScore: number | null; createdAt: string;
+  // Presente quando um admin/supervisor usou "Destravar sistema" em vez da
+  // pessoa concluir de verdade — id de quem liberou.
+  forcedByAdminId?: number | null;
 };
+export type TrainingPendingUser = { id: number; name: string; role: string };
 // Histórico de tentativas do PRÓPRIO usuário num treinamento (Ver progresso/resultado).
 export type TrainingAttempt = {
   id: number; attemptNumber: number; quizScore: number | null; createdAt: string;
@@ -1769,6 +1775,10 @@ export const api = {
     update: (id: number, data: Partial<Training>) => req<Training>(`/trainings/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/trainings/${id}`, { method: "DELETE" }),
     completions: (id: number) => req<TrainingCompletion[]>(`/trainings/${id}/completions`),
+    pendingUsers: (id: number) => req<TrainingPendingUser[]>(`/trainings/${id}/pending-users`),
+    // "Destravar sistema": libera um usuário travado sem ele ter concluído.
+    forceUnlock: (id: number, userId: number) =>
+      req<{ ok: boolean }>(`/trainings/${id}/force-unlock`, { method: "POST", body: JSON.stringify({ userId }) }),
     // Histórico de tentativas do usuário logado nesse treinamento ("Ver progresso").
     attempts: (id: number) => req<TrainingAttempt[]>(`/trainings/${id}/attempts`),
     // "Continuar de onde parou": salva/descarta o rascunho do quiz em andamento.
