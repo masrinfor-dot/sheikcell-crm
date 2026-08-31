@@ -13,7 +13,6 @@ import tasksRouter from "./tasks";
 import settingsRouter from "./settings";
 import partnerLinksRouter from "./partnerLinks";
 import tradeInRouter from "./tradeIn";
-import checklistsRouter, { enforceMandatoryChecklists } from "./checklists";
 import trainingsRouter, { enforceMandatoryTrainings } from "./trainings";
 import rhRouter from "./rh";
 import rhDpRouter, { enforceMandatoryClockIn } from "./rhDp";
@@ -42,8 +41,8 @@ router.use(healthRouter);
 router.use(authRouter);
 router.use(superadminRouter);
 router.use(superadminSaasRouter);
-// Trava o sistema (423) enquanto houver questionário/treinamento obrigatório pendente.
-router.use(enforceMandatoryChecklists);
+// Trava o sistema (423) enquanto houver treinamento (ou checklist, que agora
+// é só um tipo de treinamento — ver trainings.ts) obrigatório pendente.
 router.use(enforceMandatoryTrainings);
 router.use(enforceMandatoryClockIn);
 router.use(enforceMandatoryRoutines);
@@ -59,7 +58,6 @@ router.use(tasksRouter);
 router.use(settingsRouter);
 router.use(partnerLinksRouter);
 router.use(tradeInRouter);
-router.use(checklistsRouter);
 router.use(trainingsRouter);
 router.use(rhRouter);
 router.use(rhDpRouter);

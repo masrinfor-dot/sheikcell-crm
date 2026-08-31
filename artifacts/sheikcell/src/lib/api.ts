@@ -796,9 +796,13 @@ export type SystemBoardComment = {
 };
 
 export type QuizQuestion = { id: string; label: string; options: string[]; correct?: number };
+// Perguntas do tipo "checklist" (ex-Questionários, fundido em Treinamentos —
+// ver migration 0071_trainings_checklist_merge.sql). Sem "resposta certa":
+// texto livre, opções ou nota de 1 a 5.
+export type ChecklistQuestion = { id: string; label: string; type: "text" | "options" | "rating"; options?: string[] };
 export type Training = {
   id: number; title: string; description: string | null;
-  type: "text" | "video" | "quiz"; content: string | null;
+  type: "text" | "video" | "quiz" | "checklist"; content: string | null;
   quiz: QuizQuestion[] | null; mandatory: boolean;
   targetRoles?: string[]; active?: boolean; createdAt?: string;
   completed?: boolean; myScore?: number | null;
@@ -810,10 +814,21 @@ export type Training = {
   draftAnswers?: Record<string, number> | null;
   // Prazo pra concluir (opcional, só informativo).
   dueDate?: string | null;
+  // Exclusivos do tipo "checklist".
+  questions?: ChecklistQuestion[] | null;
+  recurrence?: "daily" | "weekly" | "once" | null;
+  dayOfWeek?: number | null;
+  startDate?: string | null;
+  // Presente nos itens retornados por /trainings/pending quando type="checklist" —
+  // período (dia/semana) que está devido agora.
+  periodKey?: string;
 };
 export type TrainingCompletion = {
   id: number; userId: number; userName: string | null;
   attemptNumber?: number; quizScore: number | null; createdAt: string;
+  // Presente em conclusões de checklist: respostas por pergunta e o período.
+  answers?: Record<string, string> | Record<string, number> | null;
+  periodKey?: string | null;
   // Presente quando um admin/supervisor usou "Destravar sistema" em vez da
   // pessoa concluir de verdade — id de quem liberou.
   forcedByAdminId?: number | null;
@@ -822,22 +837,6 @@ export type TrainingPendingUser = { id: number; name: string; role: string };
 // Histórico de tentativas do PRÓPRIO usuário num treinamento (Ver progresso/resultado).
 export type TrainingAttempt = {
   id: number; attemptNumber: number; quizScore: number | null; createdAt: string;
-};
-
-export type ChecklistQuestion = { id: string; label: string; type: "text" | "options" | "rating"; options?: string[] };
-export type Checklist = {
-  id: number; title: string; description: string | null;
-  questions: ChecklistQuestion[]; targetRoles: string[];
-  recurrence: "daily" | "weekly" | "once"; dayOfWeek: number | null;
-  startDate: string | null; mandatory: boolean; active: boolean; createdAt: string;
-};
-export type PendingChecklist = {
-  id: number; title: string; description: string | null;
-  questions: ChecklistQuestion[]; mandatory: boolean; periodKey: string;
-};
-export type ChecklistResponse = {
-  id: number; userId: number; userName: string | null;
-  periodKey: string; answers: Record<string, string>; createdAt: string;
 };
 
 // Rotinas e Produtividade (RH) — checklists operacionais agendados,
@@ -1769,7 +1768,7 @@ export const api = {
   trainings: {
     pending: () => req<Training[]>("/trainings/pending"),
     list: () => req<Training[]>("/trainings"),
-    complete: (id: number, answers?: Record<string, number>) =>
+    complete: (id: number, answers?: Record<string, number> | Record<string, string>) =>
       req<{ ok: boolean; score: number | null; attemptNumber: number }>(`/trainings/${id}/complete`, { method: "POST", body: JSON.stringify({ answers }) }),
     create: (data: Partial<Training>) => req<Training>("/trainings", { method: "POST", body: JSON.stringify(data) }),
     update: (id: number, data: Partial<Training>) => req<Training>(`/trainings/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
@@ -1785,16 +1784,6 @@ export const api = {
     saveProgress: (id: number, answers: Record<string, number>) =>
       req<{ ok: boolean }>(`/trainings/${id}/progress`, { method: "POST", body: JSON.stringify({ answers }) }),
     clearProgress: (id: number) => req<{ ok: boolean }>(`/trainings/${id}/progress`, { method: "DELETE" }),
-  },
-  checklists: {
-    pending: () => req<PendingChecklist[]>("/checklists/pending"),
-    respond: (id: number, answers: Record<string, string>) =>
-      req<{ id: number }>(`/checklists/${id}/respond`, { method: "POST", body: JSON.stringify({ answers }) }),
-    list: () => req<Checklist[]>("/checklists"),
-    create: (data: Partial<Checklist>) => req<Checklist>("/checklists", { method: "POST", body: JSON.stringify(data) }),
-    update: (id: number, data: Partial<Checklist>) => req<Checklist>(`/checklists/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
-    remove: (id: number) => req<{ ok: boolean }>(`/checklists/${id}`, { method: "DELETE" }),
-    responses: (id: number) => req<ChecklistResponse[]>(`/checklists/${id}/responses`),
   },
   rotinas: {
     list: () => req<RoutineChecklist[]>("/rotinas/checklists"),

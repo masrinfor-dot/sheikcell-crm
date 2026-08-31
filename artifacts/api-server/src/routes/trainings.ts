@@ -7,9 +7,67 @@ import { requireModuleAccess } from "../lib/moduleAccess";
 const router: IRouter = Router();
 
 type QuizQuestion = { id: string; label: string; options: string[]; correct: number };
+type ChecklistQuestion = { id: string; label: string; type: "text" | "options" | "rating"; options?: string[] };
 const VALID_ROLES = ["admin", "supervisor", "vendedor"];
-const VALID_TYPES = ["text", "video", "quiz"];
+const VALID_TYPES = ["text", "video", "quiz", "checklist"];
+const VALID_RECURRENCE = ["daily", "weekly", "once"];
 const QUIZ_PASS_SCORE = 70; // % mínimo de acertos para concluir um quiz
+
+// ── Datas no fuso da loja (Brasil) — usado só pelo tipo "checklist" ────────
+function todayParts(): { dateKey: string; weekday: number } {
+  const now = new Date();
+  const dateKey = now.toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" }); // YYYY-MM-DD
+  const weekdayName = now.toLocaleDateString("en-US", { timeZone: "America/Sao_Paulo", weekday: "short" });
+  const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(weekdayName);
+  return { dateKey, weekday };
+}
+
+// Chave da semana ISO-like: segunda como início ("YYYY-Wnn").
+function weekKey(dateKey: string): string {
+  const d = new Date(`${dateKey}T12:00:00Z`);
+  const day = (d.getUTCDay() + 6) % 7; // 0=segunda
+  d.setUTCDate(d.getUTCDate() - day + 3); // quinta da semana
+  const jan4 = new Date(Date.UTC(d.getUTCFullYear(), 0, 4));
+  const week = 1 + Math.round(((d.getTime() - jan4.getTime()) / 86400000 - 3 + ((jan4.getUTCDay() + 6) % 7)) / 7);
+  return `${d.getUTCFullYear()}-W${String(week).padStart(2, "0")}`;
+}
+
+// Verifica se o checklist está "devido" hoje para preenchimento e qual a
+// chave do período (uma resposta por período por usuário).
+function dueInfo(c: { recurrence: string | null; dayOfWeek: number | null; startDate: string | null }): { due: boolean; periodKey: string } {
+  const { dateKey, weekday } = todayParts();
+  if (c.startDate && dateKey < c.startDate) return { due: false, periodKey: "" };
+  if (c.recurrence === "daily") return { due: true, periodKey: dateKey };
+  if (c.recurrence === "weekly") {
+    const target = c.dayOfWeek ?? 1;
+    // Semana começa na segunda (1) e termina no domingo (0). Fica pendente do
+    // dia configurado até o fim da semana.
+    const pos = (d: number) => (d + 6) % 7; // segunda=0 ... domingo=6
+    return { due: pos(weekday) >= pos(target), periodKey: weekKey(dateKey) };
+  }
+  // once: devido a partir da data de início (ou criação)
+  return { due: true, periodKey: "once" };
+}
+
+function sanitizeChecklistQuestions(input: unknown): ChecklistQuestion[] | null {
+  if (!Array.isArray(input) || input.length === 0 || input.length > 30) return null;
+  const out: ChecklistQuestion[] = [];
+  for (let i = 0; i < input.length; i++) {
+    const q = input[i] as Partial<ChecklistQuestion>;
+    const label = typeof q?.label === "string" ? q.label.trim().slice(0, 300) : "";
+    const type = q?.type === "options" || q?.type === "rating" ? q.type : "text";
+    if (!label) return null;
+    let options: string[] | undefined;
+    if (type === "options") {
+      options = Array.isArray(q?.options)
+        ? q.options.filter((o): o is string => typeof o === "string" && !!o.trim()).map((o) => o.trim().slice(0, 100)).slice(0, 10)
+        : [];
+      if (options.length < 2) return null;
+    }
+    out.push({ id: `q${i + 1}`, label, type, ...(options ? { options } : {}) });
+  }
+  return out;
+}
 
 function sanitizeQuiz(input: unknown): QuizQuestion[] | null {
   if (!Array.isArray(input) || input.length === 0 || input.length > 30) return null;
@@ -54,36 +112,79 @@ function sanitizeDueDate(input: unknown): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-// Remove o gabarito antes de mandar o quiz para quem vai responder.
+// Remove o gabarito antes de mandar o quiz para quem vai responder (o
+// checklist não tem "resposta certa", então suas perguntas vão inteiras).
 function stripAnswers(t: typeof trainingsTable.$inferSelect) {
   const quiz = Array.isArray(t.quiz)
     ? (t.quiz as QuizQuestion[]).map(({ id, label, options }) => ({ id, label, options }))
     : null;
-  return { id: t.id, title: t.title, description: t.description, type: t.type, content: t.content, quiz, mandatory: t.mandatory, dueDate: t.dueDate };
+  return {
+    id: t.id, title: t.title, description: t.description, type: t.type, content: t.content, quiz,
+    mandatory: t.mandatory, dueDate: t.dueDate,
+    questions: t.type === "checklist" ? (t.questions as ChecklistQuestion[] | null) : null,
+    recurrence: t.recurrence, dayOfWeek: t.dayOfWeek, startDate: t.startDate,
+  };
 }
 
 // ── Pendências (compartilhado com o bloqueio do sistema) ───────────────────
+// Treinamentos normais (texto/vídeo/quiz): pendente = nunca concluído (uma
+// vez feito, fica concluído pra sempre — repetir é opcional). Checklist:
+// pendente = "devido" hoje/nesta semana E sem resposta para o período atual —
+// pode voltar a ficar pendente no próximo período mesmo já tendo respondido
+// antes (ver dueInfo/periodKey acima).
 export async function getPendingTrainings(uid: number, role: string, tenantId: number) {
   const all = await db.select().from(trainingsTable)
     .where(and(eq(trainingsTable.active, true), eq(trainingsTable.tenantId, tenantId)));
   const target = all.filter((t) => (t.targetRoles as string[]).includes(role));
   if (target.length === 0) return [];
-  const done = await db.select({ trainingId: trainingCompletionsTable.trainingId })
-    .from(trainingCompletionsTable)
-    .where(and(
-      eq(trainingCompletionsTable.userId, uid),
-      inArray(trainingCompletionsTable.trainingId, target.map((t) => t.id)),
-    ));
-  const doneSet = new Set(done.map((d) => d.trainingId));
-  const pending = target.filter((t) => !doneSet.has(t.id));
-  if (pending.length === 0) return [];
-  // Rascunho em andamento ("Continuar de onde parou") mesmo dentro da trava
-  // de obrigatório — sem isso, um quiz longo interrompido reiniciaria do zero.
-  const drafts = await db.select({ trainingId: trainingProgressTable.trainingId, answers: trainingProgressTable.answers })
-    .from(trainingProgressTable)
-    .where(and(eq(trainingProgressTable.userId, uid), inArray(trainingProgressTable.trainingId, pending.map((t) => t.id))));
-  const draftMap = new Map(drafts.map((d) => [d.trainingId, d.answers]));
-  return pending.map((t) => ({ ...stripAnswers(t), draftAnswers: draftMap.get(t.id) ?? null }));
+
+  const normal = target.filter((t) => t.type !== "checklist");
+  const checklists = target.filter((t) => t.type === "checklist");
+  const results: (ReturnType<typeof stripAnswers> & { draftAnswers?: unknown; periodKey?: string })[] = [];
+
+  if (normal.length) {
+    const done = await db.select({ trainingId: trainingCompletionsTable.trainingId })
+      .from(trainingCompletionsTable)
+      .where(and(
+        eq(trainingCompletionsTable.userId, uid),
+        inArray(trainingCompletionsTable.trainingId, normal.map((t) => t.id)),
+      ));
+    const doneSet = new Set(done.map((d) => d.trainingId));
+    const pendingNormal = normal.filter((t) => !doneSet.has(t.id));
+    if (pendingNormal.length) {
+      // Rascunho em andamento ("Continuar de onde parou") mesmo dentro da
+      // trava de obrigatório — sem isso, um quiz longo interrompido reiniciaria do zero.
+      const drafts = await db.select({ trainingId: trainingProgressTable.trainingId, answers: trainingProgressTable.answers })
+        .from(trainingProgressTable)
+        .where(and(eq(trainingProgressTable.userId, uid), inArray(trainingProgressTable.trainingId, pendingNormal.map((t) => t.id))));
+      const draftMap = new Map(drafts.map((d) => [d.trainingId, d.answers]));
+      results.push(...pendingNormal.map((t) => ({ ...stripAnswers(t), draftAnswers: draftMap.get(t.id) ?? null })));
+    }
+  }
+
+  if (checklists.length) {
+    const due = checklists
+      .map((t) => ({ t, info: dueInfo(t) }))
+      .filter((x) => x.info.due);
+    if (due.length) {
+      const ids = due.map((d) => d.t.id);
+      const keys = Array.from(new Set(due.map((d) => d.info.periodKey)));
+      const answered = await db
+        .select({ trainingId: trainingCompletionsTable.trainingId, periodKey: trainingCompletionsTable.periodKey })
+        .from(trainingCompletionsTable)
+        .where(and(
+          eq(trainingCompletionsTable.userId, uid),
+          inArray(trainingCompletionsTable.trainingId, ids),
+          inArray(trainingCompletionsTable.periodKey, keys),
+        ));
+      const doneSet = new Set(answered.map((a) => `${a.trainingId}|${a.periodKey}`));
+      results.push(...due
+        .filter((d) => !doneSet.has(`${d.t.id}|${d.info.periodKey}`))
+        .map((d) => ({ ...stripAnswers(d.t), draftAnswers: null, periodKey: d.info.periodKey })));
+    }
+  }
+
+  return results;
 }
 
 // Estatísticas de tentativas do próprio usuário, por treinamento — usado
@@ -134,10 +235,9 @@ const BLOCK_CACHE_MS = 60000;
 function invalidateTrainingBlock(uid: number): void { blockCache.delete(uid); }
 
 // Rotas que continuam acessíveis enquanto o usuário está travado por
-// treinamento OU questionário pendente (as duas travas compartilham a lista).
+// treinamento (ou checklist, que agora é só um tipo de treinamento) pendente.
 export const GATE_ALLOWLIST = [
   /^\/auth\//,
-  /^\/checklists\/pending$/, /^\/checklists\/\d+\/respond$/,
   /^\/trainings\/pending$/, /^\/trainings\/\d+\/complete$/,
   // "Continuar de onde parou" e "Ver progresso" precisam funcionar mesmo com
   // o treinamento obrigatório travando o resto do sistema.
@@ -217,6 +317,51 @@ router.post("/trainings/:id/complete", requireAuth, async (req, res): Promise<vo
   if (!t || !t.active) { res.status(404).json({ error: "Treinamento não encontrado" }); return; }
   if (!(t.targetRoles as string[]).includes(req.session.userRole ?? "")) {
     res.status(403).json({ error: "Este treinamento não é para a sua função" }); return;
+  }
+
+  // Checklist: sem nota/gabarito — cada pergunta (texto/opções/nota) só
+  // precisa vir preenchida. Uma resposta por período (dia/semana/único); o
+  // índice parcial training_completions_period_unique barra uma 2ª resposta
+  // no mesmo período (corrida entre abas).
+  if (t.type === "checklist") {
+    const info = dueInfo(t);
+    if (!info.due) { res.status(400).json({ error: "Este questionário não está aberto hoje" }); return; }
+    const questions = (t.questions ?? []) as ChecklistQuestion[];
+    const raw = ((req.body ?? {}) as { answers?: Record<string, string> }).answers ?? {};
+    const answers: Record<string, string> = {};
+    for (const q of questions) {
+      const v = typeof raw[q.id] === "string" ? raw[q.id].trim().slice(0, 1000) : "";
+      if (!v) { res.status(400).json({ error: `Responda a pergunta: "${q.label}"` }); return; }
+      if (q.type === "options" && !(q.options ?? []).includes(v)) { res.status(400).json({ error: `Opção inválida em: "${q.label}"` }); return; }
+      if (q.type === "rating" && !["1", "2", "3", "4", "5"].includes(v)) { res.status(400).json({ error: `Nota inválida em: "${q.label}"` }); return; }
+      answers[q.id] = v;
+    }
+    const uid = req.session.userId!;
+    let attemptNumber: number | null = null;
+    for (let tries = 0; tries < 2 && attemptNumber === null; tries++) {
+      const [{ max }] = await db.select({ max: sql<number>`coalesce(max(${trainingCompletionsTable.attemptNumber}), 0)` })
+        .from(trainingCompletionsTable)
+        .where(and(eq(trainingCompletionsTable.trainingId, id), eq(trainingCompletionsTable.userId, uid)));
+      const next = (max ?? 0) + 1;
+      try {
+        await db.insert(trainingCompletionsTable).values({
+          tenantId, trainingId: id, userId: uid, attemptNumber: next, quizScore: null, answers, periodKey: info.periodKey,
+        });
+        attemptNumber = next;
+      } catch (err) {
+        const constraint = (err as { constraint?: string })?.constraint;
+        if (constraint === "training_completions_period_unique") {
+          res.status(409).json({ error: "Você já respondeu este questionário neste período" }); return;
+        }
+        if ((err as { code?: string })?.code === "23505" && tries === 0) continue; // corrida no attemptNumber: tenta o próximo
+        req.log.error({ err }, "checklist completion insert failed");
+        res.status(500).json({ error: "Erro ao registrar a resposta. Tente novamente." }); return;
+      }
+    }
+    if (attemptNumber === null) { res.status(500).json({ error: "Erro ao registrar a resposta. Tente novamente." }); return; }
+    invalidateTrainingBlock(uid);
+    res.status(201).json({ ok: true, score: null, attemptNumber });
+    return;
   }
 
   let quizScore: number | null = null;
@@ -333,7 +478,7 @@ router.get("/trainings/:id/attempts", requireAuth, async (req, res): Promise<voi
 // ── Gestão (admin ou supervisor) ───────────────────────────────────────────
 router.post("/trainings", requireAdminOrSupervisor, requireModuleAccess("treinamentos"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { title, description, type, content, quiz, targetRoles, mandatory, active, dueDate } = req.body ?? {};
+  const { title, description, type, content, quiz, questions, recurrence, dayOfWeek, startDate, targetRoles, mandatory, active, dueDate } = req.body ?? {};
   const tt = typeof title === "string" ? title.trim().slice(0, 150) : "";
   if (!tt) { res.status(400).json({ error: "Informe o título" }); return; }
   const ty = VALID_TYPES.includes(type) ? type : "text";
@@ -341,7 +486,17 @@ router.post("/trainings", requireAdminOrSupervisor, requireModuleAccess("treinam
   if (!roles) { res.status(400).json({ error: "Escolha pelo menos uma função" }); return; }
   let qz: QuizQuestion[] | null = null;
   let ct: string | null = null;
-  if (ty === "quiz") {
+  let qs: ChecklistQuestion[] | null = null;
+  let rec: string | null = null;
+  let dow: number | null = null;
+  let sd: string | null = null;
+  if (ty === "checklist") {
+    qs = sanitizeChecklistQuestions(questions);
+    if (!qs) { res.status(400).json({ error: "Perguntas inválidas (1 a 30; opções precisam de pelo menos 2 alternativas)" }); return; }
+    rec = VALID_RECURRENCE.includes(recurrence) ? recurrence : "weekly";
+    dow = rec === "weekly" ? Math.min(6, Math.max(0, parseInt(String(dayOfWeek ?? 1), 10) || 0)) : null;
+    sd = typeof startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(startDate) ? startDate : null;
+  } else if (ty === "quiz") {
     qz = sanitizeQuiz(quiz);
     if (!qz) { res.status(400).json({ error: "Quiz inválido (1 a 30 perguntas, cada uma com 2+ opções e a resposta certa marcada)" }); return; }
     ct = typeof content === "string" ? content.trim().slice(0, 20000) || null : null; // material de apoio opcional
@@ -358,7 +513,7 @@ router.post("/trainings", requireAdminOrSupervisor, requireModuleAccess("treinam
     tenantId,
     title: tt,
     description: typeof description === "string" ? description.trim().slice(0, 500) || null : null,
-    type: ty, content: ct, quiz: qz, targetRoles: roles,
+    type: ty, content: ct, quiz: qz, questions: qs, recurrence: rec, dayOfWeek: dow, startDate: sd, targetRoles: roles,
     mandatory: mandatory !== false, active: active !== false,
     dueDate: sanitizeDueDate(dueDate),
     createdBy: req.session.userId!,
@@ -371,7 +526,7 @@ router.patch("/trainings/:id", requireAdminOrSupervisor, requireModuleAccess("tr
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const { title, description, type, content, quiz, targetRoles, mandatory, active, dueDate } = req.body ?? {};
+  const { title, description, type, content, quiz, questions, recurrence, dayOfWeek, startDate, targetRoles, mandatory, active, dueDate } = req.body ?? {};
   const update: Record<string, unknown> = {};
   if (dueDate !== undefined) update.dueDate = sanitizeDueDate(dueDate);
   if (title !== undefined) {
@@ -381,12 +536,42 @@ router.patch("/trainings/:id", requireAdminOrSupervisor, requireModuleAccess("tr
   }
   if (description !== undefined) update.description = typeof description === "string" ? description.trim().slice(0, 500) || null : null;
 
-  // Valida o registro FINAL (tipo + conteúdo + quiz coerentes entre si).
+  // Valida o registro FINAL (tipo + conteúdo/quiz/checklist coerentes entre si).
   const [existing] = await db.select().from(trainingsTable)
     .where(and(eq(trainingsTable.id, id), eq(trainingsTable.tenantId, tenantId)));
   if (!existing) { res.status(404).json({ error: "Treinamento não encontrado" }); return; }
   const finalType = type !== undefined && VALID_TYPES.includes(type) ? type : existing.type;
   update.type = finalType;
+
+  if (finalType === "checklist") {
+    const rawQuestions = questions !== undefined ? questions : existing.questions;
+    const qs = sanitizeChecklistQuestions(rawQuestions);
+    if (!qs) { res.status(400).json({ error: "Perguntas inválidas (1 a 30; opções precisam de pelo menos 2 alternativas)" }); return; }
+    update.questions = qs;
+    const rawRec = recurrence !== undefined ? recurrence : existing.recurrence;
+    const rec = VALID_RECURRENCE.includes(rawRec) ? rawRec : "weekly";
+    update.recurrence = rec;
+    const rawDow = dayOfWeek !== undefined ? dayOfWeek : existing.dayOfWeek;
+    update.dayOfWeek = rec === "weekly" ? Math.min(6, Math.max(0, parseInt(String(rawDow ?? 1), 10) || 0)) : null;
+    const rawSd = startDate !== undefined ? startDate : existing.startDate;
+    update.startDate = typeof rawSd === "string" && /^\d{4}-\d{2}-\d{2}$/.test(rawSd) ? rawSd : null;
+    update.quiz = null;
+    update.content = null;
+    if (targetRoles !== undefined) {
+      const roles = sanitizeRoles(targetRoles);
+      if (!roles) { res.status(400).json({ error: "Escolha pelo menos uma função" }); return; }
+      update.targetRoles = roles;
+    }
+    if (mandatory !== undefined) update.mandatory = !!mandatory;
+    if (active !== undefined) update.active = !!active;
+    const [updated] = await db.update(trainingsTable).set(update)
+      .where(and(eq(trainingsTable.id, id), eq(trainingsTable.tenantId, tenantId))).returning();
+    if (!updated) { res.status(404).json({ error: "Treinamento não encontrado" }); return; }
+    blockCache.clear();
+    res.json(updated);
+    return;
+  }
+
   let finalContent = content !== undefined
     ? (typeof content === "string" ? content.trim().slice(0, 20000) || null : null)
     : existing.content;
@@ -405,6 +590,10 @@ router.patch("/trainings/:id", requireAdminOrSupervisor, requireModuleAccess("tr
     }
   }
   update.content = finalContent;
+  update.questions = null;
+  update.recurrence = null;
+  update.dayOfWeek = null;
+  update.startDate = null;
   if (targetRoles !== undefined) {
     const roles = sanitizeRoles(targetRoles);
     if (!roles) { res.status(400).json({ error: "Escolha pelo menos uma função" }); return; }
@@ -448,6 +637,8 @@ router.get("/trainings/:id/completions", requireAdminOrSupervisor, requireModule
       userName: usersTable.name,
       attemptNumber: trainingCompletionsTable.attemptNumber,
       quizScore: trainingCompletionsTable.quizScore,
+      answers: trainingCompletionsTable.answers,
+      periodKey: trainingCompletionsTable.periodKey,
       forcedByAdminId: trainingCompletionsTable.forcedByAdminId,
       createdAt: trainingCompletionsTable.createdAt,
     })
@@ -473,6 +664,21 @@ router.get("/trainings/:id/pending-users", requireAdminOrSupervisor, requireModu
     .from(usersTable)
     .where(and(eq(usersTable.tenantId, tenantId), eq(usersTable.isActive, true), inArray(usersTable.role, roles)));
   if (targetUsers.length === 0) { res.json([]); return; }
+  // Checklist: "pendente" é por PERÍODO atual (pode ter respondido semana
+  // passada e estar pendente de novo hoje) — não "nunca respondeu".
+  if (t.type === "checklist") {
+    const info = dueInfo(t);
+    if (!info.due) { res.json([]); return; } // hoje/esta semana não é dia de responder: ninguém pendente
+    const answered = await db.select({ userId: trainingCompletionsTable.userId }).from(trainingCompletionsTable)
+      .where(and(
+        eq(trainingCompletionsTable.trainingId, id),
+        eq(trainingCompletionsTable.periodKey, info.periodKey),
+        inArray(trainingCompletionsTable.userId, targetUsers.map((u) => u.id)),
+      ));
+    const doneSet = new Set(answered.map((a) => a.userId));
+    res.json(targetUsers.filter((u) => !doneSet.has(u.id)));
+    return;
+  }
   const done = await db.select({ userId: trainingCompletionsTable.userId }).from(trainingCompletionsTable)
     .where(and(eq(trainingCompletionsTable.trainingId, id), inArray(trainingCompletionsTable.userId, targetUsers.map((u) => u.id))));
   const doneSet = new Set(done.map((d) => d.userId));
@@ -499,13 +705,18 @@ router.post("/trainings/:id/force-unlock", requireAdminOrSupervisor, requireModu
     .where(and(eq(usersTable.id, userId), eq(usersTable.tenantId, tenantId)));
   if (!target) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
 
+  // Checklist: marca o unlock como resposta do PERÍODO atual (se hoje/esta
+  // semana for dia de responder) — senão a pessoa continuaria "pendente" de
+  // novo no mesmo período assim que o cache de bloqueio expirasse.
+  const periodKey = t.type === "checklist" ? (dueInfo(t).due ? dueInfo(t).periodKey : null) : null;
+
   const [{ maxAttempt } = { maxAttempt: 0 }] = await db.select({ maxAttempt: sql<number>`coalesce(max(${trainingCompletionsTable.attemptNumber}), 0)` })
     .from(trainingCompletionsTable)
     .where(and(eq(trainingCompletionsTable.trainingId, id), eq(trainingCompletionsTable.userId, userId)));
   await db.insert(trainingCompletionsTable).values({
     tenantId, trainingId: id, userId,
     attemptNumber: (maxAttempt ?? 0) + 1,
-    quizScore: null, answers: null,
+    quizScore: null, answers: null, periodKey,
     forcedByAdminId: req.session.userId!,
   });
   invalidateTrainingBlock(userId);

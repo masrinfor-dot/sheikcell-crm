@@ -2,13 +2,15 @@ import { useState, useEffect, useRef } from "react";
 import { api, type Training } from "@/lib/api";
 import { youtubeEmbedUrl } from "@/lib/video";
 import { useToast } from "@/hooks/use-toast";
-import { PlayCircle, CheckCircle, ExternalLink, MoreVertical, PartyPopper } from "lucide-react";
+import { PlayCircle, CheckCircle, ExternalLink, MoreVertical, PartyPopper, Star } from "lucide-react";
 
-// Exibe um treinamento (texto, vídeo ou quiz) e permite concluir — quantas
-// vezes o usuário quiser (repetir NUNCA apaga tentativa anterior, ver
-// trainings.ts no backend). Usado tanto na aba Treinamentos quanto na trava
-// de uso obrigatório (TrainingGate, que não recebe `onExit` — treinamento
-// obrigatório não pode ser "saído" sem concluir).
+// Exibe um treinamento (texto, vídeo, quiz ou checklist/questionário) e
+// permite concluir/responder — quantas vezes o usuário quiser (repetir NUNCA
+// apaga tentativa anterior, ver trainings.ts no backend; um checklist só
+// aceita uma resposta por período — dia/semana/único — o backend rejeita a
+// 2ª tentativa no mesmo período com 409). Usado tanto na aba Treinamentos
+// quanto na trava de uso obrigatório (TrainingGate, que não recebe `onExit` —
+// treinamento obrigatório não pode ser "saído" sem concluir/responder).
 export default function TrainingViewer({
   training, onCompleted, onExit, initialAnswers, skipToQuiz,
 }: {
@@ -22,6 +24,7 @@ export default function TrainingViewer({
 }) {
   const { toast } = useToast();
   const [quizAnswers, setQuizAnswers] = useState<Record<string, number>>(initialAnswers ?? {});
+  const [checklistAnswers, setChecklistAnswers] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [lastScore, setLastScore] = useState<number | null>(null);
   const [showOptions, setShowOptions] = useState(false);
@@ -37,7 +40,11 @@ export default function TrainingViewer({
 
   const quiz = training.quiz ?? [];
   const isQuiz = training.type === "quiz";
-  const allAnswered = !isQuiz || quiz.every((q) => quizAnswers[q.id] !== undefined);
+  const isChecklist = training.type === "checklist";
+  const checklistQuestions = training.questions ?? [];
+  const allAnswered = isChecklist
+    ? checklistQuestions.every((q) => (checklistAnswers[q.id] ?? "").trim())
+    : !isQuiz || quiz.every((q) => quizAnswers[q.id] !== undefined);
   const embed = training.type === "video" && training.content ? youtubeEmbedUrl(training.content) : null;
 
   // Autosalva o rascunho a cada resposta escolhida — é isso que sustenta
@@ -53,8 +60,8 @@ export default function TrainingViewer({
     if (!allAnswered || saving) return;
     setSaving(true);
     try {
-      const r = await api.trainings.complete(training.id, isQuiz ? quizAnswers : undefined);
-      toast({ title: isQuiz ? `Aprovado! Você acertou ${r.score}%` : "Treinamento concluído!" });
+      const r = await api.trainings.complete(training.id, isQuiz ? quizAnswers : isChecklist ? checklistAnswers : undefined);
+      toast({ title: isQuiz ? `Aprovado! Você acertou ${r.score}%` : isChecklist ? "Respostas enviadas. Obrigado!" : "Treinamento concluído!" });
       setResult({ score: r.score });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Erro";
@@ -86,6 +93,20 @@ export default function TrainingViewer({
 
   // ── Tela "Treinamento concluído 🎉" ────────────────────────────────────
   if (result) {
+    // Checklist não tem "repetir": só aceita nova resposta no próximo período
+    // (dia/semana), o backend rejeita uma 2ª resposta no mesmo período.
+    if (isChecklist) {
+      return (
+        <div className="space-y-4 text-center py-2">
+          <PartyPopper className="w-10 h-10 text-primary mx-auto" />
+          <p className="font-bold text-base">Respostas enviadas 🎉</p>
+          <button onClick={onCompleted} data-testid="button-training-finish"
+            className="w-full px-3 py-2.5 rounded-xl text-xs font-semibold bg-primary text-white transition">
+            Concluir
+          </button>
+        </div>
+      );
+    }
     return (
       <div className="space-y-4 text-center py-2">
         <PartyPopper className="w-10 h-10 text-primary mx-auto" />
@@ -217,12 +238,53 @@ export default function TrainingViewer({
         </div>
       )}
 
+      {isChecklist && (
+        <div className="space-y-4">
+          {checklistQuestions.map((q, idx) => (
+            <div key={q.id}>
+              <p className="text-xs font-bold mb-1.5">{idx + 1}. {q.label}</p>
+              {q.type === "text" && (
+                <textarea rows={2} value={checklistAnswers[q.id] ?? ""}
+                  onChange={(e) => setChecklistAnswers((a) => ({ ...a, [q.id]: e.target.value }))}
+                  data-testid={`checklist-q-${q.id}`}
+                  className="w-full px-3 py-2 rounded-xl border border-border text-sm resize-none" />
+              )}
+              {q.type === "options" && (
+                <div className="flex gap-1.5 flex-wrap">
+                  {(q.options ?? []).map((opt) => (
+                    <button key={opt} onClick={() => setChecklistAnswers((a) => ({ ...a, [q.id]: opt }))}
+                      className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition ${
+                        checklistAnswers[q.id] === opt ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border hover:bg-secondary"
+                      }`}>
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {q.type === "rating" && (
+                <div className="flex gap-1">
+                  {[1, 2, 3, 4, 5].map((n) => (
+                    <button key={n} onClick={() => setChecklistAnswers((a) => ({ ...a, [q.id]: String(n) }))} title={`${n} estrela(s)`}>
+                      <Star className={`w-7 h-7 transition ${parseInt(checklistAnswers[q.id] ?? "0", 10) >= n ? "fill-amber-400 text-amber-400" : "text-border"}`} />
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       <button onClick={handleComplete} disabled={!allAnswered || saving} data-testid="button-complete-training"
         className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-primary text-white text-sm font-bold disabled:opacity-40 transition">
         <CheckCircle className="w-4 h-4" />
-        {saving ? "Enviando..." : training.type === "quiz" ? "Enviar respostas" : "Marcar como concluído"}
+        {saving ? "Enviando..." : training.type === "quiz" ? "Enviar respostas" : isChecklist ? "Enviar respostas" : "Marcar como concluído"}
       </button>
-      {!allAnswered && <p className="text-[11px] text-muted-foreground text-center">Responda todas as perguntas do quiz para enviar.</p>}
+      {!allAnswered && (
+        <p className="text-[11px] text-muted-foreground text-center">
+          {isChecklist ? "Responda todas as perguntas para enviar." : "Responda todas as perguntas do quiz para enviar."}
+        </p>
+      )}
     </div>
   );
 }

@@ -1,10 +1,11 @@
 import { useState, useEffect } from "react";
-import { api, canEditModule, type Training, type TrainingCompletion, type TrainingAttempt, type TrainingPendingUser, type QuizQuestion } from "@/lib/api";
+import { api, canEditModule, type Training, type TrainingCompletion, type TrainingAttempt, type TrainingPendingUser, type QuizQuestion, type ChecklistQuestion } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import TrainingViewer from "@/components/TrainingViewer";
 import {
   GraduationCap, Plus, X, Trash2, Pencil, Eye, CheckCircle, FileText, PlayCircle, HelpCircle, History, CalendarClock, Unlock,
+  ClipboardCheck, CalendarDays, Star,
 } from "lucide-react";
 
 function formatDueDate(iso: string): string {
@@ -15,23 +16,34 @@ function isOverdue(iso: string): boolean {
 }
 
 const ROLE_LABELS: Record<string, string> = { admin: "Admin", supervisor: "Supervisor", vendedor: "Vendedor" };
+const WEEKDAYS = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
+const REC_LABELS: Record<string, string> = { daily: "Diário", weekly: "Semanal", once: "Uma vez" };
 const TYPE_META = {
   text: { label: "Texto", icon: FileText },
   video: { label: "Vídeo", icon: PlayCircle },
   quiz: { label: "Quiz", icon: HelpCircle },
+  checklist: { label: "Questionário", icon: ClipboardCheck },
 } as const;
 
 type FormQuiz = { label: string; optionsText: string; correct: number };
+type FormChecklistQuestion = { label: string; type: ChecklistQuestion["type"]; optionsText: string };
 
 const EMPTY_FORM = {
   title: "", description: "", type: "text" as Training["type"], content: "",
   mandatory: true, active: true, targetRoles: ["vendedor"] as string[],
   quiz: [{ label: "", optionsText: "", correct: 0 }] as FormQuiz[],
   dueDate: "", // yyyy-mm-dd (input type=date) — "" = sem prazo
+  // Exclusivos do tipo "checklist" (questionário).
+  recurrence: "weekly" as NonNullable<Training["recurrence"]>,
+  dayOfWeek: 1,
+  startDate: "",
+  questions: [{ label: "", type: "text", optionsText: "" }] as FormChecklistQuestion[],
 };
 
-// Aba "Treinamentos": admin/supervisor criam material (texto, vídeo ou quiz);
-// a equipe consulta e conclui. Obrigatórios travam o sistema (TrainingGate).
+// Aba "Treinamentos": admin/supervisor criam material (texto, vídeo, quiz ou
+// questionário — este último com recorrência, fundido do antigo módulo
+// Questionários direto no banco, ver migration 0071); a equipe consulta e
+// conclui/responde. Obrigatórios travam o sistema (TrainingGate).
 export default function Treinamentos() {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -82,7 +94,11 @@ export default function Treinamentos() {
         ? (t.quiz ?? []).map((q) => ({ label: q.label, optionsText: q.options.join(", "), correct: q.correct ?? 0 }))
         : [{ label: "", optionsText: "", correct: 0 }],
       dueDate: t.dueDate ? t.dueDate.slice(0, 10) : "",
-    } : { ...EMPTY_FORM, quiz: [{ label: "", optionsText: "", correct: 0 }] });
+      recurrence: t.recurrence ?? "weekly", dayOfWeek: t.dayOfWeek ?? 1, startDate: t.startDate ?? "",
+      questions: (t.questions ?? []).length
+        ? (t.questions ?? []).map((q) => ({ label: q.label, type: q.type, optionsText: (q.options ?? []).join(", ") }))
+        : [{ label: "", type: "text", optionsText: "" }],
+    } : { ...EMPTY_FORM, quiz: [{ label: "", optionsText: "", correct: 0 }], questions: [{ label: "", type: "text", optionsText: "" }] });
     setShowForm(true);
   };
 
@@ -90,15 +106,18 @@ export default function Treinamentos() {
     const opts = q.optionsText.split(",").map((o) => o.trim()).filter(Boolean);
     return q.label.trim() && opts.length >= 2 && q.correct >= 0 && q.correct < opts.length;
   }));
-  const valid = form.title.trim() && form.targetRoles.length > 0 && quizValid
-    && (form.type === "quiz" || form.content.trim());
+  const checklistValid = form.type !== "checklist" || (form.questions.length > 0 && form.questions.every((q) =>
+    q.label.trim() && (q.type !== "options" || q.optionsText.split(",").filter((o) => o.trim()).length >= 2)));
+  const valid = form.title.trim() && form.targetRoles.length > 0 && quizValid && checklistValid
+    && (form.type === "quiz" || form.type === "checklist" || form.content.trim());
 
   const handleSave = async () => {
     if (!valid || saving) return;
     setSaving(true);
     const payload: Partial<Training> = {
       title: form.title, description: form.description, type: form.type,
-      content: form.content, mandatory: form.mandatory, active: form.active, targetRoles: form.targetRoles,
+      content: form.type === "checklist" ? null : form.content,
+      mandatory: form.mandatory, active: form.active, targetRoles: form.targetRoles,
       dueDate: form.dueDate || null,
       ...(form.type === "quiz" ? {
         quiz: form.quiz.map((q, i): QuizQuestion => ({
@@ -106,6 +125,13 @@ export default function Treinamentos() {
           options: q.optionsText.split(",").map((o) => o.trim()).filter(Boolean),
           correct: q.correct,
         })),
+      } : {}),
+      ...(form.type === "checklist" ? {
+        questions: form.questions.map((q, i): ChecklistQuestion => ({
+          id: `q${i + 1}`, label: q.label, type: q.type,
+          ...(q.type === "options" ? { options: q.optionsText.split(",").map((o) => o.trim()).filter(Boolean) } : {}),
+        })),
+        recurrence: form.recurrence, dayOfWeek: form.dayOfWeek, startDate: form.startDate || null,
       } : {}),
     };
     try {
@@ -159,6 +185,8 @@ export default function Treinamentos() {
 
   const setQz = (i: number, patch: Partial<FormQuiz>) =>
     setForm((f) => ({ ...f, quiz: f.quiz.map((q, j) => (j === i ? { ...q, ...patch } : q)) }));
+  const setQ = (i: number, patch: Partial<FormChecklistQuestion>) =>
+    setForm((f) => ({ ...f, questions: f.questions.map((q, j) => (j === i ? { ...q, ...patch } : q)) }));
 
   return (
     <div className="space-y-4">
@@ -180,7 +208,7 @@ export default function Treinamentos() {
         <div className="shk-card p-8 text-center text-muted-foreground">
           <GraduationCap className="w-8 h-8 mx-auto mb-2 opacity-30" />
           <p className="text-sm font-semibold">Nenhum treinamento disponível</p>
-          {canManage && <p className="text-xs mt-1">Crie materiais de texto, vídeo ou quiz para a equipe.</p>}
+          {canManage && <p className="text-xs mt-1">Crie materiais de texto, vídeo, quiz ou questionário para a equipe.</p>}
         </div>
       ) : (
         <div className="space-y-2">
@@ -199,6 +227,11 @@ export default function Treinamentos() {
                   <div className="flex items-center gap-2 flex-wrap">
                     <p className="font-bold text-sm break-words">{t.title}</p>
                     <span className="text-[10px] font-bold bg-blue-50 text-blue-600 border border-blue-100 px-2 py-0.5 rounded-full">{Meta.label}</span>
+                    {t.type === "checklist" && t.recurrence && (
+                      <span className="text-[10px] font-bold bg-indigo-50 text-indigo-600 border border-indigo-100 px-2 py-0.5 rounded-full flex items-center gap-1">
+                        <CalendarDays className="w-2.5 h-2.5" /> {REC_LABELS[t.recurrence]}{t.recurrence === "weekly" ? ` (${WEEKDAYS[t.dayOfWeek ?? 1]})` : ""}
+                      </span>
+                    )}
                     {t.mandatory && <span className="text-[10px] font-bold bg-red-50 text-red-600 border border-red-100 px-2 py-0.5 rounded-full">Obrigatório</span>}
                     {canManage && t.active === false && <span className="text-[10px] font-bold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inativo</span>}
                     {t.dueDate && !t.completed && (
@@ -405,7 +438,68 @@ export default function Treinamentos() {
                 </div>
               </div>
 
-              {form.type !== "quiz" ? (
+              {form.type === "checklist" ? (
+                <>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs font-medium mb-1 block">Recorrência</label>
+                      <select value={form.recurrence} onChange={(e) => setForm((f) => ({ ...f, recurrence: e.target.value as NonNullable<Training["recurrence"]> }))}
+                        className="w-full px-3 py-2 rounded-xl border border-border text-sm bg-white">
+                        <option value="daily">Diário</option>
+                        <option value="weekly">Semanal</option>
+                        <option value="once">Uma vez</option>
+                      </select>
+                    </div>
+                    {form.recurrence === "weekly" && (
+                      <div>
+                        <label className="text-xs font-medium mb-1 block">Dia da semana</label>
+                        <select value={form.dayOfWeek} onChange={(e) => setForm((f) => ({ ...f, dayOfWeek: parseInt(e.target.value, 10) }))}
+                          className="w-full px-3 py-2 rounded-xl border border-border text-sm bg-white">
+                          {WEEKDAYS.map((d, i) => <option key={i} value={i}>{d}</option>)}
+                        </select>
+                      </div>
+                    )}
+                    <div>
+                      <label className="text-xs font-medium mb-1 block">Começa em (opcional)</label>
+                      <input type="date" value={form.startDate} onChange={(e) => setForm((f) => ({ ...f, startDate: e.target.value }))}
+                        className="w-full px-3 py-2 rounded-xl border border-border text-sm" />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-xs font-bold">Perguntas</p>
+                    {form.questions.map((q, i) => (
+                      <div key={i} className="border border-border rounded-xl p-3 space-y-2">
+                        <div className="flex gap-2">
+                          <input value={q.label} onChange={(e) => setQ(i, { label: e.target.value })}
+                            placeholder={`Pergunta ${i + 1}`} data-testid={`input-question-${i}`}
+                            className="flex-1 px-3 py-2 rounded-xl border border-border text-sm" />
+                          <select value={q.type} onChange={(e) => setQ(i, { type: e.target.value as ChecklistQuestion["type"] })}
+                            className="px-2 py-2 rounded-xl border border-border text-xs bg-white">
+                            <option value="text">Texto</option>
+                            <option value="options">Opções</option>
+                            <option value="rating">Nota (1-5)</option>
+                          </select>
+                          <button onClick={() => setForm((f) => ({ ...f, questions: f.questions.filter((_, j) => j !== i) }))}
+                            disabled={form.questions.length === 1}
+                            className="p-2 rounded-lg hover:bg-red-50 text-red-400 disabled:opacity-30">
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                        {q.type === "options" && (
+                          <input value={q.optionsText} onChange={(e) => setQ(i, { optionsText: e.target.value })}
+                            placeholder="Opções separadas por vírgula (ex.: Sim, Não, Parcial)"
+                            className="w-full px-3 py-2 rounded-xl border border-border text-xs" />
+                        )}
+                      </div>
+                    ))}
+                    <button onClick={() => setForm((f) => ({ ...f, questions: [...f.questions, { label: "", type: "text", optionsText: "" }] }))}
+                      disabled={form.questions.length >= 30}
+                      className="flex items-center gap-1 text-xs font-semibold text-primary disabled:opacity-40">
+                      <Plus className="w-3.5 h-3.5" /> Adicionar pergunta
+                    </button>
+                  </div>
+                </>
+              ) : form.type !== "quiz" ? (
                 <div>
                   <label className="text-xs font-medium mb-1 block">{form.type === "video" ? "Link do vídeo (YouTube abre dentro do sistema)" : "Conteúdo do treinamento"}</label>
                   {form.type === "video" ? (
@@ -498,15 +592,17 @@ export default function Treinamentos() {
                 </label>
               </div>
 
-              <div>
-                <label className="text-xs font-medium mb-1 block">Data para realização (opcional)</label>
-                <input type="date" value={form.dueDate} data-testid="input-training-due-date"
-                  onChange={(e) => setForm((f) => ({ ...f, dueDate: e.target.value }))}
-                  className="px-3 py-2 rounded-xl border border-border text-sm" />
-                <p className="text-[11px] text-muted-foreground mt-1">
-                  Só um prazo mostrado pra equipe — vencer não libera sozinho quem não concluiu; se precisar liberar antes da conclusão, use "Destravar sistema" na lista de quem concluiu.
-                </p>
-              </div>
+              {form.type !== "checklist" && (
+                <div>
+                  <label className="text-xs font-medium mb-1 block">Data para realização (opcional)</label>
+                  <input type="date" value={form.dueDate} data-testid="input-training-due-date"
+                    onChange={(e) => setForm((f) => ({ ...f, dueDate: e.target.value }))}
+                    className="px-3 py-2 rounded-xl border border-border text-sm" />
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    Só um prazo mostrado pra equipe — vencer não libera sozinho quem não concluiu; se precisar liberar antes da conclusão, use "Destravar sistema" na lista de quem concluiu.
+                  </p>
+                </div>
+              )}
             </div>
 
             <div className="flex gap-2 mt-5">
@@ -526,26 +622,50 @@ export default function Treinamentos() {
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 overflow-y-auto">
           <div className="shk-card w-full max-w-md p-6 my-8 bg-white">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-bold">Concluíram — {viewing.title}</h3>
+              <h3 className="font-bold">{viewing.type === "checklist" ? "Respostas" : "Concluíram"} — {viewing.title}</h3>
               <button onClick={() => setViewing(null)}><X className="w-5 h-5 text-muted-foreground" /></button>
             </div>
             <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-1">
               {completions.length === 0 ? (
-                <p className="text-xs text-muted-foreground text-center py-4">Ninguém concluiu ainda.</p>
+                <p className="text-xs text-muted-foreground text-center py-4">{viewing.type === "checklist" ? "Nenhuma resposta ainda." : "Ninguém concluiu ainda."}</p>
               ) : completions.map((c) => (
-                <div key={c.id} className="flex items-center justify-between border-b border-border/50 pb-2 last:border-0">
-                  <p className="text-xs font-bold">
-                    {c.userName ?? "—"}{c.attemptNumber != null && c.attemptNumber > 1 ? ` · tentativa ${c.attemptNumber}` : ""}
-                    {c.forcedByAdminId != null && (
-                      <span className="ml-1.5 text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-100 px-1.5 py-0.5 rounded-full">Liberado manualmente</span>
-                    )}
-                  </p>
-                  <div className="text-right">
-                    {c.quizScore != null && <span className="text-xs font-bold text-green-700 mr-2">{c.quizScore}%</span>}
-                    <span className="text-[10px] text-muted-foreground">
-                      {new Date(c.createdAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
-                    </span>
+                <div key={c.id} className="border-b border-border/50 pb-2 last:border-0">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-bold">
+                      {c.userName ?? "—"}{c.attemptNumber != null && c.attemptNumber > 1 ? ` · tentativa ${c.attemptNumber}` : ""}
+                      {c.forcedByAdminId != null && (
+                        <span className="ml-1.5 text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-100 px-1.5 py-0.5 rounded-full">Liberado manualmente</span>
+                      )}
+                    </p>
+                    <div className="text-right">
+                      {c.quizScore != null && <span className="text-xs font-bold text-green-700 mr-2">{c.quizScore}%</span>}
+                      <span className="text-[10px] text-muted-foreground">
+                        {c.periodKey ? `${c.periodKey} · ` : ""}
+                        {new Date(c.createdAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                      </span>
+                    </div>
                   </div>
+                  {viewing.type === "checklist" && c.answers && (
+                    <div className="mt-1.5 space-y-1 pl-1">
+                      {(viewing.questions ?? []).map((q) => {
+                        const raw = (c.answers as Record<string, string> | null | undefined)?.[q.id];
+                        return (
+                          <div key={q.id} className="text-xs">
+                            <span className="text-muted-foreground">{q.label}: </span>
+                            {q.type === "rating" ? (
+                              <span className="inline-flex align-middle">
+                                {[1, 2, 3, 4, 5].map((n) => (
+                                  <Star key={n} className={`w-3.5 h-3.5 ${parseInt(raw ?? "0", 10) >= n ? "fill-amber-400 text-amber-400" : "text-border"}`} />
+                                ))}
+                              </span>
+                            ) : (
+                              <span className="font-semibold">{raw ?? "—"}</span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

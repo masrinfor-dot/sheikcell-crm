@@ -15,7 +15,6 @@ import Financeiras from "./Financeiras";
 import Avaliacao from "./Avaliacao";
 import VitrineAparelhos from "./VitrineAparelhos";
 import PromoGallery from "./PromoGallery";
-import Questionarios from "./Questionarios";
 import RotinasProdutividade from "./RotinasProdutividade";
 import Treinamentos from "./Treinamentos";
 import Documentos from "./Documentos";
@@ -30,7 +29,6 @@ import Financeiro from "./Financeiro";
 import PagamentosFiliais from "./PagamentosFiliais";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
 import MySessionsModal from "@/components/MySessionsModal";
-import ChecklistGate from "@/components/ChecklistGate";
 import PontoGate from "@/components/PontoGate";
 import TrainingGate from "@/components/TrainingGate";
 import RoutineChecklistGate from "@/components/RoutineChecklistGate";
@@ -53,7 +51,7 @@ import Resultados from "./Resultados";
 import Relatorios from "./Relatorios";
 import TvBox from "./TvBox";
 
-type Tab = "dashboard" | "resultados" | "relatorios" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "vitrine" | "promocoes" | "questionarios" | "treinamentos" | "documentos" | "rh" | "meuponto" | "sorteios" | "robo" | "financeiro" | "pagamentos" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "integracoes" | "sistema" | "diretorio" | "suporte" | "tvbox" | "rotinas";
+type Tab = "dashboard" | "resultados" | "relatorios" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "vitrine" | "promocoes" | "treinamentos" | "documentos" | "rh" | "meuponto" | "sorteios" | "robo" | "financeiro" | "pagamentos" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "integracoes" | "sistema" | "diretorio" | "suporte" | "tvbox" | "rotinas";
 
 // Categorias colapsáveis do menu lateral — cada aba pertence a um único grupo.
 type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabIds: Tab[] };
@@ -62,7 +60,7 @@ type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabI
 // lista de navegação (ver `suporteTab` mais abaixo).
 const TAB_GROUPS: TabGroup[] = [
   { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["dashboard", "chat", "equipe", "crm", "avaliacao", "vitrine", "promocoes", "financeiras"] },
-  { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["resultados", "relatorios", "tarefas", "documentos", "history", "rotinas", "diretorio", "meuponto", "rh", "treinamentos", "questionarios", "sorteios"] },
+  { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["resultados", "relatorios", "tarefas", "documentos", "history", "rotinas", "diretorio", "meuponto", "rh", "treinamentos", "sorteios"] },
   { key: "administracao", label: "Administração", icon: Settings, tabIds: ["users", "sectors", "financeiro", "pagamentos", "quickreplies", "whatsapp", "robo", "tvbox"] },
   { key: "configuracoes", label: "Configurações", icon: SlidersHorizontal, tabIds: ["aparencia", "integracoes"] },
   { key: "sistema", label: "Sistema (Dev)", icon: Wrench, tabIds: ["sistema"] },
@@ -512,7 +510,6 @@ export default function AdminDashboard() {
     { id: "vitrine" as Tab, label: "Vitrine Aparelhos", icon: Smartphone, adminOnly: false, module: "vitrine" as OptionalModule },
     { id: "promocoes" as Tab, label: "Banco de Promoções", icon: Image, adminOnly: false, module: "promocoes" as OptionalModule },
     { id: "tvbox" as Tab, label: "TV Box", icon: Tv, adminOnly: false, module: "tvbox" as OptionalModule },
-    { id: "questionarios" as Tab, label: "Questionários", icon: ClipboardList, adminOnly: true, module: "questionarios" as OptionalModule },
     { id: "rotinas" as Tab, label: "Rotinas e Produtividade", icon: ListChecks, adminOnly: true, module: "rotinas" as OptionalModule },
     { id: "treinamentos" as Tab, label: "Treinamentos", icon: GraduationCap, adminOnly: false, module: "treinamentos" as OptionalModule },
     { id: "documentos" as Tab, label: "Documentos", icon: FolderArchive, adminOnly: false, module: "documentos" as OptionalModule },
@@ -611,7 +608,6 @@ export default function AdminDashboard() {
         </div>
       )}
       <PontoGate />
-      <ChecklistGate />
       {showChangePassword && (
         <ChangePasswordModal onDone={() => { setShowChangePassword(false); toast({ title: "Senha alterada com sucesso!" }); }}
           onClose={() => setShowChangePassword(false)} />
@@ -900,7 +896,6 @@ export default function AdminDashboard() {
 
         {tab === "tvbox" && <TvBox />}
 
-        {tab === "questionarios" && <Questionarios />}
 
         {tab === "rotinas" && <RotinasProdutividade />}
 
