@@ -1472,10 +1472,16 @@ export default function ChatCenter({
       const params: Parameters<typeof api.chat.conversations>[0] = {};
       if (search) params.search = search;
       if (labelFilter) params.label = labelFilter;
+      // Filtros avançados (vendedor/setor) agora vão pro servidor: antes eram
+      // só client-side em cima do lote já limitado a 100 conversas mais
+      // recentes do tenant inteiro, então um vendedor com muitas conversas
+      // ativas ficava com a contagem menor do que a real (ex.: 47 vs 14).
+      if (filterVendedor) params.assigneeId = Number(filterVendedor);
+      if (filterSetor) params.sectorId = Number(filterSetor);
       const data = await api.chat.conversations(params);
       setConvs(data);
     } catch { /* silent */ } finally { setLoadingConvs(false); }
-  }, [search, labelFilter]);
+  }, [search, labelFilter, filterVendedor, filterSetor]);
 
   // ── Fetch messages ──
   const fetchMsgs = useCallback(async (id: number) => {

@@ -1574,12 +1574,13 @@ export const api = {
   chat: {
     // Conexões de WhatsApp (números de atendimento) — para etiquetar conversas.
     waSessions: () => req<{ sessionKey: string; displayName: string | null; phoneNumber: string | null; color: string; icon: string | null }[]>("/chat/wa-sessions"),
-    conversations: (params?: { search?: string; status?: string; label?: string; sectorId?: number }) => {
+    conversations: (params?: { search?: string; status?: string; label?: string; sectorId?: number; assigneeId?: number }) => {
       const qs = new URLSearchParams();
       if (params?.search) qs.set("search", params.search);
       if (params?.status) qs.set("status", params.status);
       if (params?.label) qs.set("label", params.label);
       if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      if (params?.assigneeId) qs.set("assigneeId", String(params.assigneeId));
       return req<Conversation[]>(`/chat/conversations?${qs.toString()}`);
     },
     pinConversation: (id: number) => req<{ ok: boolean }>(`/chat/conversations/${id}/pin`, { method: "POST" }),

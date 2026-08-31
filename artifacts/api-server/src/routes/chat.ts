@@ -214,7 +214,7 @@ async function canAccessConversation(
 // ─── List conversations ────────────────────────────────────────────────────
 router.get("/chat/conversations", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { search, label, status, sectorId } = req.query as Record<string, string | undefined>;
+  const { search, label, status, sectorId, assigneeId } = req.query as Record<string, string | undefined>;
 
   const userRole = req.session.userRole!;
   const userSectorId = req.session.userSectorId;
@@ -236,6 +236,11 @@ router.get("/chat/conversations", requireAuth, requireChatAccess(), async (req, 
     // setor abaixo é só o filtro OPCIONAL escolhido na tela, não uma
     // restrição de visibilidade.
     if (sectorId) conditions.push(eq(conversationsTable.sectorId, Number(sectorId)));
+    // Filtro opcional por vendedor (assignee) na tela do admin/supervisor.
+    // Sem isso, o filtro de vendedor era só client-side em cima do lote já
+    // limitado a 100 (abaixo) — um vendedor com muitas conversas ativas
+    // ficava com a contagem visivelmente menor do que a real.
+    if (assigneeId) conditions.push(eq(conversationsTable.assigneeId, Number(assigneeId)));
   } else {
     // Vendedores are ALWAYS sector-scoped and must never see every conversation.
     // - potenciais (leads novos sem dono): visíveis a todos;
