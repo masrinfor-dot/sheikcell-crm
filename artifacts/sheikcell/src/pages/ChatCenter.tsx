@@ -4,6 +4,7 @@ import { api, can, ApiError, type Conversation, type ChatMessage, type Sector, t
 import { useAuth } from "@/lib/auth";
 import { useActivityGuard } from "@/lib/activityGuard";
 import { useToast } from "@/hooks/use-toast";
+import { useClickOutside } from "@/hooks/useClickOutside";
 import {
   Search, Plus, Send, RefreshCw, X, ChevronDown, SpellCheck,
   MessageCircle, CheckCheck, AlertCircle, Tag, Filter,
@@ -1084,10 +1085,22 @@ export default function ChatCenter({
   const [showTransferPicker, setShowTransferPicker] = useState(false);
   const [showParticipantPicker, setShowParticipantPicker] = useState(false);
   const [showStatusPicker, setShowStatusPicker] = useState(false);
+  // Fecha os dropdowns de Status/Etiqueta/Transferir/Vendedores do
+  // cabeçalho da conversa ao clicar em qualquer lugar fora deles (antes só
+  // fechavam clicando explicitamente num item, ou abrindo outro — ficavam
+  // abertos pra sempre se você clicasse em outra parte da tela).
+  const headerPickersOpen = showStatusPicker || showLabelPicker || showTransferPicker || showParticipantPicker;
+  const headerPickersRef = useClickOutside<HTMLDivElement>(() => {
+    setShowStatusPicker(false);
+    setShowLabelPicker(false);
+    setShowTransferPicker(false);
+    setShowParticipantPicker(false);
+  }, headerPickersOpen);
   // Menu "mais ações" — só aparece no celular, agrupa os botões menos usados
   // do cabeçalho da conversa (favoritar, excluir, transferir, participantes,
   // CRM) pra não estourar a largura da tela.
   const [showMobileMore, setShowMobileMore] = useState(false);
+  const mobileMoreRef = useClickOutside<HTMLDivElement>(() => setShowMobileMore(false), showMobileMore);
   // Editar o nome do contato direto no cabeçalho da conversa (o nome que o
   // WhatsApp mandou nem sempre é o real — dá pra corrigir aqui sem precisar
   // ir no CRM). Reaproveita o mesmo PATCH /chat/conversations/:id que já
@@ -3247,11 +3260,11 @@ export default function ChatCenter({
                 )}
               </div>
             </div>
-            <div className="flex items-center gap-1 flex-wrap justify-end max-w-full shrink-0">
+            <div className="flex items-center gap-1 flex-wrap justify-end max-w-full shrink-0" ref={headerPickersRef}>
               {/* Menu "mais ações" — só no celular. Agrupa favoritar/excluir/CRM
                   (as ações menos usadas) pra não estourar a largura da tela.
                   No desktop esse botão some e as ações voltam a aparecer soltas. */}
-              <div className="relative md:hidden">
+              <div className="relative md:hidden" ref={mobileMoreRef}>
                 <button
                   onClick={() => setShowMobileMore((v) => !v)}
                   data-testid="button-mobile-more-actions"
