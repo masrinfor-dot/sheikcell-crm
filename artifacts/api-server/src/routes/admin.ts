@@ -1,7 +1,8 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, conversationParticipantsTable, tasksTable, taskAssigneesTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable, accessLogsTable, whatsappSessionsTable, tenantsTable, storesTable, timeClockEntriesTable, employeesTable } from "@workspace/db";
+import { db, usersTable, sectorsTable, attendanceLogsTable, conversationsTable, conversationParticipantsTable, tasksTable, taskAssigneesTable, scheduledMessagesTable, crmContactsTable, crmInternalNotesTable, accessLogsTable, whatsappSessionsTable, tenantsTable, storesTable, timeClockEntriesTable, employeesTable, impersonationLogTable } from "@workspace/db";
 import { eq, sql, desc, asc, and, gte, lt, isNull, isNotNull, notInArray, inArray, or, ilike } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { requireAdmin, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
 import { sanitizePermissions } from "../lib/permissions";
 import { requireModuleAccess, sanitizeModuleAccess, type FullModuleAccessMap, type UserGrantableModule, type ChatAccessLevel } from "../lib/moduleAccess";
@@ -778,6 +779,66 @@ router.delete("/admin/users/:id", requireAdmin, async (req, res): Promise<void> 
   }
 
   res.json({ ok: true, transferredConversations: ownedConvs.length });
+});
+
+// ─── "Modo espiar": admin acessa a tela de um vendedor da própria loja ─────
+// Reaproveita o MESMO mecanismo de sessão do "Entrar como" do superadmin
+// (impersonationLogTable + req.session.impersonatorId + POST
+// /auth/stop-impersonation pra voltar) — só que aqui quem entra é um ADMIN
+// de loja, no lugar do superadmin, e o alvo é um VENDEDOR da própria loja
+// dele, não um admin de outra loja. Como a sessão vira de fato a do
+// vendedor, o admin não só VÊ a tela dele — manda mensagem, atende
+// conversa etc. exatamente como se fosse ele (mesma autorização de sempre,
+// baseada em req.session.userId). Todo acesso fica registrado (quem, quando,
+// tela de quem) em impersonationLogTable, marcado com reason "Modo espiar"
+// pra não se misturar com o "Entrar como" do superadmin na mesma tabela.
+const MODO_ESPIAR_REASON = "Modo espiar";
+
+router.post("/admin/vendedores/:id/espiar", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const [target] = await db.select().from(usersTable)
+    .where(and(eq(usersTable.id, id), eq(usersTable.tenantId, tenantId), eq(usersTable.role, "vendedor")));
+  if (!target || !target.isActive) { res.status(404).json({ error: "Vendedor não encontrado ou inativo nesta loja" }); return; }
+
+  const adminId = req.session.userId!;
+  await db.insert(impersonationLogTable).values({
+    tenantId, superadminUserId: adminId, targetUserId: target.id, reason: MODO_ESPIAR_REASON,
+  });
+
+  req.session.impersonatorId = adminId;
+  req.session.userId = target.id;
+  req.session.userRole = target.role;
+  req.session.tenantId = target.tenantId;
+  req.session.userSectorId = target.sectorId ?? undefined;
+  req.session.userStoreId = target.storeId ?? undefined;
+  req.session.userName = target.name;
+  req.session.accessHours = null;
+  req.session.allowedSessionKeys = null;
+  res.json({ ok: true });
+});
+
+// Log de acesso do modo espiar (só desta loja) — quem entrou, em quem, quando,
+// e se já voltou (endedAt) ou ainda está "dentro" da tela do vendedor.
+router.get("/admin/espiar/log", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const adminUser = alias(usersTable, "espiar_admin");
+  const targetUser = alias(usersTable, "espiar_target");
+  const rows = await db
+    .select({
+      id: impersonationLogTable.id,
+      startedAt: impersonationLogTable.startedAt,
+      endedAt: impersonationLogTable.endedAt,
+      adminName: adminUser.name,
+      vendedorName: targetUser.name,
+    })
+    .from(impersonationLogTable)
+    .innerJoin(adminUser, eq(impersonationLogTable.superadminUserId, adminUser.id))
+    .innerJoin(targetUser, eq(impersonationLogTable.targetUserId, targetUser.id))
+    .where(and(eq(impersonationLogTable.tenantId, tenantId), eq(impersonationLogTable.reason, MODO_ESPIAR_REASON)))
+    .orderBy(desc(impersonationLogTable.startedAt))
+    .limit(200);
+  res.json(rows);
 });
 
 export default router;

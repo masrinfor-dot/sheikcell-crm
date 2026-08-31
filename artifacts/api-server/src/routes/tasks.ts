@@ -115,18 +115,18 @@ async function enrichTask(t: typeof tasksTable.$inferSelect) {
 }
 
 /**
- * Returns true if the caller can access a task. Admins/supervisors see all;
- * vendedores see tasks in their own sector, assigned to them, or created by them.
+ * Returns true if the caller can access a task. Regra confirmada pelo
+ * usuário: só ADMIN vê todas as tarefas — diferente de outras telas do
+ * sistema, aqui SUPERVISOR não tem visibilidade global. Todo mundo (inclusive
+ * supervisor) só vê tarefa que criou ou onde é participante/responsável; só
+ * estar no mesmo setor não é mais suficiente pra ver a tarefa.
  */
 function callerCanAccessTask(session: Request["session"], t: typeof tasksTable.$inferSelect, assigneeIds: number[]): boolean {
-  if (isGlobalRole(session.userRole)) return true;
+  if (session.userRole === "admin") return true;
   const uid = session.userId ?? null;
-  const sid = session.userSectorId ?? null;
-  // Fail closed: a null caller sector must never match null-sector tasks.
-  const sameSector = sid != null && t.sectorId === sid;
   const isAssignee = uid != null && assigneeIds.includes(uid);
   const isCreator = uid != null && t.createdById === uid;
-  return sameSector || isAssignee || isCreator;
+  return isAssignee || isCreator;
 }
 
 async function loadTaskWithAccess(
@@ -173,7 +173,7 @@ router.get("/tasks", requireAuth, async (req, res): Promise<void> => {
   const assigneeMap = new Map<number, number[]>();
   for (const r of assigneeRows) assigneeMap.set(r.taskId, [...(assigneeMap.get(r.taskId) ?? []), r.userId]);
 
-  const visible = isGlobalRole(userRole)
+  const visible = userRole === "admin"
     ? all
     : all.filter((t) => callerCanAccessTask(req.session, t, assigneeMap.get(t.id) ?? []));
 
@@ -228,7 +228,7 @@ router.get("/tasks/report", requireAuth, async (req, res): Promise<void> => {
   const assigneeMap = new Map<number, number[]>();
   for (const r of assigneeRows) assigneeMap.set(r.taskId, [...(assigneeMap.get(r.taskId) ?? []), r.userId]);
 
-  const visible = isGlobalRole(req.session.userRole)
+  const visible = req.session.userRole === "admin"
     ? all
     : all.filter((t) => callerCanAccessTask(req.session, t, assigneeMap.get(t.id) ?? []));
 

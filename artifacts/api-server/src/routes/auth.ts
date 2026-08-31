@@ -24,11 +24,14 @@ async function enabledModulesFor(tenantId: number | undefined): Promise<string[]
   return t?.enabledModules ?? [];
 }
 
-async function impersonatedByFor(req: Request): Promise<{ name: string } | null> {
+async function impersonatedByFor(req: Request): Promise<{ name: string; role: string } | null> {
   const impersonatorId = req.session.impersonatorId;
   if (impersonatorId == null) return null;
-  const [su] = await db.select({ name: usersTable.name }).from(usersTable).where(eq(usersTable.id, impersonatorId));
-  return su ? { name: su.name } : null;
+  const [su] = await db.select({ name: usersTable.name, role: usersTable.role }).from(usersTable).where(eq(usersTable.id, impersonatorId));
+  // role diferencia o front entre "superadmin entrou como admin" (Painel do
+  // Sistema) e "admin entrou como vendedor" (modo espiar) pra mostrar o
+  // texto/botão de volta certo — ver AdminDashboard.tsx/AttendantDashboard.tsx.
+  return su ? { name: su.name, role: su.role } : null;
 }
 
 router.post("/auth/login", async (req, res): Promise<void> => {
@@ -370,24 +373,30 @@ router.patch("/auth/me", requireAuth, async (req, res): Promise<void> => {
   });
 });
 
-// "Entrar como": volta pro superadmin original (a sessão tinha sido
-// sobrescrita por POST /superadmin/tenants/:id/impersonate/:userId).
+// "Entrar como" / "modo espiar": volta pro usuário original (a sessão tinha
+// sido sobrescrita por POST /superadmin/tenants/:id/impersonate/:userId ou
+// por POST /admin/vendedores/:id/espiar).
 router.post("/auth/stop-impersonation", requireAuth, async (req, res): Promise<void> => {
   const impersonatorId = req.session.impersonatorId;
   if (impersonatorId == null) { res.status(400).json({ error: "Não há impersonação ativa" }); return; }
-  const [superadmin] = await db.select().from(usersTable).where(eq(usersTable.id, impersonatorId));
-  if (!superadmin) { res.status(404).json({ error: "Usuário original não encontrado" }); return; }
+  const [original] = await db.select().from(usersTable).where(eq(usersTable.id, impersonatorId));
+  if (!original) { res.status(404).json({ error: "Usuário original não encontrado" }); return; }
 
   await db.update(impersonationLogTable)
     .set({ endedAt: new Date() })
     .where(sql`${impersonationLogTable.superadminUserId} = ${impersonatorId} AND ${impersonationLogTable.targetUserId} = ${req.session.userId} AND ${impersonationLogTable.endedAt} IS NULL`);
 
-  req.session.userId = superadmin.id;
-  req.session.userRole = superadmin.role;
-  req.session.tenantId = undefined;
-  req.session.userSectorId = superadmin.sectorId ?? undefined;
-  req.session.userStoreId = undefined;
-  req.session.userName = superadmin.name;
+  req.session.userId = original.id;
+  req.session.userRole = original.role;
+  // Superadmin não pertence a loja nenhuma (tenant_id=0 é só reservado, ver
+  // schema/users.ts) — a sessão dele sempre fica sem tenantId/storeId, igual
+  // sempre foi. Já um admin de loja "espiando" um vendedor (modo espiar) É de
+  // uma loja de verdade — precisa voltar com o tenantId/loja dele, senão sai
+  // do modo espiar sem acesso a nada até logar de novo.
+  req.session.tenantId = original.role === "superadmin" ? undefined : original.tenantId;
+  req.session.userSectorId = original.sectorId ?? undefined;
+  req.session.userStoreId = original.role === "superadmin" ? undefined : (original.storeId ?? undefined);
+  req.session.userName = original.name;
   req.session.accessHours = null;
   req.session.impersonatorId = undefined;
   res.json({ ok: true });

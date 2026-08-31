@@ -111,8 +111,19 @@ export type User = {
   // Módulos opcionais contratados pela loja (teto do tenant — null pro
   // superadmin, que não pertence a loja nenhuma).
   enabledModules?: string[] | null;
-  // Presente quando o superadmin está "entrando como" este usuário.
-  impersonatedBy?: { name: string } | null;
+  // Presente quando o superadmin está "entrando como" este usuário, ou um
+  // admin de loja está no "modo espiar" um vendedor — role diferencia os
+  // dois casos pro front mostrar o texto/botão de volta certo.
+  impersonatedBy?: { name: string; role: string } | null;
+};
+
+// "Modo espiar" — 1 linha do log de acesso (quem entrou, em quem, quando).
+export type EspiarLogEntry = {
+  id: number;
+  startedAt: string;
+  endedAt: string | null;
+  adminName: string;
+  vendedorName: string;
 };
 
 // Módulos opcionais que uma loja pode ou não ter contratado — mesma lista
@@ -967,6 +978,9 @@ export type TradeInEvaluation = {
   // Preenchidos só ao fechar o negócio (etapa 4).
   sellerCustomerName?: string | null; sellerCpf?: string | null;
   imei?: string | null; finalAgreedPrice?: string | null; closedAt?: string | null;
+  // Nota de compra completa: dados extras + fotos de documento/aparelho.
+  sellerRg?: string | null; sellerAddress?: string | null; sellerPhone?: string | null;
+  documentPhotos?: string[]; devicePhotos?: string[];
 };
 
 // Tabelas de margem da avaliação: 1 = maior, 2 = média, 3 = menor (em %).
@@ -1869,8 +1883,14 @@ export const api = {
     evaluate: (data: { device?: string; brand?: string; model?: string; memory?: string; color?: string; marginTable?: 1 | 2 | 3; basePrice?: string; answers: Record<string, string> }) =>
       req<{ id: number; device: string; marketPrice: string; suggestedPrice: string; summary: string; createdAt: string }>(
         "/trade-in/evaluate", { method: "POST", body: JSON.stringify(data) }),
-    close: (id: number, data: { sellerCustomerName: string; sellerCpf: string; imei: string; finalAgreedPrice: string }) =>
+    close: (id: number, data: { sellerCustomerName: string; sellerCpf: string; imei: string; finalAgreedPrice: string; sellerRg?: string; sellerAddress?: string; sellerPhone?: string }) =>
       req<TradeInEvaluation>(`/trade-in/${id}/close`, { method: "PATCH", body: JSON.stringify(data) }),
+    uploadPhoto: (id: number, kind: "document" | "device", base64: string, mimetype: string) =>
+      req<{ documentPhotos: string[]; devicePhotos: string[] }>(
+        `/trade-in/${id}/photos`, { method: "POST", body: JSON.stringify({ kind, base64, mimetype }) }),
+    deletePhoto: (id: number, kind: "document" | "device", url: string) =>
+      req<{ documentPhotos: string[]; devicePhotos: string[] }>(
+        `/trade-in/${id}/photos`, { method: "DELETE", body: JSON.stringify({ kind, url }) }),
     margins: () => req<TradeInMargins>("/trade-in/margins"),
     saveMargins: (data: Partial<TradeInMargins>) =>
       req<TradeInMargins>("/trade-in/margins", { method: "PATCH", body: JSON.stringify(data) }),
@@ -2325,6 +2345,11 @@ export const api = {
     // Uso do plano da própria loja (Fase 3 — Planos & Limites): mesmo dado
     // que o backend usa pra bloquear, pra avisar a loja antes de bater no limite.
     planUsage: () => req<PlanUsage>("/admin/plan-usage"),
+    // "Modo espiar" — admin entra na tela de um vendedor da própria loja
+    // (pode interagir, não só observar); tudo fica registrado no log abaixo.
+    // Sair usa o mesmo api.auth.stopImpersonation() do "Entrar como".
+    espiarVendedor: (userId: number) => req<{ ok: boolean }>(`/admin/vendedores/${userId}/espiar`, { method: "POST" }),
+    espiarLog: () => req<EspiarLogEntry[]>("/admin/espiar/log"),
     logs: (params?: { limit?: number; sectorId?: number; attendantId?: number; days?: number; outcome?: string; reason?: string; label?: string; search?: string }) => {
       const qs = new URLSearchParams();
       if (params?.limit) qs.set("limit", String(params.limit));

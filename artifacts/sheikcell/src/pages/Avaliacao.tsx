@@ -4,7 +4,7 @@ import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
   Smartphone, Sparkles, History, ChevronDown, ChevronLeft, RefreshCw, BadgeDollarSign, Settings, X,
-  ListChecks, Plus, Trash2, ArrowUp, ArrowDown,
+  ListChecks, Plus, Trash2, ArrowUp, ArrowDown, ImagePlus, Printer,
 } from "lucide-react";
 
 // Fluxo em etapas inspirado na Trocafone (trocafacil.trocafone.com.br):
@@ -76,6 +76,14 @@ export default function Avaliacao() {
   const [dealCpf, setDealCpf] = useState("");
   const [dealImei, setDealImei] = useState("");
   const [dealPrice, setDealPrice] = useState("");
+  // Nota de compra completa: dados extras do vendedor + fotos comprobatórias.
+  const [dealRg, setDealRg] = useState("");
+  const [dealAddress, setDealAddress] = useState("");
+  const [dealPhone, setDealPhone] = useState("");
+  const [documentPhotos, setDocumentPhotos] = useState<string[]>([]);
+  const [devicePhotos, setDevicePhotos] = useState<string[]>([]);
+  const [uploadingDoc, setUploadingDoc] = useState(false);
+  const [uploadingDevice, setUploadingDevice] = useState(false);
   const [closingDeal, setClosingDeal] = useState(false);
   const [dealClosed, setDealClosed] = useState(false);
   const [history, setHistory] = useState<TradeInEvaluation[]>([]);
@@ -139,6 +147,7 @@ export default function Avaliacao() {
       setResult(r);
       setResultTable(marginTable);
       setOfferTable(marginTable);
+      setDocumentPhotos([]); setDevicePhotos([]);
       setStep(3);
       fetchHistory();
     } catch (err) {
@@ -170,6 +179,8 @@ export default function Avaliacao() {
     setBasePrice(""); setBaseMarket("");
     setAnswers({}); setResult(null); setStep(1);
     setDealName(""); setDealCpf(""); setDealImei(""); setDealPrice("");
+    setDealRg(""); setDealAddress(""); setDealPhone("");
+    setDocumentPhotos([]); setDevicePhotos([]);
     setClosingDeal(false); setDealClosed(false);
   };
 
@@ -185,7 +196,10 @@ export default function Avaliacao() {
     }
     setClosingDeal(true);
     try {
-      await api.tradeIn.close(result.id, { sellerCustomerName: name, sellerCpf: cpf, imei, finalAgreedPrice: price });
+      await api.tradeIn.close(result.id, {
+        sellerCustomerName: name, sellerCpf: cpf, imei, finalAgreedPrice: price,
+        sellerRg: dealRg.trim() || undefined, sellerAddress: dealAddress.trim() || undefined, sellerPhone: dealPhone.trim() || undefined,
+      });
       setDealClosed(true);
       toast({ title: "Negócio fechado com sucesso" });
       fetchHistory();
@@ -194,6 +208,95 @@ export default function Avaliacao() {
     } finally {
       setClosingDeal(false);
     }
+  };
+
+  // Fotos da nota de compra: 1 upload por vez (evita estourar o corpo da
+  // requisição quando o vendedor seleciona várias fotos de uma vez).
+  const readFileAsBase64 = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        const idx = dataUrl.indexOf(",");
+        resolve(idx >= 0 ? dataUrl.slice(idx + 1) : dataUrl);
+      };
+      reader.onerror = () => reject(reader.error ?? new Error("Erro ao ler arquivo"));
+      reader.readAsDataURL(file);
+    });
+
+  const handleAddPhotos = async (kind: "document" | "device", files: FileList | null) => {
+    if (!files || files.length === 0 || !result) return;
+    const setUploading = kind === "document" ? setUploadingDoc : setUploadingDevice;
+    setUploading(true);
+    try {
+      for (const file of Array.from(files)) {
+        const base64 = await readFileAsBase64(file);
+        const r = await api.tradeIn.uploadPhoto(result.id, kind, base64, file.type);
+        setDocumentPhotos(r.documentPhotos);
+        setDevicePhotos(r.devicePhotos);
+      }
+    } catch (err) {
+      toast({ title: "Erro ao enviar foto", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleRemovePhoto = async (kind: "document" | "device", url: string) => {
+    if (!result) return;
+    try {
+      const r = await api.tradeIn.deletePhoto(result.id, kind, url);
+      setDocumentPhotos(r.documentPhotos);
+      setDevicePhotos(r.devicePhotos);
+    } catch (err) {
+      toast({ title: "Erro ao remover foto", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
+  };
+
+  const escapeHtml = (s: string) =>
+    s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] ?? c);
+
+  // Abre uma janela nova com a nota de compra pronta pra imprimir (sem
+  // depender de PDF/servidor — usa window.print() do próprio navegador).
+  const handlePrintNote = () => {
+    if (!result) return;
+    const rows: [string, string][] = [
+      ["Aparelho", result.device],
+      ["Nome do vendedor", dealName || "—"],
+      ["CPF", dealCpf || "—"],
+      ["RG", dealRg || "—"],
+      ["Endereço", dealAddress || "—"],
+      ["Telefone", dealPhone || "—"],
+      ["IMEI do aparelho", dealImei || "—"],
+      ["Valor pago", dealPrice || "—"],
+      ["Data", new Date().toLocaleString("pt-BR")],
+    ];
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Nota de compra</title>
+<style>
+  body{font-family:Arial,Helvetica,sans-serif;padding:28px;color:#111}
+  h1{font-size:18px;margin:0 0 2px}
+  p.sub{font-size:11px;color:#666;margin:0 0 22px}
+  table{width:100%;border-collapse:collapse}
+  td{padding:8px 4px;border-bottom:1px solid #ddd;font-size:13px;vertical-align:top}
+  td:first-child{font-weight:bold;width:38%;color:#444}
+  .sign{margin-top:70px;display:flex;justify-content:space-between;gap:24px}
+  .sign div{flex:1;text-align:center;border-top:1px solid #333;padding-top:6px;font-size:11px}
+  @media print{ body{padding:0} }
+</style></head><body>
+<h1>Nota de Compra de Aparelho Usado</h1>
+<p class="sub">Sheikcell</p>
+<table>${rows.map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(v)}</td></tr>`).join("")}</table>
+<div class="sign"><div>Assinatura do vendedor</div><div>Assinatura da loja</div></div>
+</body></html>`;
+    const w = window.open("", "_blank", "width=800,height=900");
+    if (!w) {
+      toast({ title: "Não foi possível abrir a janela de impressão", description: "Verifique se o navegador bloqueou pop-ups.", variant: "destructive" });
+      return;
+    }
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+    w.onload = () => { w.focus(); w.print(); };
   };
 
   // Filtros do histórico: pesquisa livre (aparelho/vendedor/cor) + marca + memória.
@@ -530,13 +633,19 @@ export default function Avaliacao() {
         <div className="shk-card p-5 border-2 border-green-200 bg-green-50/40 space-y-3">
           <p className="text-xs font-bold text-muted-foreground">{result.device}</p>
           {dealClosed ? (
-            <div className="text-center py-4 space-y-2">
+            <div className="text-center py-4 space-y-3">
               <p className="text-sm font-bold text-green-700">Negócio fechado com sucesso!</p>
               <p className="text-xs text-muted-foreground">
                 {dealName} · CPF {dealCpf} · IMEI {dealImei} · {dealPrice}
               </p>
-              <button onClick={resetForm} data-testid="button-tradein-new-after-close"
-                className="text-xs font-semibold text-primary underline">Fazer nova avaliação</button>
+              <div className="flex items-center justify-center gap-3">
+                <button onClick={handlePrintNote} data-testid="button-print-note"
+                  className="flex items-center gap-1.5 text-xs font-bold text-white bg-primary hover:opacity-90 px-3 py-1.5 rounded-full transition">
+                  <Printer className="w-3.5 h-3.5" /> Imprimir nota
+                </button>
+                <button onClick={resetForm} data-testid="button-tradein-new-after-close"
+                  className="text-xs font-semibold text-primary underline">Fazer nova avaliação</button>
+              </div>
             </div>
           ) : (
             <>
@@ -554,6 +663,24 @@ export default function Avaliacao() {
                     className="w-full mt-1 px-3 py-2 rounded-xl border border-border text-sm" />
                 </div>
                 <div>
+                  <label className="text-[10px] font-semibold text-muted-foreground uppercase">RG</label>
+                  <input value={dealRg} onChange={(e) => setDealRg(e.target.value)}
+                    placeholder="Opcional" data-testid="input-deal-rg"
+                    className="w-full mt-1 px-3 py-2 rounded-xl border border-border text-sm" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-semibold text-muted-foreground uppercase">Telefone</label>
+                  <input value={dealPhone} onChange={(e) => setDealPhone(e.target.value)}
+                    placeholder="Opcional" data-testid="input-deal-phone"
+                    className="w-full mt-1 px-3 py-2 rounded-xl border border-border text-sm" />
+                </div>
+                <div className="md:col-span-2">
+                  <label className="text-[10px] font-semibold text-muted-foreground uppercase">Endereço</label>
+                  <input value={dealAddress} onChange={(e) => setDealAddress(e.target.value)}
+                    placeholder="Opcional" data-testid="input-deal-address"
+                    className="w-full mt-1 px-3 py-2 rounded-xl border border-border text-sm" />
+                </div>
+                <div>
                   <label className="text-[10px] font-semibold text-muted-foreground uppercase">IMEI do aparelho</label>
                   <input value={dealImei} onChange={(e) => setDealImei(e.target.value)}
                     placeholder="15 dígitos" data-testid="input-deal-imei"
@@ -566,6 +693,17 @@ export default function Avaliacao() {
                     className="w-full mt-1 px-3 py-2 rounded-xl border border-border text-sm" />
                 </div>
               </div>
+
+              {/* Fotos do documento e do aparelho (comprovam a compra) */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <PhotoPicker label="Fotos do documento" testId="document" photos={documentPhotos}
+                  uploading={uploadingDoc} onAdd={(files) => handleAddPhotos("document", files)}
+                  onRemove={(url) => handleRemovePhoto("document", url)} />
+                <PhotoPicker label="Fotos do aparelho" testId="device" photos={devicePhotos}
+                  uploading={uploadingDevice} onAdd={(files) => handleAddPhotos("device", files)}
+                  onRemove={(url) => handleRemovePhoto("device", url)} />
+              </div>
+
               <div className="flex gap-2">
                 <button onClick={handleCloseDeal} disabled={closingDeal} data-testid="button-confirm-close-deal"
                   className="text-xs font-bold text-white bg-green-600 hover:bg-green-700 disabled:opacity-50 px-4 py-2 rounded-full transition flex items-center gap-1.5">
@@ -805,6 +943,38 @@ export default function Avaliacao() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// Upload de fotos (documento/aparelho) com miniaturas e remoção — usado 2x
+// na etapa 4 (nota de compra). 1 requisição por foto (ver saveTradeInPhoto
+// no backend), então múltiplas fotos selecionadas de uma vez sobem em série.
+function PhotoPicker({ label, testId, photos, uploading, onAdd, onRemove }: {
+  label: string; testId: string; photos: string[]; uploading: boolean;
+  onAdd: (files: FileList | null) => void; onRemove: (url: string) => void;
+}) {
+  return (
+    <div>
+      <label className="text-[10px] font-semibold text-muted-foreground uppercase">{label}</label>
+      <div className="mt-1 flex flex-wrap gap-2">
+        {photos.map((url) => (
+          <div key={url} className="relative w-16 h-16 rounded-lg overflow-hidden border border-border group">
+            <img src={url} alt={label} className="w-full h-full object-cover" />
+            <button type="button" onClick={() => onRemove(url)} title="Remover foto"
+              data-testid={`button-remove-photo-${testId}`}
+              className="absolute top-0.5 right-0.5 bg-black/60 hover:bg-red-600 text-white rounded-full p-0.5 transition">
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+        ))}
+        <label className={`w-16 h-16 rounded-lg border-2 border-dashed border-border flex items-center justify-center cursor-pointer hover:bg-secondary transition ${uploading ? "opacity-50 pointer-events-none" : ""}`}>
+          {uploading ? <RefreshCw className="w-4 h-4 animate-spin text-muted-foreground" /> : <ImagePlus className="w-4 h-4 text-muted-foreground" />}
+          <input type="file" accept="image/png,image/jpeg,image/webp,image/heic" multiple className="hidden"
+            data-testid={`input-photo-${testId}`}
+            onChange={(e) => { onAdd(e.target.files); e.target.value = ""; }} />
+        </label>
+      </div>
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, PERMISSION_KEYS, PERMISSION_LABELS, MODULE_LABELS, USER_GRANTABLE_MODULES, OPTIONAL_MODULES, type SectorSummary, type AttendanceLog, type Sector, type QuickReply, type Store, type DashboardAttention, type InternalConversation, type OptionalModule, type UserGrantableModule, type UserModuleAccess, type ChatLabel } from "@/lib/api";
+import { api, PERMISSION_KEYS, PERMISSION_LABELS, MODULE_LABELS, USER_GRANTABLE_MODULES, OPTIONAL_MODULES, type SectorSummary, type AttendanceLog, type Sector, type QuickReply, type Store, type DashboardAttention, type InternalConversation, type OptionalModule, type UserGrantableModule, type UserModuleAccess, type ChatLabel, type EspiarLogEntry } from "@/lib/api";
 import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
@@ -45,7 +45,7 @@ import {
   PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck,
   AlertTriangle, WifiOff,
   FolderArchive, Headphones, BarChart3, SlidersHorizontal, Palette, ChevronDown, Wrench,
-  ArrowRight, Filter, BookUser, LifeBuoy, FileBarChart2, Plug, Tv, ListChecks, PanelTop, ArrowLeftRight, Image,
+  ArrowRight, Filter, BookUser, LifeBuoy, FileBarChart2, Plug, Tv, ListChecks, PanelTop, ArrowLeftRight, Image, Eye, History,
 } from "lucide-react";
 import Resultados from "./Resultados";
 import Relatorios from "./Relatorios";
@@ -201,6 +201,32 @@ export default function AdminDashboard() {
   const [deleteUser, setDeleteUser] = useState<UserRow | null>(null);
   const [deleteTransferTo, setDeleteTransferTo] = useState("");
   const [deletingUser, setDeletingUser] = useState(false);
+
+  // "Modo espiar" — admin acessa a tela de um vendedor da própria loja e
+  // pode interagir nela (não só observar); tudo fica registrado (ver botão
+  // "Log de acesso" abaixo).
+  const [espiando, setEspiando] = useState<number | null>(null);
+  const handleEspiar = async (u: UserRow) => {
+    if (!window.confirm(`Entrar na tela de ${u.name} agora? Você vai poder ver e interagir exatamente como ${u.name} até sair do modo espiar. Esse acesso fica registrado no log.`)) return;
+    setEspiando(u.id);
+    try {
+      await api.admin.espiarVendedor(u.id);
+      window.location.href = "/";
+    } catch (err) {
+      toast({ title: "Erro ao entrar no modo espiar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+      setEspiando(null);
+    }
+  };
+  const [showEspiarLog, setShowEspiarLog] = useState(false);
+  const [espiarLog, setEspiarLog] = useState<EspiarLogEntry[]>([]);
+  const [loadingEspiarLog, setLoadingEspiarLog] = useState(false);
+  const openEspiarLog = async () => {
+    setShowEspiarLog(true);
+    setLoadingEspiarLog(true);
+    try { setEspiarLog(await api.admin.espiarLog()); }
+    catch { toast({ title: "Erro ao carregar log", variant: "destructive" }); }
+    finally { setLoadingEspiarLog(false); }
+  };
 
   const [userForm, setUserForm] = useState<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; extension: string; adminAccess: string[]; moduleAccess: UserModuleAccess; ahEnabled: boolean; ahStart: string; ahEnd: string; ahDays: number[]; waEnabled: boolean; waKeys: string[] }>({ name: "", email: "", password: "", role: "vendedor", sectorId: 1, storeName: "", extension: "", adminAccess: [], moduleAccess: {}, ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [] });
   const [sectorForm, setSectorForm] = useState<{ name: string; description: string; icon: string; color: string; isActive: boolean; enabledModules: OptionalModule[] | null }>({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true, enabledModules: null });
@@ -474,6 +500,13 @@ export default function AdminDashboard() {
   }, [collapsedGroups]);
   const toggleGroup = (key: string) => setCollapsedGroups((prev) => ({ ...prev, [key]: !prev[key] }));
 
+  // Menu lateral minimizável: encolhe pra uma barra só de ícones quando o
+  // mouse não está em cima, expande de volta ao passar o mouse — economiza
+  // espaço de tela sem esconder a navegação de vez. Independente do
+  // collapsedGroups acima (aquele é "esconder essa categoria de vez",
+  // lembrado por navegador; isso aqui é só o hover momentâneo).
+  const [sidebarHovered, setSidebarHovered] = useState(false);
+
   // ── Mensagens rápidas (aba de configuração) ──
   const [quickReplies, setQuickReplies] = useState<QuickReply[]>([]);
   const [qrForm, setQrForm] = useState<{ id: number | null; title: string; content: string; sectorId: string; storeIds: number[]; userIds: number[] } | null>(null);
@@ -657,7 +690,10 @@ export default function AdminDashboard() {
             data-testid="button-stop-impersonation"
             className="underline font-semibold hover:no-underline"
           >
-            Voltar ao Painel do Sistema
+            {/* superadmin "Entrando como" volta pro Painel do Sistema; admin
+                em "modo espiar" (impersonatedBy.role === "admin") volta pro
+                próprio painel — texto diferente evita confusão. */}
+            {user.impersonatedBy.role === "superadmin" ? "Voltar ao Painel do Sistema" : "Sair do modo espiar"}
           </button>
         </div>
       )}
@@ -678,7 +714,13 @@ export default function AdminDashboard() {
       <div className="flex">
         {/* Sidebar tabs — escondida na prévia da barra superior (Fase 1 do redesign) */}
         {!navPreview && (
-        <aside className="hidden md:block w-56 shrink-0 border-r border-border bg-white sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3">
+        <aside
+          onMouseEnter={() => setSidebarHovered(true)}
+          onMouseLeave={() => setSidebarHovered(false)}
+          data-testid="sidebar-admin"
+          className={`hidden md:block ${sidebarHovered ? "w-56" : "w-14"} shrink-0 overflow-x-hidden border-r border-border bg-white sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3 transition-[width] duration-200 ease-in-out`}
+        >
+          {sidebarHovered ? (
           <div className="flex flex-col gap-3">
             {TAB_GROUPS.map((group) => {
               // Segue a ordem definida em group.tabIds (não a ordem de allTabs).
@@ -724,6 +766,36 @@ export default function AdminDashboard() {
               </button>
             )}
           </div>
+          ) : (
+            // Minimizado: barra só de ícones com TODOS os itens visíveis (ignora
+            // collapsedGroups — nesse modo não tem cabeçalho de grupo pra clicar).
+            <div className="flex flex-col items-center gap-1">
+              {TAB_GROUPS.flatMap((group) => group.tabIds
+                .map((id) => tabs.find((t) => t.id === id))
+                .filter((t): t is typeof tabs[number] => !!t)
+              ).map(({ id, label, icon: Icon }) => (
+                <button key={id} onClick={() => navigateToTab(id)} title={label} data-testid={`tab-mini-${id}`}
+                  className={`relative flex items-center justify-center w-10 h-10 rounded-lg transition-colors ${
+                    tabMatchesNav(id, tab) ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                  }`}>
+                  <Icon className="w-4 h-4 shrink-0" />
+                  {id === "equipe" && internalChatUnread > 0 && (
+                    <span className="absolute top-0.5 right-0.5 min-w-[14px] h-[14px] px-0.5 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">
+                      {internalChatUnread > 99 ? "99+" : internalChatUnread}
+                    </span>
+                  )}
+                </button>
+              ))}
+              {suporteTab && (
+                <button onClick={() => setTab("suporte")} title={suporteTab.label} data-testid="tab-mini-suporte"
+                  className={`flex items-center justify-center w-10 h-10 rounded-lg transition-colors mt-1 ${
+                    tab === "suporte" ? "bg-amber-100 text-amber-700" : "text-amber-600 hover:bg-amber-50"
+                  }`}>
+                  <suporteTab.icon className="w-4 h-4 shrink-0" />
+                </button>
+              )}
+            </div>
+          )}
         </aside>
         )}
 
@@ -1368,10 +1440,17 @@ export default function AdminDashboard() {
             <EquipeOnline />
             <div className="flex items-center justify-between">
               <h2 className="font-bold">Usuários</h2>
-              <button onClick={openAddUser} data-testid="button-add-user"
-                className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition">
-                <Plus className="w-3.5 h-3.5" /> Novo Usuário
-              </button>
+              <div className="flex items-center gap-2">
+                <button onClick={openEspiarLog} data-testid="button-espiar-log"
+                  title="Ver quem entrou no modo espiar, em quem e quando"
+                  className="flex items-center gap-1.5 px-3 py-2 bg-white border border-border rounded-xl text-xs font-semibold hover:bg-secondary transition">
+                  <History className="w-3.5 h-3.5" /> Log do modo espiar
+                </button>
+                <button onClick={openAddUser} data-testid="button-add-user"
+                  className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition">
+                  <Plus className="w-3.5 h-3.5" /> Novo Usuário
+                </button>
+              </div>
             </div>
             <div className="shk-card overflow-hidden">
               <div className="overflow-x-auto">
@@ -1454,6 +1533,16 @@ export default function AdminDashboard() {
                                 title="Permissões e abas"
                                 className="p-1.5 text-muted-foreground hover:text-primary hover:bg-blue-50 rounded-lg transition">
                                 <ShieldCheck className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                            {u.role === "vendedor" && u.isActive && (
+                              <button
+                                onClick={() => handleEspiar(u)}
+                                disabled={espiando === u.id}
+                                data-testid={`button-espiar-user-${u.id}`}
+                                title="Modo espiar — acessar a tela deste vendedor"
+                                className="p-1.5 text-muted-foreground hover:text-primary hover:bg-blue-50 rounded-lg transition disabled:opacity-50">
+                                {espiando === u.id ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Eye className="w-3.5 h-3.5" />}
                               </button>
                             )}
                           </div>
@@ -1846,6 +1935,40 @@ export default function AdminDashboard() {
                 className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold bg-red-600 text-white hover:bg-red-700 transition disabled:opacity-50">
                 {deletingUser ? "Excluindo..." : "Excluir"}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===== MODO ESPIAR — LOG DE ACESSO ===== */}
+      {showEspiarLog && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="shk-card w-full max-w-lg p-6 max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="font-bold flex items-center gap-2"><Eye className="w-4 h-4 text-primary" />Log do modo espiar</h3>
+              <button onClick={() => setShowEspiarLog(false)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <p className="text-xs text-muted-foreground mb-3">Todo acesso à tela de um vendedor via modo espiar fica registrado aqui — quem entrou, em quem, e quando.</p>
+            <div className="flex-1 overflow-y-auto -mx-1 px-1">
+              {loadingEspiarLog ? (
+                <div className="flex justify-center py-8"><RefreshCw className="w-5 h-5 animate-spin text-muted-foreground" /></div>
+              ) : espiarLog.length === 0 ? (
+                <p className="text-xs text-muted-foreground text-center py-8">Nenhum acesso registrado ainda.</p>
+              ) : (
+                <div className="space-y-1.5">
+                  {espiarLog.map((e) => (
+                    <div key={e.id} className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-secondary/40 text-xs" data-testid={`espiar-log-row-${e.id}`}>
+                      <div className="min-w-0">
+                        <span className="font-semibold">{e.adminName}</span> entrou como <span className="font-semibold">{e.vendedorName}</span>
+                        <div className="text-[11px] text-muted-foreground">{new Date(e.startedAt).toLocaleString("pt-BR")}</div>
+                      </div>
+                      <span className={e.endedAt ? "shk-badge-done shrink-0" : "shk-badge-progress shrink-0"}>
+                        {e.endedAt ? "Encerrado" : "Em andamento"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>

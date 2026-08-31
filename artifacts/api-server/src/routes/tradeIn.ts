@@ -1,12 +1,16 @@
 import { Router, type IRouter } from "express";
 import { db, tradeInEvaluationsTable, usersTable, appSettingsTable } from "@workspace/db";
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, sql } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
 import { requirePerm } from "../lib/permissions";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import {
   QUESTIONS_KEY, DEFAULT_QUESTIONS, sanitizeQuestions, validateTradeInAnswers, type QuestionsConfig,
 } from "../lib/tradeInQuestions";
+import { MEDIA_DIR } from "../lib/whatsappInbound";
+import { writeFile, mkdir } from "fs/promises";
+import { randomUUID } from "crypto";
+import path from "path";
 
 const router: IRouter = Router();
 router.use("/trade-in", requireModuleAccess("avaliacao"));
@@ -359,13 +363,19 @@ router.patch("/trade-in/:id/close", requireAuth, async (req, res): Promise<void>
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ error: "Avaliação inválida" }); return; }
 
-  const { sellerCustomerName, sellerCpf, imei, finalAgreedPrice } = req.body as {
+  const { sellerCustomerName, sellerCpf, imei, finalAgreedPrice, sellerRg, sellerAddress, sellerPhone } = req.body as {
     sellerCustomerName?: string; sellerCpf?: string; imei?: string; finalAgreedPrice?: string;
+    sellerRg?: string; sellerAddress?: string; sellerPhone?: string;
   };
   const name = clean(sellerCustomerName, 120);
   const cpf = typeof sellerCpf === "string" ? sellerCpf.trim().slice(0, 20) : "";
   const imeiClean = typeof imei === "string" ? imei.replace(/\D/g, "").slice(0, 20) : "";
   const finalPrice = clean(finalAgreedPrice, 60);
+  // Dados extras da nota de compra (RG/endereço/telefone) — completam a nota
+  // mas não bloqueiam o fechamento se a loja não tiver essa info na hora.
+  const rg = clean(sellerRg, 30);
+  const address = clean(sellerAddress, 300);
+  const phone = clean(sellerPhone, 30);
 
   if (!name) { res.status(400).json({ error: "Informe o nome do cliente vendedor" }); return; }
   if (!CPF_RE.test(cpf)) { res.status(400).json({ error: "CPF inválido" }); return; }
@@ -382,12 +392,96 @@ router.patch("/trade-in/:id/close", requireAuth, async (req, res): Promise<void>
       sellerCpf: cpf,
       imei: imeiClean,
       finalAgreedPrice: finalPrice,
+      sellerRg: rg || null,
+      sellerAddress: address || null,
+      sellerPhone: phone || null,
       closedAt: new Date(),
     })
     .where(and(eq(tradeInEvaluationsTable.id, id), eq(tradeInEvaluationsTable.tenantId, tenantId)))
     .returning();
 
   res.json(saved);
+});
+
+// ─── Fotos da nota de compra (documento do cliente / aparelho) ────────────
+// Upload 1 foto por vez (base64), igual ao padrão já usado em anexos de
+// tarefa/chat — evita estourar o limite de corpo da requisição quando o
+// vendedor seleciona várias fotos de uma vez. Guarda só a URL na lista
+// (document_photos ou device_photos) da avaliação.
+const ALLOWED_PHOTO_MIMES: Record<string, string> = {
+  "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/heic": "heic",
+};
+const MAX_PHOTO_BYTES = 10 * 1024 * 1024; // 10 MB — foto de celular, com folga
+const MAX_PHOTOS_PER_KIND = 8;
+
+async function saveTradeInPhoto(base64: string, rawMimetype: string): Promise<string> {
+  const mimetype = rawMimetype.split(";")[0]!.trim().toLowerCase();
+  const ext = ALLOWED_PHOTO_MIMES[mimetype];
+  if (!ext) throw new Error("Tipo de foto não suportado (use JPG, PNG, WEBP ou HEIC)");
+  const buf = Buffer.from(base64, "base64");
+  if (buf.byteLength > MAX_PHOTO_BYTES) throw new Error("Foto muito grande (máximo 10 MB)");
+  await mkdir(MEDIA_DIR, { recursive: true });
+  const filename = `${randomUUID()}.${ext}`;
+  await writeFile(path.join(MEDIA_DIR, filename), buf);
+  return `/api/chat/media/${filename}`;
+}
+
+router.post("/trade-in/:id/photos", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ error: "Avaliação inválida" }); return; }
+  const { kind, base64, mimetype } = req.body as { kind?: "document" | "device"; base64?: string; mimetype?: string };
+  if (kind !== "document" && kind !== "device") { res.status(400).json({ error: "Tipo de foto inválido" }); return; }
+  if (!base64 || !mimetype) { res.status(400).json({ error: "Foto inválida" }); return; }
+
+  const [evalRow] = await db.select().from(tradeInEvaluationsTable)
+    .where(and(eq(tradeInEvaluationsTable.id, id), eq(tradeInEvaluationsTable.tenantId, tenantId))).limit(1);
+  if (!evalRow) { res.status(404).json({ error: "Avaliação não encontrada" }); return; }
+
+  const column = kind === "document" ? "documentPhotos" : "devicePhotos";
+  const current = (kind === "document" ? evalRow.documentPhotos : evalRow.devicePhotos) ?? [];
+  if (current.length >= MAX_PHOTOS_PER_KIND) {
+    res.status(400).json({ error: `Máximo de ${MAX_PHOTOS_PER_KIND} fotos por categoria` }); return;
+  }
+
+  let url: string;
+  try {
+    url = await saveTradeInPhoto(base64, mimetype);
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : "Erro ao salvar foto" }); return;
+  }
+
+  const nextList = [...current, url];
+  const [saved] = await db.update(tradeInEvaluationsTable)
+    .set({ [column]: nextList })
+    .where(and(eq(tradeInEvaluationsTable.id, id), eq(tradeInEvaluationsTable.tenantId, tenantId)))
+    .returning();
+
+  res.json({ documentPhotos: saved!.documentPhotos, devicePhotos: saved!.devicePhotos });
+});
+
+router.delete("/trade-in/:id/photos", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ error: "Avaliação inválida" }); return; }
+  const { kind, url } = req.body as { kind?: "document" | "device"; url?: string };
+  if (kind !== "document" && kind !== "device") { res.status(400).json({ error: "Tipo de foto inválido" }); return; }
+  if (!url) { res.status(400).json({ error: "Foto inválida" }); return; }
+
+  const [evalRow] = await db.select().from(tradeInEvaluationsTable)
+    .where(and(eq(tradeInEvaluationsTable.id, id), eq(tradeInEvaluationsTable.tenantId, tenantId))).limit(1);
+  if (!evalRow) { res.status(404).json({ error: "Avaliação não encontrada" }); return; }
+
+  const column = kind === "document" ? "documentPhotos" : "devicePhotos";
+  const current = (kind === "document" ? evalRow.documentPhotos : evalRow.devicePhotos) ?? [];
+  const nextList = current.filter((u) => u !== url);
+
+  const [saved] = await db.update(tradeInEvaluationsTable)
+    .set({ [column]: nextList })
+    .where(and(eq(tradeInEvaluationsTable.id, id), eq(tradeInEvaluationsTable.tenantId, tenantId)))
+    .returning();
+
+  res.json({ documentPhotos: saved!.documentPhotos, devicePhotos: saved!.devicePhotos });
 });
 
 export default router;

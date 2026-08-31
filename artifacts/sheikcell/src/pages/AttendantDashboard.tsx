@@ -77,6 +77,11 @@ export default function AttendantDashboard() {
 
   const [mainTab, setMainTab] = useState<MainTab>("queue");
 
+  // Menu lateral minimizável: encolhe pra uma barra só de ícones quando o
+  // mouse não está em cima, expande de volta ao passar o mouse — economiza
+  // espaço de tela sem esconder a navegação de vez.
+  const [sidebarHovered, setSidebarHovered] = useState(false);
+
   // Some/aparece o balão flutuante global (GlobalChatWidget) conforme a aba
   // Atendimento fica visível ou não — evita o botão dele ficar em cima do
   // botão de enviar do composer, que também encosta no canto direito aqui.
@@ -296,7 +301,10 @@ export default function AttendantDashboard() {
             data-testid="button-stop-impersonation"
             className="underline font-semibold hover:no-underline"
           >
-            Voltar ao Painel do Sistema
+            {/* Vendedor sendo "espiado" por um admin da própria loja — texto
+                diferente do "Entrar como" do superadmin (que não aparece aqui,
+                já que só admin/supervisor caem no AdminDashboard). */}
+            {user.impersonatedBy.role === "superadmin" ? "Voltar ao Painel do Sistema" : "Sair do modo espiar"}
           </button>
         </div>
       )}
@@ -309,14 +317,19 @@ export default function AttendantDashboard() {
       {/* Left sidebar + content */}
       <div className="flex">
         {/* Sidebar tabs */}
-        <aside className="hidden md:block w-52 shrink-0 border-r border-border bg-white sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3">
+        <aside
+          onMouseEnter={() => setSidebarHovered(true)}
+          onMouseLeave={() => setSidebarHovered(false)}
+          data-testid="sidebar-attendant"
+          className={`hidden md:block ${sidebarHovered ? "w-52" : "w-14"} shrink-0 overflow-x-hidden border-r border-border bg-white sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3 transition-[width] duration-200 ease-in-out`}
+        >
           <div className="flex flex-col gap-1">
             {MAIN_TABS.filter(({ module }) => moduleGranted(module)).map(({ id, label, icon: Icon }) => (
-              <button key={id} onClick={() => setMainTab(id)}
-                className={`flex items-center gap-2 w-full px-3 py-2.5 rounded-lg text-xs font-semibold text-left transition-colors ${
+              <button key={id} onClick={() => setMainTab(id)} title={sidebarHovered ? undefined : label}
+                className={`flex items-center gap-2 w-full px-3 py-2.5 rounded-lg text-xs font-semibold text-left transition-colors whitespace-nowrap ${
                   mainTab === id ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
                 }`}>
-                <Icon className="w-4 h-4 shrink-0" />{label}
+                <Icon className="w-4 h-4 shrink-0" />{sidebarHovered && <span className="truncate">{label}</span>}
               </button>
             ))}
           </div>

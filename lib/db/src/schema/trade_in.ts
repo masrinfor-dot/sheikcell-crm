@@ -24,4 +24,14 @@ export const tradeInEvaluationsTable = pgTable("trade_in_evaluations", {
   imei: text("imei"),
   finalAgreedPrice: text("final_agreed_price"),     // valor final negociado (pode diferir do suggestedPrice)
   closedAt: timestamp("closed_at"),
+  // Nota de compra completa (sub-fluxo pedido pelo usuário, "tudo de uma
+  // vez"): dados pessoais além de nome/CPF, e fotos de documento/aparelho
+  // pra comprovar a compra. Cada avaliação já é uma compra independente —
+  // várias compras do mesmo cliente são só várias avaliações fechadas com o
+  // mesmo CPF, sem precisar de nenhuma tabela nova.
+  sellerRg: text("seller_rg"),
+  sellerAddress: text("seller_address"),
+  sellerPhone: text("seller_phone"),
+  documentPhotos: jsonb("document_photos").$type<string[]>().notNull().default([]),
+  devicePhotos: jsonb("device_photos").$type<string[]>().notNull().default([]),
 });
