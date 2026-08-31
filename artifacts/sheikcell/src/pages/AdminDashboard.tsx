@@ -462,7 +462,7 @@ export default function AdminDashboard() {
 
   // ── Mensagens rápidas (aba de configuração) ──
   const [quickReplies, setQuickReplies] = useState<QuickReply[]>([]);
-  const [qrForm, setQrForm] = useState<{ id: number | null; title: string; content: string; sectorId: string } | null>(null);
+  const [qrForm, setQrForm] = useState<{ id: number | null; title: string; content: string; sectorId: string; storeIds: number[]; userIds: number[] } | null>(null);
   const [savingQr, setSavingQr] = useState(false);
   useEffect(() => {
     if (tab === "quickreplies") api.chat.quickReplies.list().then(setQuickReplies).catch(() => {});
@@ -475,6 +475,8 @@ export default function AdminDashboard() {
       const data = {
         title: qrForm.title, content: qrForm.content,
         sectorId: qrForm.sectorId ? Number(qrForm.sectorId) : null,
+        storeIds: qrForm.storeIds.length > 0 ? qrForm.storeIds : null,
+        userIds: qrForm.userIds.length > 0 ? qrForm.userIds : null,
       };
       const saved = qrForm.id
         ? await api.chat.quickReplies.update(qrForm.id, data)
@@ -1396,7 +1398,7 @@ export default function AdminDashboard() {
                 <h2 className="font-bold">Mensagens Rápidas</h2>
                 <p className="text-xs text-muted-foreground">Respostas prontas que os vendedores inserem no chat com um clique (botão ⚡ na conversa).</p>
               </div>
-              <button onClick={() => setQrForm({ id: null, title: "", content: "", sectorId: "" })} data-testid="button-add-quickreply"
+              <button onClick={() => setQrForm({ id: null, title: "", content: "", sectorId: "", storeIds: [], userIds: [] })} data-testid="button-add-quickreply"
                 className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition shrink-0">
                 <Plus className="w-3.5 h-3.5" /> Nova Mensagem
               </button>
@@ -1415,11 +1417,17 @@ export default function AdminDashboard() {
                     <div className="flex-1 min-w-0">
                       <p className="font-bold text-sm truncate">{q.title}</p>
                       <p className="text-xs text-muted-foreground whitespace-pre-wrap line-clamp-3">{q.content}</p>
-                      <p className="text-[10px] text-muted-foreground mt-1">
-                        {q.sectorId ? (sectors.find((s) => s.id === q.sectorId)?.name ?? "Setor") : "Todos os setores"}
+                      <p className="text-[10px] text-muted-foreground mt-1 flex flex-wrap gap-x-1.5">
+                        <span>{q.sectorId ? (sectors.find((s) => s.id === q.sectorId)?.name ?? "Setor") : "Todos os setores"}</span>
+                        {Array.isArray(q.storeIds) && q.storeIds.length > 0 && (
+                          <span>• Lojas: {q.storeIds.map((id) => stores.find((s) => s.id === id)?.name ?? "?").join(", ")}</span>
+                        )}
+                        {Array.isArray(q.userIds) && q.userIds.length > 0 && (
+                          <span>• Só p/ {q.userIds.map((id) => userRows.find((u) => u.id === id)?.name ?? "?").join(", ")}</span>
+                        )}
                       </p>
                     </div>
-                    <button onClick={() => setQrForm({ id: q.id, title: q.title, content: q.content, sectorId: q.sectorId ? String(q.sectorId) : "" })}
+                    <button onClick={() => setQrForm({ id: q.id, title: q.title, content: q.content, sectorId: q.sectorId ? String(q.sectorId) : "", storeIds: q.storeIds ?? [], userIds: q.userIds ?? [] })}
                       data-testid={`button-edit-quickreply-${q.id}`}
                       className="p-2 rounded-lg hover:bg-secondary transition shrink-0"><Pencil className="w-4 h-4 text-muted-foreground" /></button>
                     <button onClick={() => deleteQuickReply(q.id)} data-testid={`button-delete-quickreply-${q.id}`}
@@ -1453,6 +1461,41 @@ export default function AdminDashboard() {
                     <option value="">Todos os setores</option>
                     {sectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                   </select>
+                  <p className="text-[11px] text-muted-foreground -mb-1">
+                    Se marcar mais de um filtro abaixo (setor, loja, pessoas), a mensagem só aparece pra quem bate em todos ao mesmo tempo.
+                  </p>
+                  <div>
+                    <p className="text-xs font-semibold mb-1.5">Lojas (opcional — deixe tudo desmarcado para todas)</p>
+                    <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto border border-border rounded-xl p-2">
+                      {stores.length === 0 && <span className="text-[11px] text-muted-foreground px-1">Nenhuma loja cadastrada.</span>}
+                      {stores.map((s) => {
+                        const checked = qrForm.storeIds.includes(s.id);
+                        return (
+                          <button type="button" key={s.id} data-testid={`toggle-quickreply-store-${s.id}`}
+                            onClick={() => setQrForm({ ...qrForm, storeIds: checked ? qrForm.storeIds.filter((id) => id !== s.id) : [...qrForm.storeIds, s.id] })}
+                            className={`text-[11px] px-2 py-1 rounded-full border transition ${checked ? "bg-primary text-white border-primary" : "border-border text-muted-foreground hover:bg-secondary"}`}>
+                            {s.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold mb-1.5">Pessoas específicas (opcional — além de quem bater setor/loja)</p>
+                    <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto border border-border rounded-xl p-2">
+                      {userRows.length === 0 && <span className="text-[11px] text-muted-foreground px-1">Nenhum usuário carregado.</span>}
+                      {userRows.map((u) => {
+                        const checked = qrForm.userIds.includes(u.id);
+                        return (
+                          <button type="button" key={u.id} data-testid={`toggle-quickreply-user-${u.id}`}
+                            onClick={() => setQrForm({ ...qrForm, userIds: checked ? qrForm.userIds.filter((id) => id !== u.id) : [...qrForm.userIds, u.id] })}
+                            className={`text-[11px] px-2 py-1 rounded-full border transition ${checked ? "bg-primary text-white border-primary" : "border-border text-muted-foreground hover:bg-secondary"}`}>
+                            {u.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                   <button type="submit" disabled={savingQr} data-testid="button-save-quickreply"
                     className="w-full py-2.5 bg-primary text-white rounded-xl text-sm font-semibold hover:bg-primary/90 transition disabled:opacity-50">
                     {savingQr ? "Salvando..." : "Salvar"}

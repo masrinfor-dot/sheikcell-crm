@@ -1793,28 +1793,46 @@ router.post("/chat/notifications/read", requireAuth, requireChatAccess(), async 
 });
 
 // ─── Quick replies (mensagens rápidas) ─────────────────────────────────────
-// Leitura: qualquer usuário logado vê as globais + as do próprio setor.
-// Gestão (criar/editar/excluir): admin e supervisor.
+// Leitura: qualquer usuário logado vê as globais + as que batem com ele nas
+// dimensões preenchidas (setor/loja/usuário — todas as preenchidas precisam
+// bater, é E lógico, não OU: ver comentário no schema). Admin/supervisor
+// sempre vê todas (view de gestão). Gestão (criar/editar/excluir): admin e
+// supervisor.
+function sanitizeIdList(raw: unknown): number[] | null {
+  if (!Array.isArray(raw)) return null;
+  const ids = raw.map((v) => Number(v)).filter((n) => Number.isInteger(n) && n > 0);
+  return ids.length > 0 ? Array.from(new Set(ids)) : null;
+}
+
 router.get("/chat/quick-replies", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const role = req.session.userRole!;
+  const userId = req.session.userId!;
   const sectorId = req.session.userSectorId ?? null;
+  const storeId = req.session.userStoreId ?? null;
   const rows = await db.select().from(quickRepliesTable).where(eq(quickRepliesTable.tenantId, tenantId)).orderBy(asc(quickRepliesTable.title));
   const visible = (role === "admin" || role === "supervisor")
     ? rows
-    : rows.filter((r) => r.sectorId == null || r.sectorId === sectorId);
+    : rows.filter((r) => {
+        if (r.sectorId != null && r.sectorId !== sectorId) return false;
+        if (Array.isArray(r.storeIds) && r.storeIds.length > 0 && (storeId == null || !r.storeIds.includes(storeId))) return false;
+        if (Array.isArray(r.userIds) && r.userIds.length > 0 && !r.userIds.includes(userId)) return false;
+        return true;
+      });
   res.json(visible);
 });
 
 router.post("/chat/quick-replies", requireAdminOrSupervisor, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { title, content, sectorId } = req.body as { title?: string; content?: string; sectorId?: number | null };
+  const { title, content, sectorId, storeIds, userIds } = req.body as { title?: string; content?: string; sectorId?: number | null; storeIds?: number[] | null; userIds?: number[] | null };
   if (!title?.trim() || !content?.trim()) { res.status(400).json({ error: "Título e mensagem são obrigatórios" }); return; }
   const [created] = await db.insert(quickRepliesTable).values({
     tenantId,
     title: title.trim().slice(0, 80),
     content: content.trim().slice(0, 2000),
     sectorId: sectorId ?? null,
+    storeIds: sanitizeIdList(storeIds),
+    userIds: sanitizeIdList(userIds),
   }).returning();
   res.status(201).json(created);
 });
@@ -1822,11 +1840,13 @@ router.post("/chat/quick-replies", requireAdminOrSupervisor, async (req, res): P
 router.patch("/chat/quick-replies/:qrId", requireAdminOrSupervisor, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const qrId = parseInt(Array.isArray(req.params.qrId) ? req.params.qrId[0] : req.params.qrId, 10);
-  const { title, content, sectorId } = req.body as { title?: string; content?: string; sectorId?: number | null };
+  const { title, content, sectorId, storeIds, userIds } = req.body as { title?: string; content?: string; sectorId?: number | null; storeIds?: number[] | null; userIds?: number[] | null };
   const update: Partial<typeof quickRepliesTable.$inferInsert> = {};
   if (title !== undefined) update.title = title.trim().slice(0, 80);
   if (content !== undefined) update.content = content.trim().slice(0, 2000);
   if (sectorId !== undefined) update.sectorId = sectorId;
+  if (storeIds !== undefined) update.storeIds = sanitizeIdList(storeIds);
+  if (userIds !== undefined) update.userIds = sanitizeIdList(userIds);
   const [updated] = await db.update(quickRepliesTable).set(update).where(and(eq(quickRepliesTable.id, qrId), eq(quickRepliesTable.tenantId, tenantId))).returning();
   if (!updated) { res.status(404).json({ error: "Mensagem rápida não encontrada" }); return; }
   res.json(updated);

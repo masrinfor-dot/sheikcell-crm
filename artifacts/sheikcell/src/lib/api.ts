@@ -1258,6 +1258,8 @@ export type QuickReply = {
   title: string;
   content: string;
   sectorId: number | null;
+  storeIds: number[] | null;
+  userIds: number[] | null;
   createdAt: string;
 };
 
@@ -1661,9 +1663,9 @@ export const api = {
     },
     quickReplies: {
       list: () => req<QuickReply[]>("/chat/quick-replies"),
-      create: (data: { title: string; content: string; sectorId?: number | null }) =>
+      create: (data: { title: string; content: string; sectorId?: number | null; storeIds?: number[] | null; userIds?: number[] | null }) =>
         req<QuickReply>("/chat/quick-replies", { method: "POST", body: JSON.stringify(data) }),
-      update: (id: number, data: Partial<{ title: string; content: string; sectorId: number | null }>) =>
+      update: (id: number, data: Partial<{ title: string; content: string; sectorId: number | null; storeIds: number[] | null; userIds: number[] | null }>) =>
         req<QuickReply>(`/chat/quick-replies/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number) => req<{ ok: boolean }>(`/chat/quick-replies/${id}`, { method: "DELETE" }),
     },
