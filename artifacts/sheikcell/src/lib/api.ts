@@ -1963,6 +1963,15 @@ export const api = {
     update: (id: number, data: Partial<{ description: string; supplier: string; status: "aberto" | "pago" }>) =>
       req<FinancePayment>(`/finance/payments/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/finance/payments/${id}`, { method: "DELETE" }),
+    // Exporta os lançamentos filtrados pra Excel — a tela só monta a URL e usa
+    // um <a download>, igual ao download de documentos (sessão via cookie).
+    exportUrl: (params?: { storeId?: number | null; status?: "aberto" | "pago" | null }) => {
+      const qs = new URLSearchParams();
+      if (params?.storeId) qs.set("storeId", String(params.storeId));
+      if (params?.status) qs.set("status", params.status);
+      const qsStr = qs.toString();
+      return `${API_BASE}/finance/payments/export${qsStr ? `?${qsStr}` : ""}`;
+    },
   },
   bot: {
     settings: () => req<BotSettings>("/bot/settings"),

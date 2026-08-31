@@ -6,8 +6,15 @@ import {
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
-  ArrowLeftRight, Plus, X, Trash2, CheckCircle2, Circle, Landmark, Filter,
+  ArrowLeftRight, Plus, X, Trash2, CheckCircle2, Circle, Landmark, Filter, FileSpreadsheet,
 } from "lucide-react";
+import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
+
+const CHART_CONFIG: ChartConfig = {
+  pago: { label: "Pago", color: "hsl(var(--primary))" },
+  aberto: { label: "Em aberto", color: "#d97706" },
+};
 
 const brl = (v: number) => v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 const num = (v: string | number | null | undefined) => (v == null ? 0 : Number(v));
@@ -194,6 +201,11 @@ export default function PagamentosFiliais() {
           <ArrowLeftRight className="w-5 h-5 text-primary" /> Pagamentos entre Filiais
         </h2>
         <div className="flex items-center gap-2">
+          <a href={api.financePayments.exportUrl({ storeId: filterStoreId, status: filterStatus || null })}
+            download="pagamentos-entre-filiais.xlsx" data-testid="button-export-excel"
+            className="flex items-center gap-1 px-3 py-2 rounded-xl border border-border text-xs font-semibold hover:bg-secondary">
+            <FileSpreadsheet className="w-3.5 h-3.5" /> Exportar Excel
+          </a>
           {canManage && (
             <button onClick={() => setShowBankForm(true)} data-testid="button-manage-bank-accounts"
               className="flex items-center gap-1 px-3 py-2 rounded-xl border border-border text-xs font-semibold hover:bg-secondary">
@@ -234,26 +246,42 @@ export default function PagamentosFiliais() {
       </div>
 
       {summary && summary.stores.length > 0 && (
-        <div className="shk-card p-4 overflow-x-auto">
-          <p className="font-bold text-sm mb-3">Recebido por filial (rateio)</p>
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="text-left text-[10px] uppercase text-muted-foreground border-b border-border">
-                <th className="py-2 pr-2">Filial</th>
-                <th className="py-2 pr-2 text-right">Pago</th>
-                <th className="py-2 pr-2 text-right">Em aberto</th>
-              </tr>
-            </thead>
-            <tbody>
-              {summary.stores.map((s) => (
-                <tr key={s.storeId} className="border-b border-border/50">
-                  <td className="py-2 pr-2 font-semibold">{s.storeName}</td>
-                  <td className="py-2 pr-2 text-right text-primary font-bold">{brl(s.pago)}</td>
-                  <td className="py-2 pr-2 text-right text-amber-600">{brl(s.aberto)}</td>
+        <div className="grid md:grid-cols-2 gap-3">
+          <div className="shk-card p-4 overflow-x-auto">
+            <p className="font-bold text-sm mb-3">Recebido por filial (rateio)</p>
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-[10px] uppercase text-muted-foreground border-b border-border">
+                  <th className="py-2 pr-2">Filial</th>
+                  <th className="py-2 pr-2 text-right">Pago</th>
+                  <th className="py-2 pr-2 text-right">Em aberto</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {summary.stores.map((s) => (
+                  <tr key={s.storeId} className="border-b border-border/50">
+                    <td className="py-2 pr-2 font-semibold">{s.storeName}</td>
+                    <td className="py-2 pr-2 text-right text-primary font-bold">{brl(s.pago)}</td>
+                    <td className="py-2 pr-2 text-right text-amber-600">{brl(s.aberto)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="shk-card p-4" data-testid="chart-payments-by-store">
+            <p className="font-bold text-sm mb-3">Pago vs. em aberto por filial</p>
+            <ChartContainer config={CHART_CONFIG} className="w-full aspect-auto h-56">
+              <BarChart data={summary.stores.map((s) => ({ name: s.storeName, pago: s.pago, aberto: s.aberto }))}>
+                <CartesianGrid vertical={false} strokeDasharray="3 3" />
+                <XAxis dataKey="name" tickLine={false} axisLine={false} tick={{ fontSize: 10 }}
+                  interval={0} angle={-20} textAnchor="end" height={50} />
+                <YAxis tickLine={false} axisLine={false} tick={{ fontSize: 10 }} width={40} />
+                <ChartTooltip content={<ChartTooltipContent formatter={(v) => brl(Number(v))} />} />
+                <Bar dataKey="pago" fill="var(--color-pago)" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="aberto" fill="var(--color-aberto)" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ChartContainer>
+          </div>
         </div>
       )}
 

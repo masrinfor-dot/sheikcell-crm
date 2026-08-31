@@ -1,6 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db, financeBankAccountsTable, financePaymentsTable, financePaymentAllocationsTable, storesTable } from "@workspace/db";
 import { eq, and, asc, desc, gte, lte, inArray, sql } from "drizzle-orm";
+import * as XLSX from "xlsx";
 import { requireAuth, requireTenant } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 
@@ -153,6 +154,98 @@ router.get("/finance/payments", requireAuth, async (req, res): Promise<void> => 
   }
 
   res.json(payments.map((p) => ({ ...p, allocations: allocMap.get(p.id) ?? [] })));
+});
+
+// Exporta os lançamentos filtrados (mesmos filtros da tela: filial, status,
+// banco, período) pra uma planilha Excel — substitui de vez a necessidade de
+// levar esses números pra uma planilha à parte. Duas abas: "Lançamentos" (uma
+// linha por filial beneficiada do rateio — formato longo, bom pra somar/
+// filtrar no Excel) e "Resumo por filial" (mesmo total pago/em aberto por
+// filial mostrado na tela, sem os filtros de filial/status — visão geral).
+router.get("/finance/payments/export", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const conds = [eq(financePaymentsTable.tenantId, tenantId)];
+  const status = typeof req.query.status === "string" ? req.query.status : null;
+  if (status === "aberto" || status === "pago") conds.push(eq(financePaymentsTable.status, status));
+  const bankAccountId = req.query.bankAccountId ? parseInt(String(req.query.bankAccountId), 10) : null;
+  if (bankAccountId) conds.push(eq(financePaymentsTable.payingBankAccountId, bankAccountId));
+  const from = typeof req.query.from === "string" ? new Date(req.query.from) : null;
+  if (from && !isNaN(from.getTime())) conds.push(gte(financePaymentsTable.paymentDate, from));
+  const to = typeof req.query.to === "string" ? new Date(req.query.to) : null;
+  if (to && !isNaN(to.getTime())) conds.push(lte(financePaymentsTable.paymentDate, to));
+
+  let payments = await db.select().from(financePaymentsTable)
+    .where(and(...conds)).orderBy(desc(financePaymentsTable.paymentDate), desc(financePaymentsTable.id)).limit(500);
+
+  const storeId = req.query.storeId ? parseInt(String(req.query.storeId), 10) : null;
+  const allocMap = await loadPaymentsWithAllocations(tenantId, payments.map((p) => p.id));
+  if (storeId) {
+    payments = payments.filter((p) => p.payingStoreId === storeId || (allocMap.get(p.id) ?? []).some((a) => a.storeId === storeId));
+  }
+
+  const [stores, bankAccounts] = await Promise.all([
+    db.select().from(storesTable).where(eq(storesTable.tenantId, tenantId)),
+    db.select().from(financeBankAccountsTable).where(eq(financeBankAccountsTable.tenantId, tenantId)),
+  ]);
+  const storeName = (id: number) => stores.find((s) => s.id === id)?.name ?? `Filial #${id}`;
+  const bankLabel = (id: number) => {
+    const b = bankAccounts.find((x) => x.id === id);
+    if (!b) return `Banco #${id}`;
+    return b.label ? `${b.bankName} (${b.label})` : b.bankName;
+  };
+  const fmtDate = (d: Date) => new Date(d).toLocaleDateString("pt-BR");
+
+  const launchRows = payments.flatMap((p) => {
+    const allocs = allocMap.get(p.id) ?? [];
+    const base = {
+      Data: fmtDate(p.paymentDate),
+      Descrição: p.description,
+      Fornecedor: p.supplier ?? "",
+      "Filial pagadora": storeName(p.payingStoreId),
+      "Banco pagador": bankLabel(p.payingBankAccountId),
+      Tipo: p.splitType === "direta" ? "Direta" : "Rateada",
+      "Valor total": Number(p.totalAmount),
+      Status: p.status === "pago" ? "Pago" : "Em aberto",
+      "Pago em": p.paidAt ? fmtDate(p.paidAt) : "",
+    };
+    if (allocs.length === 0) return [{ ...base, "Filial beneficiada": "", "% rateio": "", "Valor rateado": "" }];
+    return allocs.map((a) => ({
+      ...base,
+      "Filial beneficiada": storeName(a.storeId),
+      "% rateio": a.percent != null ? `${(Number(a.percent) * 100).toFixed(2)}%` : "",
+      "Valor rateado": Number(a.amount),
+    }));
+  });
+
+  // Resumo por filial: mesma consulta agregada da tela (sem filtro de
+  // filial/status — visão geral de tudo que já foi rateado pra cada uma).
+  const summaryRows = await db.select({
+    storeId: financePaymentAllocationsTable.storeId,
+    status: financePaymentsTable.status,
+    total: sql<string>`coalesce(sum(${financePaymentAllocationsTable.amount}), 0)::text`,
+  }).from(financePaymentAllocationsTable)
+    .innerJoin(financePaymentsTable, eq(financePaymentAllocationsTable.paymentId, financePaymentsTable.id))
+    .where(eq(financePaymentsTable.tenantId, tenantId))
+    .groupBy(financePaymentAllocationsTable.storeId, financePaymentsTable.status);
+  const byStore = new Map<number, { pago: number; aberto: number }>();
+  for (const r of summaryRows) {
+    const cur = byStore.get(r.storeId) ?? { pago: 0, aberto: 0 };
+    if (r.status === "pago") cur.pago = Number(r.total); else cur.aberto = Number(r.total);
+    byStore.set(r.storeId, cur);
+  }
+  const resumoRows = [...stores].sort((a, b) => a.name.localeCompare(b.name)).map((s) => {
+    const v = byStore.get(s.id) ?? { pago: 0, aberto: 0 };
+    return { Filial: s.name, Pago: v.pago, "Em aberto": v.aberto, Total: v.pago + v.aberto };
+  });
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(launchRows), "Lançamentos");
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resumoRows), "Resumo por filial");
+  const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
+
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="pagamentos-entre-filiais.xlsx"`);
+  res.send(buffer);
 });
 
 router.get("/finance/payments/summary", requireAuth, async (req, res): Promise<void> => {
