@@ -98,6 +98,16 @@ export interface InboundWAMessageContent {
     buttonText?: string;
     sections?: Array<{ title?: string; rows?: Array<{ title?: string; description?: string }> }>;
   };
+  // Mensagem "de ida" com botões de resposta rápida (cartão com texto +
+  // até 3 botões — apps antigos/legado do WhatsApp Business). Antes só a
+  // RESPOSTA (buttonsResponseMessage, o botão que o cliente apertou) era
+  // tratada; o cartão em si caía no fallback "não suportado" (mesmo caso
+  // já resolvido pra interactiveMessage/listMessage acima).
+  buttonsMessage?: {
+    contentText?: string;
+    footerText?: string;
+    buttons?: Array<{ buttonId?: string; buttonText?: { displayText?: string } }>;
+  };
   // Convite de grupo.
   groupInviteMessage?: { groupJid?: string; groupName?: string; inviteCode?: string };
   // Produto de catálogo compartilhado (loja do WhatsApp Business).
@@ -871,6 +881,14 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
           const rows = (lm.sections ?? []).flatMap((sec) => sec.rows ?? []);
           const rowsText = rows.length ? `\n${rows.map((r) => `• ${r.title ?? ""}`).join("\n")}` : "";
           return `🔘 ${lm.title ?? lm.description ?? "Lista de opções"}${rowsText}`;
+        })()
+      : null) ??
+    (msgContent?.buttonsMessage
+      ? (() => {
+          const bm = msgContent.buttonsMessage!;
+          const btns = (bm.buttons ?? []).map((b) => b.buttonText?.displayText).filter((t): t is string => !!t);
+          const btnsText = btns.length ? `\n${btns.map((t) => `• ${t}`).join("\n")}` : "";
+          return `🔘 ${bm.contentText ?? bm.footerText ?? "Mensagem com botões"}${btnsText}`;
         })()
       : null) ??
     "";

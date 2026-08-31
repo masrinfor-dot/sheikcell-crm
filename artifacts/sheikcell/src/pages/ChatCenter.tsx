@@ -2712,6 +2712,17 @@ export default function ChatCenter({
 
   const overdueCount = alertEnabled ? convs.filter(isOverdue).length : 0;
 
+  // Filtros avançados (Vendedor/Setor) mostravam TODO o tenant pra qualquer
+  // papel — um vendedor restrito ao próprio setor (ex.: só "Administrativo")
+  // via essas opções de outros setores no dropdown, mesmo nunca conseguindo
+  // ver uma conversa de lá (a visibilidade real já é escopada no servidor).
+  // Pra admin/supervisor (que realmente gerenciam o tenant inteiro) as
+  // opções continuam completas; pro vendedor, só o próprio setor e os
+  // colegas do próprio setor aparecem como opção.
+  const isManager = user?.role === "admin" || user?.role === "supervisor";
+  const filterableSectors = isManager ? sectors : sectors.filter((s) => s.id === user?.sectorId);
+  const filterableChatUsers = isManager ? chatUsers : chatUsers.filter((u) => u.sectorId === user?.sectorId);
+
   const visibleConvs = convs.filter((c) =>
     // Busca por nome ou número (aceita número digitado com espaços/traços).
     (!search || c.name.toLowerCase().includes(search.toLowerCase()) || c.phone.includes(search) || c.phone.replace(/\D/g, "").includes(search.replace(/\D/g, "") || "\u0000")) &&
@@ -3037,13 +3048,13 @@ export default function ChatCenter({
                 data-testid="filter-conv-vendedor"
                 className="text-xs px-2 py-1 rounded-lg border border-border bg-white max-w-[140px]">
                 <option value="">Vendedor: todos</option>
-                {chatUsers.map((u) => <option key={u.id} value={String(u.id)}>{u.name}</option>)}
+                {filterableChatUsers.map((u) => <option key={u.id} value={String(u.id)}>{u.name}</option>)}
               </select>
               <select value={filterSetor} onChange={(e) => setFilterSetor(e.target.value)}
                 data-testid="filter-conv-setor"
                 className="text-xs px-2 py-1 rounded-lg border border-border bg-white max-w-[140px]">
                 <option value="">Setor: todos</option>
-                {sectors.map((s) => <option key={s.id} value={String(s.id)}>{s.name}</option>)}
+                {filterableSectors.map((s) => <option key={s.id} value={String(s.id)}>{s.name}</option>)}
               </select>
               <select value={filterNivel} onChange={(e) => setFilterNivel(e.target.value)}
                 data-testid="filter-conv-nivel"

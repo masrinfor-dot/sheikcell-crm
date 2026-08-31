@@ -24,20 +24,13 @@ export default function GlobalChatWidget() {
     || ((user?.enabledModules == null || user.enabledModules.includes("equipe"))
       && user?.moduleAccess != null && "equipe" in user.moduleAccess);
   const [open, setOpen] = useState(false);
-  // Enquanto o usuário já está na aba Atendimento do dashboard, o balão
-  // continua aparecendo (pra dar acesso ao chat interno sem precisar sair da
-  // Central) — mas sobe pro MEIO da borda direita da tela em vez de ficar no
-  // canto inferior. O composer do Atendimento ocupa a largura inteira da
-  // tela no celular: o canto inferior direito tem o botão de enviar/áudio, e
-  // o canto inferior ESQUERDO tem o botão de anexar arquivo — não tem canto
-  // de baixo livre em telas estreitas. No topo também tem barra de
-  // navegação. O meio da lateral é o único lugar que nunca colide com nada
-  // disso, no PC e no celular. Sem permissão de chat interno não sobra nada
-  // útil pra mostrar nessa tela (a aba Atendimento do próprio balão seria só
-  // um Atendimento dentro do Atendimento), então nesse caso ele continua
-  // escondido como antes.
+  // Dentro da própria tela de Atendimento OU de Chat Interno, o balão some
+  // por completo — as duas já têm acesso direto ao que ele ofereceria (o
+  // Atendimento e o Chat Interno de verdade, sem precisar do painel
+  // compacto), então ele só ficava sobrando/atrapalhando ali. Nas outras
+  // abas (Dashboard, CRM, Relatórios etc.) ele continua aparecendo normal.
   const insideAtendimento = useAtendimentoTabVisible();
-  const hideBubble = insideAtendimento && !canEquipe;
+  const hideBubble = insideAtendimento;
   const [activeTab, setActiveTab] = useState<WidgetTab>("atendimento");
   // Sem permissão de chat interno, o widget só tem a aba Atendimento. Dentro
   // da própria tela de Atendimento, força a aba Equipe (a de Atendimento
