@@ -277,7 +277,12 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
     // videoMessage normal (já tratado abaixo), então o container em si não
     // tem conteúdo próprio pra mostrar. Sem isso, virava "Tipo de mensagem
     // não suportado (albumMessage)" no meio das fotos do álbum.
-    const INVISIBLE = new Set(["reactionMessage", "protocolMessage", "pollUpdateMessage", "keepInChatMessage", "pinInChatMessage", "secretEncryptedMessage", "albumMessage"]);
+    // encReactionMessage: reação nova do WhatsApp que chega criptografada
+    // (mesma limitação do secretEncryptedMessage acima — o Baileys 7.0.0-rc14
+    // não decripta isso em nenhum nível mais alto, não dá pra extrair o emoji
+    // nem a mensagem-alvo). Sem isso, virava "Tipo de mensagem não suportado
+    // (encReactionMessage)" toda vez que alguém reagia com esse formato novo.
+    const INVISIBLE = new Set(["reactionMessage", "protocolMessage", "pollUpdateMessage", "keepInChatMessage", "pinInChatMessage", "secretEncryptedMessage", "albumMessage", "encReactionMessage"]);
     if (keys.length === 0 || keys.every((k) => INVISIBLE.has(k))) return;
   }
 
