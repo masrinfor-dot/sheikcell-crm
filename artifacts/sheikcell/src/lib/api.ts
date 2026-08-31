@@ -1777,6 +1777,9 @@ export const api = {
     remove: (id: number) => req<{ ok: boolean }>(`/crm/${id}`, { method: "DELETE" }),
     autoRegister: (data: { name: string; phone?: string; contact?: string; sectorId?: number }) =>
       req<CrmContact & { created: boolean }>("/crm/auto-register", { method: "POST", body: JSON.stringify(data) }),
+    // Recalcula o status (coluna do quadro) de todo contato a partir do
+    // estado atual da conversa mais recente dele (ver reconcileCrmStages).
+    reconcileStages: () => req<{ checked: number; updated: number }>("/crm/reconcile-stages", { method: "POST" }),
     purchases: {
       list: (contactId: number) => req<CrmPurchase[]>(`/crm/${contactId}/purchases`),
       create: (contactId: number, data: { description: string; amount?: string | number; purchaseDate?: string; category?: string; notes?: string }) =>

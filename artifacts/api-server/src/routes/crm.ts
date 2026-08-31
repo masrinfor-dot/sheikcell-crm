@@ -7,6 +7,7 @@ import { isValidStoreName } from "./stores";
 import { broadcast } from "../lib/sseEmitter";
 import { normalizePhone, phoneVariants } from "../lib/phone";
 import { isPotentialConversation, restrictedRecipients } from "../lib/conversationScope";
+import { reconcileCrmStages } from "../lib/crmSync";
 import type { Request } from "express";
 
 // Mantém o nome do Atendimento em sincronia quando o nome do cliente é
@@ -185,6 +186,17 @@ router.post("/crm/auto-register", requireAuth, async (req, res): Promise<void> =
   const enriched = await enrichContact(created);
   res.status(201).json({ ...enriched, created: true });
   broadcastContact("crm_contact_created", enriched, created.tenantId, created.sectorId);
+});
+
+// Recalcula o status (coluna do quadro) de todo contato do CRM a partir do
+// estado atual da conversa mais recente dele — ver reconcileCrmStages em
+// crmSync.ts. Restrito a admin/supervisor por ser uma varredura pesada
+// (percorre todos os contatos da loja) e por reescrever status em massa.
+router.post("/crm/reconcile-stages", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const result = await reconcileCrmStages(tenantId);
+  res.json(result);
+  if (result.updated > 0) broadcast("crm_contacts_reconciled", result, { tenantId });
 });
 
 // Delete purchase (before /crm/:id)

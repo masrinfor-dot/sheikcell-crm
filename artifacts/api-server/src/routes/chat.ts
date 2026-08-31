@@ -2054,6 +2054,11 @@ router.post("/chat/conversations/:id/participants", requireAuth, requireChatAcce
       .set({ status: "pending", updatedAt: new Date() })
       .where(and(eq(conversationsTable.id, convId), eq(conversationsTable.tenantId, tenantId)))
       .returning();
+    // Espelha no card do CRM — sem isso, o card fica preso no status antigo
+    // (ex.: "Ativo") mesmo com a conversa de volta pra fila, inflando essa
+    // coluna do quadro (mesma classe de bug que o comentário em crmSync.ts
+    // já descreve; ver reconciliação em POST /admin/crm/reconcile-stages).
+    await syncCrmAttendant(updated);
     broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey, isPotential: wasPotential });
     broadcast("participants_updated", { conversationId: convId }, { tenantId: updated.tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey, isPotential: false });
     res.status(201).json({ ok: true, conversation: updated });

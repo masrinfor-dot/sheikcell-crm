@@ -1,5 +1,5 @@
-import { db, crmContactsTable, usersTable, sectorsTable } from "@workspace/db";
-import { eq, and, isNull, inArray } from "drizzle-orm";
+import { db, crmContactsTable, conversationsTable, usersTable, sectorsTable } from "@workspace/db";
+import { eq, and, isNull, inArray, desc } from "drizzle-orm";
 import { logger } from "./logger";
 import { broadcast } from "./sseEmitter";
 import { normalizePhone, phoneVariants } from "./phone";
@@ -185,4 +185,58 @@ export async function ensureCrmContactForConversation(conv: {
     // but log so a CRM desync is detectable instead of silent.
     logger.warn({ err, phone: conv.phone, sectorId: conv.sectorId }, "CRM sync at conversation start failed");
   }
+}
+
+/**
+ * Manutenção sob demanda (botão "Recalcular status" no Quadro do CRM):
+ * recomputa o status (coluna do quadro) de TODO contato do CRM a partir do
+ * estado ATUAL da conversa dele mais recentemente atualizada — em vez de só
+ * confiar nos eventos ao vivo (syncCrmAttendant/ensureCrmContactForConversation),
+ * que corrigem o card a cada mudança mas não alcançam contatos que já
+ * ficaram desatualizados antes de alguma correção, ou por um caminho que na
+ * época não disparava o sync (ex.: conversa recolocada na fila de Pendentes
+ * ao adicionar um vendedor como participante — ver POST .../participants).
+ * Contato sem nenhuma conversa correspondente (cadastrado manualmente, nunca
+ * conversou) fica intocado — não há "verdade" de conversa pra reconciliar.
+ */
+export async function reconcileCrmStages(tenantId: number): Promise<{ checked: number; updated: number }> {
+  const contacts = await db.select().from(crmContactsTable)
+    .where(and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.isArchived, false)));
+
+  let updated = 0;
+  for (const contact of contacts) {
+    const isGroup = (contact.contact ?? "").includes("@g.us");
+    const sectorCondition = contact.sectorId != null
+      ? eq(conversationsTable.sectorId, contact.sectorId)
+      : isNull(conversationsTable.sectorId);
+    const identityCondition = isGroup
+      ? eq(conversationsTable.phone, contact.contact ?? "")
+      : (() => {
+          const variants = phoneVariants(contact.phone ?? contact.contact);
+          return variants.length > 0 ? inArray(conversationsTable.phone, variants) : null;
+        })();
+    if (!identityCondition) continue;
+
+    const [latestConv] = await db.select().from(conversationsTable)
+      .where(and(eq(conversationsTable.tenantId, tenantId), identityCondition, sectorCondition))
+      .orderBy(desc(conversationsTable.updatedAt))
+      .limit(1);
+    if (!latestConv) continue;
+
+    const stage = crmStageForConversation(latestConv);
+    if (contact.status === stage && contact.attendantId === latestConv.assigneeId) continue;
+
+    await db.update(crmContactsTable).set({
+      status: stage,
+      attendantId: latestConv.assigneeId,
+      updatedAt: new Date(),
+      ...(stage === "finalized"
+        ? (contact.status !== "finalized" ? { finalizedAt: new Date() } : {})
+        : { lastResolutionReason: null, finalizedAt: null }),
+    }).where(eq(crmContactsTable.id, contact.id));
+    updated++;
+  }
+
+  logger.info({ tenantId, checked: contacts.length, updated }, "CRM stage reconciliation completed");
+  return { checked: contacts.length, updated };
 }

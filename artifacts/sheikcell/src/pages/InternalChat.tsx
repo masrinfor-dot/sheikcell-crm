@@ -92,8 +92,14 @@ function InternalMediaContent({ msg, onTranscribed }: { msg: InternalMessage; on
   if (msg.type === "doc") {
     const filename = msg.metadata?.fileName ?? msg.mediaUrl.split("/").pop() ?? "documento";
     const size = formatFileSize(msg.metadata?.fileSize);
+    // PDF: o navegador sabe exibir sozinho, então deixa abrir/pré-visualizar
+    // em vez de forçar download (o atributo "download" ignora target="_blank"
+    // e sempre baixa, mesmo quando o navegador conseguiria mostrar o arquivo).
+    // Word/Excel/ZIP etc. continuam baixando — o navegador não sabe abri-los.
+    const ext = (filename.split(".").pop() || "").toLowerCase();
+    const isPdf = msg.metadata?.mimeType?.includes("pdf") || ext === "pdf";
     return (
-      <a href={msg.mediaUrl} target="_blank" rel="noopener noreferrer" download
+      <a href={msg.mediaUrl} target="_blank" rel="noopener noreferrer" {...(isPdf ? {} : { download: true })}
         className="flex items-center gap-2 mb-1 bg-black/5 rounded-xl px-3 py-2 hover:bg-black/10 transition">
         <DocIcon mimeType={msg.metadata?.mimeType} fileName={filename} />
         <div className="min-w-0">

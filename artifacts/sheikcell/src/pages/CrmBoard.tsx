@@ -10,7 +10,7 @@ import {
   Plus, X, Phone, Tag, StickyNote, RefreshCw, Archive, MapPin,
   ChevronRight, ChevronLeft, Crown, Star, UserPlus, UserMinus,
   Search, Filter, ExternalLink, ShoppingBag, SlidersHorizontal, Trash2, GripVertical,
-  Kanban, BookUser, Mail, Users,
+  Kanban, BookUser, Mail, Users, Wrench,
 } from "lucide-react";
 
 const FIELD_TYPES: { value: CrmCustomFieldType; label: string }[] = [
@@ -223,6 +223,7 @@ export default function CrmBoard() {
   const [filterProfile, setFilterProfile] = useState<string>("");
   const [detailId, setDetailId] = useState<number | null>(null);
   const [autoImporting, setAutoImporting] = useState(false);
+  const [reconciling, setReconciling] = useState(false);
   const [showFieldsManager, setShowFieldsManager] = useState(false);
   // "Agenda de Contatos": mesma lista/filtros do Quadro, só que como
   // diretório simples (nome/telefone/e-mail) em vez de pipeline por status —
@@ -416,6 +417,25 @@ export default function CrmBoard() {
     setAutoImporting(false);
   };
 
+  // "Recalcular status": corrige cards que ficaram presos num status antigo
+  // (ex.: "Ativo" mesmo com a conversa já resolvida há tempo) — recomputa a
+  // partir do estado ATUAL da conversa mais recente de cada contato, em vez
+  // de só confiar nos eventos ao vivo (ver reconcileCrmStages no servidor).
+  const handleReconcileStages = async () => {
+    setReconciling(true);
+    try {
+      const { checked, updated } = await api.crm.reconcileStages();
+      toast({
+        title: "Recalculado",
+        description: updated > 0
+          ? `${updated} de ${checked} card(s) corrigido(s)`
+          : `Nenhuma correção necessária (${checked} conferido(s))`,
+      });
+      fetchContacts();
+    } catch { toast({ title: "Erro ao recalcular", variant: "destructive" }); }
+    setReconciling(false);
+  };
+
   const handleContactUpdated = (updated: CrmContact) => {
     setContacts((prev) => prev.map((c) => c.id === updated.id ? updated : c));
   };
@@ -443,9 +463,19 @@ export default function CrmBoard() {
         <div className="flex items-center gap-2 flex-wrap">
           {canEdit && (
             <button onClick={handleAutoImport} disabled={autoImporting}
+              data-testid="button-crm-auto-import"
               className="flex items-center gap-1.5 px-3 py-2 border border-border rounded-xl text-xs font-medium text-muted-foreground hover:bg-secondary transition disabled:opacity-50">
               <RefreshCw className={`w-3.5 h-3.5 ${autoImporting ? "animate-spin" : ""}`} />
               {autoImporting ? "Importando…" : "Auto-importar"}
+            </button>
+          )}
+          {canEdit && (
+            <button onClick={handleReconcileStages} disabled={reconciling}
+              title="Corrige cards presos num status antigo, recalculando a partir da conversa mais recente de cada cliente"
+              data-testid="button-crm-reconcile-stages"
+              className="flex items-center gap-1.5 px-3 py-2 border border-border rounded-xl text-xs font-medium text-muted-foreground hover:bg-secondary transition disabled:opacity-50">
+              <Wrench className={`w-3.5 h-3.5 ${reconciling ? "animate-spin" : ""}`} />
+              {reconciling ? "Recalculando…" : "Recalcular status"}
             </button>
           )}
           <button onClick={fetchContacts}
