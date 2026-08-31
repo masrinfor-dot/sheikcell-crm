@@ -2650,6 +2650,19 @@ export default function ChatCenter({
       setShowNewConv(false);
       setNewForm({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "", sessionKey: "default" });
     } catch (err: unknown) {
+      // Já existe atendimento em andamento pra esse número nessa linha —
+      // em vez de só mostrar o erro, já abre a conversa existente direto
+      // (mesmo tratamento que o cartão de contato compartilhado já tinha
+      // em startConversationWith, só que esse formulário nunca tinha).
+      if (err instanceof ApiError && err.conversationId != null) {
+        setActiveId(err.conversationId);
+        const existing = convs.find((c) => c.id === err.conversationId);
+        if (existing) setCategory(conversationCategory(existing));
+        setShowNewConv(false);
+        setNewForm({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "", sessionKey: "default" });
+        toast({ title: "Atendimento já existente", description: "Esse número já estava em atendimento — abri a conversa existente." });
+        return;
+      }
       toast({ title: "Erro", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     }
   };
