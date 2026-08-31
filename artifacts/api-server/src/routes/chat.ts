@@ -1646,7 +1646,12 @@ router.post("/chat/conversations", requireAuth, requireChatAccess(), requirePerm
 
   // Número precisa EXISTIR no WhatsApp para abrir atendimento de WhatsApp.
   // Se o bridge estiver fora do ar ou desconectado, libera (não trava a loja).
-  if ((channel ?? "whatsapp") === "whatsapp" && digits) {
+  // Usa o número NORMALIZADO (com o 9º dígito reposto), não os dígitos crus:
+  // contato compartilhado via vCard costuma vir sem o 9, e mandar os dígitos
+  // crus pro bridge fazia ele responder "não existe" pra números válidos,
+  // travando o botão de iniciar atendimento a partir de contato compartilhado.
+  const checkPhone = normalizePhone(phone) || digits;
+  if ((channel ?? "whatsapp") === "whatsapp" && checkPhone) {
     const bridgeUrl = process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
     const bridgeSecret = createHmac(
       "sha256",
@@ -1656,13 +1661,13 @@ router.post("/chat/conversations", requireAuth, requireChatAccess(), requirePerm
       const r = await fetch(`${bridgeUrl}/whatsapp/check-number`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Bridge-Secret": bridgeSecret },
-        body: JSON.stringify({ phone: digits }),
+        body: JSON.stringify({ phone: checkPhone }),
         signal: AbortSignal.timeout(15_000),
       });
       if (r.ok) {
         const check = await r.json() as { exists?: boolean };
         if (check.exists === false) {
-          res.status(400).json({ error: `O número ${digits} não existe no WhatsApp. Confira o DDD e o nono dígito antes de criar o atendimento.` });
+          res.status(400).json({ error: `O número ${checkPhone} não existe no WhatsApp. Confira o DDD e o nono dígito antes de criar o atendimento.` });
           return;
         }
       }
