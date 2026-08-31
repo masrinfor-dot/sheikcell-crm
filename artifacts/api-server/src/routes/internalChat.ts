@@ -2,7 +2,7 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import { db, internalConversationsTable, internalConversationMembersTable, internalMessagesTable, usersTable, tenantsTable } from "@workspace/db";
 import { eq, and, asc, inArray, sql, ne } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { requireAuth, requireAdmin, requireTenant, isTenantSuspended } from "../middlewares/auth";
+import { requireAuth, requireAdmin, requireAdminOrSupervisor, requireTenant, isTenantSuspended } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import {
   sseEmitter,
@@ -273,14 +273,16 @@ router.get("/internal-chat/conversations", requireAuth, async (req, res): Promis
 });
 
 // ─── Create a group conversation (grupo do chat interno) ───────────────────
-// Só admin cria grupo, escolhendo o nome e os participantes — a pedido do
-// cliente (endurecido depois: supervisor cria grupo há um tempo, mas o pedido
-// mais recente foi "usuário sem ser admin não inicia conversa" — só participa
-// dos grupos que o admin já criou). Conversa direta 1:1 já era admin-only
-// (ver abaixo), então agora as duas seguem a mesma regra. O criador sempre
-// entra como membro. Grupos usam o mesmo escopo dos diretos: só membros veem,
-// recebem eventos e podem enviar mensagens.
-router.post("/internal-chat/conversations/group", requireAdmin, async (req, res): Promise<void> => {
+// Só admin/supervisor cria grupo, escolhendo o nome e os participantes — a
+// pedido do cliente, pra centralizar a comunicação em grupo com quem tem
+// visão de equipe (conversa direta 1:1 continua regra à parte, ver abaixo).
+// Revertido em 31/08: uma rodada anterior tinha restringido isso só a admin
+// por uma leitura literal de "usuário sem ser admin não inicia conversa",
+// mas o pedido original era só sobre 1:1 — o cliente confirmou que quer o
+// supervisor de volta com essa permissão. O criador sempre entra como
+// membro. Grupos usam o mesmo escopo dos diretos: só membros veem, recebem
+// eventos e podem enviar mensagens.
+router.post("/internal-chat/conversations/group", requireAdminOrSupervisor, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const userId = req.session.userId!;
   const { name, memberIds } = req.body as { name?: string; memberIds?: number[] };
