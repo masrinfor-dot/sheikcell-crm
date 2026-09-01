@@ -208,7 +208,7 @@ router.get("/finance/payments/export", requireAuth, async (req, res): Promise<vo
       Status: p.status === "pago" ? "Pago" : "Em aberto",
       "Pago em": p.paidAt ? fmtDate(p.paidAt) : "",
     };
-    if (allocs.length === 0) return [{ ...base, "Filial beneficiada": "", "% rateio": "", "Valor rateado": "" }];
+    if (allocs.length === 0) return [{ ...base, "Filial beneficiada": "", "% rateio": "", "Valor rateado": 0 }];
     return allocs.map((a) => ({
       ...base,
       "Filial beneficiada": storeName(a.storeId),
