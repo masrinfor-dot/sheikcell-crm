@@ -1806,6 +1806,9 @@ export const api = {
       remove: (noteId: number) => req<{ ok: boolean }>(`/crm/notes/${noteId}`, { method: "DELETE" }),
     },
     serviceHistory: (contactId: number) => req<AttendanceLog[]>(`/crm/${contactId}/service-history`),
+    // Tarefas/compromissos vinculados a este cliente (quadro de Tarefas) —
+    // inclui os "retorno agendado" criados a partir do Atendimento.
+    tasks: (contactId: number) => req<Task[]>(`/crm/${contactId}/tasks`),
     customFields: {
       list: () => req<CrmCustomField[]>("/crm/custom-fields"),
       create: (data: { name: string; type?: CrmCustomFieldType; options?: string; sortOrder?: number }) =>

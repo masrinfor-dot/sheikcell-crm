@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   api, canEditModule, type CrmContact, type CrmPurchase, type CrmInternalNote,
-  type AttendanceLog, type Sector, type CrmCustomField, type Store as StoreType,
+  type AttendanceLog, type Sector, type CrmCustomField, type Store as StoreType, type Task,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
@@ -9,6 +9,7 @@ import {
   X, Crown, Star, UserPlus, UserMinus, ShoppingBag, MessageSquare,
   StickyNote, Phone, Mail, Pencil, Trash2, Plus, Check, Clock,
   ChevronDown, Package, Sparkles, MapPin, Store, Compass, Ban, ShieldCheck,
+  CheckSquare, CalendarClock,
 } from "lucide-react";
 
 const PROFILES: { key: CrmContact["profile"]; label: string; color: string; Icon: React.ElementType }[] = [
@@ -52,7 +53,7 @@ function cfValue(fields: Record<string, string> | null | undefined, id: number):
   return typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
 }
 
-type Tab = "overview" | "purchases" | "history" | "notes";
+type Tab = "overview" | "purchases" | "history" | "notes" | "tasks";
 
 interface Props {
   contactId: number;
@@ -70,6 +71,7 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
   const [purchases, setPurchases] = useState<CrmPurchase[]>([]);
   const [notes, setNotes] = useState<CrmInternalNote[]>([]);
   const [history, setHistory] = useState<AttendanceLog[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
 
   // Edit state
@@ -119,6 +121,7 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
     if (tab === "purchases") api.crm.purchases.list(contactId).then(setPurchases).catch(() => {});
     if (tab === "notes") api.crm.notes.list(contactId).then(setNotes).catch(() => {});
     if (tab === "history") api.crm.serviceHistory(contactId).then(setHistory).catch(() => {});
+    if (tab === "tasks") api.crm.tasks(contactId).then(setTasks).catch(() => {});
   }, [tab, contactId]);
 
   const handleSaveEdit = async () => {
@@ -250,6 +253,7 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
     { key: "overview",  label: "Perfil",       Icon: UserPlus },
     { key: "purchases", label: "Compras",       Icon: ShoppingBag },
     { key: "history",   label: "Atendimentos",  Icon: MessageSquare },
+    { key: "tasks",     label: "Tarefas",       Icon: CheckSquare },
     { key: "notes",     label: "Notas",         Icon: StickyNote },
   ];
 
@@ -696,6 +700,47 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
                       </div>
                       {h.resolutionReason && <p className="text-xs text-foreground"><span className="font-medium">Motivo:</span> {h.resolutionReason}</p>}
                       {h.notes && <p className="text-xs text-muted-foreground italic">{h.notes}</p>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── TASKS/AGENDA ── */}
+          {tab === "tasks" && (
+            <div className="p-5 space-y-3">
+              <p className="text-sm font-semibold">Tarefas e Agenda</p>
+              <p className="text-xs text-muted-foreground -mt-2">
+                Compromissos e tarefas do quadro vinculados a este cliente — inclui os retornos agendados a partir do Atendimento.
+              </p>
+              {tasks.length === 0 ? (
+                <div className="text-center py-10 text-muted-foreground">
+                  <CheckSquare className="w-10 h-10 mx-auto mb-2 opacity-30" />
+                  <p className="text-sm">Nenhuma tarefa vinculada</p>
+                  <p className="text-xs mt-1">Agende um retorno na conversa do Atendimento, ou vincule este cliente a uma tarefa no quadro de Tarefas.</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {tasks.map((t) => (
+                    <div key={t.id} className="bg-white rounded-xl border border-border p-3 space-y-1.5">
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="text-sm font-medium">{t.title}</p>
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium shrink-0 ${
+                          t.status === "done" ? "bg-green-100 text-green-700" :
+                          t.status === "doing" ? "bg-blue-100 text-blue-700" :
+                          "bg-gray-100 text-gray-600"
+                        }`}>
+                          {t.status === "done" ? "Concluída" : t.status === "doing" ? "Em andamento" : "A fazer"}
+                        </span>
+                      </div>
+                      {t.description && <p className="text-xs text-muted-foreground whitespace-pre-wrap">{t.description}</p>}
+                      <div className="flex items-center gap-3 text-xs text-muted-foreground flex-wrap">
+                        {t.dueDate && (
+                          <span className="flex items-center gap-1"><CalendarClock className="w-3 h-3" />{fmtDateTime(t.dueDate)}</span>
+                        )}
+                        {t.assignees.length > 0 && <span>Responsável: {t.assignees.map((a) => a.name).join(", ")}</span>}
+                      </div>
                     </div>
                   ))}
                 </div>

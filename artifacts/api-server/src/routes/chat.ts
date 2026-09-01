@@ -1865,6 +1865,30 @@ router.post("/chat/conversations/:id/schedules", requireAuth, requireChatAccess(
   if (!when || isNaN(when.getTime())) { res.status(400).json({ error: "Data/hora inválida" }); return; }
   if (when.getTime() < Date.now() - 60_000) { res.status(400).json({ error: "Escolha um horário no futuro" }); return; }
 
+  // Vincula a tarefa espelho ao contato do CRM desse cliente (mesma
+  // identidade usada em crmSync.ts: variações do número + mesmo setor) — sem
+  // isso a tarefa/agenda ficava sem nenhum jeito de aparecer na ficha do
+  // cliente no CRM, mesmo o campo contactId já existindo há tempo na tabela.
+  const isGroup = (conv.phone ?? "").includes("@g.us");
+  let crmContactId: number | null = null;
+  if (!isGroup) {
+    const variants = phoneVariants(conv.phone);
+    if (variants.length > 0) {
+      const sectorCondition = conv.sectorId != null
+        ? eq(crmContactsTable.sectorId, conv.sectorId)
+        : isNull(crmContactsTable.sectorId);
+      const [match] = await db.select({ id: crmContactsTable.id }).from(crmContactsTable)
+        .where(and(
+          eq(crmContactsTable.tenantId, tenantId),
+          eq(crmContactsTable.isArchived, false),
+          inArray(crmContactsTable.phone, variants),
+          sectorCondition,
+        ))
+        .limit(1);
+      crmContactId = match?.id ?? null;
+    }
+  }
+
   // Tarefa espelho no quadro (lembrete visível para a equipe)
   const [task] = await db.insert(tasksTable).values({
     tenantId,
@@ -1877,6 +1901,7 @@ router.post("/chat/conversations/:id/schedules", requireAuth, requireChatAccess(
     createdById: req.session.userId ?? null,
     sectorId: conv.sectorId,
     dueDate: when,
+    contactId: crmContactId,
   }).returning();
   if (req.session.userId != null) {
     await db.insert(taskAssigneesTable).values({ tenantId, taskId: task!.id, userId: req.session.userId });

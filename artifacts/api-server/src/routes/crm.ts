@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { db, crmContactsTable, crmPurchasesTable, crmInternalNotesTable, crmCustomFieldsTable, sectorsTable, usersTable, attendanceLogsTable, conversationsTable } from "@workspace/db";
+import { db, crmContactsTable, crmPurchasesTable, crmInternalNotesTable, crmCustomFieldsTable, sectorsTable, usersTable, attendanceLogsTable, conversationsTable, tasksTable, taskAssigneesTable } from "@workspace/db";
 import { eq, and, desc, asc, ilike, or, inArray } from "drizzle-orm";
 import { requireAuth, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
@@ -574,6 +574,45 @@ router.get("/crm/:id/service-history", requireAuth, async (req, res): Promise<vo
     .orderBy(desc(attendanceLogsTable.createdAt))
     .limit(50);
   res.json(logs);
+});
+
+// ─── Tarefas/Agenda vinculadas a este cliente ──────────────────────────────
+// Compromissos e tarefas do quadro de Tarefas vinculados a este contato do
+// CRM (campo tasksTable.contactId, que já existia no banco mas não era
+// mostrado em lugar nenhum do CRM) — inclui os "retorno agendado" criados a
+// partir do Atendimento (ver POST /chat/conversations/:id/schedules), que
+// agora já nascem vinculados ao contato certo.
+router.get("/crm/:id/tasks", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const contact = await loadContactWithAccess(id, tenantId, req.session, res);
+  if (!contact) return;
+
+  const rows = await db.select().from(tasksTable)
+    .where(and(eq(tasksTable.tenantId, tenantId), eq(tasksTable.contactId, id), eq(tasksTable.isArchived, false)))
+    .orderBy(desc(tasksTable.dueDate), desc(tasksTable.createdAt));
+
+  const ids = rows.map((t) => t.id);
+  const assigneeRows = ids.length > 0
+    ? await db.select({ taskId: taskAssigneesTable.taskId, id: usersTable.id, name: usersTable.name })
+        .from(taskAssigneesTable)
+        .innerJoin(usersTable, eq(taskAssigneesTable.userId, usersTable.id))
+        .where(inArray(taskAssigneesTable.taskId, ids))
+    : [];
+  const assigneeMap = new Map<number, { id: number; name: string }[]>();
+  for (const a of assigneeRows) {
+    if (!assigneeMap.has(a.taskId)) assigneeMap.set(a.taskId, []);
+    assigneeMap.get(a.taskId)!.push({ id: a.id, name: a.name });
+  }
+
+  res.json(rows.map((t) => ({
+    ...t,
+    sector: null,
+    assignees: assigneeMap.get(t.id) ?? [],
+    createdBy: null,
+    contact: { id: contact.id, name: contact.name, contact: contact.contact },
+  })));
 });
 
 export default router;
