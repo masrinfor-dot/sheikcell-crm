@@ -413,10 +413,10 @@ export default function CrmBoard() {
         phone, name: contact.name, channel: "whatsapp",
         ...(contact.sectorId != null ? { sectorId: contact.sectorId } : {}),
       });
-      requestChatExpand("atendimento", conv.id);
+      requestChatExpand("atendimento", conv.id, "crm");
     } catch (err) {
       if (err instanceof ApiError && err.conversationId != null) {
-        requestChatExpand("atendimento", err.conversationId);
+        requestChatExpand("atendimento", err.conversationId, "crm");
       } else {
         toast({ title: "Erro ao abrir atendimento", description: err instanceof Error ? err.message : "Tente novamente", variant: "destructive" });
       }

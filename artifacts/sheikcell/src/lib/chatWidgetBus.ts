@@ -7,19 +7,24 @@ import { useEffect, useState } from "react";
 // montado por sessão, então um listener por vez é suficiente (mesmo espírito
 // do store do useInternalChatNotifier).
 export type ChatExpandModule = "atendimento" | "equipe";
+// origin "crm": o pedido veio do botão "ir para o atendimento" do CRM —
+// os dashboards usam isso pra mostrar um botão "Voltar ao CRM" na
+// conversa aberta (ver handleGoToChat em CrmBoard.tsx).
+export type ChatExpandOrigin = "crm";
 export type ChatExpandRequest = {
   module: ChatExpandModule;
   conversationId: number | null;
   requestId: number;
+  origin?: ChatExpandOrigin;
 };
 
 let listener: ((req: ChatExpandRequest) => void) | null = null;
 let requestCounter = 0;
 
-/** Chamado pelo GlobalChatWidget ao clicar em "expandir". */
-export function requestChatExpand(module: ChatExpandModule, conversationId: number | null): void {
+/** Chamado pelo GlobalChatWidget (ou pelo CRM) ao clicar em "expandir". */
+export function requestChatExpand(module: ChatExpandModule, conversationId: number | null, origin?: ChatExpandOrigin): void {
   requestCounter += 1;
-  listener?.({ module, conversationId, requestId: requestCounter });
+  listener?.({ module, conversationId, requestId: requestCounter, origin });
 }
 
 /** Registrado pelo AdminDashboard/AttendantDashboard pra reagir ao pedido. */

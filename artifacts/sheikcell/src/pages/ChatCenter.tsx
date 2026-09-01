@@ -1014,6 +1014,10 @@ type ChatCenterProps = {
   // cada pedido (garante reabrir mesmo pedindo a mesma conversa de novo).
   focusConversationId?: number | null;
   focusRequestId?: number;
+  // Presente quando a conversa foi aberta pelo botão "ir para o atendimento"
+  // do CRM (ver CrmBoard.tsx) — mostra um botão "Voltar ao CRM" no
+  // cabeçalho da conversa que troca de aba de volta pro Quadro do CRM.
+  onBackToCrm?: () => void;
 };
 
 type FilePreviewItem = { file: File; previewUrl: string | null; kind: "image" | "video" | "other" };
@@ -1064,6 +1068,7 @@ export default function ChatCenter({
   onActiveConversationChange,
   focusConversationId,
   focusRequestId,
+  onBackToCrm,
 }: ChatCenterProps = {}) {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -3282,6 +3287,18 @@ export default function ChatCenter({
             >
               <ChevronDown className="w-5 h-5 rotate-90" />
             </button>
+            {onBackToCrm && (
+              <button
+                type="button"
+                onClick={onBackToCrm}
+                data-testid="button-back-to-crm"
+                title="Voltar ao CRM"
+                className="flex items-center gap-1 pl-1.5 pr-2.5 py-1.5 -ml-0.5 rounded-lg text-xs font-semibold text-primary bg-primary/10 hover:bg-primary/20 transition shrink-0"
+              >
+                <ChevronLeft className="w-4 h-4" />
+                CRM
+              </button>
+            )}
             <MediaLightboxProvider>
               <HeaderAvatar name={activeConv.name} src={activeConv.avatarUrl} />
             </MediaLightboxProvider>

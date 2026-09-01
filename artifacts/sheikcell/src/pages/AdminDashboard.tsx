@@ -139,6 +139,9 @@ export default function AdminDashboard() {
   // "Expandir" no widget flutuante global: foca a mesma conversa aqui.
   const [focusConversationId, setFocusConversationId] = useState<number | null>(null);
   const [focusRequestId, setFocusRequestId] = useState(0);
+  // Veio do botão "ir para o atendimento" do CRM? Se sim, mostra um botão
+  // "Voltar ao CRM" na conversa aberta (ver ChatCenter onBackToCrm).
+  const [focusFromCrm, setFocusFromCrm] = useState(false);
   const [focusInternalConversationId, setFocusInternalConversationId] = useState<number | null>(null);
   const [focusInternalRequestId, setFocusInternalRequestId] = useState(0);
   useChatExpandListener(useCallback((req) => {
@@ -146,6 +149,7 @@ export default function AdminDashboard() {
       setTab("chat");
       setFocusConversationId(req.conversationId);
       setFocusRequestId(req.requestId);
+      setFocusFromCrm(req.origin === "crm");
     } else {
       setTab("equipe");
       setFocusInternalConversationId(req.conversationId);
@@ -1013,7 +1017,11 @@ export default function AdminDashboard() {
         {/* ChatCenter fica SEMPRE montado (escondido nas outras abas) para o
             alarme de mensagem sem resposta tocar e aparecer em qualquer tela. */}
         <div className={tab === "chat" ? "" : "hidden"}>
-          <ChatCenter focusConversationId={focusConversationId} focusRequestId={focusRequestId} />
+          <ChatCenter
+            focusConversationId={focusConversationId}
+            focusRequestId={focusRequestId}
+            onBackToCrm={focusFromCrm ? () => { setFocusFromCrm(false); setTab("crm"); } : undefined}
+          />
         </div>
 
         {tab === "equipe" && (
