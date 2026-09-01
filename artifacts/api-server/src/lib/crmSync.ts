@@ -56,7 +56,7 @@ export async function syncCrmAttendant(conv: {
     // Multi-loja: só sincroniza com o contato do CRM da MESMA loja. Compara
     // por todas as variações plausíveis do número (com/sem DDI, com/sem o 9º
     // dígito) pra não perder o contato salvo num formato antigo.
-    const [existing] = await db.select().from(crmContactsTable)
+    let [existing] = await db.select().from(crmContactsTable)
       .where(and(
         eq(crmContactsTable.tenantId, conv.tenantId),
         eq(crmContactsTable.isArchived, false),
@@ -64,16 +64,42 @@ export async function syncCrmAttendant(conv: {
         sectorCondition,
       ))
       .limit(1);
+    // Setor mudou desde que a ficha foi criada (ex.: vendedor de outro setor
+    // assume um Potencial — o claim move a conversa pro setor dele ANTES de
+    // chamar este sync, ver chat.ts .../claim). Sem esse fallback a ficha
+    // antiga fica presa no setor velho pra sempre, "grudada" em Potencial
+    // mesmo já tendo dono, porque a busca acima nunca mais bate. Procura só
+    // pela identidade (sem trava de setor) e, se achar, move a ficha junto
+    // pro setor atual da conversa.
+    let sectorMismatch = false;
+    if (!existing) {
+      const [fallback] = await db.select().from(crmContactsTable)
+        .where(and(
+          eq(crmContactsTable.tenantId, conv.tenantId),
+          eq(crmContactsTable.isArchived, false),
+          identityCondition,
+        ))
+        .orderBy(desc(crmContactsTable.updatedAt))
+        .limit(1);
+      if (fallback) {
+        existing = fallback;
+        sectorMismatch = fallback.sectorId !== conv.sectorId;
+      }
+    }
     if (!existing) return;
     const stage = crmStageForConversation(conv);
     const reasonChanged = stage === "finalized" && resolutionReason !== undefined && resolutionReason !== existing.lastResolutionReason;
-    if (existing.attendantId === conv.assigneeId && existing.status === stage && !reasonChanged) return;
+    if (existing.attendantId === conv.assigneeId && existing.status === stage && !reasonChanged && !sectorMismatch) return;
+    if (sectorMismatch) {
+      logger.info({ contactId: existing.id, fromSector: existing.sectorId, toSector: conv.sectorId, phone: conv.phone }, "CRM contact reparented to new sector (cross-sector claim/transfer)");
+    }
 
     const [updated] = await db.update(crmContactsTable)
       .set({
         attendantId: conv.assigneeId,
         status: stage,
         updatedAt: new Date(),
+        ...(sectorMismatch ? { sectorId: conv.sectorId } : {}),
         // Motivo de finalização: grava quando a conversa acabou de ser resolvida
         // (resolutionReason informado); some ao reabrir (voltou a não ser "finalized").
         ...(stage === "finalized"
@@ -217,19 +243,36 @@ export async function reconcileCrmStages(tenantId: number): Promise<{ checked: n
         })();
     if (!identityCondition) continue;
 
-    const [latestConv] = await db.select().from(conversationsTable)
+    let [latestConv] = await db.select().from(conversationsTable)
       .where(and(eq(conversationsTable.tenantId, tenantId), identityCondition, sectorCondition))
       .orderBy(desc(conversationsTable.updatedAt))
       .limit(1);
+    // Mesmo motivo do fallback em syncCrmAttendant: se a conversa mudou de
+    // setor (claim cross-setor) depois que essa ficha foi criada, a busca
+    // acima (travada no setor antigo da ficha) nunca encontra a conversa de
+    // verdade e o "Recalcular status" nunca corrige a ficha presa. Procura de
+    // novo só pela identidade, em qualquer setor.
+    let sectorMismatch = false;
+    if (!latestConv) {
+      const [fallback] = await db.select().from(conversationsTable)
+        .where(and(eq(conversationsTable.tenantId, tenantId), identityCondition))
+        .orderBy(desc(conversationsTable.updatedAt))
+        .limit(1);
+      if (fallback) {
+        latestConv = fallback;
+        sectorMismatch = fallback.sectorId !== contact.sectorId;
+      }
+    }
     if (!latestConv) continue;
 
     const stage = crmStageForConversation(latestConv);
-    if (contact.status === stage && contact.attendantId === latestConv.assigneeId) continue;
+    if (contact.status === stage && contact.attendantId === latestConv.assigneeId && !sectorMismatch) continue;
 
     await db.update(crmContactsTable).set({
       status: stage,
       attendantId: latestConv.assigneeId,
       updatedAt: new Date(),
+      ...(sectorMismatch ? { sectorId: latestConv.sectorId } : {}),
       ...(stage === "finalized"
         ? (contact.status !== "finalized" ? { finalizedAt: new Date() } : {})
         : { lastResolutionReason: null, finalizedAt: null }),
