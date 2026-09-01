@@ -333,12 +333,45 @@ router.get("/chat/conversations", requireAuth, requireChatAccess(), async (req, 
     conditions.push(sql`${conversationsTable.labels} ILIKE ${'%' + label + '%'}`);
   }
 
-  const rows = await db
-    .select()
-    .from(conversationsTable)
-    .where(and(...conditions))
-    .orderBy(desc(conversationsTable.lastMessageAt))
-    .limit(100);
+  // Sem filtro de status explícito (uso normal da tela: a Central carrega tudo
+  // de uma vez e o frontend separa em abas client-side por categoria — ver
+  // conversationCategory() em ChatCenter.tsx): antes disso rodava UM único
+  // ORDER BY lastMessageAt LIMIT 100 misturando as 4 categorias (Potenciais/
+  // Pendentes/Ativos/Resolvidas). Numa loja com bastante "Ativos" recentes,
+  // isso empurrava as Pendentes/Potenciais mais paradas pra fora do lote de
+  // 100 inteiro — a contagem real da abinha (endpoint /counts, já corrigido
+  // antes) mostrava certo (ex.: 20 Pendentes), mas a LISTA por trás da aba só
+  // trazia 3, porque as outras 17 nunca entravam nesse top-100 global (bug
+  // reportado: "os atendimentos pendentes não aparecem pro admin"). Corrigido
+  // buscando até CATEGORY_LIST_CAP de CADA categoria separadamente, com as
+  // mesmas condições de categoria usadas em /counts — assim nenhuma categoria
+  // fica escondida atrás de outra mais "barulhenta".
+  const CATEGORY_LIST_CAP = 500;
+  let rows: (typeof conversationsTable.$inferSelect)[];
+  if (status) {
+    rows = await db
+      .select()
+      .from(conversationsTable)
+      .where(and(...conditions))
+      .orderBy(desc(conversationsTable.lastMessageAt))
+      .limit(100);
+  } else {
+    const categoryPredicates = [
+      and(sql`${conversationsTable.assigneeId} IS NOT NULL`, notInArray(conversationsTable.status, ["resolved", "archived"]))!, // ativos
+      and(isNull(conversationsTable.assigneeId), eq(conversationsTable.status, "pending"))!, // pendentes
+      and(isNull(conversationsTable.assigneeId), notInArray(conversationsTable.status, ["pending", "resolved", "archived"]))!, // potenciais
+      inArray(conversationsTable.status, ["resolved", "archived"]), // resolvidas
+    ];
+    const perCategory = await Promise.all(
+      categoryPredicates.map((pred) =>
+        db.select().from(conversationsTable)
+          .where(and(...conditions, pred))
+          .orderBy(desc(conversationsTable.lastMessageAt))
+          .limit(CATEGORY_LIST_CAP)
+      ),
+    );
+    rows = perCategory.flat();
+  }
 
   const sectors = await db.select().from(sectorsTable).where(eq(sectorsTable.tenantId, tenantId));
   const users = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable).where(eq(usersTable.tenantId, tenantId));
