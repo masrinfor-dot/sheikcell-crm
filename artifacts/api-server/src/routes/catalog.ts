@@ -749,6 +749,48 @@ function cleanParsedVariants(raw: unknown): ParsedVariant[] {
   return list.length > 0 ? list : [{ storage: null, color: null, costPrice: null }];
 }
 
+// Junta itens com o mesmo modelo+condição (comparação sem diferenciar maiúsculas
+// e espaços) num único item, combinando variantes/cores/categoria — ver o
+// comentário no ponto de uso (import/parse) pra o motivo dessa segunda passada.
+function mergeParsedItems(items: ParsedItem[]): ParsedItem[] {
+  const normKey = (model: string, condition: string) => `${model.trim().toLowerCase().replace(/\s+/g, " ")}|${condition}`;
+  const order: string[] = [];
+  const byKey = new Map<string, ParsedItem>();
+  for (const it of items) {
+    const key = normKey(it.model, it.condition);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, { ...it, variants: [...it.variants], colors: [...it.colors] });
+      order.push(key);
+      continue;
+    }
+    for (const v of it.variants) {
+      const isPlaceholder = v.storage == null && v.color == null && v.costPrice == null;
+      if (isPlaceholder) continue;
+      const dup = existing.variants.some((ev) => ev.storage === v.storage && ev.color === v.color);
+      if (!dup) existing.variants.push(v);
+    }
+    for (const c of it.colors) {
+      if (!existing.colors.includes(c)) existing.colors.push(c);
+    }
+    if (existing.categoryId == null && existing.categoryPath == null) {
+      existing.categoryId = it.categoryId;
+      existing.categoryPath = it.categoryPath;
+    }
+    if (it.rawLine && existing.rawLine !== it.rawLine && !existing.rawLine.includes(it.rawLine)) {
+      existing.rawLine = existing.rawLine ? `${existing.rawLine} | ${it.rawLine}` : it.rawLine;
+    }
+    // Recalcula status/issue em cima das variantes já mescladas — um item que
+    // sozinho parecia "sem preço" pode ter ganhado preço do outro bloco mesclado.
+    const hasPrice = existing.variants.some((v) => v.costPrice != null);
+    const modelMissing = !existing.model || existing.model === "(modelo não identificado)";
+    const missing = modelMissing || !hasPrice;
+    existing.status = missing ? "pending" : "approved";
+    existing.issue = missing ? (modelMissing ? "Modelo não identificado" : "Preço não identificado") : null;
+  }
+  return order.map((k) => byKey.get(k)!);
+}
+
 // Interpreta a sugestão de categoria da IA (ex.: ["Celulares","Samsung"]).
 // Casa contra as categorias já cadastradas na loja, nível por nível
 // (case-insensitive). Se o caminho inteiro já existe, devolve o id direto —
@@ -822,7 +864,7 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
     const arr = extractJsonArray(raw);
     if (!arr) { res.status(502).json({ error: "A IA não retornou uma lista válida. Tente novamente." }); return; }
 
-    const items: ParsedItem[] = arr.slice(0, 200).map((raw) => {
+    const rawItems: ParsedItem[] = arr.slice(0, 200).map((raw) => {
       const o = (raw ?? {}) as Record<string, unknown>;
       const model = clean(o.model, 120);
       const variants = cleanParsedVariants(o.variants);
@@ -841,6 +883,14 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
         categoryPath,
       };
     });
+    // Segunda passada, determinística (não depende da IA acertar sempre): mescla
+    // itens que vieram separados mas são o MESMO aparelho (modelo+condição iguais)
+    // — acontece quando a lista do fornecedor lista o mesmo modelo em blocos
+    // diferentes (ex.: um bloco de 256GB e outro de 1TB) e a IA, mesmo instruída
+    // a agrupar tudo, ainda assim devolve dois itens. Sem essa mesclagem, a tela
+    // de importação mostra dois cartões pro mesmo modelo em vez de um só com
+    // todas as combinações de armazenamento/cor como variantes selecionáveis.
+    const items: ParsedItem[] = mergeParsedItems(rawItems);
     // Caminhos de categoria sugeridos que ainda não existem na loja, deduplicados —
     // o front pede autorização do lojista antes de criar qualquer um deles.
     const seen = new Set<string>();
