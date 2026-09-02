@@ -28,6 +28,7 @@ router.get("/trade-in", requireAuth, async (req, res): Promise<void> => {
       id: tradeInEvaluationsTable.id,
       userId: tradeInEvaluationsTable.userId,
       userName: usersTable.name,
+      customerName: tradeInEvaluationsTable.customerName,
       device: tradeInEvaluationsTable.device,
       brand: tradeInEvaluationsTable.brand,
       model: tradeInEvaluationsTable.model,
@@ -38,6 +39,16 @@ router.get("/trade-in", requireAuth, async (req, res): Promise<void> => {
       suggestedPrice: tradeInEvaluationsTable.suggestedPrice,
       aiSummary: tradeInEvaluationsTable.aiSummary,
       createdAt: tradeInEvaluationsTable.createdAt,
+      // Precisa vir no histórico pra tela decidir se mostra "Finalizar compra"
+      // (só quando ainda não fechado) e os dados já preenchidos quando fechado.
+      sellerCustomerName: tradeInEvaluationsTable.sellerCustomerName,
+      sellerCpf: tradeInEvaluationsTable.sellerCpf,
+      imei: tradeInEvaluationsTable.imei,
+      finalAgreedPrice: tradeInEvaluationsTable.finalAgreedPrice,
+      closedAt: tradeInEvaluationsTable.closedAt,
+      sellerRg: tradeInEvaluationsTable.sellerRg,
+      sellerAddress: tradeInEvaluationsTable.sellerAddress,
+      sellerPhone: tradeInEvaluationsTable.sellerPhone,
     })
     .from(tradeInEvaluationsTable)
     .leftJoin(usersTable, eq(tradeInEvaluationsTable.userId, usersTable.id))
@@ -237,9 +248,9 @@ router.post("/trade-in/base-price", requireAuth, requirePerm("usar_ia"), async (
 // Avaliação com IA: pesquisa preços atuais na web e sugere valor de compra.
 router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { device, answers, brand, model, memory, color } = req.body as {
+  const { device, answers, brand, model, memory, color, customerName } = req.body as {
     device?: string; answers?: Answers;
-    brand?: string; model?: string; memory?: string; color?: string;
+    brand?: string; model?: string; memory?: string; color?: string; customerName?: string;
   };
   // Campos estruturados (novo formulário). Se vierem, o texto do aparelho é
   // montado a partir deles; senão vale o texto livre (compatibilidade).
@@ -247,6 +258,9 @@ router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (re
   const fModel = clean(model, 60);
   const fMemory = clean(memory, 20);
   const fColor = clean(color, 30);
+  // Nome do cliente é opcional aqui (só referência/busca no histórico) — quem
+  // bloqueia de verdade é o CPF/nome exigido ao FECHAR o negócio (etapa 4).
+  const fCustomerName = clean(customerName, 120);
   const composed = [fBrand, fModel, fMemory, fColor].filter(Boolean).join(" ");
   const dev = (composed || (device ?? "")).trim().slice(0, 160);
   if (!dev) { res.status(400).json({ error: "Informe a marca e o modelo do aparelho" }); return; }
@@ -333,6 +347,7 @@ router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (re
     const [saved] = await db.insert(tradeInEvaluationsTable).values({
       tenantId,
       userId: req.session.userId ?? null,
+      customerName: fCustomerName || null,
       device: dev.slice(0, 160),
       brand: fBrand || null,
       model: fModel || null,
@@ -344,7 +359,10 @@ router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (re
       aiSummary: summary || null,
     }).returning();
 
-    res.json({ id: saved.id, device: saved.device, marketPrice, suggestedPrice, summary, createdAt: saved.createdAt });
+    res.json({
+      id: saved.id, device: saved.device, marketPrice, suggestedPrice, summary, createdAt: saved.createdAt,
+      customerName: saved.customerName,
+    });
   } catch (err) {
     req.log.error({ err }, "Trade-in AI evaluation failed");
     res.status(503).json({ error: "A IA está indisponível no momento. Tente novamente em instantes." });

@@ -57,6 +57,9 @@ export default function Avaliacao() {
   const [showMarginCfg, setShowMarginCfg] = useState(false);
   const [cfgMargins, setCfgMargins] = useState<TradeInMargins>({ t1: 40, t2: 30, t3: 20 });
   const [savingMargins, setSavingMargins] = useState(false);
+  // Nome do cliente já na simulação (etapas 1-3) — pedido do lojista pra saber
+  // de quem é cada avaliação no histórico, mesmo antes de fechar negócio.
+  const [customerName, setCustomerName] = useState("");
   const [brand, setBrand] = useState("");
   const [otherBrand, setOtherBrand] = useState(false);
   const [model, setModel] = useState("");
@@ -92,6 +95,18 @@ export default function Avaliacao() {
   const [histSearch, setHistSearch] = useState("");
   const [histBrand, setHistBrand] = useState("");
   const [histMemory, setHistMemory] = useState("");
+  // Finalizar compra direto de dentro do histórico (avaliação feita numa
+  // sessão anterior, ou o cliente saiu pra pensar e voltou depois) — mesmos
+  // campos da etapa 4, mas fechando uma avaliação passada em vez da atual.
+  const [histClosingId, setHistClosingId] = useState<number | null>(null);
+  const [histDealName, setHistDealName] = useState("");
+  const [histDealCpf, setHistDealCpf] = useState("");
+  const [histDealImei, setHistDealImei] = useState("");
+  const [histDealPrice, setHistDealPrice] = useState("");
+  const [histDealRg, setHistDealRg] = useState("");
+  const [histDealAddress, setHistDealAddress] = useState("");
+  const [histDealPhone, setHistDealPhone] = useState("");
+  const [histClosing, setHistClosing] = useState(false);
 
   // Perguntas configuráveis (servidor) + editor do admin.
   const [qConfig, setQConfig] = useState<TradeInQuestionsConfig | null>(null);
@@ -108,6 +123,7 @@ export default function Avaliacao() {
   }, []);
 
   const deviceOk = Boolean(brand.trim() && model.trim());
+  const customerNameOk = Boolean(customerName.trim());
   const questions: TradeInQuestion[] = qConfig ? (isAppleBrand(brand) ? qConfig.apple : qConfig.android) : [];
   const allAnswered = deviceOk && questions.length > 0 && questions.every((q) => answers[q.key]);
   const answeredCount = questions.filter((q) => answers[q.key]).length;
@@ -118,7 +134,7 @@ export default function Avaliacao() {
 
   // Etapa 1 → 2: busca o preço base (valor máximo em perfeito estado).
   const handleContinue = async () => {
-    if (!deviceOk || loadingBase) return;
+    if (!deviceOk || !customerNameOk || loadingBase) return;
     setLoadingBase(true);
     setBasePrice(""); setBaseMarket("");
     try {
@@ -142,12 +158,15 @@ export default function Avaliacao() {
     try {
       const r = await api.tradeIn.evaluate({
         brand: brand.trim(), model: model.trim(), memory: memory.trim(), color: color.trim(), marginTable,
-        basePrice: basePrice || undefined, answers,
+        basePrice: basePrice || undefined, answers, customerName: customerName.trim() || undefined,
       });
       setResult(r);
       setResultTable(marginTable);
       setOfferTable(marginTable);
       setDocumentPhotos([]); setDevicePhotos([]);
+      // Pré-preenche o nome na etapa 4 (fechar negócio) com o nome já
+      // informado na simulação — o vendedor ainda pode ajustar/corrigir.
+      setDealName(customerName.trim());
       setStep(3);
       fetchHistory();
     } catch (err) {
@@ -175,6 +194,7 @@ export default function Avaliacao() {
   };
 
   const resetForm = () => {
+    setCustomerName("");
     setBrand(""); setOtherBrand(false); setModel(""); setMemory(""); setColor("");
     setBasePrice(""); setBaseMarket("");
     setAnswers({}); setResult(null); setStep(1);
@@ -258,18 +278,23 @@ export default function Avaliacao() {
 
   // Abre uma janela nova com a nota de compra pronta pra imprimir (sem
   // depender de PDF/servidor — usa window.print() do próprio navegador).
-  const handlePrintNote = () => {
-    if (!result) return;
+  // Recebe os dados como parâmetro pra poder ser reaproveitada tanto pelo
+  // fechamento ao vivo (etapa 4) quanto por uma avaliação já fechada, pelo
+  // histórico (ver printNoteFromHistory).
+  const printNote = (data: {
+    device: string; name: string; cpf: string; rg: string; address: string; phone: string;
+    imei: string; price: string; dateStr: string;
+  }) => {
     const rows: [string, string][] = [
-      ["Aparelho", result.device],
-      ["Nome do vendedor", dealName || "—"],
-      ["CPF", dealCpf || "—"],
-      ["RG", dealRg || "—"],
-      ["Endereço", dealAddress || "—"],
-      ["Telefone", dealPhone || "—"],
-      ["IMEI do aparelho", dealImei || "—"],
-      ["Valor pago", dealPrice || "—"],
-      ["Data", new Date().toLocaleString("pt-BR")],
+      ["Aparelho", data.device],
+      ["Nome do vendedor", data.name || "—"],
+      ["CPF", data.cpf || "—"],
+      ["RG", data.rg || "—"],
+      ["Endereço", data.address || "—"],
+      ["Telefone", data.phone || "—"],
+      ["IMEI do aparelho", data.imei || "—"],
+      ["Valor pago", data.price || "—"],
+      ["Data", data.dateStr],
     ];
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>Nota de compra</title>
 <style>
@@ -299,7 +324,64 @@ export default function Avaliacao() {
     w.onload = () => { w.focus(); w.print(); };
   };
 
-  // Filtros do histórico: pesquisa livre (aparelho/vendedor/cor) + marca + memória.
+  // Fechamento ao vivo (etapa 4) — usa o estado atual do formulário.
+  const handlePrintNote = () => {
+    if (!result) return;
+    printNote({
+      device: result.device, name: dealName, cpf: dealCpf, rg: dealRg, address: dealAddress,
+      phone: dealPhone, imei: dealImei, price: dealPrice, dateStr: new Date().toLocaleString("pt-BR"),
+    });
+  };
+
+  // Reimprimir a nota de uma avaliação já fechada, direto do histórico.
+  const printNoteFromHistory = (h: TradeInEvaluation) => {
+    printNote({
+      device: h.device, name: h.sellerCustomerName ?? "", cpf: h.sellerCpf ?? "", rg: h.sellerRg ?? "",
+      address: h.sellerAddress ?? "", phone: h.sellerPhone ?? "", imei: h.imei ?? "", price: h.finalAgreedPrice ?? "",
+      dateStr: h.closedAt ? new Date(h.closedAt).toLocaleString("pt-BR") : new Date().toLocaleString("pt-BR"),
+    });
+  };
+
+  // Abre o mini-formulário de "Finalizar compra" pra uma avaliação do
+  // histórico (pré-preenche o nome com o que já foi informado na simulação).
+  const openHistoryClose = (h: TradeInEvaluation) => {
+    setHistClosingId(h.id);
+    setHistDealName(h.customerName ?? "");
+    setHistDealCpf(""); setHistDealImei(""); setHistDealPrice("");
+    setHistDealRg(""); setHistDealAddress(""); setHistDealPhone("");
+  };
+
+  const handleCloseFromHistory = async () => {
+    if (histClosingId == null || histClosing) return;
+    const name = histDealName.trim();
+    const cpf = histDealCpf.trim();
+    const imei = histDealImei.trim();
+    const price = histDealPrice.trim();
+    if (!name || !cpf || !imei || !price) {
+      toast({ title: "Preencha todos os campos para fechar o negócio", variant: "destructive" });
+      return;
+    }
+    setHistClosing(true);
+    try {
+      const saved = await api.tradeIn.close(histClosingId, {
+        sellerCustomerName: name, sellerCpf: cpf, imei, finalAgreedPrice: price,
+        sellerRg: histDealRg.trim() || undefined, sellerAddress: histDealAddress.trim() || undefined,
+        sellerPhone: histDealPhone.trim() || undefined,
+      });
+      // Atualiza a linha na hora, sem esperar um refetch — soma ao fetchHistory()
+      // (que também roda) pra manter tudo consistente com o servidor.
+      setHistory((prev) => prev.map((h) => (h.id === histClosingId ? { ...h, ...saved } : h)));
+      setHistClosingId(null);
+      toast({ title: "Negócio fechado com sucesso" });
+      fetchHistory();
+    } catch (err) {
+      toast({ title: "Erro ao fechar negócio", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setHistClosing(false);
+    }
+  };
+
+  // Filtros do histórico: pesquisa livre (aparelho/vendedor/cliente/cor) + marca + memória.
   const brandOptions = [...new Set(history.map((h) => h.brand).filter(Boolean))] as string[];
   const memoryOptions = [...new Set(history.map((h) => h.memory).filter(Boolean))] as string[];
   const q = histSearch.trim().toLowerCase();
@@ -307,7 +389,8 @@ export default function Avaliacao() {
     if (histBrand && h.brand !== histBrand) return false;
     if (histMemory && h.memory !== histMemory) return false;
     if (!q) return true;
-    const hay = [h.device, h.brand, h.model, h.memory, h.color, h.userName].filter(Boolean).join(" ").toLowerCase();
+    const hay = [h.device, h.brand, h.model, h.memory, h.color, h.userName, h.customerName, h.sellerCustomerName]
+      .filter(Boolean).join(" ").toLowerCase();
     return hay.includes(q);
   });
 
@@ -337,7 +420,7 @@ export default function Avaliacao() {
         <div className="shk-card p-4 space-y-3">
           <div className="flex gap-2 flex-wrap">
             <input value={histSearch} onChange={(e) => setHistSearch(e.target.value)}
-              placeholder="🔎 Pesquisar aparelho, cor ou vendedor..."
+              placeholder="🔎 Pesquisar aparelho, cor, vendedor ou cliente..."
               data-testid="input-tradein-history-search"
               className="flex-1 min-w-[180px] px-3 py-2 rounded-xl border border-border text-xs" />
             <select value={histBrand} onChange={(e) => setHistBrand(e.target.value)}
@@ -363,17 +446,82 @@ export default function Avaliacao() {
                 {history.length === 0 ? "Nenhuma avaliação feita ainda." : "Nada encontrado com esses filtros."}
               </p>
             ) : filteredHistory.map((h) => (
-              <div key={h.id} className="flex items-start justify-between gap-2 border-b border-border/50 pb-2 last:border-0">
-                <div className="min-w-0">
-                  <p className="text-xs font-bold break-words">{h.device}</p>
-                  <p className="text-[10px] text-muted-foreground">
-                    {h.userName ?? "—"} · {new Date(h.createdAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
-                    {h.color ? ` · ${h.color}` : ""}
-                  </p>
+              <div key={h.id} className="border-b border-border/50 pb-2 last:border-0">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold break-words">{h.device}</p>
+                    <p className="text-[10px] text-muted-foreground">
+                      {h.customerName ? `Cliente: ${h.customerName}` : "Cliente não informado"}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground">
+                      Avaliado por {h.userName ?? "—"} · {new Date(h.createdAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                      {h.color ? ` · ${h.color}` : ""}
+                    </p>
+                  </div>
+                  <span className="text-xs font-bold text-green-700 bg-green-50 border border-green-100 px-2 py-0.5 rounded-full shrink-0">
+                    {h.suggestedPrice ?? "—"}
+                  </span>
                 </div>
-                <span className="text-xs font-bold text-green-700 bg-green-50 border border-green-100 px-2 py-0.5 rounded-full shrink-0">
-                  {h.suggestedPrice ?? "—"}
-                </span>
+                <div className="flex items-center gap-2 mt-1.5">
+                  {h.closedAt ? (
+                    <>
+                      <span className="text-[10px] font-bold text-green-700 bg-green-50 border border-green-100 px-2 py-0.5 rounded-full">
+                        ✓ Negócio fechado{h.finalAgreedPrice ? ` · ${h.finalAgreedPrice}` : ""}
+                      </span>
+                      <button onClick={() => printNoteFromHistory(h)} data-testid={`button-history-print-${h.id}`}
+                        className="flex items-center gap-1 text-[10px] font-semibold text-primary">
+                        <Printer className="w-3 h-3" /> Reimprimir nota
+                      </button>
+                    </>
+                  ) : canEdit ? (
+                    histClosingId === h.id ? null : (
+                      <button onClick={() => openHistoryClose(h)} data-testid={`button-history-finalize-${h.id}`}
+                        className="text-[10px] font-bold text-primary underline">
+                        Finalizar compra
+                      </button>
+                    )
+                  ) : (
+                    <span className="text-[10px] text-muted-foreground">Negócio ainda não fechado</span>
+                  )}
+                </div>
+                {histClosingId === h.id && (
+                  <div className="mt-2 p-2.5 rounded-xl border border-border bg-secondary/40 space-y-2">
+                    <p className="text-[11px] font-bold">Fechar negócio desta avaliação</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <input value={histDealName} onChange={(e) => setHistDealName(e.target.value)}
+                        placeholder="Nome do cliente vendedor *" data-testid={`input-history-name-${h.id}`}
+                        className="w-full px-2.5 py-2 rounded-lg border border-border text-xs" />
+                      <input value={histDealCpf} onChange={(e) => setHistDealCpf(e.target.value)}
+                        placeholder="CPF *" data-testid={`input-history-cpf-${h.id}`}
+                        className="w-full px-2.5 py-2 rounded-lg border border-border text-xs" />
+                      <input value={histDealImei} onChange={(e) => setHistDealImei(e.target.value)}
+                        placeholder="IMEI do aparelho *" data-testid={`input-history-imei-${h.id}`}
+                        className="w-full px-2.5 py-2 rounded-lg border border-border text-xs" />
+                      <input value={histDealPrice} onChange={(e) => setHistDealPrice(e.target.value)}
+                        placeholder="Valor final pago *" data-testid={`input-history-price-${h.id}`}
+                        className="w-full px-2.5 py-2 rounded-lg border border-border text-xs" />
+                      <input value={histDealRg} onChange={(e) => setHistDealRg(e.target.value)}
+                        placeholder="RG" data-testid={`input-history-rg-${h.id}`}
+                        className="w-full px-2.5 py-2 rounded-lg border border-border text-xs" />
+                      <input value={histDealPhone} onChange={(e) => setHistDealPhone(e.target.value)}
+                        placeholder="Telefone" data-testid={`input-history-phone-${h.id}`}
+                        className="w-full px-2.5 py-2 rounded-lg border border-border text-xs" />
+                      <input value={histDealAddress} onChange={(e) => setHistDealAddress(e.target.value)}
+                        placeholder="Endereço" data-testid={`input-history-address-${h.id}`}
+                        className="w-full px-2.5 py-2 rounded-lg border border-border text-xs sm:col-span-2" />
+                    </div>
+                    <div className="flex gap-2">
+                      <button onClick={handleCloseFromHistory} disabled={histClosing} data-testid={`button-history-close-${h.id}`}
+                        className="flex-1 px-3 py-2 rounded-lg bg-primary text-white text-xs font-bold disabled:opacity-40">
+                        {histClosing ? "Fechando..." : "Fechar negócio"}
+                      </button>
+                      <button onClick={() => setHistClosingId(null)} disabled={histClosing}
+                        className="px-3 py-2 rounded-lg border border-border text-xs font-semibold">
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -416,6 +564,12 @@ export default function Avaliacao() {
       {/* Etapa 1: Aparelho */}
       {currentStep === 1 && (
         <div className="shk-card p-4 md:p-5 space-y-4">
+          <div>
+            <p className="text-[11px] font-semibold text-muted-foreground mb-0.5">Nome do cliente *</p>
+            <input value={customerName} onChange={(e) => setCustomerName(e.target.value)}
+              placeholder="Nome de quem está fazendo a simulação" data-testid="input-tradein-customer-name"
+              className="w-full px-3 py-2.5 rounded-xl border border-border text-sm" />
+          </div>
           <label className="text-sm font-bold flex items-center gap-1.5">
             <Smartphone className="w-4 h-4 text-primary" /> Qual é o aparelho?
           </label>
@@ -507,14 +661,18 @@ export default function Avaliacao() {
             </div>
           </div>
 
-          <button onClick={handleContinue} disabled={!deviceOk || loadingBase}
+          <button onClick={handleContinue} disabled={!deviceOk || !customerNameOk || loadingBase}
             data-testid="button-tradein-next"
             className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-primary text-white text-sm font-bold disabled:opacity-40 transition">
             {loadingBase
               ? (<><RefreshCw className="w-4 h-4 animate-spin" /> Buscando preço base...</>)
               : "Ver preço base → Condições"}
           </button>
-          {!deviceOk && <p className="text-[11px] text-muted-foreground text-center">Escolha a marca e informe o modelo para continuar.</p>}
+          {!customerNameOk ? (
+            <p className="text-[11px] text-muted-foreground text-center">Informe o nome do cliente para continuar.</p>
+          ) : !deviceOk && (
+            <p className="text-[11px] text-muted-foreground text-center">Escolha a marca e informe o modelo para continuar.</p>
+          )}
         </div>
       )}
 

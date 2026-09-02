@@ -13,6 +13,10 @@ export const tradeInEvaluationsTable = pgTable("trade_in_evaluations", {
   model: text("model"),
   memory: text("memory"),
   color: text("color"),
+  // Nome do cliente informado já na simulação (etapas 1-3), antes de fechar o
+  // negócio — opcional, só de referência/busca; não é o mesmo campo que
+  // sellerCustomerName (esse sim é o nome "oficial" gravado ao fechar).
+  customerName: text("customer_name"),
   answers: jsonb("answers").notNull(),         // respostas do questionário de estado
   marketPrice: text("market_price"),           // faixa de preço de mercado (texto, ex.: "R$ 2.100 – R$ 2.600")
   suggestedPrice: text("suggested_price"),     // sugestão de valor de compra

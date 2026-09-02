@@ -966,6 +966,9 @@ export type RoutineEvidenceUpload = { fileName: string; mimeType: string; data: 
 
 export type TradeInEvaluation = {
   id: number; userId: number | null; userName?: string | null;
+  // Nome do cliente informado já na simulação (etapas 1-3), opcional — não
+  // confundir com sellerCustomerName, preenchido só ao fechar o negócio.
+  customerName?: string | null;
   device: string; answers: Record<string, string>;
   brand: string | null; model: string | null; memory: string | null; color: string | null;
   marketPrice: string | null; suggestedPrice: string | null;
@@ -1894,8 +1897,8 @@ export const api = {
     basePrice: (data: { brand: string; model: string; memory?: string; color?: string; marginTable?: 1 | 2 | 3 }) =>
       req<{ device: string; marketPrice: string; basePrice: string }>(
         "/trade-in/base-price", { method: "POST", body: JSON.stringify(data) }),
-    evaluate: (data: { device?: string; brand?: string; model?: string; memory?: string; color?: string; marginTable?: 1 | 2 | 3; basePrice?: string; answers: Record<string, string> }) =>
-      req<{ id: number; device: string; marketPrice: string; suggestedPrice: string; summary: string; createdAt: string }>(
+    evaluate: (data: { device?: string; brand?: string; model?: string; memory?: string; color?: string; customerName?: string; marginTable?: 1 | 2 | 3; basePrice?: string; answers: Record<string, string> }) =>
+      req<{ id: number; device: string; marketPrice: string; suggestedPrice: string; summary: string; createdAt: string; customerName?: string | null }>(
         "/trade-in/evaluate", { method: "POST", body: JSON.stringify(data) }),
     close: (id: number, data: { sellerCustomerName: string; sellerCpf: string; imei: string; finalAgreedPrice: string; sellerRg?: string; sellerAddress?: string; sellerPhone?: string }) =>
       req<TradeInEvaluation>(`/trade-in/${id}/close`, { method: "PATCH", body: JSON.stringify(data) }),
