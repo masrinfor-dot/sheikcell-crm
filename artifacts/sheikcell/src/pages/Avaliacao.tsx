@@ -91,6 +91,13 @@ export default function Avaliacao() {
   const [dealClosed, setDealClosed] = useState(false);
   const [history, setHistory] = useState<TradeInEvaluation[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  // Aba "Celulares comprados" — só as avaliações já fechadas (compra
+  // efetivada), separado do histórico geral (que mistura simulações não
+  // fechadas). Reaproveita o mesmo mini-formulário de fechamento (via
+  // histClosingId/openHistoryClose) pra permitir completar o IMEI depois,
+  // quando o aparelho foi comprado com defeito e não deu pra conferir na hora.
+  const [showPurchased, setShowPurchased] = useState(false);
+  const [purchSearch, setPurchSearch] = useState("");
   // Pesquisa e filtros do histórico
   const [histSearch, setHistSearch] = useState("");
   const [histBrand, setHistBrand] = useState("");
@@ -210,8 +217,11 @@ export default function Avaliacao() {
     const cpf = dealCpf.trim();
     const imei = dealImei.trim();
     const price = dealPrice.trim();
-    if (!name || !cpf || !imei || !price) {
-      toast({ title: "Preencha todos os campos para fechar o negócio", variant: "destructive" });
+    // IMEI é opcional aqui de propósito: às vezes o aparelho comprado chega
+    // com defeito e nem liga pra conferir o IMEI na hora — dá pra completar
+    // depois pela aba "Celulares comprados".
+    if (!name || !cpf || !price) {
+      toast({ title: "Preencha nome, CPF e valor para fechar o negócio", variant: "destructive" });
       return;
     }
     setClosingDeal(true);
@@ -284,6 +294,7 @@ export default function Avaliacao() {
   const printNote = (data: {
     device: string; name: string; cpf: string; rg: string; address: string; phone: string;
     imei: string; price: string; dateStr: string;
+    documentPhotos?: string[]; devicePhotos?: string[];
   }) => {
     const rows: [string, string][] = [
       ["Aparelho", data.device],
@@ -296,6 +307,16 @@ export default function Avaliacao() {
       ["Valor pago", data.price || "—"],
       ["Data", data.dateStr],
     ];
+    // As fotos são salvas como URL relativa à raiz (ex.: "/api/chat/media/xxx"),
+    // então precisam do origin da própria janela pra virar URL absoluta —
+    // a janela de impressão é aberta em branco (about:blank) e não herda base URL.
+    const toAbsUrl = (u: string) => (u.startsWith("http") ? u : `${window.location.origin}${u}`);
+    const photoSection = (title: string, urls: string[] | undefined) => {
+      if (!urls || urls.length === 0) return "";
+      const imgs = urls.map((u) => `<img src="${escapeHtml(toAbsUrl(u))}" />`).join("");
+      return `<div class="photos"><p class="ptitle">${escapeHtml(title)}</p><div class="pgrid">${imgs}</div></div>`;
+    };
+    const photosHtml = photoSection("Fotos do documento", data.documentPhotos) + photoSection("Fotos do aparelho", data.devicePhotos);
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>Nota de compra</title>
 <style>
   body{font-family:Arial,Helvetica,sans-serif;padding:28px;color:#111}
@@ -304,13 +325,18 @@ export default function Avaliacao() {
   table{width:100%;border-collapse:collapse}
   td{padding:8px 4px;border-bottom:1px solid #ddd;font-size:13px;vertical-align:top}
   td:first-child{font-weight:bold;width:38%;color:#444}
+  .photos{margin-top:20px;page-break-inside:avoid}
+  .photos .ptitle{font-size:12px;font-weight:bold;color:#444;margin:0 0 6px}
+  .pgrid{display:flex;flex-wrap:wrap;gap:8px}
+  .pgrid img{width:140px;height:140px;object-fit:cover;border:1px solid #ccc;border-radius:4px}
   .sign{margin-top:70px;display:flex;justify-content:space-between;gap:24px}
   .sign div{flex:1;text-align:center;border-top:1px solid #333;padding-top:6px;font-size:11px}
-  @media print{ body{padding:0} }
+  @media print{ body{padding:0} .photos{page-break-inside:avoid} }
 </style></head><body>
 <h1>Nota de Compra de Aparelho Usado</h1>
 <p class="sub">Sheikcell</p>
 <table>${rows.map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(v)}</td></tr>`).join("")}</table>
+${photosHtml}
 <div class="sign"><div>Assinatura do vendedor</div><div>Assinatura da loja</div></div>
 </body></html>`;
     const w = window.open("", "_blank", "width=800,height=900");
@@ -330,6 +356,7 @@ export default function Avaliacao() {
     printNote({
       device: result.device, name: dealName, cpf: dealCpf, rg: dealRg, address: dealAddress,
       phone: dealPhone, imei: dealImei, price: dealPrice, dateStr: new Date().toLocaleString("pt-BR"),
+      documentPhotos, devicePhotos,
     });
   };
 
@@ -339,16 +366,26 @@ export default function Avaliacao() {
       device: h.device, name: h.sellerCustomerName ?? "", cpf: h.sellerCpf ?? "", rg: h.sellerRg ?? "",
       address: h.sellerAddress ?? "", phone: h.sellerPhone ?? "", imei: h.imei ?? "", price: h.finalAgreedPrice ?? "",
       dateStr: h.closedAt ? new Date(h.closedAt).toLocaleString("pt-BR") : new Date().toLocaleString("pt-BR"),
+      documentPhotos: h.documentPhotos ?? [], devicePhotos: h.devicePhotos ?? [],
     });
   };
 
   // Abre o mini-formulário de "Finalizar compra" pra uma avaliação do
-  // histórico (pré-preenche o nome com o que já foi informado na simulação).
+  // histórico. Serve pra dois casos: (1) fechar uma avaliação ainda aberta —
+  // pré-preenche só o nome, com o que já foi informado na simulação; (2)
+  // completar dados de uma compra JÁ fechada (ex.: IMEI que ficou de fora
+  // porque o aparelho chegou com defeito) — nesse caso pré-preenche tudo com
+  // o que já foi salvo, já que o endpoint de fechar é idempotente e reaplica
+  // os campos.
   const openHistoryClose = (h: TradeInEvaluation) => {
     setHistClosingId(h.id);
-    setHistDealName(h.customerName ?? "");
-    setHistDealCpf(""); setHistDealImei(""); setHistDealPrice("");
-    setHistDealRg(""); setHistDealAddress(""); setHistDealPhone("");
+    setHistDealName(h.sellerCustomerName || h.customerName || "");
+    setHistDealCpf(h.sellerCpf ?? "");
+    setHistDealImei(h.imei ?? "");
+    setHistDealPrice(h.finalAgreedPrice ?? "");
+    setHistDealRg(h.sellerRg ?? "");
+    setHistDealAddress(h.sellerAddress ?? "");
+    setHistDealPhone(h.sellerPhone ?? "");
   };
 
   const handleCloseFromHistory = async () => {
@@ -357,8 +394,8 @@ export default function Avaliacao() {
     const cpf = histDealCpf.trim();
     const imei = histDealImei.trim();
     const price = histDealPrice.trim();
-    if (!name || !cpf || !imei || !price) {
-      toast({ title: "Preencha todos os campos para fechar o negócio", variant: "destructive" });
+    if (!name || !cpf || !price) {
+      toast({ title: "Preencha nome, CPF e valor para fechar o negócio", variant: "destructive" });
       return;
     }
     setHistClosing(true);
@@ -394,6 +431,15 @@ export default function Avaliacao() {
     return hay.includes(q);
   });
 
+  // "Celulares comprados": só avaliações com negócio fechado (closedAt setado).
+  const purchasedList = history.filter((h) => h.closedAt);
+  const pq = purchSearch.trim().toLowerCase();
+  const filteredPurchased = purchasedList.filter((h) => {
+    if (!pq) return true;
+    const hay = [h.device, h.sellerCustomerName, h.customerName, h.sellerCpf, h.imei].filter(Boolean).join(" ").toLowerCase();
+    return hay.includes(pq);
+  });
+
   const modelSuggestions = MODELS_BY_BRAND[brand.trim()] ?? [];
   const currentStep = step === 4 ? 4 : (result ? 3 : step);
 
@@ -408,12 +454,120 @@ export default function Avaliacao() {
         <h2 className="text-lg font-bold flex items-center gap-2">
           <BadgeDollarSign className="w-5 h-5 text-primary" /> Avaliação de Usados
         </h2>
-        <button onClick={() => setShowHistory((v) => !v)} data-testid="button-toggle-tradein-history"
-          className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-border text-xs font-semibold text-muted-foreground hover:bg-secondary transition">
-          <History className="w-3.5 h-3.5" /> Últimas avaliações
-          <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showHistory ? "rotate-180" : ""}`} />
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setShowPurchased((v) => !v)} data-testid="button-toggle-tradein-purchased"
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-border text-xs font-semibold text-muted-foreground hover:bg-secondary transition">
+            <Smartphone className="w-3.5 h-3.5" /> Celulares comprados
+            <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showPurchased ? "rotate-180" : ""}`} />
+          </button>
+          <button onClick={() => setShowHistory((v) => !v)} data-testid="button-toggle-tradein-history"
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-border text-xs font-semibold text-muted-foreground hover:bg-secondary transition">
+            <History className="w-3.5 h-3.5" /> Últimas avaliações
+            <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showHistory ? "rotate-180" : ""}`} />
+          </button>
+        </div>
       </div>
+
+      {/* Celulares comprados — só negócios já fechados */}
+      {showPurchased && (
+        <div className="shk-card p-4 space-y-3">
+          <div className="flex gap-2 flex-wrap">
+            <input value={purchSearch} onChange={(e) => setPurchSearch(e.target.value)}
+              placeholder="🔎 Pesquisar aparelho, cliente, CPF ou IMEI..."
+              data-testid="input-tradein-purchased-search"
+              className="flex-1 min-w-[180px] px-3 py-2 rounded-xl border border-border text-xs" />
+          </div>
+          <div className="space-y-2 max-h-96 overflow-y-auto">
+            {filteredPurchased.length === 0 ? (
+              <p className="text-xs text-muted-foreground text-center py-2">
+                {purchasedList.length === 0 ? "Nenhuma compra fechada ainda." : "Nada encontrado com essa pesquisa."}
+              </p>
+            ) : filteredPurchased.map((h) => (
+              <div key={h.id} className="border-b border-border/50 pb-2 last:border-0">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold break-words">{h.device}</p>
+                    <p className="text-[10px] text-muted-foreground">
+                      {h.sellerCustomerName ?? h.customerName ?? "Cliente não informado"} · CPF {h.sellerCpf ?? "—"}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground">
+                      Comprado {h.closedAt ? new Date(h.closedAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—"}
+                      {h.sellerPhone ? ` · ${h.sellerPhone}` : ""}
+                    </p>
+                  </div>
+                  <span className="text-xs font-bold text-green-700 bg-green-50 border border-green-100 px-2 py-0.5 rounded-full shrink-0">
+                    {h.finalAgreedPrice ?? "—"}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                  {h.imei ? (
+                    <span className="text-[10px] font-semibold text-muted-foreground">IMEI: {h.imei}</span>
+                  ) : (
+                    <span className="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-100 px-2 py-0.5 rounded-full">
+                      IMEI pendente
+                    </span>
+                  )}
+                  {canEdit && histClosingId !== h.id && (
+                    <button onClick={() => openHistoryClose(h)} data-testid={`button-purchased-edit-${h.id}`}
+                      className="text-[10px] font-bold text-primary underline">
+                      {h.imei ? "Editar dados" : "Completar IMEI"}
+                    </button>
+                  )}
+                  <button onClick={() => printNoteFromHistory(h)} data-testid={`button-purchased-print-${h.id}`}
+                    className="flex items-center gap-1 text-[10px] font-semibold text-primary">
+                    <Printer className="w-3 h-3" /> Reimprimir nota
+                  </button>
+                </div>
+                {(h.documentPhotos?.length || h.devicePhotos?.length) ? (
+                  <div className="flex gap-1.5 flex-wrap mt-1.5">
+                    {[...(h.documentPhotos ?? []), ...(h.devicePhotos ?? [])].map((url) => (
+                      <img key={url} src={url} alt="" className="w-10 h-10 object-cover rounded-lg border border-border" />
+                    ))}
+                  </div>
+                ) : null}
+                {histClosingId === h.id && (
+                  <div className="mt-2 p-2.5 rounded-xl border border-border bg-secondary/40 space-y-2">
+                    <p className="text-[11px] font-bold">Completar dados desta compra</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <input value={histDealName} onChange={(e) => setHistDealName(e.target.value)}
+                        placeholder="Nome do cliente vendedor *" data-testid={`input-purchased-name-${h.id}`}
+                        className="w-full px-2.5 py-2 rounded-lg border border-border text-xs" />
+                      <input value={histDealCpf} onChange={(e) => setHistDealCpf(e.target.value)}
+                        placeholder="CPF *" data-testid={`input-purchased-cpf-${h.id}`}
+                        className="w-full px-2.5 py-2 rounded-lg border border-border text-xs" />
+                      <input value={histDealImei} onChange={(e) => setHistDealImei(e.target.value)}
+                        placeholder="IMEI (opcional)" data-testid={`input-purchased-imei-${h.id}`}
+                        className="w-full px-2.5 py-2 rounded-lg border border-border text-xs" />
+                      <input value={histDealPrice} onChange={(e) => setHistDealPrice(e.target.value)}
+                        placeholder="Valor final pago *" data-testid={`input-purchased-price-${h.id}`}
+                        className="w-full px-2.5 py-2 rounded-lg border border-border text-xs" />
+                      <input value={histDealRg} onChange={(e) => setHistDealRg(e.target.value)}
+                        placeholder="RG" data-testid={`input-purchased-rg-${h.id}`}
+                        className="w-full px-2.5 py-2 rounded-lg border border-border text-xs" />
+                      <input value={histDealPhone} onChange={(e) => setHistDealPhone(e.target.value)}
+                        placeholder="Telefone" data-testid={`input-purchased-phone-${h.id}`}
+                        className="w-full px-2.5 py-2 rounded-lg border border-border text-xs" />
+                      <input value={histDealAddress} onChange={(e) => setHistDealAddress(e.target.value)}
+                        placeholder="Endereço" data-testid={`input-purchased-address-${h.id}`}
+                        className="w-full px-2.5 py-2 rounded-lg border border-border text-xs sm:col-span-2" />
+                    </div>
+                    <div className="flex gap-2">
+                      <button onClick={handleCloseFromHistory} disabled={histClosing} data-testid={`button-purchased-save-${h.id}`}
+                        className="flex-1 px-3 py-2 rounded-lg bg-primary text-white text-xs font-bold disabled:opacity-40">
+                        {histClosing ? "Salvando..." : "Salvar"}
+                      </button>
+                      <button onClick={() => setHistClosingId(null)} disabled={histClosing}
+                        className="px-3 py-2 rounded-lg border border-border text-xs font-semibold">
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Histórico */}
       {showHistory && (
@@ -495,7 +649,7 @@ export default function Avaliacao() {
                         placeholder="CPF *" data-testid={`input-history-cpf-${h.id}`}
                         className="w-full px-2.5 py-2 rounded-lg border border-border text-xs" />
                       <input value={histDealImei} onChange={(e) => setHistDealImei(e.target.value)}
-                        placeholder="IMEI do aparelho *" data-testid={`input-history-imei-${h.id}`}
+                        placeholder="IMEI (opcional)" data-testid={`input-history-imei-${h.id}`}
                         className="w-full px-2.5 py-2 rounded-lg border border-border text-xs" />
                       <input value={histDealPrice} onChange={(e) => setHistDealPrice(e.target.value)}
                         placeholder="Valor final pago *" data-testid={`input-history-price-${h.id}`}
@@ -841,8 +995,9 @@ export default function Avaliacao() {
                 <div>
                   <label className="text-[10px] font-semibold text-muted-foreground uppercase">IMEI do aparelho</label>
                   <input value={dealImei} onChange={(e) => setDealImei(e.target.value)}
-                    placeholder="15 dígitos" data-testid="input-deal-imei"
+                    placeholder="Opcional — dá pra preencher depois" data-testid="input-deal-imei"
                     className="w-full mt-1 px-3 py-2 rounded-xl border border-border text-sm" />
+                  <p className="text-[9px] text-muted-foreground mt-0.5">Aparelho com defeito e não liga? Feche sem o IMEI e complete depois em "Celulares comprados".</p>
                 </div>
                 <div>
                   <label className="text-[10px] font-semibold text-muted-foreground uppercase">Valor final negociado</label>

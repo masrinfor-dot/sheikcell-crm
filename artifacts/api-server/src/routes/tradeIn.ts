@@ -49,6 +49,10 @@ router.get("/trade-in", requireAuth, async (req, res): Promise<void> => {
       sellerRg: tradeInEvaluationsTable.sellerRg,
       sellerAddress: tradeInEvaluationsTable.sellerAddress,
       sellerPhone: tradeInEvaluationsTable.sellerPhone,
+      // Pra reimprimir a nota (com fotos) e pra aba "Celulares comprados"
+      // mostrar as fotos sem precisar abrir a avaliação uma por uma.
+      documentPhotos: tradeInEvaluationsTable.documentPhotos,
+      devicePhotos: tradeInEvaluationsTable.devicePhotos,
     })
     .from(tradeInEvaluationsTable)
     .leftJoin(usersTable, eq(tradeInEvaluationsTable.userId, usersTable.id))
@@ -397,10 +401,17 @@ router.patch("/trade-in/:id/close", requireAuth, async (req, res): Promise<void>
 
   if (!name) { res.status(400).json({ error: "Informe o nome do cliente vendedor" }); return; }
   if (!CPF_RE.test(cpf)) { res.status(400).json({ error: "CPF inválido" }); return; }
-  if (imeiClean.length < 14 || imeiClean.length > 17) { res.status(400).json({ error: "IMEI inválido" }); return; }
+  // IMEI é OPCIONAL ao fechar: às vezes o aparelho comprado chega com defeito
+  // e nem liga pra conferir o IMEI na hora — dá pra fechar o negócio sem ele
+  // e preencher depois (ver aba "Celulares comprados"). Se vier preenchido,
+  // ainda valida o formato (14-17 dígitos) pra não gravar lixo.
+  if (imeiClean && (imeiClean.length < 14 || imeiClean.length > 17)) {
+    res.status(400).json({ error: "IMEI inválido (se for preencher, use entre 14 e 17 dígitos)" }); return;
+  }
   if (!finalPrice) { res.status(400).json({ error: "Informe o valor final negociado" }); return; }
 
-  const [existing] = await db.select({ id: tradeInEvaluationsTable.id }).from(tradeInEvaluationsTable)
+  const [existing] = await db.select({ id: tradeInEvaluationsTable.id, closedAt: tradeInEvaluationsTable.closedAt })
+    .from(tradeInEvaluationsTable)
     .where(and(eq(tradeInEvaluationsTable.id, id), eq(tradeInEvaluationsTable.tenantId, tenantId))).limit(1);
   if (!existing) { res.status(404).json({ error: "Avaliação não encontrada" }); return; }
 
@@ -408,12 +419,15 @@ router.patch("/trade-in/:id/close", requireAuth, async (req, res): Promise<void>
     .set({
       sellerCustomerName: name,
       sellerCpf: cpf,
-      imei: imeiClean,
+      imei: imeiClean || null,
       finalAgreedPrice: finalPrice,
       sellerRg: rg || null,
       sellerAddress: address || null,
       sellerPhone: phone || null,
-      closedAt: new Date(),
+      // Preserva a data original do fechamento se já estava fechado (ex.:
+      // só voltando pra completar o IMEI depois) — só grava agora na
+      // primeira vez.
+      closedAt: existing.closedAt ?? new Date(),
     })
     .where(and(eq(tradeInEvaluationsTable.id, id), eq(tradeInEvaluationsTable.tenantId, tenantId)))
     .returning();
