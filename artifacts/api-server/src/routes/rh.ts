@@ -7,7 +7,18 @@ import { requireModuleAccess } from "../lib/moduleAccess";
 
 const router: IRouter = Router();
 
-export type RhQuestion = { id: string; label: string; type: "text" | "longtext" | "options"; options?: string[] };
+// Perfil comportamental (estilo DISC simplificado, 4 tipos definidos pelo
+// lojista) — cada opção de uma pergunta "options" pode ser marcada com um
+// destes 4 perfis (optionProfiles, mesmo índice de `options`); ao responder,
+// o perfil marcado na alternativa escolhida soma 1 ponto (ver
+// computeProfileResult abaixo). null = alternativa não representa nenhum perfil.
+export const PROFILE_TYPES = ["analitico", "dominante", "apoiador", "inovador"] as const;
+export type ProfileType = (typeof PROFILE_TYPES)[number];
+
+export type RhQuestion = {
+  id: string; label: string; type: "text" | "longtext" | "options"; options?: string[];
+  optionProfiles?: (ProfileType | null)[];
+};
 export type RhStage = { id: string; title: string; description: string; type: "form" | "video"; enabled: boolean; questions: RhQuestion[]; maxVideoSeconds?: number | null };
 
 const Q_TYPES = ["text", "longtext", "options"];
@@ -33,10 +44,13 @@ const DEFAULT_STAGES: RhStage[] = [
   {
     id: "s2", title: "Teste de perfil", type: "form", enabled: true,
     description: "Escolha a opção que mais combina com você.",
+    // Alternativas já marcadas com o perfil comportamental (mesmo índice de
+    // `options`) — exemplo pronto de como usar optionProfiles; o admin pode
+    // ajustar livremente no editor ou reorganizar tudo via "Organizar com IA".
     questions: [
-      { id: "q1", label: "Um cliente chega irritado. O que você faz?", type: "options", options: ["Ouço com calma e tento resolver", "Chamo o gerente", "Respondo no mesmo tom"] },
-      { id: "q2", label: "Você prefere trabalhar:", type: "options", options: ["Em equipe", "Sozinho", "Tanto faz"] },
-      { id: "q3", label: "Quando bate a meta, você:", type: "options", options: ["Tenta vender ainda mais", "Relaxa o resto do mês", "Ajuda os colegas"] },
+      { id: "q1", label: "Um cliente chega irritado. O que você faz?", type: "options", options: ["Ouço com calma e tento resolver", "Chamo o gerente", "Respondo no mesmo tom"], optionProfiles: ["apoiador", null, "dominante"] },
+      { id: "q2", label: "Você prefere trabalhar:", type: "options", options: ["Em equipe", "Sozinho", "Tanto faz"], optionProfiles: ["apoiador", "analitico", null] },
+      { id: "q3", label: "Quando bate a meta, você:", type: "options", options: ["Tenta vender ainda mais", "Relaxa o resto do mês", "Ajuda os colegas"], optionProfiles: ["dominante", null, "apoiador"] },
     ],
   },
   {
@@ -135,6 +149,16 @@ function sanitizeStages(input: unknown): RhStage[] | null {
             : [];
           if (opts.length < 2) return null;
           question.options = opts;
+          // optionProfiles: mesmo índice de `options` — só grava o array se
+          // pelo menos 1 alternativa tiver perfil marcado (pergunta comum de
+          // múltipla escolha, sem nada a ver com teste de perfil, fica sem
+          // esse campo, do jeito que já era antes desta feature).
+          const rawProfiles = Array.isArray(q?.optionProfiles) ? q.optionProfiles : [];
+          const profiles: (ProfileType | null)[] = opts.map((_, idx) => {
+            const v = rawProfiles[idx];
+            return (PROFILE_TYPES as readonly string[]).includes(v as string) ? (v as ProfileType) : null;
+          });
+          if (profiles.some((p) => p != null)) question.optionProfiles = profiles;
         }
         questions.push(question);
       }
@@ -153,6 +177,53 @@ function sanitizeStages(input: unknown): RhStage[] | null {
 function sanitizePositionName(input: unknown): string | null {
   const name = typeof input === "string" ? input.trim().slice(0, 80) : "";
   return name || null;
+}
+
+// Extrai o array JSON da resposta da IA (mesmo padrão de catalog.ts): tira
+// eventuais fences de markdown e pega o trecho entre o primeiro "[" e o
+// último "]" — a IA às vezes escreve texto antes/depois do JSON mesmo
+// quando instruída a responder só com o array.
+function extractJsonArray(raw: string): unknown[] | null {
+  const text = raw.replace(/^```(?:json)?/m, "").replace(/```$/m, "").trim();
+  const start = text.indexOf("[");
+  const end = text.lastIndexOf("]");
+  if (start === -1 || end === -1) return null;
+  try {
+    const parsed = JSON.parse(text.slice(start, end + 1));
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// Tally do perfil comportamental: cada pergunta "options" com optionProfiles
+// soma 1 ponto pro perfil marcado na alternativa que o candidato escolheu.
+// O perfil dominante é o de maior contagem (empate resolvido pela ordem de
+// PROFILE_TYPES); null se a candidatura não tinha nenhuma pergunta com perfil
+// configurado (processo sem "teste de perfil" com opções marcadas).
+function computeProfileResult(
+  stages: RhStage[],
+  answers: Record<string, Record<string, string>>,
+): { result: ProfileType | null; scores: Record<ProfileType, number> | null } {
+  const scores: Record<ProfileType, number> = { analitico: 0, dominante: 0, apoiador: 0, inovador: 0 };
+  for (const stage of stages) {
+    const stageAnswers = answers[stage.id];
+    if (!stageAnswers) continue;
+    for (const q of stage.questions) {
+      if (q.type !== "options" || !q.options || !q.optionProfiles) continue;
+      const given = stageAnswers[q.id];
+      if (given == null) continue;
+      const idx = q.options.indexOf(given);
+      if (idx === -1) continue;
+      const profile = q.optionProfiles[idx];
+      if (profile) scores[profile]++;
+    }
+  }
+  const total = PROFILE_TYPES.reduce((sum, p) => sum + scores[p], 0);
+  if (total === 0) return { result: null, scores: null };
+  let best: ProfileType = PROFILE_TYPES[0];
+  for (const p of PROFILE_TYPES) if (scores[p] > scores[best]) best = p;
+  return { result: best, scores };
 }
 
 // Cargos ativos da loja, na ordem configurada — usado tanto pela tela pública
@@ -285,11 +356,14 @@ router.post("/rh/public/:token/apply", async (req, res): Promise<void> => {
     answers[stage.id] = clean;
   }
 
+  const { result: profileResult, scores: profileScores } = computeProfileResult(stages, answers);
+
   try {
     const [created] = await db.insert(rhCandidatesTable).values({
       tenantId: settings.tenantId, // loja dona do processo (vem do token do link)
       name, phone, email, cpf: cpfDigits, positionId, positionName, answers, videoData, videoMime,
       stagesSnapshot: stages, // congela as etapas do momento da candidatura
+      profileResult, profileScores,
     }).returning({ id: rhCandidatesTable.id });
     res.status(201).json({ ok: true, id: created!.id });
   } catch (err) {
@@ -395,6 +469,63 @@ router.delete("/rh/positions/:id", requireModuleAccess("rh"), async (req, res): 
   res.json({ ok: true });
 });
 
+// ── Organizar lista de perguntas com IA ─────────────────────────────────────
+// O lojista cola uma lista crua de perguntas (sem organização nenhuma,
+// misturando dados pessoais/experiência/teste de perfil/técnicas) e a IA
+// organiza em etapas coerentes pra vaga. Reaproveita sanitizeStages pra
+// validar/normalizar o resultado — nunca confia direto no que a IA devolve.
+// Não salva nada sozinho: devolve as etapas propostas pro front mostrar no
+// editor, o admin revisa/ajusta e só persiste ao clicar em Salvar (mesmo
+// fluxo de revisão da importação por IA da Vitrine Aparelhos).
+router.post("/rh/ai-organize", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const body = (req.body ?? {}) as { rawText?: unknown; positionName?: unknown };
+  const rawText = typeof body.rawText === "string" ? body.rawText.trim().slice(0, 12000) : "";
+  if (!rawText) { res.status(400).json({ error: "Cole a lista de perguntas" }); return; }
+  const positionName = typeof body.positionName === "string" ? body.positionName.trim().slice(0, 80) : "";
+
+  const prompt = [
+    `Você organiza uma lista de perguntas de processo seletivo (RH, mercado brasileiro) em etapas estruturadas de formulário.`,
+    positionName ? `A vaga é: "${positionName}".` : `Não foi informada uma vaga específica — organize de forma genérica.`,
+    `Abaixo está uma lista de perguntas que o lojista quer usar no processo seletivo, sem organização nenhuma (pode misturar perguntas de todo tipo: dados pessoais, experiência, teste de perfil comportamental, perguntas técnicas etc.).`,
+    `Sua tarefa: agrupar essas perguntas em etapas (stages) coerentes por tema (ex.: "Pré-entrevista", "Teste de perfil", "Perguntas técnicas"), na ordem que fizer mais sentido pro candidato responder. NÃO invente perguntas novas fora da lista, exceto na regra especial abaixo. Mantenha o texto original de cada pergunta o máximo possível (só ajuste ortografia/pontuação óbvias).`,
+    `Pra cada pergunta, escolha o tipo mais adequado: "text" (resposta curta, ex.: idade, bairro, telefone), "longtext" (resposta longa/dissertativa) ou "options" (múltipla escolha — quando a pergunta já vier com alternativas na lista, OU quando for uma pergunta de teste de perfil comportamental, ver regra especial).`,
+    ``,
+    `REGRA ESPECIAL — teste de perfil comportamental: quando uma pergunta claramente pedir pra avaliar o COMPORTAMENTO/PERFIL do candidato (ex.: "como você reage a...", "você prefere trabalhar...", "quando algo dá errado, você...", "diante de uma meta difícil..."), gere de 2 a 4 alternativas de resposta plausíveis (só se a pergunta ainda não tiver alternativas prontas na lista original) e classifique CADA alternativa com um destes 4 perfis, no array "optionProfiles" (mesmo índice de "options"; use null se a alternativa não representar nenhum perfil claro):`,
+    `- "analitico": foco em precisão, dados, fatos, organização, processos claros e lógicos, atenção a detalhes.`,
+    `- "dominante": foco em resultados, metas, velocidade, decisão rápida, liderança, autonomia.`,
+    `- "apoiador": foco em pessoas, harmonia, colaboração, empatia, ambiente estável, ouvir bem.`,
+    `- "inovador": foco em ideias, criatividade, comunicação, conexões, adaptabilidade, otimismo.`,
+    `Só use "optionProfiles" em perguntas de teste de perfil de verdade — perguntas comuns de múltipla escolha (não comportamentais) devem vir sem esse campo (ou com todos os valores null).`,
+    ``,
+    `Lista de perguntas do lojista:`,
+    rawText,
+    ``,
+    `Responda SOMENTE com um JSON array válido, sem markdown, neste formato:`,
+    `[{"title":"Pré-entrevista","description":"Conte um pouco sobre você.","questions":[{"label":"Qual sua idade?","type":"text"},{"label":"Um cliente chega irritado. O que você faz?","type":"options","options":["Ouço com calma e tento resolver","Chamo o gerente","Respondo no mesmo tom"],"optionProfiles":["apoiador","dominante",null]}]}]`,
+    `Máximo 10 etapas, máximo 30 perguntas por etapa, entre 2 e 8 alternativas por pergunta "options". "description" é uma frase curta de instrução pro candidato (pode ficar "").`,
+  ].join("\n");
+
+  try {
+    const { getOpenAiClientForTenant } = await import("../lib/aiClient");
+    const openai = await getOpenAiClientForTenant(tenantId);
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o",
+      max_tokens: 4096,
+      messages: [{ role: "user", content: prompt }],
+    });
+    const raw = completion.choices[0]?.message?.content?.trim() ?? "";
+    const arr = extractJsonArray(raw);
+    if (!arr) { res.status(502).json({ error: "A IA não retornou uma lista válida. Tente novamente." }); return; }
+    const stages = sanitizeStages(arr);
+    if (!stages) { res.status(502).json({ error: "A IA organizou algo fora do esperado (etapa sem título, pergunta sem opções suficientes etc.). Tente novamente ou ajuste o texto colado." }); return; }
+    res.json({ stages });
+  } catch (err) {
+    req.log.error({ err }, "RH AI organize failed");
+    res.status(503).json({ error: "A IA está indisponível no momento. Tente novamente em instantes." });
+  }
+});
+
 router.get("/rh/candidates", requireModuleAccess("rh"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const rows = await db.select({
@@ -410,6 +541,8 @@ router.get("/rh/candidates", requireModuleAccess("rh"), async (req, res): Promis
     notes: rhCandidatesTable.notes,
     stagesSnapshot: rhCandidatesTable.stagesSnapshot,
     hasVideo: rhCandidatesTable.videoMime,
+    profileResult: rhCandidatesTable.profileResult,
+    profileScores: rhCandidatesTable.profileScores,
     createdAt: rhCandidatesTable.createdAt,
   }).from(rhCandidatesTable)
     .where(eq(rhCandidatesTable.tenantId, tenantId))

@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import {
   api, API_BASE, canEditModule,
-  type RhStage, type RhQuestion, type RhCandidate, type RhPosition,
+  type RhStage, type RhQuestion, type RhCandidate, type RhPosition, type RhProfileType,
   type Employee, type WorkShift, type TimeClockEntry, type TimeBankResult, type TimeBankSummaryRow, type LeaveRecord, type TimeBankClosure,
   type Store, type User,
 } from "@/lib/api";
@@ -11,8 +11,47 @@ import { useToast } from "@/hooks/use-toast";
 import {
   Users, Settings2, Copy, RefreshCw, Plus, Trash2, X, CheckCircle, XCircle,
   Video, ChevronDown, ChevronUp, Save, Link2, UserSquare2, CalendarClock, Clock, Wallet, Pencil, Archive, PlayCircle,
-  AlertTriangle, Image as ImageIcon, Smartphone, Printer, Star, Briefcase,
+  AlertTriangle, Image as ImageIcon, Smartphone, Printer, Star, Briefcase, Sparkles,
 } from "lucide-react";
+
+// Perfil comportamental (estilo DISC simplificado, 4 tipos definidos pelo
+// lojista) — calculado automaticamente a partir das respostas da(s)
+// pergunta(s) de teste de perfil (ver optionProfiles/computeProfileResult no
+// backend, rh.ts). Textos exatamente como definidos pelo lojista.
+const PROFILE_TYPES: RhProfileType[] = ["analitico", "dominante", "apoiador", "inovador"];
+const PROFILE_META: Record<RhProfileType, {
+  label: string; emoji: string; cls: string;
+  foco: string; pontosFortes: string; desafios: string; motivacao: string;
+}> = {
+  analitico: {
+    label: "Analítico", emoji: "📊", cls: "bg-blue-50 text-blue-700 border-blue-200",
+    foco: "Precisão, dados e fatos.",
+    pontosFortes: "Organização, atenção aos detalhes e qualidade.",
+    desafios: "Perfeccionismo e lentidão para decidir.",
+    motivacao: "Processos claros e tarefas lógicas.",
+  },
+  dominante: {
+    label: "Dominante", emoji: "🎯", cls: "bg-red-50 text-red-700 border-red-200",
+    foco: "Resultados, metas e velocidade.",
+    pontosFortes: "Determinação, liderança e foco em soluções.",
+    desafios: "Impaciência e autoritarismo.",
+    motivacao: "Desafios, autonomia e poder de decisão.",
+  },
+  apoiador: {
+    label: "Apoiador", emoji: "🤝", cls: "bg-green-50 text-green-700 border-green-200",
+    foco: "Pessoas, harmonia e ritmo constante.",
+    pontosFortes: "Empatia, lealdade e bom ouvinte.",
+    desafios: "Resistência a mudanças e dificuldade em dizer não.",
+    motivacao: "Ambientes seguros e colaboração.",
+  },
+  inovador: {
+    label: "Inovador", emoji: "💡", cls: "bg-amber-50 text-amber-700 border-amber-200",
+    foco: "Ideias, criatividade e conexões.",
+    pontosFortes: "Comunicação, otimismo e adaptabilidade.",
+    desafios: "Falta de foco e desorganização com prazos.",
+    motivacao: "Reconhecimento social e liberdade para criar.",
+  },
+};
 
 const STATUS_META: Record<RhCandidate["status"], { label: string; cls: string }> = {
   novo: { label: "Novo", cls: "bg-blue-50 text-blue-600 border-blue-100" },
@@ -328,6 +367,11 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
         </div>`).join("");
       return `<h2>${esc(s.title)}</h2>${rows}`;
     }).join("");
+    const profileHtml = c.profileResult ? `
+      <div class="profile">
+        <p class="label">Perfil comportamental</p>
+        <p class="answer">${esc(PROFILE_META[c.profileResult].emoji)} ${esc(PROFILE_META[c.profileResult].label)} — ${esc(PROFILE_META[c.profileResult].foco)}</p>
+      </div>` : "";
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>Entrevista — ${esc(c.name)}</title>
       <style>
         body { font-family: Arial, Helvetica, sans-serif; color: #111; padding: 32px; max-width: 720px; margin: 0 auto; }
@@ -338,6 +382,7 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
         .q { margin-bottom: 10px; }
         .label { font-size: 11px; color: #666; margin: 0 0 2px; }
         .answer { font-size: 13px; margin: 0; white-space: pre-wrap; }
+        .profile { margin-top: 12px; padding: 10px 12px; background: #f0f4ff; border-radius: 8px; }
         .notes { margin-top: 24px; padding: 12px; background: #f5f5f5; border-radius: 8px; }
         .notes p.label { margin-bottom: 4px; }
         @media print { body { padding: 0; } }
@@ -346,6 +391,7 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
       <p class="meta">${esc(c.phone)}${c.email ? ` · ${esc(c.email)}` : ""}</p>
       <p class="meta">Candidatura em ${new Date(c.createdAt).toLocaleString("pt-BR")}</p>
       <span class="status">${esc(STATUS_META[c.status].label)}</span>
+      ${profileHtml}
       ${sections}
       ${c.notes ? `<div class="notes"><p class="label">Anotações internas</p><p class="answer">${esc(c.notes)}</p></div>` : ""}
     </body></html>`;
@@ -456,6 +502,11 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                               <Briefcase className="w-3 h-3" /> {c.positionName}
                             </span>
                           )}
+                          {c.profileResult && (
+                            <span className={`text-[10px] font-bold border px-2 py-0.5 rounded-full ${PROFILE_META[c.profileResult].cls}`}>
+                              {PROFILE_META[c.profileResult].emoji} {PROFILE_META[c.profileResult].label}
+                            </span>
+                          )}
                           {c.hasVideo && <Video className="w-3.5 h-3.5 text-primary" />}
                         </div>
                         <p className="text-[11px] text-muted-foreground">{c.phone}{c.email ? ` · ${c.email}` : ""}{c.cpf ? ` · CPF ${c.cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, "$1.$2.$3-$4")}` : ""} · {new Date(c.createdAt).toLocaleDateString("pt-BR")}</p>
@@ -544,7 +595,8 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                   className="p-1.5 rounded-lg hover:bg-red-50 text-red-400 disabled:opacity-30"><Trash2 className="w-3.5 h-3.5" /></button>
               </div>
               <StageEditor stages={positionDraft.stages} setStages={setPositionDraftStages}
-                canEdit={canEdit} onSave={savePosition} saving={savingPosition} saveLabel="Salvar cargo" />
+                canEdit={canEdit} onSave={savePosition} saving={savingPosition} saveLabel="Salvar cargo"
+                positionName={positionDraft.name} />
             </div>
           ) : positions.length === 0 ? (
             <>
@@ -573,6 +625,23 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                 <p className="text-xs text-muted-foreground flex items-center gap-1 mt-0.5"><Briefcase className="w-3.5 h-3.5 text-primary" /> Vaga: <span className="font-semibold">{opened.positionName}</span></p>
               )}
             </div>
+
+            {opened.profileResult && (
+              <div className={`rounded-xl border p-3 mb-4 ${PROFILE_META[opened.profileResult].cls}`} data-testid="candidate-profile-result">
+                <p className="text-xs font-bold flex items-center gap-1.5">
+                  {PROFILE_META[opened.profileResult].emoji} Perfil comportamental: {PROFILE_META[opened.profileResult].label}
+                </p>
+                <p className="text-[11px] mt-1"><span className="font-semibold">Foco:</span> {PROFILE_META[opened.profileResult].foco}</p>
+                <p className="text-[11px]"><span className="font-semibold">Pontos fortes:</span> {PROFILE_META[opened.profileResult].pontosFortes}</p>
+                <p className="text-[11px]"><span className="font-semibold">Desafios:</span> {PROFILE_META[opened.profileResult].desafios}</p>
+                <p className="text-[11px]"><span className="font-semibold">Motivação:</span> {PROFILE_META[opened.profileResult].motivacao}</p>
+                {opened.profileScores && (
+                  <p className="text-[10px] mt-1.5 opacity-70">
+                    {PROFILE_TYPES.map((p) => `${PROFILE_META[p].emoji} ${opened.profileScores![p]}`).join("  ·  ")}
+                  </p>
+                )}
+              </div>
+            )}
 
             <div className="flex gap-1.5 mb-4 flex-wrap">
               <button onClick={() => setStatus(opened, "pre_aprovado")} data-testid="button-preapprove-candidate" disabled={!canEdit}
@@ -642,14 +711,23 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
 // "legado" (sem cargo, 1 só pra loja inteira) quanto pelo processo de cada
 // cargo individual (item: processo seletivo por função). `stages`/`setStages`
 // definem só ONDE o editor lê/escreve; o resto do editor é idêntico nos 2 casos.
-function StageEditor({ stages, setStages, canEdit, onSave, saving, saveLabel = "Salvar processo" }: {
+function StageEditor({ stages, setStages, canEdit, onSave, saving, saveLabel = "Salvar processo", positionName }: {
   stages: RhStage[];
   setStages: Dispatch<SetStateAction<RhStage[]>>;
   canEdit: boolean;
   onSave: () => void;
   saving: boolean;
   saveLabel?: string;
+  // Nome do cargo (quando o processo é por vaga) — dá contexto pra IA
+  // organizar as etapas pensando nessa função específica. Sem cargo
+  // (processo legado, 1 só pra loja), fica undefined e a IA organiza genérico.
+  positionName?: string;
 }) {
+  const { toast } = useToast();
+  const [showAiOrganize, setShowAiOrganize] = useState(false);
+  const [aiRawText, setAiRawText] = useState("");
+  const [aiOrganizing, setAiOrganizing] = useState(false);
+
   const setStage = (i: number, patch: Partial<RhStage>) =>
     setStages((prev) => prev.map((s, j) => (j === i ? { ...s, ...patch } : s)));
   const setQuestion = (si: number, qi: number, patch: Partial<RhQuestion>) =>
@@ -663,8 +741,50 @@ function StageEditor({ stages, setStages, canEdit, onSave, saving, saveLabel = "
       return next;
     });
 
+  // Organiza a lista crua colada pelo admin em etapas via IA — só preenche o
+  // editor (estado local, ainda não salvo); o admin revisa/ajusta e clica em
+  // Salvar quando estiver satisfeito, exatamente como a importação por IA da
+  // Vitrine Aparelhos.
+  const runAiOrganize = async () => {
+    if (!aiRawText.trim() || aiOrganizing) return;
+    setAiOrganizing(true);
+    try {
+      const r = await api.rh.aiOrganize({ rawText: aiRawText, positionName });
+      setStages(r.stages);
+      setShowAiOrganize(false);
+      setAiRawText("");
+      toast({ title: "Etapas organizadas pela IA!", description: "Revise as perguntas e os perfis marcados antes de salvar." });
+    } catch (err) {
+      toast({ title: "Erro ao organizar com IA", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setAiOrganizing(false);
+    }
+  };
+
   return (
     <fieldset disabled={!canEdit} className="space-y-3 border-0 p-0 m-0">
+      <div className="shk-card p-3 space-y-2 bg-secondary/30">
+        <button type="button" onClick={() => setShowAiOrganize((v) => !v)} data-testid="button-toggle-ai-organize"
+          className="flex items-center gap-1.5 text-xs font-bold text-primary">
+          <Sparkles className="w-3.5 h-3.5" /> Organizar lista de perguntas com IA
+          {showAiOrganize ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+        </button>
+        {showAiOrganize && (
+          <div className="space-y-2">
+            <p className="text-[11px] text-muted-foreground">
+              Cole a lista de perguntas sem organização nenhuma (dados pessoais, técnicas, teste de perfil misturados). A IA agrupa em etapas{positionName ? ` pensando na vaga "${positionName}"` : ""} e, nas perguntas de teste de perfil, já sugere as alternativas marcadas com o perfil comportamental (Analítico/Dominante/Apoiador/Inovador). Isso <strong>substitui</strong> as etapas do editor abaixo — revise tudo antes de clicar em Salvar.
+            </p>
+            <textarea value={aiRawText} onChange={(e) => setAiRawText(e.target.value)} rows={6}
+              placeholder={"Cole aqui, por exemplo:\nQual sua idade?\nUm cliente chega irritado, o que você faz?\nVocê prefere trabalhar em equipe ou sozinho?\nJá trabalhou com vendas? Onde?"}
+              data-testid="textarea-ai-organize"
+              className="w-full px-3 py-2 rounded-xl border border-border text-xs resize-none" />
+            <button type="button" onClick={runAiOrganize} disabled={!aiRawText.trim() || aiOrganizing} data-testid="button-run-ai-organize"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
+              <Sparkles className="w-3.5 h-3.5" /> {aiOrganizing ? "Organizando..." : "Organizar etapas"}
+            </button>
+          </div>
+        )}
+      </div>
       {stages.map((s, si) => (
         <div key={si} className={`shk-card p-4 space-y-3 ${!s.enabled ? "opacity-60" : ""}`}>
           <div className="flex items-center gap-2">
@@ -728,11 +848,36 @@ function StageEditor({ stages, setStages, canEdit, onSave, saving, saveLabel = "
                     <input value={q.label} onChange={(e) => setQuestion(si, qi, { label: e.target.value })}
                       placeholder={`Pergunta ${qi + 1}`} className="w-full px-3 py-1.5 rounded-xl border border-border text-xs" />
                     {q.type === "options" && (
-                      <input value={(q.options ?? []).join(", ")}
-                        onChange={(e) => setQuestion(si, qi, { options: e.target.value.split(",").map((o) => o.trimStart()) })}
-                        onBlur={(e) => setQuestion(si, qi, { options: e.target.value.split(",").map((o) => o.trim()).filter(Boolean) })}
-                        placeholder="Opções separadas por vírgula"
-                        className="w-full px-3 py-1.5 rounded-xl border border-border text-[11px]" />
+                      <>
+                        <input value={(q.options ?? []).join(", ")}
+                          onChange={(e) => setQuestion(si, qi, { options: e.target.value.split(",").map((o) => o.trimStart()) })}
+                          onBlur={(e) => setQuestion(si, qi, { options: e.target.value.split(",").map((o) => o.trim()).filter(Boolean) })}
+                          placeholder="Opções separadas por vírgula"
+                          className="w-full px-3 py-1.5 rounded-xl border border-border text-[11px]" />
+                        {(q.options ?? []).length >= 2 && (
+                          <div className="flex flex-wrap gap-1 pt-0.5">
+                            {(q.options ?? []).map((opt, oi) => (
+                              <div key={oi} className="flex items-center gap-1 bg-white border border-border rounded-lg pl-1.5 pr-0.5 py-0.5">
+                                <span className="text-[9px] text-muted-foreground truncate max-w-[90px]">{opt || `Opção ${oi + 1}`}</span>
+                                <select value={q.optionProfiles?.[oi] ?? ""} data-testid={`select-option-profile-${si}-${qi}-${oi}`}
+                                  onChange={(e) => {
+                                    const val = e.target.value as RhProfileType | "";
+                                    const base = q.optionProfiles ?? (q.options ?? []).map(() => null);
+                                    const next = [...base];
+                                    next[oi] = val || null;
+                                    setQuestion(si, qi, { optionProfiles: next });
+                                  }}
+                                  className="text-[9px] border-0 bg-transparent px-1 py-0.5 text-muted-foreground">
+                                  <option value="">Perfil: nenhum</option>
+                                  {PROFILE_TYPES.map((p) => (
+                                    <option key={p} value={p}>{PROFILE_META[p].emoji} {PROFILE_META[p].label}</option>
+                                  ))}
+                                </select>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                   <select value={q.type} onChange={(e) => setQuestion(si, qi, { type: e.target.value as RhQuestion["type"], ...(e.target.value === "options" ? { options: q.options ?? [] } : {}) })}

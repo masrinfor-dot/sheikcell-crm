@@ -989,7 +989,13 @@ export type TradeInQuestionOption = { label: string; blocks: boolean };
 export type TradeInQuestion = { key: string; label: string; options: TradeInQuestionOption[] };
 export type TradeInQuestionsConfig = { apple: TradeInQuestion[]; android: TradeInQuestion[] };
 
-export type RhQuestion = { id: string; label: string; type: "text" | "longtext" | "options"; options?: string[] };
+// Perfil comportamental (estilo DISC simplificado, 4 tipos) — ver
+// optionProfiles em RhQuestion e computeProfileResult no backend (rh.ts).
+export type RhProfileType = "analitico" | "dominante" | "apoiador" | "inovador";
+export type RhQuestion = {
+  id: string; label: string; type: "text" | "longtext" | "options"; options?: string[];
+  optionProfiles?: (RhProfileType | null)[];
+};
 export type RhStage = { id: string; title: string; description: string; type: "form" | "video"; enabled: boolean; questions: RhQuestion[]; maxVideoSeconds?: number | null };
 export type RhPosition = {
   id: number; name: string; active: boolean; sortOrder: number; stages: RhStage[];
@@ -1002,6 +1008,8 @@ export type RhCandidate = {
   answers: Record<string, Record<string, string>>;
   stagesSnapshot: RhStage[] | null;
   notes: string | null; hasVideo: boolean; createdAt: string;
+  profileResult: RhProfileType | null;
+  profileScores: Record<RhProfileType, number> | null;
 };
 
 // ── RH: Departamento Pessoal ────────────────────────────────────────────────
@@ -2067,6 +2075,11 @@ export const api = {
     settings: () => req<{ publicToken: string; stages: RhStage[] }>("/rh/settings"),
     saveSettings: (stages: RhStage[]) => req<{ ok: boolean }>("/rh/settings", { method: "PUT", body: JSON.stringify({ stages }) }),
     regenerateToken: () => req<{ publicToken: string }>("/rh/settings/regenerate-token", { method: "POST" }),
+    // Organiza uma lista crua de perguntas (colada pelo admin) em etapas
+    // estruturadas via IA, já com o perfil comportamental sugerido nas
+    // perguntas de teste de perfil — o admin revisa/ajusta antes de salvar.
+    aiOrganize: (data: { rawText: string; positionName?: string }) =>
+      req<{ stages: RhStage[] }>("/rh/ai-organize", { method: "POST", body: JSON.stringify(data) }),
     positions: {
       list: () => req<RhPosition[]>("/rh/positions"),
       create: (data: { name: string; stages?: RhStage[] }) => req<RhPosition>("/rh/positions", { method: "POST", body: JSON.stringify(data) }),

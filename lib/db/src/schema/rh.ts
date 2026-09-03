@@ -59,5 +59,12 @@ export const rhCandidatesTable = pgTable("rh_candidates", {
   videoData: text("video_data"), // base64 do vídeo gravado
   videoMime: text("video_mime"),
   notes: text("notes"), // anotações internas do admin
+  // Perfil comportamental (Analítico/Dominante/Apoiador/Inovador) calculado
+  // automaticamente na hora da candidatura, a partir das opções marcadas com
+  // perfil em perguntas type:"options" (ver optionProfiles em RhQuestion,
+  // artifacts/api-server/src/routes/rh.ts). null = nenhuma pergunta da
+  // candidatura tinha perfil configurado (processo sem "teste de perfil").
+  profileResult: text("profile_result"),
+  profileScores: jsonb("profile_scores"), // { analitico, dominante, apoiador, inovador }
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
