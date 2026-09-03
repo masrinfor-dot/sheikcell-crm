@@ -1068,6 +1068,9 @@ export type TimeClockEntry = {
   at: string;
   source: "self" | "admin" | "whatsapp";
   proofUrl?: string | null;
+  lat?: number | null;
+  lng?: number | null;
+  accuracyMeters?: number | null;
   flagged?: boolean;
   flagReason?: string | null;
 };
@@ -2095,7 +2098,8 @@ export const api = {
   rhDp: {
     me: {
       get: () => req<Employee>("/rh-dp/me"),
-      punch: () => req<TimeClockEntry>("/rh-dp/me/punch", { method: "POST" }),
+      punch: (data?: { photoBase64: string; mimetype: string; lat: number; lng: number; accuracyMeters?: number | null }) =>
+        req<TimeClockEntry>("/rh-dp/me/punch", { method: "POST", body: data ? JSON.stringify(data) : undefined }),
       timeBank: (from?: string, to?: string) =>
         req<TimeBankResult>(`/rh-dp/me/time-bank?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
       clockStatus: () => req<{ needsClockIn: boolean }>("/rh-dp/me/clock-status"),

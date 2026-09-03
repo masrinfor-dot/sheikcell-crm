@@ -1,4 +1,4 @@
-import { pgTable, serial, text, timestamp, integer, boolean, jsonb, date, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, timestamp, integer, boolean, jsonb, date, uniqueIndex, doublePrecision } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { usersTable } from "./users";
 import { storesTable } from "./stores";
@@ -67,9 +67,17 @@ export const timeClockEntriesTable = pgTable("time_clock_entries", {
   at: timestamp("at", { withTimezone: true }).notNull().defaultNow(), // sempre now() do servidor
   source: text("source").notNull().default("self"), // "self" | "admin" | "whatsapp" (check-in por foto)
   createdByUserId: integer("created_by_user_id"),
-  // Comprovante (foto) do check-in por WhatsApp — mesma mediaUrl que
-  // whatsappInbound.ts já salva em disco pra mensagens normais.
+  // Comprovante (foto) do check-in — pelo WhatsApp (tryConsumePontoCheckIn em
+  // lib/whatsappInbound.ts) ou pela selfie tirada no navegador na batida de
+  // entrada obrigatória (PontoGate.tsx / POST /rh-dp/me/punch).
   proofUrl: text("proof_url"),
+  // Geolocalização capturada no navegador na hora da batida (obrigatória só
+  // pra batida de entrada via self-service — ver requirePhotoAndGeo em
+  // rhDp.ts). Nula pras batidas antigas (antes desse recurso), pelo WhatsApp
+  // (não captura geo) e pelas feitas manualmente pelo admin.
+  lat: doublePrecision("lat"),
+  lng: doublePrecision("lng"),
+  accuracyMeters: doublePrecision("accuracy_meters"),
   // Duas fotos em pouco tempo do mesmo colaborador: registra as duas, mas
   // marca ambas pra revisão manual em vez de decidir sozinho qual vale
   // (ver tryConsumePontoCheckIn em lib/whatsappInbound.ts).

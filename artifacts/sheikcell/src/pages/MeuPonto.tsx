@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import { api, type Employee, type TimeBankResult } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
-import { Clock, Wallet, CheckCircle2, Loader2 } from "lucide-react";
+import { usePunchCapture } from "@/hooks/use-punch-capture";
+import { Clock, Wallet, CheckCircle2, Loader2, Camera, MapPin } from "lucide-react";
 
 const KIND_LABELS: Record<string, string> = { in: "Entrada", break_start: "Início do intervalo", break_end: "Fim do intervalo", out: "Saída" };
 
@@ -56,11 +57,25 @@ export default function MeuPonto() {
 
   useEffect(() => { load(); }, [load]);
 
+  const todayEntries = today?.days[0]?.entries ?? [];
+  const doneForToday = todayEntries.length > 0 && todayEntries[todayEntries.length - 1]!.kind === "out";
+  // Sem nenhuma batida hoje ainda, a próxima é sempre "entrada" — exige foto
+  // + geo do mesmo jeito que o PontoGate.tsx (o backend rejeita sem isso).
+  // Só se aplica a quem bate a entrada por aqui em vez de pelo gate: admin
+  // (isento do gate) ou colaborador de escala flexível (gate nunca aparece).
+  const nextIsIn = todayEntries.length === 0;
+  const needsCapture = nextIsIn && !doneForToday && !loading && !notLinked && !!employee;
+  const { cam, geo, videoRef, ready, startCamera, startGeo, capture, stop } = usePunchCapture(needsCapture);
+
   const punch = async () => {
     if (punching) return;
+    if (needsCapture && !ready) return;
     setPunching(true);
     try {
-      const created = await api.rhDp.me.punch();
+      const payload = needsCapture ? capture() : null;
+      if (needsCapture && !payload) { setPunching(false); return; }
+      const created = await api.rhDp.me.punch(payload ?? undefined);
+      if (needsCapture) stop();
       toast({ title: `Ponto registrado: ${KIND_LABELS[created.kind] ?? created.kind}`, description: new Date(created.at).toLocaleTimeString("pt-BR") });
       await load();
     } catch (err) {
@@ -82,16 +97,44 @@ export default function MeuPonto() {
     );
   }
 
-  const todayEntries = today?.days[0]?.entries ?? [];
-  const doneForToday = todayEntries.length > 0 && todayEntries[todayEntries.length - 1]!.kind === "out";
-
   return (
     <div className="max-w-md mx-auto px-4 py-6 space-y-4">
       <h2 className="text-lg font-bold flex items-center gap-2"><Clock className="w-5 h-5 text-primary" /> Meu Ponto</h2>
 
       <div className="shk-card p-5 text-center space-y-3">
         <p className="text-xs text-muted-foreground">{new Date().toLocaleDateString("pt-BR", { weekday: "long", day: "2-digit", month: "long" })}</p>
-        <button onClick={punch} disabled={punching || doneForToday} data-testid="button-punch-clock"
+
+        {needsCapture && (
+          <div className="space-y-2">
+            <p className="text-[11px] text-muted-foreground">A entrada precisa de foto e localização</p>
+            <div className="relative w-full aspect-[4/3] rounded-xl overflow-hidden bg-muted flex items-center justify-center">
+              {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+              <video ref={videoRef} playsInline className={`w-full h-full object-cover ${cam.status === "ok" ? "" : "hidden"}`} />
+              {cam.status === "loading" && <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />}
+              {cam.status === "error" && (
+                <div className="p-3 flex flex-col items-center gap-2 text-destructive">
+                  <Camera className="w-6 h-6" />
+                  <p className="text-xs">{cam.error}</p>
+                  <button onClick={startCamera} className="text-xs font-semibold text-primary underline" data-testid="button-meuponto-retry-camera">
+                    Tentar de novo
+                  </button>
+                </div>
+              )}
+            </div>
+            <div className="flex items-center justify-center gap-2 text-xs">
+              <MapPin className={`w-4 h-4 ${geo.status === "ok" ? "text-emerald-600" : geo.status === "error" ? "text-destructive" : "text-muted-foreground"}`} />
+              {geo.status === "loading" && <span className="text-muted-foreground">Obtendo localização...</span>}
+              {geo.status === "ok" && <span className="text-emerald-600 font-medium">Localização confirmada</span>}
+              {geo.status === "error" && (
+                <span className="text-destructive">
+                  {geo.error} <button onClick={startGeo} className="font-semibold underline" data-testid="button-meuponto-retry-geo">Tentar de novo</button>
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
+        <button onClick={punch} disabled={punching || doneForToday || (needsCapture && !ready)} data-testid="button-punch-clock"
           className="w-full py-4 rounded-2xl bg-primary text-white font-bold text-base disabled:opacity-40 flex items-center justify-center gap-2">
           {punching ? <Loader2 className="w-5 h-5 animate-spin" /> : <CheckCircle2 className="w-5 h-5" />}
           {doneForToday ? "Ponto do dia completo" : "Bater ponto"}

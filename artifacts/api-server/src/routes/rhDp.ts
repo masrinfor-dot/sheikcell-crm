@@ -9,6 +9,10 @@ import { requireModuleAccess } from "../lib/moduleAccess";
 import { computeTimeBank, nextPunchKind, dayKeySaoPaulo, employeeNeedsClockInToday } from "../lib/timeBank";
 import { normalizePhone } from "../lib/phone";
 import { generateClosuresForMonth, previousMonthKey, currentMonthKey } from "../lib/timeBankClosures";
+import { MEDIA_DIR } from "../lib/whatsappInbound";
+import { writeFile, mkdir } from "fs/promises";
+import { randomUUID } from "crypto";
+import path from "path";
 
 const router: IRouter = Router();
 
@@ -60,6 +64,29 @@ async function getEmployee(id: number, tenantId: number) {
   const [row] = await db.select().from(employeesTable)
     .where(and(eq(employeesTable.id, id), eq(employeesTable.tenantId, tenantId)));
   return row ?? null;
+}
+
+// Selfie tirada no navegador na batida de entrada obrigatória — mesmo padrão
+// de saveTradeInPhoto em routes/tradeIn.ts (base64 -> arquivo em MEDIA_DIR,
+// servido por GET /chat/media/:filename em chat.ts).
+const PUNCH_PHOTO_MIMES: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/heic": "heic",
+};
+const MAX_PUNCH_PHOTO_BYTES = 10 * 1024 * 1024; // 10 MB
+
+async function savePunchPhoto(base64: string, rawMimetype: string): Promise<string> {
+  const mimetype = rawMimetype.split(";")[0]!.trim().toLowerCase();
+  const ext = PUNCH_PHOTO_MIMES[mimetype];
+  if (!ext) throw new Error("Tipo de foto não suportado (use JPG, PNG, WEBP ou HEIC)");
+  const buf = Buffer.from(base64, "base64");
+  if (buf.byteLength > MAX_PUNCH_PHOTO_BYTES) throw new Error("Foto muito grande (máximo 10 MB)");
+  await mkdir(MEDIA_DIR, { recursive: true });
+  const filename = `${randomUUID()}.${ext}`;
+  await writeFile(path.join(MEDIA_DIR, filename), buf);
+  return `/api/chat/media/${filename}`;
 }
 
 // ── Ponto obrigatório: bloqueia o uso do sistema até bater a entrada ────────
@@ -163,8 +190,39 @@ router.post("/rh-dp/me/punch", requireAuth, async (req, res): Promise<void> => {
   const kind = nextPunchKind(effectiveEntries, hasBreak);
   if (!kind) { res.status(409).json({ error: "Você já bateu todos os pontos de hoje." }); return; }
 
+  // Batida de ENTRADA feita pelo próprio colaborador (é a que o PontoGate.tsx
+  // exige logo ao abrir o sistema) precisa de foto + geolocalização — as
+  // outras (intervalo/saída) e batidas feitas pelo admin (rota separada,
+  // abaixo) continuam sem essa exigência.
+  let proofUrl: string | null = null;
+  let lat: number | null = null;
+  let lng: number | null = null;
+  let accuracyMeters: number | null = null;
+  if (kind === "in") {
+    const { photoBase64, mimetype } = req.body ?? {};
+    const rawLat = req.body?.lat;
+    const rawLng = req.body?.lng;
+    const rawAccuracy = req.body?.accuracyMeters;
+    const validLat = typeof rawLat === "number" && Number.isFinite(rawLat);
+    const validLng = typeof rawLng === "number" && Number.isFinite(rawLng);
+    if (typeof photoBase64 !== "string" || !photoBase64 || typeof mimetype !== "string" || !mimetype || !validLat || !validLng) {
+      res.status(400).json({ error: "Foto e localização são obrigatórias para bater o ponto de entrada." });
+      return;
+    }
+    try {
+      proofUrl = await savePunchPhoto(photoBase64, mimetype);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : "Não foi possível salvar a foto." });
+      return;
+    }
+    lat = rawLat;
+    lng = rawLng;
+    accuracyMeters = typeof rawAccuracy === "number" && Number.isFinite(rawAccuracy) ? rawAccuracy : null;
+  }
+
   const [created] = await db.insert(timeClockEntriesTable).values({
     tenantId, employeeId: employee.id, kind, source: "self", createdByUserId: req.session.userId,
+    proofUrl, lat, lng, accuracyMeters,
   }).returning();
   invalidateClockInBlock(req.session.userId!);
   res.status(201).json(created);

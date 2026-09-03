@@ -11,7 +11,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   Users, Settings2, Copy, RefreshCw, Plus, Trash2, X, CheckCircle, XCircle,
   Video, ChevronDown, ChevronUp, Save, Link2, UserSquare2, CalendarClock, Clock, Wallet, Pencil, Archive, PlayCircle,
-  AlertTriangle, Image as ImageIcon, Smartphone, Printer, Star, Briefcase, Sparkles,
+  AlertTriangle, Image as ImageIcon, Smartphone, Printer, Star, Briefcase, Sparkles, MapPin,
 } from "lucide-react";
 
 // Perfil comportamental (estilo DISC simplificado, 4 tipos definidos pelo
@@ -1472,6 +1472,13 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
                         <a href={e.proofUrl} target="_blank" rel="noreferrer" title="Ver foto do comprovante"
                           className="text-primary hover:opacity-70">
                           <ImageIcon className="w-3.5 h-3.5" />
+                        </a>
+                      )}
+                      {e.lat != null && e.lng != null && (
+                        <a href={`https://www.google.com/maps?q=${e.lat},${e.lng}`} target="_blank" rel="noreferrer"
+                          title={`Ver localização no mapa${e.accuracyMeters != null ? ` (precisão ~${Math.round(e.accuracyMeters)}m)` : ""}`}
+                          className="text-primary hover:opacity-70">
+                          <MapPin className="w-3.5 h-3.5" />
                         </a>
                       )}
                       {e.flagged && (
