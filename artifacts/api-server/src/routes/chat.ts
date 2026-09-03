@@ -2,12 +2,12 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
-import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, messagePinsTable, attendanceLogsTable, attendanceStartEventsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, taskAssigneesTable, crmPurchasesTable, appSettingsTable } from "@workspace/db";
+import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, messagePinsTable, attendanceLogsTable, attendanceStartEventsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, taskAssigneesTable, crmPurchasesTable, appSettingsTable, tradeInEvaluationsTable, timeClockEntriesTable } from "@workspace/db";
 import { eq, desc, and, or, lt, gte, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { requireAuth, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
 import { checkPerm, requirePerm, getCurrentAllowedSessionKeys } from "../lib/permissions";
-import { requireChatAccess } from "../lib/moduleAccess";
+import { requireChatAccess, checkChatAccess, checkModuleAccess } from "../lib/moduleAccess";
 import {
   broadcast,
   sseEmitter,
@@ -2254,7 +2254,7 @@ router.post("/chat/messages/:id/transcribe", requireAuth, requireChatAccess(), a
 });
 
 // ─── Serve saved media files ───────────────────────────────────────────────
-router.get("/chat/media/:filename", requireAuth, requireChatAccess(), async (req: Request, res: Response): Promise<void> => {
+router.get("/chat/media/:filename", requireAuth, async (req: Request, res: Response): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const filename = path.basename(req.params.filename as string);
   const filepath = path.join(MEDIA_DIR, filename);
@@ -2263,7 +2263,15 @@ router.get("/chat/media/:filename", requireAuth, requireChatAccess(), async (req
     return;
   }
 
-  // Resolve the media file to its owning conversation and enforce sector access.
+  // MEDIA_DIR é compartilhado por 3 fluxos que salvam arquivo com
+  // writeFile/randomUUID direto (chat, avaliação de troca e ponto de RH),
+  // cada um com sua própria regra de "quem pode ver". Resolve o dono pela
+  // ordem: mensagem de chat (regra original, com acesso por conversa) ->
+  // avaliação de troca (Avaliação de Usados) -> comprovante de ponto (RH/DP).
+  // Sem dono reconhecido, nega por segurança (antes disto, TUDO exigia
+  // acesso a Atendimento e "dono = mensagem", o que quebrava as fotos de
+  // avaliação de troca e ia quebrar as de ponto: nenhuma das duas gera
+  // mensagem de chat, então ficavam sempre 403).
   const mediaUrl = `/api/chat/media/${filename}`;
   const [owningMsg] = await db
     .select({ conversationId: messagesTable.conversationId, metadata: messagesTable.metadata })
@@ -2271,21 +2279,54 @@ router.get("/chat/media/:filename", requireAuth, requireChatAccess(), async (req
     .where(eq(messagesTable.mediaUrl, mediaUrl))
     .limit(1);
 
-  if (!owningMsg) {
-    // File exists on disk but has no owning message — deny access to be safe.
-    res.status(403).json({ error: "Acesso negado" });
-    return;
-  }
+  let downloadFileName: string | undefined;
 
-  const [conv] = await db
-    .select()
-    .from(conversationsTable)
-    .where(and(eq(conversationsTable.id, owningMsg.conversationId), eq(conversationsTable.tenantId, tenantId)))
-    .limit(1);
+  if (owningMsg) {
+    if ((await checkChatAccess(req)) === "none") {
+      res.status(403).json({ error: "Acesso negado" });
+      return;
+    }
+    const [conv] = await db
+      .select()
+      .from(conversationsTable)
+      .where(and(eq(conversationsTable.id, owningMsg.conversationId), eq(conversationsTable.tenantId, tenantId)))
+      .limit(1);
+    if (!conv || !(await canAccessConversation(conv, req))) {
+      res.status(403).json({ error: "Acesso negado" });
+      return;
+    }
+    downloadFileName = owningMsg.metadata?.fileName;
+  } else {
+    const [tradeInMatch] = await db
+      .select({ id: tradeInEvaluationsTable.id })
+      .from(tradeInEvaluationsTable)
+      .where(and(
+        eq(tradeInEvaluationsTable.tenantId, tenantId),
+        sql`(${tradeInEvaluationsTable.documentPhotos} @> ${JSON.stringify([mediaUrl])}::jsonb OR ${tradeInEvaluationsTable.devicePhotos} @> ${JSON.stringify([mediaUrl])}::jsonb)`,
+      ))
+      .limit(1);
 
-  if (!conv || !(await canAccessConversation(conv, req))) {
-    res.status(403).json({ error: "Acesso negado" });
-    return;
+    if (tradeInMatch) {
+      if ((await checkModuleAccess(req, "avaliacao")) == null) {
+        res.status(403).json({ error: "Acesso negado" });
+        return;
+      }
+    } else {
+      const [pontoMatch] = await db
+        .select({ id: timeClockEntriesTable.id })
+        .from(timeClockEntriesTable)
+        .where(and(eq(timeClockEntriesTable.tenantId, tenantId), eq(timeClockEntriesTable.proofUrl, mediaUrl)))
+        .limit(1);
+      if (!pontoMatch) {
+        // Arquivo existe no disco mas não pertence a nada que reconhecemos — nega por segurança.
+        res.status(403).json({ error: "Acesso negado" });
+        return;
+      }
+      if ((await checkModuleAccess(req, "rh")) == null) {
+        res.status(403).json({ error: "Acesso negado" });
+        return;
+      }
+    }
   }
 
   const ext = path.extname(filename).slice(1).toLowerCase();
@@ -2310,7 +2351,7 @@ router.get("/chat/media/:filename", requireAuth, requireChatAccess(), async (req
   // botão de baixar de vídeo/áudio/doc na Central (sem isso, o navegador
   // abre o arquivo na própria aba/visualizador nativo em vez de baixar).
   if (req.query["download"] === "1") {
-    const downloadName = owningMsg.metadata?.fileName ?? filename;
+    const downloadName = downloadFileName ?? filename;
     res.setHeader("Content-Disposition", `attachment; filename="${downloadName.replace(/"/g, "")}"`);
   }
 
