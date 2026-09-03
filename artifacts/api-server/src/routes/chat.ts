@@ -2302,7 +2302,7 @@ router.get("/chat/media/:filename", requireAuth, async (req: Request, res: Respo
       .from(tradeInEvaluationsTable)
       .where(and(
         eq(tradeInEvaluationsTable.tenantId, tenantId),
-        sql`(${tradeInEvaluationsTable.documentPhotos} @> ${JSON.stringify([mediaUrl])}::jsonb OR ${tradeInEvaluationsTable.devicePhotos} @> ${JSON.stringify([mediaUrl])}::jsonb)`,
+        sql`(${tradeInEvaluationsTable.documentPhotos} @> ${JSON.stringify([mediaUrl])}::jsonb OR ${tradeInEvaluationsTable.devicePhotos} @> ${JSON.stringify([mediaUrl])}::jsonb OR ${tradeInEvaluationsTable.paymentProofPhotos} @> ${JSON.stringify([mediaUrl])}::jsonb)`,
       ))
       .limit(1);
 

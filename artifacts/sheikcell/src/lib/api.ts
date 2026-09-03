@@ -977,8 +977,11 @@ export type TradeInEvaluation = {
   sellerCustomerName?: string | null; sellerCpf?: string | null;
   imei?: string | null; finalAgreedPrice?: string | null; closedAt?: string | null;
   // Nota de compra completa: dados extras + fotos de documento/aparelho.
-  sellerRg?: string | null; sellerAddress?: string | null; sellerPhone?: string | null;
+  sellerRg?: string | null; sellerAddress?: string | null; sellerNeighborhood?: string | null; sellerPhone?: string | null;
   documentPhotos?: string[]; devicePhotos?: string[];
+  // Forma de pagamento + dados do Pix (chave/titular) + foto do comprovante.
+  paymentMethod?: string | null; pixKey?: string | null; pixKeyHolder?: string | null;
+  paymentProofPhotos?: string[];
 };
 
 // Tabelas de margem da avaliação: 1 = maior, 2 = média, 3 = menor (em %).
@@ -1911,13 +1914,17 @@ export const api = {
     evaluate: (data: { device?: string; brand?: string; model?: string; memory?: string; color?: string; customerName?: string; marginTable?: 1 | 2 | 3; basePrice?: string; answers: Record<string, string> }) =>
       req<{ id: number; device: string; marketPrice: string; suggestedPrice: string; summary: string; createdAt: string; customerName?: string | null }>(
         "/trade-in/evaluate", { method: "POST", body: JSON.stringify(data) }),
-    close: (id: number, data: { sellerCustomerName: string; sellerCpf: string; imei: string; finalAgreedPrice: string; sellerRg?: string; sellerAddress?: string; sellerPhone?: string }) =>
+    close: (id: number, data: {
+      sellerCustomerName: string; sellerCpf: string; imei: string; finalAgreedPrice: string;
+      sellerRg?: string; sellerAddress?: string; sellerNeighborhood?: string; sellerPhone?: string;
+      paymentMethod?: string; pixKey?: string; pixKeyHolder?: string;
+    }) =>
       req<TradeInEvaluation>(`/trade-in/${id}/close`, { method: "PATCH", body: JSON.stringify(data) }),
-    uploadPhoto: (id: number, kind: "document" | "device", base64: string, mimetype: string) =>
-      req<{ documentPhotos: string[]; devicePhotos: string[] }>(
+    uploadPhoto: (id: number, kind: "document" | "device" | "payment", base64: string, mimetype: string) =>
+      req<{ documentPhotos: string[]; devicePhotos: string[]; paymentProofPhotos: string[] }>(
         `/trade-in/${id}/photos`, { method: "POST", body: JSON.stringify({ kind, base64, mimetype }) }),
-    deletePhoto: (id: number, kind: "document" | "device", url: string) =>
-      req<{ documentPhotos: string[]; devicePhotos: string[] }>(
+    deletePhoto: (id: number, kind: "document" | "device" | "payment", url: string) =>
+      req<{ documentPhotos: string[]; devicePhotos: string[]; paymentProofPhotos: string[] }>(
         `/trade-in/${id}/photos`, { method: "DELETE", body: JSON.stringify({ kind, url }) }),
     margins: () => req<TradeInMargins>("/trade-in/margins"),
     saveMargins: (data: Partial<TradeInMargins>) =>

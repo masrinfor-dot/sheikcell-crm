@@ -48,11 +48,16 @@ router.get("/trade-in", requireAuth, async (req, res): Promise<void> => {
       closedAt: tradeInEvaluationsTable.closedAt,
       sellerRg: tradeInEvaluationsTable.sellerRg,
       sellerAddress: tradeInEvaluationsTable.sellerAddress,
+      sellerNeighborhood: tradeInEvaluationsTable.sellerNeighborhood,
       sellerPhone: tradeInEvaluationsTable.sellerPhone,
+      paymentMethod: tradeInEvaluationsTable.paymentMethod,
+      pixKey: tradeInEvaluationsTable.pixKey,
+      pixKeyHolder: tradeInEvaluationsTable.pixKeyHolder,
       // Pra reimprimir a nota (com fotos) e pra aba "Celulares comprados"
       // mostrar as fotos sem precisar abrir a avaliação uma por uma.
       documentPhotos: tradeInEvaluationsTable.documentPhotos,
       devicePhotos: tradeInEvaluationsTable.devicePhotos,
+      paymentProofPhotos: tradeInEvaluationsTable.paymentProofPhotos,
     })
     .from(tradeInEvaluationsTable)
     .leftJoin(usersTable, eq(tradeInEvaluationsTable.userId, usersTable.id))
@@ -385,19 +390,28 @@ router.patch("/trade-in/:id/close", requireAuth, async (req, res): Promise<void>
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ error: "Avaliação inválida" }); return; }
 
-  const { sellerCustomerName, sellerCpf, imei, finalAgreedPrice, sellerRg, sellerAddress, sellerPhone } = req.body as {
+  const {
+    sellerCustomerName, sellerCpf, imei, finalAgreedPrice, sellerRg, sellerAddress, sellerPhone,
+    sellerNeighborhood, paymentMethod, pixKey, pixKeyHolder,
+  } = req.body as {
     sellerCustomerName?: string; sellerCpf?: string; imei?: string; finalAgreedPrice?: string;
     sellerRg?: string; sellerAddress?: string; sellerPhone?: string;
+    sellerNeighborhood?: string; paymentMethod?: string; pixKey?: string; pixKeyHolder?: string;
   };
   const name = clean(sellerCustomerName, 120);
   const cpf = typeof sellerCpf === "string" ? sellerCpf.trim().slice(0, 20) : "";
   const imeiClean = typeof imei === "string" ? imei.replace(/\D/g, "").slice(0, 20) : "";
   const finalPrice = clean(finalAgreedPrice, 60);
-  // Dados extras da nota de compra (RG/endereço/telefone) — completam a nota
-  // mas não bloqueiam o fechamento se a loja não tiver essa info na hora.
+  // Dados extras da nota de compra (RG/endereço/telefone/pagamento) —
+  // completam a nota mas não bloqueiam o fechamento se a loja não tiver essa
+  // info na hora (mesmo espírito do IMEI opcional).
   const rg = clean(sellerRg, 30);
   const address = clean(sellerAddress, 300);
+  const neighborhood = clean(sellerNeighborhood, 120);
   const phone = clean(sellerPhone, 30);
+  const payMethod = clean(paymentMethod, 40);
+  const pKey = typeof pixKey === "string" ? pixKey.trim().slice(0, 140) : "";
+  const pKeyHolder = clean(pixKeyHolder, 120);
 
   if (!name) { res.status(400).json({ error: "Informe o nome do cliente vendedor" }); return; }
   if (!CPF_RE.test(cpf)) { res.status(400).json({ error: "CPF inválido" }); return; }
@@ -423,7 +437,11 @@ router.patch("/trade-in/:id/close", requireAuth, async (req, res): Promise<void>
       finalAgreedPrice: finalPrice,
       sellerRg: rg || null,
       sellerAddress: address || null,
+      sellerNeighborhood: neighborhood || null,
       sellerPhone: phone || null,
+      paymentMethod: payMethod || null,
+      pixKey: pKey || null,
+      pixKeyHolder: pKeyHolder || null,
       // Preserva a data original do fechamento se já estava fechado (ex.:
       // só voltando pra completar o IMEI depois) — só grava agora na
       // primeira vez.
@@ -462,16 +480,16 @@ router.post("/trade-in/:id/photos", requireAuth, async (req, res): Promise<void>
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ error: "Avaliação inválida" }); return; }
-  const { kind, base64, mimetype } = req.body as { kind?: "document" | "device"; base64?: string; mimetype?: string };
-  if (kind !== "document" && kind !== "device") { res.status(400).json({ error: "Tipo de foto inválido" }); return; }
+  const { kind, base64, mimetype } = req.body as { kind?: "document" | "device" | "payment"; base64?: string; mimetype?: string };
+  if (kind !== "document" && kind !== "device" && kind !== "payment") { res.status(400).json({ error: "Tipo de foto inválido" }); return; }
   if (!base64 || !mimetype) { res.status(400).json({ error: "Foto inválida" }); return; }
 
   const [evalRow] = await db.select().from(tradeInEvaluationsTable)
     .where(and(eq(tradeInEvaluationsTable.id, id), eq(tradeInEvaluationsTable.tenantId, tenantId))).limit(1);
   if (!evalRow) { res.status(404).json({ error: "Avaliação não encontrada" }); return; }
 
-  const column = kind === "document" ? "documentPhotos" : "devicePhotos";
-  const current = (kind === "document" ? evalRow.documentPhotos : evalRow.devicePhotos) ?? [];
+  const column = kind === "document" ? "documentPhotos" : kind === "device" ? "devicePhotos" : "paymentProofPhotos";
+  const current = evalRow[column] ?? [];
   if (current.length >= MAX_PHOTOS_PER_KIND) {
     res.status(400).json({ error: `Máximo de ${MAX_PHOTOS_PER_KIND} fotos por categoria` }); return;
   }
@@ -489,23 +507,23 @@ router.post("/trade-in/:id/photos", requireAuth, async (req, res): Promise<void>
     .where(and(eq(tradeInEvaluationsTable.id, id), eq(tradeInEvaluationsTable.tenantId, tenantId)))
     .returning();
 
-  res.json({ documentPhotos: saved!.documentPhotos, devicePhotos: saved!.devicePhotos });
+  res.json({ documentPhotos: saved!.documentPhotos, devicePhotos: saved!.devicePhotos, paymentProofPhotos: saved!.paymentProofPhotos });
 });
 
 router.delete("/trade-in/:id/photos", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ error: "Avaliação inválida" }); return; }
-  const { kind, url } = req.body as { kind?: "document" | "device"; url?: string };
-  if (kind !== "document" && kind !== "device") { res.status(400).json({ error: "Tipo de foto inválido" }); return; }
+  const { kind, url } = req.body as { kind?: "document" | "device" | "payment"; url?: string };
+  if (kind !== "document" && kind !== "device" && kind !== "payment") { res.status(400).json({ error: "Tipo de foto inválido" }); return; }
   if (!url) { res.status(400).json({ error: "Foto inválida" }); return; }
 
   const [evalRow] = await db.select().from(tradeInEvaluationsTable)
     .where(and(eq(tradeInEvaluationsTable.id, id), eq(tradeInEvaluationsTable.tenantId, tenantId))).limit(1);
   if (!evalRow) { res.status(404).json({ error: "Avaliação não encontrada" }); return; }
 
-  const column = kind === "document" ? "documentPhotos" : "devicePhotos";
-  const current = (kind === "document" ? evalRow.documentPhotos : evalRow.devicePhotos) ?? [];
+  const column = kind === "document" ? "documentPhotos" : kind === "device" ? "devicePhotos" : "paymentProofPhotos";
+  const current = evalRow[column] ?? [];
   const nextList = current.filter((u) => u !== url);
 
   const [saved] = await db.update(tradeInEvaluationsTable)
@@ -513,7 +531,7 @@ router.delete("/trade-in/:id/photos", requireAuth, async (req, res): Promise<voi
     .where(and(eq(tradeInEvaluationsTable.id, id), eq(tradeInEvaluationsTable.tenantId, tenantId)))
     .returning();
 
-  res.json({ documentPhotos: saved!.documentPhotos, devicePhotos: saved!.devicePhotos });
+  res.json({ documentPhotos: saved!.documentPhotos, devicePhotos: saved!.devicePhotos, paymentProofPhotos: saved!.paymentProofPhotos });
 });
 
 export default router;

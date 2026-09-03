@@ -35,7 +35,16 @@ export const tradeInEvaluationsTable = pgTable("trade_in_evaluations", {
   // mesmo CPF, sem precisar de nenhuma tabela nova.
   sellerRg: text("seller_rg"),
   sellerAddress: text("seller_address"),
+  sellerNeighborhood: text("seller_neighborhood"), // bairro — separado do endereço livre, pra facilitar leitura na nota
   sellerPhone: text("seller_phone"),
   documentPhotos: jsonb("document_photos").$type<string[]>().notNull().default([]),
   devicePhotos: jsonb("device_photos").$type<string[]>().notNull().default([]),
+  // Forma de pagamento ao cliente vendedor (Dinheiro/Pix/Cartão/Transferência —
+  // texto livre, a loja pode digitar outra) + dados do Pix quando for o caso
+  // (chave e titular podem ser de terceiro, ex.: familiar do vendedor) + foto
+  // do comprovante (mesmo padrão de documentPhotos/devicePhotos).
+  paymentMethod: text("payment_method"),
+  pixKey: text("pix_key"),
+  pixKeyHolder: text("pix_key_holder"), // titular da chave Pix (pode ser diferente do vendedor)
+  paymentProofPhotos: jsonb("payment_proof_photos").$type<string[]>().notNull().default([]),
 });
