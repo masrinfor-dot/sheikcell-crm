@@ -1,4 +1,4 @@
-import { Router, type IRouter } from "express";
+import { Router, type IRouter, type Request } from "express";
 import { db, tradeInEvaluationsTable, usersTable, appSettingsTable } from "@workspace/db";
 import { eq, and, desc, sql } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
@@ -171,6 +171,13 @@ router.delete("/trade-in/questions", requireAdmin, async (req, res): Promise<voi
 const clean = (v: unknown, max: number) => (typeof v === "string"
   ? v.normalize("NFC").replace(/[^\p{L}\p{N} .,+\-()/%–]/gu, " ").replace(/\s+/g, " ").trim().slice(0, max)
   : "");
+
+// Um "celular comprado" (avaliação já com closedAt) só pode ser editado —
+// dados, fotos ou excluído — por admin/supervisor; qualquer vendedor com
+// acesso de edição ao módulo continua livre para FECHAR uma avaliação nova
+// (closedAt ainda nulo) e mexer nas fotos dela até fechar o negócio.
+const isManager = (req: Request): boolean =>
+  req.session.userRole === "admin" || req.session.userRole === "supervisor";
 
 // Chama a IA de preços (com busca na web; cai para estimativa sem web).
 async function askPriceAI(prompt: string, tenantId: number): Promise<string> {
@@ -428,6 +435,12 @@ router.patch("/trade-in/:id/close", requireAuth, async (req, res): Promise<void>
     .from(tradeInEvaluationsTable)
     .where(and(eq(tradeInEvaluationsTable.id, id), eq(tradeInEvaluationsTable.tenantId, tenantId))).limit(1);
   if (!existing) { res.status(404).json({ error: "Avaliação não encontrada" }); return; }
+  // Já é um celular comprado (negócio já fechado antes)? Só admin/supervisor
+  // pode editar os dados dessa compra — vendedor comum só fecha uma vez.
+  if (existing.closedAt && !isManager(req)) {
+    res.status(403).json({ error: "Somente admin ou supervisor pode editar uma compra já fechada" });
+    return;
+  }
 
   const [saved] = await db.update(tradeInEvaluationsTable)
     .set({
@@ -487,6 +500,10 @@ router.post("/trade-in/:id/photos", requireAuth, async (req, res): Promise<void>
   const [evalRow] = await db.select().from(tradeInEvaluationsTable)
     .where(and(eq(tradeInEvaluationsTable.id, id), eq(tradeInEvaluationsTable.tenantId, tenantId))).limit(1);
   if (!evalRow) { res.status(404).json({ error: "Avaliação não encontrada" }); return; }
+  if (evalRow.closedAt && !isManager(req)) {
+    res.status(403).json({ error: "Somente admin ou supervisor pode editar uma compra já fechada" });
+    return;
+  }
 
   const column = kind === "document" ? "documentPhotos" : kind === "device" ? "devicePhotos" : "paymentProofPhotos";
   const current = evalRow[column] ?? [];
@@ -521,6 +538,10 @@ router.delete("/trade-in/:id/photos", requireAuth, async (req, res): Promise<voi
   const [evalRow] = await db.select().from(tradeInEvaluationsTable)
     .where(and(eq(tradeInEvaluationsTable.id, id), eq(tradeInEvaluationsTable.tenantId, tenantId))).limit(1);
   if (!evalRow) { res.status(404).json({ error: "Avaliação não encontrada" }); return; }
+  if (evalRow.closedAt && !isManager(req)) {
+    res.status(403).json({ error: "Somente admin ou supervisor pode editar uma compra já fechada" });
+    return;
+  }
 
   const column = kind === "document" ? "documentPhotos" : kind === "device" ? "devicePhotos" : "paymentProofPhotos";
   const current = evalRow[column] ?? [];
@@ -532,6 +553,21 @@ router.delete("/trade-in/:id/photos", requireAuth, async (req, res): Promise<voi
     .returning();
 
   res.json({ documentPhotos: saved!.documentPhotos, devicePhotos: saved!.devicePhotos, paymentProofPhotos: saved!.paymentProofPhotos });
+});
+
+// Excluir uma avaliação/compra — só admin ou supervisor (item sensível: some
+// da aba "Celulares comprados" e do histórico pra sempre).
+router.delete("/trade-in/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ error: "Avaliação inválida" }); return; }
+  if (!isManager(req)) { res.status(403).json({ error: "Somente admin ou supervisor pode excluir" }); return; }
+
+  const [deleted] = await db.delete(tradeInEvaluationsTable)
+    .where(and(eq(tradeInEvaluationsTable.id, id), eq(tradeInEvaluationsTable.tenantId, tenantId)))
+    .returning({ id: tradeInEvaluationsTable.id });
+  if (!deleted) { res.status(404).json({ error: "Avaliação não encontrada" }); return; }
+  res.json({ ok: true });
 });
 
 export default router;

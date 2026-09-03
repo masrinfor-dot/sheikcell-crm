@@ -1926,6 +1926,7 @@ export const api = {
     deletePhoto: (id: number, kind: "document" | "device" | "payment", url: string) =>
       req<{ documentPhotos: string[]; devicePhotos: string[]; paymentProofPhotos: string[] }>(
         `/trade-in/${id}/photos`, { method: "DELETE", body: JSON.stringify({ kind, url }) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/trade-in/${id}`, { method: "DELETE" }),
     margins: () => req<TradeInMargins>("/trade-in/margins"),
     saveMargins: (data: Partial<TradeInMargins>) =>
       req<TradeInMargins>("/trade-in/margins", { method: "PATCH", body: JSON.stringify(data) }),

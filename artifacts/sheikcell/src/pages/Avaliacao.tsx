@@ -54,6 +54,9 @@ export default function Avaliacao() {
   const { toast } = useToast();
   const { user } = useAuth();
   const canEdit = canEditModule(user, "avaliacao");
+  // Editar dados/fotos ou excluir um celular JÁ COMPRADO é restrito — só
+  // admin ou supervisor (vendedor comum só fecha o negócio uma vez).
+  const canManagePurchased = user?.role === "admin" || user?.role === "supervisor";
 
   const [step, setStep] = useState(1);
   const [marginTable, setMarginTable] = useState<1 | 2 | 3>(2);
@@ -128,6 +131,16 @@ export default function Avaliacao() {
   const [histDealPixKey, setHistDealPixKey] = useState("");
   const [histDealPixKeyHolder, setHistDealPixKeyHolder] = useState("");
   const [histClosing, setHistClosing] = useState(false);
+  // Fotos da avaliação sendo finalizada/completada pelo histórico ou pela aba
+  // "Celulares comprados" — mesmo padrão da etapa 4, mas usando o id
+  // histClosingId (avaliação antiga) em vez de result.id (avaliação ao vivo).
+  const [histDocumentPhotos, setHistDocumentPhotos] = useState<string[]>([]);
+  const [histDevicePhotos, setHistDevicePhotos] = useState<string[]>([]);
+  const [histPaymentProofPhotos, setHistPaymentProofPhotos] = useState<string[]>([]);
+  const [histUploadingDoc, setHistUploadingDoc] = useState(false);
+  const [histUploadingDevice, setHistUploadingDevice] = useState(false);
+  const [histUploadingPayment, setHistUploadingPayment] = useState(false);
+  const [deletingPurchasedId, setDeletingPurchasedId] = useState<number | null>(null);
 
   // Perguntas configuráveis (servidor) + editor do admin.
   const [qConfig, setQConfig] = useState<TradeInQuestionsConfig | null>(null);
@@ -425,6 +438,60 @@ ${photosHtml}
     setHistDealPaymentMethod(h.paymentMethod ?? "");
     setHistDealPixKey(h.pixKey ?? "");
     setHistDealPixKeyHolder(h.pixKeyHolder ?? "");
+    setHistDocumentPhotos(h.documentPhotos ?? []);
+    setHistDevicePhotos(h.devicePhotos ?? []);
+    setHistPaymentProofPhotos(h.paymentProofPhotos ?? []);
+  };
+
+  // Fotos da avaliação antiga sendo finalizada/completada (mesmo endpoint da
+  // etapa 4, só que usando o id salvo em histClosingId). Atualiza também a
+  // linha na lista em memória pra miniatura já aparecer sem esperar refetch.
+  const handleAddHistPhotos = async (kind: "document" | "device" | "payment", files: FileList | null) => {
+    if (!files || files.length === 0 || histClosingId == null) return;
+    const setUploading = kind === "document" ? setHistUploadingDoc : kind === "device" ? setHistUploadingDevice : setHistUploadingPayment;
+    setUploading(true);
+    try {
+      for (const file of Array.from(files)) {
+        const base64 = await readFileAsBase64(file);
+        const r = await api.tradeIn.uploadPhoto(histClosingId, kind, base64, file.type);
+        setHistDocumentPhotos(r.documentPhotos);
+        setHistDevicePhotos(r.devicePhotos);
+        setHistPaymentProofPhotos(r.paymentProofPhotos);
+        setHistory((prev) => prev.map((it) => (it.id === histClosingId ? { ...it, ...r } : it)));
+      }
+    } catch (err) {
+      toast({ title: "Erro ao enviar foto", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleRemoveHistPhoto = async (kind: "document" | "device" | "payment", url: string) => {
+    if (histClosingId == null) return;
+    try {
+      const r = await api.tradeIn.deletePhoto(histClosingId, kind, url);
+      setHistDocumentPhotos(r.documentPhotos);
+      setHistDevicePhotos(r.devicePhotos);
+      setHistPaymentProofPhotos(r.paymentProofPhotos);
+      setHistory((prev) => prev.map((it) => (it.id === histClosingId ? { ...it, ...r } : it)));
+    } catch (err) {
+      toast({ title: "Erro ao remover foto", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
+  };
+
+  // Excluir uma compra (só admin/supervisor — botão só aparece pra eles).
+  const handleDeletePurchased = async (id: number) => {
+    if (!confirm("Excluir esta compra? Essa ação não pode ser desfeita.")) return;
+    setDeletingPurchasedId(id);
+    try {
+      await api.tradeIn.remove(id);
+      setHistory((prev) => prev.filter((h) => h.id !== id));
+      toast({ title: "Compra excluída" });
+    } catch (err) {
+      toast({ title: "Erro ao excluir", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setDeletingPurchasedId(null);
+    }
   };
 
   const handleCloseFromHistory = async () => {
@@ -605,7 +672,7 @@ ${photosHtml}
                       <Wallet className="w-3 h-3" /> {h.paymentMethod}
                     </span>
                   )}
-                  {canEdit && histClosingId !== h.id && (
+                  {canManagePurchased && histClosingId !== h.id && (
                     <button onClick={() => openHistoryClose(h)} data-testid={`button-purchased-edit-${h.id}`}
                       className="text-[10px] font-bold text-primary underline">
                       {h.imei ? "Editar dados" : "Completar IMEI"}
@@ -615,6 +682,13 @@ ${photosHtml}
                     className="flex items-center gap-1 text-[10px] font-semibold text-primary">
                     <Printer className="w-3 h-3" /> Reimprimir nota
                   </button>
+                  {canManagePurchased && (
+                    <button onClick={() => handleDeletePurchased(h.id)} disabled={deletingPurchasedId === h.id}
+                      data-testid={`button-purchased-delete-${h.id}`}
+                      className="flex items-center gap-1 text-[10px] font-semibold text-red-600 disabled:opacity-40">
+                      <Trash2 className="w-3 h-3" /> {deletingPurchasedId === h.id ? "Excluindo..." : "Excluir"}
+                    </button>
+                  )}
                 </div>
                 {(h.documentPhotos?.length || h.devicePhotos?.length || h.paymentProofPhotos?.length) ? (
                   <div className="flex gap-1.5 flex-wrap mt-1.5">
@@ -653,6 +727,17 @@ ${photosHtml}
                         paymentMethod={histDealPaymentMethod} onPaymentMethod={setHistDealPaymentMethod}
                         pixKey={histDealPixKey} onPixKey={setHistDealPixKey}
                         pixKeyHolder={histDealPixKeyHolder} onPixKeyHolder={setHistDealPixKeyHolder} />
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      <PhotoPicker label="Fotos do documento" testId={`purchased-doc-${h.id}`} photos={histDocumentPhotos}
+                        uploading={histUploadingDoc} onAdd={(files) => handleAddHistPhotos("document", files)}
+                        onRemove={(url) => handleRemoveHistPhoto("document", url)} />
+                      <PhotoPicker label="Fotos do aparelho" testId={`purchased-device-${h.id}`} photos={histDevicePhotos}
+                        uploading={histUploadingDevice} onAdd={(files) => handleAddHistPhotos("device", files)}
+                        onRemove={(url) => handleRemoveHistPhoto("device", url)} />
+                      <PhotoPicker label="Comprovante de pagamento" testId={`purchased-payment-${h.id}`} photos={histPaymentProofPhotos}
+                        uploading={histUploadingPayment} onAdd={(files) => handleAddHistPhotos("payment", files)}
+                        onRemove={(url) => handleRemoveHistPhoto("payment", url)} />
                     </div>
                     <div className="flex gap-2">
                       <button onClick={handleCloseFromHistory} disabled={histClosing} data-testid={`button-purchased-save-${h.id}`}
@@ -771,6 +856,17 @@ ${photosHtml}
                         paymentMethod={histDealPaymentMethod} onPaymentMethod={setHistDealPaymentMethod}
                         pixKey={histDealPixKey} onPixKey={setHistDealPixKey}
                         pixKeyHolder={histDealPixKeyHolder} onPixKeyHolder={setHistDealPixKeyHolder} />
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      <PhotoPicker label="Fotos do documento" testId={`history-doc-${h.id}`} photos={histDocumentPhotos}
+                        uploading={histUploadingDoc} onAdd={(files) => handleAddHistPhotos("document", files)}
+                        onRemove={(url) => handleRemoveHistPhoto("document", url)} />
+                      <PhotoPicker label="Fotos do aparelho" testId={`history-device-${h.id}`} photos={histDevicePhotos}
+                        uploading={histUploadingDevice} onAdd={(files) => handleAddHistPhotos("device", files)}
+                        onRemove={(url) => handleRemoveHistPhoto("device", url)} />
+                      <PhotoPicker label="Comprovante de pagamento" testId={`history-payment-${h.id}`} photos={histPaymentProofPhotos}
+                        uploading={histUploadingPayment} onAdd={(files) => handleAddHistPhotos("payment", files)}
+                        onRemove={(url) => handleRemoveHistPhoto("payment", url)} />
                     </div>
                     <div className="flex gap-2">
                       <button onClick={handleCloseFromHistory} disabled={histClosing} data-testid={`button-history-close-${h.id}`}
