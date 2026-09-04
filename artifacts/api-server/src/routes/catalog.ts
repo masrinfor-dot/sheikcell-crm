@@ -934,11 +934,22 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
   try {
     const { getOpenAiClientForTenant } = await import("../lib/aiClient");
     const openai = await getOpenAiClientForTenant(tenantId);
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o",
-      max_tokens: 4096,
-      messages: [{ role: "user", content: prompt }],
-    });
+    const completion = await openai.chat.completions.create(
+      {
+        model: "gpt-4o",
+        max_tokens: 4096,
+        messages: [{ role: "user", content: prompt }],
+      },
+      // O client (aiClient.ts / integrations-openai-ai) usa 25s de timeout
+      // por padrão — bom pra chamadas leves, mas curto demais aqui: essa
+      // rota lê uma lista de fornecedor inteira (até 12000 caracteres) e
+      // pede pra IA devolver até 4096 tokens de JSON estruturado, o que em
+      // listas grandes passa de 25s com alguma frequência (timeout real,
+      // não a IA "fora do ar" — só demora mais que o padrão). Sobrescreve
+      // só nesta chamada, sem mudar o timeout padrão usado pelas outras
+      // features de IA do sistema.
+      { timeout: 55_000 },
+    );
     const raw = completion.choices[0]?.message?.content?.trim() ?? "";
     const arr = extractJsonArray(raw);
     if (!arr) { res.status(502).json({ error: "A IA não retornou uma lista válida. Tente novamente." }); return; }
@@ -984,7 +995,20 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
     res.json({ items, newCategoryPaths });
   } catch (err) {
     req.log.error({ err }, "Catalog AI import failed");
-    res.status(503).json({ error: "A IA está indisponível no momento. Tente novamente em instantes." });
+    // Mensagem específica por causa (antes era sempre a mesma genérica
+    // "IA indisponível", mesmo motivo pra qualquer erro — dificultava saber
+    // se era só demora (lista grande, tenta de novo) ou algo que precisa de
+    // ação (chave de API inválida/sem crédito, exige o admin verificar).
+    const { OpenAI: OpenAISdk } = await import("openai");
+    let message = "A IA está indisponível no momento. Tente novamente em instantes.";
+    if (err instanceof OpenAISdk.APIConnectionTimeoutError || (err as { name?: string })?.name === "APIConnectionTimeoutError") {
+      message = "A IA demorou demais pra analisar essa lista (listas grandes podem passar de 1 minuto). Tente novamente — se persistir, tente colar em partes menores.";
+    } else if (err instanceof OpenAISdk.RateLimitError) {
+      message = "A IA está sobrecarregada no momento (limite de uso atingido). Aguarde um instante e tente de novo.";
+    } else if (err instanceof OpenAISdk.AuthenticationError) {
+      message = "A chave de acesso à IA está inválida ou expirada. Fale com o administrador do sistema.";
+    }
+    res.status(503).json({ error: message });
   }
 });
 

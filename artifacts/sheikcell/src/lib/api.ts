@@ -42,9 +42,23 @@ async function req<T>(path: string, opts?: RequestInit & { timeoutMs?: number })
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
+    const code = (err as { code?: string }).code;
+    // Sessão expirada ou encerrada no servidor (cookie venceu — 24h desde o
+    // login — ou o limite de 2 sessões simultâneas por usuário derrubou esta
+    // aba) enquanto a página ficava aberta: sem isso, a tela continuava
+    // mostrando os dados já carregados (parecendo logado) e só a próxima
+    // ação (ex.: "Iniciar atendimento") revelava o problema com um erro cru
+    // "Unauthorized", sem explicar nada nem levar de volta pro login. Não
+    // dispara pra /auth/login (senha errada é 401 normal ali) nem /auth/me
+    // (checagem silenciosa no carregamento inicial, visitante deslogado é
+    // esperado) nem REAUTH_REQUIRED (fluxo separado de confirmar senha de
+    // novo pra ação sensível — RoutineChecklistGate.tsx já trata via `code`).
+    if (res.status === 401 && code !== "REAUTH_REQUIRED" && path !== "/auth/login" && path !== "/auth/me") {
+      window.dispatchEvent(new CustomEvent("sheikcell:unauthorized"));
+    }
     throw new ApiError(
       (err as { error?: string }).error ?? res.statusText,
-      (err as { code?: string }).code,
+      code,
       (err as { conversationId?: number }).conversationId,
     );
   }

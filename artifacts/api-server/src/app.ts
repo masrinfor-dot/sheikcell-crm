@@ -67,6 +67,16 @@ app.use(
     })(),
     resave: false,
     saveUninitialized: false,
+    // rolling: renova os 24h a cada requisição (connect-pg-simple faz isso
+    // com um touch() leve, sem resalvar a sessão inteira — não precisa de
+    // resave:true). Sem isso o cookie vencia 24h depois do LOGIN, não do
+    // último uso — alguém trabalhando o dia inteiro com a aba aberta (comum
+    // numa loja) caía sozinho no meio do expediente: a tela continuava
+    // mostrando os dados já carregados (parecia logado) e só a próxima ação
+    // (ex.: "Iniciar atendimento") revelava com um "Unauthorized" cru, sem
+    // aviso nenhum. Agora quem usa o sistema ativamente nunca cai sozinho;
+    // só expira de verdade depois de 24h sem nenhuma requisição.
+    rolling: true,
     cookie: {
       secure: process.env["NODE_ENV"] === "production",
       httpOnly: true,

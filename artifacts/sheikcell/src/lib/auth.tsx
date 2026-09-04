@@ -2,6 +2,7 @@ import { createContext, useContext, useState, useEffect, type ReactNode } from "
 import { api, type User } from "./api";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
 import { ActivityGuardProvider } from "./activityGuard";
+import { toast } from "@/hooks/use-toast";
 
 type AuthCtx = {
   user: User | null;
@@ -30,6 +31,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .then((r) => setUser(r.user))
       .catch(() => setUser(null))
       .finally(() => setLoading(false));
+  }, []);
+
+  // Sessão caiu no servidor (cookie de 24h venceu, ou o limite de 2 sessões
+  // simultâneas por usuário derrubou esta aba) enquanto a página ficava
+  // aberta — ver o dispatch em lib/api.ts. Sem isso, a pessoa ficava com a
+  // tela travada mostrando dados antigos, achando que ainda estava logada,
+  // e só descobria ao tentar fazer alguma ação e levar um "Unauthorized" sem
+  // explicação nenhuma. Agora desloga de verdade (o roteador já manda pra
+  // /login sozinho quando user vira null) e avisa com uma mensagem clara.
+  useEffect(() => {
+    function handleUnauthorized() {
+      setUser((prev) => {
+        if (prev) {
+          toast({
+            title: "Sessão expirada",
+            description: "Sua sessão expirou ou foi encerrada em outro dispositivo. Faça login novamente.",
+            variant: "destructive",
+          });
+        }
+        return null;
+      });
+    }
+    window.addEventListener("sheikcell:unauthorized", handleUnauthorized);
+    return () => window.removeEventListener("sheikcell:unauthorized", handleUnauthorized);
   }, []);
 
   const login = async (email: string, password: string) => {
