@@ -10,6 +10,7 @@ export type PricingSettings = {
   invoiceCostPercent: number; // custo de nota fiscal — impostos/tributação sobre o custo (%)
   cardFeeTable: Record<string, number>; // taxa de cartão por nº de parcelas ("1".."18") em %
   wholesaleMarginPercent: number; // margem de lucro padrão pro preço de atacado (técnico/lojista) — normalmente menor que a de varejo
+  roundPricesUp: boolean; // arredondar sempre o preço de venda pra cima, pro próximo múltiplo de R$50 terminando em ",90"
 };
 
 const INSTALLMENTS = Array.from({ length: 18 }, (_, i) => String(i + 1));
@@ -19,7 +20,26 @@ export const DEFAULT_PRICING_SETTINGS: PricingSettings = {
   invoiceCostPercent: 0,
   cardFeeTable: Object.fromEntries(INSTALLMENTS.map((n) => [n, Math.min(2 + Number(n) * 1.1, 40)])),
   wholesaleMarginPercent: 12,
+  roundPricesUp: false,
 };
+
+/**
+ * Arredonda um preço pra cima, pro próximo "final bonito": o topo do próximo
+ * múltiplo de R$50 menos R$0,10 (ex.: R$2.102,02 → R$2.149,90; R$2.150,00→
+ * R$2.199,90). Sempre avança (nunca reduz o preço), inclusive quando o valor
+ * já está exatamente num múltiplo de 50. Se o preço já termina em ",90" num
+ * desses múltiplos, fica igual (idempotente). Cálculo em centavos inteiros
+ * pra não sofrer com erro de ponto flutuante.
+ */
+export function roundPriceUpTo50(price: number): number {
+  if (!Number.isFinite(price) || price <= 0) return price;
+  const cents = Math.round(price * 100);
+  const bucketCents = 5000; // R$50 em centavos
+  const remainder = cents % bucketCents;
+  const nextBucketTopCents = remainder === 0 ? cents + bucketCents : cents - remainder + bucketCents;
+  const rounded = nextBucketTopCents - 10; // termina em ,90 — já é idempotente por construção
+  return rounded / 100;
+}
 
 /** Sanitiza as configurações de precificação vindas do cliente (só números válidos, dentro de faixas seguras). */
 export function sanitizePricingSettings(input: unknown): PricingSettings {
@@ -38,6 +58,7 @@ export function sanitizePricingSettings(input: unknown): PricingSettings {
     invoiceCostPercent: norm(o.invoiceCostPercent, DEFAULT_PRICING_SETTINGS.invoiceCostPercent, 0, 95),
     cardFeeTable,
     wholesaleMarginPercent: norm(o.wholesaleMarginPercent, DEFAULT_PRICING_SETTINGS.wholesaleMarginPercent, 0, 95),
+    roundPricesUp: o.roundPricesUp === true,
   };
 }
 
@@ -54,15 +75,17 @@ export function calcularPrecoVenda(params: {
   notaFiscalPercent: number;
   taxaCartaoPercent: number;
   custoJaIncluiNotaFiscal?: boolean;
+  arredondarPraCima?: boolean;
 }): number {
-  const { custo, margemPercent, notaFiscalPercent, taxaCartaoPercent, custoJaIncluiNotaFiscal } = params;
+  const { custo, margemPercent, notaFiscalPercent, taxaCartaoPercent, custoJaIncluiNotaFiscal, arredondarPraCima } = params;
   if (!Number.isFinite(custo) || custo <= 0) return 0;
   const custoComNota = custoJaIncluiNotaFiscal ? custo : custo * (1 + notaFiscalPercent / 100);
   const divisor = 1 - (margemPercent + taxaCartaoPercent) / 100;
   // Margem + taxa somando 100% ou mais tornaria o preço infinito/negativo —
   // trava num múltiplo do custo em vez de quebrar a tela do lojista.
-  if (divisor <= 0.05) return Math.round(custoComNota * 3 * 100) / 100;
-  return Math.round((custoComNota / divisor) * 100) / 100;
+  const preco = divisor <= 0.05 ? custoComNota * 3 : custoComNota / divisor;
+  if (arredondarPraCima) return roundPriceUpTo50(preco);
+  return Math.round(preco * 100) / 100;
 }
 
 /** Valor de cada parcela no cartão para um número de parcelas (preço já formado, sem juros adicional na exibição). */
@@ -86,6 +109,7 @@ export function precoVendaDoProduto(
     notaFiscalPercent: settings.invoiceCostPercent,
     taxaCartaoPercent,
     custoJaIncluiNotaFiscal: produto.costIncludesInvoice,
+    arredondarPraCima: settings.roundPricesUp,
   });
 }
 
@@ -108,6 +132,7 @@ export function precoAtacadoDoProduto(
     notaFiscalPercent: settings.invoiceCostPercent,
     taxaCartaoPercent: 0,
     custoJaIncluiNotaFiscal: produto.costIncludesInvoice,
+    arredondarPraCima: settings.roundPricesUp,
   });
 }
 
@@ -128,6 +153,7 @@ export function precoAVistaDoProduto(
     notaFiscalPercent: settings.invoiceCostPercent,
     taxaCartaoPercent: 0,
     custoJaIncluiNotaFiscal: produto.costIncludesInvoice,
+    arredondarPraCima: settings.roundPricesUp,
   });
 }
 
@@ -164,6 +190,7 @@ export function parcelamento12xAtacadoDoProduto(
     notaFiscalPercent: settings.invoiceCostPercent,
     taxaCartaoPercent,
     custoJaIncluiNotaFiscal: produto.costIncludesInvoice,
+    arredondarPraCima: settings.roundPricesUp,
   });
   return { total, parcela: parcelaCartao(total, 12) };
 }

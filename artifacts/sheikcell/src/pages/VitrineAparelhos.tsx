@@ -430,6 +430,7 @@ export default function VitrineAparelhos() {
   // ─── Copiar mensagem formatada pro WhatsApp ────────────────────────────
   const productMessage = (p: CatalogProduct) => [
     `📱 ${p.model}`,
+    `✨ Qualidade: ${CATALOG_CONDITIONS.find((c) => c.value === p.condition)?.label ?? p.condition}`,
     p.colors.length ? `🎨 Cores: ${p.colors.join(", ")}` : null,
     ...p.variants
       .filter((v) => v.salePrice != null)
@@ -1245,6 +1246,16 @@ export default function VitrineAparelhos() {
                   ))}
                 </div>
                 <p className="text-[10px] text-muted-foreground mt-1">O preço é calculado usando a taxa de 1x como referência; as demais aparecem no parcelamento exibido ao cliente.</p>
+              </div>
+              <div className="flex items-start gap-2 rounded-lg border px-3 py-2.5 bg-muted/30">
+                <input type="checkbox" id="round-prices-up" checked={settingsForm.roundPricesUp}
+                  onChange={(e) => setSettingsForm({ ...settingsForm, roundPricesUp: e.target.checked })}
+                  data-testid="checkbox-round-prices-up"
+                  className="mt-0.5 w-4 h-4 rounded border-muted-foreground/40 text-primary focus:ring-2 focus:ring-primary/40" />
+                <label htmlFor="round-prices-up" className="text-xs cursor-pointer">
+                  <span className="font-semibold text-muted-foreground">Arredondar preços pra cima</span>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">Sempre arredonda o preço calculado pro final ",90" mais próximo pra cima, em faixas de R$50. Ex.: R$2.102,02 → R$2.149,90; R$2.150,00 → R$2.199,90.</p>
+                </label>
               </div>
               <button onClick={handleSaveSettings} disabled={savingSettings} data-testid="button-save-pricing-settings"
                 className="w-full py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition">

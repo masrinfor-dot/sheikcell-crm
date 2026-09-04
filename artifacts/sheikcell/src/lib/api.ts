@@ -442,6 +442,7 @@ export type CatalogPricingSettings = {
   invoiceCostPercent: number;
   cardFeeTable: Record<string, number>;
   wholesaleMarginPercent: number;
+  roundPricesUp: boolean;
 };
 
 export type CatalogPublicVariant = {
