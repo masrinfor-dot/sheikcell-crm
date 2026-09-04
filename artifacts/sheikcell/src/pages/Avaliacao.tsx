@@ -8,8 +8,10 @@ import {
 } from "lucide-react";
 
 // Formas de pagamento oferecidas ao fechar a compra (nota de compra) — texto
-// livre no banco, mas a UI sugere as mais comuns pra loja não digitar toda vez.
-const PAYMENT_METHODS = ["Dinheiro", "Pix", "Cartão de débito", "Cartão de crédito", "Transferência bancária", "Outro"];
+// livre no banco, a lista aqui só alimenta o <select>. EDITÁVEL pelo admin
+// (Editar formas de pagamento) e vem do servidor; este array é só o valor
+// inicial enquanto a config real ainda não chegou.
+const DEFAULT_PAYMENT_METHODS = ["Dinheiro", "Pix", "Cartão de débito", "Cartão de crédito", "Transferência bancária", "Troca", "Outro"];
 
 // Fluxo em etapas inspirado na Trocafone (trocafacil.trocafone.com.br):
 // 1) Aparelho (marca → modelo → memória → cor)  2) Condições  3) Oferta.
@@ -149,11 +151,18 @@ export default function Avaliacao() {
   const [cfgTab, setCfgTab] = useState<"apple" | "android">("apple");
   const [savingQuestions, setSavingQuestions] = useState(false);
 
+  // Formas de pagamento configuráveis (servidor) + editor do admin.
+  const [paymentMethods, setPaymentMethods] = useState<string[]>(DEFAULT_PAYMENT_METHODS);
+  const [showPaymentMethodsCfg, setShowPaymentMethodsCfg] = useState(false);
+  const [cfgPaymentMethods, setCfgPaymentMethods] = useState<string[]>([]);
+  const [savingPaymentMethods, setSavingPaymentMethods] = useState(false);
+
   const fetchHistory = () => { api.tradeIn.list().then(setHistory).catch(() => {}); };
   useEffect(() => {
     fetchHistory();
     api.tradeIn.margins().then(setMargins).catch(() => {});
     api.tradeIn.questions().then(setQConfig).catch(() => {});
+    api.tradeIn.paymentMethods().then(setPaymentMethods).catch(() => {});
   }, []);
 
   const deviceOk = Boolean(brand.trim() && model.trim());
@@ -726,7 +735,8 @@ ${photosHtml}
                         neighborhood={histDealNeighborhood} onNeighborhood={setHistDealNeighborhood}
                         paymentMethod={histDealPaymentMethod} onPaymentMethod={setHistDealPaymentMethod}
                         pixKey={histDealPixKey} onPixKey={setHistDealPixKey}
-                        pixKeyHolder={histDealPixKeyHolder} onPixKeyHolder={setHistDealPixKeyHolder} />
+                        pixKeyHolder={histDealPixKeyHolder} onPixKeyHolder={setHistDealPixKeyHolder}
+                        paymentMethods={paymentMethods} />
                     </div>
                     <div className="grid grid-cols-3 gap-2">
                       <PhotoPicker label="Fotos do documento" testId={`purchased-doc-${h.id}`} photos={histDocumentPhotos}
@@ -855,7 +865,8 @@ ${photosHtml}
                         neighborhood={histDealNeighborhood} onNeighborhood={setHistDealNeighborhood}
                         paymentMethod={histDealPaymentMethod} onPaymentMethod={setHistDealPaymentMethod}
                         pixKey={histDealPixKey} onPixKey={setHistDealPixKey}
-                        pixKeyHolder={histDealPixKeyHolder} onPixKeyHolder={setHistDealPixKeyHolder} />
+                        pixKeyHolder={histDealPixKeyHolder} onPixKeyHolder={setHistDealPixKeyHolder}
+                        paymentMethods={paymentMethods} />
                     </div>
                     <div className="grid grid-cols-3 gap-2">
                       <PhotoPicker label="Fotos do documento" testId={`history-doc-${h.id}`} photos={histDocumentPhotos}
@@ -998,6 +1009,14 @@ ${photosHtml}
                     data-testid="button-question-settings"
                     className="flex items-center gap-1 text-[11px] font-semibold text-primary">
                     <ListChecks className="w-3 h-3" /> Editar perguntas
+                  </button>
+                  <button onClick={() => {
+                      setCfgPaymentMethods([...paymentMethods]);
+                      setShowPaymentMethodsCfg(true);
+                    }}
+                    data-testid="button-payment-methods-settings"
+                    className="flex items-center gap-1 text-[11px] font-semibold text-primary">
+                    <Wallet className="w-3 h-3" /> Formas de pagamento
                   </button>
                 </div>
               )}
@@ -1221,7 +1240,7 @@ ${photosHtml}
                     data-testid="select-deal-payment-method"
                     className="w-full mt-1 px-3 py-2 rounded-xl border border-border text-sm bg-white">
                     <option value="">Opcional</option>
-                    {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+                    {paymentMethods.map((m) => <option key={m} value={m}>{m}</option>)}
                   </select>
                 </div>
                 {/pix/i.test(dealPaymentMethod) && (
@@ -1439,6 +1458,102 @@ ${photosHtml}
         </div>
       )}
 
+      {/* Modal: editar formas de pagamento (só admin) */}
+      {showPaymentMethodsCfg && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowPaymentMethodsCfg(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-md max-h-[90vh] flex flex-col shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="p-5 pb-3 space-y-2 border-b border-border">
+              <div className="flex items-center justify-between">
+                <h3 className="font-bold flex items-center gap-2"><Wallet className="w-4 h-4 text-primary" /> Formas de pagamento</h3>
+                <button onClick={() => setShowPaymentMethodsCfg(false)} data-testid="button-close-payment-methods-cfg"><X className="w-5 h-5 text-muted-foreground" /></button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Edite as opções oferecidas ao fechar a compra de um aparelho usado (nota de compra). Ex.: adicione <b>Troca</b> se a loja aceita
+                trocar o usado por outro aparelho do estoque em vez de pagar em dinheiro/Pix.
+              </p>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-5 space-y-2">
+              {cfgPaymentMethods.map((m, mi) => (
+                <div key={mi} className="flex items-center gap-2">
+                  <input value={m}
+                    onChange={(e) => setCfgPaymentMethods((c) => c.map((v, i) => (i === mi ? e.target.value : v)))}
+                    placeholder="Ex.: Troca" maxLength={40}
+                    data-testid={`input-payment-method-${mi}`}
+                    className="flex-1 px-3 py-2 rounded-xl border border-border text-xs" />
+                  <button disabled={mi === 0} title="Mover para cima"
+                    onClick={() => setCfgPaymentMethods((c) => {
+                      const n = [...c]; [n[mi - 1], n[mi]] = [n[mi]!, n[mi - 1]!]; return n;
+                    })}
+                    className="p-1 rounded-lg border border-border text-muted-foreground disabled:opacity-30 hover:bg-secondary">
+                    <ArrowUp className="w-3.5 h-3.5" />
+                  </button>
+                  <button disabled={mi === cfgPaymentMethods.length - 1} title="Mover para baixo"
+                    onClick={() => setCfgPaymentMethods((c) => {
+                      const n = [...c]; [n[mi], n[mi + 1]] = [n[mi + 1]!, n[mi]!]; return n;
+                    })}
+                    className="p-1 rounded-lg border border-border text-muted-foreground disabled:opacity-30 hover:bg-secondary">
+                    <ArrowDown className="w-3.5 h-3.5" />
+                  </button>
+                  <button title="Remover" disabled={cfgPaymentMethods.length <= 1}
+                    data-testid={`button-remove-payment-method-${mi}`}
+                    onClick={() => setCfgPaymentMethods((c) => c.filter((_, i) => i !== mi))}
+                    className="p-1 rounded-lg border border-red-200 text-red-600 disabled:opacity-30 hover:bg-red-50">
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
+              {cfgPaymentMethods.length < 20 && (
+                <button onClick={() => setCfgPaymentMethods((c) => [...c, ""])}
+                  data-testid="button-add-payment-method"
+                  className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl border-2 border-dashed border-border text-xs font-bold text-primary hover:bg-secondary transition">
+                  <Plus className="w-4 h-4" /> Adicionar forma de pagamento
+                </button>
+              )}
+            </div>
+
+            <div className="p-5 pt-3 border-t border-border flex items-center gap-3">
+              <button
+                onClick={async () => {
+                  if (!confirm("Restaurar as formas de pagamento padrão do sistema? As personalizações serão perdidas.")) return;
+                  try {
+                    const def = await api.tradeIn.resetPaymentMethods();
+                    setPaymentMethods(def);
+                    setCfgPaymentMethods([...def]);
+                    toast({ title: "Formas de pagamento padrão restauradas" });
+                  } catch (err) {
+                    toast({ title: "Erro ao restaurar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+                  }
+                }}
+                data-testid="button-reset-payment-methods"
+                className="text-xs font-semibold text-muted-foreground underline">
+                Restaurar padrão
+              </button>
+              <button
+                onClick={async () => {
+                  setSavingPaymentMethods(true);
+                  try {
+                    const cleaned = cfgPaymentMethods.map((m) => m.trim()).filter(Boolean);
+                    const saved = await api.tradeIn.savePaymentMethods(cleaned);
+                    setPaymentMethods(saved);
+                    setShowPaymentMethodsCfg(false);
+                    toast({ title: "Formas de pagamento salvas! ✅" });
+                  } catch (err) {
+                    toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+                  } finally {
+                    setSavingPaymentMethods(false);
+                  }
+                }}
+                disabled={savingPaymentMethods}
+                data-testid="button-save-payment-methods"
+                className="flex-1 py-2.5 rounded-xl bg-primary text-white font-semibold text-sm disabled:opacity-50">
+                {savingPaymentMethods ? "Salvando..." : "Salvar formas de pagamento"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Modal: editar % das tabelas de margem (só admin) */}
       {showMarginCfg && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowMarginCfg(false)}>
@@ -1534,12 +1649,13 @@ function PhotoPicker({ label, testId, photos, uploading, onAdd, onRemove }: {
 // mini-formulários de "finalizar/completar compra" do histórico e da aba
 // "Celulares comprados" (ambos compartilham o mesmo estado histDeal*, só o
 // testIdPrefix muda pra manter os data-testid únicos por linha).
-function PaymentFields({ testIdPrefix, neighborhood, onNeighborhood, paymentMethod, onPaymentMethod, pixKey, onPixKey, pixKeyHolder, onPixKeyHolder }: {
+function PaymentFields({ testIdPrefix, neighborhood, onNeighborhood, paymentMethod, onPaymentMethod, pixKey, onPixKey, pixKeyHolder, onPixKeyHolder, paymentMethods }: {
   testIdPrefix: string;
   neighborhood: string; onNeighborhood: (v: string) => void;
   paymentMethod: string; onPaymentMethod: (v: string) => void;
   pixKey: string; onPixKey: (v: string) => void;
   pixKeyHolder: string; onPixKeyHolder: (v: string) => void;
+  paymentMethods: string[];
 }) {
   const isPix = /pix/i.test(paymentMethod);
   return (
@@ -1551,7 +1667,7 @@ function PaymentFields({ testIdPrefix, neighborhood, onNeighborhood, paymentMeth
         data-testid={`select-${testIdPrefix}-payment-method`}
         className="w-full px-2.5 py-2 rounded-lg border border-border text-xs bg-white">
         <option value="">Forma de pagamento</option>
-        {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+        {paymentMethods.map((m) => <option key={m} value={m}>{m}</option>)}
       </select>
       {isPix && (
         <>

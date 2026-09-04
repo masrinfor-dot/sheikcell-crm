@@ -1935,6 +1935,10 @@ export const api = {
     saveQuestions: (data: TradeInQuestionsConfig) =>
       req<TradeInQuestionsConfig>("/trade-in/questions", { method: "PUT", body: JSON.stringify(data) }),
     resetQuestions: () => req<TradeInQuestionsConfig>("/trade-in/questions", { method: "DELETE" }),
+    paymentMethods: () => req<string[]>("/trade-in/payment-methods"),
+    savePaymentMethods: (data: string[]) =>
+      req<string[]>("/trade-in/payment-methods", { method: "PUT", body: JSON.stringify(data) }),
+    resetPaymentMethods: () => req<string[]>("/trade-in/payment-methods", { method: "DELETE" }),
   },
   results: {
     summary: (params?: { from?: string; to?: string; sectorId?: number; attendantId?: number; store?: string }) => {

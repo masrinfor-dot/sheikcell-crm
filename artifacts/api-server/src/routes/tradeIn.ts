@@ -7,6 +7,9 @@ import { requireModuleAccess } from "../lib/moduleAccess";
 import {
   QUESTIONS_KEY, DEFAULT_QUESTIONS, sanitizeQuestions, validateTradeInAnswers, type QuestionsConfig,
 } from "../lib/tradeInQuestions";
+import {
+  PAYMENT_METHODS_KEY, DEFAULT_PAYMENT_METHODS, sanitizePaymentMethods,
+} from "../lib/tradeInPaymentMethods";
 import { MEDIA_DIR } from "../lib/whatsappInbound";
 import { writeFile, mkdir } from "fs/promises";
 import { randomUUID } from "crypto";
@@ -165,6 +168,49 @@ router.delete("/trade-in/questions", requireAdmin, async (req, res): Promise<voi
   await db.delete(appSettingsTable)
     .where(and(eq(appSettingsTable.tenantId, tenantId), eq(appSettingsTable.key, QUESTIONS_KEY)));
   res.json(DEFAULT_QUESTIONS);
+});
+
+// ─── Formas de pagamento (editáveis por loja) ────────────────────────────────
+// Lista de opções sugeridas ao fechar a compra (nota de compra) — texto livre
+// no banco (tradeInEvaluationsTable.paymentMethod), a lista aqui só alimenta o
+// <select> da tela. Mesmo padrão de app_settings usado nas perguntas acima.
+
+async function getPaymentMethodsConfig(tenantId: number): Promise<string[]> {
+  const [row] = await db.select().from(appSettingsTable)
+    .where(and(eq(appSettingsTable.tenantId, tenantId), eq(appSettingsTable.key, PAYMENT_METHODS_KEY))).limit(1);
+  if (!row) return DEFAULT_PAYMENT_METHODS;
+  try {
+    const { methods } = sanitizePaymentMethods(JSON.parse(row.value));
+    return methods ?? DEFAULT_PAYMENT_METHODS;
+  } catch {
+    return DEFAULT_PAYMENT_METHODS;
+  }
+}
+
+router.get("/trade-in/payment-methods", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  res.json(await getPaymentMethodsConfig(tenantId));
+});
+
+router.put("/trade-in/payment-methods", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { methods, error } = sanitizePaymentMethods(req.body);
+  if (!methods) { res.status(400).json({ error: error ?? "Configuração inválida" }); return; }
+  await db.insert(appSettingsTable)
+    .values({ tenantId, key: PAYMENT_METHODS_KEY, value: JSON.stringify(methods) })
+    .onConflictDoUpdate({
+      target: [appSettingsTable.tenantId, appSettingsTable.key],
+      set: { value: JSON.stringify(methods) },
+    });
+  res.json(methods);
+});
+
+// Restaurar as formas de pagamento padrão do sistema.
+router.delete("/trade-in/payment-methods", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  await db.delete(appSettingsTable)
+    .where(and(eq(appSettingsTable.tenantId, tenantId), eq(appSettingsTable.key, PAYMENT_METHODS_KEY)));
+  res.json(DEFAULT_PAYMENT_METHODS);
 });
 
 // Sanitiza texto como DADO de aparelho (sem quebras/aspas — evita injeção).
