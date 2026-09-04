@@ -9,7 +9,7 @@ import {
 import {
   Smartphone, Plus, X, Search, Trash2, Pencil, Sparkles, Settings2, Link2,
   Copy, ImagePlus, Check, AlertTriangle, Loader2, MessageCircle, Info, Calculator,
-  Tags, Lock, KeyRound,
+  Tags, Lock, KeyRound, Package,
 } from "lucide-react";
 
 function formatBRL(v: string | number | null): string {
@@ -386,6 +386,19 @@ export default function VitrineAparelhos() {
       setEditing((prev) => prev && { ...prev, photos: prev.photos.filter((ph) => ph.id !== photoId) });
       setProducts((prev) => prev.map((p) => (p.id === editing.id ? { ...p, photos: p.photos.filter((ph) => ph.id !== photoId) } : p)));
     } catch { toast({ title: "Erro ao remover foto", variant: "destructive" }); }
+  };
+
+  // Marca/desmarca uma foto como "da caixa" (embalagem lacrada) — só faz
+  // diferença pra aparelhos "novo": a vitrine pública mostra ela primeiro
+  // nesse caso, e some pra qualquer outra condição (ver publicPhotoIds na API).
+  const handleToggleBoxPhoto = async (photoId: number, next: boolean) => {
+    if (!editing) return;
+    try {
+      const updated = await api.catalog.setBoxPhoto(editing.id, photoId, next);
+      const apply = (photos: typeof editing.photos) => photos.map((ph) => (ph.id === photoId ? updated : ph));
+      setEditing((prev) => prev && { ...prev, photos: apply(prev.photos) });
+      setProducts((prev) => prev.map((p) => (p.id === editing.id ? { ...p, photos: apply(p.photos) } : p)));
+    } catch { toast({ title: "Erro ao marcar foto da caixa", variant: "destructive" }); }
   };
 
   // ─── Busca de fotos padronizadas na internet ────────────────────────────
@@ -1032,14 +1045,26 @@ export default function VitrineAparelhos() {
                       <Search className="w-3 h-3" /> Buscar fotos na internet
                     </button>
                   </div>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">Marque <Package className="w-2.5 h-2.5 inline" /> na foto da caixa lacrada: pra aparelhos "novo" ela aparece primeiro na vitrine; pras demais condições, fotos de caixa não aparecem pro cliente.</p>
                   <div className="mt-1 flex flex-wrap gap-2">
                     {editing.photos.map((ph) => (
                       <div key={ph.id} className="relative w-16 h-16 rounded-lg overflow-hidden border group">
                         <img src={api.catalog.photoUrl(ph.id)} alt="" className="w-full h-full object-cover" />
-                        <button onClick={() => handlePhotoRemove(ph.id)} data-testid={`button-remove-photo-${ph.id}`}
-                          className="absolute inset-0 bg-black/50 text-white opacity-0 group-hover:opacity-100 flex items-center justify-center transition">
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        {ph.isBoxPhoto && (
+                          <span className="absolute top-0.5 left-0.5 bg-primary text-white rounded p-0.5 pointer-events-none">
+                            <Package className="w-3 h-3" />
+                          </span>
+                        )}
+                        <div className="absolute inset-0 bg-black/50 text-white opacity-0 group-hover:opacity-100 flex items-center justify-center gap-1 transition">
+                          <button onClick={() => handleToggleBoxPhoto(ph.id, !ph.isBoxPhoto)} title={ph.isBoxPhoto ? "Desmarcar foto da caixa" : "Marcar como foto da caixa"}
+                            data-testid={`button-toggle-box-photo-${ph.id}`}
+                            className={`p-1 rounded ${ph.isBoxPhoto ? "bg-primary" : "hover:bg-white/20"}`}>
+                            <Package className="w-4 h-4" />
+                          </button>
+                          <button onClick={() => handlePhotoRemove(ph.id)} data-testid={`button-remove-photo-${ph.id}`} className="p-1 rounded hover:bg-white/20">
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
                     ))}
                     <label className="w-16 h-16 rounded-lg border border-dashed flex items-center justify-center cursor-pointer hover:bg-secondary/50 transition">

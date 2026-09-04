@@ -152,6 +152,11 @@ export const catalogProductPhotosTable = pgTable("catalog_product_photos", {
   productId: integer("product_id").notNull().references(() => catalogProductsTable.id, { onDelete: "cascade" }),
   storedName: text("stored_name").notNull(),
   sourceUrl: text("source_url"), // null = upload manual; preenchido = veio de busca de imagem
+  // Marca se é a foto da caixa/embalagem lacrada (em vez do aparelho em si).
+  // Só faz sentido pra condição "novo": a vitrine pública mostra a foto da
+  // caixa primeiro nesse caso; pra qualquer outra condição (seminovo/outlet)
+  // fotos de caixa são ignoradas — só interessa mostrar o aparelho de fato.
+  isBoxPhoto: boolean("is_box_photo").notNull().default(false),
   sortOrder: integer("sort_order").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

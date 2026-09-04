@@ -145,17 +145,31 @@ function withWholesaleInstallmentPricing<
 }
 
 async function photosByProductIds(tenantId: number, productIds: number[]) {
-  if (productIds.length === 0) return new Map<number, { id: number; storedName: string; sortOrder: number }[]>();
+  if (productIds.length === 0) return new Map<number, { id: number; storedName: string; sortOrder: number; isBoxPhoto: boolean }[]>();
   const rows = await db.select().from(catalogProductPhotosTable)
     .where(and(eq(catalogProductPhotosTable.tenantId, tenantId), inArray(catalogProductPhotosTable.productId, productIds)))
     .orderBy(catalogProductPhotosTable.sortOrder);
-  const map = new Map<number, { id: number; storedName: string; sortOrder: number }[]>();
+  const map = new Map<number, { id: number; storedName: string; sortOrder: number; isBoxPhoto: boolean }[]>();
   for (const p of rows) {
     const list = map.get(p.productId) ?? [];
-    list.push({ id: p.id, storedName: p.storedName, sortOrder: p.sortOrder });
+    list.push({ id: p.id, storedName: p.storedName, sortOrder: p.sortOrder, isBoxPhoto: p.isBoxPhoto });
     map.set(p.productId, list);
   }
   return map;
+}
+
+// Ordena/filtra as fotos de um produto pra exibição na vitrine PÚBLICA: pra
+// aparelho "novo", a foto da caixa (lacrada) vem primeiro, seguida das fotos
+// do aparelho em si — pra qualquer outra condição (seminovo/outlet etc.) as
+// fotos marcadas como "da caixa" nem aparecem, só interessa o aparelho de
+// fato. Preserva a ordem relativa (sortOrder) dentro de cada grupo. No
+// admin (Vitrine Aparelhos) o lojista continua vendo/editando TODAS as
+// fotos, com essa marcação — só a vitrine pública aplica essa regra.
+function publicPhotoIds(list: { id: number; sortOrder: number; isBoxPhoto: boolean }[], condition: string): number[] {
+  if (condition === "novo") {
+    return [...list.filter((p) => p.isBoxPhoto), ...list.filter((p) => !p.isBoxPhoto)].map((p) => p.id);
+  }
+  return list.filter((p) => !p.isBoxPhoto).map((p) => p.id);
 }
 
 async function variantsByProductIds(tenantId: number, productIds: number[]) {
@@ -576,6 +590,21 @@ router.post("/catalog/products/:id/photos/from-url", requireAuth, async (req, re
     req.log.error({ err }, "Catalog photo from-url failed");
     res.status(503).json({ error: "Não consegui baixar essa imagem agora. Tente novamente." });
   }
+});
+
+// Marca/desmarca uma foto como "da caixa" (embalagem lacrada) — usada pra
+// decidir a ordem/filtro de fotos na vitrine pública (ver publicPhotoIds).
+router.patch("/catalog/products/:id/photos/:photoId", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const productId = Number(req.params.id);
+  const photoId = Number(req.params.photoId);
+  const { isBoxPhoto } = req.body as { isBoxPhoto?: unknown };
+  if (typeof isBoxPhoto !== "boolean") { res.status(400).json({ error: "Informe isBoxPhoto (true/false)" }); return; }
+  const [photo] = await db.update(catalogProductPhotosTable).set({ isBoxPhoto })
+    .where(and(eq(catalogProductPhotosTable.id, photoId), eq(catalogProductPhotosTable.productId, productId), eq(catalogProductPhotosTable.tenantId, tenantId)))
+    .returning();
+  if (!photo) { res.status(404).json({ error: "Foto não encontrada" }); return; }
+  res.json(photo);
 });
 
 router.delete("/catalog/products/:id/photos/:photoId", requireAuth, async (req, res): Promise<void> => {
@@ -1096,7 +1125,7 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
         colors: r.colors,
         description: r.description,
         categoryId: r.categoryId,
-        photos: (photos.get(r.id) ?? []).map((p) => p.id),
+        photos: publicPhotoIds(photos.get(r.id) ?? [], r.condition),
         variants: (variants.get(r.id) ?? [])
           .filter((v) => v.salePrice != null)
           .map((v) => {

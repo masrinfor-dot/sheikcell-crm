@@ -369,7 +369,7 @@ export const CATALOG_CONDITION_CRITERIA: Record<
   },
 };
 
-export type CatalogPhoto = { id: number; storedName: string; sourceUrl?: string | null; sortOrder: number };
+export type CatalogPhoto = { id: number; storedName: string; sourceUrl?: string | null; sortOrder: number; isBoxPhoto: boolean };
 
 // Categoria/aba personalizável (Celulares > Samsung/Apple, Peças de
 // celular...) — a loja cria/edita/apaga livremente. parentId null = aba
@@ -2284,6 +2284,8 @@ export const api = {
     addPhoto: (productId: number, file: File) => readAsAttachment(file).then((att) =>
       req<CatalogPhoto>(`/catalog/products/${productId}/photos`, { method: "POST", body: JSON.stringify({ mimeType: att?.mimetype, data: att?.base64 }) })),
     removePhoto: (productId: number, photoId: number) => req<{ ok: boolean }>(`/catalog/products/${productId}/photos/${photoId}`, { method: "DELETE" }),
+    setBoxPhoto: (productId: number, photoId: number, isBoxPhoto: boolean) =>
+      req<CatalogPhoto>(`/catalog/products/${productId}/photos/${photoId}`, { method: "PATCH", body: JSON.stringify({ isBoxPhoto }) }),
     photoUrl: (photoId: number) => `/api/catalog-public/photos/${photoId}/file`,
     photoSearch: (q: string) => req<{ results: CatalogPhotoSearchResult[] }>(`/catalog/photo-search?q=${encodeURIComponent(q)}`),
     addPhotoFromUrl: (productId: number, url: string) =>

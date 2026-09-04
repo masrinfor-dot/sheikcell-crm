@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import { useParams } from "wouter";
 import { api, CATALOG_CONDITIONS, CATALOG_CONDITION_CRITERIA, type CatalogPublicProduct, type CatalogCategory } from "@/lib/api";
 import { Smartphone, MessageCircle, PackageX, Info, Lock, ShoppingCart, Plus, Minus, X, Unlock, Search } from "lucide-react";
+import { Carousel, CarouselContent, CarouselItem, CarouselPrevious, CarouselNext, type CarouselApi } from "@/components/ui/carousel";
 
 // Vitrine PÚBLICA (sem login) — link compartilhável /vitrine/:slug, mostrado
 // pro cliente final. Nunca expõe custo/margem, só o preço de venda (e o de
@@ -174,7 +175,16 @@ function ProductDetailModal({
   onClose: () => void;
 }) {
   const [activePhoto, setActivePhoto] = useState(0);
+  const [carouselApi, setCarouselApi] = useState<CarouselApi>();
   const [showCriteria, setShowCriteria] = useState(false);
+
+  useEffect(() => {
+    if (!carouselApi) return;
+    const onSelect = () => setActivePhoto(carouselApi.selectedScrollSnap());
+    onSelect();
+    carouselApi.on("select", onSelect);
+    return () => { carouselApi.off("select", onSelect); };
+  }, [carouselApi]);
   const colors = useMemo(() => [...new Set(p.variants.map((v) => v.color).filter((c): c is string => !!c))], [p]);
   const [selectedColor, setSelectedColor] = useState<string | null>(colors[0] ?? null);
   const variantsForColor = useMemo(
@@ -205,17 +215,33 @@ function ProductDetailModal({
           <button onClick={onClose} data-testid="button-close-detail" className="p-1 rounded hover:bg-neutral-100 shrink-0"><X className="w-4 h-4" /></button>
         </div>
         <div className="overflow-y-auto p-4 space-y-3">
-          <div className="aspect-square bg-neutral-100 rounded-xl overflow-hidden flex items-center justify-center">
-            {p.photos.length > 0 ? (
-              <img src={api.catalog.photoUrl(p.photos[activePhoto] ?? p.photos[0])} alt={p.model} className="w-full h-full object-cover" />
-            ) : (
+          {p.photos.length > 0 ? (
+            <Carousel setApi={setCarouselApi} opts={{ loop: p.photos.length > 1 }}>
+              <CarouselContent className="ml-0">
+                {p.photos.map((ph) => (
+                  <CarouselItem key={ph} className="pl-0">
+                    <div className="aspect-square bg-neutral-100 rounded-xl overflow-hidden">
+                      <img src={api.catalog.photoUrl(ph)} alt={p.model} className="w-full h-full object-cover" />
+                    </div>
+                  </CarouselItem>
+                ))}
+              </CarouselContent>
+              {p.photos.length > 1 && (
+                <>
+                  <CarouselPrevious className="left-2 h-7 w-7 bg-white/80 hover:bg-white border-neutral-200" />
+                  <CarouselNext className="right-2 h-7 w-7 bg-white/80 hover:bg-white border-neutral-200" />
+                </>
+              )}
+            </Carousel>
+          ) : (
+            <div className="aspect-square bg-neutral-100 rounded-xl overflow-hidden flex items-center justify-center">
               <Smartphone className="w-16 h-16 text-neutral-300" />
-            )}
-          </div>
+            </div>
+          )}
           {p.photos.length > 1 && (
             <div className="flex gap-1.5 overflow-x-auto">
               {p.photos.map((ph, i) => (
-                <button key={ph} type="button" onClick={() => setActivePhoto(i)}
+                <button key={ph} type="button" onClick={() => carouselApi?.scrollTo(i)}
                   className={`w-12 h-12 rounded-lg overflow-hidden border-2 shrink-0 ${i === activePhoto ? "border-neutral-900" : "border-transparent"}`}>
                   <img src={api.catalog.photoUrl(ph)} alt="" className="w-full h-full object-cover" />
                 </button>
