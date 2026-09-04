@@ -2312,6 +2312,10 @@ export const api = {
       req<CatalogPhoto>(`/catalog/products/${productId}/photos/${photoId}`, { method: "PATCH", body: JSON.stringify({ isBoxPhoto }) }),
     photoUrl: (photoId: number) => `/api/catalog-public/photos/${photoId}/file`,
     photoSearch: (q: string) => req<{ results: CatalogPhotoSearchResult[] }>(`/catalog/photo-search?q=${encodeURIComponent(q)}`),
+    fetchMissingPhotos: () =>
+      req<{ checked: number; attached: number; remaining: number; photoSearchConfigured: boolean }>(
+        "/catalog/products/photos/fetch-missing", { method: "POST", timeoutMs: 60_000 }
+      ),
     addPhotoFromUrl: (productId: number, url: string) =>
       req<CatalogPhoto>(`/catalog/products/${productId}/photos/from-url`, { method: "POST", body: JSON.stringify({ url }) }),
     pricingSettings: () => req<CatalogPricingSettings>("/catalog/pricing-settings"),

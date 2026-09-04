@@ -100,6 +100,7 @@ export default function VitrineAparelhos() {
   const [saving, setSaving] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [showConditionInfo, setShowConditionInfo] = useState(false);
+  const [fetchingMissingPhotos, setFetchingMissingPhotos] = useState(false);
 
   // Busca de fotos na internet (dentro do modal de edição do produto)
   const [showPhotoSearch, setShowPhotoSearch] = useState(false);
@@ -244,6 +245,33 @@ export default function VitrineAparelhos() {
       toast({ title: "Erro ao salvar código", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
     } finally {
       setSavingWholesaleCode(false);
+    }
+  };
+
+  // Produtos importados antes de existir um provedor de busca de fotos
+  // funcionando ficaram sem foto pra sempre (a tentativa automática só roda
+  // uma vez, na hora do import). Esse botão varre esses produtos e tenta
+  // buscar foto pra cada um agora, sem precisar abrir um por um.
+  const handleFetchMissingPhotos = async () => {
+    if (fetchingMissingPhotos) return;
+    setFetchingMissingPhotos(true);
+    try {
+      const r = await api.catalog.fetchMissingPhotos();
+      if (r.checked === 0) {
+        toast({ title: "Nenhum produto sem foto encontrado" });
+      } else {
+        toast({
+          title: `${r.attached} de ${r.checked} produto(s) ganharam foto`,
+          description: r.remaining > 0
+            ? `Ainda restam ${r.remaining} produto(s) sem foto — clique de novo pra continuar.`
+            : (r.checked - r.attached > 0 ? `${r.checked - r.attached} não encontraram foto na busca.` : undefined),
+        });
+      }
+      load();
+    } catch (err) {
+      toast({ title: "Erro ao buscar fotos", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    } finally {
+      setFetchingMissingPhotos(false);
     }
   };
 
@@ -798,6 +826,13 @@ export default function VitrineAparelhos() {
           <button onClick={copyFullCatalog} data-testid="button-copy-full-catalog"
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700 hover:bg-emerald-200 transition">
             <MessageCircle className="w-3.5 h-3.5" /> Copiar catálogo pro WhatsApp
+          </button>
+        )}
+        {canManage && products.some((p) => p.photos.length === 0) && (
+          <button onClick={handleFetchMissingPhotos} disabled={fetchingMissingPhotos} data-testid="button-fetch-missing-photos"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-700 hover:bg-amber-200 transition disabled:opacity-60">
+            {fetchingMissingPhotos ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ImagePlus className="w-3.5 h-3.5" />}
+            {fetchingMissingPhotos ? "Buscando fotos..." : "Buscar fotos que faltam"}
           </button>
         )}
         {canManage && products.length > 0 && (

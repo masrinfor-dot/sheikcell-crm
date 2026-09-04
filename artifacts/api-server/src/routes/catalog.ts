@@ -1109,6 +1109,46 @@ async function autoAttachPhotosOnImport(
   return outcomes.filter((o) => o.status === "fulfilled" && o.value === true).length;
 }
 
+// "Recuperar" produtos que ficaram sem NENHUMA foto — cobre dois casos reais:
+// (1) produtos importados numa época em que a busca automática ainda não
+// tinha um provedor funcionando de verdade (ex.: só o Google Custom Search
+// configurado, que está fechado pra clientes novos desde 2024 — a tentativa
+// automática do import rodava e sempre falhava, calada, e o produto ficava
+// sem foto pra sempre, sem nenhum jeito de tentar de novo em massa); (2)
+// fotos que existiam mas o arquivo se perdeu (ex.: cadastradas antes do
+// armazenamento permanente `/app/storage` existir). Mesmo best-effort do
+// import automático, só que rodando sob demanda pra todos os produtos sem
+// foto de uma vez, em vez de um por um na tela de editar produto.
+const BULK_MISSING_PHOTO_LIMIT = 25;
+
+router.post("/catalog/products/photos/fetch-missing", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  if (!photoSearchConfigured()) {
+    res.status(501).json({ error: "Busca de imagens não configurada neste servidor." });
+    return;
+  }
+  const rows = await db.select({ id: catalogProductsTable.id, model: catalogProductsTable.model })
+    .from(catalogProductsTable).where(eq(catalogProductsTable.tenantId, tenantId));
+  const photos = await photosByProductIds(tenantId, rows.map((r) => r.id));
+  const missing = rows.filter((r) => (photos.get(r.id) ?? []).length === 0);
+  const targets = missing.slice(0, BULK_MISSING_PHOTO_LIMIT);
+
+  const outcomes = await Promise.allSettled(targets.map(async (p) => {
+    const urls = await autoPhotoSearchUrls(p.model);
+    for (const url of urls) {
+      if (await autoAttachPhoto(tenantId, p.id, url)) return true;
+    }
+    return false;
+  }));
+  const attached = outcomes.filter((o) => o.status === "fulfilled" && o.value === true).length;
+  res.json({
+    checked: targets.length,
+    attached,
+    remaining: Math.max(0, missing.length - targets.length),
+    photoSearchConfigured: true,
+  });
+});
+
 router.post("/catalog/import/confirm", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const items = (req.body as { items?: unknown }).items;
