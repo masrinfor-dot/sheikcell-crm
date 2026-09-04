@@ -8,21 +8,29 @@ export type QuestionsConfig = { apple: QuestionCfg[]; android: QuestionCfg[] };
 
 export const QUESTIONS_KEY = "trade_in_questions";
 
+// Política da loja (04/09, verbatim: "APAARELHOS QUE NÃO LIGAM COMPRAMOS
+// TAMBEM" / "COM QUALQUER DEFEITO COMPRAMOS"): nenhum defeito bloqueia a
+// avaliação por padrão — a loja compra o aparelho de qualquer jeito (por um
+// valor menor, calculado pela IA com base nas respostas). O mecanismo de
+// "bloqueia" continua existindo (o admin ainda pode marcar alguma opção
+// como bloqueante em "Editar perguntas" se decidir não comprar algo
+// específico no futuro), só o padrão de fábrica que mudou de "bloqueia" pra
+// "não bloqueia" em todas as opções de defeito.
 const COMMON_QUESTIONS: QuestionCfg[] = [
-  { key: "Liga", label: "O aparelho liga? (tela acende, sistema inicia e o toque na tela funciona)", options: [{ label: "Sim", blocks: false }, { label: "Não liga", blocks: true }] },
-  { key: "Ligações", label: "Faz e recebe ligações pela rede móvel? (chip/operadora — não vale WhatsApp)", options: [{ label: "Sim", blocks: false }, { label: "Não faz ligações", blocks: true }] },
-  { key: "Wi-Fi e Bluetooth", label: "Wi-Fi e Bluetooth funcionam normalmente? (conecta, navega e recebe arquivos)", options: [{ label: "Sim", blocks: false }, { label: "Não funciona", blocks: true }] },
+  { key: "Liga", label: "O aparelho liga? (tela acende, sistema inicia e o toque na tela funciona)", options: [{ label: "Sim", blocks: false }, { label: "Não liga", blocks: false }] },
+  { key: "Ligações", label: "Faz e recebe ligações pela rede móvel? (chip/operadora — não vale WhatsApp)", options: [{ label: "Sim", blocks: false }, { label: "Não faz ligações", blocks: false }] },
+  { key: "Wi-Fi e Bluetooth", label: "Wi-Fi e Bluetooth funcionam normalmente? (conecta, navega e recebe arquivos)", options: [{ label: "Sim", blocks: false }, { label: "Não funciona", blocks: false }] },
   { key: "Marcas de uso", label: "Tem marcas de uso?", options: [{ label: "Sem marcas de uso", blocks: false }, { label: "Quase imperceptíveis", blocks: false }, { label: "Marcas visíveis", blocks: false }] },
   { key: "Carcaça / traseira", label: "Traseira ou laterais trincadas, rachadas, descascando, com peças faltando ou riscos?", options: [{ label: "Não", blocks: false }, { label: "Sim, com avarias", blocks: false }] },
   { key: "Tela", label: "Tela quebrada, trincada, riscada ou com mancha/burn-in (tela fantasma, pixel queimado, LCD vazando)?", options: [{ label: "Não", blocks: false }, { label: "Sim, com avarias", blocks: false }] },
-  { key: "Câmeras", label: "As câmeras (frontal e traseira) abrem e registram fotos normalmente?", options: [{ label: "Sem problemas", blocks: false }, { label: "Com problema", blocks: true }] },
+  { key: "Câmeras", label: "As câmeras (frontal e traseira) abrem e registram fotos normalmente?", options: [{ label: "Sem problemas", blocks: false }, { label: "Com problema", blocks: false }] },
   { key: "Acessórios", label: "Acompanha acessórios?", options: [{ label: "Caixa e carregador originais", blocks: false }, { label: "Só carregador", blocks: false }, { label: "Sem acessórios", blocks: false }] },
 ];
 
 export const DEFAULT_QUESTIONS: QuestionsConfig = {
   apple: [
     ...COMMON_QUESTIONS.slice(0, 6),
-    { key: "Biometria", label: "Face ID / Touch ID funciona e cadastra nova biometria?", options: [{ label: "Funciona", blocks: false }, { label: "Não funciona", blocks: true }, { label: "Não tem", blocks: false }] },
+    { key: "Biometria", label: "Face ID / Touch ID funciona e cadastra nova biometria?", options: [{ label: "Funciona", blocks: false }, { label: "Não funciona", blocks: false }, { label: "Não tem", blocks: false }] },
     COMMON_QUESTIONS[6]!,
     { key: "Saúde da bateria", label: "Qual o nível de saúde da bateria (Ajustes → Bateria)?", options: [{ label: "Superior a 90%", blocks: false }, { label: "Entre 80% e 90%", blocks: false }, { label: "Inferior a 80%", blocks: false }] },
     { key: "Peça não genuína", label: "Aparece mensagem de \"peça não genuína ou desconhecida\" (Ajustes → Bateria)?", options: [{ label: "Não", blocks: false }, { label: "Sim, aparece", blocks: false }] },
@@ -31,7 +39,7 @@ export const DEFAULT_QUESTIONS: QuestionsConfig = {
   ],
   android: [
     ...COMMON_QUESTIONS.slice(0, 6),
-    { key: "Biometria", label: "Leitor de digital / desbloqueio facial funciona e cadastra nova biometria?", options: [{ label: "Funciona", blocks: false }, { label: "Não funciona", blocks: true }, { label: "Não tem", blocks: false }] },
+    { key: "Biometria", label: "Leitor de digital / desbloqueio facial funciona e cadastra nova biometria?", options: [{ label: "Funciona", blocks: false }, { label: "Não funciona", blocks: false }, { label: "Não tem", blocks: false }] },
     COMMON_QUESTIONS[6]!,
     { key: "Bateria", label: "Como está a bateria?", options: [{ label: "Segura bem a carga", blocks: false }, { label: "Descarrega rápido", blocks: false }, { label: "Ruim / estufada", blocks: false }] },
     COMMON_QUESTIONS[7]!,
