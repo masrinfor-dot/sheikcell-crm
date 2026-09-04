@@ -34,6 +34,7 @@ import tvboxRouter from "./tvbox";
 import pdfRouter from "./pdf";
 import rotinasRouter, { enforceMandatoryRoutines } from "./rotinas";
 import catalogRouter, { catalogPublicRouter } from "./catalog";
+import geoRouter from "./geo";
 
 const router: IRouter = Router();
 router.use(healthRouter);
@@ -78,5 +79,6 @@ router.use(rotinasRouter);
 router.use(catalogRouter);
 // Sem requireAuth: a vitrine pública é vista por clientes sem login.
 router.use(catalogPublicRouter);
+router.use(geoRouter);
 
 export default router;

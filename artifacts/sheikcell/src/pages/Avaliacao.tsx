@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { api, canEditModule, type TradeInEvaluation, type TradeInMargins, type TradeInQuestion, type TradeInQuestionsConfig } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
+import { AddressAutocompleteInput } from "@/components/AddressAutocompleteInput";
 import {
   Smartphone, Sparkles, History, ChevronDown, ChevronLeft, RefreshCw, BadgeDollarSign, Settings, X,
   ListChecks, Plus, Trash2, ArrowUp, ArrowDown, ImagePlus, Printer, Wallet, TrendingUp, LayoutDashboard,
@@ -1660,8 +1661,9 @@ function PaymentFields({ testIdPrefix, neighborhood, onNeighborhood, paymentMeth
   const isPix = /pix/i.test(paymentMethod);
   return (
     <>
-      <input value={neighborhood} onChange={(e) => onNeighborhood(e.target.value)}
-        placeholder="Bairro" data-testid={`input-${testIdPrefix}-neighborhood`}
+      <AddressAutocompleteInput value={neighborhood} onChange={onNeighborhood}
+        kind="address"
+        placeholder="Bairro" testId={`input-${testIdPrefix}-neighborhood`}
         className="w-full px-2.5 py-2 rounded-lg border border-border text-xs" />
       <select value={paymentMethod} onChange={(e) => onPaymentMethod(e.target.value)}
         data-testid={`select-${testIdPrefix}-payment-method`}

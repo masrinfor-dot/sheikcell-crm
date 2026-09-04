@@ -2363,6 +2363,14 @@ export const api = {
       req<DocumentItem>(`/meetings/${id}/generate`, { method: "POST", body: JSON.stringify({ kind }) }),
     remove: (id: number) => req<{ ok: boolean }>(`/meetings/${id}`, { method: "DELETE" }),
   },
+  geo: {
+    // kind "city" = campo Cidade (CRM); "address" (default) = campo Bairro
+    // (Avaliação/nota de compra de usado). Ver routes/geo.ts no backend.
+    autocomplete: (q: string, kind?: "city" | "address") =>
+      req<{ results: { description: string; mainText: string; secondaryText: string }[] }>(
+        `/geo/autocomplete?q=${encodeURIComponent(q)}&kind=${kind ?? "address"}`
+      ),
+  },
   stores: {
     list: (all?: boolean) => req<Store[]>(`/stores${all ? "?all=1" : ""}`),
     create: (name: string) => req<Store>("/stores", { method: "POST", body: JSON.stringify({ name }) }),

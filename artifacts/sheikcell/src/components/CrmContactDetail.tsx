@@ -3,6 +3,7 @@ import {
   api, canEditModule, type CrmContact, type CrmPurchase, type CrmInternalNote,
   type AttendanceLog, type Sector, type CrmCustomField, type Store as StoreType, type Task,
 } from "@/lib/api";
+import { AddressAutocompleteInput } from "@/components/AddressAutocompleteInput";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -431,7 +432,9 @@ export default function CrmContactDetail({ contactId, onClose, onContactUpdated,
                     <div className="grid grid-cols-2 gap-2">
                       <div>
                         <label className="text-xs text-muted-foreground mb-1 block">Cidade</label>
-                        <input value={editForm.city} onChange={(e) => setEditForm({ ...editForm, city: e.target.value })}
+                        <AddressAutocompleteInput
+                          value={editForm.city} onChange={(v) => setEditForm({ ...editForm, city: v })}
+                          kind="city"
                           placeholder="Governador Valadares"
                           className="w-full px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
                       </div>
