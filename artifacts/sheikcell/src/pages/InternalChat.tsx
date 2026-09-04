@@ -573,10 +573,9 @@ export default function InternalChat({ docked = false, onActiveConversationChang
 
   const openNew = async () => {
     setShowNew(true);
-    // Admin inicia conversa nova (grupo ou 1:1); supervisor cria só grupo
-    // (1:1 continua exclusivo de admin — ver gate das abas no modal, abaixo).
-    // Por isso o modal já abre direto na aba que a pessoa pode usar.
-    setNewMode(user?.role === "admin" ? "direct" : "group");
+    // Cliente pediu (04/09/2026): só grupos daqui pra frente — conversa 1:1
+    // nova fica desativada até pra admin (aba removida do modal, abaixo).
+    setNewMode("group");
     setGroupName("");
     setGroupMembers([]);
   };
@@ -1666,16 +1665,11 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                   <X className="w-4 h-4" />
                 </button>
               </div>
-              {/* Conversa direta (1:1) continua exclusiva de admin; grupo
-                  libera admin e supervisor também. Quem não é admin nunca
-                  veria a aba "Conversa" (o backend rejeitaria mesmo assim). */}
+              {/* Cliente pediu (04/09/2026): só grupos daqui pra frente — aba
+                  de conversa direta (1:1) removida, sobra só "Grupo". O
+                  backend também rejeita criação de 1:1 nova, então mesmo uma
+                  chamada direta à API não contorna a regra. */}
               <div className="flex gap-1 p-2 border-b">
-                {user?.role === "admin" && (
-                  <button onClick={() => setNewMode("direct")} data-testid="tab-new-direct"
-                    className={`flex-1 text-xs font-semibold rounded-lg px-3 py-2 transition ${newMode === "direct" ? "bg-primary text-white" : "text-muted-foreground hover:bg-muted/60"}`}>
-                    Conversa
-                  </button>
-                )}
                 <button onClick={() => setNewMode("group")} data-testid="tab-new-group"
                   className={`flex-1 text-xs font-semibold rounded-lg px-3 py-2 transition ${newMode === "group" ? "bg-violet-600 text-white" : "text-muted-foreground hover:bg-muted/60"}`}>
                   <Users className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />Grupo

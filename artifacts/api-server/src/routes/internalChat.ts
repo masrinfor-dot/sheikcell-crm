@@ -320,10 +320,12 @@ router.post("/internal-chat/conversations/group", requireAdminOrSupervisor, asyn
 });
 
 // ─── Start (or fetch) a direct 1:1 conversation ────────────────────────────
-// Restrito a admin (diferente do grupo, acima, que também libera supervisor):
-// funcionário comum não inicia conversa 1:1 com colega por conta própria.
-// Conversas diretas já existentes (criadas antes desta regra) continuam
-// acessíveis normalmente pelas rotas de mensagens/listagem, que não mudam.
+// Cliente pediu (04/09/2026): só grupos criados por admin/supervisor daqui
+// pra frente — desativa a criação de NOVAS conversas diretas pra todo mundo,
+// inclusive admin. Se já existir uma direta entre os dois (criada antes
+// desta regra), ela continua sendo retornada normalmente — só a criação de
+// uma direta nova é que fica bloqueada. Conversas diretas já existentes
+// continuam acessíveis normalmente pelas rotas de mensagens/listagem.
 router.post("/internal-chat/conversations/direct", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const userId = req.session.userId!;
@@ -363,15 +365,9 @@ router.post("/internal-chat/conversations/direct", requireAdmin, async (req, res
   }
 
   if (convId == null) {
-    const [created] = await db
-      .insert(internalConversationsTable)
-      .values({ tenantId, kind: "direct" })
-      .returning({ id: internalConversationsTable.id });
-    convId = created!.id;
-    await db.insert(internalConversationMembersTable).values([
-      { tenantId, conversationId: convId, userId },
-      { tenantId, conversationId: convId, userId: targetId },
-    ]).onConflictDoNothing();
+    // Só grupos daqui pra frente — não cria uma direta nova, nem pra admin.
+    res.status(403).json({ error: "Conversas diretas (1:1) estão desativadas. Use um grupo para se comunicar." });
+    return;
   }
 
   const [other] = await db
