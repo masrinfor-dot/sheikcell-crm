@@ -14,6 +14,10 @@ export function usePunchCapture(active: boolean) {
   const [geo, setGeo] = useState<GeoState>({ status: "idle" });
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  // Identifica a tentativa mais recente de startCamera — usado pra ignorar
+  // (ou recuperar sozinho) uma resposta atrasada de getUserMedia depois que
+  // já desistimos dela por timeout (ver startCamera abaixo).
+  const camAttemptRef = useRef(0);
 
   const stop = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -51,10 +55,26 @@ export function usePunchCapture(active: boolean) {
     }
   }
 
+  // Em alguns celulares/navegadores (relatado em produção: Chrome Android
+  // dentro de um WebView, ou o popup nativo de permissão aparecendo fora da
+  // área visível), getUserMedia() nem resolve nem rejeita — fica "pendurado"
+  // pra sempre, e a tela ficava girando o spinner de carregamento
+  // indefinidamente, sem nenhuma mensagem (pior que um erro: parecia
+  // travado, sem pista do que fazer). Agora corta em 20s com uma mensagem
+  // acionável. Se getUserMedia resolver DEPOIS do timeout (o navegador
+  // demorou mas o usuário acabou liberando a câmera num popup atrasado), a
+  // tentativa mais recente ainda aproveita o stream sozinha em vez de
+  // descartar — só ignora/fecha o stream se já existir uma tentativa mais
+  // nova (ex.: o usuário clicou em "Tentar de novo" enquanto isso).
   const startCamera = useCallback(async () => {
     setCam({ status: "loading" });
+    const attempt = ++camAttemptRef.current;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: 480 }, audio: false });
+      const stream = await Promise.race([
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: 480 }, audio: false }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new DOMException("Tempo esgotado esperando a câmera", "TimeoutError")), 20_000)),
+      ]);
+      if (attempt !== camAttemptRef.current) { stream.getTracks().forEach((t) => t.stop()); return; }
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -63,8 +83,17 @@ export function usePunchCapture(active: boolean) {
       }
       setCam({ status: "ok" });
     } catch (err) {
+      if (attempt !== camAttemptRef.current) return; // uma tentativa mais nova já assumiu
       // eslint-disable-next-line no-console
       console.warn("[ponto] getUserMedia falhou:", err instanceof Error ? `${err.name}: ${err.message}` : err);
+      const name = err instanceof Error ? err.name : "";
+      if (name === "TimeoutError") {
+        setCam({
+          status: "error",
+          error: "A câmera demorou demais pra responder. Verifique se apareceu um aviso pedindo permissão de câmera (às vezes fica escondido atrás do teclado ou de outro app) e tente de novo.",
+        });
+        return;
+      }
       setCam({ status: "error", error: cameraErrorMessage(err) });
     }
   }, []);
