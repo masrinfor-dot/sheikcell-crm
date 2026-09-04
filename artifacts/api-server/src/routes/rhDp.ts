@@ -191,29 +191,50 @@ router.post("/rh-dp/me/punch", requireAuth, async (req, res): Promise<void> => {
   if (!kind) { res.status(409).json({ error: "Você já bateu todos os pontos de hoje." }); return; }
 
   // Batida de ENTRADA feita pelo próprio colaborador (é a que o PontoGate.tsx
-  // exige logo ao abrir o sistema) precisa de foto + geolocalização — as
-  // outras (intervalo/saída) e batidas feitas pelo admin (rota separada,
-  // abaixo) continuam sem essa exigência.
+  // exige logo ao abrir o sistema) precisa de geolocalização sempre, e de
+  // foto — MAS a foto pode ser dispensada se o navegador genuinamente não
+  // conseguir acessar a câmera (sem webcam no aparelho, permissão negada,
+  // câmera em uso por outro programa etc. — ver use-punch-capture.ts): nesse
+  // caso o cliente manda `noPhotoReason` em vez de `photoBase64`, a batida é
+  // aceita sem foto mas marcada `flagged` pra revisão do admin (painel RH →
+  // Ponto). Antes, sem essa via de escape, um colaborador cujo computador não
+  // tinha câmera ficava PERMANENTEMENTE travado na tela de ponto obrigatório,
+  // sem conseguir usar o sistema de jeito nenhum — pior que aceitar uma
+  // batida sem foto e sinalizar pra revisão. Geolocalização continua sempre
+  // obrigatória (não tem via de escape pra ela).
   let proofUrl: string | null = null;
   let lat: number | null = null;
   let lng: number | null = null;
   let accuracyMeters: number | null = null;
+  let flagged = false;
+  let flagReason: string | null = null;
   if (kind === "in") {
-    const { photoBase64, mimetype } = req.body ?? {};
+    const { photoBase64, mimetype, noPhotoReason } = req.body ?? {};
     const rawLat = req.body?.lat;
     const rawLng = req.body?.lng;
     const rawAccuracy = req.body?.accuracyMeters;
     const validLat = typeof rawLat === "number" && Number.isFinite(rawLat);
     const validLng = typeof rawLng === "number" && Number.isFinite(rawLng);
-    if (typeof photoBase64 !== "string" || !photoBase64 || typeof mimetype !== "string" || !mimetype || !validLat || !validLng) {
-      res.status(400).json({ error: "Foto e localização são obrigatórias para bater o ponto de entrada." });
+    if (!validLat || !validLng) {
+      res.status(400).json({ error: "Localização é obrigatória para bater o ponto de entrada." });
       return;
     }
-    try {
-      proofUrl = await savePunchPhoto(photoBase64, mimetype);
-    } catch (err) {
-      res.status(400).json({ error: err instanceof Error ? err.message : "Não foi possível salvar a foto." });
+    const hasPhoto = typeof photoBase64 === "string" && !!photoBase64 && typeof mimetype === "string" && !!mimetype;
+    const skipReason = typeof noPhotoReason === "string" ? noPhotoReason.trim().slice(0, 300) : "";
+    if (!hasPhoto && !skipReason) {
+      res.status(400).json({ error: "Foto (ou o motivo de não conseguir tirar) é obrigatória para bater o ponto de entrada." });
       return;
+    }
+    if (hasPhoto) {
+      try {
+        proofUrl = await savePunchPhoto(photoBase64, mimetype);
+      } catch (err) {
+        res.status(400).json({ error: err instanceof Error ? err.message : "Não foi possível salvar a foto." });
+        return;
+      }
+    } else {
+      flagged = true;
+      flagReason = `Sem foto (câmera indisponível no aparelho do colaborador): ${skipReason}`;
     }
     lat = rawLat;
     lng = rawLng;
@@ -222,7 +243,7 @@ router.post("/rh-dp/me/punch", requireAuth, async (req, res): Promise<void> => {
 
   const [created] = await db.insert(timeClockEntriesTable).values({
     tenantId, employeeId: employee.id, kind, source: "self", createdByUserId: req.session.userId,
-    proofUrl, lat, lng, accuracyMeters,
+    proofUrl, lat, lng, accuracyMeters, flagged, flagReason,
   }).returning();
   invalidateClockInBlock(req.session.userId!);
   res.status(201).json(created);

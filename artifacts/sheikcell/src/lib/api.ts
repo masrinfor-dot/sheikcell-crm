@@ -2111,7 +2111,13 @@ export const api = {
   rhDp: {
     me: {
       get: () => req<Employee>("/rh-dp/me"),
-      punch: (data?: { photoBase64: string; mimetype: string; lat: number; lng: number; accuracyMeters?: number | null }) =>
+      punch: (data?:
+        | { photoBase64: string; mimetype: string; lat: number; lng: number; accuracyMeters?: number | null }
+        // Entrada sem foto (câmera indisponível) — geo continua obrigatória;
+        // backend marca a batida como `flagged` pra revisão do RH. Ver
+        // captureWithoutPhoto em use-punch-capture.ts.
+        | { lat: number; lng: number; accuracyMeters?: number | null; noPhotoReason: string }
+      ) =>
         req<TimeClockEntry>("/rh-dp/me/punch", { method: "POST", body: data ? JSON.stringify(data) : undefined }),
       timeBank: (from?: string, to?: string) =>
         req<TimeBankResult>(`/rh-dp/me/time-bank?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),

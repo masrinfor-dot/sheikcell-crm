@@ -65,7 +65,7 @@ export default function MeuPonto() {
   // (isento do gate) ou colaborador de escala flexível (gate nunca aparece).
   const nextIsIn = todayEntries.length === 0;
   const needsCapture = nextIsIn && !doneForToday && !loading && !notLinked && !!employee;
-  const { cam, geo, videoRef, ready, startCamera, startGeo, capture, stop } = usePunchCapture(needsCapture);
+  const { cam, geo, videoRef, ready, startCamera, startGeo, capture, captureWithoutPhoto, stop } = usePunchCapture(needsCapture);
 
   const punch = async () => {
     if (punching) return;
@@ -77,6 +77,25 @@ export default function MeuPonto() {
       const created = await api.rhDp.me.punch(payload ?? undefined);
       if (needsCapture) stop();
       toast({ title: `Ponto registrado: ${KIND_LABELS[created.kind] ?? created.kind}`, description: new Date(created.at).toLocaleTimeString("pt-BR") });
+      await load();
+    } catch (err) {
+      toast({ title: "Erro ao bater ponto", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setPunching(false); }
+  };
+
+  // Mesma via de escape do PontoGate.tsx: se a câmera não funcionar aqui
+  // (admin ou colaborador de escala flexível batendo a própria entrada fora
+  // do gate), bate só com localização e sinaliza pra revisão do RH em vez de
+  // deixar sem alternativa nenhuma.
+  const punchWithoutPhoto = async () => {
+    if (punching || geo.status !== "ok") return;
+    const payload = captureWithoutPhoto(cam.error ?? "Câmera indisponível");
+    if (!payload) return;
+    setPunching(true);
+    try {
+      await api.rhDp.me.punch(payload);
+      stop();
+      toast({ title: "Ponto registrado sem foto", description: "Sinalizado para revisão do RH, já que a câmera não funcionou." });
       await load();
     } catch (err) {
       toast({ title: "Erro ao bater ponto", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
@@ -139,6 +158,15 @@ export default function MeuPonto() {
           {punching ? <Loader2 className="w-5 h-5 animate-spin" /> : <CheckCircle2 className="w-5 h-5" />}
           {doneForToday ? "Ponto do dia completo" : "Bater ponto"}
         </button>
+
+        {needsCapture && cam.status === "error" && (
+          <button onClick={punchWithoutPhoto} disabled={punching || geo.status !== "ok"} data-testid="button-meuponto-punch-no-photo"
+            className="w-full py-3 rounded-2xl bg-white border-2 border-primary text-primary font-bold text-sm disabled:opacity-40 flex items-center justify-center gap-2">
+            {punching ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+            Continuar sem foto (câmera indisponível)
+          </button>
+        )}
+
         {todayEntries.length > 0 && (
           <div className="flex flex-wrap justify-center gap-1.5 pt-1">
             {todayEntries.map((e, i) => (

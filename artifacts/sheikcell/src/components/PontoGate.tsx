@@ -20,7 +20,7 @@ export default function PontoGate() {
   const [needsClockIn, setNeedsClockIn] = useState(false);
   const [punching, setPunching] = useState(false);
   const [now, setNow] = useState(() => new Date());
-  const { cam, geo, videoRef, ready, startCamera, startGeo, capture, stop } = usePunchCapture(needsClockIn);
+  const { cam, geo, videoRef, ready, startCamera, startGeo, capture, captureWithoutPhoto, stop } = usePunchCapture(needsClockIn);
 
   // Relógio ao vivo, só pra dar confiança de que o horário que vai ser
   // gravado é o de agora (mesma ideia do relógio que aparece na tela de
@@ -57,6 +57,29 @@ export default function PontoGate() {
     } catch (err) {
       toast({ title: "Erro ao bater ponto", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
       refresh(); // pode já ter sido batido em outra aba
+    } finally {
+      setPunching(false);
+    }
+  };
+
+  // Via de escape: quando a câmera dá erro (sem webcam, permissão negada,
+  // travada em outro app, timeout etc.), não faz sentido deixar o
+  // colaborador travado pra sempre — bate a entrada só com localização, e o
+  // backend marca `flagged` pra revisão do admin (painel RH → Ponto).
+  // Localização continua sempre obrigatória.
+  const punchWithoutPhoto = async () => {
+    if (punching || geo.status !== "ok") return;
+    const payload = captureWithoutPhoto(cam.error ?? "Câmera indisponível");
+    if (!payload) return;
+    setPunching(true);
+    try {
+      await api.rhDp.me.punch(payload);
+      stop();
+      toast({ title: "Ponto registrado sem foto", description: "Sua entrada foi sinalizada para revisão do RH, já que a câmera não funcionou." });
+      setNeedsClockIn(false);
+    } catch (err) {
+      toast({ title: "Erro ao bater ponto", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+      refresh();
     } finally {
       setPunching(false);
     }
@@ -116,10 +139,10 @@ export default function PontoGate() {
           </button>
         )}
 
-        {(camError || geoError) && (
+        {geoError && !camError && (
           <div className="flex items-start gap-2 text-left bg-amber-50 border border-amber-200 rounded-lg p-2 text-[11px] text-amber-800">
             <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-            <span>Foto e localização são obrigatórias para bater o ponto de entrada. Sem elas o sistema fica bloqueado.</span>
+            <span>Localização é obrigatória para bater o ponto de entrada. Sem ela o sistema fica bloqueado.</span>
           </div>
         )}
 
@@ -128,6 +151,20 @@ export default function PontoGate() {
           {punching ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
           Bater entrada
         </button>
+
+        {camError && (
+          <>
+            <div className="flex items-start gap-2 text-left bg-amber-50 border border-amber-200 rounded-lg p-2 text-[11px] text-amber-800">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span>Se a câmera continuar sem funcionar, você pode bater o ponto só com a localização — isso vai ficar sinalizado para o RH revisar.</span>
+            </div>
+            <button onClick={punchWithoutPhoto} disabled={punching || geo.status !== "ok"} data-testid="button-ponto-gate-punch-no-photo"
+              className="w-full py-3 rounded-xl bg-white border-2 border-primary text-primary font-bold text-sm disabled:opacity-40 flex items-center justify-center gap-2">
+              {punching ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+              Continuar sem foto (câmera indisponível)
+            </button>
+          </>
+        )}
       </div>
     </div>
   );

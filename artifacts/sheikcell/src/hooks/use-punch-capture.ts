@@ -144,5 +144,18 @@ export function usePunchCapture(active: boolean) {
     return { photoBase64, mimetype: "image/jpeg", lat: geo.lat, lng: geo.lng, accuracyMeters: geo.accuracyMeters ?? null };
   }, [ready, geo]);
 
-  return { cam, geo, videoRef, ready, startCamera, startGeo, capture, stop };
+  // Via de escape pra quando a câmera genuinamente não funciona nesse
+  // aparelho/navegador (sem webcam, permissão negada, travada em outro app,
+  // timeout etc. — ver cam.status === "error" acima). Localização continua
+  // obrigatória (sem via de escape pra ela) — só dispensa a foto, e o
+  // backend marca a batida como `flagged` pra revisão do admin. Sem isso, um
+  // colaborador nessas condições ficava permanentemente travado no gate,
+  // sem conseguir usar o sistema de jeito nenhum.
+  const captureWithoutPhoto = useCallback((reason: string): { lat: number; lng: number; accuracyMeters: number | null; noPhotoReason: string } | null => {
+    if (geo.status !== "ok" || geo.lat == null || geo.lng == null) return null;
+    const trimmed = reason.trim().slice(0, 300) || "Câmera indisponível";
+    return { lat: geo.lat, lng: geo.lng, accuracyMeters: geo.accuracyMeters ?? null, noPhotoReason: trimmed };
+  }, [geo]);
+
+  return { cam, geo, videoRef, ready, startCamera, startGeo, capture, captureWithoutPhoto, stop };
 }
