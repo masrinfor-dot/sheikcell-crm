@@ -20,6 +20,37 @@ export function usePunchCapture(active: boolean) {
     streamRef.current = null;
   }, []);
 
+  // Mensagem de erro específica por causa (antes era um texto genérico só de
+  // "permissão" pra qualquer falha — mas getUserMedia falha por vários
+  // motivos bem diferentes, e cada um pede uma ação diferente do usuário/loja:
+  // permissão negada no navegador, câmera inexistente no aparelho, câmera já
+  // em uso por outro programa/aba, contexto inseguro (http sem ser
+  // localhost), ou nenhuma câmera satisfaz as restrições pedidas.
+  function cameraErrorMessage(err: unknown): string {
+    if (typeof window !== "undefined" && window.isSecureContext === false) {
+      return "A página precisa ser aberta em HTTPS para usar a câmera. Confira o endereço no navegador.";
+    }
+    const name = err instanceof Error ? err.name : "";
+    switch (name) {
+      case "NotAllowedError":
+      case "PermissionDeniedError":
+        return "Permissão de câmera negada. Clique no ícone de cadeado/câmera ao lado do endereço no navegador, libere a câmera para este site e clique em \"Tentar acessar a câmera de novo\".";
+      case "NotFoundError":
+      case "DevicesNotFoundError":
+        return "Nenhuma câmera foi encontrada neste computador/dispositivo. Conecte uma webcam (ou use um celular/notebook com câmera) para bater o ponto.";
+      case "NotReadableError":
+      case "TrackStartError":
+        return "A câmera não pôde ser aberta — provavelmente está sendo usada por outro programa ou aba (ex.: Teams, Zoom, outra aba do navegador). Feche esses programas e tente de novo.";
+      case "OverconstrainedError":
+      case "ConstraintNotSatisfiedError":
+        return "A câmera deste dispositivo não é compatível com a captura pedida. Tente outro navegador ou dispositivo.";
+      case "SecurityError":
+        return "O navegador bloqueou o acesso à câmera por segurança nesta página. Confira se o endereço começa com https://.";
+      default:
+        return "Não foi possível acessar a câmera. Libere a permissão de câmera no navegador e tente de novo.";
+    }
+  }
+
   const startCamera = useCallback(async () => {
     setCam({ status: "loading" });
     try {
@@ -31,8 +62,10 @@ export function usePunchCapture(active: boolean) {
         await videoRef.current.play().catch(() => {});
       }
       setCam({ status: "ok" });
-    } catch {
-      setCam({ status: "error", error: "Não foi possível acessar a câmera. Libere a permissão de câmera no navegador e tente de novo." });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[ponto] getUserMedia falhou:", err instanceof Error ? `${err.name}: ${err.message}` : err);
+      setCam({ status: "error", error: cameraErrorMessage(err) });
     }
   }, []);
 

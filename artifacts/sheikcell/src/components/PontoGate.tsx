@@ -19,7 +19,18 @@ export default function PontoGate() {
   const { toast } = useToast();
   const [needsClockIn, setNeedsClockIn] = useState(false);
   const [punching, setPunching] = useState(false);
+  const [now, setNow] = useState(() => new Date());
   const { cam, geo, videoRef, ready, startCamera, startGeo, capture, stop } = usePunchCapture(needsClockIn);
+
+  // Relógio ao vivo, só pra dar confiança de que o horário que vai ser
+  // gravado é o de agora (mesma ideia do relógio que aparece na tela de
+  // "Registrar Ponto" da Sólides/Tangerino) — puramente visual, o horário
+  // gravado de verdade é o do servidor, não o do navegador.
+  useEffect(() => {
+    if (!needsClockIn) return;
+    const t = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(t);
+  }, [needsClockIn]);
 
   const refresh = useCallback(() => {
     api.rhDp.me.clockStatus().then((s) => setNeedsClockIn(s.needsClockIn)).catch(() => {});
@@ -63,6 +74,10 @@ export default function PontoGate() {
           <p className="text-xs text-muted-foreground mt-1">
             Tire uma foto e confirme sua localização para registrar a entrada de hoje.
           </p>
+          <p className="text-2xl font-bold tabular-nums mt-2" data-testid="text-ponto-gate-clock">
+            {now.toLocaleTimeString("pt-BR")}
+          </p>
+          <p className="text-[11px] text-muted-foreground">{now.toLocaleDateString("pt-BR")}</p>
         </div>
 
         <div className="relative w-full aspect-[4/3] rounded-xl overflow-hidden bg-muted flex items-center justify-center">
@@ -76,6 +91,12 @@ export default function PontoGate() {
             </div>
           )}
         </div>
+
+        {!camError && (
+          <p className="text-[11px] text-muted-foreground -mt-2">
+            Use o Google Chrome e libere a câmera quando o navegador pedir, para o ponto funcionar certinho.
+          </p>
+        )}
 
         {camError && (
           <button onClick={startCamera} className="text-xs font-semibold text-primary underline" data-testid="button-ponto-gate-retry-camera">
