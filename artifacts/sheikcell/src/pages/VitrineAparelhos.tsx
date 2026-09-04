@@ -146,21 +146,42 @@ export default function VitrineAparelhos() {
   const [newCategoryParent, setNewCategoryParent] = useState<number | "">("");
   const [savingCategory, setSavingCategory] = useState(false);
 
+  // GET /catalog/wholesale-code devolve o código de acesso ao atacado em
+  // texto puro — por isso o backend exige admin de verdade (requireAdmin),
+  // diferente dos outros GETs desta tela (categorias, slug, WhatsApp), que
+  // qualquer usuário com acesso à Vitrine pode ler. Antes, essa chamada
+  // entrava no mesmo Promise.all das outras: um supervisor (ou qualquer
+  // login sem ser admin) abrindo a Vitrine tomava 403 nela, e como
+  // Promise.all rejeita tudo se UMA falhar, a tela inteira quebrava — vitrine
+  // aparecia vazia ("Nenhum aparelho cadastrado ainda") com o erro genérico,
+  // mesmo a loja tendo produtos cadastrados normalmente. Corrigido em duas
+  // frentes: só busca o código pra quem é admin de verdade, e trocado pra
+  // Promise.allSettled — uma chamada falhando não derruba mais as outras.
   const load = () => {
     setLoading(true);
-    Promise.all([
+    const isAdmin = user?.role === "admin";
+    Promise.allSettled([
       api.catalog.list(), api.catalog.getSlug(), api.catalog.getWhatsapp(), api.catalog.getWhatsappWholesale(),
-      api.catalog.categories(), api.catalog.getWholesaleCode(),
+      api.catalog.categories(), isAdmin ? api.catalog.getWholesaleCode() : Promise.resolve(null),
     ])
       .then(([l, s, w, ww, cats, wc]) => {
-        setProducts(l.products); setSettings(l.settings);
-        setSlug(s.slug); setSlugInput(s.slug ?? "");
-        setWhatsapp(w.whatsapp); setWhatsappInput(w.whatsapp ?? "");
-        setWhatsappWholesale(ww.whatsapp); setWhatsappWholesaleInput(ww.whatsapp ?? "");
-        setCategories(cats.categories);
-        setHasWholesaleCode(wc.hasCode); setWholesaleCodeInput(wc.code ?? "");
+        if (l.status === "fulfilled") { setProducts(l.value.products); setSettings(l.value.settings); }
+        if (s.status === "fulfilled") { setSlug(s.value.slug); setSlugInput(s.value.slug ?? ""); }
+        if (w.status === "fulfilled") { setWhatsapp(w.value.whatsapp); setWhatsappInput(w.value.whatsapp ?? ""); }
+        if (ww.status === "fulfilled") { setWhatsappWholesale(ww.value.whatsapp); setWhatsappWholesaleInput(ww.value.whatsapp ?? ""); }
+        if (cats.status === "fulfilled") setCategories(cats.value.categories);
+        if (wc.status === "fulfilled" && wc.value) { setHasWholesaleCode(wc.value.hasCode); setWholesaleCodeInput(wc.value.code ?? ""); }
+        const failed = [l, s, w, ww, cats, wc].filter((r) => r.status === "rejected");
+        if (failed.length > 0) {
+          // eslint-disable-next-line no-console
+          console.warn("[vitrine] falha ao carregar", failed.map((r) => (r as PromiseRejectedResult).reason));
+          toast({
+            title: l.status === "rejected" ? "Erro ao carregar a vitrine" : "Algumas informações da vitrine não carregaram",
+            description: l.status === "rejected" ? undefined : "A lista de aparelhos carregou normal — só alguma configuração extra falhou. Tente recarregar a página.",
+            variant: "destructive",
+          });
+        }
       })
-      .catch(() => toast({ title: "Erro ao carregar a vitrine", variant: "destructive" }))
       .finally(() => setLoading(false));
   };
   useEffect(load, []);
