@@ -502,46 +502,89 @@ router.post("/catalog/products/:id/photos", requireAuth, async (req, res): Promi
   res.status(201).json(photo);
 });
 
-// Busca de imagens padronizadas na internet (Google Custom Search — Imagens).
-// Exige as env vars GOOGLE_CSE_API_KEY e GOOGLE_CSE_CX (Programmable Search
-// Engine com "busca de imagem" habilitada). Sem elas, devolve 501 com uma
-// mensagem clara em vez de quebrar a tela — a loja pode seguir cadastrando
-// fotos por upload manual normalmente.
+// Busca de imagens padronizadas na internet. Suporta dois provedores, nessa
+// ordem de preferência (usa o primeiro que estiver configurado):
+//   1. Serper.dev (SERPER_API_KEY) — conta grátis, sem cartão/faturamento.
+//   2. Google Custom Search (GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX) — exige
+//      conta de faturamento do Google Cloud vinculada e verificada (pode
+//      levar até 24h pra ativar numa conta de teste grátis nova).
+// Sem nenhum dos dois configurados, devolve 501 com uma mensagem clara em vez
+// de quebrar a tela — a loja pode seguir cadastrando fotos por upload manual.
+type ImageSearchResult = { title: string; imageUrl: string; thumbnailUrl: string; sourceUrl: string };
+
+function photoSearchConfigured(): boolean {
+  return !!process.env["SERPER_API_KEY"] || !!(process.env["GOOGLE_CSE_API_KEY"] && process.env["GOOGLE_CSE_CX"]);
+}
+
+async function searchImagesSerper(query: string, num: number): Promise<ImageSearchResult[]> {
+  const apiKey = process.env["SERPER_API_KEY"];
+  if (!apiKey) return [];
+  const r = await fetch("https://google.serper.dev/images", {
+    method: "POST",
+    headers: { "X-API-KEY": apiKey, "Content-Type": "application/json" },
+    body: JSON.stringify({ q: query, num, safe: "active" }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    logger.warn({ status: r.status, body: body.slice(0, 300), query }, "Catalog photo search: Serper respondeu erro");
+    return [];
+  }
+  const json = (await r.json()) as {
+    images?: { title?: string; imageUrl?: string; thumbnailUrl?: string; link?: string }[];
+  };
+  return (json.images ?? []).slice(0, num).map((it) => ({
+    title: clean(it.title, 150),
+    imageUrl: typeof it.imageUrl === "string" ? it.imageUrl : "",
+    thumbnailUrl: typeof it.thumbnailUrl === "string" ? it.thumbnailUrl : (typeof it.imageUrl === "string" ? it.imageUrl : ""),
+    sourceUrl: typeof it.link === "string" ? it.link : "",
+  })).filter((r) => r.imageUrl);
+}
+
+async function searchImagesGoogleCse(query: string, num: number): Promise<ImageSearchResult[]> {
+  const apiKey = process.env["GOOGLE_CSE_API_KEY"];
+  const cx = process.env["GOOGLE_CSE_CX"];
+  if (!apiKey || !cx) return [];
+  const url = new URL("https://www.googleapis.com/customsearch/v1");
+  url.searchParams.set("key", apiKey);
+  url.searchParams.set("cx", cx);
+  url.searchParams.set("q", query);
+  url.searchParams.set("searchType", "image");
+  url.searchParams.set("num", String(num));
+  url.searchParams.set("safe", "active");
+  url.searchParams.set("imgSize", "large");
+  const r = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    logger.warn({ status: r.status, body: body.slice(0, 300), query }, "Catalog photo search: Google CSE respondeu erro");
+    return [];
+  }
+  const json = (await r.json()) as { items?: { title?: string; link?: string; image?: { thumbnailLink?: string; contextLink?: string } }[] };
+  return (json.items ?? []).slice(0, num).map((it) => ({
+    title: clean(it.title, 150),
+    imageUrl: typeof it.link === "string" ? it.link : "",
+    thumbnailUrl: typeof it.image?.thumbnailLink === "string" ? it.image.thumbnailLink : (typeof it.link === "string" ? it.link : ""),
+    sourceUrl: typeof it.image?.contextLink === "string" ? it.image.contextLink : "",
+  })).filter((r) => r.imageUrl);
+}
+
+async function searchImages(query: string, num: number): Promise<ImageSearchResult[]> {
+  if (process.env["SERPER_API_KEY"]) return searchImagesSerper(query, num);
+  return searchImagesGoogleCse(query, num);
+}
+
 router.get("/catalog/photo-search", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   void tenantId;
-  const apiKey = process.env["GOOGLE_CSE_API_KEY"];
-  const cx = process.env["GOOGLE_CSE_CX"];
-  if (!apiKey || !cx) {
-    res.status(501).json({ error: "Busca de imagens não configurada neste servidor. Peça pro desenvolvedor configurar GOOGLE_CSE_API_KEY e GOOGLE_CSE_CX (Google Programmable Search Engine)." });
+  if (!photoSearchConfigured()) {
+    res.status(501).json({ error: "Busca de imagens não configurada neste servidor. Configure SERPER_API_KEY (serper.dev, grátis) ou GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX." });
     return;
   }
   const q = clean((req.query as Record<string, unknown>).q, 150);
   if (!q) { res.status(400).json({ error: "Informe o que buscar" }); return; }
 
   try {
-    const url = new URL("https://www.googleapis.com/customsearch/v1");
-    url.searchParams.set("key", apiKey);
-    url.searchParams.set("cx", cx);
-    url.searchParams.set("q", q);
-    url.searchParams.set("searchType", "image");
-    url.searchParams.set("num", "8");
-    url.searchParams.set("safe", "active");
-    url.searchParams.set("imgSize", "large");
-
-    const r = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-    if (!r.ok) {
-      req.log.warn({ status: r.status }, "Catalog photo search: Google CSE respondeu erro");
-      res.status(502).json({ error: "A busca de imagens falhou. Tente novamente." });
-      return;
-    }
-    const json = (await r.json()) as { items?: { title?: string; link?: string; image?: { thumbnailLink?: string; contextLink?: string } }[] };
-    const results = (json.items ?? []).slice(0, 8).map((it) => ({
-      title: clean(it.title, 150),
-      imageUrl: typeof it.link === "string" ? it.link : "",
-      thumbnailUrl: typeof it.image?.thumbnailLink === "string" ? it.image.thumbnailLink : (typeof it.link === "string" ? it.link : ""),
-      sourceUrl: typeof it.image?.contextLink === "string" ? it.image.contextLink : "",
-    })).filter((r) => r.imageUrl);
+    const results = await searchImages(q, 8);
     res.json({ results });
   } catch (err) {
     req.log.error({ err }, "Catalog photo search failed");
@@ -946,36 +989,15 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
 });
 
 // Busca best-effort de fotos pra anexar automaticamente ao importar por IA —
-// mesma API do Google Custom Search da busca manual (rota /catalog/photo-search
-// abaixo), mas nunca propaga erro: sem GOOGLE_CSE_API_KEY/CX configuradas, ou
-// se a busca falhar por qualquer motivo (ex.: conta de faturamento do Google
-// Cloud não vinculada — ver diagnóstico do lojista), o produto simplesmente
-// importa sem foto, exatamente como já acontecia antes dessa feature existir.
+// mesma API da busca manual (searchImages, rota /catalog/photo-search acima),
+// mas nunca propaga erro: sem nenhum provedor configurado, ou se a busca
+// falhar por qualquer motivo, o produto simplesmente importa sem foto,
+// exatamente como já acontecia antes dessa feature existir.
 async function autoPhotoSearchUrls(query: string): Promise<string[]> {
-  const apiKey = process.env["GOOGLE_CSE_API_KEY"];
-  const cx = process.env["GOOGLE_CSE_CX"];
-  if (!apiKey || !cx) return [];
+  if (!photoSearchConfigured()) return [];
   try {
-    const url = new URL("https://www.googleapis.com/customsearch/v1");
-    url.searchParams.set("key", apiKey);
-    url.searchParams.set("cx", cx);
-    url.searchParams.set("q", query);
-    url.searchParams.set("searchType", "image");
-    url.searchParams.set("num", "3");
-    url.searchParams.set("safe", "active");
-    url.searchParams.set("imgSize", "large");
-    const r = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-    if (!r.ok) {
-      // Best-effort por design (importação nunca deve travar por causa da
-      // foto), mas SEM log isso fica invisível pra sempre — quem investiga
-      // "fotos não vêm automático" precisa dessa causa (ex.: 403 = conta de
-      // faturamento do Google Cloud não vinculada, 429 = cota diária estourada).
-      const body = await r.text().catch(() => "");
-      logger.warn({ status: r.status, body: body.slice(0, 300), query }, "Catalog auto photo search: Google CSE respondeu erro");
-      return [];
-    }
-    const json = (await r.json()) as { items?: { link?: string }[] };
-    return (json.items ?? []).map((it) => (typeof it.link === "string" ? it.link : "")).filter(Boolean);
+    const results = await searchImages(query, 3);
+    return results.map((r) => r.imageUrl).filter(Boolean);
   } catch (err) {
     logger.warn({ err, query }, "Catalog auto photo search failed");
     return [];
@@ -1022,7 +1044,7 @@ async function autoAttachPhotosOnImport(
   tenantId: number,
   products: (typeof catalogProductsTable.$inferSelect)[],
 ): Promise<number> {
-  if (!process.env["GOOGLE_CSE_API_KEY"] || !process.env["GOOGLE_CSE_CX"]) return 0;
+  if (!photoSearchConfigured()) return 0;
   const targets = products.slice(0, AUTO_IMPORT_PHOTO_LIMIT);
   const outcomes = await Promise.allSettled(targets.map(async (p) => {
     const urls = await autoPhotoSearchUrls(p.model);
@@ -1067,8 +1089,7 @@ router.post("/catalog/import/confirm", requireAuth, async (req, res): Promise<vo
   // vincular conta de faturamento no Google Cloud) ou falhar, os produtos já
   // foram importados normalmente — só ficam sem foto, como sempre.
   const photosAttached = await autoAttachPhotosOnImport(tenantId, createdProducts);
-  const photoSearchConfigured = !!(process.env["GOOGLE_CSE_API_KEY"] && process.env["GOOGLE_CSE_CX"]);
-  res.status(201).json({ imported: createdProducts.length, products: createdProducts, photosAttached, photoSearchConfigured });
+  res.status(201).json({ imported: createdProducts.length, products: createdProducts, photosAttached, photoSearchConfigured: photoSearchConfigured() });
 });
 
 export default router;
