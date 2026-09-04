@@ -122,19 +122,26 @@ function withInstallmentPricing<
 
 // Mesma ideia acima, só que pro preço de atacado: o preço de atacado
 // (wholesalePrice) já É o valor à vista (sem taxa de cartão, ver
-// precoAtacadoDoProduto) — só falta calcular o valor da parcela em 12x pra
-// mostrar "atacado à vista: R$X · ou 12x de R$Y" pra quem desbloqueou com o
-// código de acesso.
+// precoAtacadoDoProduto) — calcula também na hora (wholesalePriceCash),
+// igual o priceCash do varejo, em vez de confiar só no valor gravado no
+// banco em resolveVariantWholesalePrice (que fica desatualizado se a
+// margem de atacado padrão mudar depois — o preço de venda já não tinha
+// esse problema, o de atacado tinha). Só cai no valor gravado quando não dá
+// pra calcular (produto sem custo cadastrado = preço de atacado digitado
+// manualmente pelo lojista, sem fórmula).
 function withWholesaleInstallmentPricing<
   T extends { costPrice: string | number | null; costIncludesInvoice: boolean; wholesaleMarginPercentOverride: string | number | null },
->(v: T, settings: PricingSettings): { wholesaleInstallment12Value: number | null } {
+>(v: T, settings: PricingSettings): { wholesaleInstallment12Value: number | null; wholesalePriceCash: number | null } {
   const produto = {
     costPrice: toNumberOrNull(v.costPrice),
     costIncludesInvoice: v.costIncludesInvoice,
     wholesaleMarginPercentOverride: toNumberOrNull(v.wholesaleMarginPercentOverride),
   };
   const installment = parcelamento12xAtacadoDoProduto(produto, settings);
-  return { wholesaleInstallment12Value: installment?.parcela ?? null };
+  return {
+    wholesaleInstallment12Value: installment?.parcela ?? null,
+    wholesalePriceCash: precoAtacadoDoProduto(produto, settings),
+  };
 }
 
 async function photosByProductIds(tenantId: number, productIds: number[]) {
@@ -1092,15 +1099,23 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
         photos: (photos.get(r.id) ?? []).map((p) => p.id),
         variants: (variants.get(r.id) ?? [])
           .filter((v) => v.salePrice != null)
-          .map((v) => ({
-            id: v.id, storage: v.storage, color: v.color, salePrice: v.salePrice, inStock: v.stockQty > 0,
-            wholesalePrice: wholesaleUnlocked ? v.wholesalePrice : null,
-            // à vista/12x calculados na hora, nunca expõe custo/margem (ver withInstallmentPricing).
-            ...withInstallmentPricing(v, pricingSettings),
-            // 12x de atacado só sai junto do preço de atacado, ou seja, só pra
-            // quem já desbloqueou com o código (mesma regra do wholesalePrice acima).
-            wholesaleInstallment12Value: wholesaleUnlocked ? withWholesaleInstallmentPricing(v, pricingSettings).wholesaleInstallment12Value : null,
-          })),
+          .map((v) => {
+            // Preço de atacado calculado na hora (sempre em sincronia com a
+            // margem de atacado atual, ver withWholesaleInstallmentPricing);
+            // só cai no valor gravado no banco se não der pra calcular
+            // (produto sem custo cadastrado = número de atacado digitado à
+            // mão pelo lojista).
+            const wholesale = withWholesaleInstallmentPricing(v, pricingSettings);
+            return {
+              id: v.id, storage: v.storage, color: v.color, salePrice: v.salePrice, inStock: v.stockQty > 0,
+              wholesalePrice: wholesaleUnlocked ? (wholesale.wholesalePriceCash ?? v.wholesalePrice) : null,
+              // à vista/12x calculados na hora, nunca expõe custo/margem (ver withInstallmentPricing).
+              ...withInstallmentPricing(v, pricingSettings),
+              // 12x de atacado só sai junto do preço de atacado, ou seja, só pra
+              // quem já desbloqueou com o código (mesma regra do wholesalePrice acima).
+              wholesaleInstallment12Value: wholesaleUnlocked ? wholesale.wholesaleInstallment12Value : null,
+            };
+          }),
       }))
       .filter((p) => p.variants.length > 0),
   });
