@@ -2333,6 +2333,13 @@ export default function ChatCenter({
       // 409 se outro vendedor já assumiu) em vez de um erro genérico.
       const msg = e instanceof Error ? e.message : "";
       toast({ title: "Erro ao iniciar atendimento", description: msg || undefined, variant: "destructive" });
+      // "Atendimento fantasma": a lista local ainda mostrava a conversa como
+      // livre (Pendente), mas o servidor já tinha outro responsável — geralmente
+      // porque um evento em tempo real (SSE) se perdeu numa reconexão. Sem isto,
+      // a conversa fica "presa" na fila de quem não consegue mais assumi-la,
+      // dando o mesmo erro 409 pra sempre. Resincroniza com o servidor (fonte
+      // da verdade) pra ela sumir da fila de quem não pode mais assumi-la.
+      fetchConvs();
     }
   };
 
