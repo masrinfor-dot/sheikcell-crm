@@ -1060,7 +1060,7 @@ async function autoPhotoSearchUrls(query: string): Promise<string[]> {
 // Baixa e anexa uma foto ao produto — mesma validação da rota manual
 // /catalog/products/:id/photos/from-url, mas devolve boolean em vez de
 // responder HTTP (uso interno, best-effort, nunca derruba a importação).
-async function autoAttachPhoto(tenantId: number, productId: number, imageUrl: string): Promise<boolean> {
+async function autoAttachPhoto(tenantId: number, productId: number, imageUrl: string, sortOrder = 0): Promise<boolean> {
   try {
     const parsed = new URL(imageUrl);
     if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
@@ -1077,11 +1077,24 @@ async function autoAttachPhoto(tenantId: number, productId: number, imageUrl: st
     await mkdir(CATALOG_MEDIA_DIR, { recursive: true });
     const storedName = `${randomUUID()}.${ext}`;
     await writeFile(path.join(CATALOG_MEDIA_DIR, storedName), buf);
-    await db.insert(catalogProductPhotosTable).values({ tenantId, productId, storedName, sourceUrl: parsed.toString(), sortOrder: 0 });
+    await db.insert(catalogProductPhotosTable).values({ tenantId, productId, storedName, sourceUrl: parsed.toString(), sortOrder });
     return true;
   } catch {
     return false;
   }
+}
+
+// Anexa várias fotos (até maxPhotos) em vez de parar na primeira que baixar
+// certo — assim o carrossel da vitrine pública (já existe, estilo Instagram,
+// arrasta pro lado) tem o que mostrar de verdade, em vez de só uma foto
+// solitária. sortOrder incremental preserva a ordem dos resultados de busca.
+async function autoAttachPhotos(tenantId: number, productId: number, urls: string[], maxPhotos = 3): Promise<number> {
+  let attached = 0;
+  for (const url of urls) {
+    if (attached >= maxPhotos) break;
+    if (await autoAttachPhoto(tenantId, productId, url, attached)) attached++;
+  }
+  return attached;
 }
 
 // Protege contra imports enormes deixando o confirm lento — acima disso, os
@@ -1101,12 +1114,9 @@ async function autoAttachPhotosOnImport(
   const targets = products.slice(0, AUTO_IMPORT_PHOTO_LIMIT);
   const outcomes = await Promise.allSettled(targets.map(async (p) => {
     const urls = await autoPhotoSearchUrls(p.model);
-    for (const url of urls) {
-      if (await autoAttachPhoto(tenantId, p.id, url)) return true;
-    }
-    return false;
+    return autoAttachPhotos(tenantId, p.id, urls);
   }));
-  return outcomes.filter((o) => o.status === "fulfilled" && o.value === true).length;
+  return outcomes.filter((o) => o.status === "fulfilled" && o.value > 0).length;
 }
 
 // "Recuperar" produtos que ficaram sem NENHUMA foto — cobre dois casos reais:
@@ -1135,12 +1145,9 @@ router.post("/catalog/products/photos/fetch-missing", requireAuth, async (req, r
 
   const outcomes = await Promise.allSettled(targets.map(async (p) => {
     const urls = await autoPhotoSearchUrls(p.model);
-    for (const url of urls) {
-      if (await autoAttachPhoto(tenantId, p.id, url)) return true;
-    }
-    return false;
+    return autoAttachPhotos(tenantId, p.id, urls);
   }));
-  const attached = outcomes.filter((o) => o.status === "fulfilled" && o.value === true).length;
+  const attached = outcomes.filter((o) => o.status === "fulfilled" && o.value > 0).length;
   res.json({
     checked: targets.length,
     attached,
