@@ -144,15 +144,17 @@ function withWholesaleInstallmentPricing<
   };
 }
 
+type CatalogPhotoRow = { id: number; storedName: string; sortOrder: number; isBoxPhoto: boolean; sourceUrl: string | null; color: string | null };
+
 async function photosByProductIds(tenantId: number, productIds: number[]) {
-  if (productIds.length === 0) return new Map<number, { id: number; storedName: string; sortOrder: number; isBoxPhoto: boolean; sourceUrl: string | null }[]>();
+  if (productIds.length === 0) return new Map<number, CatalogPhotoRow[]>();
   const rows = await db.select().from(catalogProductPhotosTable)
     .where(and(eq(catalogProductPhotosTable.tenantId, tenantId), inArray(catalogProductPhotosTable.productId, productIds)))
     .orderBy(catalogProductPhotosTable.sortOrder);
-  const map = new Map<number, { id: number; storedName: string; sortOrder: number; isBoxPhoto: boolean; sourceUrl: string | null }[]>();
+  const map = new Map<number, CatalogPhotoRow[]>();
   for (const p of rows) {
     const list = map.get(p.productId) ?? [];
-    list.push({ id: p.id, storedName: p.storedName, sortOrder: p.sortOrder, isBoxPhoto: p.isBoxPhoto, sourceUrl: p.sourceUrl });
+    list.push({ id: p.id, storedName: p.storedName, sortOrder: p.sortOrder, isBoxPhoto: p.isBoxPhoto, sourceUrl: p.sourceUrl, color: p.color });
     map.set(p.productId, list);
   }
   return map;
@@ -164,12 +166,14 @@ async function photosByProductIds(tenantId: number, productIds: number[]) {
 // fotos marcadas como "da caixa" nem aparecem, só interessa o aparelho de
 // fato. Preserva a ordem relativa (sortOrder) dentro de cada grupo. No
 // admin (Vitrine Aparelhos) o lojista continua vendo/editando TODAS as
-// fotos, com essa marcação — só a vitrine pública aplica essa regra.
-function publicPhotoIds(list: { id: number; sortOrder: number; isBoxPhoto: boolean }[], condition: string): number[] {
-  if (condition === "novo") {
-    return [...list.filter((p) => p.isBoxPhoto), ...list.filter((p) => !p.isBoxPhoto)].map((p) => p.id);
-  }
-  return list.filter((p) => !p.isBoxPhoto).map((p) => p.id);
+// fotos, com essa marcação — só a vitrine pública aplica essa regra. Cada
+// foto sai com a cor que ela representa (ou null = geral) pra o front
+// filtrar pelo seletor de cor, sem precisar de outra chamada.
+function publicPhotoIds(list: { id: number; sortOrder: number; isBoxPhoto: boolean; color: string | null }[], condition: string): { id: number; color: string | null }[] {
+  const ordered = condition === "novo"
+    ? [...list.filter((p) => p.isBoxPhoto), ...list.filter((p) => !p.isBoxPhoto)]
+    : list.filter((p) => !p.isBoxPhoto);
+  return ordered.map((p) => ({ id: p.id, color: p.color }));
 }
 
 async function variantsByProductIds(tenantId: number, productIds: number[]) {
@@ -479,7 +483,7 @@ router.post("/catalog/products/:id/photos", requireAuth, async (req, res): Promi
     .where(and(eq(catalogProductsTable.id, productId), eq(catalogProductsTable.tenantId, tenantId))).limit(1);
   if (!existing) { res.status(404).json({ error: "Produto não encontrado" }); return; }
 
-  const { mimeType, data } = req.body as { mimeType?: string; data?: string };
+  const { mimeType, data, color } = req.body as { mimeType?: string; data?: string; color?: unknown };
   const mime = typeof mimeType === "string" ? mimeType.split(";")[0].trim() : "";
   const ext = PHOTO_MIME[mime];
   if (!ext) { res.status(400).json({ error: "Formato não permitido. Use JPEG, PNG ou WEBP." }); return; }
@@ -497,7 +501,7 @@ router.post("/catalog/products/:id/photos", requireAuth, async (req, res): Promi
   const [count] = await db.select({ id: catalogProductPhotosTable.id }).from(catalogProductPhotosTable)
     .where(eq(catalogProductPhotosTable.productId, productId));
   const [photo] = await db.insert(catalogProductPhotosTable).values({
-    tenantId, productId, storedName, sortOrder: count ? 1 : 0,
+    tenantId, productId, storedName, sortOrder: count ? 1 : 0, color: clean(color, 40) || null,
   }).returning();
   res.status(201).json(photo);
 });
@@ -632,6 +636,7 @@ router.post("/catalog/products/:id/photos/from-url", requireAuth, async (req, re
 
   const raw = (req.body as { url?: unknown }).url;
   const sourceUrl = typeof raw === "string" ? raw.trim().slice(0, 2000) : "";
+  const color = clean((req.body as { color?: unknown }).color, 40) || null;
   let parsed: URL;
   try { parsed = new URL(sourceUrl); } catch { res.status(400).json({ error: "URL inválida" }); return; }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") { res.status(400).json({ error: "URL inválida" }); return; }
@@ -655,7 +660,7 @@ router.post("/catalog/products/:id/photos/from-url", requireAuth, async (req, re
     const [count] = await db.select({ id: catalogProductPhotosTable.id }).from(catalogProductPhotosTable)
       .where(eq(catalogProductPhotosTable.productId, productId));
     const [photo] = await db.insert(catalogProductPhotosTable).values({
-      tenantId, productId, storedName, sourceUrl: parsed.toString(), sortOrder: count ? 1 : 0,
+      tenantId, productId, storedName, sourceUrl: parsed.toString(), sortOrder: count ? 1 : 0, color,
     }).returning();
     res.status(201).json(photo);
   } catch (err) {
@@ -664,15 +669,21 @@ router.post("/catalog/products/:id/photos/from-url", requireAuth, async (req, re
   }
 });
 
-// Marca/desmarca uma foto como "da caixa" (embalagem lacrada) — usada pra
-// decidir a ordem/filtro de fotos na vitrine pública (ver publicPhotoIds).
+// Marca/desmarca uma foto como "da caixa" (embalagem lacrada) e/ou marca qual
+// cor cadastrada do produto ela representa (color=null volta a ser foto
+// "geral", mostrada em qualquer cor) — usada pra decidir a ordem/filtro de
+// fotos na vitrine pública (ver publicPhotoIds). Aceita os dois campos juntos
+// ou separados; pelo menos um precisa vir preenchido.
 router.patch("/catalog/products/:id/photos/:photoId", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const productId = Number(req.params.id);
   const photoId = Number(req.params.photoId);
-  const { isBoxPhoto } = req.body as { isBoxPhoto?: unknown };
-  if (typeof isBoxPhoto !== "boolean") { res.status(400).json({ error: "Informe isBoxPhoto (true/false)" }); return; }
-  const [photo] = await db.update(catalogProductPhotosTable).set({ isBoxPhoto })
+  const { isBoxPhoto, color } = req.body as { isBoxPhoto?: unknown; color?: unknown };
+  const patch: Partial<typeof catalogProductPhotosTable.$inferInsert> = {};
+  if (typeof isBoxPhoto === "boolean") patch.isBoxPhoto = isBoxPhoto;
+  if ("color" in (req.body as object)) patch.color = clean(color, 40) || null;
+  if (Object.keys(patch).length === 0) { res.status(400).json({ error: "Informe isBoxPhoto e/ou color" }); return; }
+  const [photo] = await db.update(catalogProductPhotosTable).set(patch)
     .where(and(eq(catalogProductPhotosTable.id, photoId), eq(catalogProductPhotosTable.productId, productId), eq(catalogProductPhotosTable.tenantId, tenantId)))
     .returning();
   if (!photo) { res.status(404).json({ error: "Foto não encontrada" }); return; }
@@ -1060,7 +1071,7 @@ async function autoPhotoSearchUrls(query: string, num = 3): Promise<string[]> {
 // Baixa e anexa uma foto ao produto — mesma validação da rota manual
 // /catalog/products/:id/photos/from-url, mas devolve boolean em vez de
 // responder HTTP (uso interno, best-effort, nunca derruba a importação).
-async function autoAttachPhoto(tenantId: number, productId: number, imageUrl: string, sortOrder = 0): Promise<boolean> {
+async function autoAttachPhoto(tenantId: number, productId: number, imageUrl: string, sortOrder = 0, color: string | null = null): Promise<boolean> {
   try {
     const parsed = new URL(imageUrl);
     if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
@@ -1077,7 +1088,7 @@ async function autoAttachPhoto(tenantId: number, productId: number, imageUrl: st
     await mkdir(CATALOG_MEDIA_DIR, { recursive: true });
     const storedName = `${randomUUID()}.${ext}`;
     await writeFile(path.join(CATALOG_MEDIA_DIR, storedName), buf);
-    await db.insert(catalogProductPhotosTable).values({ tenantId, productId, storedName, sourceUrl: parsed.toString(), sortOrder });
+    await db.insert(catalogProductPhotosTable).values({ tenantId, productId, storedName, sourceUrl: parsed.toString(), sortOrder, color });
     return true;
   } catch {
     return false;
@@ -1094,29 +1105,32 @@ const AUTO_IMPORT_PHOTO_LIMIT = 40;
 const AUTO_PHOTO_MAX_PER_PRODUCT = 8;
 
 // Busca e anexa fotos tentando pegar UMA de cada cor cadastrada do produto
-// (ex.: "iPhone 14 Pro Max Preto", "iPhone 14 Pro Max Vermelho", ...) em vez
-// de só a primeira foto genérica do modelo — assim o carrossel da vitrine
-// pública (já existe, estilo Instagram, arrasta pro lado) mostra a cor real
-// de cada variante. usedUrls evita repetir uma foto já anexada (tanto entre
-// cores nesta mesma chamada quanto contra fotos que o produto já tinha,
-// quando é um "top up"). sortOrder incremental (a partir de startSortOrder)
+// que ainda não tem foto própria (ex.: "iPhone 14 Pro Max Preto", "iPhone 14
+// Pro Max Vermelho", ...), marcando cada foto com a cor da busca que achou
+// ela — é essa marcação que deixa a vitrine pública trocar de foto junto com
+// o seletor de cor (ver publicPhotoIds/color). missingColors já vem filtrado
+// pelo chamador (só as cores que ainda não têm foto — nem tenta de novo uma
+// cor que já foi resolvida antes). usedUrls evita repetir uma foto já
+// anexada (tanto entre cores nesta chamada quanto contra fotos que o produto
+// já tinha, num "top up"). sortOrder incremental (a partir de startSortOrder)
 // preserva a ordem: fotos existentes primeiro, novas depois.
 async function autoAttachPhotosForProduct(
   tenantId: number,
   productId: number,
   model: string,
-  colors: string[],
+  missingColors: string[],
+  hasAnyColor: boolean,
   usedUrls: Set<string>,
   startSortOrder: number,
-  maxPhotos: number,
+  maxNewPhotos: number,
 ): Promise<number> {
   let sortOrder = startSortOrder;
   let attached = 0;
 
-  async function attachFirstNew(urls: string[]): Promise<boolean> {
+  async function attachFirstNew(urls: string[], color: string | null): Promise<boolean> {
     for (const url of urls) {
       if (usedUrls.has(url)) continue;
-      if (await autoAttachPhoto(tenantId, productId, url, sortOrder)) {
+      if (await autoAttachPhoto(tenantId, productId, url, sortOrder, color)) {
         usedUrls.add(url);
         sortOrder++;
         attached++;
@@ -1126,29 +1140,31 @@ async function autoAttachPhotosForProduct(
     return false;
   }
 
-  const target = Math.min(maxPhotos, colors.length > 0 ? colors.length : 3);
-
-  if (colors.length > 0) {
-    for (const color of colors) {
-      if (attached >= target) break;
+  if (missingColors.length > 0) {
+    for (const color of missingColors) {
+      if (attached >= maxNewPhotos) break;
       const urls = await autoPhotoSearchUrls(`${model} ${color}`, 3);
-      await attachFirstNew(urls);
+      await attachFirstNew(urls, color);
     }
-  } else {
-    const urls = await autoPhotoSearchUrls(model, target);
+  } else if (!hasAnyColor) {
+    // Produto sem nenhuma cor cadastrada: busca genérica normal do modelo,
+    // sem marcação de cor (foto "geral").
+    const urls = await autoPhotoSearchUrls(model, maxNewPhotos);
     for (const url of urls) {
-      if (attached >= target) break;
-      await attachFirstNew([url]);
+      if (attached >= maxNewPhotos) break;
+      await attachFirstNew([url], null);
     }
   }
 
-  // Fallback: se alguma cor não achou foto própria, completa o que falta com
-  // busca genérica do modelo (melhor uma foto "errada" de cor do que nenhuma).
-  if (attached < target) {
-    const urls = await autoPhotoSearchUrls(model, target + 2);
+  // Fallback: se alguma cor não achou foto própria (ou sobrou espaço),
+  // completa o que falta com busca genérica do modelo, SEM marcar cor — essa
+  // foto "geral" aparece pra qualquer cor que não tenha foto dedicada, em vez
+  // de deixar o carrossel vazio.
+  if (attached < maxNewPhotos) {
+    const urls = await autoPhotoSearchUrls(model, maxNewPhotos - attached + 2);
     for (const url of urls) {
-      if (attached >= target) break;
-      await attachFirstNew([url]);
+      if (attached >= maxNewPhotos) break;
+      await attachFirstNew([url], null);
     }
   }
 
@@ -1165,9 +1181,10 @@ async function autoAttachPhotosOnImport(
 ): Promise<number> {
   if (!photoSearchConfigured()) return 0;
   const targets = products.slice(0, AUTO_IMPORT_PHOTO_LIMIT);
-  const outcomes = await Promise.allSettled(targets.map((p) =>
-    autoAttachPhotosForProduct(tenantId, p.id, p.model, p.colors, new Set<string>(), 0, AUTO_PHOTO_MAX_PER_PRODUCT),
-  ));
+  const outcomes = await Promise.allSettled(targets.map((p) => {
+    const target = Math.min(AUTO_PHOTO_MAX_PER_PRODUCT, p.colors.length > 0 ? p.colors.length : 3);
+    return autoAttachPhotosForProduct(tenantId, p.id, p.model, p.colors, p.colors.length === 0, new Set<string>(), 0, target);
+  }));
   return outcomes.filter((o) => o.status === "fulfilled" && o.value > 0).length;
 }
 
@@ -1199,15 +1216,20 @@ router.post("/catalog/products/photos/fetch-missing", requireAuth, async (req, r
     .map((r) => {
       const existing = photosMap.get(r.id) ?? [];
       const target = Math.min(AUTO_PHOTO_MAX_PER_PRODUCT, r.colors.length > 0 ? r.colors.length : 3);
-      return { row: r, existing, target };
+      const coveredColors = new Set(existing.map((ph) => ph.color).filter((c): c is string => !!c));
+      const missingColors = r.colors.filter((c) => !coveredColors.has(c));
+      const needed = Math.max(0, target - existing.length);
+      return { row: r, existing, missingColors, needed };
     })
-    .filter((x) => x.existing.length < x.target);
+    .filter((x) => x.needed > 0 && (x.missingColors.length > 0 || x.row.colors.length === 0));
 
   const targets = needsMore.slice(0, BULK_MISSING_PHOTO_LIMIT);
 
   const outcomes = await Promise.allSettled(targets.map((t) => {
     const usedUrls = new Set(t.existing.map((ph) => ph.sourceUrl).filter((u): u is string => !!u));
-    return autoAttachPhotosForProduct(tenantId, t.row.id, t.row.model, t.row.colors, usedUrls, t.existing.length, t.target);
+    return autoAttachPhotosForProduct(
+      tenantId, t.row.id, t.row.model, t.missingColors, t.row.colors.length === 0, usedUrls, t.existing.length, t.needed,
+    );
   }));
   const attached = outcomes.filter((o) => o.status === "fulfilled" && o.value > 0).length;
   res.json({

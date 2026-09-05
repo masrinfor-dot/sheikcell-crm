@@ -101,6 +101,16 @@ export default function VitrineAparelhos() {
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [showConditionInfo, setShowConditionInfo] = useState(false);
   const [fetchingMissingPhotos, setFetchingMissingPhotos] = useState(false);
+  // Índice da variante calculando preço agora (null = nenhuma) — sem isso o
+  // botão da calculadora ficava sem nenhum retorno visual enquanto esperava a
+  // resposta do servidor, dando a impressão de estar travado/lento.
+  const [calculatingVariant, setCalculatingVariant] = useState<number | null>(null);
+  // Cores digitadas no campo "Cores" do formulário (ex.: "Preto, Vermelho") —
+  // opções do seletor de cor de cada foto, abaixo.
+  const formColorOptions = useMemo(
+    () => form.colors.split(",").map((c) => c.trim()).filter(Boolean),
+    [form.colors],
+  );
 
   // Busca de fotos na internet (dentro do modal de edição do produto)
   const [showPhotoSearch, setShowPhotoSearch] = useState(false);
@@ -340,9 +350,11 @@ export default function VitrineAparelhos() {
   const removeVariant = (idx: number) => setForm((f) => ({ ...f, variants: f.variants.length > 1 ? f.variants.filter((_, i) => i !== idx) : f.variants }));
 
   const calcVariantPrice = async (idx: number) => {
+    if (calculatingVariant != null) return;
     const v = form.variants[idx];
     const custo = Number(v.costPrice);
     if (!Number.isFinite(custo) || custo <= 0) { toast({ title: "Informe o custo dessa variante primeiro", variant: "destructive" }); return; }
+    setCalculatingVariant(idx);
     try {
       const r = await api.catalog.simulatePrice({
         costPrice: custo, costIncludesInvoice: v.costIncludesInvoice,
@@ -356,7 +368,16 @@ export default function VitrineAparelhos() {
       patch.installment12Preview = r.installment12 != null ? `12x de ${formatBRL(r.installment12.parcela)}` : undefined;
       patch.wholesaleInstallment12Preview = r.wholesaleInstallment12 != null ? `12x de ${formatBRL(r.wholesaleInstallment12.parcela)}` : undefined;
       updateVariant(idx, patch);
-    } catch { toast({ title: "Erro ao calcular preço", variant: "destructive" }); }
+    } catch (err) {
+      const timedOut = err instanceof DOMException && err.name === "AbortError";
+      toast({
+        title: timedOut ? "Demorou demais pra calcular" : "Erro ao calcular preço",
+        description: timedOut ? "O servidor não respondeu a tempo — tente de novo." : undefined,
+        variant: "destructive",
+      });
+    } finally {
+      setCalculatingVariant(null);
+    }
   };
 
   const handleSave = async () => {
@@ -448,6 +469,19 @@ export default function VitrineAparelhos() {
       setEditing((prev) => prev && { ...prev, photos: apply(prev.photos) });
       setProducts((prev) => prev.map((p) => (p.id === editing.id ? { ...p, photos: apply(p.photos) } : p)));
     } catch { toast({ title: "Erro ao marcar foto da caixa", variant: "destructive" }); }
+  };
+
+  // Marca qual cor cadastrada essa foto representa (ou "" = geral, mostrada
+  // em qualquer cor) — é o que deixa a vitrine pública trocar de foto junto
+  // com o seletor de cor do cliente.
+  const handleSetPhotoColor = async (photoId: number, color: string) => {
+    if (!editing) return;
+    try {
+      const updated = await api.catalog.setPhotoColor(editing.id, photoId, color || null);
+      const apply = (photos: typeof editing.photos) => photos.map((ph) => (ph.id === photoId ? updated : ph));
+      setEditing((prev) => prev && { ...prev, photos: apply(prev.photos) });
+      setProducts((prev) => prev.map((p) => (p.id === editing.id ? { ...p, photos: apply(p.photos) } : p)));
+    } catch { toast({ title: "Erro ao marcar cor da foto", variant: "destructive" }); }
   };
 
   // ─── Busca de fotos padronizadas na internet ────────────────────────────
@@ -1039,8 +1073,11 @@ export default function VitrineAparelhos() {
                           </p>
                         )}
                       </div>
-                      <button type="button" onClick={() => calcVariantPrice(idx)} title="Calcular a partir do custo" data-testid={`button-calc-variant-${idx}`}
-                        className="p-2 rounded border hover:bg-secondary text-muted-foreground"><Calculator className="w-3.5 h-3.5" /></button>
+                      <button type="button" onClick={() => calcVariantPrice(idx)} disabled={calculatingVariant != null}
+                        title={calculatingVariant === idx ? "Calculando..." : "Calcular a partir do custo"} data-testid={`button-calc-variant-${idx}`}
+                        className="p-2 rounded border hover:bg-secondary text-muted-foreground disabled:opacity-60">
+                        {calculatingVariant === idx ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Calculator className="w-3.5 h-3.5" />}
+                      </button>
                       <div className="w-20">
                         <label className="text-[10px] text-muted-foreground">Estoque</label>
                         <input type="number" value={v.stockQty} onChange={(e) => updateVariant(idx, { stockQty: e.target.value })} data-testid={`input-variant-stock-${idx}`}
@@ -1102,25 +1139,38 @@ export default function VitrineAparelhos() {
                     </button>
                   </div>
                   <p className="text-[10px] text-muted-foreground mt-0.5">Marque <Package className="w-2.5 h-2.5 inline" /> na foto da caixa lacrada: pra aparelhos "novo" ela aparece primeiro na vitrine; pras demais condições, fotos de caixa não aparecem pro cliente.</p>
+                  {formColorOptions.length > 0 && (
+                    <p className="text-[10px] text-muted-foreground">Marque a <b>cor</b> de cada foto pra vitrine trocar de foto junto com a cor escolhida pelo cliente — "Geral" aparece pra qualquer cor sem foto própria.</p>
+                  )}
                   <div className="mt-1 flex flex-wrap gap-2">
                     {editing.photos.map((ph) => (
-                      <div key={ph.id} className="relative w-16 h-16 rounded-lg overflow-hidden border group">
-                        <img src={api.catalog.photoUrl(ph.id)} alt="" className="w-full h-full object-cover" />
-                        {ph.isBoxPhoto && (
-                          <span className="absolute top-0.5 left-0.5 bg-primary text-white rounded p-0.5 pointer-events-none">
-                            <Package className="w-3 h-3" />
-                          </span>
-                        )}
-                        <div className="absolute inset-0 bg-black/50 text-white opacity-0 group-hover:opacity-100 flex items-center justify-center gap-1 transition">
-                          <button onClick={() => handleToggleBoxPhoto(ph.id, !ph.isBoxPhoto)} title={ph.isBoxPhoto ? "Desmarcar foto da caixa" : "Marcar como foto da caixa"}
-                            data-testid={`button-toggle-box-photo-${ph.id}`}
-                            className={`p-1 rounded ${ph.isBoxPhoto ? "bg-primary" : "hover:bg-white/20"}`}>
-                            <Package className="w-4 h-4" />
-                          </button>
-                          <button onClick={() => handlePhotoRemove(ph.id)} data-testid={`button-remove-photo-${ph.id}`} className="p-1 rounded hover:bg-white/20">
-                            <Trash2 className="w-4 h-4" />
-                          </button>
+                      <div key={ph.id} className="flex flex-col gap-0.5">
+                        <div className="relative w-16 h-16 rounded-lg overflow-hidden border group">
+                          <img src={api.catalog.photoUrl(ph.id)} alt="" className="w-full h-full object-cover" />
+                          {ph.isBoxPhoto && (
+                            <span className="absolute top-0.5 left-0.5 bg-primary text-white rounded p-0.5 pointer-events-none">
+                              <Package className="w-3 h-3" />
+                            </span>
+                          )}
+                          <div className="absolute inset-0 bg-black/50 text-white opacity-0 group-hover:opacity-100 flex items-center justify-center gap-1 transition">
+                            <button onClick={() => handleToggleBoxPhoto(ph.id, !ph.isBoxPhoto)} title={ph.isBoxPhoto ? "Desmarcar foto da caixa" : "Marcar como foto da caixa"}
+                              data-testid={`button-toggle-box-photo-${ph.id}`}
+                              className={`p-1 rounded ${ph.isBoxPhoto ? "bg-primary" : "hover:bg-white/20"}`}>
+                              <Package className="w-4 h-4" />
+                            </button>
+                            <button onClick={() => handlePhotoRemove(ph.id)} data-testid={`button-remove-photo-${ph.id}`} className="p-1 rounded hover:bg-white/20">
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
                         </div>
+                        {formColorOptions.length > 0 && (
+                          <select value={ph.color ?? ""} onChange={(e) => handleSetPhotoColor(ph.id, e.target.value)}
+                            data-testid={`select-photo-color-${ph.id}`}
+                            className="w-16 rounded border px-0.5 py-0.5 text-[9px] bg-background focus:outline-none focus:ring-1 focus:ring-primary/40">
+                            <option value="">Geral</option>
+                            {formColorOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+                          </select>
+                        )}
                       </div>
                     ))}
                     <label className="w-16 h-16 rounded-lg border border-dashed flex items-center justify-center cursor-pointer hover:bg-secondary/50 transition">

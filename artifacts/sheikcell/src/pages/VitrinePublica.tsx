@@ -94,7 +94,7 @@ function ProductCard({
       <button type="button" onClick={() => onOpenDetail(p)} data-testid={`button-open-detail-${p.id}`}
         className="aspect-square bg-neutral-100 flex items-center justify-center overflow-hidden">
         {p.photos[0] ? (
-          <img src={api.catalog.photoUrl(p.photos[0])} alt={p.model} className="w-full h-full object-cover" loading="lazy" />
+          <img src={api.catalog.photoUrl(p.photos[0].id)} alt={p.model} className="w-full h-full object-cover" loading="lazy" />
         ) : (
           <Smartphone className="w-10 h-10 text-neutral-300" />
         )}
@@ -193,6 +193,25 @@ function ProductDetailModal({
   );
   const [selectedId, setSelectedId] = useState(variantsForColor[0]?.id ?? p.variants[0]?.id ?? null);
 
+  // Fotos da cor escolhida — se nenhuma foto foi marcada com essa cor
+  // especificamente, cai pras fotos "gerais" (sem cor marcada) como
+  // fallback, e só mostra as de outra cor se o produto não tiver nenhuma
+  // foto geral (nunca deixa o carrossel vazio se existe alguma foto).
+  const displayedPhotos = useMemo(() => {
+    if (!selectedColor) return p.photos;
+    const forColor = p.photos.filter((ph) => ph.color === selectedColor);
+    if (forColor.length > 0) return forColor;
+    const generic = p.photos.filter((ph) => !ph.color);
+    return generic.length > 0 ? generic : p.photos;
+  }, [p.photos, selectedColor]);
+
+  // Trocar de cor muda a lista de fotos exibida — volta o carrossel pro
+  // início pra não ficar preso num índice que não existe mais na lista nova.
+  useEffect(() => {
+    setActivePhoto(0);
+    carouselApi?.scrollTo(0);
+  }, [displayedPhotos, carouselApi]);
+
   const handleSelectColor = (c: string) => {
     setSelectedColor(c);
     const match = p.variants.find((v) => v.color === c);
@@ -215,18 +234,18 @@ function ProductDetailModal({
           <button onClick={onClose} data-testid="button-close-detail" className="p-1 rounded hover:bg-neutral-100 shrink-0"><X className="w-4 h-4" /></button>
         </div>
         <div className="overflow-y-auto p-4 space-y-3">
-          {p.photos.length > 0 ? (
-            <Carousel setApi={setCarouselApi} opts={{ loop: p.photos.length > 1 }}>
+          {displayedPhotos.length > 0 ? (
+            <Carousel setApi={setCarouselApi} opts={{ loop: displayedPhotos.length > 1 }}>
               <CarouselContent className="ml-0">
-                {p.photos.map((ph) => (
-                  <CarouselItem key={ph} className="pl-0">
+                {displayedPhotos.map((ph) => (
+                  <CarouselItem key={ph.id} className="pl-0">
                     <div className="aspect-square bg-neutral-100 rounded-xl overflow-hidden">
-                      <img src={api.catalog.photoUrl(ph)} alt={p.model} className="w-full h-full object-cover" />
+                      <img src={api.catalog.photoUrl(ph.id)} alt={p.model} className="w-full h-full object-cover" />
                     </div>
                   </CarouselItem>
                 ))}
               </CarouselContent>
-              {p.photos.length > 1 && (
+              {displayedPhotos.length > 1 && (
                 <>
                   <CarouselPrevious className="left-2 h-7 w-7 bg-white/80 hover:bg-white border-neutral-200" />
                   <CarouselNext className="right-2 h-7 w-7 bg-white/80 hover:bg-white border-neutral-200" />
@@ -238,12 +257,12 @@ function ProductDetailModal({
               <Smartphone className="w-16 h-16 text-neutral-300" />
             </div>
           )}
-          {p.photos.length > 1 && (
+          {displayedPhotos.length > 1 && (
             <div className="flex gap-1.5 overflow-x-auto">
-              {p.photos.map((ph, i) => (
-                <button key={ph} type="button" onClick={() => carouselApi?.scrollTo(i)}
+              {displayedPhotos.map((ph, i) => (
+                <button key={ph.id} type="button" onClick={() => carouselApi?.scrollTo(i)}
                   className={`w-12 h-12 rounded-lg overflow-hidden border-2 shrink-0 ${i === activePhoto ? "border-neutral-900" : "border-transparent"}`}>
-                  <img src={api.catalog.photoUrl(ph)} alt="" className="w-full h-full object-cover" />
+                  <img src={api.catalog.photoUrl(ph.id)} alt="" className="w-full h-full object-cover" />
                 </button>
               ))}
             </div>

@@ -383,7 +383,7 @@ export const CATALOG_CONDITION_CRITERIA: Record<
   },
 };
 
-export type CatalogPhoto = { id: number; storedName: string; sourceUrl?: string | null; sortOrder: number; isBoxPhoto: boolean };
+export type CatalogPhoto = { id: number; storedName: string; sourceUrl?: string | null; sortOrder: number; isBoxPhoto: boolean; color: string | null };
 
 // Categoria/aba personalizável (Celulares > Samsung/Apple, Peças de
 // celular...) — a loja cria/edita/apaga livremente. parentId null = aba
@@ -476,7 +476,9 @@ export type CatalogPublicProduct = {
   colors: string[];
   description: string | null;
   categoryId: number | null;
-  photos: number[];
+  // color: cor que essa foto representa (null = foto "geral", mostrada em
+  // qualquer cor selecionada) — ver publicPhotoIds no backend.
+  photos: { id: number; color: string | null }[];
   variants: CatalogPublicVariant[];
 };
 
@@ -2305,19 +2307,24 @@ export const api = {
     update: (id: number, data: Record<string, unknown>) => req<CatalogProduct>(`/catalog/products/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/catalog/products/${id}`, { method: "DELETE" }),
     bulkRemove: (ids: number[]) => req<{ ok: boolean; deleted: number }>("/catalog/products/bulk-delete", { method: "POST", body: JSON.stringify({ ids }) }),
-    addPhoto: (productId: number, file: File) => readAsAttachment(file).then((att) =>
-      req<CatalogPhoto>(`/catalog/products/${productId}/photos`, { method: "POST", body: JSON.stringify({ mimeType: att?.mimetype, data: att?.base64 }) })),
+    addPhoto: (productId: number, file: File, color?: string | null) => readAsAttachment(file).then((att) =>
+      req<CatalogPhoto>(`/catalog/products/${productId}/photos`, { method: "POST", body: JSON.stringify({ mimeType: att?.mimetype, data: att?.base64, color }) })),
     removePhoto: (productId: number, photoId: number) => req<{ ok: boolean }>(`/catalog/products/${productId}/photos/${photoId}`, { method: "DELETE" }),
     setBoxPhoto: (productId: number, photoId: number, isBoxPhoto: boolean) =>
       req<CatalogPhoto>(`/catalog/products/${productId}/photos/${photoId}`, { method: "PATCH", body: JSON.stringify({ isBoxPhoto }) }),
+    // color = null volta a foto pra "geral" (mostrada em qualquer cor
+    // selecionada na vitrine pública, e usada de fallback quando a cor
+    // escolhida não tem foto própria).
+    setPhotoColor: (productId: number, photoId: number, color: string | null) =>
+      req<CatalogPhoto>(`/catalog/products/${productId}/photos/${photoId}`, { method: "PATCH", body: JSON.stringify({ color }) }),
     photoUrl: (photoId: number) => `/api/catalog-public/photos/${photoId}/file`,
     photoSearch: (q: string) => req<{ results: CatalogPhotoSearchResult[] }>(`/catalog/photo-search?q=${encodeURIComponent(q)}`),
     fetchMissingPhotos: () =>
       req<{ checked: number; attached: number; remaining: number; photoSearchConfigured: boolean }>(
         "/catalog/products/photos/fetch-missing", { method: "POST", timeoutMs: 60_000 }
       ),
-    addPhotoFromUrl: (productId: number, url: string) =>
-      req<CatalogPhoto>(`/catalog/products/${productId}/photos/from-url`, { method: "POST", body: JSON.stringify({ url }) }),
+    addPhotoFromUrl: (productId: number, url: string, color?: string | null) =>
+      req<CatalogPhoto>(`/catalog/products/${productId}/photos/from-url`, { method: "POST", body: JSON.stringify({ url, color }) }),
     pricingSettings: () => req<CatalogPricingSettings>("/catalog/pricing-settings"),
     savePricingSettings: (data: CatalogPricingSettings) => req<CatalogPricingSettings>("/catalog/pricing-settings", { method: "PUT", body: JSON.stringify(data) }),
     simulatePrice: (data: { costPrice: number; costIncludesInvoice?: boolean; marginPercentOverride?: number | null; wholesaleMarginPercentOverride?: number | null }) =>
@@ -2330,7 +2337,7 @@ export const api = {
         // wholesaleInstallment12 traz o total e a parcela em 12x de atacado.
         wholesaleInstallment12: { total: number; parcela: number } | null;
         settings: CatalogPricingSettings;
-      }>("/catalog/pricing-settings/simulate", { method: "POST", body: JSON.stringify(data) }),
+      }>("/catalog/pricing-settings/simulate", { method: "POST", body: JSON.stringify(data), timeoutMs: 12_000 }),
     getSlug: () => req<{ slug: string | null }>("/catalog/slug"),
     setSlug: (slug: string) => req<{ slug: string | null }>("/catalog/slug", { method: "PUT", body: JSON.stringify({ slug }) }),
     getWhatsapp: () => req<{ whatsapp: string | null }>("/catalog/whatsapp"),

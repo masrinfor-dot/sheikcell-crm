@@ -157,6 +157,12 @@ export const catalogProductPhotosTable = pgTable("catalog_product_photos", {
   // caixa primeiro nesse caso; pra qualquer outra condição (seminovo/outlet)
   // fotos de caixa são ignoradas — só interessa mostrar o aparelho de fato.
   isBoxPhoto: boolean("is_box_photo").notNull().default(false),
+  // Qual cor cadastrada do produto (catalogProductsTable.colors) essa foto
+  // representa — null = foto "geral" (mostrada pra qualquer cor selecionada,
+  // e usada de fallback quando a cor escolhida não tem foto própria). Some
+  // preenchida automaticamente pela busca automática de fotos por cor, ou
+  // manualmente pelo lojista ao marcar a cor de uma foto já anexada.
+  color: text("color"),
   sortOrder: integer("sort_order").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
