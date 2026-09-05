@@ -145,14 +145,14 @@ function withWholesaleInstallmentPricing<
 }
 
 async function photosByProductIds(tenantId: number, productIds: number[]) {
-  if (productIds.length === 0) return new Map<number, { id: number; storedName: string; sortOrder: number; isBoxPhoto: boolean }[]>();
+  if (productIds.length === 0) return new Map<number, { id: number; storedName: string; sortOrder: number; isBoxPhoto: boolean; sourceUrl: string | null }[]>();
   const rows = await db.select().from(catalogProductPhotosTable)
     .where(and(eq(catalogProductPhotosTable.tenantId, tenantId), inArray(catalogProductPhotosTable.productId, productIds)))
     .orderBy(catalogProductPhotosTable.sortOrder);
-  const map = new Map<number, { id: number; storedName: string; sortOrder: number; isBoxPhoto: boolean }[]>();
+  const map = new Map<number, { id: number; storedName: string; sortOrder: number; isBoxPhoto: boolean; sourceUrl: string | null }[]>();
   for (const p of rows) {
     const list = map.get(p.productId) ?? [];
-    list.push({ id: p.id, storedName: p.storedName, sortOrder: p.sortOrder, isBoxPhoto: p.isBoxPhoto });
+    list.push({ id: p.id, storedName: p.storedName, sortOrder: p.sortOrder, isBoxPhoto: p.isBoxPhoto, sourceUrl: p.sourceUrl });
     map.set(p.productId, list);
   }
   return map;
@@ -1046,10 +1046,10 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
 // mas nunca propaga erro: sem nenhum provedor configurado, ou se a busca
 // falhar por qualquer motivo, o produto simplesmente importa sem foto,
 // exatamente como já acontecia antes dessa feature existir.
-async function autoPhotoSearchUrls(query: string): Promise<string[]> {
+async function autoPhotoSearchUrls(query: string, num = 3): Promise<string[]> {
   if (!photoSearchConfigured()) return [];
   try {
-    const results = await searchImages(query, 3);
+    const results = await searchImages(query, num);
     return results.map((r) => r.imageUrl).filter(Boolean);
   } catch (err) {
     logger.warn({ err, query }, "Catalog auto photo search failed");
@@ -1084,51 +1084,105 @@ async function autoAttachPhoto(tenantId: number, productId: number, imageUrl: st
   }
 }
 
-// Anexa várias fotos (até maxPhotos) em vez de parar na primeira que baixar
-// certo — assim o carrossel da vitrine pública (já existe, estilo Instagram,
-// arrasta pro lado) tem o que mostrar de verdade, em vez de só uma foto
-// solitária. sortOrder incremental preserva a ordem dos resultados de busca.
-async function autoAttachPhotos(tenantId: number, productId: number, urls: string[], maxPhotos = 3): Promise<number> {
-  let attached = 0;
-  for (const url of urls) {
-    if (attached >= maxPhotos) break;
-    if (await autoAttachPhoto(tenantId, productId, url, attached)) attached++;
-  }
-  return attached;
-}
-
 // Protege contra imports enormes deixando o confirm lento — acima disso, os
 // produtos ainda importam normalmente, só não tentam foto automática (dá pra
 // buscar manualmente depois, um por um, na tela de edição).
 const AUTO_IMPORT_PHOTO_LIMIT = 40;
 
-// Uma tentativa de foto por produto recém-importado (busca + primeira que
-// baixar certo), tudo em paralelo. Melhor esforço: nunca lança erro, nunca
-// atrasa a resposta além do timeout de uma busca+download (rodam junto, não
-// somados por produto).
+// Teto de fotos automáticas por produto — mesmo teto do upload manual (o
+// modal de edição já aceita até 8 arquivos de uma vez).
+const AUTO_PHOTO_MAX_PER_PRODUCT = 8;
+
+// Busca e anexa fotos tentando pegar UMA de cada cor cadastrada do produto
+// (ex.: "iPhone 14 Pro Max Preto", "iPhone 14 Pro Max Vermelho", ...) em vez
+// de só a primeira foto genérica do modelo — assim o carrossel da vitrine
+// pública (já existe, estilo Instagram, arrasta pro lado) mostra a cor real
+// de cada variante. usedUrls evita repetir uma foto já anexada (tanto entre
+// cores nesta mesma chamada quanto contra fotos que o produto já tinha,
+// quando é um "top up"). sortOrder incremental (a partir de startSortOrder)
+// preserva a ordem: fotos existentes primeiro, novas depois.
+async function autoAttachPhotosForProduct(
+  tenantId: number,
+  productId: number,
+  model: string,
+  colors: string[],
+  usedUrls: Set<string>,
+  startSortOrder: number,
+  maxPhotos: number,
+): Promise<number> {
+  let sortOrder = startSortOrder;
+  let attached = 0;
+
+  async function attachFirstNew(urls: string[]): Promise<boolean> {
+    for (const url of urls) {
+      if (usedUrls.has(url)) continue;
+      if (await autoAttachPhoto(tenantId, productId, url, sortOrder)) {
+        usedUrls.add(url);
+        sortOrder++;
+        attached++;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  const target = Math.min(maxPhotos, colors.length > 0 ? colors.length : 3);
+
+  if (colors.length > 0) {
+    for (const color of colors) {
+      if (attached >= target) break;
+      const urls = await autoPhotoSearchUrls(`${model} ${color}`, 3);
+      await attachFirstNew(urls);
+    }
+  } else {
+    const urls = await autoPhotoSearchUrls(model, target);
+    for (const url of urls) {
+      if (attached >= target) break;
+      await attachFirstNew([url]);
+    }
+  }
+
+  // Fallback: se alguma cor não achou foto própria, completa o que falta com
+  // busca genérica do modelo (melhor uma foto "errada" de cor do que nenhuma).
+  if (attached < target) {
+    const urls = await autoPhotoSearchUrls(model, target + 2);
+    for (const url of urls) {
+      if (attached >= target) break;
+      await attachFirstNew([url]);
+    }
+  }
+
+  return attached;
+}
+
+// Uma tentativa de foto por produto recém-importado (busca por cor + fallback
+// genérico), tudo em paralelo. Melhor esforço: nunca lança erro, nunca atrasa
+// a resposta além do timeout de uma busca+download (rodam junto, não somados
+// por produto).
 async function autoAttachPhotosOnImport(
   tenantId: number,
   products: (typeof catalogProductsTable.$inferSelect)[],
 ): Promise<number> {
   if (!photoSearchConfigured()) return 0;
   const targets = products.slice(0, AUTO_IMPORT_PHOTO_LIMIT);
-  const outcomes = await Promise.allSettled(targets.map(async (p) => {
-    const urls = await autoPhotoSearchUrls(p.model);
-    return autoAttachPhotos(tenantId, p.id, urls);
-  }));
+  const outcomes = await Promise.allSettled(targets.map((p) =>
+    autoAttachPhotosForProduct(tenantId, p.id, p.model, p.colors, new Set<string>(), 0, AUTO_PHOTO_MAX_PER_PRODUCT),
+  ));
   return outcomes.filter((o) => o.status === "fulfilled" && o.value > 0).length;
 }
 
-// "Recuperar" produtos que ficaram sem NENHUMA foto — cobre dois casos reais:
-// (1) produtos importados numa época em que a busca automática ainda não
-// tinha um provedor funcionando de verdade (ex.: só o Google Custom Search
-// configurado, que está fechado pra clientes novos desde 2024 — a tentativa
-// automática do import rodava e sempre falhava, calada, e o produto ficava
-// sem foto pra sempre, sem nenhum jeito de tentar de novo em massa); (2)
-// fotos que existiam mas o arquivo se perdeu (ex.: cadastradas antes do
-// armazenamento permanente `/app/storage` existir). Mesmo best-effort do
-// import automático, só que rodando sob demanda pra todos os produtos sem
-// foto de uma vez, em vez de um por um na tela de editar produto.
+// "Recuperar" produtos que ficaram sem foto (ou sem foto suficiente pra ter
+// uma de cada cor) — cobre três casos reais: (1) produtos importados numa
+// época em que a busca automática ainda não tinha um provedor funcionando de
+// verdade (ex.: só o Google Custom Search configurado, que está fechado pra
+// clientes novos desde 2024 — a tentativa automática do import rodava e
+// sempre falhava, calada, e o produto ficava sem foto pra sempre, sem nenhum
+// jeito de tentar de novo em massa); (2) fotos que existiam mas o arquivo se
+// perdeu (ex.: cadastradas antes do armazenamento permanente `/app/storage`
+// existir); (3) produtos com várias cores cadastradas mas que só ganharam 1
+// foto na importação original — "completa" até ter uma foto por cor. Mesmo
+// best-effort do import automático, só que rodando sob demanda pra todos os
+// produtos de uma vez, em vez de um por um na tela de editar produto.
 const BULK_MISSING_PHOTO_LIMIT = 25;
 
 router.post("/catalog/products/photos/fetch-missing", requireAuth, async (req, res): Promise<void> => {
@@ -1137,21 +1191,29 @@ router.post("/catalog/products/photos/fetch-missing", requireAuth, async (req, r
     res.status(501).json({ error: "Busca de imagens não configurada neste servidor." });
     return;
   }
-  const rows = await db.select({ id: catalogProductsTable.id, model: catalogProductsTable.model })
+  const rows = await db.select({ id: catalogProductsTable.id, model: catalogProductsTable.model, colors: catalogProductsTable.colors })
     .from(catalogProductsTable).where(eq(catalogProductsTable.tenantId, tenantId));
-  const photos = await photosByProductIds(tenantId, rows.map((r) => r.id));
-  const missing = rows.filter((r) => (photos.get(r.id) ?? []).length === 0);
-  const targets = missing.slice(0, BULK_MISSING_PHOTO_LIMIT);
+  const photosMap = await photosByProductIds(tenantId, rows.map((r) => r.id));
 
-  const outcomes = await Promise.allSettled(targets.map(async (p) => {
-    const urls = await autoPhotoSearchUrls(p.model);
-    return autoAttachPhotos(tenantId, p.id, urls);
+  const needsMore = rows
+    .map((r) => {
+      const existing = photosMap.get(r.id) ?? [];
+      const target = Math.min(AUTO_PHOTO_MAX_PER_PRODUCT, r.colors.length > 0 ? r.colors.length : 3);
+      return { row: r, existing, target };
+    })
+    .filter((x) => x.existing.length < x.target);
+
+  const targets = needsMore.slice(0, BULK_MISSING_PHOTO_LIMIT);
+
+  const outcomes = await Promise.allSettled(targets.map((t) => {
+    const usedUrls = new Set(t.existing.map((ph) => ph.sourceUrl).filter((u): u is string => !!u));
+    return autoAttachPhotosForProduct(tenantId, t.row.id, t.row.model, t.row.colors, usedUrls, t.existing.length, t.target);
   }));
   const attached = outcomes.filter((o) => o.status === "fulfilled" && o.value > 0).length;
   res.json({
     checked: targets.length,
     attached,
-    remaining: Math.max(0, missing.length - targets.length),
+    remaining: Math.max(0, needsMore.length - targets.length),
     photoSearchConfigured: true,
   });
 });
