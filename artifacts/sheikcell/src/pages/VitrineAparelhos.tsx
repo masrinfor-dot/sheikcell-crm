@@ -5,11 +5,12 @@ import {
   api, canEditModule, CATALOG_CONDITIONS, CATALOG_CONDITION_CRITERIA,
   type CatalogProduct, type CatalogPricingSettings, type CatalogImportItem, type CatalogCondition,
   type CatalogImportVariant, type CatalogPhotoSearchResult, type CatalogCategory,
+  type CatalogTrustBadge, type CatalogStockNotification,
 } from "@/lib/api";
 import {
   Smartphone, Plus, X, Search, Trash2, Pencil, Sparkles, Settings2, Link2,
   Copy, ImagePlus, Check, AlertTriangle, Loader2, MessageCircle, Info, Calculator,
-  Tags, Lock, KeyRound, Package,
+  Tags, Lock, KeyRound, Package, ShieldCheck, Bell, Percent, ListChecks,
 } from "lucide-react";
 
 function formatBRL(v: string | number | null): string {
@@ -31,6 +32,9 @@ type VariantFormRow = {
   salePrice: string;
   wholesalePrice: string;
   wholesaleMarginPercentOverride: string;
+  // Preço "de" (comparação, opcional) — quando maior que o preço à vista
+  // atual, a vitrine pública mostra riscado + selo de desconto "X% OFF".
+  compareAtPrice: string;
   stockQty: string;
   // Só pra exibir depois de clicar em "calcular" — não é salvo (à vista/12x
   // são derivados do custo/margem na hora de exibir, ver withInstallmentPricing
@@ -44,12 +48,15 @@ type VariantFormRow = {
 
 const emptyVariant: VariantFormRow = {
   storage: "", color: "", costPrice: "", costIncludesInvoice: false, marginPercentOverride: "", salePrice: "",
-  wholesalePrice: "", wholesaleMarginPercentOverride: "", stockQty: "1",
+  wholesalePrice: "", wholesaleMarginPercentOverride: "", compareAtPrice: "", stockQty: "1",
 };
 
 const emptyForm = {
   model: "", condition: "bom" as CatalogCondition, colors: "",
   description: "", status: "active" as CatalogProduct["status"], categoryId: null as number | null,
+  // Uma característica por linha — convertido em array na hora de salvar
+  // (ver handleSave) e de carregar (ver openEdit).
+  aiCharacteristics: "",
   variants: [{ ...emptyVariant }] as VariantFormRow[],
 };
 
@@ -157,6 +164,20 @@ export default function VitrineAparelhos() {
   const [newCategoryParent, setNewCategoryParent] = useState<number | "">("");
   const [savingCategory, setSavingCategory] = useState(false);
 
+  // "Principais características" geradas por IA (ver form.aiCharacteristics acima).
+  const [generatingCharacteristics, setGeneratingCharacteristics] = useState(false);
+
+  // Selos de confiança/garantia customizados (ex.: "Qualidade Premium Dubai")
+  // — configuração da loja, mostrada na vitrine pública.
+  const [showTrustBadges, setShowTrustBadges] = useState(false);
+  const [trustBadgesForm, setTrustBadgesForm] = useState<CatalogTrustBadge[]>([]);
+  const [savingTrustBadges, setSavingTrustBadges] = useState(false);
+
+  // "Avise-me quando chegar" — pedidos de clientes pra produtos/variantes
+  // esgotados, capturados na vitrine pública sem login.
+  const [stockNotifications, setStockNotifications] = useState<CatalogStockNotification[]>([]);
+  const [showStockNotifications, setShowStockNotifications] = useState(false);
+
   // GET /catalog/wholesale-code devolve o código de acesso ao atacado em
   // texto puro — por isso o backend exige admin de verdade (requireAdmin),
   // diferente dos outros GETs desta tela (categorias, slug, WhatsApp), que
@@ -174,15 +195,18 @@ export default function VitrineAparelhos() {
     Promise.allSettled([
       api.catalog.list(), api.catalog.getSlug(), api.catalog.getWhatsapp(), api.catalog.getWhatsappWholesale(),
       api.catalog.categories(), isAdmin ? api.catalog.getWholesaleCode() : Promise.resolve(null),
+      api.catalog.getTrustBadges(), api.catalog.stockNotifications(),
     ])
-      .then(([l, s, w, ww, cats, wc]) => {
+      .then(([l, s, w, ww, cats, wc, tb, sn]) => {
         if (l.status === "fulfilled") { setProducts(l.value.products); setSettings(l.value.settings); }
         if (s.status === "fulfilled") { setSlug(s.value.slug); setSlugInput(s.value.slug ?? ""); }
         if (w.status === "fulfilled") { setWhatsapp(w.value.whatsapp); setWhatsappInput(w.value.whatsapp ?? ""); }
         if (ww.status === "fulfilled") { setWhatsappWholesale(ww.value.whatsapp); setWhatsappWholesaleInput(ww.value.whatsapp ?? ""); }
         if (cats.status === "fulfilled") setCategories(cats.value.categories);
         if (wc.status === "fulfilled" && wc.value) { setHasWholesaleCode(wc.value.hasCode); setWholesaleCodeInput(wc.value.code ?? ""); }
-        const failed = [l, s, w, ww, cats, wc].filter((r) => r.status === "rejected");
+        if (tb.status === "fulfilled") setTrustBadgesForm(tb.value.badges);
+        if (sn.status === "fulfilled") setStockNotifications(sn.value.notifications);
+        const failed = [l, s, w, ww, cats, wc, tb, sn].filter((r) => r.status === "rejected");
         if (failed.length > 0) {
           // eslint-disable-next-line no-console
           console.warn("[vitrine] falha ao carregar", failed.map((r) => (r as PromiseRejectedResult).reason));
@@ -327,11 +351,13 @@ export default function VitrineAparelhos() {
     setForm({
       model: p.model, condition: p.condition, colors: p.colors.join(", "),
       description: p.description ?? "", status: p.status, categoryId: p.categoryId,
+      aiCharacteristics: (p.aiCharacteristics ?? []).join("\n"),
       variants: p.variants.length > 0
         ? p.variants.map((v) => ({
             id: v.id, storage: v.storage ?? "", color: v.color ?? "", costPrice: v.costPrice ?? "", costIncludesInvoice: v.costIncludesInvoice,
             marginPercentOverride: v.marginPercentOverride ?? "", salePrice: v.salePrice ?? "", wholesalePrice: v.wholesalePrice ?? "",
             wholesaleMarginPercentOverride: v.wholesaleMarginPercentOverride ?? "",
+            compareAtPrice: v.compareAtPrice ?? "",
             stockQty: String(v.stockQty),
           }))
         : [{ ...emptyVariant }],
@@ -380,6 +406,70 @@ export default function VitrineAparelhos() {
     }
   };
 
+  // Gera a lista de "Principais características" com IA a partir do modelo/
+  // condição/cores/armazenamentos já digitados no formulário — não precisa
+  // salvar o produto antes. O resultado só entra no campo do formulário; o
+  // lojista revisa/edita e salva junto do resto ao clicar em "Salvar".
+  const handleGenerateCharacteristics = async () => {
+    const model = form.model.trim();
+    if (!model || generatingCharacteristics) { if (!model) toast({ title: "Informe o modelo do aparelho primeiro", variant: "destructive" }); return; }
+    setGeneratingCharacteristics(true);
+    try {
+      const r = await api.catalog.generateCharacteristics({
+        model, condition: form.condition,
+        colors: form.colors.split(",").map((c) => c.trim()).filter(Boolean),
+        variants: form.variants.map((v) => ({ storage: v.storage.trim() || null })),
+      });
+      setForm((f) => ({ ...f, aiCharacteristics: r.characteristics.join("\n") }));
+    } catch (err) {
+      toast({ title: "Erro ao gerar características", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    } finally {
+      setGeneratingCharacteristics(false);
+    }
+  };
+
+  // ─── Selos de confiança/garantia customizados ───────────────────────────
+  const updateTrustBadge = (idx: number, patch: Partial<CatalogTrustBadge>) => {
+    setTrustBadgesForm((prev) => prev.map((b, i) => (i === idx ? { ...b, ...patch } : b)));
+  };
+  const addTrustBadge = () => setTrustBadgesForm((prev) => (prev.length < 6 ? [...prev, { title: "", description: "" }] : prev));
+  const removeTrustBadge = (idx: number) => setTrustBadgesForm((prev) => prev.filter((_, i) => i !== idx));
+  const handleSaveTrustBadges = async () => {
+    if (savingTrustBadges) return;
+    setSavingTrustBadges(true);
+    try {
+      const r = await api.catalog.saveTrustBadges(trustBadgesForm.filter((b) => b.title.trim()));
+      setTrustBadgesForm(r.badges);
+      toast({ title: "Selos de confiança atualizados" });
+      setShowTrustBadges(false);
+    } catch (err) {
+      toast({ title: "Erro ao salvar selos", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    } finally {
+      setSavingTrustBadges(false);
+    }
+  };
+
+  // ─── "Avise-me quando chegar" ────────────────────────────────────────────
+  const pendingNotifications = stockNotifications.filter((n) => !n.notified);
+  const handleToggleNotified = async (n: CatalogStockNotification) => {
+    setStockNotifications((prev) => prev.map((x) => (x.id === n.id ? { ...x, notified: !n.notified } : x)));
+    try {
+      await api.catalog.setStockNotificationNotified(n.id, !n.notified);
+    } catch {
+      setStockNotifications((prev) => prev.map((x) => (x.id === n.id ? { ...x, notified: n.notified } : x)));
+      toast({ title: "Erro ao atualizar", variant: "destructive" });
+    }
+  };
+  const handleDeleteNotification = async (id: number) => {
+    setStockNotifications((prev) => prev.filter((x) => x.id !== id));
+    try {
+      await api.catalog.removeStockNotification(id);
+    } catch {
+      toast({ title: "Erro ao excluir", variant: "destructive" });
+      load();
+    }
+  };
+
   const handleSave = async () => {
     if (saving) return;
     const model = form.model.trim();
@@ -392,6 +482,7 @@ export default function VitrineAparelhos() {
       description: form.description.trim() || null,
       status: form.status,
       categoryId: form.categoryId,
+      aiCharacteristics: form.aiCharacteristics.split("\n").map((c) => c.trim()).filter(Boolean),
       variants: form.variants.map((v) => ({
         id: v.id,
         storage: v.storage.trim() || null,
@@ -402,6 +493,7 @@ export default function VitrineAparelhos() {
         salePrice: v.salePrice ? Number(v.salePrice) : null,
         wholesalePrice: v.wholesalePrice ? Number(v.wholesalePrice) : null,
         wholesaleMarginPercentOverride: v.wholesaleMarginPercentOverride ? Number(v.wholesaleMarginPercentOverride) : null,
+        compareAtPrice: v.compareAtPrice ? Number(v.compareAtPrice) : null,
         stockQty: Number(v.stockQty) || 0,
       })),
     };
@@ -737,6 +829,17 @@ export default function VitrineAparelhos() {
             <button onClick={() => setShowCategories(true)} data-testid="button-catalog-categories"
               className="flex items-center gap-1.5 px-3 py-2 bg-secondary text-foreground rounded-xl text-xs font-semibold hover:bg-secondary/70 transition">
               <Tags className="w-3.5 h-3.5" /> Categorias
+            </button>
+            <button onClick={() => setShowTrustBadges(true)} data-testid="button-catalog-trust-badges"
+              className="flex items-center gap-1.5 px-3 py-2 bg-secondary text-foreground rounded-xl text-xs font-semibold hover:bg-secondary/70 transition">
+              <ShieldCheck className="w-3.5 h-3.5" /> Selos de confiança
+            </button>
+            <button onClick={() => setShowStockNotifications(true)} data-testid="button-catalog-stock-notifications"
+              className="relative flex items-center gap-1.5 px-3 py-2 bg-secondary text-foreground rounded-xl text-xs font-semibold hover:bg-secondary/70 transition">
+              <Bell className="w-3.5 h-3.5" /> Avise-me
+              {pendingNotifications.length > 0 && (
+                <span className="ml-0.5 px-1.5 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-bold leading-none">{pendingNotifications.length}</span>
+              )}
             </button>
             <button onClick={openCreate} data-testid="button-add-product"
               className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition">
@@ -1084,6 +1187,19 @@ export default function VitrineAparelhos() {
                           className="mt-0.5 w-full rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40" />
                       </div>
                     </div>
+                    <div>
+                      <label className="text-[10px] text-muted-foreground flex items-center gap-1">
+                        <Percent className="w-2.5 h-2.5" /> Preço "de" (opcional — pra mostrar desconto riscado na vitrine)
+                      </label>
+                      <input type="number" value={v.compareAtPrice} onChange={(e) => updateVariant(idx, { compareAtPrice: e.target.value })}
+                        placeholder="Ex.: preço antes da promoção" data-testid={`input-variant-compare-at-price-${idx}`}
+                        className="mt-0.5 w-full rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                      {v.compareAtPrice && v.salePrice && Number(v.compareAtPrice) > Number(v.salePrice) && (
+                        <p className="mt-0.5 text-[10px] text-emerald-700">
+                          Mostrará <s>{formatBRL(v.compareAtPrice)}</s> → {formatBRL(v.salePrice)} · {Math.round((1 - Number(v.salePrice) / Number(v.compareAtPrice)) * 100)}% OFF
+                        </p>
+                      )}
+                    </div>
                     <div className="rounded border border-amber-200 bg-amber-50/50 p-2 space-y-2">
                       <p className="text-[10px] font-semibold text-amber-800 flex items-center gap-1"><Lock className="w-2.5 h-2.5" /> Preço de atacado — só aparece pra quem tem o código de acesso</p>
                       <div className="grid grid-cols-2 gap-2">
@@ -1126,6 +1242,24 @@ export default function VitrineAparelhos() {
               <div>
                 <label className="text-xs font-semibold text-muted-foreground">Descrição (opcional)</label>
                 <textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} rows={2} data-testid="input-product-description"
+                  className="mt-1 w-full rounded-lg border px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-primary/40" />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-muted-foreground flex items-center gap-1">
+                    <ListChecks className="w-3 h-3" /> Principais características (uma por linha — aparece na vitrine pública)
+                  </label>
+                  <button type="button" onClick={handleGenerateCharacteristics} disabled={generatingCharacteristics || !form.model.trim()}
+                    data-testid="button-generate-characteristics"
+                    className="flex items-center gap-1 text-[11px] font-semibold text-violet-700 hover:underline disabled:opacity-50 disabled:no-underline shrink-0">
+                    {generatingCharacteristics ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+                    {generatingCharacteristics ? "Gerando..." : "Gerar com IA"}
+                  </button>
+                </div>
+                <textarea value={form.aiCharacteristics} onChange={(e) => setForm({ ...form, aiCharacteristics: e.target.value })} rows={4}
+                  placeholder={"Ex.:\nTela Super Retina XDR 6,1\"\n128GB de armazenamento\nCâmera dupla 12MP\nBateria de longa duração"}
+                  data-testid="input-product-characteristics"
                   className="mt-1 w-full rounded-lg border px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-primary/40" />
               </div>
 
@@ -1454,6 +1588,81 @@ export default function VitrineAparelhos() {
                   <Plus className="w-3.5 h-3.5" /> Adicionar categoria
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: selos de confiança/garantia customizados */}
+      {showTrustBadges && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-3 py-6 overflow-y-auto" onClick={() => setShowTrustBadges(false)}>
+          <div className="bg-card rounded-xl w-full max-w-lg shadow-xl border overflow-hidden my-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <span className="font-semibold text-sm flex items-center gap-2"><ShieldCheck className="w-4 h-4 text-primary" /> Selos de confiança e garantia</span>
+              <button onClick={() => setShowTrustBadges(false)} className="p-1 rounded hover:bg-muted/60"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-4 space-y-3 max-h-[75vh] overflow-y-auto">
+              <p className="text-xs text-muted-foreground">Selos mostrados na página de cada aparelho na vitrine pública, tipo "Qualidade Premium Dubai" ou "Garantia Sheik Cell" — personalize o texto do jeito que quiser (até 6 selos).</p>
+              {trustBadgesForm.map((b, idx) => (
+                <div key={idx} className="rounded-lg border p-2.5 space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <input value={b.title} onChange={(e) => updateTrustBadge(idx, { title: e.target.value })}
+                      placeholder="Título (ex.: Qualidade Premium Dubai)" data-testid={`input-trust-badge-title-${idx}`}
+                      className="flex-1 rounded border px-2 py-1.5 text-sm font-semibold focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                    <button type="button" onClick={() => removeTrustBadge(idx)} data-testid={`button-remove-trust-badge-${idx}`}
+                      className="p-1.5 rounded hover:bg-red-50 text-red-600"><Trash2 className="w-3.5 h-3.5" /></button>
+                  </div>
+                  <input value={b.description} onChange={(e) => updateTrustBadge(idx, { description: e.target.value })}
+                    placeholder="Descrição curta (opcional)" data-testid={`input-trust-badge-description-${idx}`}
+                    className="w-full rounded border px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                </div>
+              ))}
+              {trustBadgesForm.length < 6 && (
+                <button type="button" onClick={addTrustBadge} data-testid="button-add-trust-badge"
+                  className="flex items-center gap-1 text-xs font-semibold text-primary hover:underline">
+                  <Plus className="w-3 h-3" /> Adicionar selo
+                </button>
+              )}
+              <button onClick={handleSaveTrustBadges} disabled={savingTrustBadges} data-testid="button-save-trust-badges"
+                className="w-full py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition">
+                {savingTrustBadges ? "Salvando..." : "Salvar selos"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: "avise-me quando chegar" — pedidos de clientes */}
+      {showStockNotifications && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-3 py-6 overflow-y-auto" onClick={() => setShowStockNotifications(false)}>
+          <div className="bg-card rounded-xl w-full max-w-lg shadow-xl border overflow-hidden my-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <span className="font-semibold text-sm flex items-center gap-2"><Bell className="w-4 h-4 text-primary" /> Avise-me quando chegar</span>
+              <button onClick={() => setShowStockNotifications(false)} className="p-1 rounded hover:bg-muted/60"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-4 space-y-2 max-h-[75vh] overflow-y-auto">
+              <p className="text-xs text-muted-foreground">Clientes que pediram aviso quando um aparelho esgotado voltar ao estoque, direto na vitrine pública. Marque como "avisado" depois de entrar em contato.</p>
+              {stockNotifications.length === 0 ? (
+                <p className="text-xs text-muted-foreground text-center py-6">Nenhum pedido ainda.</p>
+              ) : (
+                stockNotifications.map((n) => (
+                  <div key={n.id} data-testid={`stock-notification-${n.id}`}
+                    className={`rounded-lg border p-2.5 flex items-start gap-2 ${n.notified ? "opacity-50" : ""}`}>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-semibold truncate">{n.model}{n.variant ? ` — ${[n.variant.storage, n.variant.color].filter(Boolean).join(" · ")}` : ""}</p>
+                      <p className="text-xs text-muted-foreground">{n.customerName} · {n.customerContact}</p>
+                      <p className="text-[10px] text-muted-foreground">{new Date(n.createdAt).toLocaleString("pt-BR")}</p>
+                    </div>
+                    <button type="button" onClick={() => handleToggleNotified(n)} data-testid={`button-toggle-notified-${n.id}`}
+                      title={n.notified ? "Marcar como pendente" : "Marcar como avisado"}
+                      className={`p-1.5 rounded-lg shrink-0 ${n.notified ? "bg-emerald-100 text-emerald-700" : "hover:bg-secondary text-muted-foreground"}`}>
+                      <Check className="w-3.5 h-3.5" />
+                    </button>
+                    <button type="button" onClick={() => handleDeleteNotification(n.id)} data-testid={`button-delete-notification-${n.id}`}
+                      className="p-1.5 rounded-lg hover:bg-red-50 text-red-600 shrink-0"><Trash2 className="w-3.5 h-3.5" /></button>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         </div>

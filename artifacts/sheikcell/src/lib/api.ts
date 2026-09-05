@@ -409,6 +409,9 @@ export type CatalogProductVariant = {
   // código de acesso (ver api.catalog.getWholesaleCode).
   wholesalePrice: string | null;
   wholesaleMarginPercentOverride: string | null;
+  // Preço "de" (comparação), digitado à mão — quando maior que o preço à
+  // vista atual, a vitrine pública mostra riscado + selo de desconto.
+  compareAtPrice: string | null;
   stockQty: number;
   sortOrder: number;
   // Calculados na hora pelo backend a partir do custo/margem (não são
@@ -433,6 +436,7 @@ export type CatalogVariantInput = {
   salePrice?: number | null;
   wholesalePrice?: number | null;
   wholesaleMarginPercentOverride?: number | null;
+  compareAtPrice?: number | null;
   stockQty: number;
 };
 
@@ -445,10 +449,26 @@ export type CatalogProduct = {
   status: "active" | "inactive" | "sold";
   categoryId: number | null;
   sortOrder: number;
+  // Lista de características (specs) gerada por IA ou editada à mão — ver
+  // api.catalog.generateCharacteristics.
+  aiCharacteristics: string[] | null;
   createdAt: string;
   updatedAt: string;
   photos: CatalogPhoto[];
   variants: CatalogProductVariant[];
+};
+
+export type CatalogTrustBadge = { title: string; description: string };
+
+export type CatalogStockNotification = {
+  id: number;
+  productId: number;
+  model: string;
+  variant: { id: number; storage: string | null; color: string | null } | null;
+  customerName: string;
+  customerContact: string;
+  notified: boolean;
+  createdAt: string;
 };
 
 export type CatalogPricingSettings = {
@@ -462,6 +482,9 @@ export type CatalogPricingSettings = {
 export type CatalogPublicVariant = {
   id: number; storage: string | null; color: string | null; salePrice: string | null; inStock: boolean;
   wholesalePrice: string | null;
+  // Preço "de" (comparação) — quando maior que o preço à vista atual, mostra
+  // riscado + selo "X% OFF" (ver discountInfo em VitrinePublica.tsx).
+  compareAtPrice: string | null;
   priceCash?: number | null;
   installment12Value?: number | null;
   // Só vem preenchido junto com wholesalePrice, ou seja, só pra quem já
@@ -476,6 +499,7 @@ export type CatalogPublicProduct = {
   colors: string[];
   description: string | null;
   categoryId: number | null;
+  aiCharacteristics: string[] | null;
   // color: cor que essa foto representa (null = foto "geral", mostrada em
   // qualquer cor selecionada) — ver publicPhotoIds no backend.
   photos: { id: number; color: string | null }[];
@@ -2362,8 +2386,21 @@ export const api = {
     public: (slug: string, code?: string) =>
       req<{
         storeName: string; whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
-        categories: CatalogCategory[]; products: CatalogPublicProduct[];
+        categories: CatalogCategory[]; products: CatalogPublicProduct[]; trustBadges: CatalogTrustBadge[];
       }>(`/catalog-public/${slug}${code ? `?code=${encodeURIComponent(code)}` : ""}`),
+    // Gera a lista de "Principais características" com IA — não salva nada
+    // sozinho, o lojista revisa/edita e salva junto do resto do produto.
+    generateCharacteristics: (data: { model: string; condition: CatalogCondition; colors: string[]; variants: { storage: string | null }[] }) =>
+      req<{ characteristics: string[] }>("/catalog/characteristics/generate", { method: "POST", body: JSON.stringify(data), timeoutMs: 30_000 }),
+    getTrustBadges: () => req<{ badges: CatalogTrustBadge[] }>("/catalog/trust-badges"),
+    saveTrustBadges: (badges: CatalogTrustBadge[]) => req<{ badges: CatalogTrustBadge[] }>("/catalog/trust-badges", { method: "PUT", body: JSON.stringify({ badges }) }),
+    stockNotifications: () => req<{ notifications: CatalogStockNotification[] }>("/catalog/stock-notifications"),
+    setStockNotificationNotified: (id: number, notified: boolean) =>
+      req<{ ok: boolean }>(`/catalog/stock-notifications/${id}`, { method: "PATCH", body: JSON.stringify({ notified }) }),
+    removeStockNotification: (id: number) => req<{ ok: boolean }>(`/catalog/stock-notifications/${id}`, { method: "DELETE" }),
+    // Pedido de "avise-me quando chegar" — vitrine pública, sem login.
+    notifyMe: (slug: string, data: { productId: number; variantId?: number | null; customerName: string; customerContact: string }) =>
+      req<{ ok: boolean }>(`/catalog-public/${slug}/notify-me`, { method: "POST", body: JSON.stringify(data) }),
   },
   meetings: {
     list: () => req<MeetingItem[]>("/meetings"),

@@ -1,7 +1,10 @@
 import { useState, useEffect, useMemo } from "react";
 import { useParams } from "wouter";
-import { api, CATALOG_CONDITIONS, CATALOG_CONDITION_CRITERIA, type CatalogPublicProduct, type CatalogCategory } from "@/lib/api";
-import { Smartphone, MessageCircle, PackageX, Info, Lock, ShoppingCart, Plus, Minus, X, Unlock, Search } from "lucide-react";
+import { api, CATALOG_CONDITIONS, CATALOG_CONDITION_CRITERIA, type CatalogPublicProduct, type CatalogCategory, type CatalogTrustBadge } from "@/lib/api";
+import {
+  Smartphone, MessageCircle, PackageX, Info, Lock, ShoppingCart, Plus, Minus, X, Unlock, Search,
+  ShieldCheck, BellRing, ListChecks, Tag,
+} from "lucide-react";
 import { Carousel, CarouselContent, CarouselItem, CarouselPrevious, CarouselNext, type CarouselApi } from "@/components/ui/carousel";
 
 // Vitrine PÚBLICA (sem login) — link compartilhável /vitrine/:slug, mostrado
@@ -11,8 +14,19 @@ import { Carousel, CarouselContent, CarouselItem, CarouselPrevious, CarouselNext
 
 type PublicData = {
   storeName: string; whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
-  categories: CatalogCategory[]; products: CatalogPublicProduct[];
+  categories: CatalogCategory[]; products: CatalogPublicProduct[]; trustBadges: CatalogTrustBadge[];
 };
+
+// Preço "de/por": só mostra desconto se a loja preencheu um preço "de" maior
+// que o preço à vista atual — devolve null quando não há desconto pra
+// mostrar (comportamento de antes desse campo existir).
+function discountInfo(v: { compareAtPrice?: string | null; priceCash?: number | null; salePrice?: string | null } | null | undefined): { from: number; percentOff: number } | null {
+  if (!v?.compareAtPrice) return null;
+  const from = Number(v.compareAtPrice);
+  const current = v.priceCash ?? (v.salePrice != null ? Number(v.salePrice) : null);
+  if (!Number.isFinite(from) || current == null || !Number.isFinite(current) || from <= current) return null;
+  return { from, percentOff: Math.round((1 - current / from) * 100) };
+}
 
 // Rótulo de uma variante combinando armazenamento e cor, o que tiver
 // preenchido (ex.: "256GB · Preto", "Preto" se não variar armazenamento,
@@ -74,7 +88,7 @@ function ProductCard({
   p, wholesaleUnlocked, onAddToCart, onOpenDetail,
 }: {
   p: CatalogPublicProduct; wholesaleUnlocked: boolean;
-  onAddToCart: (item: { productId: number; variantId: number; model: string; storage: string | null; unitPrice: number | null; wholesale: boolean }) => void;
+  onAddToCart: (item: { productId: number; variantId: number; model: string; storage: string | null; unitPrice: number | null; wholesale: boolean }, qty: number) => void;
   onOpenDetail: (p: CatalogPublicProduct) => void;
 }) {
   const [selectedId, setSelectedId] = useState(p.variants[0]?.id ?? null);
@@ -88,11 +102,17 @@ function ProductCard({
   const wholesaleInstallmentLabel = wholesaleUnlocked ? wholesaleInstallment12Label(selected) : null;
   const inStock = selected?.inStock ?? false;
   const criteria = CATALOG_CONDITION_CRITERIA[p.condition]?.criteria ?? [];
+  const discount = discountInfo(selected);
 
   return (
     <div className="bg-white rounded-2xl border border-neutral-200 overflow-hidden flex flex-col">
       <button type="button" onClick={() => onOpenDetail(p)} data-testid={`button-open-detail-${p.id}`}
-        className="aspect-square bg-neutral-100 flex items-center justify-center overflow-hidden">
+        className="relative aspect-square bg-neutral-100 flex items-center justify-center overflow-hidden">
+        {discount && (
+          <span className="absolute top-1.5 left-1.5 z-10 px-1.5 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-bold">
+            {discount.percentOff}% OFF
+          </span>
+        )}
         {p.photos[0] ? (
           <img src={api.catalog.photoUrl(p.photos[0].id)} alt={p.model} className="w-full h-full object-cover" loading="lazy" />
         ) : (
@@ -138,6 +158,7 @@ function ProductCard({
         )}
 
         <div className="mt-auto pt-1">
+          {discount && <p className="text-[11px] text-neutral-400 line-through">{formatBRL(discount.from)}</p>}
           <p className="text-base font-bold text-neutral-900">{retailPrice ?? "Sob consulta"}</p>
           {retailPrice && <p className="text-[10px] text-neutral-400">à vista (Pix)</p>}
           {installmentLabel && <p className="text-[11px] text-neutral-500">{installmentLabel}</p>}
@@ -147,15 +168,22 @@ function ProductCard({
               {wholesaleInstallmentLabel && <p className="text-[11px] text-amber-600">{wholesaleInstallmentLabel}</p>}
             </>
           )}
-          <button type="button" disabled={!inStock || !selected}
-            onClick={() => selected && onAddToCart({
-              productId: p.id, variantId: selected.id, model: p.model, storage: cartVariantLabel(selected),
-              unitPrice: wholesaleUnlocked && selected.wholesalePrice != null ? Number(selected.wholesalePrice) : (selected.salePrice != null ? Number(selected.salePrice) : null),
-              wholesale: wholesaleUnlocked && selected.wholesalePrice != null,
-            })}
-            className="mt-2 inline-flex items-center justify-center gap-1.5 w-full py-2 rounded-xl bg-neutral-900 text-white text-xs font-semibold hover:bg-neutral-800 transition disabled:opacity-40">
-            <ShoppingCart className="w-3.5 h-3.5" /> Adicionar ao pedido
-          </button>
+          {inStock ? (
+            <button type="button" disabled={!selected}
+              onClick={() => selected && onAddToCart({
+                productId: p.id, variantId: selected.id, model: p.model, storage: cartVariantLabel(selected),
+                unitPrice: wholesaleUnlocked && selected.wholesalePrice != null ? Number(selected.wholesalePrice) : (selected.salePrice != null ? Number(selected.salePrice) : null),
+                wholesale: wholesaleUnlocked && selected.wholesalePrice != null,
+              }, 1)}
+              className="mt-2 inline-flex items-center justify-center gap-1.5 w-full py-2 rounded-xl bg-neutral-900 text-white text-xs font-semibold hover:bg-neutral-800 transition disabled:opacity-40">
+              <ShoppingCart className="w-3.5 h-3.5" /> Adicionar ao pedido
+            </button>
+          ) : (
+            <button type="button" onClick={() => onOpenDetail(p)} data-testid={`button-notify-me-card-${p.id}`}
+              className="mt-2 inline-flex items-center justify-center gap-1.5 w-full py-2 rounded-xl bg-neutral-100 text-neutral-700 text-xs font-semibold hover:bg-neutral-200 transition">
+              <BellRing className="w-3.5 h-3.5" /> Avise-me quando chegar
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -168,15 +196,24 @@ function ProductCard({
 // variando (primeiro escolhe a cor, depois só os armazenamentos daquela
 // cor aparecem pra escolher).
 function ProductDetailModal({
-  p, wholesaleUnlocked, onAddToCart, onClose,
+  p, wholesaleUnlocked, slug, trustBadges, onAddToCart, onClose,
 }: {
-  p: CatalogPublicProduct; wholesaleUnlocked: boolean;
-  onAddToCart: (item: { productId: number; variantId: number; model: string; storage: string | null; unitPrice: number | null; wholesale: boolean }) => void;
+  p: CatalogPublicProduct; wholesaleUnlocked: boolean; slug: string; trustBadges: CatalogTrustBadge[];
+  onAddToCart: (item: { productId: number; variantId: number; model: string; storage: string | null; unitPrice: number | null; wholesale: boolean }, qty: number) => void;
   onClose: () => void;
 }) {
   const [activePhoto, setActivePhoto] = useState(0);
   const [carouselApi, setCarouselApi] = useState<CarouselApi>();
   const [showCriteria, setShowCriteria] = useState(false);
+  // Quantidade escolhida antes de adicionar ao pedido (não expomos o estoque
+  // exato pro cliente final — só limitamos a um teto razoável).
+  const [qty, setQty] = useState(1);
+  const [showNotifyMe, setShowNotifyMe] = useState(false);
+  const [notifyName, setNotifyName] = useState("");
+  const [notifyContact, setNotifyContact] = useState("");
+  const [notifySending, setNotifySending] = useState(false);
+  const [notifyDone, setNotifyDone] = useState(false);
+  const [notifyError, setNotifyError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!carouselApi) return;
@@ -225,6 +262,34 @@ function ProductDetailModal({
   const wholesaleInstallmentLabel = wholesaleUnlocked ? wholesaleInstallment12Label(selected) : null;
   const inStock = selected?.inStock ?? false;
   const criteria = CATALOG_CONDITION_CRITERIA[p.condition]?.criteria ?? [];
+  const discount = discountInfo(selected);
+
+  // Trocar de variante volta a quantidade pra 1 e fecha o form de "avise-me"
+  // aberto pra outra variante (evita mandar o pedido de aviso pra variante
+  // errada se o cliente mudar de cor/armazenamento no meio do caminho).
+  useEffect(() => {
+    setQty(1);
+    setShowNotifyMe(false);
+    setNotifyDone(false);
+    setNotifyError(null);
+  }, [selectedId]);
+
+  const handleNotifySubmit = async () => {
+    if (notifySending || !notifyName.trim() || !notifyContact.trim()) return;
+    setNotifySending(true);
+    setNotifyError(null);
+    try {
+      await api.catalog.notifyMe(slug, {
+        productId: p.id, variantId: selected?.id ?? null,
+        customerName: notifyName.trim(), customerContact: notifyContact.trim(),
+      });
+      setNotifyDone(true);
+    } catch (err) {
+      setNotifyError(err instanceof Error ? err.message : "Não foi possível enviar agora. Tente de novo.");
+    } finally {
+      setNotifySending(false);
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-40 flex items-end sm:items-center justify-center bg-black/40 px-3 py-6" onClick={onClose}>
@@ -284,6 +349,19 @@ function ProductDetailModal({
           )}
           {p.description && <p className="text-xs text-neutral-500">{p.description}</p>}
 
+          {p.aiCharacteristics && p.aiCharacteristics.length > 0 && (
+            <div className="rounded-lg bg-neutral-50 border border-neutral-200 p-2.5">
+              <p className="text-[11px] font-semibold text-neutral-700 mb-1 flex items-center gap-1"><ListChecks className="w-3 h-3" /> Principais características</p>
+              <ul className="space-y-0.5">
+                {p.aiCharacteristics.map((c, i) => (
+                  <li key={i} className="text-[11px] text-neutral-500 flex items-start gap-1.5">
+                    <span className="mt-1 w-1 h-1 rounded-full bg-neutral-400 shrink-0" /> {c}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {colors.length > 1 && (
             <div>
               <p className="text-[11px] font-semibold text-neutral-500 mb-1">Cor</p>
@@ -316,6 +394,12 @@ function ProductDetailModal({
           )}
 
           <div className="pt-1">
+            {discount && (
+              <div className="flex items-center gap-1.5 mb-0.5">
+                <p className="text-sm text-neutral-400 line-through">{formatBRL(discount.from)}</p>
+                <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-bold"><Tag className="w-2.5 h-2.5" /> {discount.percentOff}% OFF</span>
+              </div>
+            )}
             <p className="text-xl font-bold text-neutral-900">{retailPrice ?? "Sob consulta"}</p>
             {retailPrice && <p className="text-xs text-neutral-400">à vista (Pix)</p>}
             {installmentLabel && <p className="text-sm text-neutral-500">{installmentLabel}</p>}
@@ -325,17 +409,67 @@ function ProductDetailModal({
                 {wholesaleInstallmentLabel && <p className="text-xs text-amber-600">{wholesaleInstallmentLabel}</p>}
               </>
             )}
-            <button type="button" disabled={!inStock || !selected}
-              onClick={() => selected && onAddToCart({
-                productId: p.id, variantId: selected.id, model: p.model, storage: cartVariantLabel(selected),
-                unitPrice: wholesaleUnlocked && selected.wholesalePrice != null ? Number(selected.wholesalePrice) : (selected.salePrice != null ? Number(selected.salePrice) : null),
-                wholesale: wholesaleUnlocked && selected.wholesalePrice != null,
-              })}
-              data-testid="button-add-to-cart-detail"
-              className="mt-2 inline-flex items-center justify-center gap-1.5 w-full py-2.5 rounded-xl bg-neutral-900 text-white text-sm font-semibold hover:bg-neutral-800 transition disabled:opacity-40">
-              <ShoppingCart className="w-4 h-4" /> Adicionar ao pedido
-            </button>
+
+            {inStock ? (
+              <>
+                <div className="mt-2 flex items-center gap-2">
+                  <span className="text-xs font-semibold text-neutral-500">Quantidade</span>
+                  <div className="flex items-center gap-1 border rounded-lg">
+                    <button type="button" onClick={() => setQty((q) => Math.max(1, q - 1))} data-testid="button-detail-qty-minus"
+                      className="p-1.5 hover:bg-neutral-50 rounded-l-lg"><Minus className="w-3.5 h-3.5" /></button>
+                    <span className="w-6 text-center text-sm font-semibold" data-testid="text-detail-qty">{qty}</span>
+                    <button type="button" onClick={() => setQty((q) => Math.min(20, q + 1))} data-testid="button-detail-qty-plus"
+                      className="p-1.5 hover:bg-neutral-50 rounded-r-lg"><Plus className="w-3.5 h-3.5" /></button>
+                  </div>
+                </div>
+                <button type="button" disabled={!selected}
+                  onClick={() => selected && onAddToCart({
+                    productId: p.id, variantId: selected.id, model: p.model, storage: cartVariantLabel(selected),
+                    unitPrice: wholesaleUnlocked && selected.wholesalePrice != null ? Number(selected.wholesalePrice) : (selected.salePrice != null ? Number(selected.salePrice) : null),
+                    wholesale: wholesaleUnlocked && selected.wholesalePrice != null,
+                  }, qty)}
+                  data-testid="button-add-to-cart-detail"
+                  className="mt-2 inline-flex items-center justify-center gap-1.5 w-full py-2.5 rounded-xl bg-neutral-900 text-white text-sm font-semibold hover:bg-neutral-800 transition disabled:opacity-40">
+                  <ShoppingCart className="w-4 h-4" /> Adicionar ao pedido
+                </button>
+              </>
+            ) : notifyDone ? (
+              <p className="mt-2 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2.5 text-center">Combinado! A gente avisa assim que chegar.</p>
+            ) : showNotifyMe ? (
+              <div className="mt-2 rounded-xl border border-neutral-200 p-3 space-y-2">
+                <p className="text-xs font-semibold text-neutral-700">Avisar quando chegar</p>
+                <input value={notifyName} onChange={(e) => setNotifyName(e.target.value)} placeholder="Seu nome" data-testid="input-notify-name"
+                  className="w-full rounded-lg border px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-400" />
+                <input value={notifyContact} onChange={(e) => setNotifyContact(e.target.value)} placeholder="WhatsApp ou e-mail" data-testid="input-notify-contact"
+                  className="w-full rounded-lg border px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-400" />
+                {notifyError && <p className="text-xs text-red-600">{notifyError}</p>}
+                <button type="button" onClick={handleNotifySubmit} disabled={notifySending || !notifyName.trim() || !notifyContact.trim()}
+                  data-testid="button-submit-notify-me"
+                  className="w-full py-2 rounded-lg bg-neutral-900 text-white text-sm font-semibold hover:bg-neutral-800 disabled:opacity-40 transition">
+                  {notifySending ? "Enviando..." : "Quero ser avisado"}
+                </button>
+              </div>
+            ) : (
+              <button type="button" onClick={() => setShowNotifyMe(true)} data-testid="button-notify-me-detail"
+                className="mt-2 inline-flex items-center justify-center gap-1.5 w-full py-2.5 rounded-xl bg-neutral-100 text-neutral-700 text-sm font-semibold hover:bg-neutral-200 transition">
+                <BellRing className="w-4 h-4" /> Avise-me quando chegar
+              </button>
+            )}
           </div>
+
+          {trustBadges.length > 0 && (
+            <div className="grid grid-cols-1 gap-1.5 pt-1 border-t border-neutral-100">
+              {trustBadges.map((b, i) => (
+                <div key={i} className="flex items-start gap-2 pt-1.5">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-xs font-semibold text-neutral-700">{b.title}</p>
+                    {b.description && <p className="text-[11px] text-neutral-400">{b.description}</p>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -402,11 +536,11 @@ export default function VitrinePublica() {
     }
   };
 
-  const addToCart = (item: { productId: number; variantId: number; model: string; storage: string | null; unitPrice: number | null; wholesale: boolean }) => {
+  const addToCart = (item: { productId: number; variantId: number; model: string; storage: string | null; unitPrice: number | null; wholesale: boolean }, qty = 1) => {
     setCart((prev) => {
       const existing = prev.find((c) => c.variantId === item.variantId);
-      if (existing) return prev.map((c) => (c.variantId === item.variantId ? { ...c, qty: c.qty + 1 } : c));
-      return [...prev, { ...item, qty: 1 }];
+      if (existing) return prev.map((c) => (c.variantId === item.variantId ? { ...c, qty: c.qty + qty } : c));
+      return [...prev, { ...item, qty }];
     });
     setShowCart(true);
   };
@@ -674,12 +808,14 @@ export default function VitrinePublica() {
         </div>
       )}
 
-      {detailProduct && (
+      {detailProduct && slug && (
         <ProductDetailModal
           key={detailProduct.id}
           p={detailProduct}
           wholesaleUnlocked={data.wholesaleUnlocked}
-          onAddToCart={(item) => { addToCart(item); setDetailProduct(null); }}
+          slug={slug}
+          trustBadges={data.trustBadges}
+          onAddToCart={(item, qty) => { addToCart(item, qty); setDetailProduct(null); }}
           onClose={() => setDetailProduct(null)}
         />
       )}

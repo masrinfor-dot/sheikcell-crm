@@ -103,6 +103,12 @@ export const catalogProductsTable = pgTable("catalog_products", {
   status: text("status").notNull().default("active"), // active | inactive | sold
   categoryId: integer("category_id").references(() => catalogCategoriesTable.id, { onDelete: "set null" }),
   sortOrder: integer("sort_order").notNull().default(0),
+  // Lista de características (armazenamento, RAM, tela, câmera, bateria...)
+  // gerada por IA a partir do modelo/condição/cores, editável à mão pelo
+  // lojista depois — mostrada na vitrine pública como "Principais
+  // características" (mesma ideia da "Ficha técnica gerada por IA" da Lu, do
+  // Magalu). Null/vazio = a vitrine pública não mostra essa seção.
+  aiCharacteristics: jsonb("ai_characteristics").$type<string[]>(),
   createdBy: integer("created_by").references(() => usersTable.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -135,6 +141,11 @@ export const catalogProductVariantsTable = pgTable("catalog_product_variants", {
   // valor exato. Null = não foi possível calcular (sem custo informado).
   wholesalePrice: numeric("wholesale_price"),
   wholesaleMarginPercentOverride: numeric("wholesale_margin_percent_override"), // null = usa a margem de atacado padrão da loja
+  // Preço "de" (comparação), digitado à mão pelo lojista — quando maior que o
+  // preço à vista atual, a vitrine pública mostra ele riscado ao lado do
+  // preço final, com um selo de desconto ("X% OFF"). Null = não mostra
+  // desconto nenhum (comportamento de antes desse campo existir).
+  compareAtPrice: numeric("compare_at_price"),
   stockQty: integer("stock_qty").notNull().default(1),
   sortOrder: integer("sort_order").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -167,3 +178,21 @@ export const catalogProductPhotosTable = pgTable("catalog_product_photos", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 export type CatalogProductPhoto = typeof catalogProductPhotosTable.$inferSelect;
+
+// "Avise-me quando chegar" — pedido de um cliente (sem login, vitrine
+// pública) pra ser avisado quando um produto/variante esgotado voltar a ter
+// estoque. variantId null = pediu pro produto de forma geral (não escolheu
+// uma variante específica antes de esgotar). notified = o lojista já
+// contatou esse cliente (marcação manual, ver painel admin da Vitrine) —
+// nunca dispara nada sozinho, é só uma lista de contatos pra loja seguir.
+export const catalogStockNotificationsTable = pgTable("catalog_stock_notifications", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  productId: integer("product_id").notNull().references(() => catalogProductsTable.id, { onDelete: "cascade" }),
+  variantId: integer("variant_id").references(() => catalogProductVariantsTable.id, { onDelete: "cascade" }),
+  customerName: text("customer_name").notNull(),
+  customerContact: text("customer_contact").notNull(),
+  notified: boolean("notified").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type CatalogStockNotification = typeof catalogStockNotificationsTable.$inferSelect;

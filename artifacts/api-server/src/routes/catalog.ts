@@ -10,6 +10,7 @@ import {
   catalogProductVariantsTable,
   catalogProductPhotosTable,
   catalogCategoriesTable,
+  catalogStockNotificationsTable,
   appSettingsTable,
   tenantsTable,
   type CatalogCategory,
@@ -27,7 +28,7 @@ import {
   parcelamento12xAtacadoDoProduto,
   type PricingSettings,
 } from "../lib/catalogPricing";
-import { CATALOG_CONDITIONS, type CatalogCondition } from "@workspace/db";
+import { CATALOG_CONDITIONS, CATALOG_CONDITION_CRITERIA, type CatalogCondition } from "@workspace/db";
 
 const router: IRouter = Router();
 router.use("/catalog", requireModuleAccess("vitrine"));
@@ -93,6 +94,14 @@ function cleanColors(v: unknown): string[] {
 
 function cleanCondition(v: unknown): CatalogCondition {
   return CATALOG_CONDITIONS.includes(v as CatalogCondition) ? (v as CatalogCondition) : "bom";
+}
+
+// Lista de características (specs) do produto — gerada por IA ou editada à
+// mão pelo lojista (ver rota /catalog/characteristics/generate abaixo).
+function cleanCharacteristics(v: unknown): string[] | null {
+  if (!Array.isArray(v)) return null;
+  const list = v.filter((c): c is string => typeof c === "string").map((c) => c.normalize("NFC").trim().slice(0, 150)).filter(Boolean).slice(0, 12);
+  return list.length > 0 ? list : null;
 }
 
 function toNumberOrNull(v: unknown): number | null {
@@ -202,6 +211,9 @@ type VariantInput = {
   salePrice: number | null;
   wholesalePrice: number | null;
   wholesaleMarginPercentOverride: number | null;
+  // Preço "de" (comparação), digitado à mão — ver comentário no schema
+  // (catalogProductVariantsTable.compareAtPrice) e na rota pública abaixo.
+  compareAtPrice: number | null;
   stockQty: number;
 };
 
@@ -217,6 +229,7 @@ function cleanVariantInput(raw: unknown): VariantInput {
     salePrice: "salePrice" in o ? toNumberOrNull(o.salePrice) : null,
     wholesalePrice: "wholesalePrice" in o ? toNumberOrNull(o.wholesalePrice) : null,
     wholesaleMarginPercentOverride: toNumberOrNull(o.wholesaleMarginPercentOverride),
+    compareAtPrice: toNumberOrNull(o.compareAtPrice),
     stockQty: Number.isInteger(o.stockQty) ? Math.max(0, o.stockQty as number) : 1,
   };
 }
@@ -266,6 +279,7 @@ async function replaceVariants(tenantId: number, productId: number, rawVariants:
       salePrice,
       wholesalePrice,
       wholesaleMarginPercentOverride: v.wholesaleMarginPercentOverride != null ? String(v.wholesaleMarginPercentOverride) : null,
+      compareAtPrice: v.compareAtPrice != null ? String(v.compareAtPrice) : null,
       stockQty: v.stockQty,
       sortOrder: i,
       updatedAt: new Date(),
@@ -382,6 +396,7 @@ router.post("/catalog/products", requireAuth, async (req, res): Promise<void> =>
     description: clean(body.description, 2000) || null,
     status: body.status === "inactive" || body.status === "sold" ? body.status : "active",
     categoryId: await cleanCategoryId(tenantId, body.categoryId),
+    aiCharacteristics: cleanCharacteristics(body.aiCharacteristics),
     createdBy: req.session.userId ?? null,
   }).returning();
 
@@ -413,6 +428,7 @@ router.patch("/catalog/products/:id", requireAuth, async (req, res): Promise<voi
     status: body.status === "active" || body.status === "inactive" || body.status === "sold" ? body.status : existing.status,
     categoryId: "categoryId" in body ? await cleanCategoryId(tenantId, body.categoryId) : existing.categoryId,
     sortOrder: "sortOrder" in body && Number.isInteger(body.sortOrder) ? (body.sortOrder as number) : existing.sortOrder,
+    aiCharacteristics: "aiCharacteristics" in body ? cleanCharacteristics(body.aiCharacteristics) : existing.aiCharacteristics,
     updatedAt: new Date(),
   }).where(and(eq(catalogProductsTable.id, id), eq(catalogProductsTable.tenantId, tenantId))).returning();
 
@@ -756,6 +772,168 @@ router.post("/catalog/pricing-settings/simulate", requireAuth, async (req, res):
   const produtoAtacado = { costPrice: custo, costIncludesInvoice: costIncludesInvoice === true, wholesaleMarginPercentOverride: toNumberOrNull(wholesaleMarginPercentOverride) };
   const wholesaleInstallment12 = parcelamento12xAtacadoDoProduto(produtoAtacado, settings);
   res.json({ salePrice, wholesalePrice, priceCash, installment12, wholesaleInstallment12, settings });
+});
+
+// Gera a lista de "Principais características" (armazenamento, RAM, tela,
+// câmera, bateria etc.) a partir do modelo/condição/cores/variantes — sem
+// salvar nada (o lojista revisa/edita no formulário e salva junto com o
+// resto do produto, mesmo padrão de /catalog/pricing-settings/simulate).
+// Funciona tanto num produto já cadastrado quanto ainda no formulário de
+// criação (não depende de um id existente).
+router.post("/catalog/characteristics/generate", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const body = req.body as Record<string, unknown>;
+  const model = clean(body.model, 120);
+  if (!model) { res.status(400).json({ error: "Informe o modelo do aparelho" }); return; }
+  const condition = cleanCondition(body.condition);
+  const colors = cleanColors(body.colors);
+  const rawVariants = Array.isArray(body.variants) ? body.variants : [];
+  const storages = [...new Set(rawVariants.map((v) => clean((v as { storage?: unknown })?.storage, 40)).filter(Boolean))];
+
+  const prompt = [
+    `Você é um especialista em celulares/smartphones do mercado brasileiro.`,
+    `Gere uma lista curta de "principais características" pro anúncio de um aparelho, no estilo de ficha técnica resumida (tipo a "Ficha técnica gerada por IA" de marketplaces como Magazine Luiza).`,
+    `Aparelho: ${model}.`,
+    `Condição/selo de qualidade: ${CATALOG_CONDITION_CRITERIA[condition]?.label ?? condition}.`,
+    colors.length > 0 ? `Cores disponíveis: ${colors.join(", ")}.` : null,
+    storages.length > 0 ? `Armazenamento(s) disponível(is): ${storages.join(", ")}.` : null,
+    ``,
+    `Use seu conhecimento sobre esse modelo específico pra listar até 8 características reais dele (armazenamento, memória RAM, tamanho/tipo de tela, resolução da câmera traseira/frontal, capacidade da bateria, processador, se tem 5G, resistência à água, etc.) — só inclua o que você tiver confiança de estar correto pra esse modelo. Cada característica é uma frase curta (máx. 12 palavras), direta, sem markdown.`,
+    `Se o aparelho não for "novo", pode incluir 1 característica sobre o estado de conservação usando o selo de qualidade informado acima.`,
+    `Responda SOMENTE com um JSON array de strings, sem markdown, ex.: ["Tela Super Retina XDR 6,1\\"","128GB de armazenamento","Câmera dupla 12MP","Bateria de longa duração","5G"]`,
+  ].filter(Boolean).join("\n");
+
+  try {
+    const { getOpenAiClientForTenant } = await import("../lib/aiClient");
+    const openai = await getOpenAiClientForTenant(tenantId);
+    const completion = await openai.chat.completions.create(
+      { model: "gpt-4o", max_tokens: 500, messages: [{ role: "user", content: prompt }] },
+      { timeout: 25_000 },
+    );
+    const raw = completion.choices[0]?.message?.content?.trim() ?? "";
+    const text = raw.replace(/^```(?:json)?/m, "").replace(/```$/m, "").trim();
+    const start = text.indexOf("[");
+    const end = text.lastIndexOf("]");
+    let characteristics: string[] = [];
+    if (start !== -1 && end !== -1) {
+      try {
+        const arr = JSON.parse(text.slice(start, end + 1));
+        characteristics = cleanCharacteristics(arr) ?? [];
+      } catch { /* segue com lista vazia — erro tratado abaixo */ }
+    }
+    if (characteristics.length === 0) { res.status(502).json({ error: "A IA não retornou uma lista válida. Tente novamente." }); return; }
+    res.json({ characteristics });
+  } catch (err) {
+    req.log.error({ err }, "Catalog characteristics generation failed");
+    const { OpenAI: OpenAISdk } = await import("openai");
+    let message = "A IA está indisponível no momento. Tente novamente em instantes.";
+    if (err instanceof OpenAISdk.APIConnectionTimeoutError || (err as { name?: string })?.name === "APIConnectionTimeoutError") {
+      message = "A IA demorou demais pra gerar as características. Tente novamente.";
+    } else if (err instanceof OpenAISdk.RateLimitError) {
+      message = "A IA está sobrecarregada no momento (limite de uso atingido). Aguarde um instante e tente de novo.";
+    } else if (err instanceof OpenAISdk.AuthenticationError) {
+      message = "A chave de acesso à IA está inválida ou expirada. Fale com o administrador do sistema.";
+    }
+    res.status(503).json({ error: message });
+  }
+});
+
+// ─── Selos de confiança/garantia customizados (vitrine pública) ─────────────
+// Configuráveis pela loja (nome/descrição de cada selo) — mesmo padrão de
+// appSettingsTable já usado pra configuração de preço (PRICING_KEY acima).
+// Sem nenhum configurado ainda, usa um padrão pronto com a marca SheikCell.
+
+type TrustBadge = { title: string; description: string };
+const TRUST_BADGES_KEY = "catalog_trust_badges";
+const DEFAULT_TRUST_BADGES: TrustBadge[] = [
+  { title: "Qualidade Premium Dubai", description: "Aparelhos selecionados com padrão internacional de qualidade" },
+  { title: "Garantia Sheik Cell", description: "Garantia direto com a loja em cada aparelho" },
+  { title: "Testado e Aprovado", description: "Conferido em bateria, tela e funcionamento antes de sair da loja" },
+];
+
+function sanitizeTrustBadges(raw: unknown): TrustBadge[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 6).map((b) => {
+    const o = (b ?? {}) as Record<string, unknown>;
+    return { title: clean(o.title, 60), description: clean(o.description, 140) };
+  }).filter((b) => b.title);
+}
+
+async function getTrustBadges(tenantId: number): Promise<TrustBadge[]> {
+  const [row] = await db.select().from(appSettingsTable)
+    .where(and(eq(appSettingsTable.tenantId, tenantId), eq(appSettingsTable.key, TRUST_BADGES_KEY))).limit(1);
+  if (!row) return DEFAULT_TRUST_BADGES;
+  try {
+    const parsed = sanitizeTrustBadges(JSON.parse(row.value));
+    return parsed.length > 0 ? parsed : DEFAULT_TRUST_BADGES;
+  } catch {
+    return DEFAULT_TRUST_BADGES;
+  }
+}
+
+router.get("/catalog/trust-badges", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  res.json({ badges: await getTrustBadges(tenantId) });
+});
+
+router.put("/catalog/trust-badges", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const badges = sanitizeTrustBadges((req.body as { badges?: unknown }).badges);
+  await db.insert(appSettingsTable)
+    .values({ tenantId, key: TRUST_BADGES_KEY, value: JSON.stringify(badges) })
+    .onConflictDoUpdate({ target: [appSettingsTable.tenantId, appSettingsTable.key], set: { value: JSON.stringify(badges), updatedAt: new Date() } });
+  res.json({ badges: badges.length > 0 ? badges : DEFAULT_TRUST_BADGES });
+});
+
+// ─── "Avise-me quando chegar" — pedidos de aviso de reposição de estoque ────
+
+router.get("/catalog/stock-notifications", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rows = await db.select().from(catalogStockNotificationsTable)
+    .where(eq(catalogStockNotificationsTable.tenantId, tenantId))
+    .orderBy(desc(catalogStockNotificationsTable.createdAt)).limit(300);
+  const productIds = [...new Set(rows.map((r) => r.productId))];
+  const products = productIds.length > 0
+    ? await db.select({ id: catalogProductsTable.id, model: catalogProductsTable.model }).from(catalogProductsTable)
+        .where(and(inArray(catalogProductsTable.id, productIds), eq(catalogProductsTable.tenantId, tenantId)))
+    : [];
+  const productById = new Map(products.map((p) => [p.id, p.model]));
+  const variantIds = [...new Set(rows.map((r) => r.variantId).filter((v): v is number => v != null))];
+  const variants = variantIds.length > 0
+    ? await db.select({ id: catalogProductVariantsTable.id, storage: catalogProductVariantsTable.storage, color: catalogProductVariantsTable.color })
+        .from(catalogProductVariantsTable).where(inArray(catalogProductVariantsTable.id, variantIds))
+    : [];
+  const variantById = new Map(variants.map((v) => [v.id, v]));
+  res.json({
+    notifications: rows.map((r) => ({
+      id: r.id,
+      productId: r.productId,
+      model: productById.get(r.productId) ?? "(produto removido)",
+      variant: r.variantId != null ? variantById.get(r.variantId) ?? null : null,
+      customerName: r.customerName,
+      customerContact: r.customerContact,
+      notified: r.notified,
+      createdAt: r.createdAt,
+    })),
+  });
+});
+
+router.patch("/catalog/stock-notifications/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = Number(req.params.id);
+  const notified = (req.body as { notified?: unknown }).notified === true;
+  const [row] = await db.update(catalogStockNotificationsTable).set({ notified })
+    .where(and(eq(catalogStockNotificationsTable.id, id), eq(catalogStockNotificationsTable.tenantId, tenantId))).returning();
+  if (!row) { res.status(404).json({ error: "Pedido não encontrado" }); return; }
+  res.json({ ok: true });
+});
+
+router.delete("/catalog/stock-notifications/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = Number(req.params.id);
+  await db.delete(catalogStockNotificationsTable)
+    .where(and(eq(catalogStockNotificationsTable.id, id), eq(catalogStockNotificationsTable.tenantId, tenantId)));
+  res.json({ ok: true });
 });
 
 // ─── Link público e contato (WhatsApp) da vitrine ───────────────────────────
@@ -1309,11 +1487,12 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
     .where(and(eq(catalogProductsTable.tenantId, tenant.id), eq(catalogProductsTable.status, "active")))
     .orderBy(catalogProductsTable.sortOrder, desc(catalogProductsTable.createdAt));
   const ids = rows.map((r) => r.id);
-  const [photos, variants, categories, pricingSettings] = await Promise.all([
+  const [photos, variants, categories, pricingSettings, trustBadges] = await Promise.all([
     photosByProductIds(tenant.id, ids),
     variantsByProductIds(tenant.id, ids),
     db.select().from(catalogCategoriesTable).where(eq(catalogCategoriesTable.tenantId, tenant.id)).orderBy(catalogCategoriesTable.sortOrder, catalogCategoriesTable.id),
     getPricingSettings(tenant.id),
+    getTrustBadges(tenant.id),
   ]);
 
   // Preço de atacado só sai na resposta se o código enviado bater com o
@@ -1333,6 +1512,9 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
     hasWholesale: !!tenant.catalogWholesaleCode,
     wholesaleUnlocked,
     categories: categories.map((c) => ({ id: c.id, name: c.name, parentId: c.parentId, sortOrder: c.sortOrder })),
+    // Selos de confiança/garantia customizados pela loja — mostrados uma vez
+    // por página (ver getTrustBadges/DEFAULT_TRUST_BADGES acima).
+    trustBadges,
     // Nunca expõe custo/margem — só o que o cliente final (ou o
     // técnico/lojista com código, no caso do atacado) pode ver.
     products: rows
@@ -1343,6 +1525,7 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
         colors: r.colors,
         description: r.description,
         categoryId: r.categoryId,
+        aiCharacteristics: r.aiCharacteristics ?? null,
         photos: publicPhotoIds(photos.get(r.id) ?? [], r.condition),
         variants: (variants.get(r.id) ?? [])
           .filter((v) => v.salePrice != null)
@@ -1356,6 +1539,10 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
             return {
               id: v.id, storage: v.storage, color: v.color, salePrice: v.salePrice, inStock: v.stockQty > 0,
               wholesalePrice: wholesaleUnlocked ? (wholesale.wholesalePriceCash ?? v.wholesalePrice) : null,
+              // Preço "de" (comparação) — a vitrine pública só usa ele pra
+              // mostrar o riscado/selo de desconto se for maior que o preço à
+              // vista atual (ver cálculo no front, VitrinePublica.tsx).
+              compareAtPrice: v.compareAtPrice,
               // à vista/12x calculados na hora, nunca expõe custo/margem (ver withInstallmentPricing).
               ...withInstallmentPricing(v, pricingSettings),
               // 12x de atacado só sai junto do preço de atacado, ou seja, só pra
@@ -1366,6 +1553,47 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
       }))
       .filter((p) => p.variants.length > 0),
   });
+});
+
+// "Avise-me quando chegar" — cliente (sem login) pede pra ser avisado quando
+// um produto/variante esgotado voltar ao estoque. Best-effort de validação:
+// produto precisa existir e pertencer a essa loja; variantId (se enviado)
+// precisa pertencer a esse produto — mas não IMPEDE o pedido se o item já
+// tiver voltado ao estoque nesse meio tempo (o lojista decide o que fazer,
+// não é um bloqueio automático).
+catalogPublicRouter.post("/catalog-public/:slug/notify-me", async (req: Request, res: Response): Promise<void> => {
+  const rawSlug = Array.isArray(req.params.slug) ? req.params.slug[0] : req.params.slug;
+  const slug = (rawSlug ?? "").toLowerCase();
+  const [tenant] = await db.select({ id: tenantsTable.id }).from(tenantsTable)
+    .where(and(eq(tenantsTable.catalogSlug, slug), eq(tenantsTable.isActive, true))).limit(1);
+  if (!tenant) { res.status(404).json({ error: "Vitrine não encontrada" }); return; }
+
+  const body = req.body as Record<string, unknown>;
+  const productId = Number(body.productId);
+  const variantIdRaw = body.variantId;
+  const customerName = clean(body.customerName, 100);
+  const customerContact = clean(body.customerContact, 100);
+  if (!Number.isInteger(productId) || productId <= 0) { res.status(400).json({ error: "Produto inválido" }); return; }
+  if (!customerName || !customerContact) { res.status(400).json({ error: "Informe seu nome e um contato (WhatsApp ou e-mail)" }); return; }
+
+  const [product] = await db.select({ id: catalogProductsTable.id }).from(catalogProductsTable)
+    .where(and(eq(catalogProductsTable.id, productId), eq(catalogProductsTable.tenantId, tenant.id))).limit(1);
+  if (!product) { res.status(404).json({ error: "Produto não encontrado" }); return; }
+
+  let variantId: number | null = null;
+  if (variantIdRaw != null) {
+    const vId = Number(variantIdRaw);
+    if (Number.isInteger(vId) && vId > 0) {
+      const [variant] = await db.select({ id: catalogProductVariantsTable.id }).from(catalogProductVariantsTable)
+        .where(and(eq(catalogProductVariantsTable.id, vId), eq(catalogProductVariantsTable.productId, productId), eq(catalogProductVariantsTable.tenantId, tenant.id))).limit(1);
+      if (variant) variantId = variant.id;
+    }
+  }
+
+  await db.insert(catalogStockNotificationsTable).values({
+    tenantId: tenant.id, productId, variantId, customerName, customerContact,
+  });
+  res.status(201).json({ ok: true });
 });
 
 catalogPublicRouter.get("/catalog-public/photos/:photoId/file", async (req: Request, res: Response): Promise<void> => {
