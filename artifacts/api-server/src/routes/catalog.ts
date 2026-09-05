@@ -600,9 +600,22 @@ async function searchImagesGoogleCse(query: string, num: number): Promise<ImageS
   })).filter((r) => r.imageUrl);
 }
 
+// Tenta cada provedor configurado, na ordem de preferência, e só passa pro
+// próximo se o anterior não trouxe nenhum resultado — seja porque não está
+// configurado, seja porque a chamada falhou (ex.: cota mensal esgotada, como
+// já aconteceu com o plano grátis do SearchAPI.io: 429 "used all of the
+// searches for the month"). Antes, um provedor configurado mas fora do ar
+// travava a busca inteira sem nem tentar o próximo da lista — mesmo com outro
+// provedor configurado e talvez funcionando.
 async function searchImages(query: string, num: number): Promise<ImageSearchResult[]> {
-  if (process.env["SERPER_API_KEY"]) return searchImagesSerper(query, num);
-  if (process.env["SEARCHAPI_API_KEY"]) return searchImagesSearchApiIo(query, num);
+  if (process.env["SERPER_API_KEY"]) {
+    const results = await searchImagesSerper(query, num);
+    if (results.length > 0) return results;
+  }
+  if (process.env["SEARCHAPI_API_KEY"]) {
+    const results = await searchImagesSearchApiIo(query, num);
+    if (results.length > 0) return results;
+  }
   return searchImagesGoogleCse(query, num);
 }
 
