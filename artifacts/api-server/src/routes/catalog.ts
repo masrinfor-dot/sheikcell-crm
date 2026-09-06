@@ -522,20 +522,24 @@ router.post("/catalog/products/:id/photos", requireAuth, async (req, res): Promi
   res.status(201).json(photo);
 });
 
-// Busca de imagens padronizadas na internet. Suporta três provedores, nessa
-// ordem de preferência (usa o primeiro que estiver configurado):
+// Busca de imagens padronizadas na internet. Suporta quatro provedores,
+// nessa ordem de preferência (tenta cada um configurado até achar foto):
 //   1. Serper.dev (SERPER_API_KEY) — conta grátis, sem cartão/faturamento.
 //   2. SearchAPI.io (SEARCHAPI_API_KEY) — conta grátis (100 buscas/mês),
-//      login com Google, sem cartão. Usado como alternativa quando o
-//      cadastro no Serper.dev está instável.
-//   3. Google Custom Search (GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX) — API
-//      fechada para novos clientes desde 2024, mantido só por compat.
-// Sem nenhum dos três configurados, devolve 501 com uma mensagem clara em vez
-// de quebrar a tela — a loja pode seguir cadastrando fotos por upload manual.
+//      login com Google, sem cartão. Cota mensal esgota rápido.
+//   3. SerpApi (SERPAPI_API_KEY, serpapi.com — cuidado, é diferente do
+//      SearchAPI.io acima apesar do nome parecido) — conta grátis (250
+//      buscas/mês), sem cartão, chave liberada na hora (sem revisão manual).
+//   4. Google Custom Search (GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX) — API
+//      fechada para novos clientes desde 2024, mantido só por compat; a
+//      conta usada aqui está presa numa retenção de revisão do Google.
+// Sem nenhum dos quatro configurados, devolve 501 com uma mensagem clara em
+// vez de quebrar a tela — a loja pode seguir cadastrando fotos por upload manual.
 type ImageSearchResult = { title: string; imageUrl: string; thumbnailUrl: string; sourceUrl: string };
 
 function photoSearchConfigured(): boolean {
   return !!process.env["SERPER_API_KEY"] || !!process.env["SEARCHAPI_API_KEY"]
+    || !!process.env["SERPAPI_API_KEY"]
     || !!(process.env["GOOGLE_CSE_API_KEY"] && process.env["GOOGLE_CSE_CX"]);
 }
 
@@ -589,6 +593,31 @@ async function searchImagesSearchApiIo(query: string, num: number): Promise<Imag
   })).filter((r) => r.imageUrl);
 }
 
+async function searchImagesSerpApi(query: string, num: number): Promise<ImageSearchResult[]> {
+  const apiKey = process.env["SERPAPI_API_KEY"];
+  if (!apiKey) return [];
+  const url = new URL("https://serpapi.com/search.json");
+  url.searchParams.set("engine", "google_images");
+  url.searchParams.set("q", query);
+  url.searchParams.set("api_key", apiKey);
+  url.searchParams.set("safe", "active");
+  const r = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    logger.warn({ status: r.status, body: body.slice(0, 300), query }, "Catalog photo search: SerpApi respondeu erro");
+    return [];
+  }
+  const json = (await r.json()) as {
+    images_results?: { title?: string; original?: string; thumbnail?: string; link?: string }[];
+  };
+  return (json.images_results ?? []).slice(0, num).map((it) => ({
+    title: clean(it.title, 150),
+    imageUrl: typeof it.original === "string" ? it.original : "",
+    thumbnailUrl: typeof it.thumbnail === "string" ? it.thumbnail : (typeof it.original === "string" ? it.original : ""),
+    sourceUrl: typeof it.link === "string" ? it.link : "",
+  })).filter((r) => r.imageUrl);
+}
+
 async function searchImagesGoogleCse(query: string, num: number): Promise<ImageSearchResult[]> {
   const apiKey = process.env["GOOGLE_CSE_API_KEY"];
   const cx = process.env["GOOGLE_CSE_CX"];
@@ -632,6 +661,10 @@ async function searchImages(query: string, num: number): Promise<ImageSearchResu
     const results = await searchImagesSearchApiIo(query, num);
     if (results.length > 0) return results;
   }
+  if (process.env["SERPAPI_API_KEY"]) {
+    const results = await searchImagesSerpApi(query, num);
+    if (results.length > 0) return results;
+  }
   return searchImagesGoogleCse(query, num);
 }
 
@@ -639,7 +672,7 @@ router.get("/catalog/photo-search", requireAuth, async (req, res): Promise<void>
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   void tenantId;
   if (!photoSearchConfigured()) {
-    res.status(501).json({ error: "Busca de imagens não configurada neste servidor. Configure SERPER_API_KEY (serper.dev, grátis), SEARCHAPI_API_KEY (searchapi.io, grátis) ou GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX." });
+    res.status(501).json({ error: "Busca de imagens não configurada neste servidor. Configure SERPER_API_KEY (serper.dev, grátis), SEARCHAPI_API_KEY (searchapi.io, grátis), SERPAPI_API_KEY (serpapi.com, grátis) ou GOOGLE_CSE_API_KEY + GOOGLE_CSE_CX." });
     return;
   }
   const q = clean((req.query as Record<string, unknown>).q, 150);
