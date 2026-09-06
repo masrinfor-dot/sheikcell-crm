@@ -459,6 +459,20 @@ export type CatalogProduct = {
 };
 
 export type CatalogTrustBadge = { title: string; description: string };
+export type CatalogPaymentMethod = { title: string; description: string };
+
+export type CatalogProductReview = {
+  id: number;
+  productId: number;
+  model: string;
+  variant: { id: number; storage: string | null; color: string | null } | null;
+  rating: number;
+  customerName: string;
+  customerPhone: string;
+  customerCity: string;
+  comment: string | null;
+  createdAt: string;
+};
 
 export type CatalogStockNotification = {
   id: number;
@@ -500,6 +514,9 @@ export type CatalogPublicProduct = {
   description: string | null;
   categoryId: number | null;
   aiCharacteristics: string[] | null;
+  // Resumo de avaliação (estrelas) — null se o produto ainda não tem
+  // nenhuma avaliação.
+  reviewsSummary: { average: number; count: number } | null;
   // color: cor que essa foto representa (null = foto "geral", mostrada em
   // qualquer cor selecionada) — ver publicPhotoIds no backend.
   photos: { id: number; color: string | null }[];
@@ -2386,7 +2403,7 @@ export const api = {
     public: (slug: string, code?: string) =>
       req<{
         storeName: string; whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
-        categories: CatalogCategory[]; products: CatalogPublicProduct[]; trustBadges: CatalogTrustBadge[];
+        categories: CatalogCategory[]; products: CatalogPublicProduct[]; trustBadges: CatalogTrustBadge[]; paymentMethods: CatalogPaymentMethod[];
       }>(`/catalog-public/${slug}${code ? `?code=${encodeURIComponent(code)}` : ""}`),
     // Gera a lista de "Principais características" com IA — não salva nada
     // sozinho, o lojista revisa/edita e salva junto do resto do produto.
@@ -2401,6 +2418,13 @@ export const api = {
     // Pedido de "avise-me quando chegar" — vitrine pública, sem login.
     notifyMe: (slug: string, data: { productId: number; variantId?: number | null; customerName: string; customerContact: string }) =>
       req<{ ok: boolean }>(`/catalog-public/${slug}/notify-me`, { method: "POST", body: JSON.stringify(data) }),
+    getPaymentMethods: () => req<{ methods: CatalogPaymentMethod[] }>("/catalog/payment-methods"),
+    savePaymentMethods: (methods: CatalogPaymentMethod[]) => req<{ methods: CatalogPaymentMethod[] }>("/catalog/payment-methods", { method: "PUT", body: JSON.stringify({ methods }) }),
+    reviews: () => req<{ reviews: CatalogProductReview[] }>("/catalog/reviews"),
+    removeReview: (id: number) => req<{ ok: boolean }>(`/catalog/reviews/${id}`, { method: "DELETE" }),
+    // Avaliação de cliente (estrelas + comentário) — vitrine pública, sem login.
+    submitReview: (slug: string, data: { productId: number; variantId?: number | null; rating: number; customerName: string; customerPhone: string; customerCity: string; comment?: string }) =>
+      req<{ ok: boolean }>(`/catalog-public/${slug}/reviews`, { method: "POST", body: JSON.stringify(data) }),
   },
   meetings: {
     list: () => req<MeetingItem[]>("/meetings"),

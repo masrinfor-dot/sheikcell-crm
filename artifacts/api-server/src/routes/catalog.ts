@@ -11,6 +11,7 @@ import {
   catalogProductPhotosTable,
   catalogCategoriesTable,
   catalogStockNotificationsTable,
+  catalogProductReviewsTable,
   appSettingsTable,
   tenantsTable,
   type CatalogCategory,
@@ -969,6 +970,96 @@ router.delete("/catalog/stock-notifications/:id", requireAuth, async (req, res):
   res.json({ ok: true });
 });
 
+// ─── Formas de pagamento (vitrine pública) ──────────────────────────────────
+// Configurável pela loja (mesmo padrão de TRUST_BADGES_KEY acima) — pedido
+// do lojista foi "deixa em branco pra eu cadastrar depois", então o padrão
+// aqui é lista VAZIA (sem nenhuma forma de pagamento pronta) — a seção "Ver
+// formas de pagamento" só aparece na vitrine pública depois que a loja
+// cadastrar pelo menos uma.
+
+type PaymentMethod = { title: string; description: string };
+const PAYMENT_METHODS_KEY = "catalog_payment_methods";
+
+function sanitizePaymentMethods(raw: unknown): PaymentMethod[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 10).map((b) => {
+    const o = (b ?? {}) as Record<string, unknown>;
+    return { title: clean(o.title, 60), description: clean(o.description, 140) };
+  }).filter((b) => b.title);
+}
+
+async function getPaymentMethods(tenantId: number): Promise<PaymentMethod[]> {
+  const [row] = await db.select().from(appSettingsTable)
+    .where(and(eq(appSettingsTable.tenantId, tenantId), eq(appSettingsTable.key, PAYMENT_METHODS_KEY))).limit(1);
+  if (!row) return [];
+  try {
+    return sanitizePaymentMethods(JSON.parse(row.value));
+  } catch {
+    return [];
+  }
+}
+
+router.get("/catalog/payment-methods", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  res.json({ methods: await getPaymentMethods(tenantId) });
+});
+
+router.put("/catalog/payment-methods", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const methods = sanitizePaymentMethods((req.body as { methods?: unknown }).methods);
+  await db.insert(appSettingsTable)
+    .values({ tenantId, key: PAYMENT_METHODS_KEY, value: JSON.stringify(methods) })
+    .onConflictDoUpdate({ target: [appSettingsTable.tenantId, appSettingsTable.key], set: { value: JSON.stringify(methods), updatedAt: new Date() } });
+  res.json({ methods });
+});
+
+// ─── Avaliações de clientes (estrelas + comentário) ─────────────────────────
+// Botão "Avaliar" só aparece na vitrine pública pra quem está no modo
+// varejo (sem o código de atacado desbloqueado — ver wholesaleUnlocked no
+// front). Sem aprovação prévia: aparece direto; a loja apaga pelo painel
+// (botão "Avaliações") se algum comentário for indevido.
+
+router.get("/catalog/reviews", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rows = await db.select().from(catalogProductReviewsTable)
+    .where(eq(catalogProductReviewsTable.tenantId, tenantId))
+    .orderBy(desc(catalogProductReviewsTable.createdAt)).limit(300);
+  const productIds = [...new Set(rows.map((r) => r.productId))];
+  const products = productIds.length > 0
+    ? await db.select({ id: catalogProductsTable.id, model: catalogProductsTable.model }).from(catalogProductsTable)
+        .where(and(inArray(catalogProductsTable.id, productIds), eq(catalogProductsTable.tenantId, tenantId)))
+    : [];
+  const productById = new Map(products.map((p) => [p.id, p.model]));
+  const variantIds = [...new Set(rows.map((r) => r.variantId).filter((v): v is number => v != null))];
+  const variants = variantIds.length > 0
+    ? await db.select({ id: catalogProductVariantsTable.id, storage: catalogProductVariantsTable.storage, color: catalogProductVariantsTable.color })
+        .from(catalogProductVariantsTable).where(inArray(catalogProductVariantsTable.id, variantIds))
+    : [];
+  const variantById = new Map(variants.map((v) => [v.id, v]));
+  res.json({
+    reviews: rows.map((r) => ({
+      id: r.id,
+      productId: r.productId,
+      model: productById.get(r.productId) ?? "(produto removido)",
+      variant: r.variantId != null ? variantById.get(r.variantId) ?? null : null,
+      rating: r.rating,
+      customerName: r.customerName,
+      customerPhone: r.customerPhone,
+      customerCity: r.customerCity,
+      comment: r.comment,
+      createdAt: r.createdAt,
+    })),
+  });
+});
+
+router.delete("/catalog/reviews/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = Number(req.params.id);
+  await db.delete(catalogProductReviewsTable)
+    .where(and(eq(catalogProductReviewsTable.id, id), eq(catalogProductReviewsTable.tenantId, tenantId)));
+  res.json({ ok: true });
+});
+
 // ─── Link público e contato (WhatsApp) da vitrine ───────────────────────────
 
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{1,38}[a-z0-9])?$/;
@@ -1520,13 +1611,29 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
     .where(and(eq(catalogProductsTable.tenantId, tenant.id), eq(catalogProductsTable.status, "active")))
     .orderBy(catalogProductsTable.sortOrder, desc(catalogProductsTable.createdAt));
   const ids = rows.map((r) => r.id);
-  const [photos, variants, categories, pricingSettings, trustBadges] = await Promise.all([
+  const [photos, variants, categories, pricingSettings, trustBadges, paymentMethods, reviewRows] = await Promise.all([
     photosByProductIds(tenant.id, ids),
     variantsByProductIds(tenant.id, ids),
     db.select().from(catalogCategoriesTable).where(eq(catalogCategoriesTable.tenantId, tenant.id)).orderBy(catalogCategoriesTable.sortOrder, catalogCategoriesTable.id),
     getPricingSettings(tenant.id),
     getTrustBadges(tenant.id),
+    getPaymentMethods(tenant.id),
+    ids.length > 0
+      ? db.select({ productId: catalogProductReviewsTable.productId, rating: catalogProductReviewsTable.rating })
+          .from(catalogProductReviewsTable)
+          .where(and(eq(catalogProductReviewsTable.tenantId, tenant.id), inArray(catalogProductReviewsTable.productId, ids)))
+      : Promise.resolve([]),
   ]);
+
+  // Média/contagem de avaliação por produto — calculado aqui (não guardado
+  // na tabela) pra nunca ficar desatualizado se uma avaliação for apagada.
+  const reviewsSummaryByProduct = new Map<number, { average: number; count: number }>();
+  for (const r of reviewRows) {
+    const cur = reviewsSummaryByProduct.get(r.productId) ?? { average: 0, count: 0 };
+    cur.average = (cur.average * cur.count + r.rating) / (cur.count + 1);
+    cur.count += 1;
+    reviewsSummaryByProduct.set(r.productId, cur);
+  }
 
   // Preço de atacado só sai na resposta se o código enviado bater com o
   // configurado pela loja — sem código configurado, ninguém vê (nem com
@@ -1548,6 +1655,10 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
     // Selos de confiança/garantia customizados pela loja — mostrados uma vez
     // por página (ver getTrustBadges/DEFAULT_TRUST_BADGES acima).
     trustBadges,
+    // Formas de pagamento cadastradas pela loja — lista vazia até a loja
+    // cadastrar a primeira (ver getPaymentMethods acima); o front só mostra
+    // a seção "Ver formas de pagamento" se vier pelo menos uma.
+    paymentMethods,
     // Nunca expõe custo/margem — só o que o cliente final (ou o
     // técnico/lojista com código, no caso do atacado) pode ver.
     products: rows
@@ -1559,6 +1670,11 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
         description: r.description,
         categoryId: r.categoryId,
         aiCharacteristics: r.aiCharacteristics ?? null,
+        // Resumo de avaliação (estrelas) — null quando o produto ainda não
+        // tem nenhuma avaliação, pro front não mostrar "0 avaliações".
+        reviewsSummary: reviewsSummaryByProduct.has(r.id)
+          ? { average: Math.round(reviewsSummaryByProduct.get(r.id)!.average * 10) / 10, count: reviewsSummaryByProduct.get(r.id)!.count }
+          : null,
         photos: publicPhotoIds(photos.get(r.id) ?? [], r.condition),
         variants: (variants.get(r.id) ?? [])
           .filter((v) => v.salePrice != null)
@@ -1625,6 +1741,50 @@ catalogPublicRouter.post("/catalog-public/:slug/notify-me", async (req: Request,
 
   await db.insert(catalogStockNotificationsTable).values({
     tenantId: tenant.id, productId, variantId, customerName, customerContact,
+  });
+  res.status(201).json({ ok: true });
+});
+
+// Avaliação de cliente (estrelas + comentário) — sem login, capturando
+// nome/telefone/cidade (pedido do lojista, pra confirmar que é venda real).
+// O front só mostra o botão pra quem está no modo varejo (sem código de
+// atacado desbloqueado), mas essa rota não impõe essa regra — é só de
+// interface; qualquer avaliação recebida aqui é válida.
+catalogPublicRouter.post("/catalog-public/:slug/reviews", async (req: Request, res: Response): Promise<void> => {
+  const rawSlug = Array.isArray(req.params.slug) ? req.params.slug[0] : req.params.slug;
+  const slug = (rawSlug ?? "").toLowerCase();
+  const [tenant] = await db.select({ id: tenantsTable.id }).from(tenantsTable)
+    .where(and(eq(tenantsTable.catalogSlug, slug), eq(tenantsTable.isActive, true))).limit(1);
+  if (!tenant) { res.status(404).json({ error: "Vitrine não encontrada" }); return; }
+
+  const body = req.body as Record<string, unknown>;
+  const productId = Number(body.productId);
+  const variantIdRaw = body.variantId;
+  const rating = Number(body.rating);
+  const customerName = clean(body.customerName, 100);
+  const customerPhone = clean(body.customerPhone, 40);
+  const customerCity = clean(body.customerCity, 100);
+  const comment = clean(body.comment, 500) || null;
+  if (!Number.isInteger(productId) || productId <= 0) { res.status(400).json({ error: "Produto inválido" }); return; }
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) { res.status(400).json({ error: "Nota inválida" }); return; }
+  if (!customerName || !customerPhone || !customerCity) { res.status(400).json({ error: "Informe nome, telefone e cidade" }); return; }
+
+  const [product] = await db.select({ id: catalogProductsTable.id }).from(catalogProductsTable)
+    .where(and(eq(catalogProductsTable.id, productId), eq(catalogProductsTable.tenantId, tenant.id))).limit(1);
+  if (!product) { res.status(404).json({ error: "Produto não encontrado" }); return; }
+
+  let variantId: number | null = null;
+  if (variantIdRaw != null) {
+    const vId = Number(variantIdRaw);
+    if (Number.isInteger(vId) && vId > 0) {
+      const [variant] = await db.select({ id: catalogProductVariantsTable.id }).from(catalogProductVariantsTable)
+        .where(and(eq(catalogProductVariantsTable.id, vId), eq(catalogProductVariantsTable.productId, productId), eq(catalogProductVariantsTable.tenantId, tenant.id))).limit(1);
+      if (variant) variantId = variant.id;
+    }
+  }
+
+  await db.insert(catalogProductReviewsTable).values({
+    tenantId: tenant.id, productId, variantId, rating, customerName, customerPhone, customerCity, comment,
   });
   res.status(201).json({ ok: true });
 });

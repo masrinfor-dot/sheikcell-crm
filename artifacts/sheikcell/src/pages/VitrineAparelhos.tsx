@@ -5,12 +5,12 @@ import {
   api, canEditModule, CATALOG_CONDITIONS, CATALOG_CONDITION_CRITERIA,
   type CatalogProduct, type CatalogPricingSettings, type CatalogImportItem, type CatalogCondition,
   type CatalogImportVariant, type CatalogPhotoSearchResult, type CatalogCategory,
-  type CatalogTrustBadge, type CatalogStockNotification,
+  type CatalogTrustBadge, type CatalogStockNotification, type CatalogPaymentMethod, type CatalogProductReview,
 } from "@/lib/api";
 import {
   Smartphone, Plus, X, Search, Trash2, Pencil, Sparkles, Settings2, Link2,
   Copy, ImagePlus, Check, AlertTriangle, Loader2, MessageCircle, Info, Calculator,
-  Tags, Lock, KeyRound, Package, ShieldCheck, Bell, Percent, ListChecks,
+  Tags, Lock, KeyRound, Package, ShieldCheck, Bell, Percent, ListChecks, CreditCard, Star,
 } from "lucide-react";
 
 function formatBRL(v: string | number | null): string {
@@ -178,6 +178,17 @@ export default function VitrineAparelhos() {
   const [stockNotifications, setStockNotifications] = useState<CatalogStockNotification[]>([]);
   const [showStockNotifications, setShowStockNotifications] = useState(false);
 
+  // Formas de pagamento — configuração da loja (título/descrição livres),
+  // começa vazia até a loja cadastrar a primeira (ver DEFAULT no backend).
+  const [showPaymentMethods, setShowPaymentMethods] = useState(false);
+  const [paymentMethodsForm, setPaymentMethodsForm] = useState<CatalogPaymentMethod[]>([]);
+  const [savingPaymentMethods, setSavingPaymentMethods] = useState(false);
+
+  // Avaliações de clientes (estrelas + comentário), capturadas na vitrine
+  // pública sem login — moderação manual (apagar comentário indevido).
+  const [reviews, setReviews] = useState<CatalogProductReview[]>([]);
+  const [showReviews, setShowReviews] = useState(false);
+
   // GET /catalog/wholesale-code devolve o código de acesso ao atacado em
   // texto puro — por isso o backend exige admin de verdade (requireAdmin),
   // diferente dos outros GETs desta tela (categorias, slug, WhatsApp), que
@@ -196,8 +207,9 @@ export default function VitrineAparelhos() {
       api.catalog.list(), api.catalog.getSlug(), api.catalog.getWhatsapp(), api.catalog.getWhatsappWholesale(),
       api.catalog.categories(), isAdmin ? api.catalog.getWholesaleCode() : Promise.resolve(null),
       api.catalog.getTrustBadges(), api.catalog.stockNotifications(),
+      api.catalog.getPaymentMethods(), api.catalog.reviews(),
     ])
-      .then(([l, s, w, ww, cats, wc, tb, sn]) => {
+      .then(([l, s, w, ww, cats, wc, tb, sn, pm, rv]) => {
         if (l.status === "fulfilled") { setProducts(l.value.products); setSettings(l.value.settings); }
         if (s.status === "fulfilled") { setSlug(s.value.slug); setSlugInput(s.value.slug ?? ""); }
         if (w.status === "fulfilled") { setWhatsapp(w.value.whatsapp); setWhatsappInput(w.value.whatsapp ?? ""); }
@@ -206,7 +218,9 @@ export default function VitrineAparelhos() {
         if (wc.status === "fulfilled" && wc.value) { setHasWholesaleCode(wc.value.hasCode); setWholesaleCodeInput(wc.value.code ?? ""); }
         if (tb.status === "fulfilled") setTrustBadgesForm(tb.value.badges);
         if (sn.status === "fulfilled") setStockNotifications(sn.value.notifications);
-        const failed = [l, s, w, ww, cats, wc, tb, sn].filter((r) => r.status === "rejected");
+        if (pm.status === "fulfilled") setPaymentMethodsForm(pm.value.methods);
+        if (rv.status === "fulfilled") setReviews(rv.value.reviews);
+        const failed = [l, s, w, ww, cats, wc, tb, sn, pm, rv].filter((r) => r.status === "rejected");
         if (failed.length > 0) {
           // eslint-disable-next-line no-console
           console.warn("[vitrine] falha ao carregar", failed.map((r) => (r as PromiseRejectedResult).reason));
@@ -464,6 +478,38 @@ export default function VitrineAparelhos() {
     setStockNotifications((prev) => prev.filter((x) => x.id !== id));
     try {
       await api.catalog.removeStockNotification(id);
+    } catch {
+      toast({ title: "Erro ao excluir", variant: "destructive" });
+      load();
+    }
+  };
+
+  // ─── Formas de pagamento ─────────────────────────────────────────────────
+  const updatePaymentMethod = (idx: number, patch: Partial<CatalogPaymentMethod>) => {
+    setPaymentMethodsForm((prev) => prev.map((b, i) => (i === idx ? { ...b, ...patch } : b)));
+  };
+  const addPaymentMethod = () => setPaymentMethodsForm((prev) => (prev.length < 10 ? [...prev, { title: "", description: "" }] : prev));
+  const removePaymentMethod = (idx: number) => setPaymentMethodsForm((prev) => prev.filter((_, i) => i !== idx));
+  const handleSavePaymentMethods = async () => {
+    if (savingPaymentMethods) return;
+    setSavingPaymentMethods(true);
+    try {
+      const r = await api.catalog.savePaymentMethods(paymentMethodsForm.filter((m) => m.title.trim()));
+      setPaymentMethodsForm(r.methods);
+      toast({ title: "Formas de pagamento atualizadas" });
+      setShowPaymentMethods(false);
+    } catch (err) {
+      toast({ title: "Erro ao salvar formas de pagamento", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    } finally {
+      setSavingPaymentMethods(false);
+    }
+  };
+
+  // ─── Avaliações de clientes ──────────────────────────────────────────────
+  const handleDeleteReview = async (id: number) => {
+    setReviews((prev) => prev.filter((r) => r.id !== id));
+    try {
+      await api.catalog.removeReview(id);
     } catch {
       toast({ title: "Erro ao excluir", variant: "destructive" });
       load();
@@ -839,6 +885,17 @@ export default function VitrineAparelhos() {
               <Bell className="w-3.5 h-3.5" /> Avise-me
               {pendingNotifications.length > 0 && (
                 <span className="ml-0.5 px-1.5 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-bold leading-none">{pendingNotifications.length}</span>
+              )}
+            </button>
+            <button onClick={() => setShowPaymentMethods(true)} data-testid="button-catalog-payment-methods"
+              className="flex items-center gap-1.5 px-3 py-2 bg-secondary text-foreground rounded-xl text-xs font-semibold hover:bg-secondary/70 transition">
+              <CreditCard className="w-3.5 h-3.5" /> Formas de pagamento
+            </button>
+            <button onClick={() => setShowReviews(true)} data-testid="button-catalog-reviews"
+              className="relative flex items-center gap-1.5 px-3 py-2 bg-secondary text-foreground rounded-xl text-xs font-semibold hover:bg-secondary/70 transition">
+              <Star className="w-3.5 h-3.5" /> Avaliações
+              {reviews.length > 0 && (
+                <span className="ml-0.5 px-1.5 py-0.5 rounded-full bg-neutral-600 text-white text-[10px] font-bold leading-none">{reviews.length}</span>
               )}
             </button>
             <button onClick={openCreate} data-testid="button-add-product"
@@ -1659,6 +1716,84 @@ export default function VitrineAparelhos() {
                       <Check className="w-3.5 h-3.5" />
                     </button>
                     <button type="button" onClick={() => handleDeleteNotification(n.id)} data-testid={`button-delete-notification-${n.id}`}
+                      className="p-1.5 rounded-lg hover:bg-red-50 text-red-600 shrink-0"><Trash2 className="w-3.5 h-3.5" /></button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: formas de pagamento */}
+      {showPaymentMethods && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-3 py-6 overflow-y-auto" onClick={() => setShowPaymentMethods(false)}>
+          <div className="bg-card rounded-xl w-full max-w-lg shadow-xl border overflow-hidden my-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <span className="font-semibold text-sm flex items-center gap-2"><CreditCard className="w-4 h-4 text-primary" /> Formas de pagamento</span>
+              <button onClick={() => setShowPaymentMethods(false)} className="p-1 rounded hover:bg-muted/60"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-4 space-y-3 max-h-[75vh] overflow-y-auto">
+              <p className="text-xs text-muted-foreground">Formas de pagamento mostradas na página de cada aparelho na vitrine pública (ex.: "Pix" / "15% de desconto", "Cartão de crédito" / "até 12x"). Começa vazio — cadastre as suas; sem nenhuma cadastrada, essa seção não aparece pro cliente.</p>
+              {paymentMethodsForm.length === 0 && (
+                <p className="text-xs text-muted-foreground text-center py-2">Nenhuma forma de pagamento cadastrada ainda.</p>
+              )}
+              {paymentMethodsForm.map((m, idx) => (
+                <div key={idx} className="rounded-lg border p-2.5 space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <input value={m.title} onChange={(e) => updatePaymentMethod(idx, { title: e.target.value })}
+                      placeholder="Título (ex.: Pix)" data-testid={`input-payment-method-title-${idx}`}
+                      className="flex-1 rounded border px-2 py-1.5 text-sm font-semibold focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                    <button type="button" onClick={() => removePaymentMethod(idx)} data-testid={`button-remove-payment-method-${idx}`}
+                      className="p-1.5 rounded hover:bg-red-50 text-red-600"><Trash2 className="w-3.5 h-3.5" /></button>
+                  </div>
+                  <input value={m.description} onChange={(e) => updatePaymentMethod(idx, { description: e.target.value })}
+                    placeholder="Descrição curta (ex.: 15% de desconto pagando na hora)" data-testid={`input-payment-method-description-${idx}`}
+                    className="w-full rounded border px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                </div>
+              ))}
+              {paymentMethodsForm.length < 10 && (
+                <button type="button" onClick={addPaymentMethod} data-testid="button-add-payment-method"
+                  className="flex items-center gap-1 text-xs font-semibold text-primary hover:underline">
+                  <Plus className="w-3 h-3" /> Adicionar forma de pagamento
+                </button>
+              )}
+              <button onClick={handleSavePaymentMethods} disabled={savingPaymentMethods} data-testid="button-save-payment-methods"
+                className="w-full py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition">
+                {savingPaymentMethods ? "Salvando..." : "Salvar formas de pagamento"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: avaliações de clientes */}
+      {showReviews && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-3 py-6 overflow-y-auto" onClick={() => setShowReviews(false)}>
+          <div className="bg-card rounded-xl w-full max-w-lg shadow-xl border overflow-hidden my-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <span className="font-semibold text-sm flex items-center gap-2"><Star className="w-4 h-4 text-primary" /> Avaliações de clientes</span>
+              <button onClick={() => setShowReviews(false)} className="p-1 rounded hover:bg-muted/60"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-4 space-y-2 max-h-[75vh] overflow-y-auto">
+              <p className="text-xs text-muted-foreground">Avaliações (estrelas + comentário) feitas por clientes na vitrine pública, no modo varejo. Aparecem direto na vitrine sem revisão prévia — apague aqui se algum comentário for indevido.</p>
+              {reviews.length === 0 ? (
+                <p className="text-xs text-muted-foreground text-center py-6">Nenhuma avaliação ainda.</p>
+              ) : (
+                reviews.map((r) => (
+                  <div key={r.id} data-testid={`review-${r.id}`} className="rounded-lg border p-2.5 flex items-start gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1 mb-0.5">
+                        {[1, 2, 3, 4, 5].map((n) => (
+                          <Star key={n} className={`w-3 h-3 ${n <= r.rating ? "fill-amber-400 text-amber-400" : "text-neutral-300"}`} />
+                        ))}
+                      </div>
+                      <p className="text-sm font-semibold truncate">{r.model}{r.variant ? ` — ${[r.variant.storage, r.variant.color].filter(Boolean).join(" · ")}` : ""}</p>
+                      <p className="text-xs text-muted-foreground">{r.customerName} · {r.customerPhone} · {r.customerCity}</p>
+                      {r.comment && <p className="text-xs text-foreground/80 mt-1">{r.comment}</p>}
+                      <p className="text-[10px] text-muted-foreground mt-0.5">{new Date(r.createdAt).toLocaleString("pt-BR")}</p>
+                    </div>
+                    <button type="button" onClick={() => handleDeleteReview(r.id)} data-testid={`button-delete-review-${r.id}`}
                       className="p-1.5 rounded-lg hover:bg-red-50 text-red-600 shrink-0"><Trash2 className="w-3.5 h-3.5" /></button>
                   </div>
                 ))

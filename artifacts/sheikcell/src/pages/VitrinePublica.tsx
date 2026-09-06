@@ -1,9 +1,9 @@
 import { useState, useEffect, useMemo } from "react";
 import { useParams } from "wouter";
-import { api, CATALOG_CONDITIONS, CATALOG_CONDITION_CRITERIA, type CatalogPublicProduct, type CatalogCategory, type CatalogTrustBadge } from "@/lib/api";
+import { api, CATALOG_CONDITIONS, CATALOG_CONDITION_CRITERIA, type CatalogPublicProduct, type CatalogCategory, type CatalogTrustBadge, type CatalogPaymentMethod } from "@/lib/api";
 import {
   Smartphone, MessageCircle, PackageX, Info, Lock, ShoppingCart, Plus, Minus, X, Unlock, Search,
-  ShieldCheck, BellRing, ListChecks, Tag,
+  ShieldCheck, BellRing, ListChecks, Tag, Star, CreditCard,
 } from "lucide-react";
 import { Carousel, CarouselContent, CarouselItem, CarouselPrevious, CarouselNext, type CarouselApi } from "@/components/ui/carousel";
 
@@ -14,7 +14,7 @@ import { Carousel, CarouselContent, CarouselItem, CarouselPrevious, CarouselNext
 
 type PublicData = {
   storeName: string; whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
-  categories: CatalogCategory[]; products: CatalogPublicProduct[]; trustBadges: CatalogTrustBadge[];
+  categories: CatalogCategory[]; products: CatalogPublicProduct[]; trustBadges: CatalogTrustBadge[]; paymentMethods: CatalogPaymentMethod[];
 };
 
 // Preço "de/por": só mostra desconto se a loja preencheu um preço "de" maior
@@ -236,9 +236,9 @@ function ProductCard({
 // variando (primeiro escolhe a cor, depois só os armazenamentos daquela
 // cor aparecem pra escolher).
 function ProductDetailModal({
-  p, wholesaleUnlocked, slug, trustBadges, onAddToCart, onClose,
+  p, wholesaleUnlocked, slug, trustBadges, paymentMethods, onAddToCart, onClose,
 }: {
-  p: CatalogPublicProduct; wholesaleUnlocked: boolean; slug: string; trustBadges: CatalogTrustBadge[];
+  p: CatalogPublicProduct; wholesaleUnlocked: boolean; slug: string; trustBadges: CatalogTrustBadge[]; paymentMethods: CatalogPaymentMethod[];
   onAddToCart: (item: { productId: number; variantId: number; model: string; storage: string | null; unitPrice: number | null; wholesale: boolean }, qty: number) => void;
   onClose: () => void;
 }) {
@@ -254,6 +254,18 @@ function ProductDetailModal({
   const [notifySending, setNotifySending] = useState(false);
   const [notifyDone, setNotifyDone] = useState(false);
   const [notifyError, setNotifyError] = useState<string | null>(null);
+  const [showPaymentMethods, setShowPaymentMethods] = useState(false);
+  // "Avaliar este aparelho" — só aparece pra quem está no modo varejo (sem o
+  // código de atacado desbloqueado, ver wholesaleUnlocked acima).
+  const [showReviewForm, setShowReviewForm] = useState(false);
+  const [reviewRating, setReviewRating] = useState(5);
+  const [reviewName, setReviewName] = useState("");
+  const [reviewPhone, setReviewPhone] = useState("");
+  const [reviewCity, setReviewCity] = useState("");
+  const [reviewComment, setReviewComment] = useState("");
+  const [reviewSending, setReviewSending] = useState(false);
+  const [reviewDone, setReviewDone] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!carouselApi) return;
@@ -312,6 +324,9 @@ function ProductDetailModal({
     setShowNotifyMe(false);
     setNotifyDone(false);
     setNotifyError(null);
+    setShowReviewForm(false);
+    setReviewDone(false);
+    setReviewError(null);
   }, [selectedId]);
 
   const handleNotifySubmit = async () => {
@@ -328,6 +343,24 @@ function ProductDetailModal({
       setNotifyError(err instanceof Error ? err.message : "Não foi possível enviar agora. Tente de novo.");
     } finally {
       setNotifySending(false);
+    }
+  };
+
+  const handleReviewSubmit = async () => {
+    if (reviewSending || !reviewName.trim() || !reviewPhone.trim() || !reviewCity.trim()) return;
+    setReviewSending(true);
+    setReviewError(null);
+    try {
+      await api.catalog.submitReview(slug, {
+        productId: p.id, variantId: selected?.id ?? null, rating: reviewRating,
+        customerName: reviewName.trim(), customerPhone: reviewPhone.trim(), customerCity: reviewCity.trim(),
+        comment: reviewComment.trim() || undefined,
+      });
+      setReviewDone(true);
+    } catch (err) {
+      setReviewError(err instanceof Error ? err.message : "Não foi possível enviar agora. Tente de novo.");
+    } finally {
+      setReviewSending(false);
     }
   };
 
@@ -380,6 +413,14 @@ function ProductDetailModal({
             </button>
             {!inStock && <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-red-100 text-red-600">Esgotado</span>}
           </div>
+          {p.reviewsSummary && (
+            <div className="flex items-center gap-1">
+              {[1, 2, 3, 4, 5].map((n) => (
+                <Star key={n} className={`w-3.5 h-3.5 ${n <= Math.round(p.reviewsSummary!.average) ? "fill-amber-400 text-amber-400" : "text-neutral-300"}`} />
+              ))}
+              <span className="text-xs text-neutral-500">{p.reviewsSummary.average.toFixed(1)} · {p.reviewsSummary.count} avaliaç{p.reviewsSummary.count === 1 ? "ão" : "ões"}</span>
+            </div>
+          )}
           {showCriteria && (
             <div className="rounded-lg bg-neutral-50 border border-neutral-200 p-2 space-y-0.5">
               {criteria.map((c) => (
@@ -448,6 +489,25 @@ function ProductDetailModal({
                 {wholesaleInstallmentLabel && <p className="text-xs text-amber-600">{wholesaleInstallmentLabel}</p>}
               </>
             )}
+            {paymentMethods.length > 0 && (
+              <button type="button" onClick={() => setShowPaymentMethods((v) => !v)} data-testid="button-toggle-payment-methods"
+                className="mt-0.5 text-xs font-semibold text-blue-600 hover:underline">
+                Ver as formas de pagamento
+              </button>
+            )}
+            {showPaymentMethods && paymentMethods.length > 0 && (
+              <div className="mt-1.5 rounded-lg bg-neutral-50 border border-neutral-200 p-2.5 space-y-1.5">
+                {paymentMethods.map((m, i) => (
+                  <div key={i} className="flex items-start gap-2">
+                    <CreditCard className="w-3.5 h-3.5 text-neutral-500 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="text-xs font-semibold text-neutral-700">{m.title}</p>
+                      {m.description && <p className="text-[11px] text-neutral-400">{m.description}</p>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
 
             {inStock ? (
               <>
@@ -495,6 +555,44 @@ function ProductDetailModal({
               </button>
             )}
           </div>
+
+          {!wholesaleUnlocked && (
+            <div className="pt-1 border-t border-neutral-100">
+              {reviewDone ? (
+                <p className="mt-2 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2.5 text-center">Obrigado pela avaliação!</p>
+              ) : showReviewForm ? (
+                <div className="mt-2 rounded-xl border border-neutral-200 p-3 space-y-2">
+                  <p className="text-xs font-semibold text-neutral-700">Avaliar este aparelho</p>
+                  <div className="flex items-center gap-1">
+                    {[1, 2, 3, 4, 5].map((n) => (
+                      <button key={n} type="button" onClick={() => setReviewRating(n)} data-testid={`button-review-star-${n}`} aria-label={`${n} estrela(s)`}>
+                        <Star className={`w-5 h-5 ${n <= reviewRating ? "fill-amber-400 text-amber-400" : "text-neutral-300"}`} />
+                      </button>
+                    ))}
+                  </div>
+                  <input value={reviewName} onChange={(e) => setReviewName(e.target.value)} placeholder="Seu nome" data-testid="input-review-name"
+                    className="w-full rounded-lg border px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-400" />
+                  <input value={reviewPhone} onChange={(e) => setReviewPhone(e.target.value)} placeholder="Telefone" data-testid="input-review-phone"
+                    className="w-full rounded-lg border px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-400" />
+                  <input value={reviewCity} onChange={(e) => setReviewCity(e.target.value)} placeholder="Cidade" data-testid="input-review-city"
+                    className="w-full rounded-lg border px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-400" />
+                  <textarea value={reviewComment} onChange={(e) => setReviewComment(e.target.value)} placeholder="Comentário (opcional)" data-testid="input-review-comment" rows={2}
+                    className="w-full rounded-lg border px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-400 resize-none" />
+                  {reviewError && <p className="text-xs text-red-600">{reviewError}</p>}
+                  <button type="button" onClick={handleReviewSubmit} disabled={reviewSending || !reviewName.trim() || !reviewPhone.trim() || !reviewCity.trim()}
+                    data-testid="button-submit-review"
+                    className="w-full py-2 rounded-lg bg-neutral-900 text-white text-sm font-semibold hover:bg-neutral-800 disabled:opacity-40 transition">
+                    {reviewSending ? "Enviando..." : "Enviar avaliação"}
+                  </button>
+                </div>
+              ) : (
+                <button type="button" onClick={() => setShowReviewForm(true)} data-testid="button-open-review-form"
+                  className="mt-2 inline-flex items-center justify-center gap-1.5 w-full py-2 rounded-xl bg-neutral-100 text-neutral-700 text-sm font-semibold hover:bg-neutral-200 transition">
+                  <Star className="w-4 h-4" /> Avaliar este aparelho
+                </button>
+              )}
+            </div>
+          )}
 
           {trustBadges.length > 0 && (
             <div className="grid grid-cols-1 gap-1.5 pt-1 border-t border-neutral-100">
@@ -854,6 +952,7 @@ export default function VitrinePublica() {
           wholesaleUnlocked={data.wholesaleUnlocked}
           slug={slug}
           trustBadges={data.trustBadges}
+          paymentMethods={data.paymentMethods}
           onAddToCart={(item, qty) => { addToCart(item, qty); setDetailProduct(null); }}
           onClose={() => setDetailProduct(null)}
         />

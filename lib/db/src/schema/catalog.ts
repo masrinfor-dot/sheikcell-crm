@@ -196,3 +196,24 @@ export const catalogStockNotificationsTable = pgTable("catalog_stock_notificatio
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 export type CatalogStockNotification = typeof catalogStockNotificationsTable.$inferSelect;
+
+// Avaliação de cliente (estrelas + comentário) — só aparece o botão "Avaliar"
+// na vitrine pública pra quem está no modo varejo (sem o código de atacado
+// desbloqueado, ver wholesaleUnlocked no front). Pede nome/telefone/cidade
+// (mesma ideia do "avise-me") pra loja poder confirmar que é venda real, não
+// pra criar conta nenhuma. Sem moderação/aprovação prévia — aparece direto na
+// vitrine; a loja apaga manualmente pelo painel (botão "Avaliações") se
+// algum comentário for indevido.
+export const catalogProductReviewsTable = pgTable("catalog_product_reviews", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  productId: integer("product_id").notNull().references(() => catalogProductsTable.id, { onDelete: "cascade" }),
+  variantId: integer("variant_id").references(() => catalogProductVariantsTable.id, { onDelete: "cascade" }),
+  rating: integer("rating").notNull(), // 1 a 5
+  customerName: text("customer_name").notNull(),
+  customerPhone: text("customer_phone").notNull(),
+  customerCity: text("customer_city").notNull(),
+  comment: text("comment"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type CatalogProductReview = typeof catalogProductReviewsTable.$inferSelect;
