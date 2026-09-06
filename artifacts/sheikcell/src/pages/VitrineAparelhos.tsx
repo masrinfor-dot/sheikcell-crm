@@ -140,6 +140,20 @@ function storagesLabel(p: CatalogProduct): string {
   return list.join(", ");
 }
 
+// Espelha a mesma checagem do backend (rota /catalog/products/photos/fetch-missing):
+// um produto "precisa de mais foto" não é só quem está com ZERO fotos — é também
+// quem já tem alguma foto geral mas ainda não tem uma foto própria de cada cor
+// cadastrada (até o teto de 8). Sem isso, o botão "Buscar fotos que faltam" some
+// assim que todo produto ganha ao menos 1 foto, mesmo faltando foto de cor.
+const AUTO_PHOTO_MAX_PER_PRODUCT = 8;
+function productNeedsMorePhotos(p: CatalogProduct): boolean {
+  const target = Math.min(AUTO_PHOTO_MAX_PER_PRODUCT, p.colors.length > 0 ? p.colors.length : 3);
+  const coveredColors = new Set(p.photos.map((ph) => ph.color).filter((c): c is string => !!c));
+  const missingColors = p.colors.filter((c) => !coveredColors.has(c));
+  const needed = Math.max(0, target - p.photos.length);
+  return needed > 0 && (missingColors.length > 0 || p.colors.length === 0);
+}
+
 // Ordenação da listagem — "Mais novos primeiro" é sempre o padrão (pedido
 // do lojista). Sem cadastro de geração/ano no sistema (o campo "modelo" é
 // texto livre), usa o primeiro número que aparecer no nome como aproximação
@@ -1270,7 +1284,7 @@ export default function VitrineAparelhos() {
             <MessageCircle className="w-3.5 h-3.5" /> Copiar catálogo pro WhatsApp
           </button>
         )}
-        {canManage && products.some((p) => p.photos.length === 0) && (
+        {canManage && products.some(productNeedsMorePhotos) && (
           <button onClick={handleFetchMissingPhotos} disabled={fetchingMissingPhotos} data-testid="button-fetch-missing-photos"
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-700 hover:bg-amber-200 transition disabled:opacity-60">
             {fetchingMissingPhotos ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ImagePlus className="w-3.5 h-3.5" />}
