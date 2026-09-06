@@ -3,6 +3,7 @@ import path from "path";
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
 import { mkdir, writeFile, unlink } from "fs/promises";
+import sharp from "sharp";
 import { eq, and, desc, inArray, sql } from "drizzle-orm";
 import {
   db,
@@ -51,6 +52,54 @@ const PHOTO_MIME: Record<string, string> = {
   "image/webp": "webp",
 };
 const MAX_PHOTO_SIZE = 8 * 1024 * 1024; // 8MB
+
+// Fotos de fornecedores chegam com quantidades bem diferentes de "moldura"
+// em branco ao redor do aparelho — algumas já vêm bem enquadradas, outras
+// sobram com bastante espaço vazio. Isso fazia a mesma caixa (aspect-square)
+// na vitrine mostrar um aparelho grande numa foto e minúsculo em outra.
+// Para corrigir isso de forma automática (sem precisar reprocessar upload por
+// upload), recortamos a margem de cor sólida ao servir o arquivo, com cache
+// em disco para não repetir o processamento a cada request.
+const TRIMMED_PHOTO_CACHE_DIR = path.join(CATALOG_MEDIA_DIR, ".trimmed");
+
+async function getTrimmedPhotoPath(originalPath: string): Promise<string> {
+  const ext = path.extname(originalPath) || ".jpg";
+  const base = path.basename(originalPath, ext);
+  const trimmedPath = path.join(TRIMMED_PHOTO_CACHE_DIR, `${base}${ext}`);
+  if (existsSync(trimmedPath)) return trimmedPath;
+  try {
+    const originalMeta = await sharp(originalPath).metadata();
+    if (!originalMeta.width || !originalMeta.height) return originalPath;
+    // Importante: .metadata() num pipeline com .trim() pendente NÃO reflete o
+    // resultado do recorte (retorna as dimensões de entrada) — só rodando o
+    // pipeline de fato (toBuffer/toFile) dá o tamanho real pós-recorte. Por
+    // isso já executamos aqui e reaproveitamos o buffer para gravar o cache.
+    const { data, info } = await sharp(originalPath).trim({ threshold: 12 }).toBuffer({ resolveWithObject: true });
+    if (!info.width || !info.height) return originalPath;
+    // Segurança: um aparelho pequeno numa foto bem "sobrando de espaço" é
+    // exatamente o caso que queremos corrigir (recorte agressivo é o objetivo
+    // aqui), então não limitamos por proporção do tamanho original — só
+    // rejeitamos um resultado praticamente vazio, sinal de que a foto não tem
+    // uma borda de cor sólida clara para detectar (ex.: já ocupa o quadro
+    // inteiro) e o algoritmo de recorte "quebrou".
+    const brokeCompletely = info.width < 24 || info.height < 24;
+    if (brokeCompletely) return originalPath;
+    await mkdir(TRIMMED_PHOTO_CACHE_DIR, { recursive: true });
+    await writeFile(trimmedPath, data);
+    return trimmedPath;
+  } catch (err) {
+    logger.warn({ err, originalPath }, "Falha ao recortar espaço em branco da foto do catálogo");
+    return originalPath;
+  }
+}
+
+async function removeTrimmedPhotoCache(storedName: string): Promise<void> {
+  const original = path.join(CATALOG_MEDIA_DIR, path.basename(storedName));
+  const ext = path.extname(original) || ".jpg";
+  const base = path.basename(original, ext);
+  const trimmedPath = path.join(TRIMMED_PHOTO_CACHE_DIR, `${base}${ext}`);
+  if (existsSync(trimmedPath)) await unlink(trimmedPath).catch(() => {});
+}
 
 function photoContentMatchesMime(buf: Buffer, mime: string): boolean {
   const startsWith = (sig: number[]) => sig.every((b, i) => buf[i] === b);
@@ -524,6 +573,7 @@ router.delete("/catalog/products/:id", requireAuth, async (req, res): Promise<vo
   for (const p of photoRows) {
     const filepath = path.join(CATALOG_MEDIA_DIR, path.basename(p.storedName));
     if (existsSync(filepath)) await unlink(filepath).catch(() => {});
+    await removeTrimmedPhotoCache(p.storedName);
   }
   res.json({ ok: true });
 });
@@ -550,6 +600,7 @@ router.post("/catalog/products/bulk-delete", requireAuth, async (req, res): Prom
   for (const p of photoRows) {
     const filepath = path.join(CATALOG_MEDIA_DIR, path.basename(p.storedName));
     if (existsSync(filepath)) await unlink(filepath).catch(() => {});
+    await removeTrimmedPhotoCache(p.storedName);
   }
   res.json({ ok: true, deleted: ownedIds.length });
 });
@@ -826,6 +877,7 @@ router.delete("/catalog/products/:id/photos/:photoId", requireAuth, async (req, 
   await db.delete(catalogProductPhotosTable).where(eq(catalogProductPhotosTable.id, photoId));
   const filepath = path.join(CATALOG_MEDIA_DIR, path.basename(photo.storedName));
   if (existsSync(filepath)) await unlink(filepath).catch(() => {});
+  await removeTrimmedPhotoCache(photo.storedName);
   res.json({ ok: true });
 });
 
@@ -1919,7 +1971,10 @@ catalogPublicRouter.get("/catalog-public/photos/:photoId/file", async (req: Requ
   if (!photo) { res.status(404).json({ error: "Foto não encontrada" }); return; }
   const filepath = path.join(CATALOG_MEDIA_DIR, path.basename(photo.storedName));
   if (!existsSync(filepath)) { res.status(404).json({ error: "Arquivo não encontrado no servidor" }); return; }
-  res.setHeader("Cache-Control", "public, max-age=3600");
+  // ?raw=1 pula o recorte automático (útil se algum dia precisarmos comparar
+  // com o arquivo original enviado pelo fornecedor).
+  const servedPath = req.query["raw"] === "1" ? filepath : await getTrimmedPhotoPath(filepath);
+  res.setHeader("Cache-Control", "public, max-age=86400");
   res.setHeader("X-Content-Type-Options", "nosniff");
-  res.sendFile(filepath);
+  res.sendFile(servedPath);
 });
