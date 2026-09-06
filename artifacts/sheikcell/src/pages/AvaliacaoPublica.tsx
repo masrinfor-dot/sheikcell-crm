@@ -86,6 +86,44 @@ export default function AvaliacaoPublica() {
     ]).catch((e) => setError(e instanceof Error ? e.message : "Avaliação não disponível"));
   }, [slug]);
 
+  // IMPORTANTE: todo Hook (useState/useEffect/useMemo) precisa ser chamado
+  // em toda renderização, na mesma ordem — inclusive enquanto `questions`
+  // ainda não carregou. Por isso `questionList`/`device`/etc. abaixo são só
+  // valores comuns (não Hooks) com fallback seguro pra `questions` nulo, e o
+  // useMemo do whatsapp vem ANTES dos retornos antecipados de loading/erro
+  // logo depois. Antes essa ordem estava invertida — o useMemo só passava a
+  // ser chamado DEPOIS que `questions` carregava, e o React quebrava com
+  // "Rendered more hooks than during the previous render" (tela em branco)
+  // assim que a avaliação terminava de carregar.
+  const questionList = questions ? (isAppleBrand(brand) ? questions.apple : questions.android) : [];
+  const deviceOk = Boolean(brand.trim() && model.trim());
+  const allAnswered = questionList.length > 0 && questionList.every((q) => answers[q.key]);
+  const device = [brand.trim(), model.trim(), memory, color].filter(Boolean).join(" ");
+  const conditionLines = questionList
+    .filter((q) => answers[q.key])
+    .map((q) => `${q.label}: ${answers[q.key]}`);
+
+  // Mensagem pronta pro WhatsApp — calculada sempre (não só depois do
+  // clique), assim o link fica pronto num <a> normal em vez de window.open
+  // async (que navegador costuma bloquear se não for direto no clique).
+  const whatsappMessage = useMemo(() => {
+    const lines = [
+      blockedMessage
+        ? `Olá! Quero vender meu ${device || "aparelho"} — pedi uma avaliação no site mas esse caso precisa ser visto por vocês.`
+        : `Olá! Fiz uma avaliação do meu ${device || "aparelho"} no site e quero ${isTroca ? "usar ele de entrada numa troca" : "vender"}.`,
+      "",
+      `Aparelho: ${device || "-"}`,
+      ...(conditionLines.length > 0 ? ["Estado:", ...conditionLines.map((l) => `- ${l}`)] : []),
+      ...(result ? [`Valor estimado: ${result.estimatedPrice} (a confirmar depois de conferir o aparelho)`] : []),
+      "",
+      `Nome: ${leadName.trim()}`,
+      `Telefone: ${leadPhone.trim()}`,
+    ];
+    return lines.join("\n");
+  }, [blockedMessage, device, conditionLines, result, isTroca, leadName, leadPhone]);
+
+  const waUrl = waLink(whatsapp, whatsappMessage);
+
   if (error) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-neutral-50 px-4">
@@ -104,10 +142,6 @@ export default function AvaliacaoPublica() {
       </div>
     );
   }
-
-  const questionList = isAppleBrand(brand) ? questions.apple : questions.android;
-  const deviceOk = Boolean(brand.trim() && model.trim());
-  const allAnswered = questionList.length > 0 && questionList.every((q) => answers[q.key]);
 
   const confirmContact = () => {
     setContactError(null);
@@ -136,32 +170,6 @@ export default function AvaliacaoPublica() {
       setEstimating(false);
     }
   };
-
-  const device = [brand.trim(), model.trim(), memory, color].filter(Boolean).join(" ");
-  const conditionLines = questionList
-    .filter((q) => answers[q.key])
-    .map((q) => `${q.label}: ${answers[q.key]}`);
-
-  // Mensagem pronta pro WhatsApp — calculada sempre (não só depois do
-  // clique), assim o link fica pronto num <a> normal em vez de window.open
-  // async (que navegador costuma bloquear se não for direto no clique).
-  const whatsappMessage = useMemo(() => {
-    const lines = [
-      blockedMessage
-        ? `Olá! Quero vender meu ${device || "aparelho"} — pedi uma avaliação no site mas esse caso precisa ser visto por vocês.`
-        : `Olá! Fiz uma avaliação do meu ${device || "aparelho"} no site e quero ${isTroca ? "usar ele de entrada numa troca" : "vender"}.`,
-      "",
-      `Aparelho: ${device || "-"}`,
-      ...(conditionLines.length > 0 ? ["Estado:", ...conditionLines.map((l) => `- ${l}`)] : []),
-      ...(result ? [`Valor estimado: ${result.estimatedPrice} (a confirmar depois de conferir o aparelho)`] : []),
-      "",
-      `Nome: ${leadName.trim()}`,
-      `Telefone: ${leadPhone.trim()}`,
-    ];
-    return lines.join("\n");
-  }, [blockedMessage, device, conditionLines, result, isTroca, leadName, leadPhone]);
-
-  const waUrl = waLink(whatsapp, whatsappMessage);
 
   // Registra o lead no CRM da loja (fire-and-forget na hora do clique final
   // — nunca deve travar o redirecionamento/aplicação do desconto se falhar,
