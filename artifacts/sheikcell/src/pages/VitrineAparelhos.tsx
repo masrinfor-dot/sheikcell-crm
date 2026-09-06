@@ -6,12 +6,13 @@ import {
   type CatalogProduct, type CatalogPricingSettings, type CatalogImportItem, type CatalogCondition,
   type CatalogImportVariant, type CatalogPhotoSearchResult, type CatalogCategory,
   type CatalogTrustBadge, type CatalogStockNotification, type CatalogPaymentMethod, type CatalogProductReview,
-  type CatalogMarketCheckVerdict,
+  type CatalogMarketCheckVerdict, type TradeInEvaluation,
 } from "@/lib/api";
+import { waLink } from "@/lib/utils";
 import {
   Smartphone, Plus, X, Search, Trash2, Pencil, Sparkles, Settings2, Link2,
   Copy, ImagePlus, Check, AlertTriangle, Loader2, MessageCircle, Info, Calculator,
-  Tags, Lock, KeyRound, Package, ShieldCheck, Bell, Percent, ListChecks, CreditCard, Star,
+  Tags, Lock, KeyRound, Package, ShieldCheck, Bell, Percent, ListChecks, CreditCard, Star, Wallet,
 } from "lucide-react";
 
 function formatBRL(v: string | number | null): string {
@@ -297,6 +298,18 @@ export default function VitrineAparelhos() {
   const [reviews, setReviews] = useState<CatalogProductReview[]>([]);
   const [showReviews, setShowReviews] = useState(false);
 
+  // Avaliações de USADO feitas pelo próprio cliente na vitrine pública
+  // (source="public_lead" — ver tradeInPublicRouter/AvaliacaoPublica.tsx),
+  // sem intervenção de atendente. Pedido do lojista (06/09): "se o cliente
+  // não chama no whats fica registrado para o vendedor chamar" — como o
+  // fluxo público sempre grava o lead no mesmo módulo de Avaliação de
+  // Usados (com telefone, mesmo que o cliente nunca abra o WhatsApp),
+  // só precisa expor essa lista aqui na Vitrine, sem mexer no backend.
+  const [tradeInLeads, setTradeInLeads] = useState<TradeInEvaluation[]>([]);
+  const [showTradeInLeads, setShowTradeInLeads] = useState(false);
+  const publicTradeInLeads = tradeInLeads.filter((t) => t.source === "public_lead");
+  const pendingTradeInLeads = publicTradeInLeads.filter((t) => !t.closedAt);
+
   // GET /catalog/wholesale-code devolve o código de acesso ao atacado em
   // texto puro — por isso o backend exige admin de verdade (requireAdmin),
   // diferente dos outros GETs desta tela (categorias, slug, WhatsApp), que
@@ -316,8 +329,12 @@ export default function VitrineAparelhos() {
       api.catalog.categories(), isAdmin ? api.catalog.getWholesaleCode() : Promise.resolve(null),
       api.catalog.getTrustBadges(), api.catalog.stockNotifications(),
       api.catalog.getPaymentMethods(), api.catalog.reviews(),
+      // Best-effort: só falha (e é ignorado, sem toast de erro) se a loja não
+      // tiver o módulo "Avaliação de Usados" habilitado — a Vitrine funciona
+      // normalmente sem essa lista nesse caso.
+      api.tradeIn.list().catch(() => []),
     ])
-      .then(([l, s, w, ww, cats, wc, tb, sn, pm, rv]) => {
+      .then(([l, s, w, ww, cats, wc, tb, sn, pm, rv, ti]) => {
         if (l.status === "fulfilled") { setProducts(l.value.products); setSettings(l.value.settings); }
         if (s.status === "fulfilled") { setSlug(s.value.slug); setSlugInput(s.value.slug ?? ""); }
         if (w.status === "fulfilled") { setWhatsapp(w.value.whatsapp); setWhatsappInput(w.value.whatsapp ?? ""); }
@@ -328,6 +345,7 @@ export default function VitrineAparelhos() {
         if (sn.status === "fulfilled") setStockNotifications(sn.value.notifications);
         if (pm.status === "fulfilled") setPaymentMethodsForm(pm.value.methods);
         if (rv.status === "fulfilled") setReviews(rv.value.reviews);
+        if (ti.status === "fulfilled") setTradeInLeads(ti.value);
         const failed = [l, s, w, ww, cats, wc, tb, sn, pm, rv].filter((r) => r.status === "rejected");
         if (failed.length > 0) {
           // eslint-disable-next-line no-console
@@ -1083,6 +1101,15 @@ export default function VitrineAparelhos() {
                 <span className="ml-0.5 px-1.5 py-0.5 rounded-full bg-neutral-600 text-white text-[10px] font-bold leading-none">{reviews.length}</span>
               )}
             </button>
+            {publicTradeInLeads.length > 0 && (
+              <button onClick={() => setShowTradeInLeads(true)} data-testid="button-catalog-tradein-leads"
+                className="relative flex items-center gap-1.5 px-3 py-2 bg-secondary text-foreground rounded-xl text-xs font-semibold hover:bg-secondary/70 transition">
+                <Wallet className="w-3.5 h-3.5" /> Avaliações de usado
+                {pendingTradeInLeads.length > 0 && (
+                  <span className="ml-0.5 px-1.5 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-bold leading-none">{pendingTradeInLeads.length}</span>
+                )}
+              </button>
+            )}
             <button onClick={openCreate} data-testid="button-add-product"
               className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition">
               <Plus className="w-3.5 h-3.5" /> Novo aparelho
@@ -2100,6 +2127,51 @@ export default function VitrineAparelhos() {
                       className="p-1.5 rounded-lg hover:bg-red-50 text-red-600 shrink-0"><Trash2 className="w-3.5 h-3.5" /></button>
                   </div>
                 ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: avaliações de usado feitas pelo cliente na vitrine pública */}
+      {showTradeInLeads && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-3 py-6 overflow-y-auto" onClick={() => setShowTradeInLeads(false)}>
+          <div className="bg-card rounded-xl w-full max-w-lg shadow-xl border overflow-hidden my-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <span className="font-semibold text-sm flex items-center gap-2"><Wallet className="w-4 h-4 text-primary" /> Avaliações de usado (vitrine pública)</span>
+              <button onClick={() => setShowTradeInLeads(false)} className="p-1 rounded hover:bg-muted/60"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-4 space-y-2 max-h-[75vh] overflow-y-auto">
+              <p className="text-xs text-muted-foreground">
+                Clientes que avaliaram o próprio usado na vitrine (venda avulsa ou troca) e deixaram nome/telefone — mesmo quando não chamam no WhatsApp, o lead fica registrado aqui pro vendedor entrar em contato. Todas também aparecem no módulo "Avaliação de Usados".
+              </p>
+              {publicTradeInLeads.length === 0 ? (
+                <p className="text-xs text-muted-foreground text-center py-6">Nenhuma avaliação feita pelo cliente ainda.</p>
+              ) : (
+                publicTradeInLeads.map((t) => {
+                  const wa = waLink(t.sellerPhone, `Olá, ${t.customerName ?? ""}! Vi que você avaliou o ${t.device} aqui na loja — vamos dar sequência?`.trim());
+                  return (
+                    <div key={t.id} data-testid={`tradein-lead-${t.id}`} className="rounded-lg border p-2.5 flex items-start gap-2">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
+                          <p className="text-sm font-semibold truncate">{t.customerName ?? "(sem nome)"}</p>
+                          <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold leading-none ${t.closedAt ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                            {t.closedAt ? "Fechado" : "Pendente"}
+                          </span>
+                        </div>
+                        <p className="text-xs text-muted-foreground">{t.device}{t.sellerPhone ? ` · ${t.sellerPhone}` : ""}</p>
+                        {t.suggestedPrice && <p className="text-xs text-foreground/80 mt-0.5">Valor estimado: <span className="font-semibold">{t.suggestedPrice}</span></p>}
+                        <p className="text-[10px] text-muted-foreground mt-0.5">{new Date(t.createdAt).toLocaleString("pt-BR")}</p>
+                      </div>
+                      {wa && (
+                        <a href={wa} target="_blank" rel="noreferrer" data-testid={`button-tradein-lead-whatsapp-${t.id}`}
+                          className="p-1.5 rounded-lg hover:bg-emerald-50 text-emerald-600 shrink-0" title="Chamar no WhatsApp">
+                          <MessageCircle className="w-3.5 h-3.5" />
+                        </a>
+                      )}
+                    </div>
+                  );
+                })
               )}
             </div>
           </div>
