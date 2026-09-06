@@ -191,14 +191,14 @@ function ProductCard({
   return (
     <div className="bg-white rounded-2xl border border-neutral-200 overflow-hidden flex flex-col">
       <button type="button" onClick={() => onOpenDetail(p)} data-testid={`button-open-detail-${p.id}`}
-        className="relative aspect-square bg-neutral-100 flex items-center justify-center overflow-hidden">
+        className="relative aspect-square bg-neutral-100 flex items-center justify-center overflow-hidden p-4">
         {discount && (
           <span className="absolute top-1.5 left-1.5 z-10 px-1.5 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-bold">
             {discount.percentOff}% OFF
           </span>
         )}
         {p.photos[0] ? (
-          <img src={api.catalog.photoUrl(p.photos[0].id)} alt={p.model} className="w-full h-full object-cover" loading="lazy" />
+          <img src={api.catalog.photoUrl(p.photos[0].id)} alt={p.model} className="w-full h-full object-contain" loading="lazy" />
         ) : (
           <Smartphone className="w-10 h-10 text-neutral-300" />
         )}
@@ -421,8 +421,8 @@ function ProductDetailModal({
               <CarouselContent className="ml-0">
                 {displayedPhotos.map((ph) => (
                   <CarouselItem key={ph.id} className="pl-0">
-                    <div className="aspect-square bg-neutral-100 rounded-xl overflow-hidden">
-                      <img src={api.catalog.photoUrl(ph.id)} alt={p.model} className="w-full h-full object-cover" />
+                    <div className="aspect-square bg-neutral-100 rounded-xl overflow-hidden p-4">
+                      <img src={api.catalog.photoUrl(ph.id)} alt={p.model} className="w-full h-full object-contain" />
                     </div>
                   </CarouselItem>
                 ))}
