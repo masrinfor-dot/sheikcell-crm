@@ -529,7 +529,7 @@ export type CatalogPublicProduct = {
   variants: CatalogPublicVariant[];
 };
 
-export type CatalogImportVariant = { storage: string | null; color: string | null; costPrice: number | null };
+export type CatalogImportVariant = { storage: string | null; color: string | null; costPrice: number | null; marginPercentOverride: number | null };
 
 export type CatalogImportItem = {
   model: string;
@@ -2405,7 +2405,14 @@ export const api = {
     // timeoutMs maior que importParse: além de gravar os produtos, agora
     // também tenta buscar 1 foto por produto na internet (melhor esforço,
     // com timeout próprio por produto — ver autoAttachPhotosOnImport no backend).
-    importConfirm: (items: CatalogImportItem[]) => req<{ imported: number; products: CatalogProduct[]; photosAttached?: number; photoSearchConfigured?: boolean }>("/catalog/import/confirm", { method: "POST", body: JSON.stringify({ items }), timeoutMs: 90_000 }),
+    // existingProductId: quando o item bate com um modelo já cadastrado na
+    // mesma categoria (checagem no front, ver handleConfirmImport), evita
+    // criar anúncio duplicado — o backend só atualiza custo/margem das
+    // variantes do produto que já existe em vez de criar um novo.
+    importConfirm: (items: (CatalogImportItem & { existingProductId?: number | null })[]) =>
+      req<{ imported: number; updated: number; products: CatalogProduct[]; updatedProducts: CatalogProduct[]; photosAttached?: number; photoSearchConfigured?: boolean }>(
+        "/catalog/import/confirm", { method: "POST", body: JSON.stringify({ items }), timeoutMs: 90_000 },
+      ),
     public: (slug: string, code?: string) =>
       req<{
         storeName: string; whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;

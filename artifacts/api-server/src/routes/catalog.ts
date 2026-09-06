@@ -302,6 +302,69 @@ async function replaceVariants(tenantId: number, productId: number, rawVariants:
   }
 }
 
+// Reimportação de uma lista sobre um modelo já cadastrado: em vez de criar um
+// anúncio duplicado (mesmo modelo/categoria), só atualiza o preço de custo
+// (e a margem, se o lojista escolheu mudar) das variantes já existentes —
+// preserva estoque, "custo já com nota", preço "de" e margem de atacado que
+// já estavam cadastrados. Variante nova (armazenamento que não existia ainda
+// nesse produto, ex.: chegou um 512GB que só tinha 256GB) é adicionada ao
+// MESMO produto, nunca cria um segundo anúncio. Casamento de variante por
+// armazenamento normalizado (minúsculo + sem espaço) — cor não entra no
+// casamento porque a lista do fornecedor normalmente só varia por memória.
+async function updateVariantsFromImport(tenantId: number, productId: number, items: ParsedVariant[], settings: PricingSettings) {
+  const normStorage = (s: string | null) => (s ?? "").toLowerCase().replace(/\s+/g, "");
+  const existing = await db.select().from(catalogProductVariantsTable)
+    .where(and(eq(catalogProductVariantsTable.productId, productId), eq(catalogProductVariantsTable.tenantId, tenantId)));
+  const existingByStorage = new Map(existing.map((v) => [normStorage(v.storage), v]));
+
+  for (const item of items) {
+    if (item.costPrice == null && item.marginPercentOverride == null) continue; // nada pra atualizar nessa variante
+    const match = existingByStorage.get(normStorage(item.storage));
+    const marginPercentOverride = item.marginPercentOverride ?? (match ? numOrNull(match.marginPercentOverride) : null);
+    const costPrice = item.costPrice ?? (match ? numOrNull(match.costPrice) : null);
+    const vInput: VariantInput = {
+      id: match?.id,
+      storage: item.storage ?? match?.storage ?? null,
+      color: item.color ?? match?.color ?? null,
+      costPrice,
+      costIncludesInvoice: match?.costIncludesInvoice ?? false,
+      marginPercentOverride,
+      salePrice: null, // sempre recalcula a partir do novo custo/margem
+      wholesalePrice: null,
+      wholesaleMarginPercentOverride: match ? numOrNull(match.wholesaleMarginPercentOverride) : null,
+      compareAtPrice: match ? numOrNull(match.compareAtPrice) : null,
+      stockQty: match?.stockQty ?? 1,
+    };
+    const salePrice = await resolveVariantSalePrice(vInput, settings);
+    const wholesalePrice = await resolveVariantWholesalePrice(vInput, settings);
+    const values = {
+      storage: vInput.storage,
+      color: vInput.color,
+      costPrice: vInput.costPrice != null ? String(vInput.costPrice) : null,
+      marginPercentOverride: vInput.marginPercentOverride != null ? String(vInput.marginPercentOverride) : null,
+      salePrice,
+      wholesalePrice,
+      updatedAt: new Date(),
+    };
+    if (match) {
+      await db.update(catalogProductVariantsTable).set(values)
+        .where(and(eq(catalogProductVariantsTable.id, match.id), eq(catalogProductVariantsTable.tenantId, tenantId)));
+    } else {
+      await db.insert(catalogProductVariantsTable).values({
+        tenantId, productId, costIncludesInvoice: false, stockQty: 1, sortOrder: existing.length, ...values,
+      });
+    }
+  }
+  await db.update(catalogProductsTable).set({ updatedAt: new Date() })
+    .where(and(eq(catalogProductsTable.id, productId), eq(catalogProductsTable.tenantId, tenantId)));
+}
+
+function numOrNull(v: string | null): number | null {
+  if (v == null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 // ─── Categorias/abas personalizáveis ────────────────────────────────────────
 
 async function cleanCategoryId(tenantId: number, v: unknown): Promise<number | null> {
@@ -1143,7 +1206,7 @@ router.put("/catalog/wholesale-code", requireAdmin, async (req, res): Promise<vo
 
 // ─── Importação de lista do fornecedor via IA ───────────────────────────────
 
-type ParsedVariant = { storage: string | null; color: string | null; costPrice: number | null };
+type ParsedVariant = { storage: string | null; color: string | null; costPrice: number | null; marginPercentOverride: number | null };
 type ParsedItem = {
   model: string;
   condition: CatalogCondition;
@@ -1178,9 +1241,9 @@ function cleanParsedVariants(raw: unknown): ParsedVariant[] {
   const arr = Array.isArray(raw) ? raw : [];
   const list = arr.slice(0, 20).map((v) => {
     const o = (v ?? {}) as Record<string, unknown>;
-    return { storage: clean(o.storage, 40) || null, color: clean(o.color, 40) || null, costPrice: toNumberOrNull(o.costPrice) };
+    return { storage: clean(o.storage, 40) || null, color: clean(o.color, 40) || null, costPrice: toNumberOrNull(o.costPrice), marginPercentOverride: toNumberOrNull(o.marginPercentOverride) };
   });
-  return list.length > 0 ? list : [{ storage: null, color: null, costPrice: null }];
+  return list.length > 0 ? list : [{ storage: null, color: null, costPrice: null, marginPercentOverride: null }];
 }
 
 // Junta itens com o mesmo modelo+condição (comparação sem diferenciar maiúsculas
@@ -1566,6 +1629,11 @@ router.post("/catalog/import/confirm", requireAuth, async (req, res): Promise<vo
     return {
       model: clean(o.model, 120), condition: cleanCondition(o.condition), colors: cleanColors(o.colors),
       variants: cleanParsedVariants(o.variants), categoryIdRaw: o.categoryId,
+      // existingProductId: enviado pelo front quando esse item bate com um
+      // modelo já cadastrado na mesma categoria (ver checagem de duplicado em
+      // VitrineAparelhos.tsx) — nesse caso NÃO cria um segundo anúncio, só
+      // atualiza custo/margem das variantes do produto que já existe.
+      existingProductId: Number.isInteger(o.existingProductId) ? (o.existingProductId as number) : null,
     };
   }).filter((p) => p.model);
 
@@ -1575,12 +1643,27 @@ router.post("/catalog/import/confirm", requireAuth, async (req, res): Promise<vo
   // valida que a categoria realmente pertence a essa loja.
   const toImport = await Promise.all(toImportRaw.map(async (p) => ({ ...p, categoryId: await cleanCategoryId(tenantId, p.categoryIdRaw) })));
 
+  // Confirma que os existingProductId enviados realmente pertencem a essa
+  // loja antes de tocar em qualquer variante (nunca confia em id vindo do
+  // front sem checar o tenant).
+  const existingIdsToCheck = [...new Set(toImport.map((p) => p.existingProductId).filter((id): id is number => id != null))];
+  const validExistingIds = existingIdsToCheck.length > 0
+    ? new Set((await db.select({ id: catalogProductsTable.id }).from(catalogProductsTable)
+        .where(and(inArray(catalogProductsTable.id, existingIdsToCheck), eq(catalogProductsTable.tenantId, tenantId)))).map((r) => r.id))
+    : new Set<number>();
+
   const createdProducts: (typeof catalogProductsTable.$inferSelect)[] = [];
+  const updatedProductIds: number[] = [];
   for (const item of toImport) {
+    if (item.existingProductId != null && validExistingIds.has(item.existingProductId)) {
+      await updateVariantsFromImport(tenantId, item.existingProductId, item.variants, settings);
+      updatedProductIds.push(item.existingProductId);
+      continue;
+    }
     const [product] = await db.insert(catalogProductsTable).values({
       tenantId, model: item.model, condition: item.condition, colors: item.colors, categoryId: item.categoryId, createdBy: req.session.userId ?? null,
     }).returning();
-    await replaceVariants(tenantId, product.id, item.variants.map((v) => ({ storage: v.storage, color: v.color, costPrice: v.costPrice })), settings);
+    await replaceVariants(tenantId, product.id, item.variants.map((v) => ({ storage: v.storage, color: v.color, costPrice: v.costPrice, marginPercentOverride: v.marginPercentOverride })), settings);
     createdProducts.push(product);
   }
   // Melhor esforço: tenta puxar 1 foto por produto recém-criado (mesma busca
@@ -1588,7 +1671,18 @@ router.post("/catalog/import/confirm", requireAuth, async (req, res): Promise<vo
   // vincular conta de faturamento no Google Cloud) ou falhar, os produtos já
   // foram importados normalmente — só ficam sem foto, como sempre.
   const photosAttached = await autoAttachPhotosOnImport(tenantId, createdProducts);
-  res.status(201).json({ imported: createdProducts.length, products: createdProducts, photosAttached, photoSearchConfigured: photoSearchConfigured() });
+  const updatedProducts = updatedProductIds.length > 0
+    ? await db.select().from(catalogProductsTable)
+        .where(and(inArray(catalogProductsTable.id, [...new Set(updatedProductIds)]), eq(catalogProductsTable.tenantId, tenantId)))
+    : [];
+  res.status(201).json({
+    imported: createdProducts.length,
+    updated: updatedProductIds.length,
+    products: createdProducts,
+    updatedProducts,
+    photosAttached,
+    photoSearchConfigured: photoSearchConfigured(),
+  });
 });
 
 export default router;

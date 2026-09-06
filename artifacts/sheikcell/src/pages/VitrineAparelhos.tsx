@@ -787,7 +787,7 @@ export default function VitrineAparelhos() {
     setImportItems((prev) => prev && prev.map((it, i) => (i === idx ? { ...it, variants: it.variants.map((v, j) => (j === vIdx ? { ...v, ...patch } : v)) } : it)));
   };
   const addImportVariant = (idx: number) => {
-    setImportItems((prev) => prev && prev.map((it, i) => (i === idx ? { ...it, variants: [...it.variants, { storage: null, color: null, costPrice: null }] } : it)));
+    setImportItems((prev) => prev && prev.map((it, i) => (i === idx ? { ...it, variants: [...it.variants, { storage: null, color: null, costPrice: null, marginPercentOverride: null }] } : it)));
   };
   const removeImportVariant = (idx: number, vIdx: number) => {
     setImportItems((prev) => prev && prev.map((it, i) => (i === idx ? { ...it, variants: it.variants.length > 1 ? it.variants.filter((_, j) => j !== vIdx) : it.variants } : it)));
@@ -841,20 +841,17 @@ export default function VitrineAparelhos() {
       });
       // Evitar anúncio duplicado na importação em lote: mesmo modelo já
       // cadastrado na mesma categoria/subcategoria (mesmo aviso do cadastro
-      // manual, ver handleSave) — não bloqueia sozinho, só avisa e deixa o
-      // lojista decidir (pode ser reimportação por engano da mesma lista).
-      const dupPairs = resolved
-        .map((it) => ({ it, match: products.find((p) => p.categoryId === (it.categoryId ?? null) && normalizeModelForDuplicateCheck(p.model) === normalizeModelForDuplicateCheck(it.model)) }))
-        .filter((x): x is { it: typeof resolved[number]; match: CatalogProduct } => !!x.match);
-      if (dupPairs.length > 0) {
-        const list = dupPairs.map(({ it, match }) => `- ${it.model} → já existe como "${match.model}" (${CATALOG_CONDITIONS.find((c) => c.value === match.condition)?.label ?? match.condition})`).join("\n");
-        const proceed = confirm(
-          `${dupPairs.length === 1 ? "1 item" : `${dupPairs.length} itens`} dessa lista já parece(m) cadastrado(s) na mesma categoria/subcategoria:\n\n${list}\n\n` +
-          `Continuar mesmo assim (pode duplicar o anúncio)?`
-        );
-        if (!proceed) { setConfirming(false); return; }
-      }
-      const r = await api.catalog.importConfirm(resolved);
+      // manual, ver handleSave) — a partir daqui NÃO cria um segundo anúncio
+      // pra esses itens: marca existingProductId e o backend só atualiza
+      // custo/margem das variantes do anúncio que já existe (ver
+      // updateVariantsFromImport na API). Itens sem duplicata seguem criando
+      // anúncio novo, como sempre.
+      const withExisting = resolved.map((it) => {
+        const match = products.find((p) => p.categoryId === (it.categoryId ?? null) && normalizeModelForDuplicateCheck(p.model) === normalizeModelForDuplicateCheck(it.model));
+        return { ...it, existingProductId: match?.id ?? null };
+      });
+      const dupCount = withExisting.filter((it) => it.existingProductId != null).length;
+      const r = await api.catalog.importConfirm(withExisting);
       setProducts((prev) => [...r.products.map((p) => ({ ...p, photos: [], variants: [] as CatalogProduct["variants"] })), ...prev]);
       // Sem GOOGLE_CSE_API_KEY/CX configurada no servidor a busca automática
       // nem roda — sem isso o lojista via "importado" sem nenhuma pista de
@@ -864,7 +861,8 @@ export default function VitrineAparelhos() {
         : r.photosAttached
           ? ` ${r.photosAttached} já com foto encontrada na internet.`
           : " Nenhuma foto encontrada automaticamente — adicione manualmente na edição do produto.";
-      toast({ title: `${r.imported} aparelho(s) importado(s)! Recarregando lista...${photoNote}` });
+      const updatedNote = dupCount > 0 ? ` ${r.updated} atualizado(s) (custo/margem) em anúncio(s) já existente(s), sem duplicar.` : "";
+      toast({ title: `${r.imported} aparelho(s) novo(s) importado(s)!${updatedNote} Recarregando lista...${photoNote}` });
       setShowImport(false);
       load();
     } catch (err) {
@@ -1575,6 +1573,9 @@ export default function VitrineAparelhos() {
                                 className="flex-1 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Cor" />
                               <input type="number" value={v.costPrice ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { costPrice: e.target.value ? Number(e.target.value) : null })}
                                 className="flex-1 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Custo R$" />
+                              <input type="number" value={v.marginPercentOverride ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { marginPercentOverride: e.target.value ? Number(e.target.value) : null })}
+                                className="w-20 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Margem %"
+                                title="Margem de venda (%) pra essa variante — em branco mantém a margem já cadastrada (se for atualização) ou a margem padrão da loja (se for anúncio novo)" />
                               {it.variants.length > 1 && (
                                 <button onClick={() => removeImportVariant(idx, vIdx)} className="p-1 rounded hover:bg-red-50 text-red-600"><X className="w-3 h-3" /></button>
                               )}
@@ -1595,6 +1596,14 @@ export default function VitrineAparelhos() {
                             <p className="text-[10px] text-violet-700 mt-0.5">Sugestão da IA (categoria nova): {it.categoryPath.join(" > ")}</p>
                           )}
                         </div>
+                        {(() => {
+                          const match = products.find((p) => p.categoryId === (it.categoryId ?? null) && normalizeModelForDuplicateCheck(p.model) === normalizeModelForDuplicateCheck(it.model));
+                          return match ? (
+                            <p className="text-[10px] text-blue-700 bg-blue-50 rounded px-1.5 py-0.5">
+                              Já existe como "{match.model}" ({CATALOG_CONDITIONS.find((c) => c.value === match.condition)?.label ?? match.condition}) — vai só ATUALIZAR custo/margem desse anúncio, sem duplicar.
+                            </p>
+                          ) : null;
+                        })()}
                         {it.issue && <p className="text-[10px] text-amber-700">{it.issue}</p>}
                         {it.rawLine && <p className="text-[10px] text-muted-foreground truncate">"{it.rawLine}"</p>}
                       </div>
