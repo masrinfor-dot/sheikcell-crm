@@ -1,9 +1,10 @@
 import { useState, useEffect, useMemo } from "react";
-import { useParams, Link } from "wouter";
+import { useParams, useLocation, Link } from "wouter";
 import { api, CATALOG_CONDITIONS, CATALOG_CONDITION_CRITERIA, type CatalogPublicProduct, type CatalogCategory, type CatalogTrustBadge, type CatalogPaymentMethod } from "@/lib/api";
+import { waLink } from "@/lib/utils";
 import {
   Smartphone, MessageCircle, PackageX, Info, Lock, ShoppingCart, Plus, Minus, X, Unlock, Search,
-  ShieldCheck, BellRing, ListChecks, Tag, Star, CreditCard, Wallet,
+  ShieldCheck, BellRing, ListChecks, Tag, Star, CreditCard, Wallet, AlertTriangle,
 } from "lucide-react";
 import { Carousel, CarouselContent, CarouselItem, CarouselPrevious, CarouselNext, type CarouselApi } from "@/components/ui/carousel";
 
@@ -112,17 +113,28 @@ function wholesaleInstallment12Label(v: { wholesaleInstallment12Value?: number |
   return value ? `ou 12x de ${value} no cartão` : null;
 }
 
-function waLink(phone: string | null, text: string): string | null {
-  if (!phone) return null;
-  let digits = phone.replace(/\D/g, "");
-  if (!digits) return null;
-  if (!digits.startsWith("55")) digits = `55${digits}`;
-  return `https://wa.me/${digits}?text=${encodeURIComponent(text)}`;
-}
-
 function wholesaleStorageKey(slug: string) {
   return `sheikcell-vitrine-atacado-${slug}`;
 }
+
+function cartStorageKey(slug: string) {
+  return `sheikcell-vitrine-carrinho-${slug}`;
+}
+
+function tradeInStorageKey(slug: string) {
+  return `sheikcell-vitrine-troca-${slug}`;
+}
+
+// Desconto do usado avaliado, aplicado no carrinho — gravado pela
+// AvaliacaoPublica (fluxo "trocar por este aparelho") e lido aqui pra
+// abater do total. Fica em localStorage pra sobreviver à navegação entre
+// as duas páginas (são rotas/componentes diferentes, então o carrinho em
+// memória se perderia na volta se não persistisse).
+type TradeInDiscount = {
+  device: string;
+  estimatedPriceLabel: string;
+  estimatedPriceValue: number | null;
+};
 
 // Ordenação da listagem — "Mais novos primeiro" é sempre a ordem padrão
 // (pedido do lojista). Sem cadastro de geração/ano no sistema (o campo
@@ -286,6 +298,7 @@ function ProductDetailModal({
   onAddToCart: (item: { productId: number; variantId: number; model: string; storage: string | null; unitPrice: number | null; wholesale: boolean }, qty: number) => void;
   onClose: () => void;
 }) {
+  const [, navigate] = useLocation();
   const [activePhoto, setActivePhoto] = useState(0);
   const [carouselApi, setCarouselApi] = useState<CarouselApi>();
   const [showCriteria, setShowCriteria] = useState(false);
@@ -575,6 +588,22 @@ function ProductDetailModal({
                   className="mt-2 inline-flex items-center justify-center gap-1.5 w-full py-2.5 rounded-xl bg-neutral-900 text-white text-sm font-semibold hover:bg-neutral-800 transition disabled:opacity-40">
                   <ShoppingCart className="w-4 h-4" /> Adicionar ao pedido
                 </button>
+                {!wholesaleUnlocked && (
+                  <button type="button" disabled={!selected}
+                    onClick={() => {
+                      if (!selected) return;
+                      onAddToCart({
+                        productId: p.id, variantId: selected.id, model: p.model, storage: cartVariantLabel(selected),
+                        unitPrice: selected.salePrice != null ? Number(selected.salePrice) : null,
+                        wholesale: false,
+                      }, qty);
+                      navigate(`/avaliar/${slug}?troca=1`);
+                    }}
+                    data-testid="button-trade-in-for-product"
+                    className="mt-2 inline-flex items-center justify-center gap-1.5 w-full py-2.5 rounded-xl border-2 border-neutral-900 text-neutral-900 text-sm font-semibold hover:bg-neutral-50 transition disabled:opacity-40">
+                    <Wallet className="w-4 h-4" /> Trocar por este aparelho (dar seu usado)
+                  </button>
+                )}
               </>
             ) : notifyDone ? (
               <p className="mt-2 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2.5 text-center">Combinado! A gente avisa assim que chegar.</p>
@@ -682,6 +711,7 @@ export default function VitrinePublica() {
   const [cart, setCart] = useState<CartItem[]>([]);
   const [showCart, setShowCart] = useState(false);
   const [detailProduct, setDetailProduct] = useState<CatalogPublicProduct | null>(null);
+  const [tradeIn, setTradeIn] = useState<TradeInDiscount | null>(null);
 
   const loadData = (code?: string) => {
     if (!slug) { setError("Link inválido"); return; }
@@ -695,8 +725,33 @@ export default function VitrinePublica() {
     let savedCode: string | null = null;
     try { savedCode = localStorage.getItem(wholesaleStorageKey(slug)); } catch { /* privado/bloqueado — segue sem código salvo */ }
     loadData(savedCode ?? undefined);
+    // Carrinho e desconto de troca ficam salvos localmente — sem isso, ir
+    // pra tela de avaliação (rota separada) e voltar apagaria o pedido que
+    // o cliente já tinha montado.
+    try {
+      const savedCart = localStorage.getItem(cartStorageKey(slug));
+      if (savedCart) setCart(JSON.parse(savedCart) as CartItem[]);
+    } catch { /* privado/bloqueado ou dado corrompido — segue com carrinho vazio */ }
+    try {
+      const savedTradeIn = localStorage.getItem(tradeInStorageKey(slug));
+      if (savedTradeIn) setTradeIn(JSON.parse(savedTradeIn) as TradeInDiscount);
+    } catch { /* idem */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug]);
+
+  // Persiste o carrinho a cada mudança (mesma lógica do código de atacado).
+  useEffect(() => {
+    if (!slug) return;
+    try {
+      if (cart.length > 0) localStorage.setItem(cartStorageKey(slug), JSON.stringify(cart));
+      else localStorage.removeItem(cartStorageKey(slug));
+    } catch { /* privado/bloqueado — segue sem persistir */ }
+  }, [slug, cart]);
+
+  const removeTradeIn = () => {
+    setTradeIn(null);
+    if (slug) { try { localStorage.removeItem(tradeInStorageKey(slug)); } catch { /* segue sem persistir */ } }
+  };
 
   const handleUnlock = async () => {
     if (!slug || !codeInput.trim() || unlocking) return;
@@ -736,7 +791,12 @@ export default function VitrinePublica() {
 
   const removeFromCart = (variantId: number) => setCart((prev) => prev.filter((c) => c.variantId !== variantId));
 
-  const cartTotal = cart.reduce((sum, c) => sum + (c.unitPrice ?? 0) * c.qty, 0);
+  const cartSubtotal = cart.reduce((sum, c) => sum + (c.unitPrice ?? 0) * c.qty, 0);
+  // Desconto do usado avaliado abate do total, mas nunca deixa o total
+  // negativo (ex.: usado avaliado em mais do que o pedido, cliente com
+  // troco a receber — isso fica pra loja resolver por fora, não no site).
+  const tradeInDeduction = tradeIn?.estimatedPriceValue != null ? Math.min(tradeIn.estimatedPriceValue, cartSubtotal) : 0;
+  const cartTotal = Math.max(0, cartSubtotal - tradeInDeduction);
   const cartCount = cart.reduce((sum, c) => sum + c.qty, 0);
 
   const checkoutMessage = useMemo(() => {
@@ -744,14 +804,19 @@ export default function VitrinePublica() {
     const lines = cart.map((c) =>
       `${c.qty}x ${c.model}${c.storage ? ` ${c.storage}` : ""} — ${formatBRL(c.unitPrice) ?? "sob consulta"}${c.wholesale ? " (atacado)" : ""}`
     );
+    const tradeInLines = tradeIn ? [
+      "",
+      `Desconto do meu usado (${tradeIn.device}): ${tradeIn.estimatedPriceLabel} — valor sujeito a confirmação da loja depois de conferir o checklist`,
+    ] : [];
     return [
       `Olá! Vi a vitrine da ${data.storeName} e quero fazer o seguinte pedido:`,
       "",
       ...lines,
+      ...tradeInLines,
       "",
-      `Total: ${formatBRL(cartTotal)}`,
+      `Total${tradeIn ? " (com o desconto do usado, a confirmar)" : ""}: ${formatBRL(cartTotal)}`,
     ].join("\n");
-  }, [cart, data, cartTotal]);
+  }, [cart, data, cartTotal, tradeIn]);
 
   // Enquanto o atacado não foi desbloqueado, sempre usa o WhatsApp de
   // varejo — o de atacado nem chega do backend nesse caso (ver rota
@@ -988,6 +1053,27 @@ export default function VitrinePublica() {
             </div>
             {cart.length > 0 && (
               <div className="p-4 border-t space-y-2">
+                {tradeIn && (
+                  <div className="rounded-xl border-2 border-amber-300 bg-amber-50 p-3 space-y-1.5">
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-xs font-semibold text-amber-900">
+                        Desconto do seu usado ({tradeIn.device}): −{tradeIn.estimatedPriceLabel}
+                      </p>
+                      <button type="button" onClick={removeTradeIn} data-testid="button-remove-tradein"
+                        className="p-0.5 rounded hover:bg-amber-100 text-amber-700 shrink-0"><X className="w-3.5 h-3.5" /></button>
+                    </div>
+                    <p className="text-[11px] text-amber-800 font-medium flex items-start gap-1">
+                      <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                      Valor sujeito a confirmação: o preço final do seu usado será confirmado pela loja depois de conferir o checklist pessoalmente.
+                    </p>
+                  </div>
+                )}
+                {tradeIn && (
+                  <div className="flex items-center justify-between text-xs text-neutral-500">
+                    <span>Subtotal</span>
+                    <span>{formatBRL(cartSubtotal)}</span>
+                  </div>
+                )}
                 <div className="flex items-center justify-between text-sm font-bold text-neutral-900">
                   <span>Total</span>
                   <span>{formatBRL(cartTotal)}</span>
