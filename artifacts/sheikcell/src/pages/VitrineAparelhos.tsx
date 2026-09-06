@@ -6,6 +6,7 @@ import {
   type CatalogProduct, type CatalogPricingSettings, type CatalogImportItem, type CatalogCondition,
   type CatalogImportVariant, type CatalogPhotoSearchResult, type CatalogCategory,
   type CatalogTrustBadge, type CatalogStockNotification, type CatalogPaymentMethod, type CatalogProductReview,
+  type CatalogMarketCheckVerdict,
 } from "@/lib/api";
 import {
   Smartphone, Plus, X, Search, Trash2, Pencil, Sparkles, Settings2, Link2,
@@ -21,6 +22,61 @@ function formatBRL(v: string | number | null): string {
 }
 
 const INSTALLMENT_OPTIONS = [1, 2, 3, 4, 6, 10, 12, 18];
+
+// Margem que vale pra um item da importação: a que o lojista digitou na hora
+// (marginPercentOverride) tem prioridade; sem isso, cai na margem configurada
+// pra CATEGORIA do item (se tiver); sem isso, cai na margem padrão da loja.
+// Mesma prioridade usada de verdade no backend ao salvar (ver
+// resolveCategoryMargin/precoVendaDoProduto em catalogPricing.ts) — aqui é só
+// uma prévia client-side, pra mostrar na tela de revisão antes de importar.
+function resolveSuggestedMargin(categoryId: number | null, settings: CatalogPricingSettings): number {
+  if (categoryId != null) {
+    const v = settings.categoryMarginOverrides[String(categoryId)];
+    if (v != null) return v;
+  }
+  return settings.defaultMarginPercent;
+}
+
+// Prévia do preço de venda a partir do custo — mesma fórmula de
+// calcularPrecoVenda no backend (custo ÷ (1 − margem% − taxa de cartão%),
+// taxa de referência 1x, sem "custo já com nota"), só que calculada aqui no
+// front pra mostrar instantaneamente na revisão da importação sem precisar
+// de uma chamada ao servidor por variante.
+function previewSalePrice(custo: number | null, margemPercent: number, settings: CatalogPricingSettings): number | null {
+  if (custo == null || !Number.isFinite(custo) || custo <= 0) return null;
+  const custoComNota = custo * (1 + settings.invoiceCostPercent / 100);
+  const taxaCartaoPercent = settings.cardFeeTable["1"] ?? 0;
+  const divisor = 1 - (margemPercent + taxaCartaoPercent) / 100;
+  const preco = divisor <= 0.05 ? custoComNota * 3 : custoComNota / divisor;
+  if (!settings.roundPricesUp) return Math.round(preco * 100) / 100;
+  const cents = Math.round(preco * 100);
+  const bucketCents = 5000;
+  const remainder = cents % bucketCents;
+  const nextBucketTopCents = remainder === 0 ? cents + bucketCents : cents - remainder + bucketCents;
+  return (nextBucketTopCents - 10) / 100;
+}
+
+type MarketCheckState = {
+  loading: boolean;
+  marketRange: string | null;
+  verdict: CatalogMarketCheckVerdict | null;
+  note: string | null;
+  error: string | null;
+};
+
+// Checagem automática de mercado só nos primeiros N itens ao abrir a revisão
+// (listas grandes ficariam lentas/caras chamando IA+busca na web pra cada
+// item de uma vez) — os demais o lojista consegue checar manualmente pelo
+// botão "Verificar" em cada card.
+const MARKET_CHECK_AUTO_LIMIT = 30;
+const MARKET_CHECK_CONCURRENCY = 3;
+
+const MARKET_CHECK_BADGE: Record<CatalogMarketCheckVerdict, { label: string; className: string }> = {
+  compativel: { label: "Compatível com o mercado", className: "bg-emerald-50 text-emerald-700 border-emerald-200" },
+  acima: { label: "Acima do mercado", className: "bg-amber-50 text-amber-700 border-amber-200" },
+  abaixo: { label: "Abaixo do mercado", className: "bg-blue-50 text-blue-700 border-blue-200" },
+  sem_dados: { label: "Sem dados de mercado", className: "bg-neutral-100 text-neutral-600 border-neutral-200" },
+};
 
 type VariantFormRow = {
   id?: number;
@@ -185,6 +241,10 @@ export default function VitrineAparelhos() {
   // na loja) — só são criadas de verdade se o lojista autorizar explicitamente.
   const [importNewCategoryPaths, setImportNewCategoryPaths] = useState<string[][]>([]);
   const [authorizeNewCategories, setAuthorizeNewCategories] = useState(false);
+  // Checagem de preço de mercado por item (índice do item em importItems) —
+  // disparada automaticamente pra revisão de preço antes de finalizar a
+  // importação (ver runMarketCheck/handleParse).
+  const [marketChecks, setMarketChecks] = useState<Record<number, MarketCheckState>>({});
 
   const [showSettings, setShowSettings] = useState(false);
   const [settingsForm, setSettingsForm] = useState<CatalogPricingSettings | null>(null);
@@ -448,6 +508,7 @@ export default function VitrineAparelhos() {
         costPrice: custo, costIncludesInvoice: v.costIncludesInvoice,
         marginPercentOverride: v.marginPercentOverride ? Number(v.marginPercentOverride) : null,
         wholesaleMarginPercentOverride: v.wholesaleMarginPercentOverride ? Number(v.wholesaleMarginPercentOverride) : null,
+        categoryId: form.categoryId,
       });
       const patch: Partial<VariantFormRow> = {};
       if (r.salePrice != null) patch.salePrice = String(r.salePrice);
@@ -764,6 +825,45 @@ export default function VitrineAparelhos() {
     setShowImport(true);
   };
 
+  // Checa se o preço calculado (custo + margem sugerida) está compatível com
+  // o mercado — pesquisa na web com IA. Chamada automaticamente pros
+  // primeiros itens ao abrir a revisão (ver handleParse) e também disponível
+  // pra rodar de novo manualmente em qualquer item (botão "Verificar" no
+  // card, cobre tanto os que passaram do limite automático quanto reverificar
+  // depois de mudar preço/margem/categoria).
+  const runMarketCheck = async (idx: number, item: CatalogImportItem) => {
+    setMarketChecks((prev) => ({ ...prev, [idx]: { loading: true, marketRange: prev[idx]?.marketRange ?? null, verdict: prev[idx]?.verdict ?? null, note: prev[idx]?.note ?? null, error: null } }));
+    try {
+      const firstVariant = item.variants[0];
+      const margin = firstVariant?.marginPercentOverride ?? (settings ? resolveSuggestedMargin(item.categoryId, settings) : null);
+      const preview = settings && margin != null ? previewSalePrice(firstVariant?.costPrice ?? null, margin, settings) : null;
+      const r = await api.catalog.marketCheck({ model: item.model, condition: item.condition, storage: firstVariant?.storage ?? null, salePrice: preview });
+      setMarketChecks((prev) => ({ ...prev, [idx]: { loading: false, marketRange: r.marketRange, verdict: r.verdict, note: r.note, error: null } }));
+    } catch (err) {
+      setMarketChecks((prev) => ({ ...prev, [idx]: { loading: false, marketRange: null, verdict: null, note: null, error: err instanceof Error ? err.message : "Erro ao verificar" } }));
+    }
+  };
+
+  // Roda a checagem de mercado pros primeiros MARKET_CHECK_AUTO_LIMIT itens
+  // aprovados, MARKET_CHECK_CONCURRENCY de cada vez (uma fila simples) — em
+  // vez de disparar tudo de uma vez, o que sobrecarregaria a IA/rede numa
+  // lista grande.
+  const autoRunMarketChecks = async (items: CatalogImportItem[]) => {
+    const targets = items
+      .map((it, idx) => ({ it, idx }))
+      .filter(({ it }) => it.status === "approved" && it.model && it.model !== "(modelo não identificado)")
+      .slice(0, MARKET_CHECK_AUTO_LIMIT);
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(MARKET_CHECK_CONCURRENCY, targets.length) }, async () => {
+      while (cursor < targets.length) {
+        const target = targets[cursor++];
+        if (!target) break;
+        await runMarketCheck(target.idx, target.it);
+      }
+    });
+    await Promise.all(workers);
+  };
+
   const handleParse = async () => {
     if (parsing || !importText.trim()) return;
     setParsing(true);
@@ -773,6 +873,8 @@ export default function VitrineAparelhos() {
       setImportNewCategoryPaths(r.newCategoryPaths ?? []);
       setAuthorizeNewCategories(false);
       setImportTab(r.items.some((i) => i.status === "approved") ? "approved" : "pending");
+      setMarketChecks({});
+      void autoRunMarketChecks(r.items);
     } catch (err) {
       toast({ title: "Erro ao analisar a lista", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
     } finally {
@@ -1300,9 +1402,9 @@ export default function VitrineAparelhos() {
                           className="mt-0.5 w-full rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40" />
                       </div>
                       <div>
-                        <label className="text-[10px] text-muted-foreground">Margem % (em branco = padrão)</label>
+                        <label className="text-[10px] text-muted-foreground">Margem % (em branco = da categoria/padrão)</label>
                         <input type="number" value={v.marginPercentOverride} onChange={(e) => updateVariant(idx, { marginPercentOverride: e.target.value })}
-                          placeholder={settings ? String(settings.defaultMarginPercent) : ""} data-testid={`input-variant-margin-${idx}`}
+                          placeholder={settings ? String(resolveSuggestedMargin(form.categoryId, settings)) : ""} data-testid={`input-variant-margin-${idx}`}
                           className="mt-0.5 w-full rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40" />
                       </div>
                     </div>
@@ -1542,6 +1644,10 @@ export default function VitrineAparelhos() {
                       )}
                     </div>
                   )}
+                  <p className="text-[10px] text-muted-foreground flex items-center gap-1">
+                    <Search className="w-3 h-3 shrink-0" />
+                    Verificando preço de mercado automaticamente nos primeiros {MARKET_CHECK_AUTO_LIMIT} itens aprovados (com IA + busca na web) — os demais têm um botão "Verificar preço de mercado" em cada card.
+                  </p>
                   <div className="flex gap-2">
                     <button onClick={() => setImportTab("approved")} data-testid="tab-import-approved"
                       className={`px-3 py-1.5 rounded-full text-xs font-semibold transition flex items-center gap-1 ${importTab === "approved" ? "bg-primary text-white" : "bg-secondary text-muted-foreground"}`}>
@@ -1565,22 +1671,36 @@ export default function VitrineAparelhos() {
                           </select>
                         </div>
                         <div className="space-y-1.5">
-                          {it.variants.map((v, vIdx) => (
-                            <div key={vIdx} className="flex items-center gap-2">
-                              <input value={v.storage ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { storage: e.target.value || null })}
-                                className="flex-1 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Armazenamento" />
-                              <input value={v.color ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { color: e.target.value || null })}
-                                className="flex-1 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Cor" />
-                              <input type="number" value={v.costPrice ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { costPrice: e.target.value ? Number(e.target.value) : null })}
-                                className="flex-1 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Custo R$" />
-                              <input type="number" value={v.marginPercentOverride ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { marginPercentOverride: e.target.value ? Number(e.target.value) : null })}
-                                className="w-20 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Margem %"
-                                title="Margem de venda (%) pra essa variante — em branco mantém a margem já cadastrada (se for atualização) ou a margem padrão da loja (se for anúncio novo)" />
-                              {it.variants.length > 1 && (
-                                <button onClick={() => removeImportVariant(idx, vIdx)} className="p-1 rounded hover:bg-red-50 text-red-600"><X className="w-3 h-3" /></button>
+                          {it.variants.map((v, vIdx) => {
+                            const suggestedMargin = settings ? resolveSuggestedMargin(it.categoryId, settings) : null;
+                            const effectiveMargin = v.marginPercentOverride ?? suggestedMargin;
+                            const preview = settings && effectiveMargin != null ? previewSalePrice(v.costPrice, effectiveMargin, settings) : null;
+                            return (
+                            <div key={vIdx} className="space-y-0.5">
+                              <div className="flex items-center gap-2">
+                                <input value={v.storage ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { storage: e.target.value || null })}
+                                  className="flex-1 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Armazenamento" />
+                                <input value={v.color ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { color: e.target.value || null })}
+                                  className="flex-1 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Cor" />
+                                <input type="number" value={v.costPrice ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { costPrice: e.target.value ? Number(e.target.value) : null })}
+                                  className="flex-1 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Custo R$" />
+                                <input type="number" value={v.marginPercentOverride ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { marginPercentOverride: e.target.value ? Number(e.target.value) : null })}
+                                  className="w-20 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40"
+                                  placeholder={suggestedMargin != null ? `${suggestedMargin}%` : "Margem %"}
+                                  title="Margem de venda (%) pra essa variante — em branco usa a margem da categoria (se configurada) ou a margem padrão da loja" />
+                                {it.variants.length > 1 && (
+                                  <button onClick={() => removeImportVariant(idx, vIdx)} className="p-1 rounded hover:bg-red-50 text-red-600"><X className="w-3 h-3" /></button>
+                                )}
+                              </div>
+                              {preview != null && v.costPrice != null && (
+                                <p className="text-[10px] text-muted-foreground pl-0.5">
+                                  Preço de venda estimado: <span className="font-semibold text-foreground">{formatBRL(preview)}</span>
+                                  {" "}(margem {effectiveMargin}%{v.marginPercentOverride == null && it.categoryId != null && settings?.categoryMarginOverrides[String(it.categoryId)] != null ? " — da categoria" : v.marginPercentOverride == null ? " — padrão da loja" : ""})
+                                </p>
                               )}
                             </div>
-                          ))}
+                            );
+                          })}
                           <button onClick={() => addImportVariant(idx)} className="text-[10px] font-semibold text-primary hover:underline flex items-center gap-1">
                             <Plus className="w-2.5 h-2.5" /> Adicionar variante
                           </button>
@@ -1606,6 +1726,44 @@ export default function VitrineAparelhos() {
                         })()}
                         {it.issue && <p className="text-[10px] text-amber-700">{it.issue}</p>}
                         {it.rawLine && <p className="text-[10px] text-muted-foreground truncate">"{it.rawLine}"</p>}
+                        {(() => {
+                          const mc = marketChecks[idx];
+                          if (!mc) return null;
+                          if (mc.loading) {
+                            return (
+                              <p className="text-[10px] text-muted-foreground flex items-center gap-1">
+                                <Loader2 className="w-3 h-3 animate-spin" /> Verificando preço de mercado...
+                              </p>
+                            );
+                          }
+                          if (mc.error) {
+                            return (
+                              <div className="flex items-center gap-2">
+                                <p className="text-[10px] text-red-700">Falha ao verificar mercado: {mc.error}</p>
+                                <button onClick={() => runMarketCheck(idx, it)} className="text-[10px] font-semibold text-primary hover:underline shrink-0">Tentar de novo</button>
+                              </div>
+                            );
+                          }
+                          if (mc.verdict) {
+                            const badge = MARKET_CHECK_BADGE[mc.verdict];
+                            return (
+                              <div className={`rounded border px-1.5 py-1 space-y-0.5 ${badge.className}`}>
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-[10px] font-semibold">{badge.label}{mc.marketRange ? ` · ${mc.marketRange}` : ""}</span>
+                                  <button onClick={() => runMarketCheck(idx, it)} className="text-[10px] font-semibold hover:underline shrink-0">Verificar de novo</button>
+                                </div>
+                                {mc.note && <p className="text-[10px] opacity-90">{mc.note}</p>}
+                              </div>
+                            );
+                          }
+                          return null;
+                        })()}
+                        {!marketChecks[idx] && it.model && it.model !== "(modelo não identificado)" && (
+                          <button onClick={() => runMarketCheck(idx, it)} data-testid={`button-market-check-${idx}`}
+                            className="text-[10px] font-semibold text-primary hover:underline flex items-center gap-1">
+                            <Search className="w-2.5 h-2.5" /> Verificar preço de mercado
+                          </button>
+                        )}
                       </div>
                     ))}
                     {visibleImportItems.length === 0 && <p className="text-xs text-muted-foreground text-center py-4">Nada aqui.</p>}
@@ -1670,6 +1828,49 @@ export default function VitrineAparelhos() {
                   ))}
                 </div>
                 <p className="text-[10px] text-muted-foreground mt-1">O preço é calculado usando a taxa de 1x como referência; as demais aparecem no parcelamento exibido ao cliente.</p>
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-muted-foreground flex items-center gap-1"><Tags className="w-3 h-3" /> Margem de venda por categoria (%)</label>
+                <p className="text-[10px] text-muted-foreground mt-0.5 mb-1.5">A margem varia por tipo de produto — em branco usa a margem padrão da loja ({settingsForm.defaultMarginPercent}%) pra essa categoria. Vale pra anúncios novos e pra importação; a margem digitada à mão num aparelho específico sempre tem prioridade sobre a da categoria.</p>
+                {categories.length === 0 ? (
+                  <p className="text-[10px] text-muted-foreground text-center py-2">Nenhuma categoria cadastrada ainda.</p>
+                ) : (
+                  <div className="space-y-1 max-h-48 overflow-y-auto rounded-lg border p-2">
+                    {topCategories.map((c) => (
+                      <div key={c.id} className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="flex-1 text-xs font-medium truncate">{c.name}</span>
+                          <input type="number" value={settingsForm.categoryMarginOverrides[String(c.id)] ?? ""}
+                            onChange={(e) => setSettingsForm({
+                              ...settingsForm,
+                              categoryMarginOverrides: e.target.value
+                                ? { ...settingsForm.categoryMarginOverrides, [String(c.id)]: Number(e.target.value) }
+                                : Object.fromEntries(Object.entries(settingsForm.categoryMarginOverrides).filter(([k]) => k !== String(c.id))),
+                            })}
+                            data-testid={`input-category-margin-${c.id}`}
+                            placeholder={`${settingsForm.defaultMarginPercent}%`}
+                            className="w-20 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                        </div>
+                        {childCategories(c.id).map((sub) => (
+                          <div key={sub.id} className="flex items-center gap-2 pl-3">
+                            <span className="text-muted-foreground text-xs">↳</span>
+                            <span className="flex-1 text-xs truncate">{sub.name}</span>
+                            <input type="number" value={settingsForm.categoryMarginOverrides[String(sub.id)] ?? ""}
+                              onChange={(e) => setSettingsForm({
+                                ...settingsForm,
+                                categoryMarginOverrides: e.target.value
+                                  ? { ...settingsForm.categoryMarginOverrides, [String(sub.id)]: Number(e.target.value) }
+                                  : Object.fromEntries(Object.entries(settingsForm.categoryMarginOverrides).filter(([k]) => k !== String(sub.id))),
+                              })}
+                              data-testid={`input-category-margin-${sub.id}`}
+                              placeholder={`${settingsForm.defaultMarginPercent}%`}
+                              className="w-20 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
               <div className="flex items-start gap-2 rounded-lg border px-3 py-2.5 bg-muted/30">
                 <input type="checkbox" id="round-prices-up" checked={settingsForm.roundPricesUp}

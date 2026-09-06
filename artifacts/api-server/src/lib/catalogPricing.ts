@@ -11,6 +11,16 @@ export type PricingSettings = {
   cardFeeTable: Record<string, number>; // taxa de cartão por nº de parcelas ("1".."18") em %
   wholesaleMarginPercent: number; // margem de lucro padrão pro preço de atacado (técnico/lojista) — normalmente menor que a de varejo
   roundPricesUp: boolean; // arredondar sempre o preço de venda pra cima, pro próximo múltiplo de R$50 terminando em ",90"
+  // Margem de varejo por categoria (chave = id da categoria, como string —
+  // JSON não aceita chave numérica; valor = margem %). A margem varia
+  // bastante por tipo de produto (ex.: iPhone x Peças de celular x
+  // Acessórios), então em vez de digitar a margem em CADA anúncio, o lojista
+  // configura aqui uma vez por categoria. Prioridade de resolução da margem
+  // (ver resolveCategoryMargin/precoVendaDoProduto): margem própria do
+  // produto/variante > margem da categoria > margem padrão da loja. Só afeta
+  // o preço de VAREJO — o preço de atacado sempre usa wholesaleMarginPercent
+  // (ou a margem de atacado própria do produto), sem variar por categoria.
+  categoryMarginOverrides: Record<string, number>;
 };
 
 const INSTALLMENTS = Array.from({ length: 18 }, (_, i) => String(i + 1));
@@ -21,6 +31,7 @@ export const DEFAULT_PRICING_SETTINGS: PricingSettings = {
   cardFeeTable: Object.fromEntries(INSTALLMENTS.map((n) => [n, Math.min(2 + Number(n) * 1.1, 40)])),
   wholesaleMarginPercent: 12,
   roundPricesUp: false,
+  categoryMarginOverrides: {},
 };
 
 /**
@@ -53,13 +64,39 @@ export function sanitizePricingSettings(input: unknown): PricingSettings {
   for (const n of INSTALLMENTS) {
     cardFeeTable[n] = norm(rawTable[n], DEFAULT_PRICING_SETTINGS.cardFeeTable[n] ?? 0, 0, 50);
   }
+  const rawCategoryMargins = (o.categoryMarginOverrides != null && typeof o.categoryMarginOverrides === "object"
+    ? o.categoryMarginOverrides
+    : {}) as Record<string, unknown>;
+  const categoryMarginOverrides: Record<string, number> = {};
+  for (const [key, val] of Object.entries(rawCategoryMargins).slice(0, 200)) {
+    const categoryId = Number(key);
+    if (!Number.isInteger(categoryId) || categoryId <= 0) continue;
+    const n = Number(val);
+    if (Number.isFinite(n) && n >= 0 && n <= 95) categoryMarginOverrides[String(categoryId)] = Math.round(n * 100) / 100;
+  }
+
   return {
     defaultMarginPercent: norm(o.defaultMarginPercent, DEFAULT_PRICING_SETTINGS.defaultMarginPercent, 0, 95),
     invoiceCostPercent: norm(o.invoiceCostPercent, DEFAULT_PRICING_SETTINGS.invoiceCostPercent, 0, 95),
     cardFeeTable,
     wholesaleMarginPercent: norm(o.wholesaleMarginPercent, DEFAULT_PRICING_SETTINGS.wholesaleMarginPercent, 0, 95),
     roundPricesUp: o.roundPricesUp === true,
+    categoryMarginOverrides,
   };
+}
+
+/**
+ * Resolve a margem de venda (varejo) que se aplica por causa da CATEGORIA do
+ * produto — usada como fallback antes de cair na margem padrão da loja (ver
+ * precoVendaDoProduto/precoAVistaDoProduto/parcelamento12xDoProduto: a
+ * margem própria do produto/variante sempre tem prioridade sobre a da
+ * categoria). Devolve null se o produto não tem categoria ou a categoria não
+ * tem margem configurada — nesse caso quem chamar cai na margem padrão.
+ */
+export function resolveCategoryMargin(categoryId: number | null | undefined, settings: PricingSettings): number | null {
+  if (categoryId == null) return null;
+  const v = settings.categoryMarginOverrides[String(categoryId)];
+  return Number.isFinite(v) ? v : null;
 }
 
 /**
@@ -94,14 +131,21 @@ export function parcelaCartao(precoVenda: number, parcelas: number): number {
   return Math.round((precoVenda / parcelas) * 100) / 100;
 }
 
-/** Preço de venda de um produto: usa a margem própria do produto se houver, senão a margem padrão da loja. */
+/**
+ * Preço de venda de um produto: usa a margem própria do produto se houver;
+ * senão a margem configurada pra CATEGORIA do produto (categoryId), se
+ * houver; senão a margem padrão da loja. categoryId é opcional — chamadas
+ * que não sabem/não têm categoria (ex.: simulação avulsa) continuam caindo
+ * direto na margem padrão, como sempre.
+ */
 export function precoVendaDoProduto(
   produto: { costPrice: number | null; costIncludesInvoice: boolean; marginPercentOverride: number | null },
   settings: PricingSettings,
   taxaCartaoReferenciaParcelas = 1,
+  categoryId?: number | null,
 ): number | null {
   if (produto.costPrice == null || !Number.isFinite(produto.costPrice) || produto.costPrice <= 0) return null;
-  const margemPercent = produto.marginPercentOverride ?? settings.defaultMarginPercent;
+  const margemPercent = produto.marginPercentOverride ?? resolveCategoryMargin(categoryId, settings) ?? settings.defaultMarginPercent;
   const taxaCartaoPercent = settings.cardFeeTable[String(taxaCartaoReferenciaParcelas)] ?? 0;
   return calcularPrecoVenda({
     custo: produto.costPrice,
@@ -144,9 +188,10 @@ export function precoAtacadoDoProduto(
 export function precoAVistaDoProduto(
   produto: { costPrice: number | null; costIncludesInvoice: boolean; marginPercentOverride: number | null },
   settings: PricingSettings,
+  categoryId?: number | null,
 ): number | null {
   if (produto.costPrice == null || !Number.isFinite(produto.costPrice) || produto.costPrice <= 0) return null;
-  const margemPercent = produto.marginPercentOverride ?? settings.defaultMarginPercent;
+  const margemPercent = produto.marginPercentOverride ?? resolveCategoryMargin(categoryId, settings) ?? settings.defaultMarginPercent;
   return calcularPrecoVenda({
     custo: produto.costPrice,
     margemPercent,
@@ -166,8 +211,9 @@ export function precoAVistaDoProduto(
 export function parcelamento12xDoProduto(
   produto: { costPrice: number | null; costIncludesInvoice: boolean; marginPercentOverride: number | null },
   settings: PricingSettings,
+  categoryId?: number | null,
 ): { total: number; parcela: number } | null {
-  const total = precoVendaDoProduto(produto, settings, 12);
+  const total = precoVendaDoProduto(produto, settings, 12, categoryId);
   return total != null ? { total, parcela: parcelaCartao(total, 12) } : null;
 }
 

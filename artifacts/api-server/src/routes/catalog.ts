@@ -30,6 +30,7 @@ import {
   parcelamento12xAtacadoDoProduto,
   type PricingSettings,
 } from "../lib/catalogPricing";
+import { extractJsonObject, askCatalogAIWithWebSearch, buildMarketCheckPrompt, cleanMarketCheckVerdict } from "../lib/catalogMarketPrice";
 import { CATALOG_CONDITIONS, CATALOG_CONDITION_CRITERIA, type CatalogCondition } from "@workspace/db";
 
 const router: IRouter = Router();
@@ -166,15 +167,15 @@ function toNumberOrNull(v: unknown): number | null {
 // preço, sempre em sincronia se a margem/tabela de cartão mudar depois).
 function withInstallmentPricing<
   T extends { costPrice: string | number | null; costIncludesInvoice: boolean; marginPercentOverride: string | number | null },
->(v: T, settings: PricingSettings): { priceCash: number | null; installment12Value: number | null } {
+>(v: T, settings: PricingSettings, categoryId?: number | null): { priceCash: number | null; installment12Value: number | null } {
   const produto = {
     costPrice: toNumberOrNull(v.costPrice),
     costIncludesInvoice: v.costIncludesInvoice,
     marginPercentOverride: toNumberOrNull(v.marginPercentOverride),
   };
-  const installment = parcelamento12xDoProduto(produto, settings);
+  const installment = parcelamento12xDoProduto(produto, settings, categoryId);
   return {
-    priceCash: precoAVistaDoProduto(produto, settings),
+    priceCash: precoAVistaDoProduto(produto, settings, categoryId),
     installment12Value: installment?.parcela ?? null,
   };
 }
@@ -284,12 +285,14 @@ function cleanVariantInput(raw: unknown): VariantInput {
   };
 }
 
-async function resolveVariantSalePrice(v: VariantInput, settings: PricingSettings): Promise<string | null> {
+async function resolveVariantSalePrice(v: VariantInput, settings: PricingSettings, categoryId?: number | null): Promise<string | null> {
   if (v.salePrice != null) return String(v.salePrice);
   if (v.costPrice == null) return null;
   const computed = precoVendaDoProduto(
     { costPrice: v.costPrice, costIncludesInvoice: v.costIncludesInvoice, marginPercentOverride: v.marginPercentOverride },
     settings,
+    1,
+    categoryId,
   );
   return computed != null ? String(computed) : null;
 }
@@ -308,7 +311,7 @@ async function resolveVariantWholesalePrice(v: VariantInput, settings: PricingSe
 }
 
 /** Substitui as variantes de um produto (upsert por id + remove as que sumiram). Sempre garante ao menos 1 variante. */
-async function replaceVariants(tenantId: number, productId: number, rawVariants: unknown, settings: PricingSettings) {
+async function replaceVariants(tenantId: number, productId: number, rawVariants: unknown, settings: PricingSettings, categoryId?: number | null) {
   const list = Array.isArray(rawVariants) && rawVariants.length > 0 ? rawVariants : [{}];
   const inputs = list.slice(0, 20).map(cleanVariantInput);
 
@@ -318,7 +321,7 @@ async function replaceVariants(tenantId: number, productId: number, rawVariants:
   const keepIds = new Set<number>();
 
   for (const [i, v] of inputs.entries()) {
-    const salePrice = await resolveVariantSalePrice(v, settings);
+    const salePrice = await resolveVariantSalePrice(v, settings, categoryId);
     const wholesalePrice = await resolveVariantWholesalePrice(v, settings);
     const values = {
       storage: v.storage,
@@ -362,8 +365,13 @@ async function replaceVariants(tenantId: number, productId: number, rawVariants:
 // casamento porque a lista do fornecedor normalmente só varia por memória.
 async function updateVariantsFromImport(tenantId: number, productId: number, items: ParsedVariant[], settings: PricingSettings) {
   const normStorage = (s: string | null) => (s ?? "").toLowerCase().replace(/\s+/g, "");
-  const existing = await db.select().from(catalogProductVariantsTable)
-    .where(and(eq(catalogProductVariantsTable.productId, productId), eq(catalogProductVariantsTable.tenantId, tenantId)));
+  const [[product], existing] = await Promise.all([
+    db.select({ categoryId: catalogProductsTable.categoryId }).from(catalogProductsTable)
+      .where(and(eq(catalogProductsTable.id, productId), eq(catalogProductsTable.tenantId, tenantId))).limit(1),
+    db.select().from(catalogProductVariantsTable)
+      .where(and(eq(catalogProductVariantsTable.productId, productId), eq(catalogProductVariantsTable.tenantId, tenantId))),
+  ]);
+  const categoryId = product?.categoryId ?? null;
   const existingByStorage = new Map(existing.map((v) => [normStorage(v.storage), v]));
 
   for (const item of items) {
@@ -384,7 +392,7 @@ async function updateVariantsFromImport(tenantId: number, productId: number, ite
       compareAtPrice: match ? numOrNull(match.compareAtPrice) : null,
       stockQty: match?.stockQty ?? 1,
     };
-    const salePrice = await resolveVariantSalePrice(vInput, settings);
+    const salePrice = await resolveVariantSalePrice(vInput, settings, categoryId);
     const wholesalePrice = await resolveVariantWholesalePrice(vInput, settings);
     const values = {
       storage: vInput.storage,
@@ -489,7 +497,7 @@ router.get("/catalog/products", requireAuth, async (req, res): Promise<void> => 
       // pra mostrar "à vista" e "12x" no card/edição sem duplicar preço no banco.
       // Atacado (admin sempre vê, sem código de acesso) ganha o mesmo tratamento.
       variants: (variants.get(r.id) ?? []).map((v) => ({
-        ...v, ...withInstallmentPricing(v, settings), ...withWholesaleInstallmentPricing(v, settings),
+        ...v, ...withInstallmentPricing(v, settings, r.categoryId), ...withWholesaleInstallmentPricing(v, settings),
       })),
     })),
   });
@@ -514,12 +522,12 @@ router.post("/catalog/products", requireAuth, async (req, res): Promise<void> =>
   }).returning();
 
   const settings = await getPricingSettings(tenantId);
-  await replaceVariants(tenantId, product.id, body.variants, settings);
+  await replaceVariants(tenantId, product.id, body.variants, settings, product.categoryId);
   const variants = await variantsByProductIds(tenantId, [product.id]);
   res.status(201).json({
     ...product, photos: [],
     variants: (variants.get(product.id) ?? []).map((v) => ({
-      ...v, ...withInstallmentPricing(v, settings), ...withWholesaleInstallmentPricing(v, settings),
+      ...v, ...withInstallmentPricing(v, settings, product.categoryId), ...withWholesaleInstallmentPricing(v, settings),
     })),
   });
 });
@@ -547,14 +555,14 @@ router.patch("/catalog/products/:id", requireAuth, async (req, res): Promise<voi
 
   const settings = await getPricingSettings(tenantId);
   if ("variants" in body) {
-    await replaceVariants(tenantId, id, body.variants, settings);
+    await replaceVariants(tenantId, id, body.variants, settings, updated.categoryId);
   }
 
   const [photos, variants] = await Promise.all([photosByProductIds(tenantId, [id]), variantsByProductIds(tenantId, [id])]);
   res.json({
     ...updated, photos: photos.get(id) ?? [],
     variants: (variants.get(id) ?? []).map((v) => ({
-      ...v, ...withInstallmentPricing(v, settings), ...withWholesaleInstallmentPricing(v, settings),
+      ...v, ...withInstallmentPricing(v, settings, updated.categoryId), ...withWholesaleInstallmentPricing(v, settings),
     })),
   });
 });
@@ -902,22 +910,28 @@ router.put("/catalog/pricing-settings", requireAdmin, async (req, res): Promise<
 router.post("/catalog/pricing-settings/simulate", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const settings = await getPricingSettings(tenantId);
-  const { costPrice, costIncludesInvoice, marginPercentOverride, wholesaleMarginPercentOverride } = req.body as {
-    costPrice?: unknown; costIncludesInvoice?: unknown; marginPercentOverride?: unknown; wholesaleMarginPercentOverride?: unknown;
+  const { costPrice, costIncludesInvoice, marginPercentOverride, wholesaleMarginPercentOverride, categoryId } = req.body as {
+    costPrice?: unknown; costIncludesInvoice?: unknown; marginPercentOverride?: unknown; wholesaleMarginPercentOverride?: unknown; categoryId?: unknown;
   };
   const custo = toNumberOrNull(costPrice);
   if (custo == null || custo <= 0) { res.status(400).json({ error: "Informe o custo do aparelho" }); return; }
+  // categoryId aqui é só pra resolver a margem de fallback (ver
+  // resolveCategoryMargin) — não precisa validar que a categoria existe de
+  // verdade (é só uma simulação, não grava nada).
+  const catId = Number.isInteger(categoryId) && (categoryId as number) > 0 ? (categoryId as number) : null;
   const salePrice = precoVendaDoProduto(
     { costPrice: custo, costIncludesInvoice: costIncludesInvoice === true, marginPercentOverride: toNumberOrNull(marginPercentOverride) },
     settings,
+    1,
+    catId,
   );
   const wholesalePrice = precoAtacadoDoProduto(
     { costPrice: custo, costIncludesInvoice: costIncludesInvoice === true, wholesaleMarginPercentOverride: toNumberOrNull(wholesaleMarginPercentOverride) },
     settings,
   );
   const produtoVarejo = { costPrice: custo, costIncludesInvoice: costIncludesInvoice === true, marginPercentOverride: toNumberOrNull(marginPercentOverride) };
-  const priceCash = precoAVistaDoProduto(produtoVarejo, settings);
-  const installment12 = parcelamento12xDoProduto(produtoVarejo, settings);
+  const priceCash = precoAVistaDoProduto(produtoVarejo, settings, catId);
+  const installment12 = parcelamento12xDoProduto(produtoVarejo, settings, catId);
   const produtoAtacado = { costPrice: custo, costIncludesInvoice: costIncludesInvoice === true, wholesaleMarginPercentOverride: toNumberOrNull(wholesaleMarginPercentOverride) };
   const wholesaleInstallment12 = parcelamento12xAtacadoDoProduto(produtoAtacado, settings);
   res.json({ salePrice, wholesalePrice, priceCash, installment12, wholesaleInstallment12, settings });
@@ -1482,6 +1496,42 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
   }
 });
 
+// Checagem de preço de mercado — usada na tela de revisão da importação
+// (antes de finalizar): pesquisa na web com IA se o preço de venda calculado
+// (custo + margem, com base na categoria) está compatível com o que o
+// mercado brasileiro cobra por aquele mesmo aparelho/condição. Chamada sob
+// demanda por item (botão "Verificar preço de mercado"), não automática pra
+// cada item — evita custo/tempo desnecessário numa lista com dezenas de
+// aparelhos quando o lojista só quer conferir alguns.
+router.post("/catalog/import/market-check", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const body = req.body as Record<string, unknown>;
+  const model = clean(body.model, 120);
+  if (!model) { res.status(400).json({ error: "Informe o modelo do aparelho" }); return; }
+  const condition = cleanCondition(body.condition);
+  const storage = clean(body.storage, 40);
+  const price = toNumberOrNull(body.salePrice);
+  const device = [model, storage].filter(Boolean).join(" ");
+  const conditionLabel = CATALOG_CONDITION_CRITERIA[condition]?.label ?? condition;
+
+  const prompt = buildMarketCheckPrompt({ device, conditionLabel, price });
+  try {
+    const { getOpenAiClientForTenant } = await import("../lib/aiClient");
+    const openai = await getOpenAiClientForTenant(tenantId);
+    const raw = await askCatalogAIWithWebSearch(openai, prompt);
+    const parsed = extractJsonObject<{ marketRange?: string; verdict?: string; note?: string }>(raw);
+    if (!parsed) { res.status(502).json({ error: "A IA não retornou uma resposta válida. Tente novamente." }); return; }
+    res.json({
+      marketRange: clean(parsed.marketRange, 200) || null,
+      verdict: cleanMarketCheckVerdict(parsed.verdict),
+      note: clean(parsed.note, 400) || null,
+    });
+  } catch (err) {
+    req.log.error({ err }, "Catalog market price check failed");
+    res.status(503).json({ error: "A IA está indisponível no momento. Tente novamente em instantes." });
+  }
+});
+
 // Busca best-effort de fotos pra anexar automaticamente ao importar por IA —
 // mesma API da busca manual (searchImages, rota /catalog/photo-search acima),
 // mas nunca propaga erro: sem nenhum provedor configurado, ou se a busca
@@ -1715,7 +1765,7 @@ router.post("/catalog/import/confirm", requireAuth, async (req, res): Promise<vo
     const [product] = await db.insert(catalogProductsTable).values({
       tenantId, model: item.model, condition: item.condition, colors: item.colors, categoryId: item.categoryId, createdBy: req.session.userId ?? null,
     }).returning();
-    await replaceVariants(tenantId, product.id, item.variants.map((v) => ({ storage: v.storage, color: v.color, costPrice: v.costPrice, marginPercentOverride: v.marginPercentOverride })), settings);
+    await replaceVariants(tenantId, product.id, item.variants.map((v) => ({ storage: v.storage, color: v.color, costPrice: v.costPrice, marginPercentOverride: v.marginPercentOverride })), settings, product.categoryId);
     createdProducts.push(product);
   }
   // Melhor esforço: tenta puxar 1 foto por produto recém-criado (mesma busca
@@ -1843,7 +1893,7 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
               // vista atual (ver cálculo no front, VitrinePublica.tsx).
               compareAtPrice: v.compareAtPrice,
               // à vista/12x calculados na hora, nunca expõe custo/margem (ver withInstallmentPricing).
-              ...withInstallmentPricing(v, pricingSettings),
+              ...withInstallmentPricing(v, pricingSettings, r.categoryId),
               // 12x de atacado só sai junto do preço de atacado, ou seja, só pra
               // quem já desbloqueou com o código (mesma regra do wholesalePrice acima).
               wholesaleInstallment12Value: wholesaleUnlocked ? wholesale.wholesaleInstallment12Value : null,

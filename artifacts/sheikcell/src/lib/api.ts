@@ -494,7 +494,14 @@ export type CatalogPricingSettings = {
   cardFeeTable: Record<string, number>;
   wholesaleMarginPercent: number;
   roundPricesUp: boolean;
+  // Margem de venda por categoria (chave = id da categoria, como string) —
+  // usada como fallback antes da margem padrão da loja quando o produto (ou
+  // uma variante importada) não tem margem própria definida. Ver
+  // categoryMarginForId em VitrineAparelhos.tsx.
+  categoryMarginOverrides: Record<string, number>;
 };
+
+export type CatalogMarketCheckVerdict = "compativel" | "acima" | "abaixo" | "sem_dados";
 
 export type CatalogPublicVariant = {
   id: number; storage: string | null; color: string | null; salePrice: string | null; inStock: boolean;
@@ -2406,7 +2413,7 @@ export const api = {
       req<CatalogPhoto>(`/catalog/products/${productId}/photos/from-url`, { method: "POST", body: JSON.stringify({ url, color }) }),
     pricingSettings: () => req<CatalogPricingSettings>("/catalog/pricing-settings"),
     savePricingSettings: (data: CatalogPricingSettings) => req<CatalogPricingSettings>("/catalog/pricing-settings", { method: "PUT", body: JSON.stringify(data) }),
-    simulatePrice: (data: { costPrice: number; costIncludesInvoice?: boolean; marginPercentOverride?: number | null; wholesaleMarginPercentOverride?: number | null }) =>
+    simulatePrice: (data: { costPrice: number; costIncludesInvoice?: boolean; marginPercentOverride?: number | null; wholesaleMarginPercentOverride?: number | null; categoryId?: number | null }) =>
       req<{
         salePrice: number | null; wholesalePrice: number | null;
         // priceCash = à vista (Pix/dinheiro, sem taxa de cartão); installment12
@@ -2444,6 +2451,13 @@ export const api = {
     importConfirm: (items: (CatalogImportItem & { existingProductId?: number | null })[]) =>
       req<{ imported: number; updated: number; products: CatalogProduct[]; updatedProducts: CatalogProduct[]; photosAttached?: number; photoSearchConfigured?: boolean }>(
         "/catalog/import/confirm", { method: "POST", body: JSON.stringify({ items }), timeoutMs: 90_000 },
+      ),
+    // Checagem de preço de mercado sob demanda (botão por item na revisão da
+    // importação) — pesquisa na web com IA se o preço calculado está
+    // compatível com o que o mercado brasileiro cobra por aquele aparelho.
+    marketCheck: (data: { model: string; condition: CatalogCondition; storage: string | null; salePrice: number | null }) =>
+      req<{ marketRange: string | null; verdict: CatalogMarketCheckVerdict; note: string | null }>(
+        "/catalog/import/market-check", { method: "POST", body: JSON.stringify(data), timeoutMs: 30_000 },
       ),
     public: (slug: string, code?: string) =>
       req<{
