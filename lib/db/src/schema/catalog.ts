@@ -103,6 +103,13 @@ export const catalogProductsTable = pgTable("catalog_products", {
   status: text("status").notNull().default("active"), // active | inactive | sold
   categoryId: integer("category_id").references(() => catalogCategoriesTable.id, { onDelete: "set null" }),
   sortOrder: integer("sort_order").notNull().default(0),
+  // Contador de "clique em finalizar pedido" na vitrine pública — não é uma
+  // venda confirmada de verdade (não existe sistema de pedido/venda
+  // concluída vinculado à Vitrine, o "Finalizar pedido" só abre o
+  // WhatsApp), só uma aproximação de popularidade pra ordenar por "mais
+  // comprado" na listagem. Incrementado pela rota pública
+  // POST /catalog-public/:slug/checkout-click.
+  purchaseCount: integer("purchase_count").notNull().default(0),
   // Lista de características (armazenamento, RAM, tela, câmera, bateria...)
   // gerada por IA a partir do modelo/condição/cores, editável à mão pelo
   // lojista depois — mostrada na vitrine pública como "Principais

@@ -124,6 +124,50 @@ function wholesaleStorageKey(slug: string) {
   return `sheikcell-vitrine-atacado-${slug}`;
 }
 
+// Ordenação da listagem — "Mais novos primeiro" é sempre a ordem padrão
+// (pedido do lojista). Sem cadastro de geração/ano no sistema (o campo
+// "modelo" é texto livre), usa o primeiro número que aparecer no nome do
+// modelo como aproximação da geração/lançamento (ex.: "iPhone 16 Pro Max" →
+// 16, "Galaxy S24 Ultra" → 24). Modelo sem nenhum número cai por último —
+// não tem como saber a geração desses.
+function modelGenerationRank(model: string): number {
+  const match = model.match(/\d+/);
+  return match ? parseInt(match[0], 10) : -1;
+}
+
+// Menor preço à vista entre as variantes com preço definido — mesmo valor
+// mostrado no card ("a partir de"), usado pro filtro Menor/Maior preço.
+function productMinPrice(p: { variants: { priceCash?: number | null; salePrice: string | null }[] }): number | null {
+  const prices = p.variants
+    .map((v) => v.priceCash ?? (v.salePrice != null ? Number(v.salePrice) : null))
+    .filter((n): n is number => n != null && Number.isFinite(n));
+  return prices.length > 0 ? Math.min(...prices) : null;
+}
+
+type SortOption = "recent" | "price_asc" | "price_desc" | "popular";
+
+function sortProducts<T extends { id: number; model: string; purchaseCount?: number; variants: { priceCash?: number | null; salePrice: string | null }[] }>(
+  list: T[], sortBy: SortOption,
+): T[] {
+  const arr = [...list];
+  if (sortBy === "price_asc" || sortBy === "price_desc") {
+    arr.sort((a, b) => {
+      const pa = productMinPrice(a), pb = productMinPrice(b);
+      if (pa == null && pb == null) return b.id - a.id;
+      if (pa == null) return 1; // sem preço cadastrado vai pro fim, nas duas direções
+      if (pb == null) return -1;
+      return sortBy === "price_asc" ? pa - pb : pb - pa;
+    });
+    return arr;
+  }
+  if (sortBy === "popular") {
+    arr.sort((a, b) => (b.purchaseCount ?? 0) - (a.purchaseCount ?? 0) || b.id - a.id);
+    return arr;
+  }
+  arr.sort((a, b) => modelGenerationRank(b.model) - modelGenerationRank(a.model) || b.id - a.id);
+  return arr;
+}
+
 function ProductCard({
   p, wholesaleUnlocked, onAddToCart, onOpenDetail,
 }: {
@@ -627,6 +671,8 @@ export default function VitrinePublica() {
   const [conditionFilter, setConditionFilter] = useState<string | "all">("all");
   const [storageFilter, setStorageFilter] = useState<string | "all">("all");
   const [colorFilter, setColorFilter] = useState<string | "all">("all");
+  // "recent" (modelo mais novo primeiro) é sempre o padrão — pedido do lojista.
+  const [sortBy, setSortBy] = useState<SortOption>("recent");
 
   const [showUnlock, setShowUnlock] = useState(false);
   const [codeInput, setCodeInput] = useState("");
@@ -759,6 +805,7 @@ export default function VitrinePublica() {
       || p.colors.some((c) => c.toLowerCase().includes(searchNorm))
       || p.variants.some((v) => (v.storage ?? "").toLowerCase().includes(searchNorm) || (v.color ?? "").toLowerCase().includes(searchNorm));
   });
+  const sortedProducts = sortProducts(filteredProducts, sortBy);
 
   return (
     <div className="min-h-screen bg-neutral-50 pb-20">
@@ -872,18 +919,26 @@ export default function VitrinePublica() {
               {availableColors.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
           )}
+          <select value={sortBy} onChange={(e) => setSortBy(e.target.value as SortOption)}
+            data-testid="select-sort-vitrine"
+            className="ml-auto px-2.5 py-1 rounded-full text-[11px] font-semibold bg-white border border-neutral-200 text-neutral-500 focus:outline-none">
+            <option value="recent">Mais novos primeiro</option>
+            <option value="price_asc">Menor preço</option>
+            <option value="price_desc">Maior preço</option>
+            <option value="popular">Mais comprado</option>
+          </select>
         </div>
       </div>
 
       <main className="max-w-5xl mx-auto px-4 py-6">
-        {filteredProducts.length === 0 ? (
+        {sortedProducts.length === 0 ? (
           <div className="text-center py-24 text-neutral-400">
             <Smartphone className="w-12 h-12 mx-auto mb-3 opacity-30" />
             <p className="text-sm">Nenhum aparelho encontrado com esses filtros.</p>
           </div>
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
-            {filteredProducts.map((p) => (
+            {sortedProducts.map((p) => (
               <ProductCard key={p.id} p={p} wholesaleUnlocked={data.wholesaleUnlocked} onAddToCart={addToCart} onOpenDetail={setDetailProduct} />
             ))}
           </div>
@@ -933,6 +988,13 @@ export default function VitrinePublica() {
                 </div>
                 {checkoutWa ? (
                   <a href={checkoutWa} target="_blank" rel="noreferrer" data-testid="button-checkout-whatsapp"
+                    onClick={() => {
+                      // Best-effort, só alimenta o filtro "Mais comprado" — nunca deve
+                      // travar o checkout (abre em nova aba, não navega a página atual).
+                      if (slug && cart.length > 0) {
+                        api.catalog.trackCheckoutClick(slug, cart.map((c) => ({ productId: c.productId, qty: c.qty }))).catch(() => {});
+                      }
+                    }}
                     className="flex items-center justify-center gap-1.5 w-full py-2.5 rounded-xl bg-emerald-500 text-white text-sm font-semibold hover:bg-emerald-600 transition">
                     <MessageCircle className="w-4 h-4" /> Finalizar pedido no WhatsApp
                   </a>

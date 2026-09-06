@@ -449,6 +449,9 @@ export type CatalogProduct = {
   status: "active" | "inactive" | "sold";
   categoryId: number | null;
   sortOrder: number;
+  // Aproximação de popularidade (clique em "Finalizar pedido" na vitrine
+  // pública) — usada só pro filtro de ordenação "Mais comprado".
+  purchaseCount: number;
   // Lista de características (specs) gerada por IA ou editada à mão — ver
   // api.catalog.generateCharacteristics.
   aiCharacteristics: string[] | null;
@@ -514,6 +517,9 @@ export type CatalogPublicProduct = {
   description: string | null;
   categoryId: number | null;
   aiCharacteristics: string[] | null;
+  // Aproximação de popularidade (clique em "Finalizar pedido") — usada só
+  // pro filtro de ordenação "Mais comprado" na listagem.
+  purchaseCount: number;
   // Resumo de avaliação (estrelas) — null se o produto ainda não tem
   // nenhuma avaliação.
   reviewsSummary: { average: number; count: number } | null;
@@ -2425,6 +2431,11 @@ export const api = {
     // Avaliação de cliente (estrelas + comentário) — vitrine pública, sem login.
     submitReview: (slug: string, data: { productId: number; variantId?: number | null; rating: number; customerName: string; customerPhone: string; customerCity: string; comment?: string }) =>
       req<{ ok: boolean }>(`/catalog-public/${slug}/reviews`, { method: "POST", body: JSON.stringify(data) }),
+    // Clique em "Finalizar pedido no WhatsApp" — best-effort, só pra
+    // alimentar o filtro de ordenação "Mais comprado" (ver comentário no
+    // schema/rota). Nunca deve travar o checkout se falhar.
+    trackCheckoutClick: (slug: string, items: { productId: number; qty: number }[]) =>
+      req<{ ok: boolean }>(`/catalog-public/${slug}/checkout-click`, { method: "POST", body: JSON.stringify({ items }) }),
   },
   meetings: {
     list: () => req<MeetingItem[]>("/meetings"),

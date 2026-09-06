@@ -83,6 +83,52 @@ function storagesLabel(p: CatalogProduct): string {
   return list.join(", ");
 }
 
+// Ordenação da listagem — "Mais novos primeiro" é sempre o padrão (pedido
+// do lojista). Sem cadastro de geração/ano no sistema (o campo "modelo" é
+// texto livre), usa o primeiro número que aparecer no nome como aproximação
+// da geração/lançamento (ex.: "iPhone 16 Pro Max" → 16). Modelo sem número
+// nenhum cai por último.
+function modelGenerationRank(model: string): number {
+  const match = model.match(/\d+/);
+  return match ? parseInt(match[0], 10) : -1;
+}
+
+function productMinPrice(p: CatalogProduct): number | null {
+  const prices = p.variants
+    .map((v) => v.priceCash ?? (v.salePrice != null ? Number(v.salePrice) : null))
+    .filter((n): n is number => n != null && Number.isFinite(n));
+  return prices.length > 0 ? Math.min(...prices) : null;
+}
+
+type CatalogSortOption = "recent" | "price_asc" | "price_desc" | "popular";
+
+function sortCatalogProducts(list: CatalogProduct[], sortBy: CatalogSortOption): CatalogProduct[] {
+  const arr = [...list];
+  if (sortBy === "price_asc" || sortBy === "price_desc") {
+    arr.sort((a, b) => {
+      const pa = productMinPrice(a), pb = productMinPrice(b);
+      if (pa == null && pb == null) return b.id - a.id;
+      if (pa == null) return 1;
+      if (pb == null) return -1;
+      return sortBy === "price_asc" ? pa - pb : pb - pa;
+    });
+    return arr;
+  }
+  if (sortBy === "popular") {
+    arr.sort((a, b) => (b.purchaseCount ?? 0) - (a.purchaseCount ?? 0) || b.id - a.id);
+    return arr;
+  }
+  arr.sort((a, b) => modelGenerationRank(b.model) - modelGenerationRank(a.model) || b.id - a.id);
+  return arr;
+}
+
+// Normaliza o modelo pra comparar duplicidade (evitar dois anúncios do
+// mesmo aparelho na mesma categoria/subcategoria) — minúsculo, sem acento,
+// espaços colapsados. Ex.: "iPhone  15 Pró Max" e "iphone 15 pro max" batem.
+function normalizeModelForDuplicateCheck(model: string): string {
+  return model.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+}
+
 export default function VitrineAparelhos() {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -94,6 +140,8 @@ export default function VitrineAparelhos() {
   const [search, setSearch] = useState("");
   const [filterStatus, setFilterStatus] = useState<"active" | "all">("active");
   const [filterCategory, setFilterCategory] = useState<number | "all">("all");
+  // "recent" (modelo mais novo primeiro) é sempre o padrão — pedido do lojista.
+  const [sortBy, setSortBy] = useState<CatalogSortOption>("recent");
 
   // Seleção em massa (excluir vários de uma vez, geralmente depois de
   // filtrar por categoria/busca/status pra achar só o que quer apagar).
@@ -323,11 +371,11 @@ export default function VitrineAparelhos() {
     }
   };
 
-  const filtered = products.filter((p) =>
+  const filtered = sortCatalogProducts(products.filter((p) =>
     (filterStatus === "all" || p.status === "active") &&
     (filterCategory === "all" || p.categoryId === filterCategory) &&
     (!search || p.model.toLowerCase().includes(search.toLowerCase()) || storagesLabel(p).toLowerCase().includes(search.toLowerCase()))
-  );
+  ), sortBy);
 
   const toggleSelectMode = () => { setSelectMode((v) => !v); setSelectedIds(new Set()); };
   const toggleSelected = (id: number) => {
@@ -520,6 +568,28 @@ export default function VitrineAparelhos() {
     if (saving) return;
     const model = form.model.trim();
     if (!model) { toast({ title: "Informe o modelo do aparelho", variant: "destructive" }); return; }
+    // Evitar anúncio duplicado: só ao CRIAR (não ao editar) — mesmo modelo
+    // (sem diferenciar acento/maiúscula) já cadastrado na mesma categoria/
+    // subcategoria. Não bloqueia sozinho (condições diferentes do mesmo
+    // aparelho são um caso legítimo, ex.: "Novo" e "Bom" lado a lado) — só
+    // avisa e deixa o lojista decidir se quer mesmo criar outro cartão ou
+    // prefere editar o que já existe.
+    if (!editing) {
+      const normalized = normalizeModelForDuplicateCheck(model);
+      const duplicates = products.filter((p) => p.categoryId === form.categoryId && normalizeModelForDuplicateCheck(p.model) === normalized);
+      if (duplicates.length > 0) {
+        const catLabel = form.categoryId != null ? categoryPathLabel(categories, form.categoryId) : "sem categoria definida";
+        const list = duplicates
+          .map((p) => `- ${p.model} (${CATALOG_CONDITIONS.find((c) => c.value === p.condition)?.label ?? p.condition})`)
+          .join("\n");
+        const proceed = confirm(
+          `Já existe ${duplicates.length === 1 ? "um anúncio" : `${duplicates.length} anúncios`} desse modelo em "${catLabel}":\n\n${list}\n\n` +
+          `Se é o mesmo aparelho, prefira editar o anúncio existente (pra adicionar variante/estoque) em vez de duplicar.\n\n` +
+          `Criar mesmo assim um novo anúncio?`
+        );
+        if (!proceed) return;
+      }
+    }
     setSaving(true);
     const payload: Record<string, unknown> = {
       model,
@@ -769,6 +839,21 @@ export default function VitrineAparelhos() {
         }
         return it; // sem categoria (o lojista pode ter escolhido uma manualmente — já está em it.categoryId)
       });
+      // Evitar anúncio duplicado na importação em lote: mesmo modelo já
+      // cadastrado na mesma categoria/subcategoria (mesmo aviso do cadastro
+      // manual, ver handleSave) — não bloqueia sozinho, só avisa e deixa o
+      // lojista decidir (pode ser reimportação por engano da mesma lista).
+      const dupPairs = resolved
+        .map((it) => ({ it, match: products.find((p) => p.categoryId === (it.categoryId ?? null) && normalizeModelForDuplicateCheck(p.model) === normalizeModelForDuplicateCheck(it.model)) }))
+        .filter((x): x is { it: typeof resolved[number]; match: CatalogProduct } => !!x.match);
+      if (dupPairs.length > 0) {
+        const list = dupPairs.map(({ it, match }) => `- ${it.model} → já existe como "${match.model}" (${CATALOG_CONDITIONS.find((c) => c.value === match.condition)?.label ?? match.condition})`).join("\n");
+        const proceed = confirm(
+          `${dupPairs.length === 1 ? "1 item" : `${dupPairs.length} itens`} dessa lista já parece(m) cadastrado(s) na mesma categoria/subcategoria:\n\n${list}\n\n` +
+          `Continuar mesmo assim (pode duplicar o anúncio)?`
+        );
+        if (!proceed) { setConfirming(false); return; }
+      }
       const r = await api.catalog.importConfirm(resolved);
       setProducts((prev) => [...r.products.map((p) => ({ ...p, photos: [], variants: [] as CatalogProduct["variants"] })), ...prev]);
       // Sem GOOGLE_CSE_API_KEY/CX configurada no servidor a busca automática
@@ -1016,6 +1101,14 @@ export default function VitrineAparelhos() {
           className={`px-3 py-1.5 rounded-full text-xs font-semibold transition ${filterStatus === "active" ? "bg-primary text-white" : "bg-secondary text-muted-foreground"}`}>
           {filterStatus === "active" ? "Só ativos" : "Todos"}
         </button>
+        <select value={sortBy} onChange={(e) => setSortBy(e.target.value as CatalogSortOption)}
+          data-testid="select-sort-catalog"
+          className="rounded-full border px-3 py-1.5 text-xs font-semibold bg-white text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40">
+          <option value="recent">Mais novos primeiro</option>
+          <option value="price_asc">Menor preço</option>
+          <option value="price_desc">Maior preço</option>
+          <option value="popular">Mais comprado</option>
+        </select>
         {products.some((p) => p.status === "active") && (
           <button onClick={copyFullCatalog} data-testid="button-copy-full-catalog"
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700 hover:bg-emerald-200 transition">

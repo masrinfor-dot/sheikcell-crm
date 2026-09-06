@@ -3,7 +3,7 @@ import path from "path";
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
 import { mkdir, writeFile, unlink } from "fs/promises";
-import { eq, and, desc, inArray } from "drizzle-orm";
+import { eq, and, desc, inArray, sql } from "drizzle-orm";
 import {
   db,
   catalogProductsTable,
@@ -1670,6 +1670,10 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
         description: r.description,
         categoryId: r.categoryId,
         aiCharacteristics: r.aiCharacteristics ?? null,
+        // Aproximação de popularidade (clique em "Finalizar pedido"), usada
+        // só pro filtro de ordenação "Mais comprado" no front — ver
+        // comentário em catalogProductsTable.purchaseCount.
+        purchaseCount: r.purchaseCount,
         // Resumo de avaliação (estrelas) — null quando o produto ainda não
         // tem nenhuma avaliação, pro front não mostrar "0 avaliações".
         reviewsSummary: reviewsSummaryByProduct.has(r.id)
@@ -1743,6 +1747,32 @@ catalogPublicRouter.post("/catalog-public/:slug/notify-me", async (req: Request,
     tenantId: tenant.id, productId, variantId, customerName, customerContact,
   });
   res.status(201).json({ ok: true });
+});
+
+// Contador de "clique em finalizar pedido" — usado só como aproximação de
+// popularidade pro filtro "Mais comprado" na listagem (não existe hoje
+// nenhum sistema de pedido/venda confirmada vinculado à Vitrine; "Finalizar
+// pedido no WhatsApp" só abre uma conversa, a venda em si acontece fora do
+// sistema). Best-effort: nunca falha alto, item inválido é só ignorado.
+catalogPublicRouter.post("/catalog-public/:slug/checkout-click", async (req: Request, res: Response): Promise<void> => {
+  const rawSlug = Array.isArray(req.params.slug) ? req.params.slug[0] : req.params.slug;
+  const slug = (rawSlug ?? "").toLowerCase();
+  const [tenant] = await db.select({ id: tenantsTable.id }).from(tenantsTable)
+    .where(and(eq(tenantsTable.catalogSlug, slug), eq(tenantsTable.isActive, true))).limit(1);
+  if (!tenant) { res.status(404).json({ error: "Vitrine não encontrada" }); return; }
+
+  const body = req.body as Record<string, unknown>;
+  const items = Array.isArray(body.items) ? (body.items as Record<string, unknown>[]) : [];
+  for (const item of items.slice(0, 50)) {
+    const productId = Number(item?.productId);
+    if (!Number.isInteger(productId) || productId <= 0) continue;
+    const qtyRaw = Number(item?.qty);
+    const qty = Number.isInteger(qtyRaw) && qtyRaw > 0 ? Math.min(qtyRaw, 50) : 1;
+    await db.update(catalogProductsTable)
+      .set({ purchaseCount: sql`${catalogProductsTable.purchaseCount} + ${qty}` })
+      .where(and(eq(catalogProductsTable.id, productId), eq(catalogProductsTable.tenantId, tenant.id)));
+  }
+  res.status(200).json({ ok: true });
 });
 
 // Avaliação de cliente (estrelas + comentário) — sem login, capturando
