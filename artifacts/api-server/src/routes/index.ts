@@ -12,7 +12,7 @@ import internalChatRouter from "./internalChat";
 import tasksRouter from "./tasks";
 import settingsRouter from "./settings";
 import partnerLinksRouter from "./partnerLinks";
-import tradeInRouter from "./tradeIn";
+import tradeInRouter, { tradeInPublicRouter } from "./tradeIn";
 import trainingsRouter, { enforceMandatoryTrainings } from "./trainings";
 import rhRouter from "./rh";
 import rhDpRouter, { enforceMandatoryClockIn } from "./rhDp";
@@ -79,6 +79,9 @@ router.use(rotinasRouter);
 router.use(catalogRouter);
 // Sem requireAuth: a vitrine pública é vista por clientes sem login.
 router.use(catalogPublicRouter);
+// Sem requireAuth: avaliação de usados pública (cliente avalia o próprio
+// aparelho na vitrine, sem login) — ver tradeInPublicRouter em tradeIn.ts.
+router.use(tradeInPublicRouter);
 router.use(geoRouter);
 
 export default router;

@@ -1030,6 +1030,9 @@ export type RoutineEvidenceUpload = { fileName: string; mimeType: string; data: 
 
 export type TradeInEvaluation = {
   id: number; userId: number | null; userName?: string | null;
+  // "staff" (padrão, feito por atendente) ou "public_lead" (cliente avaliou
+  // sozinho na vitrine pública e deixou contato) — ver tradeInPublicRouter.
+  source?: "staff" | "public_lead";
   // Nome do cliente informado já na simulação (etapas 1-3), opcional — não
   // confundir com sellerCustomerName, preenchido só ao fechar o negócio.
   customerName?: string | null;
@@ -1052,9 +1055,18 @@ export type TradeInEvaluation = {
 export type TradeInMargins = { t1: number; t2: number; t3: number };
 
 // Perguntas do questionário de condições (editáveis pelo admin, por marca).
-export type TradeInQuestionOption = { label: string; blocks: boolean };
+// deductionPercent: só usado no cálculo determinístico da avaliação pública
+// (tabela de valores base) — quanto essa resposta desconta do valor base.
+export type TradeInQuestionOption = { label: string; blocks: boolean; deductionPercent?: number };
 export type TradeInQuestion = { key: string; label: string; options: TradeInQuestionOption[] };
 export type TradeInQuestionsConfig = { apple: TradeInQuestion[]; android: TradeInQuestion[] };
+
+// Tabela de valores base (lista fixa) — pra modelo cadastrado aqui, a
+// avaliação pública calcula o valor na hora (fórmula), sem depender de IA.
+export type TradeInBaseValue = {
+  id: number; brand: string; model: string; storage: string | null;
+  baseValue: string; notes: string | null; createdAt: string; updatedAt: string;
+};
 
 // Perfil comportamental (estilo DISC simplificado, 4 tipos) — ver
 // optionProfiles em RhQuestion e computeProfileResult no backend (rh.ts).
@@ -2002,6 +2014,26 @@ export const api = {
     savePaymentMethods: (data: string[]) =>
       req<string[]>("/trade-in/payment-methods", { method: "PUT", body: JSON.stringify(data) }),
     resetPaymentMethods: () => req<string[]>("/trade-in/payment-methods", { method: "DELETE" }),
+    baseValues: () => req<TradeInBaseValue[]>("/trade-in/base-values"),
+    createBaseValue: (data: { brand: string; model: string; storage?: string | null; baseValue: number; notes?: string | null }) =>
+      req<TradeInBaseValue>("/trade-in/base-values", { method: "POST", body: JSON.stringify(data) }),
+    updateBaseValue: (id: number, data: { brand: string; model: string; storage?: string | null; baseValue: number; notes?: string | null }) =>
+      req<TradeInBaseValue>(`/trade-in/base-values/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    removeBaseValue: (id: number) => req<{ ok: boolean }>(`/trade-in/base-values/${id}`, { method: "DELETE" }),
+    importBaseValues: (rawText: string) =>
+      req<{ imported: number; skipped: string[]; rows: TradeInBaseValue[] }>(
+        "/trade-in/base-values/import", { method: "POST", body: JSON.stringify({ rawText }) }),
+  },
+  // Avaliação de usados PÚBLICA (vitrine, sem login) — ver tradeInPublicRouter.
+  tradeInPublic: {
+    questions: (slug: string) =>
+      req<{ apple: { key: string; label: string; options: { label: string }[] }[]; android: { key: string; label: string; options: { label: string }[] }[] }>(
+        `/trade-in-public/${slug}/questions`),
+    estimate: (slug: string, data: { brand: string; model: string; memory?: string; color?: string; answers: Record<string, string> }) =>
+      req<{ method: "table" | "ai"; device: string; estimatedPrice: string } | { blocked: true; message: string }>(
+        `/trade-in-public/${slug}/estimate`, { method: "POST", body: JSON.stringify(data) }),
+    lead: (slug: string, data: { name: string; phone: string; brand: string; model: string; memory?: string; color?: string; answers?: Record<string, string>; estimatedPrice?: string }) =>
+      req<{ ok: boolean; id: number }>(`/trade-in-public/${slug}/lead`, { method: "POST", body: JSON.stringify(data) }),
   },
   results: {
     summary: (params?: { from?: string; to?: string; sectorId?: number; attendantId?: number; store?: string }) => {

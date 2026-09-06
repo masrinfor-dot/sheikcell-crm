@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, timestamp, jsonb, numeric } from "drizzle-orm/pg-core";
 import { usersTable } from "./users";
 
 // Avaliações de compra de celulares usados (estilo Trocafone): o vendedor
@@ -7,6 +7,12 @@ export const tradeInEvaluationsTable = pgTable("trade_in_evaluations", {
   tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
   userId: integer("user_id").references(() => usersTable.id, { onDelete: "set null" }),
+  // "staff" = avaliação feita por alguém da loja (padrão, sempre foi assim).
+  // "public_lead" = veio do formulário público da vitrine (cliente avaliou o
+  // próprio aparelho sem login e deixou contato) — ver rota pública em
+  // routes/tradeIn.ts (tradeInPublicRouter). Só muda a origem pra exibição/
+  // filtro no histórico; o resto do fluxo (fechar negócio etc.) é idêntico.
+  source: text("source").notNull().default("staff"),
   device: text("device").notNull(),            // ex.: "iPhone 13 128GB" (texto composto p/ IA e exibição)
   // Campos estruturados p/ filtros do histórico (marca/modelo/memória/cor).
   brand: text("brand"),
@@ -48,3 +54,31 @@ export const tradeInEvaluationsTable = pgTable("trade_in_evaluations", {
   pixKeyHolder: text("pix_key_holder"), // titular da chave Pix (pode ser diferente do vendedor)
   paymentProofPhotos: jsonb("payment_proof_photos").$type<string[]>().notNull().default([]),
 });
+export type TradeInEvaluation = typeof tradeInEvaluationsTable.$inferSelect;
+
+// "Tabela de valores base" (lista fixa) da Avaliação de Usados — pedido do
+// lojista (06/09): pra modelo/armazenamento cadastrado aqui, o valor da
+// avaliação PÚBLICA (cliente avaliando o próprio aparelho, sem login, ver
+// tradeInPublicRouter) é calculado na hora por fórmula determinística
+// (baseValue × margem da loja × desconto por defeito) em vez de depender de
+// uma chamada de IA a cada visitante — mais rápido, sem custo de IA, e sem
+// depender de limite de uso. Modelo que não está aqui continua caindo na IA
+// (com limite por IP, ver COOLDOWN público em routes/tradeIn.ts).
+export const tradeInBaseValuesTable = pgTable("trade_in_base_values", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  brand: text("brand").notNull(),   // ex.: "Apple", "Samsung" — comparado sem acento/maiúscula
+  model: text("model").notNull(),   // ex.: "iPhone 13" — comparado sem acento/maiúscula
+  // Armazenamento — null = vale pra qualquer armazenamento desse modelo
+  // (usado quando o valor não varia por memória, ou como uma entrada "pega
+  // tudo" de reserva).
+  storage: text("storage"),
+  // Valor de referência pra um aparelho em ESTADO PERFEITO (sem os descontos
+  // do questionário) — o mesmo papel do "marketPrice"/"basePrice" que a IA
+  // estimaria, só que fixo, digitado pelo lojista.
+  baseValue: numeric("base_value").notNull(),
+  notes: text("notes"), // observação livre do lojista (opcional)
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+export type TradeInBaseValue = typeof tradeInBaseValuesTable.$inferSelect;

@@ -1,9 +1,9 @@
 import { useState, useEffect, useMemo } from "react";
-import { useParams } from "wouter";
+import { useParams, Link } from "wouter";
 import { api, CATALOG_CONDITIONS, CATALOG_CONDITION_CRITERIA, type CatalogPublicProduct, type CatalogCategory, type CatalogTrustBadge, type CatalogPaymentMethod } from "@/lib/api";
 import {
   Smartphone, MessageCircle, PackageX, Info, Lock, ShoppingCart, Plus, Minus, X, Unlock, Search,
-  ShieldCheck, BellRing, ListChecks, Tag, Star, CreditCard,
+  ShieldCheck, BellRing, ListChecks, Tag, Star, CreditCard, Wallet,
 } from "lucide-react";
 import { Carousel, CarouselContent, CarouselItem, CarouselPrevious, CarouselNext, type CarouselApi } from "@/components/ui/carousel";
 
@@ -829,6 +829,12 @@ export default function VitrinePublica() {
                 {data.wholesaleUnlocked ? <Unlock className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
                 {data.wholesaleUnlocked ? "Atacado desbloqueado" : "Sou técnico/lojista"}
               </button>
+            )}
+            {slug && (
+              <Link href={`/avaliar/${slug}`}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-neutral-900 text-white text-xs font-semibold hover:bg-neutral-800 transition shrink-0">
+                <Wallet className="w-4 h-4" /> Avalie seu usado
+              </Link>
             )}
             {generalWa && (
               <a href={generalWa} target="_blank" rel="noreferrer"

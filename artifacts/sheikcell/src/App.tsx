@@ -13,6 +13,7 @@ import Candidatura from "@/pages/Candidatura";
 import ForgotPassword from "@/pages/ForgotPassword";
 import ResetPassword from "@/pages/ResetPassword";
 import VitrinePublica from "@/pages/VitrinePublica";
+import AvaliacaoPublica from "@/pages/AvaliacaoPublica";
 import { useVisualViewportVar } from "@/hooks/useVisualViewportVar";
 
 const queryClient = new QueryClient();
@@ -38,6 +39,9 @@ function AppRoutes() {
       </Route>
       <Route path="/vitrine/:slug">
         <VitrinePublica />
+      </Route>
+      <Route path="/avaliar/:slug">
+        <AvaliacaoPublica />
       </Route>
       <Route path="/forgot-password">
         {user ? <Redirect to="/" /> : <ForgotPassword />}

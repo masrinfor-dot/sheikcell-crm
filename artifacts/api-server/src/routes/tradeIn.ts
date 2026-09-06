@@ -1,15 +1,16 @@
-import { Router, type IRouter, type Request } from "express";
-import { db, tradeInEvaluationsTable, usersTable, appSettingsTable } from "@workspace/db";
+import { Router, type IRouter, type Request, type Response } from "express";
+import { db, tradeInEvaluationsTable, tradeInBaseValuesTable, usersTable, appSettingsTable, tenantsTable } from "@workspace/db";
 import { eq, and, desc, sql } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
 import { requirePerm } from "../lib/permissions";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import {
-  QUESTIONS_KEY, DEFAULT_QUESTIONS, sanitizeQuestions, validateTradeInAnswers, type QuestionsConfig,
+  QUESTIONS_KEY, DEFAULT_QUESTIONS, sanitizeQuestions, validateTradeInAnswers, totalDeductionPercent, type QuestionsConfig,
 } from "../lib/tradeInQuestions";
 import {
   PAYMENT_METHODS_KEY, DEFAULT_PAYMENT_METHODS, sanitizePaymentMethods,
 } from "../lib/tradeInPaymentMethods";
+import { findBaseValueMatch, type BaseValueRow } from "../lib/tradeInBaseValues";
 import { MEDIA_DIR } from "../lib/whatsappInbound";
 import { writeFile, mkdir } from "fs/promises";
 import { randomUUID } from "crypto";
@@ -31,6 +32,9 @@ router.get("/trade-in", requireAuth, async (req, res): Promise<void> => {
       id: tradeInEvaluationsTable.id,
       userId: tradeInEvaluationsTable.userId,
       userName: usersTable.name,
+      // "staff" (padrão) ou "public_lead" (cliente avaliou sozinho na
+      // vitrine e deixou contato) — front usa isso pra mostrar um selo.
+      source: tradeInEvaluationsTable.source,
       customerName: tradeInEvaluationsTable.customerName,
       device: tradeInEvaluationsTable.device,
       brand: tradeInEvaluationsTable.brand,
@@ -211,6 +215,87 @@ router.delete("/trade-in/payment-methods", requireAdmin, async (req, res): Promi
   await db.delete(appSettingsTable)
     .where(and(eq(appSettingsTable.tenantId, tenantId), eq(appSettingsTable.key, PAYMENT_METHODS_KEY)));
   res.json(DEFAULT_PAYMENT_METHODS);
+});
+
+// ─── Tabela de valores base (lista fixa, pedido 06/09) ──────────────────────
+// Alimenta o cálculo determinístico da avaliação PÚBLICA (ver
+// tradeInPublicRouter mais abaixo): pra marca/modelo/armazenamento cadastrado
+// aqui, o valor é calculado na hora por fórmula (sem IA); o que não está
+// aqui cai na IA (com limite por IP). CRUD simples + import colando lista.
+
+const cleanBaseValueInput = (body: Record<string, unknown>) => ({
+  brand: clean(body.brand, 60),
+  model: clean(body.model, 120),
+  storage: clean(body.storage, 40) || null,
+  baseValue: Number(body.baseValue),
+  notes: clean(body.notes, 300) || null,
+});
+
+router.get("/trade-in/base-values", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rows = await db.select().from(tradeInBaseValuesTable)
+    .where(eq(tradeInBaseValuesTable.tenantId, tenantId))
+    .orderBy(tradeInBaseValuesTable.brand, tradeInBaseValuesTable.model, tradeInBaseValuesTable.storage);
+  res.json(rows);
+});
+
+router.post("/trade-in/base-values", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const v = cleanBaseValueInput(req.body as Record<string, unknown>);
+  if (!v.brand || !v.model) { res.status(400).json({ error: "Informe marca e modelo" }); return; }
+  if (!Number.isFinite(v.baseValue) || v.baseValue <= 0) { res.status(400).json({ error: "Informe um valor base válido" }); return; }
+  const [created] = await db.insert(tradeInBaseValuesTable).values({ tenantId, ...v, baseValue: String(v.baseValue) }).returning();
+  res.status(201).json(created);
+});
+
+router.patch("/trade-in/base-values/:id", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ error: "Item inválido" }); return; }
+  const v = cleanBaseValueInput(req.body as Record<string, unknown>);
+  if (!v.brand || !v.model) { res.status(400).json({ error: "Informe marca e modelo" }); return; }
+  if (!Number.isFinite(v.baseValue) || v.baseValue <= 0) { res.status(400).json({ error: "Informe um valor base válido" }); return; }
+  const [updated] = await db.update(tradeInBaseValuesTable)
+    .set({ ...v, baseValue: String(v.baseValue), updatedAt: new Date() })
+    .where(and(eq(tradeInBaseValuesTable.id, id), eq(tradeInBaseValuesTable.tenantId, tenantId)))
+    .returning();
+  if (!updated) { res.status(404).json({ error: "Item não encontrado" }); return; }
+  res.json(updated);
+});
+
+router.delete("/trade-in/base-values/:id", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ error: "Item inválido" }); return; }
+  const [deleted] = await db.delete(tradeInBaseValuesTable)
+    .where(and(eq(tradeInBaseValuesTable.id, id), eq(tradeInBaseValuesTable.tenantId, tenantId)))
+    .returning({ id: tradeInBaseValuesTable.id });
+  if (!deleted) { res.status(404).json({ error: "Item não encontrado" }); return; }
+  res.json({ ok: true });
+});
+
+// Import em lote colando texto — 1 linha por aparelho, campos separados por
+// ";" (Marca;Modelo;Armazenamento;Valor — armazenamento pode ficar vazio).
+// Puramente textual (sem IA), então não tem custo nem limite de uso.
+router.post("/trade-in/base-values/import", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rawText = (req.body as { rawText?: unknown }).rawText;
+  if (typeof rawText !== "string" || !rawText.trim()) { res.status(400).json({ error: "Cole a lista pra importar" }); return; }
+  const lines = rawText.split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 500);
+  const toInsert: (typeof tradeInBaseValuesTable.$inferInsert)[] = [];
+  const skipped: string[] = [];
+  for (const line of lines) {
+    const parts = line.split(";").map((p) => p.trim());
+    const brand = clean(parts[0], 60);
+    const model = clean(parts[1], 120);
+    const storage = clean(parts[2], 40) || null;
+    const baseValue = Number((parts[3] ?? "").replace(",", "."));
+    if (!brand || !model || !Number.isFinite(baseValue) || baseValue <= 0) { skipped.push(line); continue; }
+    toInsert.push({ tenantId, brand, model, storage, baseValue: String(baseValue) });
+  }
+  if (toInsert.length === 0) { res.status(400).json({ error: "Nenhuma linha válida (formato: Marca;Modelo;Armazenamento;Valor)" }); return; }
+  const created = await db.insert(tradeInBaseValuesTable).values(toInsert).returning();
+  res.status(201).json({ imported: created.length, skipped, rows: created });
 });
 
 // Sanitiza texto como DADO de aparelho (sem quebras/aspas — evita injeção).
@@ -614,6 +699,202 @@ router.delete("/trade-in/:id", requireAuth, async (req, res): Promise<void> => {
     .returning({ id: tradeInEvaluationsTable.id });
   if (!deleted) { res.status(404).json({ error: "Avaliação não encontrada" }); return; }
   res.json({ ok: true });
+});
+
+// ─── Avaliação PÚBLICA (vitrine, sem login) ─────────────────────────────────
+// Pedido do lojista (06/09): "o mesmo que temos no CRM já com tabela de
+// margem cadastrada e personalizável, como o cliente que vai fazer sua
+// avaliação do usado" — o cliente da vitrine avalia o PRÓPRIO aparelho, sem
+// login. Rota separada (montada fora do requireModuleAccess acima, igual
+// catalogPublicRouter em catalog.ts), sempre usa a tabela de margem "2 -
+// média" da loja (nunca deixa o visitante escolher a margem) e nunca fecha
+// negócio por aqui — fechar (CPF, IMEI, fotos) continua só no CRM, com
+// atendente. Duas fontes de preço, nessa ordem:
+// 1. Tabela de valores base (lista fixa) cadastrada pelo lojista — cálculo
+//    na hora, sem custo de IA (ver tradeInBaseValues.ts).
+// 2. Sem match na lista: cai na mesma IA do CRM (GPT-4o + busca na web), com
+//    limite por IP (nunca por login, aqui não tem) — ver PUBLIC_AI_LIMIT.
+export const tradeInPublicRouter: IRouter = Router();
+
+const PUBLIC_AI_LIMIT = 5; // avaliações por IA, por IP, por 24h — best-effort (reseta a cada deploy)
+const PUBLIC_AI_WINDOW_MS = 24 * 60 * 60 * 1000;
+const publicAiCallsByIp = new Map<string, number[]>();
+
+function publicAiRateLimited(ip: string): boolean {
+  const now = Date.now();
+  const calls = (publicAiCallsByIp.get(ip) ?? []).filter((t) => now - t < PUBLIC_AI_WINDOW_MS);
+  if (calls.length >= PUBLIC_AI_LIMIT) { publicAiCallsByIp.set(ip, calls); return true; }
+  calls.push(now);
+  publicAiCallsByIp.set(ip, calls);
+  return false;
+}
+
+const formatBRL = (v: number) => `R$ ${v.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+async function tenantByPublicSlug(slug: string) {
+  const [tenant] = await db.select().from(tenantsTable).where(eq(tenantsTable.catalogSlug, slug.toLowerCase())).limit(1);
+  if (!tenant || !tenant.isActive || !tenant.enabledModules.includes("avaliacao")) return null;
+  return tenant;
+}
+
+// Marca/modelo/memória/cor + questionário, no mesmo formato do form interno.
+type PublicEstimateBody = {
+  brand?: string; model?: string; memory?: string; color?: string; answers?: Record<string, string>;
+};
+
+tradeInPublicRouter.get("/trade-in-public/:slug/questions", async (req: Request, res: Response): Promise<void> => {
+  const slug = String(req.params.slug ?? "");
+  const tenant = await tenantByPublicSlug(slug);
+  if (!tenant) { res.status(404).json({ error: "Avaliação não encontrada" }); return; }
+  const cfg = await getQuestionsConfig(tenant.id);
+  // deductionPercent é só um detalhe de cálculo interno — não precisa ir pro
+  // cliente, só o texto das opções pra montar o questionário na tela.
+  const strip = (list: typeof cfg.apple) => list.map((q) => ({
+    key: q.key, label: q.label, options: q.options.map((o) => ({ label: o.label })),
+  }));
+  res.json({ apple: strip(cfg.apple), android: strip(cfg.android) });
+});
+
+tradeInPublicRouter.post("/trade-in-public/:slug/estimate", async (req: Request, res: Response): Promise<void> => {
+  const slug = String(req.params.slug ?? "");
+  const tenant = await tenantByPublicSlug(slug);
+  if (!tenant) { res.status(404).json({ error: "Avaliação não encontrada" }); return; }
+  const tenantId = tenant.id;
+
+  const { brand, model, memory, color, answers } = req.body as PublicEstimateBody;
+  const fBrand = clean(brand, 40);
+  const fModel = clean(model, 60);
+  const fMemory = clean(memory, 20);
+  const fColor = clean(color, 30);
+  if (!fBrand || !fModel) { res.status(400).json({ error: "Informe a marca e o modelo do aparelho" }); return; }
+  if (!answers || typeof answers !== "object" || Array.isArray(answers)) { res.status(400).json({ error: "Responda o questionário de estado" }); return; }
+
+  const cleanAnswers: Answers = {};
+  for (const [k, v] of Object.entries(answers).slice(0, 30)) {
+    if (typeof v !== "string") continue;
+    const key = k.trim().slice(0, 60);
+    const val = v.trim().slice(0, 200);
+    if (key && val) cleanAnswers[key] = val;
+  }
+  if (Object.keys(cleanAnswers).length === 0) { res.status(400).json({ error: "Responda o questionário de estado" }); return; }
+
+  const qConfig = await getQuestionsConfig(tenantId);
+  const isApple = /apple|iphone/i.test(fBrand);
+  const questionList = isApple ? qConfig.apple : qConfig.android;
+  const validation = validateTradeInAnswers(questionList, cleanAnswers);
+  if (!validation.ok) {
+    // 422 (opção marcada como bloqueia): resposta amigável pro cliente final
+    // em vez do erro cru do CRM — orienta a deixar contato pra avaliação
+    // manual em vez de simplesmente recusar.
+    if (validation.status === 422) {
+      res.status(200).json({ blocked: true, message: "Esse tipo de avaria precisa de uma avaliação feita pela nossa equipe. Deixe seu contato abaixo que a loja entra em contato com um valor." });
+      return;
+    }
+    res.status(validation.status).json({ error: validation.error });
+    return;
+  }
+
+  const dev = [fBrand, fModel, fMemory, fColor].filter(Boolean).join(" ");
+  const margins = await getMargins(tenantId);
+  const marginPct = margins.t2; // vitrine pública sempre usa a tabela "2 - média", nunca deixa escolher
+  const payPct = 100 - marginPct;
+
+  // 1ª tentativa: tabela de valores base (lista fixa) — sem custo, na hora.
+  const baseRows = await db.select().from(tradeInBaseValuesTable).where(eq(tradeInBaseValuesTable.tenantId, tenantId));
+  const rows: BaseValueRow[] = baseRows.map((r) => ({ brand: r.brand, model: r.model, storage: r.storage, baseValue: Number(r.baseValue) }));
+  const match = findBaseValueMatch(rows, fBrand, fModel, fMemory);
+  if (match) {
+    const deductionPct = totalDeductionPercent(questionList, cleanAnswers);
+    const estimated = Math.max(0, match.baseValue * (payPct / 100) * (1 - deductionPct / 100));
+    res.json({ method: "table", device: dev, estimatedPrice: formatBRL(estimated) });
+    return;
+  }
+
+  // 2ª tentativa: IA (mesma do CRM), com limite por IP — pesquisa/estimativa
+  // custa, então não pode ser ilimitado pra visitante anônimo.
+  const ip = req.ip ?? "unknown";
+  if (publicAiRateLimited(ip)) {
+    res.status(429).json({ error: "Limite de avaliações automáticas atingido por hoje. Deixe seu contato abaixo que a loja avalia manualmente e retorna com um valor." });
+    return;
+  }
+
+  const condLines = Object.entries(cleanAnswers).map(([k, v]) => `- ${k}: ${v}`).join("\n");
+  const prompt = [
+    `Você é o avaliador de compra de celulares usados da Sheikcell (loja no Brasil).`,
+    `Pesquise na web os preços ATUAIS de venda do aparelho usado abaixo no mercado brasileiro (OLX, Mercado Livre, Trocafone).`,
+    ``,
+    `Aparelho: ${dev.slice(0, 120)}`,
+    `Estado informado pelo cliente:`,
+    condLines || "- (sem detalhes)",
+    ``,
+    `Regras da sugestão:`,
+    `1. Estime a faixa de preço que esse aparelho usado é VENDIDO hoje no Brasil, já descontando o estado informado.`,
+    `2. A loja trabalha com margem de ${marginPct}% nesta avaliação: sugira um valor de COMPRA em torno de ${payPct}% do valor de revenda estimado.`,
+    ``,
+    `Responda SOMENTE com um JSON válido, sem markdown, neste formato:`,
+    `{"suggestedPrice":"R$ Z"}`,
+  ].join("\n");
+
+  try {
+    const parsed = extractJson<{ suggestedPrice?: string }>(await askPriceAI(prompt, tenantId));
+    const suggestedPrice = (parsed?.suggestedPrice ?? "").toString().slice(0, 100);
+    if (!suggestedPrice) { res.status(502).json({ error: "Não conseguimos calcular uma estimativa agora. Deixe seu contato que a loja avalia manualmente." }); return; }
+    res.json({ method: "ai", device: dev, estimatedPrice: suggestedPrice });
+  } catch (err) {
+    req.log.error({ err }, "Public trade-in AI estimate failed");
+    res.status(503).json({ error: "Não conseguimos calcular uma estimativa agora. Deixe seu contato que a loja avalia manualmente." });
+  }
+});
+
+// Cliente deixa contato pra loja confirmar/fechar (nunca fecha negócio direto
+// aqui — vira uma avaliação comum no CRM, source="public_lead", pra a loja
+// dar sequência com atendente).
+tradeInPublicRouter.post("/trade-in-public/:slug/lead", async (req: Request, res: Response): Promise<void> => {
+  const slug = String(req.params.slug ?? "");
+  const tenant = await tenantByPublicSlug(slug);
+  if (!tenant) { res.status(404).json({ error: "Avaliação não encontrada" }); return; }
+  const tenantId = tenant.id;
+
+  const { name, phone, brand, model, memory, color, answers, estimatedPrice } = req.body as PublicEstimateBody & {
+    name?: string; phone?: string; estimatedPrice?: string;
+  };
+  const fName = clean(name, 120);
+  const fPhone = typeof phone === "string" ? phone.replace(/\D/g, "").slice(0, 20) : "";
+  const fBrand = clean(brand, 40);
+  const fModel = clean(model, 60);
+  const fMemory = clean(memory, 20);
+  const fColor = clean(color, 30);
+  if (!fName) { res.status(400).json({ error: "Informe seu nome" }); return; }
+  if (fPhone.length < 10) { res.status(400).json({ error: "Informe um telefone válido (com DDD)" }); return; }
+  if (!fBrand || !fModel) { res.status(400).json({ error: "Informe a marca e o modelo do aparelho" }); return; }
+
+  const cleanAnswers: Answers = {};
+  if (answers && typeof answers === "object" && !Array.isArray(answers)) {
+    for (const [k, v] of Object.entries(answers).slice(0, 30)) {
+      if (typeof v !== "string") continue;
+      const key = k.trim().slice(0, 60);
+      const val = v.trim().slice(0, 200);
+      if (key && val) cleanAnswers[key] = val;
+    }
+  }
+  const dev = [fBrand, fModel, fMemory, fColor].filter(Boolean).join(" ");
+
+  const [saved] = await db.insert(tradeInEvaluationsTable).values({
+    tenantId,
+    source: "public_lead",
+    customerName: fName,
+    sellerPhone: fPhone,
+    device: dev.slice(0, 160) || "(aparelho não informado)",
+    brand: fBrand || null,
+    model: fModel || null,
+    memory: fMemory || null,
+    color: fColor || null,
+    answers: cleanAnswers,
+    suggestedPrice: clean(estimatedPrice, 100) || null,
+    aiSummary: "Avaliação feita pelo próprio cliente na vitrine pública (sem atendente) — confirme o valor com o cliente antes de fechar.",
+  }).returning();
+
+  res.status(201).json({ ok: true, id: saved.id });
 });
 
 export default router;

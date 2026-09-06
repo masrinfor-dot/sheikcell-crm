@@ -2,7 +2,12 @@
 // Lógica pura (sem DB) para poder testar: sanitização da config do admin e
 // validação estrita das respostas contra o questionário configurado.
 
-export type QOption = { label: string; blocks: boolean };
+// deductionPercent: usado SÓ pelo cálculo determinístico da avaliação
+// PÚBLICA (fórmula + tabela de valores base, ver tradeInBaseValues.ts) —
+// quanto essa resposta desconta do valor base (0-100). Ausente/0 = não
+// desconta nada. A avaliação feita por um atendente logado (com IA) nunca
+// usa esse número — a IA já pesa o estado sozinha pela pergunta em texto.
+export type QOption = { label: string; blocks: boolean; deductionPercent?: number };
 export type QuestionCfg = { key: string; label: string; options: QOption[] };
 export type QuestionsConfig = { apple: QuestionCfg[]; android: QuestionCfg[] };
 
@@ -75,7 +80,9 @@ export function sanitizeQuestions(input: unknown): { config?: QuestionsConfig; e
         if (!oLabel) return { error: `Opção sem texto na pergunta "${key}"` };
         if (seenOpts.has(oLabel)) return { error: `Opção repetida na pergunta "${key}": "${oLabel}"` };
         seenOpts.add(oLabel);
-        options.push({ label: oLabel, blocks: Boolean(o?.blocks) });
+        const dedRaw = Number(o?.deductionPercent);
+        const deductionPercent = Number.isFinite(dedRaw) ? Math.max(0, Math.min(100, Math.round(dedRaw))) : 0;
+        options.push({ label: oLabel, blocks: Boolean(o?.blocks), ...(deductionPercent > 0 ? { deductionPercent } : {}) });
       }
       if (options.every((o) => o.blocks)) return { error: `A pergunta "${key}" não pode ter todas as opções bloqueando` };
       out[group].push({ key, label, options });
@@ -114,4 +121,19 @@ export function validateTradeInAnswers(
     }
   }
   return { ok: true };
+}
+
+// Soma o deductionPercent de cada resposta marcada (só usado pela avaliação
+// PÚBLICA determinística, ver tradeInBaseValues.ts) — assume que as respostas
+// já passaram por validateTradeInAnswers (toda pergunta respondida com uma
+// opção válida). Limita a soma em 90% pra nunca zerar ou inverter o valor
+// mesmo se o lojista configurar descontos exagerados por engano.
+export function totalDeductionPercent(questionList: QuestionCfg[], answers: Record<string, string>): number {
+  let total = 0;
+  for (const q of questionList) {
+    const val = answers[q.key];
+    const opt = q.options.find((o) => o.label === val);
+    total += opt?.deductionPercent ?? 0;
+  }
+  return Math.min(90, total);
 }
