@@ -28,6 +28,46 @@ function discountInfo(v: { compareAtPrice?: string | null; priceCash?: number | 
   return { from, percentOff: Math.round((1 - current / from) * 100) };
 }
 
+// Cor real (hex) pra desenhar a bolinha de seleção de cor, tipo Trocafone/
+// Mercado Livre — casa nomes comuns de cor de aparelho (PT-BR, com ou sem
+// acento) com uma cor aproximada. Cor não reconhecida cai num cinza neutro
+// em vez de quebrar (loja pode cadastrar qualquer nome de cor).
+const COLOR_SWATCH_MAP: Record<string, string> = {
+  "preto": "#1c1c1e", "preto espacial": "#2b2b2d", "grafite": "#4a4a4d", "grafite espacial": "#4a4a4d",
+  "branco": "#f5f5f0", "branco estelar": "#efe9dd",
+  "prata": "#e4e4e4", "prateado": "#e4e4e4", "silver": "#e4e4e4",
+  "dourado": "#e8d5a8", "ouro": "#e8d5a8", "ouro rosa": "#f0d3c9", "rose gold": "#f0d3c9",
+  "rosa": "#f4c6cf", "rosa claro": "#f7d7de",
+  "azul": "#5b7fa6", "azul-marinho": "#2c3e56", "azul marinho": "#2c3e56", "azul pacifico": "#6f8ea3", "azul pacífico": "#6f8ea3", "azul celeste": "#a9c6de", "azul sierra": "#7fa0bd",
+  "verde": "#7f9c85", "verde alpino": "#5a6b57", "verde meia-noite": "#3c4a41", "verde meia noite": "#3c4a41",
+  "vermelho": "#b9312c", "product red": "#b9312c",
+  "amarelo": "#e8d44d",
+  "laranja": "#e08a3c", "coral": "#e2725b",
+  "roxo": "#8a7ca8", "lilas": "#c9b8d8", "lilás": "#c9b8d8",
+  "cinza": "#8e8e93", "cinza espacial": "#4a4a4d",
+  "titanio natural": "#8a8a86", "titânio natural": "#8a8a86",
+  "titanio preto": "#3b3b3d", "titânio preto": "#3b3b3d",
+  "titanio azul": "#3f4b5a", "titânio azul": "#3f4b5a",
+  "titanio branco": "#d8d5cd", "titânio branco": "#d8d5cd",
+  "titanio deserto": "#c4a877", "titânio deserto": "#c4a877",
+  "meia-noite": "#1b1b1f", "meia noite": "#1b1b1f", "midnight": "#1b1b1f",
+  "estelar": "#e8e2d0", "starlight": "#e8e2d0",
+  "champagne": "#e6d7b8", "bronze": "#a97c50",
+};
+
+function normalizeColorName(name: string): string {
+  return name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+}
+
+function colorSwatchHex(name: string): string {
+  const key = normalizeColorName(name);
+  if (COLOR_SWATCH_MAP[key]) return COLOR_SWATCH_MAP[key];
+  for (const [k, v] of Object.entries(COLOR_SWATCH_MAP)) {
+    if (key.includes(k)) return v;
+  }
+  return "#c9c9c9";
+}
+
 // Rótulo de uma variante combinando armazenamento e cor, o que tiver
 // preenchido (ex.: "256GB · Preto", "Preto" se não variar armazenamento,
 // "256GB" se não variar cor, "Único" se nenhum dos dois for informado).
@@ -364,15 +404,14 @@ function ProductDetailModal({
 
           {colors.length > 1 && (
             <div>
-              <p className="text-[11px] font-semibold text-neutral-500 mb-1">Cor</p>
-              <div className="flex flex-wrap gap-1.5">
+              <p className="text-[11px] font-semibold text-neutral-500 mb-1">Cor: <span className="text-neutral-700">{selectedColor}</span></p>
+              <div className="flex flex-wrap gap-2.5">
                 {colors.map((c) => (
-                  <button key={c} type="button" onClick={() => handleSelectColor(c)}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition ${
-                      c === selectedColor ? "bg-neutral-900 text-white border-neutral-900" : "bg-white text-neutral-600 border-neutral-200 hover:border-neutral-400"
-                    }`}>
-                    {c}
-                  </button>
+                  <button key={c} type="button" onClick={() => handleSelectColor(c)} title={c} aria-label={c}
+                    className={`w-8 h-8 rounded-full border-2 shrink-0 transition ${
+                      c === selectedColor ? "border-neutral-900 ring-2 ring-offset-2 ring-neutral-900" : "border-neutral-200 hover:border-neutral-400"
+                    }`}
+                    style={{ backgroundColor: colorSwatchHex(c) }} />
                 ))}
               </div>
             </div>
