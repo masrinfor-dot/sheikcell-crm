@@ -2040,7 +2040,7 @@ export const api = {
       req<{ method: "table" | "ai"; device: string; estimatedPrice: string } | { blocked: true; message: string }>(
         `/trade-in-public/${slug}/estimate`, { method: "POST", body: JSON.stringify(data) }),
     lead: (slug: string, data: { name: string; phone: string; brand: string; model: string; memory?: string; color?: string; answers?: Record<string, string>; estimatedPrice?: string }) =>
-      req<{ ok: boolean; id: number }>(`/trade-in-public/${slug}/lead`, { method: "POST", body: JSON.stringify(data) }),
+      req<{ ok: boolean; id: number; updated?: boolean }>(`/trade-in-public/${slug}/lead`, { method: "POST", body: JSON.stringify(data) }),
   },
   results: {
     summary: (params?: { from?: string; to?: string; sectorId?: number; attendantId?: number; store?: string }) => {

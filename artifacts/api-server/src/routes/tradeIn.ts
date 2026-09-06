@@ -1,6 +1,6 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import { db, tradeInEvaluationsTable, tradeInBaseValuesTable, usersTable, appSettingsTable, tenantsTable } from "@workspace/db";
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, desc, sql, isNull } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
 import { requirePerm } from "../lib/permissions";
 import { requireModuleAccess } from "../lib/moduleAccess";
@@ -879,11 +879,25 @@ tradeInPublicRouter.post("/trade-in-public/:slug/lead", async (req: Request, res
   }
   const dev = [fBrand, fModel, fMemory, fColor].filter(Boolean).join(" ");
 
-  const [saved] = await db.insert(tradeInEvaluationsTable).values({
-    tenantId,
-    source: "public_lead",
+  // Permite só uma avaliação PENDENTE por cliente (mesmo telefone) por loja —
+  // se o cliente voltar e avaliar de novo (mesmo aparelho ou outro) antes do
+  // vendedor fechar/descartar a avaliação anterior, atualiza a mesma linha em
+  // vez de criar um lead duplicado na lista do Gestor. O "createdAt" é
+  // atualizado pra hora atual pra a avaliação voltar ao topo da lista (é a
+  // interação mais recente do cliente). Avaliação já fechada (closedAt
+  // preenchido) não conta — aí é um cliente antigo vendendo outro aparelho.
+  const [existingPending] = await db.select().from(tradeInEvaluationsTable)
+    .where(and(
+      eq(tradeInEvaluationsTable.tenantId, tenantId),
+      eq(tradeInEvaluationsTable.source, "public_lead"),
+      eq(tradeInEvaluationsTable.sellerPhone, fPhone),
+      isNull(tradeInEvaluationsTable.closedAt),
+    ))
+    .orderBy(desc(tradeInEvaluationsTable.createdAt))
+    .limit(1);
+
+  const values = {
     customerName: fName,
-    sellerPhone: fPhone,
     device: dev.slice(0, 160) || "(aparelho não informado)",
     brand: fBrand || null,
     model: fModel || null,
@@ -892,9 +906,25 @@ tradeInPublicRouter.post("/trade-in-public/:slug/lead", async (req: Request, res
     answers: cleanAnswers,
     suggestedPrice: clean(estimatedPrice, 100) || null,
     aiSummary: "Avaliação feita pelo próprio cliente na vitrine pública (sem atendente) — confirme o valor com o cliente antes de fechar.",
+  };
+
+  if (existingPending) {
+    const [updated] = await db.update(tradeInEvaluationsTable)
+      .set({ ...values, createdAt: new Date() })
+      .where(eq(tradeInEvaluationsTable.id, existingPending.id))
+      .returning();
+    res.status(200).json({ ok: true, id: updated.id, updated: true });
+    return;
+  }
+
+  const [saved] = await db.insert(tradeInEvaluationsTable).values({
+    tenantId,
+    source: "public_lead",
+    sellerPhone: fPhone,
+    ...values,
   }).returning();
 
-  res.status(201).json({ ok: true, id: saved.id });
+  res.status(201).json({ ok: true, id: saved.id, updated: false });
 });
 
 export default router;
