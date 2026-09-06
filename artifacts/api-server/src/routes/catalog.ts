@@ -2021,9 +2021,14 @@ catalogPublicRouter.get("/catalog-public/photos/:photoId/file", async (req: Requ
   if (!photo) { res.status(404).json({ error: "Foto não encontrada" }); return; }
   const filepath = path.join(CATALOG_MEDIA_DIR, path.basename(photo.storedName));
   if (!existsSync(filepath)) { res.status(404).json({ error: "Arquivo não encontrado no servidor" }); return; }
-  // ?raw=1 pula o recorte automático (útil se algum dia precisarmos comparar
-  // com o arquivo original enviado pelo fornecedor).
-  const servedPath = req.query["raw"] === "1" ? filepath : await getTrimmedPhotoPath(filepath);
+  // Recorte automático de espaço em branco (sharp .trim()) DESATIVADO — em
+  // produção ele derrubava o processo inteiro (crash nativo do libvips) ao
+  // processar alguma foto específica de fornecedor, tirando o site do ar
+  // pra todo mundo. Servindo sempre o arquivo original até isolarmos qual
+  // foto crasha e resolvermos com segurança (ex.: rodando o recorte num
+  // processo isolado/offline em vez de dentro do processo principal da API).
+  const servedPath = filepath;
+  void getTrimmedPhotoPath; // mantido no arquivo pra reaproveitar quando isolarmos o recorte com segurança
   res.setHeader("Cache-Control", "public, max-age=86400");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.sendFile(servedPath);
