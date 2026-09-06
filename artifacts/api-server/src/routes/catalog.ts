@@ -2,7 +2,7 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import path from "path";
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
-import { mkdir, writeFile, unlink } from "fs/promises";
+import { mkdir, writeFile, unlink, readFile, stat } from "fs/promises";
 import sharp from "sharp";
 import { eq, and, desc, inArray, sql } from "drizzle-orm";
 import {
@@ -2027,9 +2027,27 @@ catalogPublicRouter.get("/catalog-public/photos/:photoId/file", async (req: Requ
   // pra todo mundo. Servindo sempre o arquivo original até isolarmos qual
   // foto crasha e resolvermos com segurança (ex.: rodando o recorte num
   // processo isolado/offline em vez de dentro do processo principal da API).
-  const servedPath = filepath;
   void getTrimmedPhotoPath; // mantido no arquivo pra reaproveitar quando isolarmos o recorte com segurança
-  res.setHeader("Cache-Control", "public, max-age=86400");
-  res.setHeader("X-Content-Type-Options", "nosniff");
-  res.sendFile(servedPath);
+  // Lendo o arquivo manualmente em vez de res.sendFile: em produção
+  // res.sendFile estava devolvendo um erro genérico "Not Found" mesmo com o
+  // arquivo existindo (existsSync acima confirma), sem detalhe suficiente pra
+  // diagnosticar pelo log. Lendo o buffer nós mesmos dá controle total sobre
+  // o erro real (err.code, err.path) e sobre o Content-Type.
+  try {
+    const st = await stat(filepath);
+    if (!st.isFile()) {
+      req.log.error({ filepath, isDirectory: st.isDirectory() }, "Foto do catálogo: path existe mas não é um arquivo");
+      res.status(404).json({ error: "Arquivo não encontrado no servidor" });
+      return;
+    }
+    const buf = await readFile(filepath);
+    const mime = sniffImageMime(buf) ?? "application/octet-stream";
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Type", mime);
+    res.send(buf);
+  } catch (err) {
+    req.log.error({ err, filepath }, "Falha ao ler arquivo da foto do catálogo");
+    res.status(500).json({ error: "Falha ao ler a foto no servidor" });
+  }
 });
