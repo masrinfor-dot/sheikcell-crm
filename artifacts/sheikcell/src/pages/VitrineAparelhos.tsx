@@ -2,13 +2,13 @@ import { useState, useEffect, useMemo } from "react";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
-  api, canEditModule, CATALOG_CONDITIONS, CATALOG_CONDITION_CRITERIA,
+  api, can, ApiError, canEditModule, CATALOG_CONDITIONS, CATALOG_CONDITION_CRITERIA,
   type CatalogProduct, type CatalogPricingSettings, type CatalogImportItem, type CatalogCondition,
   type CatalogImportVariant, type CatalogPhotoSearchResult, type CatalogCategory,
   type CatalogTrustBadge, type CatalogStockNotification, type CatalogPaymentMethod, type CatalogProductReview,
   type CatalogMarketCheckVerdict, type TradeInEvaluation,
 } from "@/lib/api";
-import { waLink } from "@/lib/utils";
+import { requestChatExpand } from "@/lib/chatWidgetBus";
 import {
   Smartphone, Plus, X, Search, Trash2, Pencil, Sparkles, Settings2, Link2,
   Copy, ImagePlus, Check, AlertTriangle, Loader2, MessageCircle, Info, Calculator,
@@ -309,6 +309,34 @@ export default function VitrineAparelhos() {
   const [showTradeInLeads, setShowTradeInLeads] = useState(false);
   const publicTradeInLeads = tradeInLeads.filter((t) => t.source === "public_lead");
   const pendingTradeInLeads = publicTradeInLeads.filter((t) => !t.closedAt);
+
+  // "Chamar no WhatsApp" aqui precisa abrir um atendimento DE VERDADE dentro
+  // do próprio CRM (mesmo mecanismo do "ir para o atendimento" do CrmBoard e
+  // do "Iniciar atendimento com este contato" do Chat Interno) — não um link
+  // externo pra wa.me. Um link externo abriria o WhatsApp Web/pessoal de quem
+  // clicou, sem nenhum histórico ligado ao número comercial da loja; a rota
+  // POST /chat/conversations (a mesma do resto do CRM) resolve isso e, se já
+  // existir uma conversa em andamento com esse telefone, o backend recusa com
+  // 409 devolvendo o id dela — tratado abaixo do mesmo jeito que handleGoToChat.
+  const [startingAtendimentoId, setStartingAtendimentoId] = useState<number | null>(null);
+  const handleStartTradeInAtendimento = async (t: TradeInEvaluation) => {
+    if (!t.sellerPhone) { toast({ title: "Telefone não informado nesta avaliação", variant: "destructive" }); return; }
+    setStartingAtendimentoId(t.id);
+    try {
+      const conv = await api.chat.createConversation({ phone: t.sellerPhone, name: t.customerName || t.device, channel: "whatsapp" });
+      requestChatExpand("atendimento", conv.id);
+      setShowTradeInLeads(false);
+    } catch (err) {
+      if (err instanceof ApiError && err.conversationId != null) {
+        requestChatExpand("atendimento", err.conversationId);
+        setShowTradeInLeads(false);
+      } else {
+        toast({ title: "Erro ao iniciar atendimento", description: err instanceof Error ? err.message : "Tente novamente", variant: "destructive" });
+      }
+    } finally {
+      setStartingAtendimentoId(null);
+    }
+  };
 
   // GET /catalog/wholesale-code devolve o código de acesso ao atacado em
   // texto puro — por isso o backend exige admin de verdade (requireAdmin),
@@ -2148,30 +2176,28 @@ export default function VitrineAparelhos() {
               {publicTradeInLeads.length === 0 ? (
                 <p className="text-xs text-muted-foreground text-center py-6">Nenhuma avaliação feita pelo cliente ainda.</p>
               ) : (
-                publicTradeInLeads.map((t) => {
-                  const wa = waLink(t.sellerPhone, `Olá, ${t.customerName ?? ""}! Vi que você avaliou o ${t.device} aqui na loja — vamos dar sequência?`.trim());
-                  return (
-                    <div key={t.id} data-testid={`tradein-lead-${t.id}`} className="rounded-lg border p-2.5 flex items-start gap-2">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
-                          <p className="text-sm font-semibold truncate">{t.customerName ?? "(sem nome)"}</p>
-                          <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold leading-none ${t.closedAt ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
-                            {t.closedAt ? "Fechado" : "Pendente"}
-                          </span>
-                        </div>
-                        <p className="text-xs text-muted-foreground">{t.device}{t.sellerPhone ? ` · ${t.sellerPhone}` : ""}</p>
-                        {t.suggestedPrice && <p className="text-xs text-foreground/80 mt-0.5">Valor estimado: <span className="font-semibold">{t.suggestedPrice}</span></p>}
-                        <p className="text-[10px] text-muted-foreground mt-0.5">{new Date(t.createdAt).toLocaleString("pt-BR")}</p>
+                publicTradeInLeads.map((t) => (
+                  <div key={t.id} data-testid={`tradein-lead-${t.id}`} className="rounded-lg border p-2.5 flex items-start gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
+                        <p className="text-sm font-semibold truncate">{t.customerName ?? "(sem nome)"}</p>
+                        <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold leading-none ${t.closedAt ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                          {t.closedAt ? "Fechado" : "Pendente"}
+                        </span>
                       </div>
-                      {wa && (
-                        <a href={wa} target="_blank" rel="noreferrer" data-testid={`button-tradein-lead-whatsapp-${t.id}`}
-                          className="p-1.5 rounded-lg hover:bg-emerald-50 text-emerald-600 shrink-0" title="Chamar no WhatsApp">
-                          <MessageCircle className="w-3.5 h-3.5" />
-                        </a>
-                      )}
+                      <p className="text-xs text-muted-foreground">{t.device}{t.sellerPhone ? ` · ${t.sellerPhone}` : ""}</p>
+                      {t.suggestedPrice && <p className="text-xs text-foreground/80 mt-0.5">Valor estimado: <span className="font-semibold">{t.suggestedPrice}</span></p>}
+                      <p className="text-[10px] text-muted-foreground mt-0.5">{new Date(t.createdAt).toLocaleString("pt-BR")}</p>
                     </div>
-                  );
-                })
+                    {t.sellerPhone && can(user, "criar_atendimento") && (
+                      <button type="button" onClick={() => handleStartTradeInAtendimento(t)} disabled={startingAtendimentoId === t.id}
+                        data-testid={`button-tradein-lead-atendimento-${t.id}`}
+                        className="p-1.5 rounded-lg hover:bg-emerald-50 text-emerald-600 shrink-0 disabled:opacity-40" title="Iniciar atendimento no WhatsApp">
+                        {startingAtendimentoId === t.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <MessageCircle className="w-3.5 h-3.5" />}
+                      </button>
+                    )}
+                  </div>
+                ))
               )}
             </div>
           </div>
