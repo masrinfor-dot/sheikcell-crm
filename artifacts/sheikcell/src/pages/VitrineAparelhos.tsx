@@ -370,6 +370,33 @@ export default function VitrineAparelhos() {
   const [settingsForm, setSettingsForm] = useState<CatalogPricingSettings | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
 
+  // Margem de avaliação de usados usada na Vitrine pública (cliente avaliando
+  // o próprio aparelho sozinho, sem vendedor) — mesma "Tabela 2 (média)" da
+  // tela de Avaliação de Usados (ver /trade-in/margins), só mostrada aqui
+  // junto da margem de venda pra ficar tudo num único lugar, como pedido pelo
+  // lojista (07/09). null = módulo de Avaliação de Usados não habilitado
+  // nesta loja, ou ainda não carregou — nesse caso a seção some sozinha.
+  const [tradeInMarginPct, setTradeInMarginPct] = useState<number | null>(null);
+  const [savingTradeInMargin, setSavingTradeInMargin] = useState(false);
+  const handleSaveTradeInMargin = async () => {
+    if (tradeInMarginPct == null) return;
+    const v = Math.round(tradeInMarginPct);
+    if (!Number.isFinite(v) || v < 1 || v > 90) {
+      toast({ title: "Margem inválida", description: "Use entre 1% e 90%.", variant: "destructive" });
+      return;
+    }
+    setSavingTradeInMargin(true);
+    try {
+      const saved = await api.tradeIn.saveMargins({ t2: v });
+      setTradeInMarginPct(saved.t2);
+      toast({ title: "Margem de avaliação de usados atualizada!" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSavingTradeInMargin(false);
+    }
+  };
+
   const [slug, setSlug] = useState<string | null>(null);
   const [slugInput, setSlugInput] = useState("");
   const [savingSlug, setSavingSlug] = useState(false);
@@ -513,8 +540,11 @@ export default function VitrineAparelhos() {
       // normalmente sem essa lista nesse caso.
       api.tradeIn.list().catch(() => []),
       api.catalog.getBannerImage(),
+      // Best-effort, igual à lista de leads acima: só existe se a loja tiver
+      // o módulo "Avaliação de Usados" habilitado.
+      api.tradeIn.margins().catch(() => null),
     ])
-      .then(([l, s, w, ww, cats, wc, tb, sn, pm, rv, ti, bn]) => {
+      .then(([l, s, w, ww, cats, wc, tb, sn, pm, rv, ti, bn, tim]) => {
         if (l.status === "fulfilled") { setProducts(l.value.products); setSettings(l.value.settings); }
         if (s.status === "fulfilled") { setSlug(s.value.slug); setSlugInput(s.value.slug ?? ""); }
         if (w.status === "fulfilled") { setWhatsapp(w.value.whatsapp); setWhatsappInput(w.value.whatsapp ?? ""); }
@@ -527,6 +557,7 @@ export default function VitrineAparelhos() {
         if (rv.status === "fulfilled") setReviews(rv.value.reviews);
         if (ti.status === "fulfilled") setTradeInLeads(ti.value);
         if (bn.status === "fulfilled") setBannerImage(bn.value.bannerImage);
+        if (tim.status === "fulfilled" && tim.value) setTradeInMarginPct(tim.value.t2);
         const failed = [l, s, w, ww, cats, wc, tb, sn, pm, rv].filter((r) => r.status === "rejected");
         if (failed.length > 0) {
           // eslint-disable-next-line no-console
@@ -2169,6 +2200,28 @@ export default function VitrineAparelhos() {
                   <p className="text-[10px] text-muted-foreground mt-1">Preço de atacado = custo ÷ (1 − margem de atacado%), sem taxa de cartão (venda combinada fora do cartão). Normalmente menor que a margem de varejo.</p>
                 </div>
               </div>
+              {tradeInMarginPct != null && (
+                <div className="rounded-lg border px-3 py-2.5 bg-muted/20">
+                  <label className="text-xs font-semibold text-muted-foreground flex items-center gap-1">
+                    <Wallet className="w-3 h-3" /> Margem de avaliação de usados (Vitrine pública)
+                  </label>
+                  <p className="text-[10px] text-muted-foreground mt-0.5 mb-1.5">
+                    Margem usada quando o próprio cliente avalia o usado dele sozinho na Vitrine, sem vendedor
+                    (mesma "Tabela 2 — média" da tela de Avaliação de Usados; editar aqui já atualiza lá também).
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <input type="number" min={1} max={90} value={tradeInMarginPct}
+                      onChange={(e) => setTradeInMarginPct(Number(e.target.value))}
+                      data-testid="input-tradein-vitrine-margin"
+                      className="w-24 rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
+                    <span className="text-sm font-semibold text-muted-foreground">%</span>
+                    <button onClick={handleSaveTradeInMargin} disabled={savingTradeInMargin} data-testid="button-save-tradein-vitrine-margin"
+                      className="ml-auto px-3 py-2 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary/90 disabled:opacity-50 transition">
+                      {savingTradeInMargin ? "Salvando..." : "Salvar margem de usados"}
+                    </button>
+                  </div>
+                </div>
+              )}
               <div>
                 <label className="text-xs font-semibold text-muted-foreground">Taxa do cartão por nº de parcelas (%)</label>
                 <div className="mt-1 grid grid-cols-4 gap-2">
