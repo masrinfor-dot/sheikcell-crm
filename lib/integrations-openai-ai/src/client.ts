@@ -23,5 +23,10 @@ export const openai = new OpenAI({
   // 25s é generoso pro modelo com busca na web, mas falha rápido o
   // suficiente pra quem chamou poder cair no fallback/erro tratado.
   timeout: 25_000,
-  maxRetries: 1,
+  // Antes era 1 — muito pouco pra picos passageiros de "rate_limit_exceeded"
+  // (várias lojas/módulos usando IA ao mesmo tempo nessa mesma chave
+  // compartilhada da plataforma): o SDK já espera o tempo do header
+  // "Retry-After" entre tentativas, então mais tentativas só ajudam a
+  // atravessar o pico sem precisar que o lojista clique "tentar de novo".
+  maxRetries: 3,
 });

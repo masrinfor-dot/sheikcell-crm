@@ -28,7 +28,11 @@ export async function getOpenAiClientForTenant(tenantId: number): Promise<OpenAI
     const apiKey = decryptSecret({
       ciphertext: cred.encryptedApiKey, iv: cred.iv, authTag: cred.authTag, keyVersion: cred.keyVersion,
     });
-    const client = new OpenAI({ apiKey, timeout: 25_000, maxRetries: 1 });
+    // maxRetries 3 (era 1) — mesmo motivo do client global em
+    // integrations-openai-ai/src/client.ts: mais fôlego pra atravessar um
+    // pico passageiro de rate limit sem exigir clique manual de "tentar
+    // de novo" do lojista.
+    const client = new OpenAI({ apiKey, timeout: 25_000, maxRetries: 3 });
     tenantClientCache.set(tenantId, { client, updatedAt });
     return client;
   } catch (err) {

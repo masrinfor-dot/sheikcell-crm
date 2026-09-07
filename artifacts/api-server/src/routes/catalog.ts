@@ -1011,7 +1011,17 @@ router.post("/catalog/characteristics/generate", requireAuth, requirePerm("usar_
     if (err instanceof OpenAISdk.APIConnectionTimeoutError || (err as { name?: string })?.name === "APIConnectionTimeoutError") {
       message = "A IA demorou demais pra gerar as características. Tente novamente.";
     } else if (err instanceof OpenAISdk.RateLimitError) {
-      message = "A IA está sobrecarregada no momento (limite de uso atingido). Aguarde um instante e tente de novo.";
+      // "insufficient_quota" é a chave de IA sem crédito/plano (só volta a
+      // funcionar depois que o administrador verificar o faturamento da
+      // OpenAI) — bem diferente de "rate_limit_exceeded", que é só um pico
+      // de uso passageiro (várias lojas usando IA ao mesmo tempo) e volta
+      // sozinho em instantes. Antes as duas caíam na mesma mensagem
+      // genérica de "aguarde e tente de novo", o que confundia quando o
+      // problema real era falta de crédito (ninguém ia adiantar nada só
+      // esperando).
+      message = (err as { code?: string }).code === "insufficient_quota"
+        ? "A conta de IA está sem créditos/cota disponível no momento. Fale com o administrador do sistema pra verificar o plano de faturamento da OpenAI."
+        : "A IA está sobrecarregada no momento (limite de uso atingido — várias lojas usando ao mesmo tempo). Aguarde um instante e tente de novo.";
     } else if (err instanceof OpenAISdk.AuthenticationError) {
       message = "A chave de acesso à IA está inválida ou expirada. Fale com o administrador do sistema.";
     }
@@ -1613,7 +1623,17 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
     if (err instanceof OpenAISdk.APIConnectionTimeoutError || (err as { name?: string })?.name === "APIConnectionTimeoutError") {
       message = "A IA demorou demais pra analisar essa lista (listas grandes podem passar de 1 minuto). Tente novamente — se persistir, tente colar em partes menores.";
     } else if (err instanceof OpenAISdk.RateLimitError) {
-      message = "A IA está sobrecarregada no momento (limite de uso atingido). Aguarde um instante e tente de novo.";
+      // "insufficient_quota" é a chave de IA sem crédito/plano (só volta a
+      // funcionar depois que o administrador verificar o faturamento da
+      // OpenAI) — bem diferente de "rate_limit_exceeded", que é só um pico
+      // de uso passageiro (várias lojas usando IA ao mesmo tempo) e volta
+      // sozinho em instantes. Antes as duas caíam na mesma mensagem
+      // genérica de "aguarde e tente de novo", o que confundia quando o
+      // problema real era falta de crédito (ninguém ia adiantar nada só
+      // esperando).
+      message = (err as { code?: string }).code === "insufficient_quota"
+        ? "A conta de IA está sem créditos/cota disponível no momento. Fale com o administrador do sistema pra verificar o plano de faturamento da OpenAI."
+        : "A IA está sobrecarregada no momento (limite de uso atingido — várias lojas usando ao mesmo tempo). Aguarde um instante e tente de novo.";
     } else if (err instanceof OpenAISdk.AuthenticationError) {
       message = "A chave de acesso à IA está inválida ou expirada. Fale com o administrador do sistema.";
     }
