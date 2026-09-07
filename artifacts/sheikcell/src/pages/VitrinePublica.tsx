@@ -429,47 +429,54 @@ function ProductDetailModal({
   };
 
   return (
-    <div className="fixed inset-0 z-40 flex items-end sm:items-center justify-center bg-black/40 px-3 py-6" onClick={onClose}>
-      <div className="bg-white rounded-2xl w-full max-w-lg shadow-xl border overflow-hidden my-auto max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between px-4 py-3 border-b shrink-0">
-          <span className="font-semibold text-sm text-neutral-900 truncate pr-2">{p.model}</span>
-          <button onClick={onClose} data-testid="button-close-detail" className="p-1 rounded hover:bg-neutral-100 shrink-0"><X className="w-4 h-4" /></button>
+    <div className="fixed inset-0 z-40 flex items-end sm:items-center justify-center bg-black/50 sm:px-4 sm:py-6" onClick={onClose}>
+      <div className="bg-white rounded-t-3xl sm:rounded-2xl w-full sm:max-w-4xl lg:max-w-5xl shadow-2xl border overflow-hidden max-h-[94vh] sm:max-h-[88vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-4 sm:px-6 py-3 border-b shrink-0">
+          <span className="font-semibold text-sm sm:text-base text-neutral-900 truncate pr-2">{p.model}</span>
+          <button onClick={onClose} data-testid="button-close-detail" className="p-1.5 rounded-full hover:bg-neutral-100 shrink-0"><X className="w-4 h-4" /></button>
         </div>
-        <div className="overflow-y-auto p-4 space-y-3">
-          {displayedPhotos.length > 0 ? (
-            <Carousel setApi={setCarouselApi} opts={{ loop: displayedPhotos.length > 1 }}>
-              <CarouselContent className="ml-0">
-                {displayedPhotos.map((ph) => (
-                  <CarouselItem key={ph.id} className="pl-0">
-                    <div className="aspect-square bg-neutral-100 rounded-xl overflow-hidden p-4">
-                      <img src={api.catalog.photoUrl(ph.id)} alt={p.model} className="w-full h-full object-contain" />
-                    </div>
-                  </CarouselItem>
+        {/* Layout em 2 colunas a partir do sm: foto fica "grudada" no topo
+            enquanto o cliente rola as informações — igual às páginas de
+            produto de grandes lojas (Trocafone, Mercado Livre). No celular
+            continua empilhado (foto em cima, infos embaixo), só que maior
+            que antes. */}
+        <div className="overflow-y-auto sm:grid sm:grid-cols-5">
+          <div className="sm:col-span-2 sm:sticky sm:top-0 sm:self-start bg-neutral-50 sm:border-r border-neutral-100 p-3 sm:p-5 space-y-2">
+            {displayedPhotos.length > 0 ? (
+              <Carousel setApi={setCarouselApi} opts={{ loop: displayedPhotos.length > 1 }}>
+                <CarouselContent className="ml-0">
+                  {displayedPhotos.map((ph) => (
+                    <CarouselItem key={ph.id} className="pl-0">
+                      <div className="aspect-square sm:aspect-[4/5] bg-white sm:bg-neutral-100 rounded-xl overflow-hidden p-3 sm:p-6">
+                        <img src={api.catalog.photoUrl(ph.id)} alt={p.model} className="w-full h-full object-contain" />
+                      </div>
+                    </CarouselItem>
+                  ))}
+                </CarouselContent>
+                {displayedPhotos.length > 1 && (
+                  <>
+                    <CarouselPrevious className="left-2 h-7 w-7 bg-white/80 hover:bg-white border-neutral-200" />
+                    <CarouselNext className="right-2 h-7 w-7 bg-white/80 hover:bg-white border-neutral-200" />
+                  </>
+                )}
+              </Carousel>
+            ) : (
+              <div className="aspect-square sm:aspect-[4/5] bg-neutral-100 rounded-xl overflow-hidden flex items-center justify-center">
+                <Smartphone className="w-16 h-16 text-neutral-300" />
+              </div>
+            )}
+            {displayedPhotos.length > 1 && (
+              <div className="flex gap-1.5 overflow-x-auto">
+                {displayedPhotos.map((ph, i) => (
+                  <button key={ph.id} type="button" onClick={() => carouselApi?.scrollTo(i)}
+                    className={`w-14 h-14 rounded-lg overflow-hidden border-2 shrink-0 ${i === activePhoto ? "border-neutral-900" : "border-transparent"}`}>
+                    <img src={api.catalog.photoUrl(ph.id)} alt="" className="w-full h-full object-cover" />
+                  </button>
                 ))}
-              </CarouselContent>
-              {displayedPhotos.length > 1 && (
-                <>
-                  <CarouselPrevious className="left-2 h-7 w-7 bg-white/80 hover:bg-white border-neutral-200" />
-                  <CarouselNext className="right-2 h-7 w-7 bg-white/80 hover:bg-white border-neutral-200" />
-                </>
-              )}
-            </Carousel>
-          ) : (
-            <div className="aspect-square bg-neutral-100 rounded-xl overflow-hidden flex items-center justify-center">
-              <Smartphone className="w-16 h-16 text-neutral-300" />
-            </div>
-          )}
-          {displayedPhotos.length > 1 && (
-            <div className="flex gap-1.5 overflow-x-auto">
-              {displayedPhotos.map((ph, i) => (
-                <button key={ph.id} type="button" onClick={() => carouselApi?.scrollTo(i)}
-                  className={`w-12 h-12 rounded-lg overflow-hidden border-2 shrink-0 ${i === activePhoto ? "border-neutral-900" : "border-transparent"}`}>
-                  <img src={api.catalog.photoUrl(ph.id)} alt="" className="w-full h-full object-cover" />
-                </button>
-              ))}
-            </div>
-          )}
-
+              </div>
+            )}
+          </div>
+          <div className="sm:col-span-3 p-4 sm:p-6 space-y-3">
           <div className="flex items-center gap-1.5 flex-wrap">
             <button type="button" onClick={() => setShowCriteria((v) => !v)}
               className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-neutral-100 text-neutral-600 hover:bg-neutral-200 transition">
@@ -544,7 +551,7 @@ function ProductDetailModal({
                 <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-bold"><Tag className="w-2.5 h-2.5" /> {discount.percentOff}% OFF</span>
               </div>
             )}
-            <p className="text-xl font-bold text-neutral-900">{retailPrice ?? "Sob consulta"}</p>
+            <p className="text-2xl sm:text-3xl font-bold text-neutral-900">{retailPrice ?? "Sob consulta"}</p>
             {retailPrice && <p className="text-xs text-neutral-400">à vista (Pix)</p>}
             {installmentLabel && <p className="text-sm text-neutral-500">{installmentLabel}</p>}
             {wholesalePrice && (
@@ -592,8 +599,8 @@ function ProductDetailModal({
                     wholesale: wholesaleUnlocked && selected.wholesalePrice != null,
                   }, qty)}
                   data-testid="button-add-to-cart-detail"
-                  className="mt-2 inline-flex items-center justify-center gap-1.5 w-full py-2.5 rounded-xl bg-neutral-900 text-white text-sm font-semibold hover:bg-neutral-800 transition disabled:opacity-40">
-                  <ShoppingCart className="w-4 h-4" /> Adicionar ao pedido
+                  className="mt-2 inline-flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-neutral-900 text-white text-sm sm:text-base font-bold hover:bg-neutral-800 active:scale-[0.99] transition disabled:opacity-40">
+                  <ShoppingCart className="w-4 h-4 sm:w-5 sm:h-5" /> Adicionar ao pedido
                 </button>
                 {!wholesaleUnlocked && (
                   <button type="button" disabled={!selected}
@@ -636,6 +643,20 @@ function ProductDetailModal({
             )}
           </div>
 
+          {trustBadges.length > 0 && (
+            <div className="grid grid-cols-1 gap-1.5 pt-1 border-t border-neutral-100">
+              {trustBadges.map((b, i) => (
+                <div key={i} className="flex items-start gap-2 pt-1.5">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-xs font-semibold text-neutral-700">{b.title}</p>
+                    {b.description && <p className="text-[11px] text-neutral-400">{b.description}</p>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
           {!wholesaleUnlocked && (
             <div className="pt-1 border-t border-neutral-100">
               {reviewDone ? (
@@ -673,20 +694,7 @@ function ProductDetailModal({
               )}
             </div>
           )}
-
-          {trustBadges.length > 0 && (
-            <div className="grid grid-cols-1 gap-1.5 pt-1 border-t border-neutral-100">
-              {trustBadges.map((b, i) => (
-                <div key={i} className="flex items-start gap-2 pt-1.5">
-                  <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                  <div>
-                    <p className="text-xs font-semibold text-neutral-700">{b.title}</p>
-                    {b.description && <p className="text-[11px] text-neutral-400">{b.description}</p>}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+          </div>
         </div>
       </div>
     </div>
