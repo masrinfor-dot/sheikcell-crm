@@ -2452,7 +2452,11 @@ export const api = {
     // timeoutMs um pouco acima do pior caso do backend (25s da chamada à IA
     // + 1 retry ≈ até 50s) — sem isso, uma rede/proxy travados deixavam o
     // botão "Analisar" girando pra sempre sem nunca mostrar erro.
-    importParse: (rawText: string) => req<{ items: CatalogImportItem[]; newCategoryPaths: string[][] }>("/catalog/import/parse", { method: "POST", body: JSON.stringify({ rawText }), timeoutMs: 55_000 }),
+    // truncated: true = a lista era grande demais e a resposta da IA veio
+    // cortada no meio — o back já recupera os itens que vieram completos
+    // antes do corte (ver extractJsonArrayLenient no backend), mas o(s)
+    // último(s) aparelho(s) da lista original pode(m) estar faltando.
+    importParse: (rawText: string) => req<{ items: CatalogImportItem[]; newCategoryPaths: string[][]; truncated?: boolean }>("/catalog/import/parse", { method: "POST", body: JSON.stringify({ rawText }), timeoutMs: 55_000 }),
     // timeoutMs maior que importParse: além de gravar os produtos, agora
     // também tenta buscar 1 foto por produto na internet (melhor esforço,
     // com timeout próprio por produto — ver autoAttachPhotosOnImport no backend).

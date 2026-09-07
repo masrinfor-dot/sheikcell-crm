@@ -983,6 +983,12 @@ export default function VitrineAparelhos() {
       setImportTab(r.items.some((i) => i.status === "approved") ? "approved" : "pending");
       setMarketChecks({});
       void autoRunMarketChecks(r.items);
+      if (r.truncated) {
+        toast({
+          title: "Lista grande demais — só parte foi analisada",
+          description: `${r.items.length} aparelho(s) foram reconhecidos, mas a lista pode ter mais — cole o restante em partes menores.`,
+        });
+      }
     } catch (err) {
       toast({ title: "Erro ao analisar a lista", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
     } finally {

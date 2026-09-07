@@ -1337,6 +1337,45 @@ function extractJsonArray(raw: string): unknown[] | null {
   }
 }
 
+// Recuperação pra quando a resposta da IA vem CORTADA no meio (estourou o
+// limite de tokens da resposta — mais fácil de acontecer agora que cada item
+// também traz "description"/"characteristics", em listas grandes com muitos
+// aparelhos) — em vez de descartar a lista inteira com "IA não retornou uma
+// lista válida", varre o texto item por item (contando chaves/colchetes,
+// respeitando string e escape) e aproveita todo objeto {..} que fechou
+// direitinho antes do corte, descartando só o último item (o que ficou pela
+// metade). Sem essa rede de segurança, um fornecedor com lista grande demais
+// simplesmente não conseguia importar nada.
+function extractJsonArrayLenient(raw: string): unknown[] | null {
+  const text = raw.replace(/^```(?:json)?/m, "").replace(/```$/m, "").trim();
+  const start = text.indexOf("[");
+  if (start === -1) return null;
+  const items: unknown[] = [];
+  let depth = 0;
+  let objStart = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = start + 1; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === "{") { if (depth === 0) objStart = i; depth++; continue; }
+    if (ch === "}") {
+      depth--;
+      if (depth === 0 && objStart !== -1) {
+        try { items.push(JSON.parse(text.slice(objStart, i + 1))); } catch { /* objeto malformado — pula */ }
+        objStart = -1;
+      }
+    }
+  }
+  return items.length > 0 ? items : null;
+}
+
 function cleanParsedVariants(raw: unknown): ParsedVariant[] {
   const arr = Array.isArray(raw) ? raw : [];
   const list = arr.slice(0, 20).map((v) => {
@@ -1467,22 +1506,45 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
     const completion = await openai.chat.completions.create(
       {
         model: "gpt-4o",
-        max_tokens: 4096,
+        // Antes era 4096 — ficou curto depois que cada item passou a trazer
+        // também "description" e "characteristics" (até 8 linhas de ficha
+        // técnica cada): numa lista de fornecedor com muitos aparelhos, a
+        // resposta da IA estourava esse limite e vinha CORTADA no meio do
+        // JSON, o que quebrava o parse inteiro e devolvia "Erro ao analisar
+        // a lista" sem aproveitar nada (mesmo os itens que já tinham vindo
+        // completos antes do corte). Subiu bastante a folga; ver também
+        // extractJsonArrayLenient logo abaixo, como segunda rede de
+        // segurança pra quando mesmo assim vier cortado.
+        max_tokens: 12_000,
         messages: [{ role: "user", content: prompt }],
       },
       // O client (aiClient.ts / integrations-openai-ai) usa 25s de timeout
       // por padrão — bom pra chamadas leves, mas curto demais aqui: essa
       // rota lê uma lista de fornecedor inteira (até 12000 caracteres) e
-      // pede pra IA devolver até 4096 tokens de JSON estruturado, o que em
-      // listas grandes passa de 25s com alguma frequência (timeout real,
-      // não a IA "fora do ar" — só demora mais que o padrão). Sobrescreve
-      // só nesta chamada, sem mudar o timeout padrão usado pelas outras
-      // features de IA do sistema.
+      // pede pra IA devolver um JSON estruturado grande, o que em listas
+      // grandes passa de 25s com alguma frequência (timeout real, não a IA
+      // "fora do ar" — só demora mais que o padrão). Sobrescreve só nesta
+      // chamada, sem mudar o timeout padrão usado pelas outras features de
+      // IA do sistema.
       { timeout: 55_000 },
     );
-    const raw = completion.choices[0]?.message?.content?.trim() ?? "";
-    const arr = extractJsonArray(raw);
-    if (!arr) { res.status(502).json({ error: "A IA não retornou uma lista válida. Tente novamente." }); return; }
+    const choice = completion.choices[0];
+    const raw = choice?.message?.content?.trim() ?? "";
+    const truncated = choice?.finish_reason === "length";
+    let arr = extractJsonArray(raw);
+    if (!arr && truncated) {
+      // Resposta cortada mesmo com os 12.000 tokens (lista MUITO grande) —
+      // tenta aproveitar os itens que já vieram completos antes do corte em
+      // vez de jogar tudo fora (ver extractJsonArrayLenient).
+      arr = extractJsonArrayLenient(raw);
+    }
+    if (!arr) {
+      const message = truncated
+        ? "A lista é grande demais pra IA analisar de uma vez. Tente colar em partes menores (ex.: metade da lista de cada vez)."
+        : "A IA não retornou uma lista válida. Tente novamente.";
+      res.status(502).json({ error: message });
+      return;
+    }
 
     const rawItems: ParsedItem[] = arr.slice(0, 200).map((raw) => {
       const o = (raw ?? {}) as Record<string, unknown>;
@@ -1524,7 +1586,11 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
       seen.add(key);
       newCategoryPaths.push(it.categoryPath);
     }
-    res.json({ items, newCategoryPaths });
+    // Avisa o front quando a lista recuperada (extractJsonArrayLenient) veio
+    // de uma resposta cortada — pode faltar o(s) último(s) aparelho(s) da
+    // lista original, então o lojista precisa saber pra conferir/colar o
+    // resto em partes menores, em vez de achar que a lista toda entrou.
+    res.json({ items, newCategoryPaths, truncated: truncated && arr != null });
   } catch (err) {
     req.log.error({ err }, "Catalog AI import failed");
     // Mensagem específica por causa (antes era sempre a mesma genérica
