@@ -907,6 +907,19 @@ export default function VitrinePublica() {
                 <MessageCircle className="w-4 h-4" /> WhatsApp
               </a>
             )}
+            {/* Botão de carrinho sempre visível no cabeçalho (antes só aparecia
+                flutuando depois de adicionar o 1º item) — assim o cliente sabe
+                que dá pra montar um pedido mesmo com o carrinho ainda vazio. */}
+            <button type="button" onClick={() => setShowCart(true)} data-testid="button-open-cart-header"
+              className="relative inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-neutral-100 text-neutral-700 text-xs font-semibold hover:bg-neutral-200 transition shrink-0">
+              <ShoppingCart className="w-4 h-4" />
+              <span className="hidden sm:inline">Carrinho</span>
+              {cartCount > 0 && (
+                <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-neutral-900 text-white text-[10px] font-bold leading-[18px] text-center">
+                  {cartCount}
+                </span>
+              )}
+            </button>
           </div>
         </div>
         {showUnlock && !data.wholesaleUnlocked && (
