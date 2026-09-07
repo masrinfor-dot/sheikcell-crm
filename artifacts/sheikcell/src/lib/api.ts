@@ -559,6 +559,11 @@ export type CatalogImportItem = {
   // "categorias novas sugeridas" na tela de importação).
   categoryId: number | null;
   categoryPath: string[] | null;
+  // Descrição e "principais características" já geradas pela IA junto com o
+  // resto da importação (tela/câmera/bateria/RAM etc.) — o lojista revisa/
+  // edita aqui antes de confirmar, mesmo padrão do formulário manual.
+  description: string | null;
+  characteristics: string[];
 };
 
 export type CatalogPhotoSearchResult = { title: string; imageUrl: string; thumbnailUrl: string; sourceUrl: string };

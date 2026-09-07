@@ -154,6 +154,22 @@ function modelGenerationRank(model: string): number {
   return match ? parseInt(match[0], 10) : -1;
 }
 
+// Dentro da MESMA geração (ex.: todos os "iPhone 17"), ordena do topo de
+// linha pro básico — pedido do lojista: "do pro max para os modelos de
+// entrada, ex 17 pro max, 17 pro, 17, 17 air". Casa por palavra-chave no
+// nome (Pro Max antes de Pro evita que "Pro Max" caia no bucket de "Pro"),
+// e qualquer modelo sem nenhuma dessas palavras (Android, ou linha básica
+// tipo "iPhone 17" puro) fica no meio, acima só do Air/Mini/SE.
+function modelTierRank(model: string): number {
+  const m = model.toLowerCase();
+  if (m.includes("pro max")) return 5;
+  if (m.includes("pro")) return 4;
+  if (m.includes("plus")) return 3;
+  if (m.includes("air")) return 1;
+  if (m.includes("mini") || m.includes(" se") || m.endsWith("se")) return 0;
+  return 2;
+}
+
 // Menor preço à vista entre as variantes com preço definido — mesmo valor
 // mostrado no card ("a partir de"), usado pro filtro Menor/Maior preço.
 function productMinPrice(p: { variants: { priceCash?: number | null; salePrice: string | null }[] }): number | null {

@@ -1308,6 +1308,13 @@ type ParsedItem = {
   status: "approved" | "pending";
   issue: string | null;
   rawLine: string;
+  // Descrição técnica e "principais características" (tela, câmera, bateria,
+  // RAM etc.) já geradas pela IA no mesmo passo da importação — pedido do
+  // lojista: antes só dava pra gerar isso um produto de cada vez, com o
+  // botão "Gerar com IA" já cadastrado, depois de já ter salvo o aparelho.
+  // O lojista ainda revisa/edita na tela de importação antes de confirmar.
+  description: string | null;
+  characteristics: string[];
   // Categoria/subcategoria sugerida pela IA (ex.: ["Celulares","Samsung"]).
   // categoryId preenchido = já existe exatamente essa categoria/subcategoria
   // na loja (aplicada direto). categoryPath preenchido = sugestão que NÃO
@@ -1374,6 +1381,8 @@ function mergeParsedItems(items: ParsedItem[]): ParsedItem[] {
       existing.categoryId = it.categoryId;
       existing.categoryPath = it.categoryPath;
     }
+    if (!existing.description && it.description) existing.description = it.description;
+    if (existing.characteristics.length === 0 && it.characteristics.length > 0) existing.characteristics = it.characteristics;
     if (it.rawLine && existing.rawLine !== it.rawLine && !existing.rawLine.includes(it.rawLine)) {
       existing.rawLine = existing.rawLine ? `${existing.rawLine} | ${it.rawLine}` : it.rawLine;
     }
@@ -1439,12 +1448,13 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
     ``,
     `Categorias/subcategorias já cadastradas nessa loja (reaproveite pelo nome EXATO sempre que fizer sentido, em vez de inventar uma parecida): ${categoryList || "(nenhuma cadastrada ainda)"}.`,
     `Pra cada aparelho, sugira também "categoryPath": um array com 1 ou 2 níveis indicando a aba/sub-aba da vitrine pública onde ele se encaixa (ex.: ["Celulares","Samsung"] ou ["Peças de celular"]). Prefira sempre reaproveitar um nome já cadastrado acima; só sugira um nome novo quando não existir nada parecido. Se não tiver confiança nenhuma pra sugerir, use null.`,
+    `IMPORTANTE — descrição e características: use seu conhecimento sobre CADA modelo específico (não invente o que não souber) pra preencher também "description" (1 frase curta, natural, pra vitrine pública — não repita "descrição:") e "characteristics" (array de até 8 strings curtas, estilo ficha técnica: tela/tamanho, câmera traseira/frontal (MP), bateria (mAh), memória RAM, armazenamento, processador, 5G, resistência à água — só o que você tiver confiança de estar correto pra esse modelo). Se não reconhecer o modelo com confiança nenhuma, deixe "description": null e "characteristics": [].`,
     ``,
     `Lista:`,
     text,
     ``,
     `Responda SOMENTE com um JSON array válido, sem markdown, um objeto por aparelho (família modelo+condição, independente de cor/armazenamento), neste formato:`,
-    `[{"model":"iPhone 15 Pro Max","condition":"excelente","colors":["Preto","Azul"],"variants":[{"storage":"256GB","ram":null,"network":null,"color":"Preto","costPrice":3850},{"storage":"256GB","ram":null,"network":null,"color":"Azul","costPrice":3850},{"storage":"512GB","ram":null,"network":null,"color":"Preto","costPrice":4200}],"categoryPath":["Celulares","Apple"],"rawLine":"trecho original correspondente"}]`,
+    `[{"model":"iPhone 15 Pro Max","condition":"excelente","colors":["Preto","Azul"],"variants":[{"storage":"256GB","ram":null,"network":null,"color":"Preto","costPrice":3850},{"storage":"256GB","ram":null,"network":null,"color":"Azul","costPrice":3850},{"storage":"512GB","ram":null,"network":null,"color":"Preto","costPrice":4200}],"categoryPath":["Celulares","Apple"],"description":"iPhone 15 Pro Max com tela Super Retina XDR e câmera profissional tripla.","characteristics":["Tela Super Retina XDR OLED de 6,7\\"","Câmera tripla traseira 48MP + zoom óptico","Câmera frontal 12MP","Bateria de longa duração","Chip A17 Pro","5G","Resistente à água (IP68)"],"rawLine":"trecho original correspondente"}]`,
     `Exemplo com RAM (ex.: Realme Note 70 4/256GB por R$810 e 8/256GB por R$910): "variants":[{"storage":"256GB","ram":"4GB","network":null,"color":null,"costPrice":810},{"storage":"256GB","ram":"8GB","network":null,"color":null,"costPrice":910}].`,
     `"colors" no nível do item é só a lista resumida de todas as cores encontradas pra esse modelo (informativo); o detalhe por combinação fica em "variants".`,
     `"condition" deve ser um destes: novo, excelente, muito_bom, bom, outlet (use "bom" se não estiver claro). Use "novo" quando a lista indicar que o aparelho é lacrado/lacrado de fábrica/nunca usado (ex.: "lacrado", "novo", "sealed") — não confunda com "excelente", que é pra seminovo em ótimo estado.`,
@@ -1491,6 +1501,8 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
         rawLine: clean(o.rawLine, 300),
         categoryId,
         categoryPath,
+        description: clean(o.description, 2000) || null,
+        characteristics: cleanCharacteristics(o.characteristics) ?? [],
       };
     });
     // Segunda passada, determinística (não depende da IA acertar sempre): mescla
@@ -1767,6 +1779,12 @@ router.post("/catalog/import/confirm", requireAuth, async (req, res): Promise<vo
     return {
       model: clean(o.model, 120), condition: cleanCondition(o.condition), colors: cleanColors(o.colors),
       variants: cleanParsedVariants(o.variants), categoryIdRaw: o.categoryId,
+      // Descrição/características geradas pela IA na tela de importação (ver
+      // /catalog/import/parse) — só aplicadas em produto NOVO (abaixo); um
+      // item que bate com produto já existente não sobrescreve o que o
+      // lojista já tinha escrito/editado nesses campos.
+      description: clean(o.description, 2000) || null,
+      characteristics: cleanCharacteristics(o.characteristics),
       // existingProductId: enviado pelo front quando esse item bate com um
       // modelo já cadastrado na mesma categoria (ver checagem de duplicado em
       // VitrineAparelhos.tsx) — nesse caso NÃO cria um segundo anúncio, só
@@ -1800,6 +1818,7 @@ router.post("/catalog/import/confirm", requireAuth, async (req, res): Promise<vo
     }
     const [product] = await db.insert(catalogProductsTable).values({
       tenantId, model: item.model, condition: item.condition, colors: item.colors, categoryId: item.categoryId, createdBy: req.session.userId ?? null,
+      description: item.description, aiCharacteristics: item.characteristics,
     }).returning();
     await replaceVariants(tenantId, product.id, item.variants.map((v) => ({ storage: v.storage, color: v.color, costPrice: v.costPrice, marginPercentOverride: v.marginPercentOverride })), settings, product.categoryId);
     createdProducts.push(product);

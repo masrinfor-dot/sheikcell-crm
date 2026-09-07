@@ -174,6 +174,22 @@ function modelGenerationRank(model: string): number {
   return match ? parseInt(match[0], 10) : -1;
 }
 
+// Dentro da MESMA geração (ex.: todos os "iPhone 17"), ordena do topo de
+// linha pro básico — pedido do lojista: "do pro max para os modelos de
+// entrada, ex 17 pro max, 17 pro, 17, 17 air". Casa por palavra-chave no
+// nome (Pro Max antes de Pro evita que "Pro Max" caia no bucket de "Pro"),
+// e qualquer modelo sem nenhuma dessas palavras (Android, ou linha básica
+// tipo "iPhone 17" puro) fica no meio, acima só do Air/Mini/SE.
+function modelTierRank(model: string): number {
+  const m = model.toLowerCase();
+  if (m.includes("pro max")) return 5;
+  if (m.includes("pro")) return 4;
+  if (m.includes("plus")) return 3;
+  if (m.includes("air")) return 1;
+  if (m.includes("mini") || m.includes(" se") || m.endsWith("se")) return 0;
+  return 2;
+}
+
 function productMinPrice(p: CatalogProduct): number | null {
   const prices = p.variants
     .map((v) => v.priceCash ?? (v.salePrice != null ? Number(v.salePrice) : null))
@@ -199,7 +215,10 @@ function sortCatalogProducts(list: CatalogProduct[], sortBy: CatalogSortOption):
     arr.sort((a, b) => (b.purchaseCount ?? 0) - (a.purchaseCount ?? 0) || b.id - a.id);
     return arr;
   }
-  arr.sort((a, b) => modelGenerationRank(b.model) - modelGenerationRank(a.model) || b.id - a.id);
+  arr.sort((a, b) =>
+    modelGenerationRank(b.model) - modelGenerationRank(a.model)
+    || modelTierRank(b.model) - modelTierRank(a.model)
+    || b.id - a.id);
   return arr;
 }
 
@@ -283,6 +302,10 @@ export default function VitrineAparelhos() {
   // disparada automaticamente pra revisão de preço antes de finalizar a
   // importação (ver runMarketCheck/handleParse).
   const [marketChecks, setMarketChecks] = useState<Record<number, MarketCheckState>>({});
+  // Descrição/características (IA) ficam colapsadas por padrão na revisão da
+  // importação — já vêm preenchidas sozinhas (ver prompt de import/parse),
+  // só expande pra quem quiser revisar/editar antes de confirmar.
+  const [expandedAiFields, setExpandedAiFields] = useState<Set<number>>(new Set());
 
   const [showSettings, setShowSettings] = useState(false);
   const [settingsForm, setSettingsForm] = useState<CatalogPricingSettings | null>(null);
@@ -1846,6 +1869,34 @@ export default function VitrineAparelhos() {
                           </select>
                           {it.categoryPath && (
                             <p className="text-[10px] text-violet-700 mt-0.5">Sugestão da IA (categoria nova): {it.categoryPath.join(" > ")}</p>
+                          )}
+                        </div>
+                        <div>
+                          <button type="button" onClick={() => setExpandedAiFields((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(idx)) next.delete(idx); else next.add(idx);
+                            return next;
+                          })} data-testid={`button-toggle-ai-fields-${idx}`}
+                            className="flex items-center gap-1 text-[10px] font-semibold text-violet-700 hover:underline">
+                            <Sparkles className="w-2.5 h-2.5" />
+                            {expandedAiFields.has(idx) ? "Ocultar" : "Ver"} descrição e características (gerado por IA)
+                          </button>
+                          {expandedAiFields.has(idx) && (
+                            <div className="mt-1.5 space-y-1.5 rounded border border-violet-100 bg-violet-50/40 p-2">
+                              <div>
+                                <p className="text-[10px] font-semibold text-muted-foreground mb-0.5">Descrição</p>
+                                <textarea value={it.description ?? ""} onChange={(e) => updateImportItem(idx, { description: e.target.value || null })}
+                                  data-testid={`import-item-description-${idx}`} rows={2}
+                                  className="w-full rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40 resize-none" />
+                              </div>
+                              <div>
+                                <p className="text-[10px] font-semibold text-muted-foreground mb-0.5">Principais características (uma por linha)</p>
+                                <textarea value={it.characteristics.join("\n")}
+                                  onChange={(e) => updateImportItem(idx, { characteristics: e.target.value.split("\n").map((c) => c.trim()).filter(Boolean) })}
+                                  data-testid={`import-item-characteristics-${idx}`} rows={4}
+                                  className="w-full rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40 resize-none" />
+                              </div>
+                            </div>
                           )}
                         </div>
                         {(() => {
