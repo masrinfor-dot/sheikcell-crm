@@ -15,7 +15,8 @@ import { Carousel, CarouselContent, CarouselItem, CarouselPrevious, CarouselNext
 // variantes de armazenamento e pode estar organizado numa categoria/aba.
 
 type PublicData = {
-  storeName: string; whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
+  storeName: string; logoDataUrl: string | null; bannerImage: string | null;
+  whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
   categories: CatalogCategory[]; products: CatalogPublicProduct[]; trustBadges: CatalogTrustBadge[]; paymentMethods: CatalogPaymentMethod[];
 };
 
@@ -960,11 +961,23 @@ export default function VitrinePublica() {
 
   return (
     <div className="min-h-screen bg-neutral-50 pb-20">
+      {/* Faixa de imagem de fundo, configurável em "Imagem de fundo" na tela
+          de administração da Vitrine — some sozinha se a loja não cadastrou
+          nenhuma (comportamento de antes dessa opção existir). */}
+      {data.bannerImage && (
+        <div className="w-full h-36 sm:h-48 overflow-hidden">
+          <img src={data.bannerImage} alt="" className="w-full h-full object-cover" />
+        </div>
+      )}
       <header className="sticky top-0 z-10 bg-white border-b border-neutral-200">
         <div className="max-w-5xl mx-auto px-4 py-4 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <div className="w-9 h-9 rounded-xl bg-neutral-900 text-white flex items-center justify-center shrink-0">
-              <Smartphone className="w-5 h-5" />
+            <div className="w-9 h-9 rounded-xl bg-neutral-900 text-white flex items-center justify-center shrink-0 overflow-hidden">
+              {data.logoDataUrl ? (
+                <img src={data.logoDataUrl} alt={data.storeName} className="w-full h-full object-cover" />
+              ) : (
+                <Smartphone className="w-5 h-5" />
+              )}
             </div>
             <div>
               <h1 className="font-bold text-neutral-900 leading-tight">{data.storeName}</h1>

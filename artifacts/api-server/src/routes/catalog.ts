@@ -1117,6 +1117,61 @@ router.put("/catalog/trust-badges", requireAdmin, async (req, res): Promise<void
   res.json({ badges: badges.length > 0 ? badges : DEFAULT_TRUST_BADGES });
 });
 
+// ─── Logo e imagem de fundo (banner) da vitrine pública ─────────────────────
+// A logo reaproveita a "branding_logo" já configurada em Configurações →
+// Aparência (mesma logo usada no resto do sistema) — sem endpoint próprio,
+// só lida aqui pra ir junto na resposta pública (ver getBrandingLogo abaixo).
+// A imagem de fundo é exclusiva da vitrine pública, com endpoint próprio
+// (mesmo padrão data-URL de branding_logo, ver settings.ts).
+const BANNER_IMAGE_KEY = "catalog_banner_image";
+const BANNER_MAX_BASE64_CHARS = 2_200_000; // ~1.6MB de imagem antes do base64
+function bannerImageMatchesMime(buf: Buffer, mime: string): boolean {
+  if (mime === "image/png") return buf.length > 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
+  if (mime === "image/jpeg") return buf.length > 2 && buf[0] === 0xff && buf[1] === 0xd8;
+  if (mime === "image/webp") return buf.length > 12 && buf.toString("ascii", 8, 12) === "WEBP";
+  return false;
+}
+
+async function getBrandingLogo(tenantId: number): Promise<string | null> {
+  const [row] = await db.select().from(appSettingsTable)
+    .where(and(eq(appSettingsTable.tenantId, tenantId), eq(appSettingsTable.key, "branding_logo"))).limit(1);
+  return row?.value || null;
+}
+
+async function getBannerImage(tenantId: number): Promise<string | null> {
+  const [row] = await db.select().from(appSettingsTable)
+    .where(and(eq(appSettingsTable.tenantId, tenantId), eq(appSettingsTable.key, BANNER_IMAGE_KEY))).limit(1);
+  return row?.value || null;
+}
+
+router.get("/catalog/banner-image", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  res.json({ bannerImage: await getBannerImage(tenantId) });
+});
+
+router.put("/catalog/banner-image", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { bannerImage } = req.body as { bannerImage?: string | null };
+  if (bannerImage === null || bannerImage === "") {
+    await db.insert(appSettingsTable)
+      .values({ tenantId, key: BANNER_IMAGE_KEY, value: "" })
+      .onConflictDoUpdate({ target: [appSettingsTable.tenantId, appSettingsTable.key], set: { value: "", updatedAt: new Date() } });
+    res.json({ bannerImage: null });
+    return;
+  }
+  if (typeof bannerImage !== "string") { res.status(400).json({ error: "Imagem inválida" }); return; }
+  const m = /^data:(image\/(?:png|jpeg|webp));base64,(.+)$/.exec(bannerImage);
+  if (!m) { res.status(400).json({ error: "Formato de imagem inválido. Use PNG, JPG ou WEBP." }); return; }
+  const [, mime, b64] = m;
+  if (b64.length > BANNER_MAX_BASE64_CHARS) { res.status(400).json({ error: "Imagem muito grande (máximo ~1.6MB)" }); return; }
+  const buf = Buffer.from(b64, "base64");
+  if (buf.length === 0 || !bannerImageMatchesMime(buf, mime)) { res.status(400).json({ error: "Imagem inválida" }); return; }
+  await db.insert(appSettingsTable)
+    .values({ tenantId, key: BANNER_IMAGE_KEY, value: bannerImage })
+    .onConflictDoUpdate({ target: [appSettingsTable.tenantId, appSettingsTable.key], set: { value: bannerImage, updatedAt: new Date() } });
+  res.json({ bannerImage });
+});
+
 // ─── "Avise-me quando chegar" — pedidos de aviso de reposição de estoque ────
 
 router.get("/catalog/stock-notifications", requireAuth, async (req, res): Promise<void> => {
@@ -2004,13 +2059,15 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
     .where(and(eq(catalogProductsTable.tenantId, tenant.id), eq(catalogProductsTable.status, "active")))
     .orderBy(catalogProductsTable.sortOrder, desc(catalogProductsTable.createdAt));
   const ids = rows.map((r) => r.id);
-  const [photos, variants, categories, pricingSettings, trustBadges, paymentMethods, reviewRows] = await Promise.all([
+  const [photos, variants, categories, pricingSettings, trustBadges, paymentMethods, logoDataUrl, bannerImage, reviewRows] = await Promise.all([
     photosByProductIds(tenant.id, ids),
     variantsByProductIds(tenant.id, ids),
     db.select().from(catalogCategoriesTable).where(eq(catalogCategoriesTable.tenantId, tenant.id)).orderBy(catalogCategoriesTable.sortOrder, catalogCategoriesTable.id),
     getPricingSettings(tenant.id),
     getTrustBadges(tenant.id),
     getPaymentMethods(tenant.id),
+    getBrandingLogo(tenant.id),
+    getBannerImage(tenant.id),
     ids.length > 0
       ? db.select({ productId: catalogProductReviewsTable.productId, rating: catalogProductReviewsTable.rating })
           .from(catalogProductReviewsTable)
@@ -2037,6 +2094,11 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
   const retailWa = tenant.catalogWhatsapp ?? tenant.contactPhone ?? null;
   res.json({
     storeName: tenant.name,
+    // Logo (reaproveita a mesma logo de Configurações → Aparência) e imagem
+    // de fundo (exclusiva da vitrine, ver /catalog/banner-image) — ambas
+    // opcionais, o front cai pro visual padrão se vier null.
+    logoDataUrl,
+    bannerImage,
     whatsapp: retailWa,
     // Só faz sentido mandar o número de atacado pra quem já desbloqueou —
     // sem código bloqueado nem chega a aparecer no front. Cai no número de

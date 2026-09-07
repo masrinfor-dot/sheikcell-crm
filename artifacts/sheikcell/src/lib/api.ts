@@ -2496,7 +2496,8 @@ export const api = {
       ),
     public: (slug: string, code?: string) =>
       req<{
-        storeName: string; whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
+        storeName: string; logoDataUrl: string | null; bannerImage: string | null;
+        whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
         categories: CatalogCategory[]; products: CatalogPublicProduct[]; trustBadges: CatalogTrustBadge[]; paymentMethods: CatalogPaymentMethod[];
       }>(`/catalog-public/${slug}${code ? `?code=${encodeURIComponent(code)}` : ""}`),
     // Gera a lista de "Principais características" com IA — não salva nada
@@ -2505,6 +2506,10 @@ export const api = {
       req<{ description: string | null; characteristics: string[]; specs: CatalogAiSpecs | null }>("/catalog/characteristics/generate", { method: "POST", body: JSON.stringify(data), timeoutMs: 30_000 }),
     getTrustBadges: () => req<{ badges: CatalogTrustBadge[] }>("/catalog/trust-badges"),
     saveTrustBadges: (badges: CatalogTrustBadge[]) => req<{ badges: CatalogTrustBadge[] }>("/catalog/trust-badges", { method: "PUT", body: JSON.stringify({ badges }) }),
+    // Imagem de fundo (banner) da vitrine pública — a logo reaproveita a de
+    // Configurações → Aparência, sem endpoint próprio (ver catalog.public acima).
+    getBannerImage: () => req<{ bannerImage: string | null }>("/catalog/banner-image"),
+    saveBannerImage: (bannerImage: string | null) => req<{ bannerImage: string | null }>("/catalog/banner-image", { method: "PUT", body: JSON.stringify({ bannerImage }) }),
     stockNotifications: () => req<{ notifications: CatalogStockNotification[] }>("/catalog/stock-notifications"),
     setStockNotificationNotified: (id: number, notified: boolean) =>
       req<{ ok: boolean }>(`/catalog/stock-notifications/${id}`, { method: "PATCH", body: JSON.stringify({ notified }) }),

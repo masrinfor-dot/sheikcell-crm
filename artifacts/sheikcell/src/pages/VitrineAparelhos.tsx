@@ -401,6 +401,38 @@ export default function VitrineAparelhos() {
   const [trustBadgesForm, setTrustBadgesForm] = useState<CatalogTrustBadge[]>([]);
   const [savingTrustBadges, setSavingTrustBadges] = useState(false);
 
+  // Imagem de fundo (banner) da vitrine pública — a logo em si reaproveita a
+  // já cadastrada em Configurações → Aparência, sem controle duplicado aqui.
+  const [showBannerCfg, setShowBannerCfg] = useState(false);
+  const [bannerImage, setBannerImage] = useState<string | null>(null);
+  const [savingBanner, setSavingBanner] = useState(false);
+  const MAX_BANNER_BYTES = 1_500_000; // ~1.5MB — ver BANNER_MAX_BASE64_CHARS no backend
+  const handleBannerFile = (file: File) => {
+    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+      toast({ title: "Formato não suportado", description: "Use PNG, JPG ou WEBP.", variant: "destructive" });
+      return;
+    }
+    if (file.size > MAX_BANNER_BYTES) {
+      toast({ title: "Arquivo muito grande", description: "Envie uma imagem de até 1.5MB.", variant: "destructive" });
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => setBannerImage(reader.result as string);
+    reader.readAsDataURL(file);
+  };
+  const handleSaveBanner = async (next: string | null) => {
+    setSavingBanner(true);
+    try {
+      const r = await api.catalog.saveBannerImage(next);
+      setBannerImage(r.bannerImage);
+      toast({ title: r.bannerImage ? "Imagem de fundo atualizada!" : "Imagem de fundo removida" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSavingBanner(false);
+    }
+  };
+
   // "Avise-me quando chegar" — pedidos de clientes pra produtos/variantes
   // esgotados, capturados na vitrine pública sem login.
   const [stockNotifications, setStockNotifications] = useState<CatalogStockNotification[]>([]);
@@ -480,8 +512,9 @@ export default function VitrineAparelhos() {
       // tiver o módulo "Avaliação de Usados" habilitado — a Vitrine funciona
       // normalmente sem essa lista nesse caso.
       api.tradeIn.list().catch(() => []),
+      api.catalog.getBannerImage(),
     ])
-      .then(([l, s, w, ww, cats, wc, tb, sn, pm, rv, ti]) => {
+      .then(([l, s, w, ww, cats, wc, tb, sn, pm, rv, ti, bn]) => {
         if (l.status === "fulfilled") { setProducts(l.value.products); setSettings(l.value.settings); }
         if (s.status === "fulfilled") { setSlug(s.value.slug); setSlugInput(s.value.slug ?? ""); }
         if (w.status === "fulfilled") { setWhatsapp(w.value.whatsapp); setWhatsappInput(w.value.whatsapp ?? ""); }
@@ -493,6 +526,7 @@ export default function VitrineAparelhos() {
         if (pm.status === "fulfilled") setPaymentMethodsForm(pm.value.methods);
         if (rv.status === "fulfilled") setReviews(rv.value.reviews);
         if (ti.status === "fulfilled") setTradeInLeads(ti.value);
+        if (bn.status === "fulfilled") setBannerImage(bn.value.bannerImage);
         const failed = [l, s, w, ww, cats, wc, tb, sn, pm, rv].filter((r) => r.status === "rejected");
         if (failed.length > 0) {
           // eslint-disable-next-line no-console
@@ -1291,6 +1325,10 @@ export default function VitrineAparelhos() {
             <button onClick={() => setShowTrustBadges(true)} data-testid="button-catalog-trust-badges"
               className="flex items-center gap-1.5 px-3 py-2 bg-secondary text-foreground rounded-xl text-xs font-semibold hover:bg-secondary/70 transition">
               <ShieldCheck className="w-3.5 h-3.5" /> Selos de confiança
+            </button>
+            <button onClick={() => setShowBannerCfg(true)} data-testid="button-catalog-banner"
+              className="flex items-center gap-1.5 px-3 py-2 bg-secondary text-foreground rounded-xl text-xs font-semibold hover:bg-secondary/70 transition">
+              <ImagePlus className="w-3.5 h-3.5" /> Imagem de fundo
             </button>
             <button onClick={() => setShowStockNotifications(true)} data-testid="button-catalog-stock-notifications"
               className="relative flex items-center gap-1.5 px-3 py-2 bg-secondary text-foreground rounded-xl text-xs font-semibold hover:bg-secondary/70 transition">
@@ -2309,6 +2347,59 @@ export default function VitrineAparelhos() {
               <button onClick={handleSaveTrustBadges} disabled={savingTrustBadges} data-testid="button-save-trust-badges"
                 className="w-full py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition">
                 {savingTrustBadges ? "Salvando..." : "Salvar selos"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: imagem de fundo (banner) da vitrine pública */}
+      {showBannerCfg && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-3 py-6 overflow-y-auto" onClick={() => setShowBannerCfg(false)}>
+          <div className="bg-card rounded-xl w-full max-w-lg shadow-xl border overflow-hidden my-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <span className="font-semibold text-sm flex items-center gap-2"><ImagePlus className="w-4 h-4 text-primary" /> Imagem de fundo da vitrine</span>
+              <button onClick={() => setShowBannerCfg(false)} className="p-1 rounded hover:bg-muted/60"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-4 space-y-3">
+              <p className="text-xs text-muted-foreground">
+                Uma faixa de imagem mostrada no topo da vitrine pública, antes da lista de aparelhos.
+                A logo da loja continua vindo de Configurações → Aparência.
+              </p>
+              <div className="rounded-lg border overflow-hidden bg-secondary/30 h-32 flex items-center justify-center">
+                {bannerImage ? (
+                  <img src={bannerImage} alt="Imagem de fundo" className="w-full h-full object-cover" />
+                ) : (
+                  <span className="text-xs text-muted-foreground">Nenhuma imagem cadastrada</span>
+                )}
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <input
+                  id="banner-file-input"
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) handleBannerFile(f);
+                    e.target.value = "";
+                  }}
+                />
+                <button type="button" onClick={() => document.getElementById("banner-file-input")?.click()} data-testid="button-upload-banner"
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-border text-xs font-semibold hover:bg-secondary transition">
+                  <ImagePlus className="w-3.5 h-3.5" /> Escolher imagem
+                </button>
+                {bannerImage && (
+                  <button type="button" onClick={() => setBannerImage(null)} data-testid="button-remove-banner-local"
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-red-200 text-red-600 text-xs font-semibold hover:bg-red-50 transition">
+                    <Trash2 className="w-3.5 h-3.5" /> Remover
+                  </button>
+                )}
+              </div>
+              <p className="text-[10px] text-muted-foreground">PNG, JPG ou WEBP, até 1.5MB.</p>
+              <button onClick={() => handleSaveBanner(bannerImage)} disabled={savingBanner} data-testid="button-save-banner"
+                className="w-full py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition">
+                {savingBanner ? "Salvando..." : "Salvar imagem de fundo"}
               </button>
             </div>
           </div>
