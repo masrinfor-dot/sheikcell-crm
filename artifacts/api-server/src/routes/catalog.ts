@@ -952,6 +952,22 @@ router.post("/catalog/pricing-settings/simulate", requireAuth, async (req, res):
   res.json({ salePrice, wholesalePrice, priceCash, installment12, wholesaleInstallment12, settings });
 });
 
+// Detecta se um erro 429 da OpenAI é falta de crédito/saldo (billing) em vez
+// de só um pico passageiro de uso — confirmado na prática: a conta ficou
+// com saldo NEGATIVO ("Saldo credor -$1,08" no painel da OpenAI) e o erro
+// devolvido teve o "code" vazio/diferente de "insufficient_quota" (a
+// OpenAI não é 100% consistente em qual code usa pra cada motivo de
+// billing), então checar só "insufficient_quota" deixava passar batido
+// pra mensagem genérica de "sobrecarregada" — que não ajudava, porque
+// esperar não resolve saldo negativo. Agora também olha o texto da
+// mensagem de erro, não só o code.
+function isAiBillingIssue(err: unknown): boolean {
+  const code = (err as { code?: string })?.code ?? "";
+  const msg = (err as { message?: string })?.message ?? "";
+  const haystack = `${code} ${msg}`.toLowerCase();
+  return /insufficient_quota|billing_hard_limit|billing_not_active|exceeded.*(current )?quota|current quota|saldo|credit/.test(haystack);
+}
+
 // Gera a lista de "Principais características" (armazenamento, RAM, tela,
 // câmera, bateria etc.) a partir do modelo/condição/cores/variantes — sem
 // salvar nada (o lojista revisa/edita no formulário e salva junto com o
@@ -1011,16 +1027,11 @@ router.post("/catalog/characteristics/generate", requireAuth, requirePerm("usar_
     if (err instanceof OpenAISdk.APIConnectionTimeoutError || (err as { name?: string })?.name === "APIConnectionTimeoutError") {
       message = "A IA demorou demais pra gerar as características. Tente novamente.";
     } else if (err instanceof OpenAISdk.RateLimitError) {
-      // "insufficient_quota" é a chave de IA sem crédito/plano (só volta a
-      // funcionar depois que o administrador verificar o faturamento da
-      // OpenAI) — bem diferente de "rate_limit_exceeded", que é só um pico
-      // de uso passageiro (várias lojas usando IA ao mesmo tempo) e volta
-      // sozinho em instantes. Antes as duas caíam na mesma mensagem
-      // genérica de "aguarde e tente de novo", o que confundia quando o
-      // problema real era falta de crédito (ninguém ia adiantar nada só
-      // esperando).
-      message = (err as { code?: string }).code === "insufficient_quota"
-        ? "A conta de IA está sem créditos/cota disponível no momento. Fale com o administrador do sistema pra verificar o plano de faturamento da OpenAI."
+      // Falta de crédito/saldo (billing) é bem diferente de um pico
+      // passageiro de uso: esperar não resolve, precisa o administrador
+      // adicionar crédito na conta da OpenAI. Ver isAiBillingIssue acima.
+      message = isAiBillingIssue(err)
+        ? "A conta de IA está sem créditos/saldo disponível no momento. Fale com o administrador do sistema pra adicionar créditos na conta da OpenAI."
         : "A IA está sobrecarregada no momento (limite de uso atingido — várias lojas usando ao mesmo tempo). Aguarde um instante e tente de novo.";
     } else if (err instanceof OpenAISdk.AuthenticationError) {
       message = "A chave de acesso à IA está inválida ou expirada. Fale com o administrador do sistema.";
@@ -1623,16 +1634,11 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
     if (err instanceof OpenAISdk.APIConnectionTimeoutError || (err as { name?: string })?.name === "APIConnectionTimeoutError") {
       message = "A IA demorou demais pra analisar essa lista (listas grandes podem passar de 1 minuto). Tente novamente — se persistir, tente colar em partes menores.";
     } else if (err instanceof OpenAISdk.RateLimitError) {
-      // "insufficient_quota" é a chave de IA sem crédito/plano (só volta a
-      // funcionar depois que o administrador verificar o faturamento da
-      // OpenAI) — bem diferente de "rate_limit_exceeded", que é só um pico
-      // de uso passageiro (várias lojas usando IA ao mesmo tempo) e volta
-      // sozinho em instantes. Antes as duas caíam na mesma mensagem
-      // genérica de "aguarde e tente de novo", o que confundia quando o
-      // problema real era falta de crédito (ninguém ia adiantar nada só
-      // esperando).
-      message = (err as { code?: string }).code === "insufficient_quota"
-        ? "A conta de IA está sem créditos/cota disponível no momento. Fale com o administrador do sistema pra verificar o plano de faturamento da OpenAI."
+      // Falta de crédito/saldo (billing) é bem diferente de um pico
+      // passageiro de uso: esperar não resolve, precisa o administrador
+      // adicionar crédito na conta da OpenAI. Ver isAiBillingIssue acima.
+      message = isAiBillingIssue(err)
+        ? "A conta de IA está sem créditos/saldo disponível no momento. Fale com o administrador do sistema pra adicionar créditos na conta da OpenAI."
         : "A IA está sobrecarregada no momento (limite de uso atingido — várias lojas usando ao mesmo tempo). Aguarde um instante e tente de novo.";
     } else if (err instanceof OpenAISdk.AuthenticationError) {
       message = "A chave de acesso à IA está inválida ou expirada. Fale com o administrador do sistema.";
