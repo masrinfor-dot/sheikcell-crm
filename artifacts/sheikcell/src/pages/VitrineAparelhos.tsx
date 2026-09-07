@@ -4,7 +4,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   api, can, ApiError, canEditModule, CATALOG_CONDITIONS, CATALOG_CONDITION_CRITERIA,
   type CatalogProduct, type CatalogPricingSettings, type CatalogImportItem, type CatalogCondition,
-  type CatalogImportVariant, type CatalogPhotoSearchResult, type CatalogCategory,
+  type CatalogImportVariant, type CatalogPhotoSearchResult, type CatalogCategory, type CatalogAiSpecs,
   type CatalogTrustBadge, type CatalogStockNotification, type CatalogPaymentMethod, type CatalogProductReview,
   type CatalogMarketCheckVerdict, type TradeInEvaluation,
 } from "@/lib/api";
@@ -13,6 +13,7 @@ import {
   Smartphone, Plus, X, Search, Trash2, Pencil, Sparkles, Settings2, Link2,
   Copy, ImagePlus, Check, AlertTriangle, Loader2, MessageCircle, Info, Calculator,
   Tags, Lock, KeyRound, Package, ShieldCheck, Bell, Percent, ListChecks, CreditCard, Star, Wallet,
+  Wifi, Cpu, MapPin, Monitor, Camera, Video, MemoryStick,
 } from "lucide-react";
 
 function formatBRL(v: string | number | null): string {
@@ -110,12 +111,36 @@ const emptyVariant: VariantFormRow = {
   wholesalePrice: "", wholesaleMarginPercentOverride: "", compareAtPrice: "", stockQty: "1",
 };
 
+// Ficha técnica em grade de ícones — 7 campos curtos, cada um um input
+// próprio no formulário (ver AI_SPECS_FIELDS abaixo pro rótulo/ícone/
+// placeholder de cada um).
+const emptySpecs: Record<keyof CatalogAiSpecs, string> = {
+  network: "", processor: "", gps: "", os: "", display: "", camera: "", video: "",
+};
+
+// Rótulo/ícone/placeholder de cada campo da ficha técnica em grade de
+// ícones (estilo pedido pelo lojista — igual site de comparação de preços).
+// "Memória" fica de fora de propósito: é calculada a partir das variantes
+// (armazenamento cadastrado), não gerada pela IA — ver memoryRangeLabel.
+const AI_SPECS_FIELDS: { key: keyof CatalogAiSpecs; label: string; icon: typeof Wifi; placeholder: string }[] = [
+  { key: "network", label: "Rede", icon: Wifi, placeholder: "Dual Sim, 5G" },
+  { key: "processor", label: "Processador", icon: Cpu, placeholder: "6 Core, 4.3GHz" },
+  { key: "gps", label: "GPS", icon: MapPin, placeholder: "Sim" },
+  { key: "os", label: "Sistema", icon: Smartphone, placeholder: "iOS 26" },
+  { key: "display", label: "Tela", icon: Monitor, placeholder: '6.9" · 2868x1320' },
+  { key: "camera", label: "Câmera", icon: Camera, placeholder: "48Mpx" },
+  { key: "video", label: "Vídeo", icon: Video, placeholder: "4K" },
+];
+
 const emptyForm = {
   model: "", condition: "bom" as CatalogCondition, colors: "",
   description: "", status: "active" as CatalogProduct["status"], categoryId: null as number | null,
   // Uma característica por linha — convertido em array na hora de salvar
-  // (ver handleSave) e de carregar (ver openEdit).
+  // (ver handleSave) e de carregar (ver openEdit). DEPRECATED em favor de
+  // aiSpecs abaixo; mantido só pra produtos antigos que ainda têm esse
+  // campo preenchido.
   aiCharacteristics: "",
+  aiSpecs: { ...emptySpecs },
   variants: [{ ...emptyVariant }] as VariantFormRow[],
 };
 
@@ -641,6 +666,7 @@ export default function VitrineAparelhos() {
       model: p.model, condition: p.condition, colors: p.colors.join(", "),
       description: p.description ?? "", status: p.status, categoryId: p.categoryId,
       aiCharacteristics: (p.aiCharacteristics ?? []).join("\n"),
+      aiSpecs: { ...emptySpecs, ...Object.fromEntries(Object.entries(p.aiSpecs ?? {}).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)])) },
       variants: p.variants.length > 0
         ? p.variants.map((v) => ({
             id: v.id, storage: v.storage ?? "", ram: v.ram ?? "", network: v.network ?? "", color: v.color ?? "", costPrice: v.costPrice ?? "", costIncludesInvoice: v.costIncludesInvoice,
@@ -720,6 +746,9 @@ export default function VitrineAparelhos() {
         ...f,
         aiCharacteristics: r.characteristics.length > 0 ? r.characteristics.join("\n") : f.aiCharacteristics,
         description: !f.description.trim() && r.description ? r.description : f.description,
+        aiSpecs: r.specs
+          ? { ...f.aiSpecs, ...Object.fromEntries(Object.entries(r.specs).filter(([, v]) => v != null && String(v).trim()).map(([k, v]) => [k, String(v)])) }
+          : f.aiSpecs,
       }));
     } catch (err) {
       if (!opts?.silent) toast({ title: "Erro ao gerar características", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
@@ -837,6 +866,7 @@ export default function VitrineAparelhos() {
       status: form.status,
       categoryId: form.categoryId,
       aiCharacteristics: form.aiCharacteristics.split("\n").map((c) => c.trim()).filter(Boolean),
+      aiSpecs: Object.fromEntries(Object.entries(form.aiSpecs).map(([k, v]) => [k, v.trim() || null])),
       variants: form.variants.map((v) => ({
         id: v.id,
         storage: v.storage.trim() || null,
@@ -1724,7 +1754,7 @@ export default function VitrineAparelhos() {
               <div>
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-semibold text-muted-foreground flex items-center gap-1">
-                    <ListChecks className="w-3 h-3" /> Principais características (uma por linha — aparece na vitrine pública)
+                    <ListChecks className="w-3 h-3" /> Ficha técnica (aparece em ícones na vitrine pública)
                   </label>
                   <button type="button" onClick={() => handleGenerateCharacteristics()} disabled={generatingCharacteristics || !form.model.trim()}
                     data-testid="button-generate-characteristics"
@@ -1733,8 +1763,26 @@ export default function VitrineAparelhos() {
                     {generatingCharacteristics ? "Gerando..." : "Gerar com IA"}
                   </button>
                 </div>
-                <textarea value={form.aiCharacteristics} onChange={(e) => setForm({ ...form, aiCharacteristics: e.target.value })} rows={4}
-                  placeholder={"Ex.:\nTela Super Retina XDR 6,1\"\n128GB de armazenamento\nCâmera dupla 12MP\nBateria de longa duração"}
+                <p className="text-[10px] text-muted-foreground mt-0.5">Preencha os campos abaixo (ou clique em "Gerar com IA") — "Memória" não entra aqui, ela é montada sozinha a partir dos armazenamentos cadastrados nas variantes.</p>
+                <div className="mt-1.5 grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {AI_SPECS_FIELDS.map(({ key, label, icon: Icon, placeholder }) => (
+                    <div key={key}>
+                      <label className="text-[10px] text-muted-foreground flex items-center gap-1">
+                        <Icon className="w-3 h-3" /> {label}
+                      </label>
+                      <input type="text" value={form.aiSpecs[key]}
+                        onChange={(e) => setForm((f) => ({ ...f, aiSpecs: { ...f.aiSpecs, [key]: e.target.value } }))}
+                        placeholder={placeholder} data-testid={`input-spec-${key}`}
+                        className="mt-0.5 w-full rounded-lg border px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
+                    </div>
+                  ))}
+                </div>
+
+                <label className="text-xs font-semibold text-muted-foreground mt-3 flex items-center gap-1">
+                  Outras características (uma por linha — opcional, pra detalhes que não couberam acima)
+                </label>
+                <textarea value={form.aiCharacteristics} onChange={(e) => setForm({ ...form, aiCharacteristics: e.target.value })} rows={3}
+                  placeholder={"Ex.:\nBateria de longa duração\nResistente à água IP68"}
                   data-testid="input-product-characteristics"
                   className="mt-1 w-full rounded-lg border px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-primary/40" />
               </div>

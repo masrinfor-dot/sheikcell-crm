@@ -390,6 +390,22 @@ export type CatalogPhoto = { id: number; storedName: string; sourceUrl?: string 
 // principal; parentId preenchido = subcategoria.
 export type CatalogCategory = { id: number; name: string; parentId: number | null; sortOrder: number };
 
+// Ficha técnica curta gerada por IA, mostrada em grade de ícones na vitrine
+// pública (pedido do lojista: seguir o estilo de site de comparação de
+// preços) — todo campo opcional/curto, null quando a IA não teve confiança
+// nesse dado pra esse modelo. "Memória" não entra aqui de propósito: é
+// calculada a partir do armazenamento das variantes (ver productMemoryLabel
+// em VitrinePublica.tsx), pra nunca destoar do que o lojista cadastrou.
+export type CatalogAiSpecs = {
+  network?: string | null;
+  processor?: string | null;
+  gps?: string | null;
+  os?: string | null;
+  display?: string | null;
+  camera?: string | null;
+  video?: string | null;
+};
+
 // Variante de armazenamento/memória — cada família de produto (modelo +
 // condição + cores) pode ter várias, com preço/estoque próprios.
 export type CatalogProductVariant = {
@@ -459,9 +475,10 @@ export type CatalogProduct = {
   // Aproximação de popularidade (clique em "Finalizar pedido" na vitrine
   // pública) — usada só pro filtro de ordenação "Mais comprado".
   purchaseCount: number;
-  // Lista de características (specs) gerada por IA ou editada à mão — ver
-  // api.catalog.generateCharacteristics.
+  // DEPRECATED — lista de características livre gerada por IA em produtos
+  // antigos; produto novo usa aiSpecs (grade de ícones) abaixo.
   aiCharacteristics: string[] | null;
+  aiSpecs: CatalogAiSpecs | null;
   createdAt: string;
   updatedAt: string;
   photos: CatalogPhoto[];
@@ -531,6 +548,7 @@ export type CatalogPublicProduct = {
   description: string | null;
   categoryId: number | null;
   aiCharacteristics: string[] | null;
+  aiSpecs: CatalogAiSpecs | null;
   // Aproximação de popularidade (clique em "Finalizar pedido") — usada só
   // pro filtro de ordenação "Mais comprado" na listagem.
   purchaseCount: number;
@@ -564,6 +582,7 @@ export type CatalogImportItem = {
   // edita aqui antes de confirmar, mesmo padrão do formulário manual.
   description: string | null;
   characteristics: string[];
+  specs: CatalogAiSpecs | null;
 };
 
 export type CatalogPhotoSearchResult = { title: string; imageUrl: string; thumbnailUrl: string; sourceUrl: string };
@@ -2483,7 +2502,7 @@ export const api = {
     // Gera a lista de "Principais características" com IA — não salva nada
     // sozinho, o lojista revisa/edita e salva junto do resto do produto.
     generateCharacteristics: (data: { model: string; condition: CatalogCondition; colors: string[]; variants: { storage: string | null }[] }) =>
-      req<{ description: string | null; characteristics: string[] }>("/catalog/characteristics/generate", { method: "POST", body: JSON.stringify(data), timeoutMs: 30_000 }),
+      req<{ description: string | null; characteristics: string[]; specs: CatalogAiSpecs | null }>("/catalog/characteristics/generate", { method: "POST", body: JSON.stringify(data), timeoutMs: 30_000 }),
     getTrustBadges: () => req<{ badges: CatalogTrustBadge[] }>("/catalog/trust-badges"),
     saveTrustBadges: (badges: CatalogTrustBadge[]) => req<{ badges: CatalogTrustBadge[] }>("/catalog/trust-badges", { method: "PUT", body: JSON.stringify({ badges }) }),
     stockNotifications: () => req<{ notifications: CatalogStockNotification[] }>("/catalog/stock-notifications"),

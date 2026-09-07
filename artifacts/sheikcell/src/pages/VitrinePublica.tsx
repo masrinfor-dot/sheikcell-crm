@@ -5,6 +5,7 @@ import { waLink } from "@/lib/utils";
 import {
   Smartphone, MessageCircle, PackageX, Info, Lock, ShoppingCart, Plus, Minus, X, Unlock, Search,
   ShieldCheck, BellRing, ListChecks, Tag, Star, CreditCard, Wallet, AlertTriangle,
+  Wifi, Cpu, MapPin, Monitor, Camera, Video, MemoryStick,
 } from "lucide-react";
 import { Carousel, CarouselContent, CarouselItem, CarouselPrevious, CarouselNext, type CarouselApi } from "@/components/ui/carousel";
 
@@ -89,6 +90,36 @@ function variantLabel(v: { storage: string | null; ram?: string | null; network?
 function cartVariantLabel(v: { storage: string | null; ram?: string | null; network?: string | null; color: string | null }): string | null {
   return [variantSpecLabel(v), v.color].filter(Boolean).join(" · ") || null;
 }
+
+// Ficha técnica em grade de ícones (pedido do lojista, estilo site de
+// comparação de preços) — 7 campos vindos da IA (ver CatalogAiSpecs) mais
+// "Memória", que NÃO vem da IA: é montada aqui a partir do armazenamento
+// já cadastrado nas variantes, pra nunca ficar dessincronizada do estoque
+// real (ex.: "128GB a 1TB" quando o aparelho tem mais de um tamanho).
+function storageToGB(s: string): number | null {
+  const m = /^(\d+(?:[.,]\d+)?)\s*(GB|TB)$/i.exec(s.trim());
+  if (!m) return null;
+  const n = Number(m[1].replace(",", "."));
+  if (!Number.isFinite(n)) return null;
+  return /tb/i.test(m[2]) ? n * 1024 : n;
+}
+function memoryRangeLabel(variants: { storage: string | null }[]): string | null {
+  const values = Array.from(new Set(variants.map((v) => v.storage).filter((s): s is string => !!s)));
+  if (values.length === 0) return null;
+  if (values.length === 1) return values[0];
+  const sorted = [...values].sort((a, b) => (storageToGB(a) ?? 0) - (storageToGB(b) ?? 0));
+  return `${sorted[0]} a ${sorted[sorted.length - 1]}`;
+}
+
+const AI_SPECS_DISPLAY_FIELDS: { key: "network" | "processor" | "gps" | "os" | "display" | "camera" | "video"; label: string; icon: typeof Wifi }[] = [
+  { key: "network", label: "Rede", icon: Wifi },
+  { key: "processor", label: "Processador", icon: Cpu },
+  { key: "gps", label: "GPS", icon: MapPin },
+  { key: "os", label: "Sistema", icon: Smartphone },
+  { key: "display", label: "Tela", icon: Monitor },
+  { key: "camera", label: "Câmera", icon: Camera },
+  { key: "video", label: "Vídeo", icon: Video },
+];
 
 type CartItem = {
   productId: number; variantId: number; model: string; storage: string | null;
@@ -395,6 +426,13 @@ function ProductDetailModal({
   const inStock = selected?.inStock ?? false;
   const criteria = CATALOG_CONDITION_CRITERIA[p.condition]?.criteria ?? [];
   const discount = discountInfo(selected);
+  const memory = memoryRangeLabel(p.variants);
+  const specTiles = [
+    ...(memory ? [{ key: "memory", label: "Memória", icon: MemoryStick, value: memory }] : []),
+    ...AI_SPECS_DISPLAY_FIELDS
+      .map((f) => ({ ...f, value: p.aiSpecs?.[f.key] }))
+      .filter((f): f is typeof f & { value: string } => !!f.value),
+  ];
 
   // Trocar de variante volta a quantidade pra 1 e fecha o form de "avise-me"
   // aberto pra outra variante (evita mandar o pedido de aviso pra variante
@@ -517,9 +555,26 @@ function ProductDetailModal({
           )}
           {p.description && <p className="text-xs text-neutral-500">{p.description}</p>}
 
+          {specTiles.length > 0 && (
+            <div className="rounded-lg bg-neutral-50 border border-neutral-200 p-2.5">
+              <p className="text-[11px] font-semibold text-neutral-700 mb-1.5 flex items-center gap-1"><ListChecks className="w-3 h-3" /> Ficha técnica</p>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {specTiles.map(({ key, label, icon: Icon, value }) => (
+                  <div key={key} className="flex items-center gap-1.5 bg-white rounded-lg border border-neutral-200 px-2 py-1.5">
+                    <Icon className="w-4 h-4 text-neutral-400 shrink-0" />
+                    <div className="min-w-0">
+                      <p className="text-[9px] text-neutral-400 leading-tight">{label}</p>
+                      <p className="text-[11px] font-semibold text-neutral-700 leading-tight truncate" title={value}>{value}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {p.aiCharacteristics && p.aiCharacteristics.length > 0 && (
             <div className="rounded-lg bg-neutral-50 border border-neutral-200 p-2.5">
-              <p className="text-[11px] font-semibold text-neutral-700 mb-1 flex items-center gap-1"><ListChecks className="w-3 h-3" /> Principais características</p>
+              <p className="text-[11px] font-semibold text-neutral-700 mb-1 flex items-center gap-1"><ListChecks className="w-3 h-3" /> {specTiles.length > 0 ? "Outras características" : "Principais características"}</p>
               <ul className="space-y-0.5">
                 {p.aiCharacteristics.map((c, i) => (
                   <li key={i} className="text-[11px] text-neutral-500 flex items-start gap-1.5">

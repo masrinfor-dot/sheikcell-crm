@@ -16,6 +16,7 @@ import {
   appSettingsTable,
   tenantsTable,
   type CatalogCategory,
+  type CatalogAiSpecs,
 } from "@workspace/db";
 import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
@@ -153,6 +154,23 @@ function cleanCharacteristics(v: unknown): string[] | null {
   if (!Array.isArray(v)) return null;
   const list = v.filter((c): c is string => typeof c === "string").map((c) => c.normalize("NFC").trim().slice(0, 150)).filter(Boolean).slice(0, 12);
   return list.length > 0 ? list : null;
+}
+
+// Ficha técnica em grade de ícones (CatalogAiSpecs) — só esses 7 campos
+// fixos, cada um uma string curta ou null; ver comentário no schema
+// (lib/db/src/schema/catalog.ts) pro porquê de não incluir "memória" aqui
+// (é derivada ao vivo do armazenamento das variantes no front).
+const AI_SPECS_KEYS = ["network", "processor", "gps", "os", "display", "camera", "video"] as const;
+function cleanAiSpecs(v: unknown): CatalogAiSpecs | null {
+  if (!v || typeof v !== "object") return null;
+  const obj = v as Record<string, unknown>;
+  const out: CatalogAiSpecs = {};
+  let any = false;
+  for (const key of AI_SPECS_KEYS) {
+    const val = clean(obj[key], 60);
+    if (val) { out[key] = val; any = true; }
+  }
+  return any ? out : null;
 }
 
 function toNumberOrNull(v: unknown): number | null {
@@ -533,6 +551,7 @@ router.post("/catalog/products", requireAuth, async (req, res): Promise<void> =>
     status: body.status === "inactive" || body.status === "sold" ? body.status : "active",
     categoryId: await cleanCategoryId(tenantId, body.categoryId),
     aiCharacteristics: cleanCharacteristics(body.aiCharacteristics),
+    aiSpecs: cleanAiSpecs(body.aiSpecs),
     createdBy: req.session.userId ?? null,
   }).returning();
 
@@ -565,6 +584,7 @@ router.patch("/catalog/products/:id", requireAuth, async (req, res): Promise<voi
     categoryId: "categoryId" in body ? await cleanCategoryId(tenantId, body.categoryId) : existing.categoryId,
     sortOrder: "sortOrder" in body && Number.isInteger(body.sortOrder) ? (body.sortOrder as number) : existing.sortOrder,
     aiCharacteristics: "aiCharacteristics" in body ? cleanCharacteristics(body.aiCharacteristics) : existing.aiCharacteristics,
+    aiSpecs: "aiSpecs" in body ? cleanAiSpecs(body.aiSpecs) : existing.aiSpecs,
     updatedAt: new Date(),
   }).where(and(eq(catalogProductsTable.id, id), eq(catalogProductsTable.tenantId, tenantId))).returning();
 
@@ -986,16 +1006,24 @@ router.post("/catalog/characteristics/generate", requireAuth, requirePerm("usar_
 
   const prompt = [
     `Você é um especialista em celulares/smartphones do mercado brasileiro.`,
-    `Gere uma "description" (1 frase curta, natural, pra vitrine pública) e uma lista curta de "characteristics" ("principais características", no estilo de ficha técnica resumida, tipo a "Ficha técnica gerada por IA" de marketplaces como Magazine Luiza) pro anúncio de um aparelho.`,
+    `Gere uma "description" (1 frase curta, natural, pra vitrine pública) e uma "specs" (ficha técnica curta, em ícones, no estilo de site de comparação de preços) pro anúncio de um aparelho.`,
     `Aparelho: ${model}.`,
     `Condição/selo de qualidade: ${CATALOG_CONDITION_CRITERIA[condition]?.label ?? condition}.`,
     colors.length > 0 ? `Cores disponíveis: ${colors.join(", ")}.` : null,
     storages.length > 0 ? `Armazenamento(s) disponível(is): ${storages.join(", ")}.` : null,
     ``,
-    `Use seu conhecimento sobre esse modelo específico pra listar até 8 characteristics reais dele (tamanho/tipo de tela, resolução da câmera traseira/frontal, capacidade da bateria (mAh), memória RAM, armazenamento, processador, se tem 5G, resistência à água, etc.) — só inclua o que você tiver confiança de estar correto pra esse modelo. Cada característica é uma frase curta (máx. 12 palavras), direta, sem markdown. Não invente números que não souber com confiança.`,
-    `Se o aparelho não for "novo", pode incluir 1 característica sobre o estado de conservação usando o selo de qualidade informado acima.`,
-    `Se não reconhecer o modelo com confiança nenhuma, deixe "description": null e "characteristics": [].`,
-    `Responda SOMENTE com um JSON object válido, sem markdown, neste formato: {"description":"iPhone 15 Pro Max com tela Super Retina XDR e câmera profissional tripla.","characteristics":["Tela Super Retina XDR OLED de 6,7\\"","Câmera tripla traseira 48MP + zoom óptico","Câmera frontal 12MP","Bateria de longa duração","Chip A17 Pro","5G","Resistente à água (IP68)"]}`,
+    `"specs" é um objeto com estes 7 campos, cada um uma string BEM curta (poucas palavras, sem frase completa) — deixe null o que você não tiver confiança pra esse modelo específico, nunca invente número que não souber:`,
+    `- network: tipo de rede (ex.: "Dual SIM 5G")`,
+    `- processor: chip/processador (ex.: "A18 Pro" ou "8 Core 3.2GHz")`,
+    `- gps: "Sim" se o modelo tem GPS (praticamente todo smartphone atual tem), senão null`,
+    `- os: sistema operacional com versão (ex.: "iOS 18" ou "Android 14")`,
+    `- display: tamanho da tela + resolução (ex.: "6,1\\" 2556x1179")`,
+    `- camera: resolução da câmera traseira principal (ex.: "48 Mpx")`,
+    `- video: resolução máxima de vídeo (ex.: "4K")`,
+    `Também gere "characteristics" (array de até 6 strings curtas com o que sobrar de relevante — bateria mAh, resistência à água, RAM, etc. — o que não couber nos 7 campos de specs acima).`,
+    `Se o aparelho não for "novo", pode incluir 1 characteristic sobre o estado de conservação usando o selo de qualidade informado acima.`,
+    `Se não reconhecer o modelo com confiança nenhuma, deixe "description": null, "specs": {} e "characteristics": [].`,
+    `Responda SOMENTE com um JSON object válido, sem markdown, neste formato: {"description":"iPhone 15 Pro Max com tela Super Retina XDR e câmera profissional tripla.","specs":{"network":"Dual SIM 5G","processor":"A17 Pro","gps":"Sim","os":"iOS 17","display":"6,7\\" 2796x1290","camera":"48 Mpx","video":"4K"},"characteristics":["Bateria de longa duração","Resistente à água (IP68)"]}`,
   ].filter(Boolean).join("\n");
 
   try {
@@ -1011,15 +1039,17 @@ router.post("/catalog/characteristics/generate", requireAuth, requirePerm("usar_
     const end = text.lastIndexOf("}");
     let characteristics: string[] = [];
     let description: string | null = null;
+    let specs: CatalogAiSpecs | null = null;
     if (start !== -1 && end !== -1) {
       try {
         const obj = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>;
         characteristics = cleanCharacteristics(obj.characteristics) ?? [];
         description = clean(obj.description, 2000) || null;
+        specs = cleanAiSpecs(obj.specs);
       } catch { /* segue com lista vazia — erro tratado abaixo */ }
     }
-    if (characteristics.length === 0 && !description) { res.status(502).json({ error: "A IA não retornou uma lista válida. Tente novamente." }); return; }
-    res.json({ description, characteristics });
+    if (characteristics.length === 0 && !description && !specs) { res.status(502).json({ error: "A IA não retornou uma lista válida. Tente novamente." }); return; }
+    res.json({ description, characteristics, specs });
   } catch (err) {
     req.log.error({ err }, "Catalog characteristics generation failed");
     const { OpenAI: OpenAISdk } = await import("openai");
@@ -1339,6 +1369,10 @@ type ParsedItem = {
   // O lojista ainda revisa/edita na tela de importação antes de confirmar.
   description: string | null;
   characteristics: string[];
+  // Ficha técnica em grade de ícones (ver CatalogAiSpecs) — mesmo campo
+  // gerado pela IA que /catalog/characteristics/generate, só que já no
+  // passo da importação em lote.
+  specs: CatalogAiSpecs | null;
   // Categoria/subcategoria sugerida pela IA (ex.: ["Celulares","Samsung"]).
   // categoryId preenchido = já existe exatamente essa categoria/subcategoria
   // na loja (aplicada direto). categoryPath preenchido = sugestão que NÃO
@@ -1446,6 +1480,7 @@ function mergeParsedItems(items: ParsedItem[]): ParsedItem[] {
     }
     if (!existing.description && it.description) existing.description = it.description;
     if (existing.characteristics.length === 0 && it.characteristics.length > 0) existing.characteristics = it.characteristics;
+    if (!existing.specs && it.specs) existing.specs = it.specs;
     if (it.rawLine && existing.rawLine !== it.rawLine && !existing.rawLine.includes(it.rawLine)) {
       existing.rawLine = existing.rawLine ? `${existing.rawLine} | ${it.rawLine}` : it.rawLine;
     }
@@ -1519,13 +1554,13 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
     ``,
     `Categorias/subcategorias já cadastradas nessa loja (reaproveite pelo nome EXATO sempre que fizer sentido, em vez de inventar uma parecida): ${categoryList || "(nenhuma cadastrada ainda)"}.`,
     `Pra cada aparelho, sugira também "categoryPath": um array com 1 ou 2 níveis indicando a aba/sub-aba da vitrine pública onde ele se encaixa (ex.: ["Celulares","Samsung"] ou ["Peças de celular"]). Prefira sempre reaproveitar um nome já cadastrado acima; só sugira um nome novo quando não existir nada parecido. Se não tiver confiança nenhuma pra sugerir, use null.`,
-    `IMPORTANTE — descrição e características: use seu conhecimento sobre CADA modelo específico (não invente o que não souber) pra preencher também "description" (1 frase curta, natural, pra vitrine pública — não repita "descrição:") e "characteristics" (array de até 8 strings curtas, estilo ficha técnica: tela/tamanho, câmera traseira/frontal (MP), bateria (mAh), memória RAM, armazenamento, processador, 5G, resistência à água — só o que você tiver confiança de estar correto pra esse modelo). Se não reconhecer o modelo com confiança nenhuma, deixe "description": null e "characteristics": [].`,
+    `IMPORTANTE — descrição e ficha técnica: use seu conhecimento sobre CADA modelo específico (não invente o que não souber) pra preencher também "description" (1 frase curta, natural, pra vitrine pública — não repita "descrição:"), "specs" (objeto com 7 campos BEM curtos: "network" ex. "Dual SIM 5G", "processor" ex. "A17 Pro", "gps" ex. "Sim", "os" ex. "iOS 17", "display" ex. tamanho+resolução da tela, "camera" ex. "48 Mpx", "video" ex. "4K" — null o que não souber com confiança) e "characteristics" (array de até 6 strings curtas com o que sobrar de relevante: bateria mAh, resistência à água, RAM, etc.). Se não reconhecer o modelo com confiança nenhuma, deixe "description": null, "specs": {} e "characteristics": [].`,
     ``,
     `Lista:`,
     text,
     ``,
     `Responda SOMENTE com um JSON array válido, sem markdown, um objeto por aparelho (família modelo+condição, independente de cor/armazenamento), neste formato:`,
-    `[{"model":"iPhone 15 Pro Max","condition":"excelente","colors":["Preto","Azul"],"variants":[{"storage":"256GB","ram":null,"network":null,"color":"Preto","costPrice":3850},{"storage":"256GB","ram":null,"network":null,"color":"Azul","costPrice":3850},{"storage":"512GB","ram":null,"network":null,"color":"Preto","costPrice":4200}],"categoryPath":["Celulares","Apple"],"description":"iPhone 15 Pro Max com tela Super Retina XDR e câmera profissional tripla.","characteristics":["Tela Super Retina XDR OLED de 6,7\\"","Câmera tripla traseira 48MP + zoom óptico","Câmera frontal 12MP","Bateria de longa duração","Chip A17 Pro","5G","Resistente à água (IP68)"],"rawLine":"trecho original correspondente"}]`,
+    `[{"model":"iPhone 15 Pro Max","condition":"excelente","colors":["Preto","Azul"],"variants":[{"storage":"256GB","ram":null,"network":null,"color":"Preto","costPrice":3850},{"storage":"256GB","ram":null,"network":null,"color":"Azul","costPrice":3850},{"storage":"512GB","ram":null,"network":null,"color":"Preto","costPrice":4200}],"categoryPath":["Celulares","Apple"],"description":"iPhone 15 Pro Max com tela Super Retina XDR e câmera profissional tripla.","specs":{"network":"Dual SIM 5G","processor":"A17 Pro","gps":"Sim","os":"iOS 17","display":"6,7\\" 2796x1290","camera":"48 Mpx","video":"4K"},"characteristics":["Bateria de longa duração","Resistente à água (IP68)"],"rawLine":"trecho original correspondente"}]`,
     `Exemplo com RAM (ex.: Realme Note 70 4/256GB por R$810 e 8/256GB por R$910): "variants":[{"storage":"256GB","ram":"4GB","network":null,"color":null,"costPrice":810},{"storage":"256GB","ram":"8GB","network":null,"color":null,"costPrice":910}].`,
     `"colors" no nível do item é só a lista resumida de todas as cores encontradas pra esse modelo (informativo); o detalhe por combinação fica em "variants".`,
     `"condition" deve ser um destes: novo, excelente, muito_bom, bom, outlet (use "bom" se não estiver claro). Use "novo" quando a lista indicar que o aparelho é lacrado/lacrado de fábrica/nunca usado (ex.: "lacrado", "novo", "sealed") — não confunda com "excelente", que é pra seminovo em ótimo estado.`,
@@ -1597,6 +1632,7 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
         categoryPath,
         description: clean(o.description, 2000) || null,
         characteristics: cleanCharacteristics(o.characteristics) ?? [],
+        specs: cleanAiSpecs(o.specs),
       };
     });
     // Segunda passada, determinística (não depende da IA acertar sempre): mescla
@@ -1888,6 +1924,7 @@ router.post("/catalog/import/confirm", requireAuth, async (req, res): Promise<vo
       // lojista já tinha escrito/editado nesses campos.
       description: clean(o.description, 2000) || null,
       characteristics: cleanCharacteristics(o.characteristics),
+      specs: cleanAiSpecs(o.specs),
       // existingProductId: enviado pelo front quando esse item bate com um
       // modelo já cadastrado na mesma categoria (ver checagem de duplicado em
       // VitrineAparelhos.tsx) — nesse caso NÃO cria um segundo anúncio, só
@@ -1921,7 +1958,7 @@ router.post("/catalog/import/confirm", requireAuth, async (req, res): Promise<vo
     }
     const [product] = await db.insert(catalogProductsTable).values({
       tenantId, model: item.model, condition: item.condition, colors: item.colors, categoryId: item.categoryId, createdBy: req.session.userId ?? null,
-      description: item.description, aiCharacteristics: item.characteristics,
+      description: item.description, aiCharacteristics: item.characteristics, aiSpecs: item.specs,
     }).returning();
     await replaceVariants(tenantId, product.id, item.variants.map((v) => ({ storage: v.storage, color: v.color, costPrice: v.costPrice, marginPercentOverride: v.marginPercentOverride })), settings, product.categoryId);
     createdProducts.push(product);
@@ -2024,6 +2061,7 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
         description: r.description,
         categoryId: r.categoryId,
         aiCharacteristics: r.aiCharacteristics ?? null,
+        aiSpecs: r.aiSpecs ?? null,
         // Aproximação de popularidade (clique em "Finalizar pedido"), usada
         // só pro filtro de ordenação "Mais comprado" no front — ver
         // comentário em catalogProductsTable.purchaseCount.

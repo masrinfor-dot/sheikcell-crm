@@ -88,6 +88,20 @@ export const catalogCategoriesTable = pgTable("catalog_categories", {
 });
 export type CatalogCategory = typeof catalogCategoriesTable.$inferSelect;
 
+// Ficha técnica curta gerada por IA, em grade de ícones na vitrine pública
+// (referência: sites de comparação de preço, ex.: "Dual Sim 5G", "6 Core
+// 4.3GHz", "48 Mpx"). Todo campo é opcional/curto — null quando a IA não
+// tem confiança pra esse modelo específico.
+export type CatalogAiSpecs = {
+  network?: string | null; // ex.: "Dual SIM 5G"
+  processor?: string | null; // ex.: "A18 Pro" ou "8 Core 3.2GHz"
+  gps?: string | null; // ex.: "Sim"
+  os?: string | null; // ex.: "iOS 18" / "Android 14"
+  display?: string | null; // ex.: 6.1 polegadas, 2556x1179
+  camera?: string | null; // ex.: "48 Mpx"
+  video?: string | null; // ex.: "4K"
+};
+
 // Um "produto" é a FAMÍLIA do aparelho (modelo + condição + cores +
 // descrição + fotos). Cada variação de armazenamento/memória vira uma linha
 // em catalog_product_variants, com preço e estoque próprios — assim
@@ -115,7 +129,18 @@ export const catalogProductsTable = pgTable("catalog_products", {
   // lojista depois — mostrada na vitrine pública como "Principais
   // características" (mesma ideia da "Ficha técnica gerada por IA" da Lu, do
   // Magalu). Null/vazio = a vitrine pública não mostra essa seção.
+  // DEPRECATED em favor de aiSpecs (grade de ícones) abaixo — mantido só
+  // pra produtos antigos que já têm esse campo preenchido; produto novo
+  // usa aiSpecs.
   aiCharacteristics: jsonb("ai_characteristics").$type<string[]>(),
+  // Ficha técnica em grade de ícones (pedido do lojista, 07/09: "a ficha
+  // tecnica e descrição tem que vir nesse estilo", mostrando referência de
+  // site de comparação de preços com ícones Rede/Processador/GPS/Sistema/
+  // Tela/Câmera/Vídeo) — campos curtos e fixos, ao contrário do
+  // aiCharacteristics (lista livre). "Memória" não entra aqui: é derivada
+  // ao vivo do armazenamento das variantes na vitrine, pra nunca ficar
+  // desatualizada em relação ao que o lojista de fato cadastrou.
+  aiSpecs: jsonb("ai_specs").$type<CatalogAiSpecs>(),
   createdBy: integer("created_by").references(() => usersTable.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
