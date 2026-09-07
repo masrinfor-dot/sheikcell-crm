@@ -69,18 +69,25 @@ function colorSwatchHex(name: string): string {
   return "#c9c9c9";
 }
 
-// Rótulo de uma variante combinando armazenamento e cor, o que tiver
-// preenchido (ex.: "256GB · Preto", "Preto" se não variar armazenamento,
-// "256GB" se não variar cor, "Único" se nenhum dos dois for informado).
-function variantLabel(v: { storage: string | null; color: string | null }): string {
-  return [v.storage, v.color].filter(Boolean).join(" · ") || "Único";
+// Rótulo de uma variante combinando RAM+armazenamento, rede e cor, o que
+// tiver preenchido (ex.: "8GB+256GB · Preto", "4GB+256GB 5G · Azul" — pra
+// modelos que têm o MESMO armazenamento em versões de RAM/rede diferentes,
+// ex.: Realme Note 70 4/256GB x 8/256GB — sem isso, as duas variantes
+// apareciam como "256GB" idênticas na hora de escolher, e o cliente não
+// tinha como saber qual estava selecionando). "Único" se nada for informado.
+function variantSpecLabel(v: { storage: string | null; ram?: string | null; network?: string | null }): string {
+  const base = [v.ram, v.storage].filter(Boolean).join("+");
+  return [base, v.network].filter(Boolean).join(" ");
+}
+function variantLabel(v: { storage: string | null; ram?: string | null; network?: string | null; color: string | null }): string {
+  return [variantSpecLabel(v), v.color].filter(Boolean).join(" · ") || "Único";
 }
 
 // Mesma combinação, mas sem o fallback "Único" — pra linhas do carrinho e da
 // mensagem do WhatsApp, onde é melhor não mostrar nada a mostrar um rótulo
 // vazio de placeholder.
-function cartVariantLabel(v: { storage: string | null; color: string | null }): string | null {
-  return [v.storage, v.color].filter(Boolean).join(" · ") || null;
+function cartVariantLabel(v: { storage: string | null; ram?: string | null; network?: string | null; color: string | null }): string | null {
+  return [variantSpecLabel(v), v.color].filter(Boolean).join(" · ") || null;
 }
 
 type CartItem = {
@@ -523,7 +530,7 @@ function ProductDetailModal({
                     className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition ${
                       v.id === selectedId ? "bg-neutral-900 text-white border-neutral-900" : "bg-white text-neutral-600 border-neutral-200 hover:border-neutral-400"
                     } ${!v.inStock ? "opacity-50" : ""}`}>
-                    {v.storage ?? "Único"}
+                    {variantSpecLabel(v) || "Único"}
                   </button>
                 ))}
               </div>

@@ -130,6 +130,15 @@ export const catalogProductVariantsTable = pgTable("catalog_product_variants", {
   id: serial("id").primaryKey(),
   productId: integer("product_id").notNull().references(() => catalogProductsTable.id, { onDelete: "cascade" }),
   storage: text("storage"), // ex.: "256GB" (texto livre — varia por fornecedor); null = não varia por armazenamento
+  // Memória RAM desta variante (texto livre, ex.: "4GB", "8GB") — pedido do
+  // lojista: alguns modelos (ex.: Realme Note 70) têm o MESMO armazenamento
+  // em versões de RAM diferentes, com custo/preço diferentes — sem esse
+  // campo, duas variantes "256GB" ficavam indistinguíveis no cadastro.
+  ram: text("ram"),
+  // Tecnologia de rede desta variante (texto livre, ex.: "4G", "5G") — mesmo
+  // motivo do campo "ram": em alguns modelos a versão 5G custa mais que a 4G
+  // com o mesmo armazenamento/RAM.
+  network: text("network"),
   // Cor desta variante específica (texto livre) — permite unificar no MESMO
   // produto (mesmo modelo+condição) aparelhos que só diferem por
   // armazenamento e/ou cor, cada combinação com seu próprio preço/estoque.

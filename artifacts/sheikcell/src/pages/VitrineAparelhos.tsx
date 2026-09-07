@@ -82,6 +82,8 @@ const MARKET_CHECK_BADGE: Record<CatalogMarketCheckVerdict, { label: string; cla
 type VariantFormRow = {
   id?: number;
   storage: string;
+  ram: string;
+  network: string;
   color: string;
   costPrice: string;
   costIncludesInvoice: boolean;
@@ -104,7 +106,7 @@ type VariantFormRow = {
 };
 
 const emptyVariant: VariantFormRow = {
-  storage: "", color: "", costPrice: "", costIncludesInvoice: false, marginPercentOverride: "", salePrice: "",
+  storage: "", ram: "", network: "", color: "", costPrice: "", costIncludesInvoice: false, marginPercentOverride: "", salePrice: "",
   wholesalePrice: "", wholesaleMarginPercentOverride: "", compareAtPrice: "", stockQty: "1",
 };
 
@@ -135,8 +137,16 @@ function priceRangeLabel(p: CatalogProduct): string {
   return min === max ? formatBRL(min) : `${formatBRL(min)} a ${formatBRL(max)}`;
 }
 
+// Rótulo de uma combinação RAM+armazenamento+rede, no mesmo padrão usado
+// pelos fornecedores (ex.: "4GB+256GB", "8GB+256GB 5G") — sem RAM/rede
+// cadastrada, cai só no armazenamento de sempre.
+function variantSpecLabel(v: { storage: string | null; ram?: string | null; network?: string | null }): string {
+  const base = [v.ram, v.storage].filter(Boolean).join("+");
+  return [base, v.network].filter(Boolean).join(" ");
+}
+
 function storagesLabel(p: CatalogProduct): string {
-  const list = [...new Set(p.variants.map((v) => v.storage).filter((s): s is string => !!s))];
+  const list = [...new Set(p.variants.map((v) => variantSpecLabel(v)).filter(Boolean))];
   return list.join(", ");
 }
 
@@ -198,6 +208,19 @@ function sortCatalogProducts(list: CatalogProduct[], sortBy: CatalogSortOption):
 // espaços colapsados. Ex.: "iPhone  15 Pró Max" e "iphone 15 pro max" batem.
 function normalizeModelForDuplicateCheck(model: string): string {
   return model.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+}
+
+// Acha um an\u00fancio j\u00e1 cadastrado do MESMO aparelho (modelo normalizado + mesma
+// condi\u00e7\u00e3o) pra decidir se a importa\u00e7\u00e3o deve ATUALIZAR em vez de duplicar.
+// Importante: N\u00c3O exige a mesma categoria \u2014 categoria \u00e9 s\u00f3 organiza\u00e7\u00e3o/
+// exibi\u00e7\u00e3o na vitrine, e antes disso o casamento na importa\u00e7\u00e3o em lote exigia
+// categoryId id\u00eantico; bastava a IA sugerir uma categoria um pouco diferente
+// da j\u00e1 cadastrada (ou nenhuma) pra silenciosamente criar um card duplicado
+// em vez de atualizar o pre\u00e7o do que j\u00e1 existia \u2014 pedido do lojista foi
+// justamente alertar/atualizar em vez disso.
+function findDuplicateProduct(products: CatalogProduct[], model: string, condition: CatalogCondition): CatalogProduct | undefined {
+  const normalized = normalizeModelForDuplicateCheck(model);
+  return products.find((p) => p.condition === condition && normalizeModelForDuplicateCheck(p.model) === normalized);
 }
 
 export default function VitrineAparelhos() {
@@ -536,7 +559,7 @@ export default function VitrineAparelhos() {
       aiCharacteristics: (p.aiCharacteristics ?? []).join("\n"),
       variants: p.variants.length > 0
         ? p.variants.map((v) => ({
-            id: v.id, storage: v.storage ?? "", color: v.color ?? "", costPrice: v.costPrice ?? "", costIncludesInvoice: v.costIncludesInvoice,
+            id: v.id, storage: v.storage ?? "", ram: v.ram ?? "", network: v.network ?? "", color: v.color ?? "", costPrice: v.costPrice ?? "", costIncludesInvoice: v.costIncludesInvoice,
             marginPercentOverride: v.marginPercentOverride ?? "", salePrice: v.salePrice ?? "", wholesalePrice: v.wholesalePrice ?? "",
             wholesaleMarginPercentOverride: v.wholesaleMarginPercentOverride ?? "",
             compareAtPrice: v.compareAtPrice ?? "",
@@ -723,6 +746,8 @@ export default function VitrineAparelhos() {
       variants: form.variants.map((v) => ({
         id: v.id,
         storage: v.storage.trim() || null,
+        ram: v.ram.trim() || null,
+        network: v.network.trim() || null,
         color: v.color.trim() || null,
         costPrice: v.costPrice ? Number(v.costPrice) : null,
         costIncludesInvoice: v.costIncludesInvoice,
@@ -860,7 +885,7 @@ export default function VitrineAparelhos() {
     ...p.variants
       .filter((v) => v.salePrice != null)
       .map((v) => {
-        const label = [v.storage, v.color].filter(Boolean).join(" ");
+        const label = [variantSpecLabel(v), v.color].filter(Boolean).join(" ");
         return `💰 ${label ? `${label}: ` : ""}${formatBRL(v.salePrice)}${v.stockQty <= 0 ? " (sem estoque)" : ""}`;
       }),
   ].filter(Boolean).join("\n");
@@ -949,7 +974,7 @@ export default function VitrineAparelhos() {
     setImportItems((prev) => prev && prev.map((it, i) => (i === idx ? { ...it, variants: it.variants.map((v, j) => (j === vIdx ? { ...v, ...patch } : v)) } : it)));
   };
   const addImportVariant = (idx: number) => {
-    setImportItems((prev) => prev && prev.map((it, i) => (i === idx ? { ...it, variants: [...it.variants, { storage: null, color: null, costPrice: null, marginPercentOverride: null }] } : it)));
+    setImportItems((prev) => prev && prev.map((it, i) => (i === idx ? { ...it, variants: [...it.variants, { storage: null, ram: null, network: null, color: null, costPrice: null, marginPercentOverride: null }] } : it)));
   };
   const removeImportVariant = (idx: number, vIdx: number) => {
     setImportItems((prev) => prev && prev.map((it, i) => (i === idx ? { ...it, variants: it.variants.length > 1 ? it.variants.filter((_, j) => j !== vIdx) : it.variants } : it)));
@@ -1001,15 +1026,19 @@ export default function VitrineAparelhos() {
         }
         return it; // sem categoria (o lojista pode ter escolhido uma manualmente — já está em it.categoryId)
       });
-      // Evitar anúncio duplicado na importação em lote: mesmo modelo já
-      // cadastrado na mesma categoria/subcategoria (mesmo aviso do cadastro
-      // manual, ver handleSave) — a partir daqui NÃO cria um segundo anúncio
-      // pra esses itens: marca existingProductId e o backend só atualiza
-      // custo/margem das variantes do anúncio que já existe (ver
-      // updateVariantsFromImport na API). Itens sem duplicata seguem criando
-      // anúncio novo, como sempre.
+      // Evitar anúncio duplicado na importação em lote: mesmo modelo (mesma
+      // condição) já cadastrado, INDEPENDENTE da categoria (ver
+      // findDuplicateProduct — pedido do lojista: "criar alerta ao importar
+      // lista com modelos já cadastrados pra não duplicar, e sim atualizar
+      // preços"; antes exigia categoria idêntica, e bastava a IA sugerir uma
+      // categoria um pouco diferente da já cadastrada pra criar um card
+      // duplicado silenciosamente em vez de atualizar o preço) — a partir
+      // daqui NÃO cria um segundo anúncio pra esses itens: marca
+      // existingProductId e o backend só atualiza custo/margem das variantes
+      // do anúncio que já existe (ver updateVariantsFromImport na API).
+      // Itens sem duplicata seguem criando anúncio novo, como sempre.
       const withExisting = resolved.map((it) => {
-        const match = products.find((p) => p.categoryId === (it.categoryId ?? null) && normalizeModelForDuplicateCheck(p.model) === normalizeModelForDuplicateCheck(it.model));
+        const match = findDuplicateProduct(products, it.model, it.condition);
         return { ...it, existingProductId: match?.id ?? null };
       });
       const dupCount = withExisting.filter((it) => it.existingProductId != null).length;
@@ -1036,6 +1065,14 @@ export default function VitrineAparelhos() {
 
   const approvedCount = importItems?.filter((i) => i.status === "approved").length ?? 0;
   const pendingCount = importItems?.filter((i) => i.status === "pending").length ?? 0;
+  // Quantos itens dessa importação já existem no catálogo (mesmo modelo +
+  // mesma condição) — pedido do lojista: alertar isso de forma bem visível
+  // ANTES de confirmar, já que esses itens não criam card novo, só atualizam
+  // o preço do anúncio existente (ver findDuplicateProduct/handleConfirmImport).
+  const importDuplicateCount = useMemo(
+    () => (importItems ?? []).filter((it) => findDuplicateProduct(products, it.model, it.condition) != null).length,
+    [importItems, products],
+  );
   const visibleImportItems = useMemo(
     () => (importItems ?? []).map((it, idx) => ({ it, idx })).filter(({ it }) => it.status === importTab || (importTab === "approved" && it.status !== "pending")),
     [importItems, importTab],
@@ -1463,6 +1500,17 @@ export default function VitrineAparelhos() {
                           className="p-1.5 rounded hover:bg-red-50 text-red-600"><Trash2 className="w-3.5 h-3.5" /></button>
                       )}
                     </div>
+                    {/* RAM/rede (opcional) — pra modelos que têm o MESMO armazenamento em
+                        versões de RAM e/ou tecnologia de rede diferentes (ex.: Realme Note
+                        70 4/256GB x 8/256GB, ou versão 4G x 5G), cada uma com preço próprio. */}
+                    <div className="flex items-center gap-2">
+                      <input value={v.ram} onChange={(e) => updateVariant(idx, { ram: e.target.value })}
+                        placeholder="RAM (opcional, ex.: 8GB)" data-testid={`input-variant-ram-${idx}`}
+                        className="flex-1 rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                      <input value={v.network} onChange={(e) => updateVariant(idx, { network: e.target.value })}
+                        placeholder="Rede (opcional, ex.: 5G)" data-testid={`input-variant-network-${idx}`}
+                        className="flex-1 rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                    </div>
                     <div className="grid grid-cols-2 gap-2">
                       <div>
                         <label className="text-[10px] text-muted-foreground">Custo (nota do fornecedor)</label>
@@ -1696,6 +1744,14 @@ export default function VitrineAparelhos() {
                 </>
               ) : (
                 <>
+                  {importDuplicateCount > 0 && (
+                    <div className="rounded-lg border border-blue-200 bg-blue-50/60 p-3" data-testid="banner-import-duplicates">
+                      <p className="text-xs font-semibold text-blue-800 flex items-center gap-1">
+                        <Info className="w-3.5 h-3.5" />
+                        {importDuplicateCount === 1 ? "1 aparelho desta lista já está cadastrado" : `${importDuplicateCount} aparelhos desta lista já estão cadastrados`} (mesmo modelo + condição) — {importDuplicateCount === 1 ? "ele vai só" : "eles vão só"} ATUALIZAR o preço/custo do anúncio existente, sem criar cartão duplicado. Veja o aviso azul embaixo de cada item.
+                      </p>
+                    </div>
+                  )}
                   {importNewCategoryPaths.length > 0 && (
                     <div className="rounded-lg border border-violet-200 bg-violet-50/60 p-3 space-y-2">
                       <p className="text-xs font-semibold text-violet-800 flex items-center gap-1">
@@ -1749,6 +1805,13 @@ export default function VitrineAparelhos() {
                               <div className="flex items-center gap-2">
                                 <input value={v.storage ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { storage: e.target.value || null })}
                                   className="flex-1 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Armazenamento" />
+                                {/* RAM/rede — a IA já separa "4/256GB" em ram="4GB"+storage="256GB"
+                                    quando a lista informa (ver prompt de import/parse); editável aqui
+                                    caso precise corrigir. */}
+                                <input value={v.ram ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { ram: e.target.value || null })}
+                                  className="w-20 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="RAM" />
+                                <input value={v.network ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { network: e.target.value || null })}
+                                  className="w-16 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Rede" />
                                 <input value={v.color ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { color: e.target.value || null })}
                                   className="flex-1 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" placeholder="Cor" />
                                 <input type="number" value={v.costPrice ?? ""} onChange={(e) => updateImportVariant(idx, vIdx, { costPrice: e.target.value ? Number(e.target.value) : null })}
@@ -1786,7 +1849,7 @@ export default function VitrineAparelhos() {
                           )}
                         </div>
                         {(() => {
-                          const match = products.find((p) => p.categoryId === (it.categoryId ?? null) && normalizeModelForDuplicateCheck(p.model) === normalizeModelForDuplicateCheck(it.model));
+                          const match = findDuplicateProduct(products, it.model, it.condition);
                           return match ? (
                             <p className="text-[10px] text-blue-700 bg-blue-50 rounded px-1.5 py-0.5">
                               Já existe como "{match.model}" ({CATALOG_CONDITIONS.find((c) => c.value === match.condition)?.label ?? match.condition}) — vai só ATUALIZAR custo/margem desse anúncio, sem duplicar.

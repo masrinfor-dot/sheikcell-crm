@@ -255,6 +255,8 @@ async function variantsByProductIds(tenantId: number, productIds: number[]) {
 type VariantInput = {
   id?: number;
   storage: string | null;
+  ram: string | null;
+  network: string | null;
   color: string | null;
   costPrice: number | null;
   costIncludesInvoice: boolean;
@@ -273,6 +275,8 @@ function cleanVariantInput(raw: unknown): VariantInput {
   return {
     id: Number.isInteger(o.id) ? (o.id as number) : undefined,
     storage: clean(o.storage, 40) || null,
+    ram: clean(o.ram, 20) || null,
+    network: clean(o.network, 20) || null,
     color: clean(o.color, 40) || null,
     costPrice: toNumberOrNull(o.costPrice),
     costIncludesInvoice: o.costIncludesInvoice === true,
@@ -325,6 +329,8 @@ async function replaceVariants(tenantId: number, productId: number, rawVariants:
     const wholesalePrice = await resolveVariantWholesalePrice(v, settings);
     const values = {
       storage: v.storage,
+      ram: v.ram,
+      network: v.network,
       color: v.color,
       costPrice: v.costPrice != null ? String(v.costPrice) : null,
       costIncludesInvoice: v.costIncludesInvoice,
@@ -358,13 +364,18 @@ async function replaceVariants(tenantId: number, productId: number, rawVariants:
 // anúncio duplicado (mesmo modelo/categoria), só atualiza o preço de custo
 // (e a margem, se o lojista escolheu mudar) das variantes já existentes —
 // preserva estoque, "custo já com nota", preço "de" e margem de atacado que
-// já estavam cadastrados. Variante nova (armazenamento que não existia ainda
-// nesse produto, ex.: chegou um 512GB que só tinha 256GB) é adicionada ao
-// MESMO produto, nunca cria um segundo anúncio. Casamento de variante por
-// armazenamento normalizado (minúsculo + sem espaço) — cor não entra no
-// casamento porque a lista do fornecedor normalmente só varia por memória.
+// já estavam cadastrados. Variante nova (armazenamento/RAM/rede que não
+// existia ainda nesse produto, ex.: chegou um 512GB que só tinha 256GB) é
+// adicionada ao MESMO produto, nunca cria um segundo anúncio. Casamento de
+// variante por armazenamento+RAM+rede normalizados (minúsculo + sem espaço)
+// — cor não entra no casamento porque a lista do fornecedor normalmente só
+// varia por memória. RAM/rede entraram no casamento porque, sem isso, duas
+// variantes com o MESMO armazenamento mas RAM diferente (ex.: Realme Note 70
+// 4/256GB e 8/256GB) batiam na mesma chave e uma sobrescrevia o preço da
+// outra.
 async function updateVariantsFromImport(tenantId: number, productId: number, items: ParsedVariant[], settings: PricingSettings) {
-  const normStorage = (s: string | null) => (s ?? "").toLowerCase().replace(/\s+/g, "");
+  const norm = (s: string | null) => (s ?? "").toLowerCase().replace(/\s+/g, "");
+  const variantKey = (storage: string | null, ram: string | null, network: string | null) => `${norm(storage)}|${norm(ram)}|${norm(network)}`;
   const [[product], existing] = await Promise.all([
     db.select({ categoryId: catalogProductsTable.categoryId }).from(catalogProductsTable)
       .where(and(eq(catalogProductsTable.id, productId), eq(catalogProductsTable.tenantId, tenantId))).limit(1),
@@ -372,16 +383,18 @@ async function updateVariantsFromImport(tenantId: number, productId: number, ite
       .where(and(eq(catalogProductVariantsTable.productId, productId), eq(catalogProductVariantsTable.tenantId, tenantId))),
   ]);
   const categoryId = product?.categoryId ?? null;
-  const existingByStorage = new Map(existing.map((v) => [normStorage(v.storage), v]));
+  const existingByKey = new Map(existing.map((v) => [variantKey(v.storage, v.ram, v.network), v]));
 
   for (const item of items) {
     if (item.costPrice == null && item.marginPercentOverride == null) continue; // nada pra atualizar nessa variante
-    const match = existingByStorage.get(normStorage(item.storage));
+    const match = existingByKey.get(variantKey(item.storage, item.ram, item.network));
     const marginPercentOverride = item.marginPercentOverride ?? (match ? numOrNull(match.marginPercentOverride) : null);
     const costPrice = item.costPrice ?? (match ? numOrNull(match.costPrice) : null);
     const vInput: VariantInput = {
       id: match?.id,
       storage: item.storage ?? match?.storage ?? null,
+      ram: item.ram ?? match?.ram ?? null,
+      network: item.network ?? match?.network ?? null,
       color: item.color ?? match?.color ?? null,
       costPrice,
       costIncludesInvoice: match?.costIncludesInvoice ?? false,
@@ -396,6 +409,8 @@ async function updateVariantsFromImport(tenantId: number, productId: number, ite
     const wholesalePrice = await resolveVariantWholesalePrice(vInput, settings);
     const values = {
       storage: vInput.storage,
+      ram: vInput.ram,
+      network: vInput.network,
       color: vInput.color,
       costPrice: vInput.costPrice != null ? String(vInput.costPrice) : null,
       marginPercentOverride: vInput.marginPercentOverride != null ? String(vInput.marginPercentOverride) : null,
@@ -1272,7 +1287,19 @@ router.put("/catalog/wholesale-code", requireAdmin, async (req, res): Promise<vo
 
 // ─── Importação de lista do fornecedor via IA ───────────────────────────────
 
-type ParsedVariant = { storage: string | null; color: string | null; costPrice: number | null; marginPercentOverride: number | null };
+type ParsedVariant = {
+  storage: string | null;
+  // RAM e tecnologia de rede (ex.: "4GB"/"8GB", "4G"/"5G") — pedido do
+  // lojista: modelos como o Realme Note 70 têm o MESMO armazenamento em
+  // versões de RAM diferentes, com custo diferente; sem esses campos a
+  // reimportação (updateVariantsFromImport) não tinha como distinguir as
+  // duas e acabava sobrescrevendo uma com a outra.
+  ram: string | null;
+  network: string | null;
+  color: string | null;
+  costPrice: number | null;
+  marginPercentOverride: number | null;
+};
 type ParsedItem = {
   model: string;
   condition: CatalogCondition;
@@ -1307,9 +1334,16 @@ function cleanParsedVariants(raw: unknown): ParsedVariant[] {
   const arr = Array.isArray(raw) ? raw : [];
   const list = arr.slice(0, 20).map((v) => {
     const o = (v ?? {}) as Record<string, unknown>;
-    return { storage: clean(o.storage, 40) || null, color: clean(o.color, 40) || null, costPrice: toNumberOrNull(o.costPrice), marginPercentOverride: toNumberOrNull(o.marginPercentOverride) };
+    return {
+      storage: clean(o.storage, 40) || null,
+      ram: clean(o.ram, 20) || null,
+      network: clean(o.network, 20) || null,
+      color: clean(o.color, 40) || null,
+      costPrice: toNumberOrNull(o.costPrice),
+      marginPercentOverride: toNumberOrNull(o.marginPercentOverride),
+    };
   });
-  return list.length > 0 ? list : [{ storage: null, color: null, costPrice: null, marginPercentOverride: null }];
+  return list.length > 0 ? list : [{ storage: null, ram: null, network: null, color: null, costPrice: null, marginPercentOverride: null }];
 }
 
 // Junta itens com o mesmo modelo+condição (comparação sem diferenciar maiúsculas
@@ -1328,9 +1362,9 @@ function mergeParsedItems(items: ParsedItem[]): ParsedItem[] {
       continue;
     }
     for (const v of it.variants) {
-      const isPlaceholder = v.storage == null && v.color == null && v.costPrice == null;
+      const isPlaceholder = v.storage == null && v.color == null && v.ram == null && v.network == null && v.costPrice == null;
       if (isPlaceholder) continue;
-      const dup = existing.variants.some((ev) => ev.storage === v.storage && ev.color === v.color);
+      const dup = existing.variants.some((ev) => ev.storage === v.storage && ev.color === v.color && ev.ram === v.ram && ev.network === v.network);
       if (!dup) existing.variants.push(v);
     }
     for (const c of it.colors) {
@@ -1400,7 +1434,8 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
     `Você organiza listas de fornecedores de celulares (mercado brasileiro) em dados estruturados.`,
     `Cada linha ou bloco da lista abaixo descreve um aparelho: modelo, armazenamento, cor(es) e preço de CUSTO (preço do fornecedor pra loja, não o preço de venda ao cliente final).`,
     `Ignore emojis, cabeçalhos, informações de garantia/contato/endereço — extraia SÓ os aparelhos.`,
-    `IMPORTANTE — agrupamento: quando o MESMO modelo com a MESMA condição aparecer na lista várias vezes com armazenamentos e/ou cores diferentes, agrupe TUDO num ÚNICO item (uma família), nunca crie um item separado por armazenamento ou por cor. Dentro desse item, o array "variants" tem uma entrada {"storage","color","costPrice"} pra CADA combinação de armazenamento+cor encontrada (ex.: 128GB Preto, 128GB Azul e 256GB Preto do mesmo modelo/condição viram 3 variantes dentro do mesmo item). Se o preço de custo for igual pra todas as cores de um armazenamento, ainda assim crie uma variante por cor (repita o mesmo costPrice). Se a lista não menciona cor nenhuma pra um armazenamento, deixe "color": null.`,
+    `IMPORTANTE — agrupamento: quando o MESMO modelo com a MESMA condição aparecer na lista várias vezes com armazenamentos e/ou cores diferentes, agrupe TUDO num ÚNICO item (uma família), nunca crie um item separado por armazenamento ou por cor. Dentro desse item, o array "variants" tem uma entrada {"storage","ram","network","color","costPrice"} pra CADA combinação encontrada (ex.: 128GB Preto, 128GB Azul e 256GB Preto do mesmo modelo/condição viram 3 variantes dentro do mesmo item). Se o preço de custo for igual pra todas as cores de um armazenamento, ainda assim crie uma variante por cor (repita o mesmo costPrice). Se a lista não menciona cor nenhuma pra um armazenamento, deixe "color": null.`,
+    `IMPORTANTE — RAM e rede: alguns modelos (comum em Android, ex.: "Realme Note 70 4/128GB" e "Realme Note 70 8/256GB") têm o MESMO modelo em versões de MEMÓRIA RAM diferentes (ex.: "4/128GB" = 4GB de RAM + 128GB de armazenamento) e/ou tecnologia de rede diferente (4G x 5G), normalmente com preço de custo diferente pra cada versão. Quando a lista indicar RAM (padrão "RAM/ARMAZENAMENTO", ex.: "4/128", "8/256", ou texto explícito "4GB RAM"), preencha "ram" com só o valor da RAM (ex.: "4GB") e "storage" só com o armazenamento (ex.: "128GB") — NUNCA junte os dois em "storage". Quando a lista mencionar "4G" ou "5G" explicitamente pro aparelho, preencha "network" com esse valor; se não mencionar, deixe "network": null. Trate RAM/rede diferentes como variantes DIFERENTES mesmo que o armazenamento seja igual (nunca junte "4/256GB" e "8/256GB" numa variante só).`,
     ``,
     `Categorias/subcategorias já cadastradas nessa loja (reaproveite pelo nome EXATO sempre que fizer sentido, em vez de inventar uma parecida): ${categoryList || "(nenhuma cadastrada ainda)"}.`,
     `Pra cada aparelho, sugira também "categoryPath": um array com 1 ou 2 níveis indicando a aba/sub-aba da vitrine pública onde ele se encaixa (ex.: ["Celulares","Samsung"] ou ["Peças de celular"]). Prefira sempre reaproveitar um nome já cadastrado acima; só sugira um nome novo quando não existir nada parecido. Se não tiver confiança nenhuma pra sugerir, use null.`,
@@ -1409,7 +1444,8 @@ router.post("/catalog/import/parse", requireAuth, requirePerm("usar_ia"), async 
     text,
     ``,
     `Responda SOMENTE com um JSON array válido, sem markdown, um objeto por aparelho (família modelo+condição, independente de cor/armazenamento), neste formato:`,
-    `[{"model":"iPhone 15 Pro Max","condition":"excelente","colors":["Preto","Azul"],"variants":[{"storage":"256GB","color":"Preto","costPrice":3850},{"storage":"256GB","color":"Azul","costPrice":3850},{"storage":"512GB","color":"Preto","costPrice":4200}],"categoryPath":["Celulares","Apple"],"rawLine":"trecho original correspondente"}]`,
+    `[{"model":"iPhone 15 Pro Max","condition":"excelente","colors":["Preto","Azul"],"variants":[{"storage":"256GB","ram":null,"network":null,"color":"Preto","costPrice":3850},{"storage":"256GB","ram":null,"network":null,"color":"Azul","costPrice":3850},{"storage":"512GB","ram":null,"network":null,"color":"Preto","costPrice":4200}],"categoryPath":["Celulares","Apple"],"rawLine":"trecho original correspondente"}]`,
+    `Exemplo com RAM (ex.: Realme Note 70 4/256GB por R$810 e 8/256GB por R$910): "variants":[{"storage":"256GB","ram":"4GB","network":null,"color":null,"costPrice":810},{"storage":"256GB","ram":"8GB","network":null,"color":null,"costPrice":910}].`,
     `"colors" no nível do item é só a lista resumida de todas as cores encontradas pra esse modelo (informativo); o detalhe por combinação fica em "variants".`,
     `"condition" deve ser um destes: novo, excelente, muito_bom, bom, outlet (use "bom" se não estiver claro). Use "novo" quando a lista indicar que o aparelho é lacrado/lacrado de fábrica/nunca usado (ex.: "lacrado", "novo", "sealed") — não confunda com "excelente", que é pra seminovo em ótimo estado.`,
     `Se não conseguir identificar o modelo ou nenhum preço de custo com confiança, ainda inclua o item com o que conseguir e deixe os campos faltantes null.`,
@@ -1886,7 +1922,7 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
             // mão pelo lojista).
             const wholesale = withWholesaleInstallmentPricing(v, pricingSettings);
             return {
-              id: v.id, storage: v.storage, color: v.color, salePrice: v.salePrice, inStock: v.stockQty > 0,
+              id: v.id, storage: v.storage, ram: v.ram, network: v.network, color: v.color, salePrice: v.salePrice, inStock: v.stockQty > 0,
               wholesalePrice: wholesaleUnlocked ? (wholesale.wholesalePriceCash ?? v.wholesalePrice) : null,
               // Preço "de" (comparação) — a vitrine pública só usa ele pra
               // mostrar o riscado/selo de desconto se for maior que o preço à

@@ -396,6 +396,11 @@ export type CatalogProductVariant = {
   id: number;
   productId: number;
   storage: string | null;
+  // Memória RAM e tecnologia de rede dessa variante (ex.: "4GB"/"8GB",
+  // "4G"/"5G") — alguns modelos têm o MESMO armazenamento em versões
+  // diferentes de RAM/rede, com custo/preço diferente pra cada uma.
+  ram: string | null;
+  network: string | null;
   // Cor específica dessa combinação (null = variante não distingue cor —
   // usa as cores do produto só como informação, ver CatalogProduct.colors).
   color: string | null;
@@ -429,6 +434,8 @@ export type CatalogProductVariant = {
 export type CatalogVariantInput = {
   id?: number;
   storage: string | null;
+  ram: string | null;
+  network: string | null;
   color: string | null;
   costPrice: number | null;
   costIncludesInvoice: boolean;
@@ -504,7 +511,7 @@ export type CatalogPricingSettings = {
 export type CatalogMarketCheckVerdict = "compativel" | "acima" | "abaixo" | "sem_dados";
 
 export type CatalogPublicVariant = {
-  id: number; storage: string | null; color: string | null; salePrice: string | null; inStock: boolean;
+  id: number; storage: string | null; ram: string | null; network: string | null; color: string | null; salePrice: string | null; inStock: boolean;
   wholesalePrice: string | null;
   // Preço "de" (comparação) — quando maior que o preço à vista atual, mostra
   // riscado + selo "X% OFF" (ver discountInfo em VitrinePublica.tsx).
@@ -536,7 +543,7 @@ export type CatalogPublicProduct = {
   variants: CatalogPublicVariant[];
 };
 
-export type CatalogImportVariant = { storage: string | null; color: string | null; costPrice: number | null; marginPercentOverride: number | null };
+export type CatalogImportVariant = { storage: string | null; ram: string | null; network: string | null; color: string | null; costPrice: number | null; marginPercentOverride: number | null };
 
 export type CatalogImportItem = {
   model: string;
