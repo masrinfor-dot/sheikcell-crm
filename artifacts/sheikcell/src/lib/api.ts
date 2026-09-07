@@ -2483,7 +2483,7 @@ export const api = {
     // Gera a lista de "Principais características" com IA — não salva nada
     // sozinho, o lojista revisa/edita e salva junto do resto do produto.
     generateCharacteristics: (data: { model: string; condition: CatalogCondition; colors: string[]; variants: { storage: string | null }[] }) =>
-      req<{ characteristics: string[] }>("/catalog/characteristics/generate", { method: "POST", body: JSON.stringify(data), timeoutMs: 30_000 }),
+      req<{ description: string | null; characteristics: string[] }>("/catalog/characteristics/generate", { method: "POST", body: JSON.stringify(data), timeoutMs: 30_000 }),
     getTrustBadges: () => req<{ badges: CatalogTrustBadge[] }>("/catalog/trust-badges"),
     saveTrustBadges: (badges: CatalogTrustBadge[]) => req<{ badges: CatalogTrustBadge[] }>("/catalog/trust-badges", { method: "PUT", body: JSON.stringify({ badges }) }),
     stockNotifications: () => req<{ notifications: CatalogStockNotification[] }>("/catalog/stock-notifications"),

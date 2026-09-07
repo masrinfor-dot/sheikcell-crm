@@ -970,37 +970,40 @@ router.post("/catalog/characteristics/generate", requireAuth, requirePerm("usar_
 
   const prompt = [
     `Você é um especialista em celulares/smartphones do mercado brasileiro.`,
-    `Gere uma lista curta de "principais características" pro anúncio de um aparelho, no estilo de ficha técnica resumida (tipo a "Ficha técnica gerada por IA" de marketplaces como Magazine Luiza).`,
+    `Gere uma "description" (1 frase curta, natural, pra vitrine pública) e uma lista curta de "characteristics" ("principais características", no estilo de ficha técnica resumida, tipo a "Ficha técnica gerada por IA" de marketplaces como Magazine Luiza) pro anúncio de um aparelho.`,
     `Aparelho: ${model}.`,
     `Condição/selo de qualidade: ${CATALOG_CONDITION_CRITERIA[condition]?.label ?? condition}.`,
     colors.length > 0 ? `Cores disponíveis: ${colors.join(", ")}.` : null,
     storages.length > 0 ? `Armazenamento(s) disponível(is): ${storages.join(", ")}.` : null,
     ``,
-    `Use seu conhecimento sobre esse modelo específico pra listar até 8 características reais dele (armazenamento, memória RAM, tamanho/tipo de tela, resolução da câmera traseira/frontal, capacidade da bateria, processador, se tem 5G, resistência à água, etc.) — só inclua o que você tiver confiança de estar correto pra esse modelo. Cada característica é uma frase curta (máx. 12 palavras), direta, sem markdown.`,
+    `Use seu conhecimento sobre esse modelo específico pra listar até 8 characteristics reais dele (tamanho/tipo de tela, resolução da câmera traseira/frontal, capacidade da bateria (mAh), memória RAM, armazenamento, processador, se tem 5G, resistência à água, etc.) — só inclua o que você tiver confiança de estar correto pra esse modelo. Cada característica é uma frase curta (máx. 12 palavras), direta, sem markdown. Não invente números que não souber com confiança.`,
     `Se o aparelho não for "novo", pode incluir 1 característica sobre o estado de conservação usando o selo de qualidade informado acima.`,
-    `Responda SOMENTE com um JSON array de strings, sem markdown, ex.: ["Tela Super Retina XDR 6,1\\"","128GB de armazenamento","Câmera dupla 12MP","Bateria de longa duração","5G"]`,
+    `Se não reconhecer o modelo com confiança nenhuma, deixe "description": null e "characteristics": [].`,
+    `Responda SOMENTE com um JSON object válido, sem markdown, neste formato: {"description":"iPhone 15 Pro Max com tela Super Retina XDR e câmera profissional tripla.","characteristics":["Tela Super Retina XDR OLED de 6,7\\"","Câmera tripla traseira 48MP + zoom óptico","Câmera frontal 12MP","Bateria de longa duração","Chip A17 Pro","5G","Resistente à água (IP68)"]}`,
   ].filter(Boolean).join("\n");
 
   try {
     const { getOpenAiClientForTenant } = await import("../lib/aiClient");
     const openai = await getOpenAiClientForTenant(tenantId);
     const completion = await openai.chat.completions.create(
-      { model: "gpt-4o", max_tokens: 500, messages: [{ role: "user", content: prompt }] },
+      { model: "gpt-4o", max_tokens: 700, messages: [{ role: "user", content: prompt }] },
       { timeout: 25_000 },
     );
     const raw = completion.choices[0]?.message?.content?.trim() ?? "";
     const text = raw.replace(/^```(?:json)?/m, "").replace(/```$/m, "").trim();
-    const start = text.indexOf("[");
-    const end = text.lastIndexOf("]");
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
     let characteristics: string[] = [];
+    let description: string | null = null;
     if (start !== -1 && end !== -1) {
       try {
-        const arr = JSON.parse(text.slice(start, end + 1));
-        characteristics = cleanCharacteristics(arr) ?? [];
+        const obj = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>;
+        characteristics = cleanCharacteristics(obj.characteristics) ?? [];
+        description = clean(obj.description, 2000) || null;
       } catch { /* segue com lista vazia — erro tratado abaixo */ }
     }
-    if (characteristics.length === 0) { res.status(502).json({ error: "A IA não retornou uma lista válida. Tente novamente." }); return; }
-    res.json({ characteristics });
+    if (characteristics.length === 0 && !description) { res.status(502).json({ error: "A IA não retornou uma lista válida. Tente novamente." }); return; }
+    res.json({ description, characteristics });
   } catch (err) {
     req.log.error({ err }, "Catalog characteristics generation failed");
     const { OpenAI: OpenAISdk } = await import("openai");
@@ -1449,12 +1452,20 @@ function cleanCategoryPath(raw: unknown): string[] | null {
   return names.length > 0 ? names : null;
 }
 
+// Normaliza nome de categoria pra casar com o que j\u00e1 existe mesmo com
+// pequenas diferen\u00e7as de acento/mai\u00fascula/singular-plural (ex.: "Celular" x
+// "Celulares") \u2014 pedido do lojista pra evitar que a IA crie uma categoria
+// nova quase igual a uma j\u00e1 cadastrada em vez de reaproveitar.
+function normalizeCategoryNameForMatch(s: string): string {
+  const base = s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ");
+  return base.endsWith("s") && base.length > 3 ? base.slice(0, -1) : base;
+}
+
 function matchCategoryPath(categories: CatalogCategory[], pathNames: string[] | null): { categoryId: number | null; categoryPath: string[] | null } {
   if (!pathNames || pathNames.length === 0) return { categoryId: null, categoryPath: null };
-  const norm = (s: string) => s.trim().toLowerCase();
   let parentId: number | null = null;
   for (const name of pathNames) {
-    const found = categories.find((c) => norm(c.name) === norm(name) && c.parentId === parentId);
+    const found = categories.find((c) => normalizeCategoryNameForMatch(c.name) === normalizeCategoryNameForMatch(name) && c.parentId === parentId);
     if (!found) return { categoryId: null, categoryPath: pathNames };
     parentId = found.id;
   }

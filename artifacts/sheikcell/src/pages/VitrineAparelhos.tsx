@@ -242,6 +242,21 @@ function findDuplicateProduct(products: CatalogProduct[], model: string, conditi
   return products.find((p) => p.condition === condition && normalizeModelForDuplicateCheck(p.model) === normalized);
 }
 
+// Normaliza nome de categoria pra comparar duplicidade/semelhança — mesma
+// ideia do normalizeModelForDuplicateCheck acima (minúsculo, sem acento,
+// espaços colapsados), e também tira o "s" final pra "Celular"/"Celulares"
+// baterem como a mesma categoria (pedido do lojista: evitar duplicar
+// categorias parecidas, tipo "Celulares" e "Celular" separadas).
+function normalizeCategoryName(name: string): string {
+  const base = name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+  return base.endsWith("s") && base.length > 3 ? base.slice(0, -1) : base;
+}
+
+function findSimilarCategory(categories: CatalogCategory[], name: string, parentId: number | null): CatalogCategory | undefined {
+  const normalized = normalizeCategoryName(name);
+  return categories.find((c) => c.parentId === parentId && normalizeCategoryName(c.name) === normalized);
+}
+
 export default function VitrineAparelhos() {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -279,6 +294,25 @@ export default function VitrineAparelhos() {
     () => form.colors.split(",").map((c) => c.trim()).filter(Boolean),
     [form.colors],
   );
+
+  // Detecta duas variantes que vão aparecer com o MESMO rótulo pro cliente
+  // (mesmo armazenamento + mesma cor, sem RAM/rede pra diferenciar) — ex.:
+  // um aparelho com versão 4G e versão 5G do mesmo armazenamento, cadastrado
+  // sem preencher o campo "Rede" de cada uma, mostra "256GB" duas vezes na
+  // vitrine sem o cliente saber qual está escolhendo (pedido do lojista:
+  // avisar o lojista na hora de cadastrar, antes de publicar assim).
+  const variantLabelCollision = useMemo(() => {
+    const seen = new Map<string, number>();
+    for (const v of form.variants) {
+      const label = variantSpecLabel({ storage: v.storage.trim() || null, ram: v.ram.trim() || null, network: v.network.trim() || null });
+      if (!label) continue;
+      const key = `${v.color.trim().toLowerCase()}::${label}`;
+      const count = (seen.get(key) ?? 0) + 1;
+      seen.set(key, count);
+      if (count > 1) return true;
+    }
+    return false;
+  }, [form.variants]);
 
   // Busca de fotos na internet (dentro do modal de edição do produto)
   const [showPhotoSearch, setShowPhotoSearch] = useState(false);
@@ -455,9 +489,21 @@ export default function VitrineAparelhos() {
   const handleAddCategory = async () => {
     const name = newCategoryName.trim();
     if (!name || savingCategory) return;
+    const parentId = newCategoryParent === "" ? null : newCategoryParent;
+    // Evitar categoria duplicada/parecida (ex.: "Celular" quando já existe
+    // "Celulares") — avisa e deixa reaproveitar a existente em vez de criar
+    // outra igual, sem bloquear sozinho (pode ser mesmo um nome diferente
+    // de propósito).
+    const similar = findSimilarCategory(categories, name, parentId);
+    if (similar) {
+      const proceed = confirm(
+        `Já existe uma categoria parecida: "${similar.name}".\n\nPra evitar duplicar, prefira reaproveitar essa em vez de criar outra — você pode mover subcategorias/produtos pra ela depois.\n\nCriar mesmo assim "${name}"?`
+      );
+      if (!proceed) return;
+    }
     setSavingCategory(true);
     try {
-      const created = await api.catalog.createCategory({ name, parentId: newCategoryParent === "" ? null : newCategoryParent });
+      const created = await api.catalog.createCategory({ name, parentId });
       setCategories((prev) => [...prev, created]);
       setNewCategoryName(""); setNewCategoryParent("");
     } catch (err) {
@@ -472,6 +518,21 @@ export default function VitrineAparelhos() {
       const updated = await api.catalog.updateCategory(id, { name });
       setCategories((prev) => prev.map((c) => (c.id === id ? updated : c)));
     } catch { toast({ title: "Erro ao renomear categoria", variant: "destructive" }); }
+  };
+
+  // Move uma subcategoria pra outra categoria principal (ou vira categoria
+  // principal ela mesma, se parentId null) — pedido do lojista pra corrigir
+  // categorias que ficaram na aba errada (ex.: juntar categorias duplicadas
+  // movendo as subcategorias da duplicata pra categoria certa antes de
+  // excluir a duplicata vazia).
+  const handleMoveCategory = async (sub: CatalogCategory, parentId: number | null) => {
+    if (parentId === sub.parentId) return;
+    try {
+      const updated = await api.catalog.updateCategory(sub.id, { parentId });
+      setCategories((prev) => prev.map((c) => (c.id === sub.id ? updated : c)));
+    } catch (err) {
+      toast({ title: "Erro ao mover categoria", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    }
   };
 
   const handleDeleteCategory = async (c: CatalogCategory) => {
@@ -639,9 +700,15 @@ export default function VitrineAparelhos() {
   // condição/cores/armazenamentos já digitados no formulário — não precisa
   // salvar o produto antes. O resultado só entra no campo do formulário; o
   // lojista revisa/edita e salva junto do resto ao clicar em "Salvar".
-  const handleGenerateCharacteristics = async () => {
+  // opts.silent = disparo automático (ver onBlur do campo "Modelo" abaixo,
+  // pedido do lojista: "a ficha técnica automática não puxou" — antes só
+  // gerava clicando no botão "Gerar com IA"; agora tenta sozinho assim que
+  // o lojista termina de digitar o modelo de um aparelho novo, se descrição
+  // e características ainda estiverem vazias) — não mostra toast de erro
+  // nesse caso pra não incomodar por trás de uma ação que ninguém pediu.
+  const handleGenerateCharacteristics = async (opts?: { silent?: boolean }) => {
     const model = form.model.trim();
-    if (!model || generatingCharacteristics) { if (!model) toast({ title: "Informe o modelo do aparelho primeiro", variant: "destructive" }); return; }
+    if (!model || generatingCharacteristics) { if (!model && !opts?.silent) toast({ title: "Informe o modelo do aparelho primeiro", variant: "destructive" }); return; }
     setGeneratingCharacteristics(true);
     try {
       const r = await api.catalog.generateCharacteristics({
@@ -649,9 +716,13 @@ export default function VitrineAparelhos() {
         colors: form.colors.split(",").map((c) => c.trim()).filter(Boolean),
         variants: form.variants.map((v) => ({ storage: v.storage.trim() || null })),
       });
-      setForm((f) => ({ ...f, aiCharacteristics: r.characteristics.join("\n") }));
+      setForm((f) => ({
+        ...f,
+        aiCharacteristics: r.characteristics.length > 0 ? r.characteristics.join("\n") : f.aiCharacteristics,
+        description: !f.description.trim() && r.description ? r.description : f.description,
+      }));
     } catch (err) {
-      toast({ title: "Erro ao gerar características", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+      if (!opts?.silent) toast({ title: "Erro ao gerar características", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
     } finally {
       setGeneratingCharacteristics(false);
     }
@@ -1468,7 +1539,11 @@ export default function VitrineAparelhos() {
                 <div className="col-span-2">
                   <label className="text-xs font-semibold text-muted-foreground">Modelo</label>
                   <input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} data-testid="input-product-model"
+                    onBlur={() => { if (!editing && form.model.trim() && !form.description.trim() && !form.aiCharacteristics.trim()) handleGenerateCharacteristics({ silent: true }); }}
                     placeholder="Ex.: iPhone 15 Pro Max" className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
+                  {generatingCharacteristics && !editing && (
+                    <p className="mt-0.5 text-[10px] text-violet-600 flex items-center gap-1"><Loader2 className="w-2.5 h-2.5 animate-spin" /> Gerando descrição e características automaticamente com IA...</p>
+                  )}
                 </div>
                 <div>
                   <label className="text-xs font-semibold text-muted-foreground flex items-center gap-1">
@@ -1515,6 +1590,11 @@ export default function VitrineAparelhos() {
                     <Plus className="w-3 h-3" /> Adicionar variante
                   </button>
                 </div>
+                {variantLabelCollision && (
+                  <div className="rounded-lg border border-amber-300 bg-amber-50 p-2 text-[11px] text-amber-800" data-testid="warning-variant-label-collision">
+                    Duas variantes com o mesmo armazenamento (e cor, se tiver) vão aparecer com o nome idêntico pro cliente escolher — ex.: "256GB" duas vezes, sem dar pra saber qual é qual. Se são versões diferentes (RAM ou rede 4G/5G, com preço diferente), preencha "RAM" e/ou "Rede" de cada uma abaixo pra diferenciar.
+                  </div>
+                )}
                 {form.variants.map((v, idx) => (
                   <div key={idx} className="rounded-lg border bg-white p-2.5 space-y-2">
                     <div className="flex items-center gap-2">
@@ -1646,7 +1726,7 @@ export default function VitrineAparelhos() {
                   <label className="text-xs font-semibold text-muted-foreground flex items-center gap-1">
                     <ListChecks className="w-3 h-3" /> Principais características (uma por linha — aparece na vitrine pública)
                   </label>
-                  <button type="button" onClick={handleGenerateCharacteristics} disabled={generatingCharacteristics || !form.model.trim()}
+                  <button type="button" onClick={() => handleGenerateCharacteristics()} disabled={generatingCharacteristics || !form.model.trim()}
                     data-testid="button-generate-characteristics"
                     className="flex items-center gap-1 text-[11px] font-semibold text-violet-700 hover:underline disabled:opacity-50 disabled:no-underline shrink-0">
                     {generatingCharacteristics ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
@@ -2109,6 +2189,12 @@ export default function VitrineAparelhos() {
                           <input defaultValue={sub.name} onBlur={(e) => e.target.value.trim() && e.target.value !== sub.name && handleRenameCategory(sub.id, e.target.value.trim())}
                             data-testid={`input-category-name-${sub.id}`}
                             className="flex-1 rounded border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                          <select value={sub.parentId ?? ""} onChange={(e) => handleMoveCategory(sub, e.target.value ? Number(e.target.value) : null)}
+                            data-testid={`select-category-parent-${sub.id}`} title="Mover pra outra categoria"
+                            className="rounded border px-1 py-1 text-[10px] bg-white focus:outline-none focus:ring-1 focus:ring-primary/40 max-w-[92px]">
+                            <option value="">Virar categoria principal</option>
+                            {topCategories.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                          </select>
                           <button onClick={() => handleDeleteCategory(sub)} data-testid={`button-delete-category-${sub.id}`}
                             className="p-1 rounded hover:bg-red-50 text-red-600"><Trash2 className="w-3 h-3" /></button>
                         </div>
