@@ -30,6 +30,11 @@ export const conversationsTable = pgTable("conversations", {
   name: text("name").notNull(),
   avatarUrl: text("avatar_url"),
   channel: text("channel").notNull().default("whatsapp"), // whatsapp | instagram | manual
+  // Comunidade do WhatsApp (ou o canal de avisos dela) — diferente de grupo
+  // comum, embora ambos cheguem com o mesmo tipo de JID (@g.us). Resolvido
+  // pela ponte do WhatsApp via metadata do grupo (isCommunity/
+  // isCommunityAnnounce) no momento da primeira mensagem.
+  isCommunity: boolean("is_community").notNull().default(false),
   sessionKey: text("session_key").notNull().default("default"), // qual conexão de WhatsApp recebeu a conversa
   sectorId: integer("sector_id").references(() => sectorsTable.id),
   assigneeId: integer("assignee_id").references(() => usersTable.id),

@@ -151,9 +151,24 @@ router.get("/internal-chat/events", requireAuth, (req: Request, res: Response): 
     isTenantSuspended(tenantId).then((s) => { if (s) res.end(); }).catch(() => {});
   }, 30_000);
 
+  // ── Heartbeat ──
+  // Sem isso, um proxy/rede móvel pode manter a conexão TCP "aberta" muito
+  // depois dela ter morrido de verdade — o Chat Interno fica com o ícone de
+  // conectado, mas nenhuma mensagem nova chega até a pessoa dar F5 (isso cria
+  // uma conexão nova do zero). O `/chat/events` do Atendimento já tinha essa
+  // proteção; faltava aqui. Um comentário SSE periódico (ignorado pelo
+  // EventSource) evita que intermediários fechem por inatividade e, o mais
+  // importante, a própria tentativa de escrita expõe uma conexão morta na
+  // hora: falha/dá RST, o EventSource do cliente percebe a queda e reconecta
+  // sozinho, reaplicando o que faltou via Last-Event-ID (replay/resync acima).
+  const heartbeat = setInterval(() => {
+    res.write(": keepalive\n\n");
+  }, 25_000);
+
   sseEmitter.on("internal", send);
   req.on("close", () => {
     clearInterval(suspensionCheck);
+    clearInterval(heartbeat);
     sseEmitter.off("internal", send);
   });
 });
@@ -657,6 +672,20 @@ const MEDIA_MIME_TO_EXT: Record<string, string> = {
   "application/vnd.ms-excel": "xls",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
 };
+// Fallback pela extensão do nome do arquivo quando o navegador não informa
+// (ou informa vazio/"application/octet-stream") um mimetype reconhecível —
+// PDF é o caso mais comum: em vários combos de Windows/navegador/origem do
+// arquivo (ex.: salvo de um scanner, de um e-mail, de outro programa),
+// `file.type` chega vazio pro front, e sem esse fallback o envio falhava
+// direto (mensagem confusa "mimetype é obrigatório" ou "tipo não suportado")
+// mesmo sendo um PDF válido de verdade.
+const EXT_FALLBACK_TO_MIME: Record<string, string> = {
+  pdf: "application/pdf", doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp",
+};
 const MEDIA_MAX_BYTES = 20 * 1024 * 1024;
 
 router.post("/internal-chat/conversations/:id/media", requireAuth, async (req, res): Promise<void> => {
@@ -668,9 +697,20 @@ router.post("/internal-chat/conversations/:id/media", requireAuth, async (req, r
   const { base64, mimetype: rawMimetype, filename, caption, replyToId: replyToIdRaw } = req.body as {
     base64?: string; mimetype?: string; filename?: string; caption?: string; replyToId?: number;
   };
-  if (!base64 || !rawMimetype) { res.status(400).json({ error: "base64 e mimetype são obrigatórios" }); return; }
-  const mimetype = rawMimetype.split(";")[0].trim().toLowerCase();
-  const ext = MEDIA_MIME_TO_EXT[mimetype];
+  if (!base64) { res.status(400).json({ error: "Arquivo obrigatório" }); return; }
+  let mimetype = (rawMimetype ?? "").split(";")[0]!.trim().toLowerCase();
+  let ext = MEDIA_MIME_TO_EXT[mimetype];
+  // mimetype ausente, vazio ou genérico ("application/octet-stream", comum
+  // quando o SO/navegador não sabe identificar o arquivo) — tenta pela
+  // extensão do nome antes de recusar.
+  if (!ext) {
+    const fileExt = filename?.split(".").pop()?.toLowerCase();
+    const fallbackMime = fileExt ? EXT_FALLBACK_TO_MIME[fileExt] : undefined;
+    if (fallbackMime) {
+      mimetype = fallbackMime;
+      ext = MEDIA_MIME_TO_EXT[mimetype];
+    }
+  }
   if (!ext) { res.status(400).json({ error: "Tipo de arquivo não suportado" }); return; }
 
   const conv = await getAccessibleConversation(convId, userId, tenantId);

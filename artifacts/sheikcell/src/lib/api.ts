@@ -1351,6 +1351,9 @@ export type Conversation = {
   name: string;
   avatarUrl: string | null;
   channel: string;
+  // Comunidade do WhatsApp (ou canal de avisos dela) — diferente de grupo
+  // comum, embora ambos usem @g.us; resolvido pela ponte do WhatsApp.
+  isCommunity?: boolean;
   sessionKey: string;
   sectorId: number | null;
   assigneeId: number | null;
@@ -1756,6 +1759,12 @@ export const api = {
     pinMessage: (messageId: number) => req<{ ok: boolean; pinned: PinnedMessage }>(`/chat/messages/${messageId}/pin`, { method: "POST" }),
     unpinMessage: (messageId: number) => req<{ ok: boolean; messageId: number }>(`/chat/messages/${messageId}/pin`, { method: "DELETE" }),
     messages: (id: number) => req<ChatMessage[]>(`/chat/conversations/${id}/messages`),
+    // Busca de texto DENTRO de uma conversa aberta (diferente da busca da
+    // lista de conversas, que filtra por nome/número).
+    searchMessages: (id: number, q: string) =>
+      req<{ id: number; content: string; type: string; senderName: string | null; direction: string; createdAt: string }[]>(
+        `/chat/conversations/${id}/messages/search?q=${encodeURIComponent(q)}`,
+      ),
     // Paginação por cursor: devolve o bloco de mensagens + flag de "tem mais
     // antigas" (cabeçalho X-Has-More). Sem `before`, é o bloco mais recente.
     messagesPage: async (id: number, before?: number): Promise<{ messages: ChatMessage[]; hasMore: boolean }> => {

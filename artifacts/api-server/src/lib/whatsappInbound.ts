@@ -168,6 +168,11 @@ export interface InboundWAPayload {
   senderName?: string;
   messageId?: string;
   isGroupMsg?: boolean;
+  // Baileys representa grupo comum e Comunidade do WhatsApp (ou o canal de
+  // avisos dela) com o mesmo tipo de JID (@g.us) — esta flag vem do
+  // metadata do grupo (isCommunity/isCommunityAnnounce), resolvido pela
+  // ponte do WhatsApp, pra diferenciar na Central de Atendimento.
+  isCommunityMsg?: boolean;
   fromMe?: boolean;
 }
 
@@ -280,6 +285,9 @@ async function upsertConversation(
   avatarUrl?: string,
   // Grupos: mantém o nome da conversa sincronizado com o nome do grupo.
   syncName: boolean = false,
+  // Comunidade do WhatsApp (ou canal de avisos dela) — resolvido pela ponte
+  // via metadata do grupo, ver InboundWAPayload.isCommunityMsg.
+  isCommunity: boolean = false,
 ) {
   // Bloqueio de contato (spam, envio de mensagem indesejado etc.): número
   // marcado como bloqueado no CRM (ver crm.ts PATCH /crm/:id) é descartado
@@ -352,6 +360,7 @@ async function upsertConversation(
         name: pushName,
         avatarUrl: avatarUrl ?? null,
         channel: "whatsapp",
+        isCommunity,
         sessionKey,
         sectorId: targetSectorId,
         status: "open",
@@ -382,6 +391,10 @@ async function upsertConversation(
         ...(reopen ? { status: "open", assigneeId: null, attendanceStartedAt: null } : {}),
         ...(avatarUrl && avatarUrl !== conv.avatarUrl ? { avatarUrl } : {}),
         ...(syncName && pushName && pushName !== conv.name ? { name: pushName } : {}),
+        // Autocorrige se a 1ª mensagem chegou antes do metadata do grupo
+        // resolver "é Comunidade" (timeout/erro pontual) — nunca desmarca
+        // um já marcado como comunidade por engano.
+        ...(isCommunity && !conv.isCommunity ? { isCommunity: true } : {}),
         // Convergência gradual: se a conversa foi achada via variante (número
         // salvo antigo, sem DDI ou sem o 9º dígito), atualiza pra forma
         // canônica agora que veio uma mensagem nova.
@@ -722,8 +735,10 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     ? (remoteJid ?? "unknown")
     : remoteJid?.replace("@s.whatsapp.net", "").replace("@c.us", "") ?? "unknown";
   const pushName = body.data?.pushName ?? body.senderName ?? phone;
-  // Nome da conversa: nome do grupo (subject) para grupos; nome do contato para 1:1.
-  const convName = isGroup ? (body.data?.groupSubject || "Grupo do WhatsApp") : pushName;
+  // Nome da conversa: nome do grupo (subject) para grupos/comunidades; nome do contato para 1:1.
+  const convName = isGroup
+    ? (body.data?.groupSubject || (body.isCommunityMsg ? "Comunidade do WhatsApp" : "Grupo do WhatsApp"))
+    : pushName;
   // Telefone de quem mandou DENTRO do grupo (participante) — permite abrir
   // uma conversa 1:1 com ele a partir da Central. Se vier como "@lid" sem
   // resolução (a ponte não conseguiu mapear pro telefone real), não é um
@@ -1041,6 +1056,7 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   const conv = await upsertConversation(
     tenantId, phone, convName, displayContent, sessionKey, body.data?.avatarUrl,
     isGroup && !!body.data?.groupSubject,
+    isGroup && (body.isCommunityMsg ?? false),
   );
   // Contato bloqueado (spam etc.) -- mensagem descartada, sem conversa/log.
   if (!conv) return;

@@ -704,6 +704,43 @@ router.get("/chat/conversations/:id/messages", requireAuth, requireChatAccess(),
   res.json(msgs);
 });
 
+// ─── Busca de texto DENTRO de uma conversa ─────────────────────────────────
+// Diferente do campo de busca da lista de conversas (que filtra por
+// nome/número): isso pesquisa dentro do histórico de mensagens de UMA
+// conversa já aberta, incluindo texto de legenda/transcrição de áudio.
+router.get("/chat/conversations/:id/messages/search", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+
+  const qRaw = Array.isArray(req.query.q) ? String(req.query.q[0]) : String(req.query.q ?? "");
+  const q = qRaw.trim();
+  if (q.length < 2) { res.json([]); return; }
+
+  const pattern = `%${q.replace(/[%_]/g, "\\$&")}%`; // escapa curinga do LIKE pra buscar o texto literal
+  const rows = await db.select({
+    id: messagesTable.id,
+    content: messagesTable.content,
+    type: messagesTable.type,
+    senderName: messagesTable.senderName,
+    direction: messagesTable.direction,
+    createdAt: messagesTable.createdAt,
+  })
+    .from(messagesTable)
+    .where(and(
+      eq(messagesTable.conversationId, id),
+      isNull(messagesTable.deletedAt),
+      or(ilike(messagesTable.content, pattern), ilike(messagesTable.transcript, pattern)),
+    ))
+    .orderBy(desc(messagesTable.createdAt), desc(messagesTable.id))
+    .limit(50);
+
+  res.json(rows);
+});
+
 // ─── Editar / apagar mensagem (só quem enviou, ou admin/supervisor) ───────
 // IMPORTANTE: isso edita/apaga só o REGISTRO aqui dentro do sistema — não
 // reenvia uma revogação pro WhatsApp do cliente. Fazer isso de verdade (igual
@@ -793,13 +830,13 @@ router.post("/chat/conversations/:id/media", requireAuth, requireChatAccess(), r
     replyToId?: number;
   };
 
-  if (!base64 || !rawMimetype) {
-    res.status(400).json({ error: "base64 e mimetype são obrigatórios" });
+  if (!base64) {
+    res.status(400).json({ error: "Arquivo obrigatório" });
     return;
   }
   // Navegadores mandam tipos com parâmetros, ex. "audio/webm;codecs=opus" —
   // normaliza para o tipo base antes de validar.
-  const mimetype = rawMimetype.split(";")[0].trim().toLowerCase();
+  let mimetype = (rawMimetype ?? "").split(";")[0]!.trim().toLowerCase();
 
   const ALLOWED_MIMES_OUT = new Set([
     "image/jpeg", "image/png", "image/gif", "image/webp",
@@ -811,6 +848,23 @@ router.post("/chat/conversations/:id/media", requireAuth, requireChatAccess(), r
     "application/vnd.ms-excel",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   ]);
+  // mimetype ausente, vazio ou genérico ("application/octet-stream", comum
+  // quando o navegador/SO não identifica o arquivo — PDF é o caso mais comum
+  // nesse ponto) — tenta pela extensão do nome antes de recusar, mesmo
+  // fallback aplicado no Chat Interno pro mesmo tipo de bug.
+  if (!ALLOWED_MIMES_OUT.has(mimetype)) {
+    const EXT_FALLBACK_TO_MIME: Record<string, string> = {
+      pdf: "application/pdf", doc: "application/msword",
+      docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      xls: "application/vnd.ms-excel",
+      xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp",
+      mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime",
+    };
+    const fileExt = filename?.split(".").pop()?.toLowerCase();
+    const fallbackMime = fileExt ? EXT_FALLBACK_TO_MIME[fileExt] : undefined;
+    if (fallbackMime) mimetype = fallbackMime;
+  }
   if (!ALLOWED_MIMES_OUT.has(mimetype)) {
     res.status(400).json({ error: "Tipo de arquivo não suportado" });
     return;

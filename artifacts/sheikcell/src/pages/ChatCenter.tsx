@@ -1102,6 +1102,12 @@ export default function ChatCenter({
   const [loadingMsgs, setLoadingMsgs] = useState(false);
   const [hasMoreOlder, setHasMoreOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  // Busca de texto DENTRO da conversa aberta (diferente da busca da lista de
+  // conversas, que só filtra por nome/número).
+  const [showMsgSearch, setShowMsgSearch] = useState(false);
+  const [msgSearchQuery, setMsgSearchQuery] = useState("");
+  const [msgSearchResults, setMsgSearchResults] = useState<{ id: number; content: string; type: string; senderName: string | null; direction: string; createdAt: string }[]>([]);
+  const [msgSearchLoading, setMsgSearchLoading] = useState(false);
   const [sending, setSending] = useState(false);
   // Trava obrigatória de Rotinas e Produtividade (Fase 3) só aparece quando
   // isBusy() está livre — registra aqui os mesmos momentos em que liga/
@@ -1949,6 +1955,61 @@ export default function ChatCenter({
     setHighlightedMsgId(id);
     setTimeout(() => setHighlightedMsgId((cur) => (cur === id ? null : cur)), 1500);
   };
+
+  // Fecha a conversa e limpa a busca dentro dela ao trocar de conversa —
+  // sem isso o resultado antigo (de outra conversa) ficaria visível.
+  useEffect(() => {
+    setShowMsgSearch(false);
+    setMsgSearchQuery("");
+    setMsgSearchResults([]);
+  }, [activeId]);
+
+  // Busca dentro da conversa, com debounce — evita uma request por tecla.
+  useEffect(() => {
+    const q = msgSearchQuery.trim();
+    if (activeId == null || q.length < 2) { setMsgSearchResults([]); return; }
+    setMsgSearchLoading(true);
+    const t = setTimeout(() => {
+      api.chat.searchMessages(activeId, q)
+        .then((rows) => { if (activeIdRef.current === activeId) setMsgSearchResults(rows); })
+        .catch(() => { setMsgSearchResults([]); })
+        .finally(() => setMsgSearchLoading(false));
+    }, 350);
+    return () => clearTimeout(t);
+  }, [msgSearchQuery, activeId]);
+
+  // Pula pra uma mensagem de um resultado de busca — se ela ainda não estiver
+  // carregada na tela (conversa longa, além da página inicial de 500), busca
+  // blocos mais antigos (mesma paginação por cursor do "carregar mais
+  // antigas") até achar, com um teto de segurança pra não entrar em loop.
+  const jumpToMessage = useCallback(async (id: number) => {
+    const convId = activeId;
+    if (convId == null) return;
+    if (document.getElementById(`chat-msg-${id}`)) {
+      scrollToMessage(id);
+      return;
+    }
+    setLoadingOlder(true);
+    try {
+      let cursor = messages[0]?.id;
+      for (let i = 0; i < 12 && cursor != null; i++) {
+        const { messages: older, hasMore } = await api.chat.messagesPage(convId, cursor);
+        if (activeIdRef.current !== convId) return;
+        if (older.length === 0) break;
+        setMessages((prev) => {
+          const seen = new Set(prev.map((m) => m.id));
+          return [...older.filter((m) => !seen.has(m.id)), ...prev];
+        });
+        setHasMoreOlder(hasMore);
+        if (older.some((m) => m.id === id)) break;
+        cursor = older[0]?.id;
+        if (!hasMore) break;
+      }
+    } catch { /* silent */ } finally {
+      setLoadingOlder(false);
+    }
+    requestAnimationFrame(() => requestAnimationFrame(() => scrollToMessage(id)));
+  }, [activeId, messages]);
 
   // "Marcar mensagem" — fixar/desafixar (otimista; o SSE acima confirma pros
   // outros atendentes vendo a mesma conversa).
@@ -3342,7 +3403,7 @@ export default function ChatCenter({
               )}
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 {channelIcon(activeConv.channel, isGroupConv(activeConv))}
-                <span>{isGroupConv(activeConv) ? "Grupo do WhatsApp" : activeConv.phone}</span>
+                <span>{activeConv.isCommunity ? "Comunidade do WhatsApp" : isGroupConv(activeConv) ? "Grupo do WhatsApp" : activeConv.phone}</span>
                 {activeConv.channel === "whatsapp" && (waSessions.length > 1 || activeConv.sessionKey !== "default") && (
                   <span
                     className="px-1.5 py-0.5 rounded-full font-semibold truncate max-w-[140px]"
@@ -3375,6 +3436,17 @@ export default function ChatCenter({
               </div>
             </div>
             <div className="flex items-center gap-1 flex-wrap justify-end max-w-full shrink-0" ref={headerPickersRef}>
+              {/* Busca de texto DENTRO desta conversa — diferente da busca da
+                  lista de conversas (que filtra por nome/número). */}
+              <button
+                type="button"
+                onClick={() => setShowMsgSearch((v) => !v)}
+                data-testid="button-search-in-conv"
+                title="Buscar nesta conversa"
+                className={`p-1.5 rounded-lg hover:bg-secondary transition ${showMsgSearch ? "bg-secondary" : ""}`}
+              >
+                <Search className="w-4 h-4 text-muted-foreground" />
+              </button>
               {/* Menu "mais ações" — só no celular. Agrupa favoritar/excluir/CRM
                   (as ações menos usadas) pra não estourar a largura da tela.
                   No desktop esse botão some e as ações voltam a aparecer soltas. */}
@@ -3688,6 +3760,58 @@ export default function ChatCenter({
                   <button onClick={() => handleLabel(label)} className="ml-0.5 opacity-60 hover:opacity-100"><X className="w-2.5 h-2.5" /></button>
                 </span>
               ))}
+            </div>
+          )}
+
+          {/* Busca de texto dentro da conversa aberta */}
+          {showMsgSearch && (
+            <div className="bg-white border-b border-border px-3 py-2" data-testid="bar-search-in-conv">
+              <div className="flex items-center gap-2 bg-secondary rounded-full px-3 py-1.5">
+                <Search className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                <input
+                  autoFocus
+                  value={msgSearchQuery}
+                  onChange={(e) => setMsgSearchQuery(e.target.value)}
+                  placeholder="Buscar nesta conversa..."
+                  data-testid="input-search-in-conv"
+                  className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground"
+                />
+                {msgSearchLoading && <div className="w-3.5 h-3.5 border-2 border-primary border-t-transparent rounded-full animate-spin shrink-0" />}
+                <button
+                  type="button"
+                  onClick={() => { setShowMsgSearch(false); setMsgSearchQuery(""); setMsgSearchResults([]); }}
+                  data-testid="button-close-search-in-conv"
+                >
+                  <X className="w-3.5 h-3.5 text-muted-foreground" />
+                </button>
+              </div>
+              {msgSearchQuery.trim().length >= 2 && (
+                <div className="mt-1 max-h-48 overflow-y-auto rounded-lg border border-border bg-white shadow-sm">
+                  {msgSearchResults.length === 0 && !msgSearchLoading ? (
+                    <p className="text-xs text-muted-foreground px-3 py-2">Nada encontrado com esse termo nesta conversa.</p>
+                  ) : (
+                    msgSearchResults.map((r) => (
+                      <button
+                        key={r.id}
+                        type="button"
+                        onClick={() => jumpToMessage(r.id)}
+                        data-testid={`button-search-result-${r.id}`}
+                        className="w-full text-left px-3 py-2 border-b border-border last:border-b-0 hover:bg-secondary transition"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[11px] font-semibold text-muted-foreground truncate">
+                            {r.direction === "outbound" ? (r.senderName ?? "Equipe") : (r.senderName ?? activeConv.name)}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground shrink-0">
+                            {new Date(r.createdAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                          </span>
+                        </div>
+                        <div className="text-xs text-foreground truncate">{r.content}</div>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
             </div>
           )}
 

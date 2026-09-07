@@ -169,25 +169,33 @@ async function getProfilePicture(s: Session, jid: string): Promise<string | unde
   return url;
 }
 
-// Cache do nome (subject) do grupo por JID (6h) — evita consultar os metadados
-// do grupo a cada mensagem recebida.
-const groupSubjectCache = new Map<string, { subject: string | undefined; at: number }>();
+// Cache do nome (subject) do grupo + se é uma Comunidade do WhatsApp (ou o
+// canal de avisos dela) por JID (6h) — evita consultar os metadados do
+// grupo a cada mensagem recebida. Baileys representa tanto grupo comum
+// quanto comunidade com o mesmo tipo de JID (@g.us); o metadata do grupo é
+// que informa `isCommunity`/`isCommunityAnnounce` quando é o caso.
+const groupSubjectCache = new Map<string, { subject: string | undefined; isCommunity: boolean; at: number }>();
 
-async function getGroupSubject(s: Session, jid: string): Promise<string | undefined> {
+async function getGroupInfo(s: Session, jid: string): Promise<{ subject: string | undefined; isCommunity: boolean }> {
   const hit = groupSubjectCache.get(jid);
-  if (hit && Date.now() - hit.at < AVATAR_TTL_MS) return hit.subject;
+  if (hit && Date.now() - hit.at < AVATAR_TTL_MS) return hit;
   let subject: string | undefined;
+  let isCommunity = false;
   try {
-    // Timeout curto: buscar o nome do grupo nunca pode atrasar a entrega.
-    subject = (await Promise.race([
-      s.sock?.groupMetadata(jid).then((meta) => meta?.subject || undefined),
+    // Timeout curto: buscar os metadados do grupo nunca pode atrasar a entrega.
+    const meta = await Promise.race([
+      s.sock?.groupMetadata(jid),
       new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 5_000)),
-    ])) ?? undefined;
+    ]);
+    subject = meta?.subject || undefined;
+    isCommunity = !!(meta as { isCommunity?: boolean; isCommunityAnnounce?: boolean } | undefined)?.isCommunity
+      || !!(meta as { isCommunity?: boolean; isCommunityAnnounce?: boolean } | undefined)?.isCommunityAnnounce;
   } catch {
     // sem acesso aos metadados — segue sem nome; a Central usa um rótulo padrão
   }
-  groupSubjectCache.set(jid, { subject, at: Date.now() });
-  return subject;
+  const result = { subject, isCommunity, at: Date.now() };
+  groupSubjectCache.set(jid, result);
+  return result;
 }
 
 /**
@@ -347,16 +355,17 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
   }
 
   const avatarUrl = await getProfilePicture(s, remoteJid);
-  const groupSubject = isGroup ? await getGroupSubject(s, remoteJid) : undefined;
+  const groupInfo = isGroup ? await getGroupInfo(s, remoteJid) : undefined;
 
   const payload = {
     sessionKey: s.key,
     isGroupMsg: isGroup,
+    isCommunityMsg: groupInfo?.isCommunity ?? false,
     data: {
       key: { remoteJid, fromMe: false, id: m.key?.id ?? undefined, participant },
       message: msg,
       pushName: m.pushName ?? undefined,
-      groupSubject,
+      groupSubject: groupInfo?.subject,
       messageTimestamp:
         typeof m.messageTimestamp === "number" ? m.messageTimestamp : undefined,
       mediaBase64,
