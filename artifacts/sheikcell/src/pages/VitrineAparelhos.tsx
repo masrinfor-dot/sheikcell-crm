@@ -250,8 +250,17 @@ function sortCatalogProducts(list: CatalogProduct[], sortBy: CatalogSortOption):
 // Normaliza o modelo pra comparar duplicidade (evitar dois anúncios do
 // mesmo aparelho na mesma categoria/subcategoria) — minúsculo, sem acento,
 // espaços colapsados. Ex.: "iPhone  15 Pró Max" e "iphone 15 pro max" batem.
+const REDUNDANT_BRAND_PREFIXES = ["xiaomi", "samsung", "motorola", "apple", "asus", "realme", "honor", "huawei", "oneplus", "google", "lg"];
+function stripRedundantBrandPrefix(normalized: string): string {
+  for (const brand of REDUNDANT_BRAND_PREFIXES) {
+    if (normalized === brand) continue;
+    if (normalized.startsWith(`${brand} `)) return normalized.slice(brand.length + 1).trim();
+  }
+  return normalized;
+}
 function normalizeModelForDuplicateCheck(model: string): string {
-  return model.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+  const base = model.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+  return stripRedundantBrandPrefix(base);
 }
 
 // Acha um an\u00fancio j\u00e1 cadastrado do MESMO aparelho (modelo normalizado + mesma
