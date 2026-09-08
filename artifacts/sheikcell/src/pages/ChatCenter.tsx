@@ -2515,9 +2515,21 @@ export default function ChatCenter({
   const handleTransferToUser = async (targetUserId: number, targetName: string) => {
     if (!activeConv) return;
     try {
-      await api.chat.sendMessage(activeConv.id, `🔀 Conversa transferida para ${targetName}`);
+      // Atribui o responsável PRIMEIRO (igual handleTransfer, abaixo). Antes
+      // mandava a mensagem de sistema antes de atribuir — e o backend recusa
+      // qualquer mensagem em conversa sem responsável ("Inicie o atendimento
+      // antes de enviar mensagens"), então transferir da fila (Pendentes/
+      // Potenciais, sem responsável ainda) pro admin/supervisor sempre falhava
+      // com "Erro ao transferir", obrigando a "iniciar" a conversa primeiro
+      // pra depois transferir — o que não devia ser necessário pra quem tem
+      // permissão de admin/supervisor.
       const updated = await api.chat.updateConversation(activeConv.id, { assigneeId: targetUserId });
       setConvs((prev) => prev.map((c) => c.id === activeConv.id ? { ...c, ...updated } : c));
+      // Mensagem de sistema no histórico é só um registro — best-effort: se
+      // falhar por qualquer motivo, a transferência acima já valeu.
+      try {
+        await api.chat.sendMessage(activeConv.id, `🔀 Conversa transferida para ${targetName}`);
+      } catch { /* não bloqueia a transferência, que já foi feita acima */ }
       setShowTransferPicker(false);
       toast({ title: `Transferido para ${targetName}`, description: "A conversa agora está nos Ativos desse vendedor." });
     } catch (err) {
