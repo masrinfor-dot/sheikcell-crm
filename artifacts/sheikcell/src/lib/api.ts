@@ -475,6 +475,10 @@ export type CatalogProduct = {
   // Aproximação de popularidade (clique em "Finalizar pedido" na vitrine
   // pública) — usada só pro filtro de ordenação "Mais comprado".
   purchaseCount: number;
+  // Selo "Promoção" (vermelho) na vitrine pública — marcado manualmente
+  // pelo lojista (botão "Oferta" na Vitrine Aparelhos), independente do
+  // preço "de/por" de cada variante.
+  featured: boolean;
   // DEPRECATED — lista de características livre gerada por IA em produtos
   // antigos; produto novo usa aiSpecs (grade de ícones) abaixo.
   aiCharacteristics: string[] | null;
@@ -552,6 +556,8 @@ export type CatalogPublicProduct = {
   // Aproximação de popularidade (clique em "Finalizar pedido") — usada só
   // pro filtro de ordenação "Mais comprado" na listagem.
   purchaseCount: number;
+  // Selo "Promoção" (vermelho) — marcado manualmente pelo lojista.
+  featured: boolean;
   // Resumo de avaliação (estrelas) — null se o produto ainda não tem
   // nenhuma avaliação.
   reviewsSummary: { average: number; count: number } | null;
@@ -2435,6 +2441,7 @@ export const api = {
     update: (id: number, data: Record<string, unknown>) => req<CatalogProduct>(`/catalog/products/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/catalog/products/${id}`, { method: "DELETE" }),
     bulkRemove: (ids: number[]) => req<{ ok: boolean; deleted: number }>("/catalog/products/bulk-delete", { method: "POST", body: JSON.stringify({ ids }) }),
+    bulkFeatured: (ids: number[], featured: boolean) => req<{ ok: boolean; updated: number; featured: boolean }>("/catalog/products/bulk-featured", { method: "POST", body: JSON.stringify({ ids, featured }) }),
     addPhoto: (productId: number, file: File, color?: string | null) => readAsAttachment(file).then((att) =>
       req<CatalogPhoto>(`/catalog/products/${productId}/photos`, { method: "POST", body: JSON.stringify({ mimeType: att?.mimetype, data: att?.base64, color }) })),
     removePhoto: (productId: number, photoId: number) => req<{ ok: boolean }>(`/catalog/products/${productId}/photos/${photoId}`, { method: "DELETE" }),

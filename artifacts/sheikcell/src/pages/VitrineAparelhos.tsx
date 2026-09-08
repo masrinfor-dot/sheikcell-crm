@@ -12,7 +12,7 @@ import { requestChatExpand } from "@/lib/chatWidgetBus";
 import {
   Smartphone, Plus, X, Search, Trash2, Pencil, Sparkles, Settings2, Link2,
   Copy, ImagePlus, Check, AlertTriangle, Loader2, MessageCircle, Info, Calculator,
-  Tags, Lock, KeyRound, Package, ShieldCheck, Bell, Percent, ListChecks, CreditCard, Star, Wallet,
+  Tags, Tag, Lock, KeyRound, Package, ShieldCheck, Bell, Percent, ListChecks, CreditCard, Star, Wallet,
   Wifi, Cpu, MapPin, Monitor, Camera, Video, MemoryStick,
 } from "lucide-react";
 
@@ -310,6 +310,7 @@ export default function VitrineAparelhos() {
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [bulkFeaturedUpdating, setBulkFeaturedUpdating] = useState(false);
 
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<CatalogProduct | null>(null);
@@ -729,6 +730,39 @@ export default function VitrineAparelhos() {
       toast({ title: "Erro ao excluir em massa", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
     } finally {
       setBulkDeleting(false);
+    }
+  };
+
+  // Botão "Oferta" — marca/desmarca o selo "Promoção" (vermelho) nos
+  // aparelhos selecionados, mostrado na vitrine pública (VitrinePublica.tsx).
+  // Independente do preço "de/por": dá pra destacar sem mexer em preço.
+  const handleBulkFeatured = async (featured: boolean) => {
+    if (bulkFeaturedUpdating || selectedIds.size === 0) return;
+    setBulkFeaturedUpdating(true);
+    try {
+      const ids = [...selectedIds];
+      await api.catalog.bulkFeatured(ids, featured);
+      setProducts((prev) => prev.map((p) => (selectedIds.has(p.id) ? { ...p, featured } : p)));
+      setSelectedIds(new Set());
+      setSelectMode(false);
+      toast({ title: featured ? `${ids.length} aparelho(s) marcado(s) como oferta` : `${ids.length} aparelho(s) removido(s) da oferta` });
+    } catch (err) {
+      toast({ title: "Erro ao atualizar oferta", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    } finally {
+      setBulkFeaturedUpdating(false);
+    }
+  };
+
+  // Alterna o selo de um único aparelho, sem precisar entrar no modo de
+  // seleção múltipla — atalho rápido direto no card.
+  const handleToggleFeatured = async (p: CatalogProduct) => {
+    const next = !p.featured;
+    setProducts((prev) => prev.map((x) => (x.id === p.id ? { ...x, featured: next } : x)));
+    try {
+      await api.catalog.update(p.id, { featured: next });
+    } catch (err) {
+      setProducts((prev) => prev.map((x) => (x.id === p.id ? { ...x, featured: !next } : x)));
+      toast({ title: "Erro ao atualizar oferta", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
     }
   };
 
@@ -1553,8 +1587,16 @@ export default function VitrineAparelhos() {
             <button onClick={clearSelection} data-testid="button-clear-selection"
               className="text-xs font-semibold text-muted-foreground hover:underline">Limpar seleção</button>
           )}
+          <button onClick={() => handleBulkFeatured(true)} disabled={selectedIds.size === 0 || bulkFeaturedUpdating} data-testid="button-bulk-mark-featured"
+            className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-red-50 text-red-700 border border-red-200 text-xs font-semibold hover:bg-red-100 disabled:opacity-40 transition">
+            <Tag className="w-3.5 h-3.5" /> {bulkFeaturedUpdating ? "Atualizando..." : `Marcar como oferta (${selectedIds.size})`}
+          </button>
+          <button onClick={() => handleBulkFeatured(false)} disabled={selectedIds.size === 0 || bulkFeaturedUpdating} data-testid="button-bulk-unmark-featured"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-secondary text-muted-foreground text-xs font-semibold hover:bg-secondary/70 disabled:opacity-40 transition">
+            Remover oferta
+          </button>
           <button onClick={handleBulkDelete} disabled={selectedIds.size === 0 || bulkDeleting} data-testid="button-bulk-delete"
-            className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-red-600 text-white text-xs font-semibold hover:bg-red-700 disabled:opacity-40 transition">
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-red-600 text-white text-xs font-semibold hover:bg-red-700 disabled:opacity-40 transition">
             <Trash2 className="w-3.5 h-3.5" /> {bulkDeleting ? "Excluindo..." : `Excluir selecionados (${selectedIds.size})`}
           </button>
         </div>
@@ -1582,6 +1624,11 @@ export default function VitrineAparelhos() {
                   <div className={`absolute top-1.5 left-1.5 z-10 w-5 h-5 rounded-md border-2 flex items-center justify-center ${selectedIds.has(p.id) ? "bg-primary border-primary" : "bg-white/90 border-neutral-300"}`}>
                     {selectedIds.has(p.id) && <Check className="w-3.5 h-3.5 text-white" />}
                   </div>
+                )}
+                {p.featured && (
+                  <span className="absolute top-1.5 right-1.5 z-10 px-1.5 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-bold uppercase tracking-wide">
+                    Promoção
+                  </span>
                 )}
                 {p.photos[0] ? (
                   <img src={api.catalog.photoUrl(p.photos[0].id)} alt={p.model} className="w-full h-full object-cover" />
@@ -1620,6 +1667,11 @@ export default function VitrineAparelhos() {
                       className="p-1.5 rounded-lg hover:bg-emerald-50 text-emerald-600"><MessageCircle className="w-3.5 h-3.5" /></button>
                     {canManage && (
                       <>
+                        <button onClick={() => handleToggleFeatured(p)} title={p.featured ? "Remover da oferta" : "Marcar como oferta"}
+                          data-testid={`button-toggle-featured-${p.id}`}
+                          className={`p-1.5 rounded-lg ${p.featured ? "bg-red-50 text-red-600 hover:bg-red-100" : "hover:bg-secondary text-muted-foreground"}`}>
+                          <Tag className="w-3.5 h-3.5" />
+                        </button>
                         <button onClick={() => openEdit(p)} data-testid={`button-edit-product-${p.id}`}
                           className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground"><Pencil className="w-3.5 h-3.5" /></button>
                         <button onClick={() => handleDelete(p)} data-testid={`button-delete-product-${p.id}`}

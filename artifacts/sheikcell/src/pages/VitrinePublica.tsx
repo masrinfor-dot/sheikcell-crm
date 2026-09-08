@@ -259,9 +259,23 @@ function ProductCard({
   onAddToCart: (item: { productId: number; variantId: number; model: string; storage: string | null; unitPrice: number | null; wholesale: boolean }, qty: number) => void;
   onOpenDetail: (p: CatalogPublicProduct) => void;
 }) {
-  const [selectedId, setSelectedId] = useState(p.variants[0]?.id ?? null);
+  // O card sempre mostra o preço da variante mais BARATA ("a partir de"),
+  // nunca a primeira cadastrada — pedido do lojista (08/09): "mostra sempre
+  // o menor preço das versões na frente". Escolher a variação de verdade
+  // (armazenamento/cor) só acontece dentro do modal de detalhe agora — o
+  // card não tem mais os botões de armazenamento (ocupavam espaço demais).
+  const cheapestVariant = useMemo(() => {
+    const withPrice = p.variants.filter((v) => (v.priceCash ?? (v.salePrice != null ? Number(v.salePrice) : null)) != null);
+    const pool = withPrice.length > 0 ? withPrice : p.variants;
+    return pool.reduce<typeof p.variants[number] | null>((min, v) => {
+      const price = v.priceCash ?? (v.salePrice != null ? Number(v.salePrice) : Infinity);
+      const minPrice = min ? (min.priceCash ?? (min.salePrice != null ? Number(min.salePrice) : Infinity)) : Infinity;
+      return min == null || price < minPrice ? v : min;
+    }, null);
+  }, [p.variants]);
   const [showCriteria, setShowCriteria] = useState(false);
-  const selected = p.variants.find((v) => v.id === selectedId) ?? p.variants[0] ?? null;
+  const selected = cheapestVariant ?? p.variants[0] ?? null;
+  const memory = memoryRangeLabel(p.variants);
   // À vista (Pix/dinheiro, sem taxa de cartão) é o preço principal mostrado;
   // cai pro salePrice antigo se o backend não mandar priceCash (compatibilidade).
   const retailPrice = formatBRL(selected?.priceCash ?? selected?.salePrice ?? null);
@@ -277,8 +291,16 @@ function ProductCard({
     <div className="bg-white rounded-2xl border border-neutral-200 overflow-hidden flex flex-col">
       <button type="button" onClick={() => onOpenDetail(p)} data-testid={`button-open-detail-${p.id}`}
         className="relative aspect-square bg-neutral-100 flex items-center justify-center overflow-hidden p-4">
+        {/* "Promoção" — selo vermelho manual (botão "Oferta" no admin),
+            independente do desconto de preço abaixo; os dois podem aparecer
+            juntos, cada um num canto pra não sobrepor. */}
+        {p.featured && (
+          <span className="absolute top-1.5 left-1.5 z-10 px-2 py-0.5 rounded-md bg-white text-red-600 text-[10px] font-extrabold uppercase tracking-wide shadow-sm">
+            Promoção
+          </span>
+        )}
         {discount && (
-          <span className="absolute top-1.5 left-1.5 z-10 px-1.5 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-bold">
+          <span className="absolute top-1.5 right-1.5 z-10 px-1.5 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-bold">
             {discount.percentOff}% OFF
           </span>
         )}
@@ -310,17 +332,13 @@ function ProductCard({
         </button>
         {p.colors.length > 0 && <p className="text-[11px] text-neutral-400">{p.colors.join(" · ")}</p>}
 
-        {p.variants.length > 1 && (
-          <div className="flex flex-wrap gap-1 pt-0.5">
-            {p.variants.map((v) => (
-              <button key={v.id} type="button" onClick={() => setSelectedId(v.id)}
-                className={`px-2 py-1 rounded-lg text-[11px] font-semibold border transition ${
-                  v.id === selectedId ? "bg-neutral-900 text-white border-neutral-900" : "bg-white text-neutral-600 border-neutral-200 hover:border-neutral-400"
-                } ${!v.inStock ? "opacity-50" : ""}`}>
-                {variantLabel(v)}
-              </button>
-            ))}
-          </div>
+        {/* As opções de armazenamento/cor só aparecem dentro do anúncio (modal
+            de detalhe) agora — mostrar tudo aqui no card ocupava espaço demais
+            quando o aparelho tinha muitas variantes (pedido do lojista, 08/09).
+            Aqui só uma dica compacta de faixa de memória, se houver mais de
+            uma opção. */}
+        {p.variants.length > 1 && memory && (
+          <p className="text-[11px] text-neutral-500">{memory}</p>
         )}
         {p.variants.length === 1 && (p.variants[0].storage || p.variants[0].color) && (
           <p className="text-xs text-neutral-500">{variantLabel(p.variants[0])}</p>
@@ -329,6 +347,7 @@ function ProductCard({
         <div className="mt-auto pt-1">
           {discount && <p className="text-[11px] text-neutral-400 line-through">{formatBRL(discount.from)}</p>}
           <div className="flex items-center gap-1.5 flex-wrap">
+            {p.variants.length > 1 && retailPrice && <span className="text-[10px] text-neutral-400">a partir de</span>}
             <p className="text-base font-bold text-emerald-600">{retailPrice ?? "Sob consulta"}</p>
             {retailPrice && cardFeeSavings != null && (
               <span className="px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold">-{cardFeeSavings}% à vista</span>
@@ -343,6 +362,12 @@ function ProductCard({
             </>
           )}
           {inStock ? (
+            p.variants.length > 1 ? (
+              <button type="button" onClick={() => onOpenDetail(p)} data-testid={`button-choose-options-${p.id}`}
+                className="mt-2 inline-flex items-center justify-center gap-1.5 w-full py-2 rounded-xl bg-neutral-900 text-white text-xs font-semibold hover:bg-neutral-800 transition">
+                <ShoppingCart className="w-3.5 h-3.5" /> Ver opções
+              </button>
+            ) : (
             <button type="button" disabled={!selected}
               onClick={() => selected && onAddToCart({
                 productId: p.id, variantId: selected.id, model: p.model, storage: cartVariantLabel(selected),
@@ -352,6 +377,7 @@ function ProductCard({
               className="mt-2 inline-flex items-center justify-center gap-1.5 w-full py-2 rounded-xl bg-neutral-900 text-white text-xs font-semibold hover:bg-neutral-800 transition disabled:opacity-40">
               <ShoppingCart className="w-3.5 h-3.5" /> Adicionar ao pedido
             </button>
+            )
           ) : (
             <button type="button" onClick={() => onOpenDetail(p)} data-testid={`button-notify-me-card-${p.id}`}
               className="mt-2 inline-flex items-center justify-center gap-1.5 w-full py-2 rounded-xl bg-neutral-100 text-neutral-700 text-xs font-semibold hover:bg-neutral-200 transition">
@@ -520,7 +546,12 @@ function ProductDetailModal({
             continua empilhado (foto em cima, infos embaixo), só que maior
             que antes. */}
         <div className="overflow-y-auto sm:grid sm:grid-cols-5">
-          <div className="sm:col-span-2 sm:sticky sm:top-0 sm:self-start bg-neutral-50 sm:border-r border-neutral-100 p-3 sm:p-5 space-y-2">
+          <div className="sm:col-span-2 sm:sticky sm:top-0 sm:self-start bg-neutral-50 sm:border-r border-neutral-100 p-3 sm:p-5 space-y-2 relative">
+            {p.featured && (
+              <span className="absolute top-4 left-4 sm:top-6 sm:left-6 z-10 px-2 py-0.5 rounded-md bg-white text-red-600 text-[10px] font-extrabold uppercase tracking-wide shadow-sm">
+                Promoção
+              </span>
+            )}
             {displayedPhotos.length > 0 ? (
               <Carousel setApi={setCarouselApi} opts={{ loop: displayedPhotos.length > 1 }}>
                 <CarouselContent className="ml-0">
@@ -814,6 +845,9 @@ export default function VitrinePublica() {
   // ir de novo no servidor (a vitrine já tem todo o catálogo em mãos).
   const [searchQuery, setSearchQuery] = useState("");
   const [conditionFilter, setConditionFilter] = useState<string | "all">("all");
+  // Filtro "Ofertas" — só os aparelhos marcados com o selo "Promoção" no
+  // admin (botão "Oferta" na Vitrine Aparelhos). Pedido do lojista (08/09).
+  const [onlyFeatured, setOnlyFeatured] = useState(false);
   const [storageFilter, setStorageFilter] = useState<string | "all">("all");
   const [colorFilter, setColorFilter] = useState<string | "all">("all");
   // "recent" (modelo mais novo primeiro) é sempre o padrão — pedido do lojista.
@@ -978,6 +1012,7 @@ export default function VitrinePublica() {
 
   const searchNorm = searchQuery.trim().toLowerCase();
   const filteredProducts = categoryFilteredProducts.filter((p) => {
+    if (onlyFeatured && !p.featured) return false;
     if (conditionFilter !== "all" && p.condition !== conditionFilter) return false;
     if (storageFilter !== "all" && !p.variants.some((v) => v.storage === storageFilter)) return false;
     if (colorFilter !== "all" && !p.variants.some((v) => v.color === colorFilter)) return false;
@@ -1105,6 +1140,14 @@ export default function VitrinePublica() {
             className="w-full pl-9 pr-3 py-2 rounded-xl border border-neutral-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-neutral-400" />
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
+          {data.products.some((p) => p.featured) && (
+            <button onClick={() => setOnlyFeatured((v) => !v)} data-testid="button-filter-ofertas"
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold whitespace-nowrap transition ${
+                onlyFeatured ? "bg-red-600 text-white" : "bg-red-50 text-red-600 border border-red-200 hover:bg-red-100"
+              }`}>
+              <Tag className="w-3 h-3" /> Ofertas
+            </button>
+          )}
           <button onClick={() => setConditionFilter("all")}
             className={`px-2.5 py-1 rounded-full text-[11px] font-semibold whitespace-nowrap transition ${conditionFilter === "all" ? "bg-neutral-900 text-white" : "bg-white border border-neutral-200 text-neutral-500"}`}>
             Todas as condições

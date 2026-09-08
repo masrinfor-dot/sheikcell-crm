@@ -124,6 +124,12 @@ export const catalogProductsTable = pgTable("catalog_products", {
   // comprado" na listagem. Incrementado pela rota pública
   // POST /catalog-public/:slug/checkout-click.
   purchaseCount: integer("purchase_count").notNull().default(0),
+  // Selo "Promoção" (vermelho) na vitrine pública — marcado manualmente pelo
+  // lojista (botão "Oferta" na Vitrine Aparelhos, com seleção múltipla),
+  // independente do preço "de/por" (compareAtPrice na variante): dá pra
+  // destacar um aparelho como oferta mesmo sem desconto de preço cadastrado,
+  // e vice-versa. Pedido do lojista (08/09).
+  featured: boolean("featured").notNull().default(false),
   // Lista de características (armazenamento, RAM, tela, câmera, bateria...)
   // gerada por IA a partir do modelo/condição/cores, editável à mão pelo
   // lojista depois — mostrada na vitrine pública como "Principais

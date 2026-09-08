@@ -552,6 +552,7 @@ router.post("/catalog/products", requireAuth, async (req, res): Promise<void> =>
     categoryId: await cleanCategoryId(tenantId, body.categoryId),
     aiCharacteristics: cleanCharacteristics(body.aiCharacteristics),
     aiSpecs: cleanAiSpecs(body.aiSpecs),
+    featured: body.featured === true,
     createdBy: req.session.userId ?? null,
   }).returning();
 
@@ -585,6 +586,7 @@ router.patch("/catalog/products/:id", requireAuth, async (req, res): Promise<voi
     sortOrder: "sortOrder" in body && Number.isInteger(body.sortOrder) ? (body.sortOrder as number) : existing.sortOrder,
     aiCharacteristics: "aiCharacteristics" in body ? cleanCharacteristics(body.aiCharacteristics) : existing.aiCharacteristics,
     aiSpecs: "aiSpecs" in body ? cleanAiSpecs(body.aiSpecs) : existing.aiSpecs,
+    featured: "featured" in body ? body.featured === true : existing.featured,
     updatedAt: new Date(),
   }).where(and(eq(catalogProductsTable.id, id), eq(catalogProductsTable.tenantId, tenantId))).returning();
 
@@ -646,6 +648,25 @@ router.post("/catalog/products/bulk-delete", requireAuth, async (req, res): Prom
     await removeTrimmedPhotoCache(p.storedName);
   }
   res.json({ ok: true, deleted: ownedIds.length });
+});
+
+// Marca/desmarca em massa o selo "Promoção" (botão "Oferta" na Vitrine
+// Aparelhos, com seleção múltipla) — mesmo padrão do bulk-delete acima.
+router.post("/catalog/products/bulk-featured", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const body = req.body as { ids?: unknown; featured?: unknown };
+  const ids = Array.isArray(body.ids)
+    ? [...new Set(body.ids.map((v) => Number(v)).filter((n) => Number.isInteger(n) && n > 0))].slice(0, 500)
+    : [];
+  const featured = body.featured === true;
+  if (ids.length === 0) { res.status(400).json({ error: "Nenhum produto selecionado" }); return; }
+
+  const updated = await db.update(catalogProductsTable)
+    .set({ featured, updatedAt: new Date() })
+    .where(and(inArray(catalogProductsTable.id, ids), eq(catalogProductsTable.tenantId, tenantId)))
+    .returning({ id: catalogProductsTable.id });
+  if (updated.length === 0) { res.status(404).json({ error: "Nenhum produto encontrado" }); return; }
+  res.json({ ok: true, updated: updated.length, featured });
 });
 
 // ─── Fotos ───────────────────────────────────────────────────────────────────
@@ -2130,6 +2151,9 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
         // só pro filtro de ordenação "Mais comprado" no front — ver
         // comentário em catalogProductsTable.purchaseCount.
         purchaseCount: r.purchaseCount,
+        // Selo "Promoção" (vermelho) — marcado manualmente pelo lojista, ver
+        // comentário em catalogProductsTable.featured.
+        featured: r.featured,
         // Resumo de avaliação (estrelas) — null quando o produto ainda não
         // tem nenhuma avaliação, pro front não mostrar "0 avaliações".
         reviewsSummary: reviewsSummaryByProduct.has(r.id)
