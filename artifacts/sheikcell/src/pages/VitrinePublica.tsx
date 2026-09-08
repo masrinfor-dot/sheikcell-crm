@@ -152,6 +152,23 @@ function wholesaleInstallment12Label(v: { wholesaleInstallment12Value?: number |
   return value ? `ou 12x de ${value} no cartão` : null;
 }
 
+// Quanto o preço à vista (Pix/dinheiro) é mais barato do que pagar parcelado
+// em 12x no cartão — a diferença é exatamente a taxa de cartão que a loja
+// embute no preço a prazo (ver lib/catalogPricing.ts no backend). O backend
+// já manda os dois preços prontos (priceCash e o valor de CADA parcela); só
+// falta multiplicar a parcela por 12 pra comparar com o à vista, direto no
+// front, sem precisar de outro campo. Pedido do lojista (08/09): destacar o
+// preço à vista com o desconto da taxa de cartão ao lado.
+function cardFeeSavingsPercent(v: { priceCash?: number | null; installment12Value?: number | null } | null | undefined): number | null {
+  const cash = v?.priceCash;
+  const parcela = v?.installment12Value;
+  if (cash == null || parcela == null || !Number.isFinite(cash) || !Number.isFinite(parcela) || cash <= 0) return null;
+  const total12x = parcela * 12;
+  if (total12x <= cash) return null;
+  const pct = Math.round((1 - cash / total12x) * 100);
+  return pct > 0 ? pct : null;
+}
+
 function wholesaleStorageKey(slug: string) {
   return `sheikcell-vitrine-atacado-${slug}`;
 }
@@ -254,6 +271,7 @@ function ProductCard({
   const inStock = selected?.inStock ?? false;
   const criteria = CATALOG_CONDITION_CRITERIA[p.condition]?.criteria ?? [];
   const discount = discountInfo(selected);
+  const cardFeeSavings = cardFeeSavingsPercent(selected);
 
   return (
     <div className="bg-white rounded-2xl border border-neutral-200 overflow-hidden flex flex-col">
@@ -310,8 +328,13 @@ function ProductCard({
 
         <div className="mt-auto pt-1">
           {discount && <p className="text-[11px] text-neutral-400 line-through">{formatBRL(discount.from)}</p>}
-          <p className="text-base font-bold text-neutral-900">{retailPrice ?? "Sob consulta"}</p>
-          {retailPrice && <p className="text-[10px] text-neutral-400">à vista (Pix)</p>}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <p className="text-base font-bold text-emerald-600">{retailPrice ?? "Sob consulta"}</p>
+            {retailPrice && cardFeeSavings != null && (
+              <span className="px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold">-{cardFeeSavings}% à vista</span>
+            )}
+          </div>
+          {retailPrice && <p className="text-[10px] text-emerald-600 font-semibold">à vista (Pix)</p>}
           {installmentLabel && <p className="text-[11px] text-neutral-500">{installmentLabel}</p>}
           {wholesalePrice && (
             <>
@@ -427,6 +450,7 @@ function ProductDetailModal({
   const inStock = selected?.inStock ?? false;
   const criteria = CATALOG_CONDITION_CRITERIA[p.condition]?.criteria ?? [];
   const discount = discountInfo(selected);
+  const cardFeeSavings = cardFeeSavingsPercent(selected);
   const memory = memoryRangeLabel(p.variants);
   const specTiles = [
     ...(memory ? [{ key: "memory", label: "Memória", icon: MemoryStick, value: memory }] : []),
@@ -623,8 +647,13 @@ function ProductDetailModal({
                 <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-bold"><Tag className="w-2.5 h-2.5" /> {discount.percentOff}% OFF</span>
               </div>
             )}
-            <p className="text-2xl sm:text-3xl font-bold text-neutral-900">{retailPrice ?? "Sob consulta"}</p>
-            {retailPrice && <p className="text-xs text-neutral-400">à vista (Pix)</p>}
+            <div className="flex items-center gap-2 flex-wrap">
+              <p className="text-2xl sm:text-3xl font-bold text-emerald-600">{retailPrice ?? "Sob consulta"}</p>
+              {retailPrice && cardFeeSavings != null && (
+                <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-xs font-bold">-{cardFeeSavings}% à vista</span>
+              )}
+            </div>
+            {retailPrice && <p className="text-xs text-emerald-600 font-semibold">à vista (Pix)</p>}
             {installmentLabel && <p className="text-sm text-neutral-500">{installmentLabel}</p>}
             {wholesalePrice && (
               <>
