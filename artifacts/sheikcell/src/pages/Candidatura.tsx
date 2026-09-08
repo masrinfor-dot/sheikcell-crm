@@ -28,6 +28,8 @@ export default function Candidatura() {
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [cpf, setCpf] = useState("");
+  const [city, setCity] = useState("");
+  const [neighborhood, setNeighborhood] = useState("");
   const [answers, setAnswers] = useState<Record<string, Record<string, string>>>({});
   const [videoBlob, setVideoBlob] = useState<Blob | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
@@ -171,6 +173,7 @@ export default function Candidatura() {
       }
       await api.rh.publicApply(token, {
         name, phone, email: email || undefined, cpf: onlyDigits(cpf),
+        city: city.trim() || undefined, neighborhood: neighborhood.trim() || undefined,
         positionId: selectedPosition ?? undefined, answers, videoData, videoMime,
       });
       setDone(true);
@@ -250,6 +253,18 @@ export default function Candidatura() {
                 <label className="text-xs font-medium mb-1 block">E-mail (opcional)</label>
                 <input value={email} onChange={(e) => setEmail(e.target.value)}
                   className="w-full px-3 py-2 rounded-xl border border-border text-sm" />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs font-medium mb-1 block">Cidade (opcional)</label>
+                  <input value={city} onChange={(e) => setCity(e.target.value)} data-testid="input-cand-city"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm" />
+                </div>
+                <div>
+                  <label className="text-xs font-medium mb-1 block">Bairro (opcional)</label>
+                  <input value={neighborhood} onChange={(e) => setNeighborhood(e.target.value)} data-testid="input-cand-neighborhood"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm" />
+                </div>
               </div>
               <button onClick={() => setStep(0)} disabled={!name.trim() || !phone.trim() || onlyDigits(cpf).length !== 11} data-testid="button-cand-start"
                 className="w-full px-4 py-3 rounded-xl bg-primary text-white text-sm font-bold disabled:opacity-40">

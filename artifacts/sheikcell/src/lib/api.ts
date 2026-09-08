@@ -1120,6 +1120,7 @@ export type RhPosition = {
 };
 export type RhCandidate = {
   id: number; name: string; phone: string; email: string | null;
+  city: string | null; neighborhood: string | null;
   cpf: string | null; positionId: number | null; positionName: string | null;
   status: "novo" | "pre_aprovado" | "aprovado" | "reprovado";
   answers: Record<string, Record<string, string>>;
@@ -2227,6 +2228,7 @@ export const api = {
       req<{ stages: RhStage[] }>(`/rh/public/${token}/position/${positionId}`),
     publicApply: (token: string, data: {
       name: string; phone: string; email?: string; cpf: string; positionId?: number;
+      city?: string; neighborhood?: string;
       answers: Record<string, Record<string, string>>;
       videoData?: string; videoMime?: string;
     }) => req<{ ok: boolean; id: number }>(`/rh/public/${token}/apply`, { method: "POST", body: JSON.stringify(data) }),

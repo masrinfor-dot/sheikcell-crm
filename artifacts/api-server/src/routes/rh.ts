@@ -284,6 +284,7 @@ router.post("/rh/public/:token/apply", async (req, res): Promise<void> => {
   }
   const body = (req.body ?? {}) as {
     name?: string; phone?: string; email?: string; cpf?: string; positionId?: number;
+    city?: string; neighborhood?: string;
     answers?: Record<string, Record<string, string>>;
     videoData?: string; videoMime?: string;
   };
@@ -314,6 +315,8 @@ router.post("/rh/public/:token/apply", async (req, res): Promise<void> => {
   const cpfDigits = typeof body.cpf === "string" ? body.cpf.replace(/\D/g, "") : "";
   if (!isValidCpf(cpfDigits)) { res.status(400).json({ error: "Informe um CPF válido" }); return; }
   const email = typeof body.email === "string" ? body.email.trim().slice(0, 120) || null : null;
+  const city = typeof body.city === "string" ? body.city.trim().slice(0, 80) || null : null;
+  const neighborhood = typeof body.neighborhood === "string" ? body.neighborhood.trim().slice(0, 80) || null : null;
 
   // Sem repetir o processo: 1 CPF só pode concluir a candidatura 1 vez nesta
   // loja (independente do cargo). Índice único parcial em rh_candidates (ver
@@ -361,7 +364,7 @@ router.post("/rh/public/:token/apply", async (req, res): Promise<void> => {
   try {
     const [created] = await db.insert(rhCandidatesTable).values({
       tenantId: settings.tenantId, // loja dona do processo (vem do token do link)
-      name, phone, email, cpf: cpfDigits, positionId, positionName, answers, videoData, videoMime,
+      name, phone, email, city, neighborhood, cpf: cpfDigits, positionId, positionName, answers, videoData, videoMime,
       stagesSnapshot: stages, // congela as etapas do momento da candidatura
       profileResult, profileScores,
     }).returning({ id: rhCandidatesTable.id });
@@ -533,6 +536,8 @@ router.get("/rh/candidates", requireModuleAccess("rh"), async (req, res): Promis
     name: rhCandidatesTable.name,
     phone: rhCandidatesTable.phone,
     email: rhCandidatesTable.email,
+    city: rhCandidatesTable.city,
+    neighborhood: rhCandidatesTable.neighborhood,
     cpf: rhCandidatesTable.cpf,
     positionId: rhCandidatesTable.positionId,
     positionName: rhCandidatesTable.positionName,

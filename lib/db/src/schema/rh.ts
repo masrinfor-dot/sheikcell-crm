@@ -39,6 +39,12 @@ export const rhCandidatesTable = pgTable("rh_candidates", {
   name: text("name").notNull(),
   phone: text("phone").notNull(),
   email: text("email"),
+  // Cidade/bairro do candidato — campos livres, opcionais (preenchidos no
+  // formulário público desde 08/09; candidatura antiga fica null). Servem
+  // pro filtro "Cidade"/"Bairro" na lista de candidatos (RH.tsx) — útil pra
+  // loja com processo seletivo pra vaga de uma unidade/região específica.
+  city: text("city"),
+  neighborhood: text("neighborhood"),
   // CPF só com dígitos (11 caracteres), obrigatório pra candidatura nova —
   // `null` cobre só candidaturas de antes desta feature. É a chave que
   // impede a mesma pessoa repetir o processo (índice único parcial em

@@ -233,6 +233,13 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
   const [opened, setOpened] = useState<RhCandidate | null>(null);
   const [saving, setSaving] = useState(false);
   const [filter, setFilter] = useState<"todos" | RhCandidate["status"]>("todos");
+  // Filtro por cidade/bairro — só faz sentido pra quem tem esses campos
+  // preenchidos (candidatura a partir de 08/09; ver Candidatura.tsx). "todas"/
+  // "todos" = sem filtro. Trocar a cidade reseta o bairro (a lista de bairros
+  // é sempre relativa à cidade escolhida, pra não misturar bairro de cidades
+  // diferentes com nome parecido).
+  const [cityFilter, setCityFilter] = useState<string>("todas");
+  const [bairroFilter, setBairroFilter] = useState<string>("todos");
   const [notesDraft, setNotesDraft] = useState("");
   const [expandedHistory, setExpandedHistory] = useState<Set<number>>(new Set());
 
@@ -388,7 +395,7 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
         @media print { body { padding: 0; } }
       </style></head><body>
       <h1>${esc(c.name)}</h1>
-      <p class="meta">${esc(c.phone)}${c.email ? ` · ${esc(c.email)}` : ""}</p>
+      <p class="meta">${esc(c.phone)}${c.email ? ` · ${esc(c.email)}` : ""}${(c.city || c.neighborhood) ? ` · ${esc([c.neighborhood, c.city].filter(Boolean).join(", "))}` : ""}</p>
       <p class="meta">Candidatura em ${new Date(c.createdAt).toLocaleString("pt-BR")}</p>
       <span class="status">${esc(STATUS_META[c.status].label)}</span>
       ${profileHtml}
@@ -421,7 +428,22 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
     } catch { toast({ title: "Erro", variant: "destructive" }); }
   };
 
-  const shown = candidates.filter((c) => filter === "todos" || c.status === filter);
+  // Cidades com pelo menos 1 candidato preenchido, em ordem alfabética —
+  // dropdown em vez de texto livre pra não depender de digitar igualzinho
+  // (evita "São Paulo" x "sao paulo" virarem opções diferentes).
+  const cityOptions = Array.from(new Set(candidates.map((c) => c.city).filter((v): v is string => !!v))).sort((a, b) => a.localeCompare(b, "pt-BR"));
+  // Bairros relativos à cidade escolhida (todas as cidades, se nenhuma estiver selecionada).
+  const bairroOptions = Array.from(new Set(
+    candidates
+      .filter((c) => cityFilter === "todas" || c.city === cityFilter)
+      .map((c) => c.neighborhood)
+      .filter((v): v is string => !!v),
+  )).sort((a, b) => a.localeCompare(b, "pt-BR"));
+
+  const shown = candidates.filter((c) =>
+    (filter === "todos" || c.status === filter) &&
+    (cityFilter === "todas" || c.city === cityFilter) &&
+    (bairroFilter === "todos" || c.neighborhood === bairroFilter));
 
   // Outras candidaturas da mesma pessoa (por CPF/telefone/e-mail), mais
   // recentes primeiro — calculado sobre TODOS os candidatos (não só os que
@@ -470,13 +492,34 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
 
       {view === "candidatos" ? (
         <>
-          <div className="flex gap-1.5">
+          <div className="flex gap-1.5 flex-wrap">
             {(["todos", "novo", "pre_aprovado", "aprovado", "reprovado"] as const).map((f) => (
               <button key={f} onClick={() => setFilter(f)}
                 className={`px-3 py-1.5 rounded-full text-xs font-semibold border capitalize ${filter === f ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
                 {f === "todos" ? "Todos" : STATUS_META[f].label}
               </button>
             ))}
+            {/* Filtro por cidade/bairro — só aparece quando há pelo menos 1
+                candidato com cidade preenchida (campo novo, opcional, ver
+                Candidatura.tsx); candidatura antiga não tem esse dado. */}
+            {cityOptions.length > 0 && (
+              <>
+                <select value={cityFilter} data-testid="select-rh-city-filter"
+                  onChange={(e) => { setCityFilter(e.target.value); setBairroFilter("todos"); }}
+                  className="px-2.5 py-1.5 rounded-full text-xs font-semibold border bg-white text-foreground border-border">
+                  <option value="todas">Todas as cidades</option>
+                  {cityOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+                {bairroOptions.length > 0 && (
+                  <select value={bairroFilter} data-testid="select-rh-bairro-filter"
+                    onChange={(e) => setBairroFilter(e.target.value)}
+                    className="px-2.5 py-1.5 rounded-full text-xs font-semibold border bg-white text-foreground border-border">
+                    <option value="todos">Todos os bairros</option>
+                    {bairroOptions.map((b) => <option key={b} value={b}>{b}</option>)}
+                  </select>
+                )}
+              </>
+            )}
           </div>
           {shown.length === 0 ? (
             <div className="shk-card p-8 text-center text-muted-foreground">
@@ -509,7 +552,7 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                           )}
                           {c.hasVideo && <Video className="w-3.5 h-3.5 text-primary" />}
                         </div>
-                        <p className="text-[11px] text-muted-foreground">{c.phone}{c.email ? ` · ${c.email}` : ""}{c.cpf ? ` · CPF ${c.cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, "$1.$2.$3-$4")}` : ""} · {new Date(c.createdAt).toLocaleDateString("pt-BR")}</p>
+                        <p className="text-[11px] text-muted-foreground">{c.phone}{c.email ? ` · ${c.email}` : ""}{c.cpf ? ` · CPF ${c.cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, "$1.$2.$3-$4")}` : ""}{(c.city || c.neighborhood) ? ` · ${[c.neighborhood, c.city].filter(Boolean).join(", ")}` : ""} · {new Date(c.createdAt).toLocaleDateString("pt-BR")}</p>
                       </div>
                     </button>
                     {history.length > 0 && (
@@ -619,7 +662,7 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
             </div>
             <div className="mb-3">
               <p className="text-xs text-muted-foreground">
-                {opened.phone}{opened.email ? ` · ${opened.email}` : ""}{opened.cpf ? ` · CPF ${opened.cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, "$1.$2.$3-$4")}` : ""} · {new Date(opened.createdAt).toLocaleString("pt-BR")}
+                {opened.phone}{opened.email ? ` · ${opened.email}` : ""}{opened.cpf ? ` · CPF ${opened.cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, "$1.$2.$3-$4")}` : ""}{(opened.city || opened.neighborhood) ? ` · ${[opened.neighborhood, opened.city].filter(Boolean).join(", ")}` : ""} · {new Date(opened.createdAt).toLocaleString("pt-BR")}
               </p>
               {opened.positionName && (
                 <p className="text-xs text-muted-foreground flex items-center gap-1 mt-0.5"><Briefcase className="w-3.5 h-3.5 text-primary" /> Vaga: <span className="font-semibold">{opened.positionName}</span></p>
