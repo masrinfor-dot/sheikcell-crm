@@ -6,7 +6,7 @@ import {
   type CatalogProduct, type CatalogPricingSettings, type CatalogImportItem, type CatalogCondition,
   type CatalogImportVariant, type CatalogPhotoSearchResult, type CatalogCategory, type CatalogAiSpecs,
   type CatalogTrustBadge, type CatalogStockNotification, type CatalogPaymentMethod, type CatalogProductReview,
-  type CatalogMarketCheckVerdict, type TradeInEvaluation,
+  type CatalogMarketCheckVerdict, type TradeInEvaluation, type CatalogCoupon,
 } from "@/lib/api";
 import { requestChatExpand } from "@/lib/chatWidgetBus";
 import {
@@ -486,6 +486,66 @@ export default function VitrineAparelhos() {
   const [reviews, setReviews] = useState<CatalogProductReview[]>([]);
   const [showReviews, setShowReviews] = useState(false);
 
+  // Cupons de desconto — desconto real (carrinho da vitrine pública ou
+  // vendedor manualmente no Atendimento) + identificação de quem trouxe a
+  // venda (vendorName é texto livre: cobre vendedor interno OU externo/
+  // afiliado sem login no sistema). Pedido do lojista (08/09).
+  const [coupons, setCoupons] = useState<CatalogCoupon[]>([]);
+  const [showCoupons, setShowCoupons] = useState(false);
+  const [couponForm, setCouponForm] = useState<{ id: number | null; code: string; discountType: "percent" | "fixed"; discountValue: string; vendorName: string; usageLimit: string; expiresAt: string }>({
+    id: null, code: "", discountType: "percent", discountValue: "", vendorName: "", usageLimit: "", expiresAt: "",
+  });
+  const [savingCoupon, setSavingCoupon] = useState(false);
+  const resetCouponForm = () => setCouponForm({ id: null, code: "", discountType: "percent", discountValue: "", vendorName: "", usageLimit: "", expiresAt: "" });
+  const startEditCoupon = (c: CatalogCoupon) => setCouponForm({
+    id: c.id, code: c.code, discountType: c.discountType, discountValue: String(c.discountValue),
+    vendorName: c.vendorName ?? "", usageLimit: c.usageLimit != null ? String(c.usageLimit) : "",
+    expiresAt: c.expiresAt ? c.expiresAt.slice(0, 10) : "",
+  });
+  const handleSaveCoupon = async () => {
+    if (savingCoupon) return;
+    const code = couponForm.code.trim();
+    const value = Number(couponForm.discountValue);
+    if (!code) { toast({ title: "Informe o código do cupom", variant: "destructive" }); return; }
+    if (!Number.isFinite(value) || value <= 0) { toast({ title: "Informe um valor de desconto válido", variant: "destructive" }); return; }
+    setSavingCoupon(true);
+    try {
+      const payload = {
+        code, discountType: couponForm.discountType, discountValue: value,
+        vendorName: couponForm.vendorName.trim() || null,
+        usageLimit: couponForm.usageLimit.trim() ? Number(couponForm.usageLimit) : null,
+        expiresAt: couponForm.expiresAt || null,
+      };
+      const saved = couponForm.id != null
+        ? await api.catalog.updateCoupon(couponForm.id, payload)
+        : await api.catalog.createCoupon(payload);
+      setCoupons((prev) => (couponForm.id != null ? prev.map((c) => (c.id === saved.id ? saved : c)) : [saved, ...prev]));
+      toast({ title: couponForm.id != null ? "Cupom atualizado" : "Cupom criado" });
+      resetCouponForm();
+    } catch (err) {
+      toast({ title: "Erro ao salvar cupom", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    } finally {
+      setSavingCoupon(false);
+    }
+  };
+  const handleToggleCouponActive = async (c: CatalogCoupon) => {
+    try {
+      const updated = await api.catalog.updateCoupon(c.id, { active: !c.active });
+      setCoupons((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
+    } catch (err) {
+      toast({ title: "Erro ao atualizar cupom", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    }
+  };
+  const handleDeleteCoupon = async (id: number) => {
+    try {
+      await api.catalog.deleteCoupon(id);
+      setCoupons((prev) => prev.filter((c) => c.id !== id));
+      if (couponForm.id === id) resetCouponForm();
+    } catch (err) {
+      toast({ title: "Erro ao excluir cupom", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    }
+  };
+
   // Avaliações de USADO feitas pelo próprio cliente na vitrine pública
   // (source="public_lead" — ver tradeInPublicRouter/AvaliacaoPublica.tsx),
   // sem intervenção de atendente. Pedido do lojista (06/09): "se o cliente
@@ -580,7 +640,7 @@ export default function VitrineAparelhos() {
       api.catalog.list(), api.catalog.getSlug(), api.catalog.getWhatsapp(), api.catalog.getWhatsappWholesale(),
       api.catalog.categories(), isAdmin ? api.catalog.getWholesaleCode() : Promise.resolve(null),
       api.catalog.getTrustBadges(), api.catalog.stockNotifications(),
-      api.catalog.getPaymentMethods(), api.catalog.reviews(),
+      api.catalog.getPaymentMethods(), api.catalog.reviews(), api.catalog.listCoupons(),
       // Best-effort: só falha (e é ignorado, sem toast de erro) se a loja não
       // tiver o módulo "Avaliação de Usados" habilitado — a Vitrine funciona
       // normalmente sem essa lista nesse caso.
@@ -590,7 +650,7 @@ export default function VitrineAparelhos() {
       // o módulo "Avaliação de Usados" habilitado.
       api.tradeIn.margins().catch(() => null),
     ])
-      .then(([l, s, w, ww, cats, wc, tb, sn, pm, rv, ti, bn, tim]) => {
+      .then(([l, s, w, ww, cats, wc, tb, sn, pm, rv, cp, ti, bn, tim]) => {
         if (l.status === "fulfilled") { setProducts(l.value.products); setSettings(l.value.settings); }
         if (s.status === "fulfilled") { setSlug(s.value.slug); setSlugInput(s.value.slug ?? ""); }
         if (w.status === "fulfilled") { setWhatsapp(w.value.whatsapp); setWhatsappInput(w.value.whatsapp ?? ""); }
@@ -601,10 +661,11 @@ export default function VitrineAparelhos() {
         if (sn.status === "fulfilled") setStockNotifications(sn.value.notifications);
         if (pm.status === "fulfilled") setPaymentMethodsForm(pm.value.methods);
         if (rv.status === "fulfilled") setReviews(rv.value.reviews);
+        if (cp.status === "fulfilled") setCoupons(cp.value.coupons);
         if (ti.status === "fulfilled") setTradeInLeads(ti.value);
         if (bn.status === "fulfilled") setBannerImage(bn.value.bannerImage);
         if (tim.status === "fulfilled" && tim.value) setTradeInMarginPct(tim.value.t2);
-        const failed = [l, s, w, ww, cats, wc, tb, sn, pm, rv].filter((r) => r.status === "rejected");
+        const failed = [l, s, w, ww, cats, wc, tb, sn, pm, rv, cp].filter((r) => r.status === "rejected");
         if (failed.length > 0) {
           // eslint-disable-next-line no-console
           console.warn("[vitrine] falha ao carregar", failed.map((r) => (r as PromiseRejectedResult).reason));
@@ -1450,6 +1511,10 @@ export default function VitrineAparelhos() {
             <button onClick={() => setShowPaymentMethods(true)} data-testid="button-catalog-payment-methods"
               className="flex items-center gap-1.5 px-3 py-2 bg-secondary text-foreground rounded-xl text-xs font-semibold hover:bg-secondary/70 transition">
               <CreditCard className="w-3.5 h-3.5" /> Formas de pagamento
+            </button>
+            <button onClick={() => setShowCoupons(true)} data-testid="button-catalog-coupons"
+              className="flex items-center gap-1.5 px-3 py-2 bg-secondary text-foreground rounded-xl text-xs font-semibold hover:bg-secondary/70 transition">
+              <Percent className="w-3.5 h-3.5" /> Cupons{coupons.length > 0 ? ` (${coupons.length})` : ""}
             </button>
             <button onClick={() => setShowReviews(true)} data-testid="button-catalog-reviews"
               className="relative flex items-center gap-1.5 px-3 py-2 bg-secondary text-foreground rounded-xl text-xs font-semibold hover:bg-secondary/70 transition">
@@ -2629,6 +2694,97 @@ export default function VitrineAparelhos() {
                 className="w-full py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition">
                 {savingPaymentMethods ? "Salvando..." : "Salvar formas de pagamento"}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: cupons de desconto */}
+      {showCoupons && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-3 py-6 overflow-y-auto" onClick={() => { setShowCoupons(false); resetCouponForm(); }}>
+          <div className="bg-card rounded-xl w-full max-w-lg shadow-xl border overflow-hidden my-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <span className="font-semibold text-sm flex items-center gap-2"><Percent className="w-4 h-4 text-primary" /> Cupons de desconto</span>
+              <button onClick={() => { setShowCoupons(false); resetCouponForm(); }} className="p-1 rounded hover:bg-muted/60"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-4 space-y-3 max-h-[75vh] overflow-y-auto">
+              <p className="text-xs text-muted-foreground">
+                Cupom de desconto real (cliente digita no carrinho da vitrine pública, ou vendedor aplica manualmente numa conversa do Atendimento) e identifica quem trouxe a venda — o campo "Vendedor" é um texto livre, dá pra usar com vendedor interno OU vendedor externo (afiliado sem login no sistema).
+              </p>
+              {coupons.length === 0 && (
+                <p className="text-xs text-muted-foreground text-center py-2">Nenhum cupom cadastrado ainda.</p>
+              )}
+              {coupons.map((c) => (
+                <div key={c.id} className={`rounded-lg border p-2.5 space-y-1 ${!c.active ? "opacity-50" : ""}`} data-testid={`row-coupon-${c.id}`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="font-mono font-bold text-sm truncate">{c.code}</span>
+                      <span className="text-xs text-muted-foreground shrink-0">
+                        {c.discountType === "percent" ? `${c.discountValue}%` : formatBRL(c.discountValue)}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button type="button" onClick={() => handleToggleCouponActive(c)} data-testid={`button-toggle-coupon-${c.id}`}
+                        title={c.active ? "Desativar" : "Ativar"}
+                        className={`text-[10px] font-semibold px-2 py-1 rounded-full ${c.active ? "bg-emerald-100 text-emerald-700" : "bg-neutral-100 text-neutral-500"}`}>
+                        {c.active ? "Ativo" : "Inativo"}
+                      </button>
+                      <button type="button" onClick={() => startEditCoupon(c)} data-testid={`button-edit-coupon-${c.id}`}
+                        className="p-1.5 rounded hover:bg-muted/60"><Pencil className="w-3.5 h-3.5" /></button>
+                      <button type="button" onClick={() => handleDeleteCoupon(c.id)} data-testid={`button-delete-coupon-${c.id}`}
+                        className="p-1.5 rounded hover:bg-red-50 text-red-600"><Trash2 className="w-3.5 h-3.5" /></button>
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    {c.vendorName ? `Vendedor: ${c.vendorName} · ` : ""}
+                    Usado {c.usedCount}{c.usageLimit != null ? ` de ${c.usageLimit}` : ""} vez{c.usedCount === 1 ? "" : "es"}
+                    {c.expiresAt ? ` · expira em ${new Date(c.expiresAt).toLocaleDateString("pt-BR")}` : ""}
+                  </p>
+                </div>
+              ))}
+
+              <div className="rounded-lg border p-3 space-y-2 bg-muted/20">
+                <p className="text-xs font-semibold">{couponForm.id != null ? "Editar cupom" : "Novo cupom"}</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <input value={couponForm.code} onChange={(e) => setCouponForm((f) => ({ ...f, code: e.target.value.toUpperCase() }))}
+                    placeholder="Código (ex.: JOAO10)" data-testid="input-coupon-code"
+                    className="rounded border px-2 py-1.5 text-sm font-mono uppercase focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                  <select value={couponForm.discountType} onChange={(e) => setCouponForm((f) => ({ ...f, discountType: e.target.value as "percent" | "fixed" }))}
+                    data-testid="select-coupon-discount-type"
+                    className="rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40">
+                    <option value="percent">Percentual (%)</option>
+                    <option value="fixed">Valor fixo (R$)</option>
+                  </select>
+                </div>
+                <input value={couponForm.discountValue} onChange={(e) => setCouponForm((f) => ({ ...f, discountValue: e.target.value }))}
+                  type="number" min="0" step="0.01"
+                  placeholder={couponForm.discountType === "percent" ? "Desconto em % (ex.: 10)" : "Desconto em R$ (ex.: 50)"}
+                  data-testid="input-coupon-discount-value"
+                  className="w-full rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                <input value={couponForm.vendorName} onChange={(e) => setCouponForm((f) => ({ ...f, vendorName: e.target.value }))}
+                  placeholder="Vendedor (opcional — interno ou externo, ex.: João)" data-testid="input-coupon-vendor-name"
+                  className="w-full rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                <div className="grid grid-cols-2 gap-2">
+                  <input value={couponForm.usageLimit} onChange={(e) => setCouponForm((f) => ({ ...f, usageLimit: e.target.value }))}
+                    type="number" min="1" placeholder="Limite de usos (opcional)" data-testid="input-coupon-usage-limit"
+                    className="rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                  <input value={couponForm.expiresAt} onChange={(e) => setCouponForm((f) => ({ ...f, expiresAt: e.target.value }))}
+                    type="date" data-testid="input-coupon-expires-at"
+                    className="rounded border px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/40" />
+                </div>
+                <div className="flex items-center gap-2">
+                  {couponForm.id != null && (
+                    <button type="button" onClick={resetCouponForm} data-testid="button-cancel-edit-coupon"
+                      className="px-3 py-2 rounded-lg border text-sm font-semibold hover:bg-muted/60">
+                      Cancelar
+                    </button>
+                  )}
+                  <button onClick={handleSaveCoupon} disabled={savingCoupon} data-testid="button-save-coupon"
+                    className="flex-1 py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition">
+                    {savingCoupon ? "Salvando..." : couponForm.id != null ? "Salvar alterações" : "Criar cupom"}
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>

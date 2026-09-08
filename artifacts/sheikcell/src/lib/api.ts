@@ -491,6 +491,24 @@ export type CatalogProduct = {
 
 export type CatalogTrustBadge = { title: string; description: string };
 export type CatalogPaymentMethod = { title: string; description: string };
+// Cupom de desconto da Vitrine — desconto real (carrinho público ou vendedor
+// no Atendimento) + identificação de quem trouxe a venda (vendorName é texto
+// livre, cobre vendedor interno OU externo/afiliado sem login no sistema).
+export type CatalogCoupon = {
+  id: number;
+  code: string;
+  discountType: "percent" | "fixed";
+  discountValue: number;
+  vendorName: string | null;
+  active: boolean;
+  usageLimit: number | null;
+  usedCount: number;
+  expiresAt: string | null;
+  createdAt: string;
+};
+export type CatalogCouponValidation =
+  | { valid: true; discountType: "percent" | "fixed"; discountValue: number; discountAmount: number; label: string }
+  | { valid: false; error: string };
 
 export type CatalogProductReview = {
   id: number;
@@ -2550,6 +2568,24 @@ export const api = {
     // schema/rota). Nunca deve travar o checkout se falhar.
     trackCheckoutClick: (slug: string, items: { productId: number; qty: number }[]) =>
       req<{ ok: boolean }>(`/catalog-public/${slug}/checkout-click`, { method: "POST", body: JSON.stringify({ items }) }),
+    // Cupons de desconto — admin (Vitrine Aparelhos) e uso manual pelo
+    // vendedor dentro de uma conversa do Atendimento.
+    listCoupons: () => req<{ coupons: CatalogCoupon[] }>("/catalog/coupons"),
+    createCoupon: (data: { code: string; discountType: "percent" | "fixed"; discountValue: number; vendorName?: string | null; usageLimit?: number | null; expiresAt?: string | null; active?: boolean }) =>
+      req<CatalogCoupon>("/catalog/coupons", { method: "POST", body: JSON.stringify(data) }),
+    updateCoupon: (id: number, data: Partial<{ code: string; discountType: "percent" | "fixed"; discountValue: number; vendorName: string | null; usageLimit: number | null; expiresAt: string | null; active: boolean }>) =>
+      req<CatalogCoupon>(`/catalog/coupons/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    deleteCoupon: (id: number) => req<{ ok: boolean }>(`/catalog/coupons/${id}`, { method: "DELETE" }),
+    // Vendedor aplicando manualmente dentro de uma conversa do Atendimento —
+    // registra o uso (estatística por vendedor), sem entidade de pedido.
+    redeemCoupon: (id: number) => req<CatalogCoupon>(`/catalog/coupons/${id}/redeem`, { method: "POST" }),
+    // Cupom no carrinho da vitrine pública — validar (sem efeito colateral,
+    // pode chamar de novo a cada edição do código) e resgatar (uma vez, ao
+    // clicar em "Finalizar pedido no WhatsApp" — best-effort).
+    validateCouponPublic: (slug: string, code: string, subtotal: number) =>
+      req<CatalogCouponValidation>(`/catalog-public/${slug}/coupon/validate`, { method: "POST", body: JSON.stringify({ code, subtotal }) }),
+    redeemCouponPublic: (slug: string, code: string) =>
+      req<{ ok: boolean }>(`/catalog-public/${slug}/coupon/redeem`, { method: "POST", body: JSON.stringify({ code }) }),
   },
   meetings: {
     list: () => req<MeetingItem[]>("/meetings"),

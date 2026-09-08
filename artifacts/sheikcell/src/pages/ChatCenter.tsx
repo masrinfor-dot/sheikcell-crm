@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo, Fragment } from "react";
 import { createPortal } from "react-dom";
-import { api, can, ApiError, type Conversation, type ChatMessage, type PinnedMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata } from "@/lib/api";
+import { api, can, ApiError, type Conversation, type ChatMessage, type PinnedMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata, type CatalogCoupon } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useActivityGuard } from "@/lib/activityGuard";
 import { useToast } from "@/hooks/use-toast";
@@ -14,7 +14,7 @@ import {
   Pin, PinOff, Reply, StickyNote, Star, StarOff, ChevronLeft, ChevronRight,
   MapPin, ShoppingBag, CreditCard, BarChart3, Ban, UserPlus, ExternalLink,
   FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Download, Maximize2, Pencil,
-  MoreVertical, RotateCcw,
+  MoreVertical, RotateCcw, Percent, FolderOpen,
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -516,6 +516,21 @@ function formatFileSize(bytes?: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// Miniatura de foto no banco de arquivos compartilhados — precisa do próprio
+// useMediaLightbox() (ver comentário na declaração do hook), por isso é um
+// componente à parte, renderizado dentro do <MediaLightboxProvider> do modal.
+function SharedFileImageThumb({ msg }: { msg: ChatMessage }) {
+  const openLightbox = useMediaLightbox();
+  if (!msg.mediaUrl) return null;
+  return (
+    <button type="button" onClick={() => openLightbox({ type: "image", src: msg.mediaUrl! })}
+      data-testid={`button-shared-file-image-${msg.id}`}
+      className="aspect-square rounded-lg overflow-hidden border border-border hover:opacity-80 transition">
+      <img src={msg.mediaUrl} alt="Foto" className="w-full h-full object-cover" />
+    </button>
+  );
 }
 
 function DocIcon({ mimeType, fileName }: { mimeType?: string; fileName?: string }) {
@@ -1108,6 +1123,20 @@ export default function ChatCenter({
   const [msgSearchQuery, setMsgSearchQuery] = useState("");
   const [msgSearchResults, setMsgSearchResults] = useState<{ id: number; content: string; type: string; senderName: string | null; direction: string; createdAt: string }[]>([]);
   const [msgSearchLoading, setMsgSearchLoading] = useState(false);
+  // Banco de arquivos compartilhados desta conversa (fotos/documentos/áudios
+  // já trocados) — pedido do lojista (08/09). Filtra em cima das mensagens já
+  // carregadas na tela (mesmas que a busca dentro da conversa usa); pra achar
+  // mídia de bem no início da conversa, role pra cima primeiro pra carregar
+  // páginas mais antigas, do mesmo jeito que a busca dentro da conversa já
+  // funciona.
+  const [showSharedFiles, setShowSharedFiles] = useState(false);
+  // Cupom de desconto aplicado manualmente pelo vendedor durante uma
+  // negociação — sem entidade de pedido/orçamento no sistema, então só
+  // insere o texto do desconto na mensagem e registra o uso (estatística por
+  // vendedor). Pedido do lojista (08/09).
+  const [showCouponPicker, setShowCouponPicker] = useState(false);
+  const [couponPickerList, setCouponPickerList] = useState<CatalogCoupon[]>([]);
+  const [couponPickerSearch, setCouponPickerSearch] = useState("");
   const [sending, setSending] = useState(false);
   // Trava obrigatória de Rotinas e Produtividade (Fase 3) só aparece quando
   // isBusy() está livre — registra aqui os mesmos momentos em que liga/
@@ -3459,6 +3488,17 @@ export default function ChatCenter({
               >
                 <Search className="w-4 h-4 text-muted-foreground" />
               </button>
+              {/* Banco de arquivos compartilhados desta conversa (fotos,
+                  documentos, áudios já trocados). */}
+              <button
+                type="button"
+                onClick={() => setShowSharedFiles(true)}
+                data-testid="button-shared-files"
+                title="Arquivos compartilhados"
+                className="p-1.5 rounded-lg hover:bg-secondary transition"
+              >
+                <FolderOpen className="w-4 h-4 text-muted-foreground" />
+              </button>
               {/* Menu "mais ações" — só no celular. Agrupa favoritar/excluir/CRM
                   (as ações menos usadas) pra não estourar a largura da tela.
                   No desktop esse botão some e as ações voltam a aparecer soltas. */}
@@ -4066,6 +4106,61 @@ export default function ChatCenter({
               )}
             </div>
             )}
+            {/* Cupom de desconto aplicado manualmente — sem entidade de pedido
+                no sistema, então só insere o texto do desconto na mensagem
+                (o vendedor edita/completa como quiser antes de enviar) e
+                registra o uso pra estatística por vendedor. */}
+            <div className="relative shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  const opening = !showCouponPicker;
+                  setShowCouponPicker(opening);
+                  if (opening && couponPickerList.length === 0) {
+                    api.catalog.listCoupons().then((r) => setCouponPickerList(r.coupons)).catch(() => {});
+                  }
+                }}
+                disabled={sending}
+                title="Cupom de desconto"
+                data-testid="button-coupon-picker"
+                className="w-9 h-9 rounded-full flex items-center justify-center text-emerald-700 bg-emerald-100 hover:bg-emerald-200 transition disabled:opacity-40"
+              >
+                <Percent className="w-4 h-4" />
+              </button>
+              {showCouponPicker && (
+                <div className="absolute bottom-11 left-0 bg-white border border-border rounded-xl shadow-lg z-30 w-80 max-w-[90vw] max-h-80 overflow-y-auto">
+                  <div className="px-3 py-2 border-b border-border sticky top-0 bg-white">
+                    <p className="text-xs font-semibold text-muted-foreground mb-1.5">Cupom de desconto</p>
+                    <input autoFocus value={couponPickerSearch} onChange={(e) => setCouponPickerSearch(e.target.value)}
+                      placeholder="Buscar código ou vendedor..." data-testid="input-coupon-picker-search"
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-border text-xs focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                  </div>
+                  {couponPickerList
+                    .filter((c) => c.active)
+                    .filter((c) => !couponPickerSearch.trim() || `${c.code} ${c.vendorName ?? ""}`.toLowerCase().includes(couponPickerSearch.toLowerCase()))
+                    .map((c) => (
+                    <button key={c.id} type="button" data-testid={`button-coupon-picker-${c.id}`}
+                      onClick={() => {
+                        const label = c.discountType === "percent" ? `${c.discountValue}% de desconto` : `R$ ${Number(c.discountValue).toFixed(2).replace(".", ",")} de desconto`;
+                        const text = `Cupom aplicado: ${c.code} (${label})`;
+                        setMsgText((prev) => (prev ? `${prev}\n${text}` : text));
+                        api.catalog.redeemCoupon(c.id).then((updated) => {
+                          setCouponPickerList((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
+                        }).catch(() => {});
+                        setShowCouponPicker(false);
+                        setCouponPickerSearch("");
+                      }}
+                      className="w-full text-left px-3 py-2.5 hover:bg-secondary transition">
+                      <p className="text-xs font-semibold font-mono">{c.code} <span className="font-normal text-muted-foreground">{c.discountType === "percent" ? `${c.discountValue}%` : `R$ ${Number(c.discountValue).toFixed(2).replace(".", ",")}`}</span></p>
+                      {c.vendorName && <p className="text-[11px] text-muted-foreground">Vendedor: {c.vendorName}</p>}
+                    </button>
+                  ))}
+                  {couponPickerList.filter((c) => c.active).length === 0 && (
+                    <p className="px-3 py-4 text-center text-[11px] text-muted-foreground">Nenhum cupom ativo cadastrado</p>
+                  )}
+                </div>
+              )}
+            </div>
             {can(user, "usar_ia") && (<>
             {/* Ícone só (sem texto) -- com o painel de Informações e/ou o Chat
                 Interno abertos ao lado, a coluna do meio fica estreita e os
@@ -4404,6 +4499,91 @@ export default function ChatCenter({
           </div>
         </div>
       )}
+
+      {/* ── Banco de arquivos compartilhados desta conversa ──────────────── */}
+      {showSharedFiles && activeConv && (() => {
+        const media = messages.filter((m) => m.mediaUrl && (m.type === "image" || m.type === "doc" || m.type === "audio" || m.type === "video"));
+        const images = media.filter((m) => m.type === "image");
+        const docs = media.filter((m) => m.type === "doc");
+        const audios = media.filter((m) => m.type === "audio");
+        const videos = media.filter((m) => m.type === "video");
+        return (
+          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={() => setShowSharedFiles(false)}>
+            <div className="bg-white rounded-2xl w-full max-w-lg max-h-[85vh] shadow-xl flex flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-border">
+                <h3 className="font-bold text-base flex items-center gap-2"><FolderOpen className="w-4 h-4 text-primary" /> Arquivos compartilhados</h3>
+                <button onClick={() => setShowSharedFiles(false)} data-testid="button-close-shared-files" className="text-muted-foreground hover:text-foreground transition"><X className="w-4 h-4" /></button>
+              </div>
+              <div className="p-4 space-y-4 overflow-y-auto">
+                {media.length === 0 && (
+                  <p className="text-xs text-muted-foreground text-center py-6">
+                    Nenhuma foto, documento ou áudio nas mensagens carregadas nesta conversa. Role pra cima na conversa pra carregar histórico mais antigo e tentar de novo.
+                  </p>
+                )}
+                {images.length > 0 && (
+                  <div>
+                    <p className="text-[11px] font-semibold text-muted-foreground mb-1.5">Fotos ({images.length})</p>
+                    <MediaLightboxProvider>
+                      <div className="grid grid-cols-4 gap-1.5">
+                        {images.map((m) => <SharedFileImageThumb key={m.id} msg={m} />)}
+                      </div>
+                    </MediaLightboxProvider>
+                  </div>
+                )}
+                {docs.length > 0 && (
+                  <div>
+                    <p className="text-[11px] font-semibold text-muted-foreground mb-1.5">Documentos ({docs.length})</p>
+                    <div className="space-y-1.5">
+                      {docs.map((m) => {
+                        const filename = m.metadata?.fileName ?? m.mediaUrl!.split("/").pop() ?? "documento";
+                        const size = formatFileSize(m.metadata?.fileSize);
+                        return (
+                          <a key={m.id} href={m.mediaUrl!} target="_blank" rel="noopener noreferrer" download
+                            data-testid={`link-shared-file-doc-${m.id}`}
+                            className="flex items-center gap-2 bg-secondary/60 rounded-xl px-3 py-2 hover:bg-secondary transition">
+                            <DocIcon mimeType={m.metadata?.mimeType} fileName={filename} />
+                            <div className="min-w-0 flex-1">
+                              <p className="text-xs text-foreground break-all">{filename}</p>
+                              <p className="text-[10px] text-muted-foreground">{size} {size && "·"} {new Date(m.createdAt).toLocaleDateString("pt-BR")}</p>
+                            </div>
+                          </a>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                {videos.length > 0 && (
+                  <div>
+                    <p className="text-[11px] font-semibold text-muted-foreground mb-1.5">Vídeos ({videos.length})</p>
+                    <div className="space-y-1.5">
+                      {videos.map((m) => (
+                        <a key={m.id} href={m.mediaUrl!} target="_blank" rel="noopener noreferrer" data-testid={`link-shared-file-video-${m.id}`}
+                          className="flex items-center gap-2 bg-secondary/60 rounded-xl px-3 py-2 hover:bg-secondary transition">
+                          <Video className="w-5 h-5 text-primary shrink-0" />
+                          <p className="text-xs text-foreground">{new Date(m.createdAt).toLocaleString("pt-BR")}</p>
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {audios.length > 0 && (
+                  <div>
+                    <p className="text-[11px] font-semibold text-muted-foreground mb-1.5">Áudios ({audios.length})</p>
+                    <div className="space-y-1.5">
+                      {audios.map((m) => (
+                        <div key={m.id} className="flex items-center gap-2 bg-secondary/60 rounded-xl px-3 py-2" data-testid={`row-shared-file-audio-${m.id}`}>
+                          <audio controls src={m.mediaUrl!} className="h-8 flex-1 min-w-0" />
+                          <p className="text-[10px] text-muted-foreground shrink-0">{new Date(m.createdAt).toLocaleDateString("pt-BR")}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── Quick reply preview modal: variáveis já substituídas ─────────── */}
       {quickReplyPreview !== null && (

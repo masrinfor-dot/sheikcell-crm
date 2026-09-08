@@ -962,8 +962,42 @@ export default function VitrinePublica() {
   // negativo (ex.: usado avaliado em mais do que o pedido, cliente com
   // troco a receber — isso fica pra loja resolver por fora, não no site).
   const tradeInDeduction = tradeIn?.estimatedPriceValue != null ? Math.min(tradeIn.estimatedPriceValue, cartSubtotal) : 0;
-  const cartTotal = Math.max(0, cartSubtotal - tradeInDeduction);
+
+  // Cupom de desconto no carrinho — pedido do lojista (08/09), pra dar
+  // desconto real e identificar quem trouxe a venda (vendedor interno OU
+  // externo). Valida no backend a cada edição do código (sem efeito
+  // colateral); "resgata" (conta o uso, pra estatística por vendedor) só uma
+  // vez, no clique em "Finalizar pedido no WhatsApp".
+  const [couponInput, setCouponInput] = useState("");
+  const [couponApplied, setCouponApplied] = useState<{ code: string; discountType: "percent" | "fixed"; discountValue: number; discountAmount: number; label: string } | null>(null);
+  const [couponError, setCouponError] = useState<string | null>(null);
+  const [validatingCoupon, setValidatingCoupon] = useState(false);
+
+  const subtotalAfterTradeIn = Math.max(0, cartSubtotal - tradeInDeduction);
+  const couponDiscount = couponApplied ? Math.min(couponApplied.discountAmount, subtotalAfterTradeIn) : 0;
+  const cartTotal = Math.max(0, subtotalAfterTradeIn - couponDiscount);
   const cartCount = cart.reduce((sum, c) => sum + c.qty, 0);
+
+  const handleApplyCoupon = async () => {
+    const code = couponInput.trim();
+    if (!code || !slug) return;
+    setValidatingCoupon(true);
+    setCouponError(null);
+    try {
+      const r = await api.catalog.validateCouponPublic(slug, code, subtotalAfterTradeIn);
+      if (r.valid) {
+        setCouponApplied({ code: code.toUpperCase(), discountType: r.discountType, discountValue: r.discountValue, discountAmount: r.discountAmount, label: r.label });
+      } else {
+        setCouponApplied(null);
+        setCouponError(r.error);
+      }
+    } catch {
+      setCouponError("Erro ao validar cupom");
+    } finally {
+      setValidatingCoupon(false);
+    }
+  };
+  const handleRemoveCoupon = () => { setCouponApplied(null); setCouponInput(""); setCouponError(null); };
 
   const checkoutMessage = useMemo(() => {
     if (cart.length === 0 || !data) return "";
@@ -974,15 +1008,20 @@ export default function VitrinePublica() {
       "",
       `Desconto do meu usado (${tradeIn.device}): ${tradeIn.estimatedPriceLabel} — valor sujeito a confirmação da loja depois de conferir o checklist`,
     ] : [];
+    const couponLines = couponApplied ? [
+      "",
+      `Cupom aplicado: ${couponApplied.code} (${couponApplied.label}) — desconto de ${formatBRL(couponDiscount)}`,
+    ] : [];
     return [
       `Olá! Vi a vitrine da ${data.storeName} e quero fazer o seguinte pedido:`,
       "",
       ...lines,
       ...tradeInLines,
+      ...couponLines,
       "",
-      `Total${tradeIn ? " (com o desconto do usado, a confirmar)" : ""}: ${formatBRL(cartTotal)}`,
+      `Total${tradeIn || couponApplied ? " (com desconto, a confirmar)" : ""}: ${formatBRL(cartTotal)}`,
     ].join("\n");
-  }, [cart, data, cartTotal, tradeIn]);
+  }, [cart, data, cartTotal, tradeIn, couponApplied, couponDiscount]);
 
   // Enquanto o atacado não foi desbloqueado, sempre usa o WhatsApp de
   // varejo — o de atacado nem chega do backend nesse caso (ver rota
@@ -1268,7 +1307,32 @@ export default function VitrinePublica() {
                     </p>
                   </div>
                 )}
-                {tradeIn && (
+                {couponApplied ? (
+                  <div className="rounded-xl border-2 border-emerald-300 bg-emerald-50 p-3 space-y-1">
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-xs font-semibold text-emerald-900">
+                        Cupom {couponApplied.code}: −{formatBRL(couponDiscount)}
+                      </p>
+                      <button type="button" onClick={handleRemoveCoupon} data-testid="button-remove-coupon"
+                        className="p-0.5 rounded hover:bg-emerald-100 text-emerald-700 shrink-0"><X className="w-3.5 h-3.5" /></button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-1.5">
+                      <input value={couponInput} onChange={(e) => { setCouponInput(e.target.value.toUpperCase()); setCouponError(null); }}
+                        onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleApplyCoupon(); } }}
+                        placeholder="Cupom de desconto" data-testid="input-coupon-code"
+                        className="flex-1 min-w-0 rounded-lg border px-2.5 py-1.5 text-xs font-mono uppercase focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+                      <button type="button" onClick={handleApplyCoupon} disabled={!couponInput.trim() || validatingCoupon} data-testid="button-apply-coupon"
+                        className="px-3 py-1.5 rounded-lg bg-neutral-900 text-white text-xs font-semibold hover:bg-neutral-800 disabled:opacity-40 transition">
+                        {validatingCoupon ? "..." : "Aplicar"}
+                      </button>
+                    </div>
+                    {couponError && <p className="text-[11px] text-red-600">{couponError}</p>}
+                  </div>
+                )}
+                {(tradeIn || couponApplied) && (
                   <div className="flex items-center justify-between text-xs text-neutral-500">
                     <span>Subtotal</span>
                     <span>{formatBRL(cartSubtotal)}</span>
@@ -1281,10 +1345,14 @@ export default function VitrinePublica() {
                 {checkoutWa ? (
                   <a href={checkoutWa} target="_blank" rel="noreferrer" data-testid="button-checkout-whatsapp"
                     onClick={() => {
-                      // Best-effort, só alimenta o filtro "Mais comprado" — nunca deve
-                      // travar o checkout (abre em nova aba, não navega a página atual).
+                      // Best-effort, só alimenta o filtro "Mais comprado" e a estatística
+                      // de uso do cupom — nunca deve travar o checkout (abre em nova
+                      // aba, não navega a página atual).
                       if (slug && cart.length > 0) {
                         api.catalog.trackCheckoutClick(slug, cart.map((c) => ({ productId: c.productId, qty: c.qty }))).catch(() => {});
+                      }
+                      if (slug && couponApplied) {
+                        api.catalog.redeemCouponPublic(slug, couponApplied.code).catch(() => {});
                       }
                     }}
                     className="flex items-center justify-center gap-1.5 w-full py-2.5 rounded-xl bg-emerald-500 text-white text-sm font-semibold hover:bg-emerald-600 transition">

@@ -4,7 +4,7 @@ import { randomUUID } from "crypto";
 import { existsSync } from "fs";
 import { mkdir, writeFile, unlink, readFile, stat } from "fs/promises";
 import sharp from "sharp";
-import { eq, and, desc, inArray, sql } from "drizzle-orm";
+import { eq, and, or, isNull, gt, lt, desc, inArray, sql } from "drizzle-orm";
 import {
   db,
   catalogProductsTable,
@@ -13,10 +13,12 @@ import {
   catalogCategoriesTable,
   catalogStockNotificationsTable,
   catalogProductReviewsTable,
+  catalogCouponsTable,
   appSettingsTable,
   tenantsTable,
   type CatalogCategory,
   type CatalogAiSpecs,
+  type CatalogCoupon,
 } from "@workspace/db";
 import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
@@ -509,6 +511,134 @@ router.delete("/catalog/categories/:id", requireAdmin, async (req, res): Promise
   if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ error: "Categoria inválida" }); return; }
   await db.delete(catalogCategoriesTable).where(and(eq(catalogCategoriesTable.id, id), eq(catalogCategoriesTable.tenantId, tenantId)));
   res.json({ ok: true });
+});
+
+// ─── Cupons de desconto ──────────────────────────────────────────────────
+// Dois usos combinados (pedido do lojista, 08/09): desconto real (cliente no
+// carrinho da vitrine pública, ou vendedor manualmente numa conversa do
+// Atendimento) + identificação de quem trouxe a venda (vendorName é texto
+// livre — cobre vendedor interno OU externo/afiliado sem login no sistema).
+
+function normalizeCouponCode(v: unknown): string {
+  return typeof v === "string" ? v.normalize("NFC").trim().toUpperCase().slice(0, 40) : "";
+}
+
+function cleanDiscountType(v: unknown): "percent" | "fixed" | null {
+  return v === "percent" || v === "fixed" ? v : null;
+}
+
+function cleanDiscountValue(v: unknown, type: "percent" | "fixed"): number | null {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (type === "percent" && n > 100) return null;
+  return n;
+}
+
+// numeric() do Postgres volta como string do driver — converte pro front
+// sempre receber number (mesmo padrão de toNumberOrNull nos preços da variante).
+function serializeCoupon(row: CatalogCoupon) {
+  return { ...row, discountValue: Number(row.discountValue) };
+}
+
+router.get("/catalog/coupons", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rows = await db.select().from(catalogCouponsTable)
+    .where(eq(catalogCouponsTable.tenantId, tenantId))
+    .orderBy(desc(catalogCouponsTable.createdAt));
+  res.json({ coupons: rows.map(serializeCoupon) });
+});
+
+router.post("/catalog/coupons", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const body = req.body as Record<string, unknown>;
+  const code = normalizeCouponCode(body.code);
+  if (!code) { res.status(400).json({ error: "Informe o código do cupom" }); return; }
+  const discountType = cleanDiscountType(body.discountType);
+  if (!discountType) { res.status(400).json({ error: "Tipo de desconto inválido" }); return; }
+  const discountValue = cleanDiscountValue(body.discountValue, discountType);
+  if (discountValue == null) { res.status(400).json({ error: "Valor de desconto inválido" }); return; }
+  const vendorName = clean(body.vendorName, 100) || null;
+  const usageLimit = Number.isInteger(body.usageLimit) && (body.usageLimit as number) > 0 ? (body.usageLimit as number) : null;
+  const expiresAt = typeof body.expiresAt === "string" && body.expiresAt ? new Date(body.expiresAt) : null;
+  const active = body.active !== false;
+
+  const [existing] = await db.select({ id: catalogCouponsTable.id }).from(catalogCouponsTable)
+    .where(and(eq(catalogCouponsTable.tenantId, tenantId), eq(catalogCouponsTable.code, code))).limit(1);
+  if (existing) { res.status(400).json({ error: "Já existe um cupom com esse código" }); return; }
+
+  const [coupon] = await db.insert(catalogCouponsTable)
+    .values({ tenantId, code, discountType, discountValue: String(discountValue), vendorName, usageLimit, expiresAt, active })
+    .returning();
+  res.status(201).json(serializeCoupon(coupon!));
+});
+
+router.patch("/catalog/coupons/:id", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ error: "Cupom inválido" }); return; }
+  const [existing] = await db.select().from(catalogCouponsTable)
+    .where(and(eq(catalogCouponsTable.id, id), eq(catalogCouponsTable.tenantId, tenantId))).limit(1);
+  if (!existing) { res.status(404).json({ error: "Cupom não encontrado" }); return; }
+
+  const body = req.body as Record<string, unknown>;
+  const discountType = "discountType" in body ? (cleanDiscountType(body.discountType) ?? existing.discountType as "percent" | "fixed") : (existing.discountType as "percent" | "fixed");
+  let code = existing.code;
+  if ("code" in body) {
+    const newCode = normalizeCouponCode(body.code);
+    if (!newCode) { res.status(400).json({ error: "Informe o código do cupom" }); return; }
+    if (newCode !== existing.code) {
+      const [dup] = await db.select({ id: catalogCouponsTable.id }).from(catalogCouponsTable)
+        .where(and(eq(catalogCouponsTable.tenantId, tenantId), eq(catalogCouponsTable.code, newCode))).limit(1);
+      if (dup) { res.status(400).json({ error: "Já existe um cupom com esse código" }); return; }
+    }
+    code = newCode;
+  }
+  const discountValue = "discountValue" in body
+    ? (cleanDiscountValue(body.discountValue, discountType) ?? Number(existing.discountValue))
+    : Number(existing.discountValue);
+
+  const [updated] = await db.update(catalogCouponsTable).set({
+    code,
+    discountType,
+    discountValue: String(discountValue),
+    vendorName: "vendorName" in body ? (clean(body.vendorName, 100) || null) : existing.vendorName,
+    usageLimit: "usageLimit" in body ? (Number.isInteger(body.usageLimit) && (body.usageLimit as number) > 0 ? (body.usageLimit as number) : null) : existing.usageLimit,
+    expiresAt: "expiresAt" in body ? (typeof body.expiresAt === "string" && body.expiresAt ? new Date(body.expiresAt) : null) : existing.expiresAt,
+    active: "active" in body ? body.active === true : existing.active,
+    updatedAt: new Date(),
+  }).where(and(eq(catalogCouponsTable.id, id), eq(catalogCouponsTable.tenantId, tenantId))).returning();
+  res.json(serializeCoupon(updated!));
+});
+
+router.delete("/catalog/coupons/:id", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ error: "Cupom inválido" }); return; }
+  await db.delete(catalogCouponsTable).where(and(eq(catalogCouponsTable.id, id), eq(catalogCouponsTable.tenantId, tenantId)));
+  res.json({ ok: true });
+});
+
+// Vendedor aplicando manualmente dentro de uma conversa do Atendimento — sem
+// entidade de pedido/orçamento estruturada no sistema (ver ChatCenter.tsx),
+// então isso só registra o uso (estatística por vendedor) e devolve o cupom
+// atualizado; o texto do desconto é inserido à mão na mensagem pelo próprio
+// vendedor no front.
+router.post("/catalog/coupons/:id/redeem", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ error: "Cupom inválido" }); return; }
+  const [updated] = await db.update(catalogCouponsTable)
+    .set({ usedCount: sql`${catalogCouponsTable.usedCount} + 1` })
+    .where(and(
+      eq(catalogCouponsTable.id, id),
+      eq(catalogCouponsTable.tenantId, tenantId),
+      eq(catalogCouponsTable.active, true),
+      or(isNull(catalogCouponsTable.expiresAt), gt(catalogCouponsTable.expiresAt, new Date())),
+      or(isNull(catalogCouponsTable.usageLimit), lt(catalogCouponsTable.usedCount, catalogCouponsTable.usageLimit)),
+    ))
+    .returning();
+  if (!updated) { res.status(400).json({ error: "Cupom inválido, inativo, expirado ou com limite de uso esgotado" }); return; }
+  res.json(serializeCoupon(updated));
 });
 
 // ─── Listar / criar / editar / excluir produtos ─────────────────────────────
@@ -2252,6 +2382,70 @@ catalogPublicRouter.post("/catalog-public/:slug/checkout-click", async (req: Req
       .set({ purchaseCount: sql`${catalogProductsTable.purchaseCount} + ${qty}` })
       .where(and(eq(catalogProductsTable.id, productId), eq(catalogProductsTable.tenantId, tenant.id)));
   }
+  res.status(200).json({ ok: true });
+});
+
+// Cupom de desconto — validação (sem efeito colateral, pode chamar quantas
+// vezes quiser enquanto o cliente digita/edita o código no carrinho) e
+// resgate (uma única vez, ao clicar em "Finalizar pedido no WhatsApp" —
+// best-effort, incrementa used_count pra estatística por vendedor).
+function computeCouponDiscount(coupon: CatalogCoupon, subtotal: number): number {
+  const value = Number(coupon.discountValue);
+  if (coupon.discountType === "percent") return Math.round(subtotal * (value / 100) * 100) / 100;
+  return Math.min(value, subtotal);
+}
+
+catalogPublicRouter.post("/catalog-public/:slug/coupon/validate", async (req: Request, res: Response): Promise<void> => {
+  const rawSlug = Array.isArray(req.params.slug) ? req.params.slug[0] : req.params.slug;
+  const slug = (rawSlug ?? "").toLowerCase();
+  const [tenant] = await db.select({ id: tenantsTable.id }).from(tenantsTable)
+    .where(and(eq(tenantsTable.catalogSlug, slug), eq(tenantsTable.isActive, true))).limit(1);
+  if (!tenant) { res.status(404).json({ error: "Vitrine não encontrada" }); return; }
+
+  const body = req.body as Record<string, unknown>;
+  const code = normalizeCouponCode(body.code);
+  const subtotal = Math.max(0, Number(body.subtotal) || 0);
+  if (!code) { res.status(400).json({ valid: false, error: "Informe o código do cupom" }); return; }
+
+  const [coupon] = await db.select().from(catalogCouponsTable)
+    .where(and(eq(catalogCouponsTable.tenantId, tenant.id), eq(catalogCouponsTable.code, code))).limit(1);
+  if (!coupon) { res.status(200).json({ valid: false, error: "Cupom não encontrado" }); return; }
+  if (!coupon.active) { res.status(200).json({ valid: false, error: "Cupom inativo" }); return; }
+  if (coupon.expiresAt && new Date(coupon.expiresAt).getTime() < Date.now()) { res.status(200).json({ valid: false, error: "Cupom expirado" }); return; }
+  if (coupon.usageLimit != null && coupon.usedCount >= coupon.usageLimit) { res.status(200).json({ valid: false, error: "Cupom esgotado" }); return; }
+
+  const discountAmount = computeCouponDiscount(coupon, subtotal);
+  res.status(200).json({
+    valid: true,
+    discountType: coupon.discountType,
+    discountValue: Number(coupon.discountValue),
+    discountAmount,
+    label: coupon.discountType === "percent"
+      ? `${Number(coupon.discountValue)}% de desconto`
+      : `R$ ${Number(coupon.discountValue).toFixed(2).replace(".", ",")} de desconto`,
+  });
+});
+
+catalogPublicRouter.post("/catalog-public/:slug/coupon/redeem", async (req: Request, res: Response): Promise<void> => {
+  const rawSlug = Array.isArray(req.params.slug) ? req.params.slug[0] : req.params.slug;
+  const slug = (rawSlug ?? "").toLowerCase();
+  const [tenant] = await db.select({ id: tenantsTable.id }).from(tenantsTable)
+    .where(and(eq(tenantsTable.catalogSlug, slug), eq(tenantsTable.isActive, true))).limit(1);
+  if (!tenant) { res.status(404).json({ error: "Vitrine não encontrada" }); return; }
+
+  const body = req.body as Record<string, unknown>;
+  const code = normalizeCouponCode(body.code);
+  if (!code) { res.status(200).json({ ok: false }); return; }
+
+  await db.update(catalogCouponsTable)
+    .set({ usedCount: sql`${catalogCouponsTable.usedCount} + 1` })
+    .where(and(
+      eq(catalogCouponsTable.tenantId, tenant.id),
+      eq(catalogCouponsTable.code, code),
+      eq(catalogCouponsTable.active, true),
+      or(isNull(catalogCouponsTable.expiresAt), gt(catalogCouponsTable.expiresAt, new Date())),
+      or(isNull(catalogCouponsTable.usageLimit), lt(catalogCouponsTable.usedCount, catalogCouponsTable.usageLimit)),
+    ));
   res.status(200).json({ ok: true });
 });
 

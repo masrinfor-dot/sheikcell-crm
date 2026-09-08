@@ -264,3 +264,30 @@ export const catalogProductReviewsTable = pgTable("catalog_product_reviews", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 export type CatalogProductReview = typeof catalogProductReviewsTable.$inferSelect;
+
+// Cupom de desconto da Vitrine — dois usos combinados (pedido do lojista,
+// 08/09): (1) desconto de verdade, aplicado pelo cliente no carrinho da
+// vitrine pública OU pelo vendedor manualmente durante uma negociação no
+// Atendimento; (2) identifica QUEM trouxe a venda — vendorName é um rótulo
+// livre (não precisa ser um usuário cadastrado no sistema: "será usado para
+// vendedores externos também", ou seja, afiliados/parceiros sem login no
+// CRM) — o próprio código do cupom (ex. "JOAO10") já costuma identificar o
+// vendedor, então não é uma referência (FK) pra tabela de usuários, só um
+// texto informativo pra aparecer nas estatísticas de uso.
+export const catalogCouponsTable = pgTable("catalog_coupons", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  code: text("code").notNull(), // sempre gravado em MAIÚSCULO (normalizado no backend antes de salvar/comparar)
+  discountType: text("discount_type").notNull(), // "percent" | "fixed"
+  discountValue: numeric("discount_value").notNull(),
+  // Vendedor (interno ou externo) que esse cupom identifica — null = cupom
+  // geral da loja, sem vendedor específico vinculado.
+  vendorName: text("vendor_name"),
+  active: boolean("active").notNull().default(true),
+  usageLimit: integer("usage_limit"), // null = sem limite de usos
+  usedCount: integer("used_count").notNull().default(0),
+  expiresAt: timestamp("expires_at", { withTimezone: true }), // null = nunca expira
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type CatalogCoupon = typeof catalogCouponsTable.$inferSelect;
