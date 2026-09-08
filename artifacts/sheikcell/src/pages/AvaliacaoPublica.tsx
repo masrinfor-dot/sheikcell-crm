@@ -37,6 +37,27 @@ function tradeInStorageKey(slug: string) {
   return `sheikcell-vitrine-troca-${slug}`;
 }
 
+// Mesma chave usada em VitrinePublica.tsx pro carrinho — lida aqui só pra
+// montar um texto do(s) aparelho(s) que o cliente já tinha escolhido antes
+// de cair na avaliação (fluxo "Trocar por este aparelho"), pra registrar
+// junto do lead e o vendedor já saber o que oferecer na hora de chamar.
+function cartStorageKey(slug: string) {
+  return `sheikcell-vitrine-carrinho-${slug}`;
+}
+type MiniCartItem = { model: string; storage: string | null };
+function wantedProductFromCart(slug: string): string | null {
+  try {
+    const raw = localStorage.getItem(cartStorageKey(slug));
+    if (!raw) return null;
+    const items = JSON.parse(raw) as MiniCartItem[];
+    if (!Array.isArray(items) || items.length === 0) return null;
+    const labels = items.map((i) => [i.model, i.storage].filter(Boolean).join(" ")).filter(Boolean);
+    return labels.length > 0 ? labels.join(", ").slice(0, 200) : null;
+  } catch {
+    return null; // privado/bloqueado ou carrinho vazio — segue sem essa info
+  }
+}
+
 type PublicQuestion = { key: string; label: string; options: { label: string }[] };
 type PublicQuestions = { apple: PublicQuestion[]; android: PublicQuestion[] };
 type EstimateResult =
@@ -179,6 +200,9 @@ export default function AvaliacaoPublica() {
     slug ? api.tradeInPublic.lead(slug, {
       name: leadName.trim(), phone: leadPhone, brand: brand.trim(), model: model.trim(), memory, color,
       answers, estimatedPrice: result?.estimatedPrice,
+      // Só manda o aparelho do carrinho no modo troca — no modo avulso
+      // (só vender) não tem nenhum aparelho novo esperando no carrinho.
+      wantedProduct: isTroca ? (wantedProductFromCart(slug) ?? undefined) : undefined,
     }) : Promise.resolve();
 
   const finishStandalone = () => {

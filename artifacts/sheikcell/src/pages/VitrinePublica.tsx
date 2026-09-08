@@ -552,39 +552,47 @@ function ProductDetailModal({
                 Promoção
               </span>
             )}
-            {displayedPhotos.length > 0 ? (
-              <Carousel setApi={setCarouselApi} opts={{ loop: displayedPhotos.length > 1 }}>
-                <CarouselContent className="ml-0">
-                  {displayedPhotos.map((ph) => (
-                    <CarouselItem key={ph.id} className="pl-0">
-                      <div className="aspect-square sm:aspect-[4/5] bg-white sm:bg-neutral-100 rounded-xl overflow-hidden p-3 sm:p-6">
-                        <img src={api.catalog.photoUrl(ph.id)} alt={p.model} className="w-full h-full object-contain" />
-                      </div>
-                    </CarouselItem>
+            {/* Miniaturas numa coluna vertical à esquerda da foto principal a
+                partir do sm (estilo Mercado Livre) — no celular continuam
+                embaixo, em fileira horizontal, com flex-col-reverse invertendo
+                a ordem visual sem duplicar código. */}
+            <div className="flex flex-col-reverse sm:flex-row gap-2">
+              {displayedPhotos.length > 1 && (
+                <div className="flex sm:flex-col gap-1.5 overflow-x-auto sm:overflow-x-visible sm:overflow-y-auto sm:max-h-[420px] sm:w-14 shrink-0">
+                  {displayedPhotos.map((ph, i) => (
+                    <button key={ph.id} type="button" onClick={() => carouselApi?.scrollTo(i)}
+                      className={`w-14 h-14 rounded-lg overflow-hidden border-2 shrink-0 ${i === activePhoto ? "border-neutral-900" : "border-transparent"}`}>
+                      <img src={api.catalog.photoUrl(ph.id)} alt="" className="w-full h-full object-cover" />
+                    </button>
                   ))}
-                </CarouselContent>
-                {displayedPhotos.length > 1 && (
-                  <>
-                    <CarouselPrevious className="left-2 h-7 w-7 bg-white/80 hover:bg-white border-neutral-200" />
-                    <CarouselNext className="right-2 h-7 w-7 bg-white/80 hover:bg-white border-neutral-200" />
-                  </>
+                </div>
+              )}
+              <div className="flex-1 min-w-0">
+                {displayedPhotos.length > 0 ? (
+                  <Carousel setApi={setCarouselApi} opts={{ loop: displayedPhotos.length > 1 }}>
+                    <CarouselContent className="ml-0">
+                      {displayedPhotos.map((ph) => (
+                        <CarouselItem key={ph.id} className="pl-0">
+                          <div className="aspect-square sm:aspect-[4/5] bg-white sm:bg-neutral-100 rounded-xl overflow-hidden p-3 sm:p-6">
+                            <img src={api.catalog.photoUrl(ph.id)} alt={p.model} className="w-full h-full object-contain" />
+                          </div>
+                        </CarouselItem>
+                      ))}
+                    </CarouselContent>
+                    {displayedPhotos.length > 1 && (
+                      <>
+                        <CarouselPrevious className="left-2 h-7 w-7 bg-white/80 hover:bg-white border-neutral-200" />
+                        <CarouselNext className="right-2 h-7 w-7 bg-white/80 hover:bg-white border-neutral-200" />
+                      </>
+                    )}
+                  </Carousel>
+                ) : (
+                  <div className="aspect-square sm:aspect-[4/5] bg-neutral-100 rounded-xl overflow-hidden flex items-center justify-center">
+                    <Smartphone className="w-16 h-16 text-neutral-300" />
+                  </div>
                 )}
-              </Carousel>
-            ) : (
-              <div className="aspect-square sm:aspect-[4/5] bg-neutral-100 rounded-xl overflow-hidden flex items-center justify-center">
-                <Smartphone className="w-16 h-16 text-neutral-300" />
               </div>
-            )}
-            {displayedPhotos.length > 1 && (
-              <div className="flex gap-1.5 overflow-x-auto">
-                {displayedPhotos.map((ph, i) => (
-                  <button key={ph.id} type="button" onClick={() => carouselApi?.scrollTo(i)}
-                    className={`w-14 h-14 rounded-lg overflow-hidden border-2 shrink-0 ${i === activePhoto ? "border-neutral-900" : "border-transparent"}`}>
-                    <img src={api.catalog.photoUrl(ph.id)} alt="" className="w-full h-full object-cover" />
-                  </button>
-                ))}
-              </div>
-            )}
+            </div>
           </div>
           <div className="sm:col-span-3 p-4 sm:p-6 space-y-3">
           <div className="flex items-center gap-1.5 flex-wrap">
@@ -671,7 +679,11 @@ function ProductDetailModal({
             </div>
           )}
 
-          <div className="pt-1">
+          {/* Caixa de preço destacada, estilo Mercado Livre ("Melhor preço" em
+              caixa própria, separada do resto das informações) — pedido do
+              lojista (08/09): "faz parecido com o mercado livre". */}
+          <div className="pt-1 rounded-2xl border border-neutral-200 bg-neutral-50 p-3 sm:p-4">
+            <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wide mb-1">Melhor preço</p>
             {discount && (
               <div className="flex items-center gap-1.5 mb-0.5">
                 <p className="text-sm text-neutral-400 line-through">{formatBRL(discount.from)}</p>
@@ -685,21 +697,23 @@ function ProductDetailModal({
               )}
             </div>
             {retailPrice && <p className="text-xs text-emerald-600 font-semibold">à vista (Pix)</p>}
-            {installmentLabel && <p className="text-sm text-neutral-500">{installmentLabel}</p>}
+            {installmentLabel && (
+              <p className="text-sm text-neutral-700 bg-white border border-neutral-200 rounded-lg px-2 py-1 mt-1.5 inline-block">{installmentLabel}</p>
+            )}
             {wholesalePrice && (
               <>
-                <p className="text-sm font-bold text-amber-700 flex items-center gap-1"><Lock className="w-3.5 h-3.5" /> Atacado à vista: {wholesalePrice}</p>
+                <p className="text-sm font-bold text-amber-700 flex items-center gap-1 mt-1.5"><Lock className="w-3.5 h-3.5" /> Atacado à vista: {wholesalePrice}</p>
                 {wholesaleInstallmentLabel && <p className="text-xs text-amber-600">{wholesaleInstallmentLabel}</p>}
               </>
             )}
             {paymentMethods.length > 0 && (
               <button type="button" onClick={() => setShowPaymentMethods((v) => !v)} data-testid="button-toggle-payment-methods"
-                className="mt-0.5 text-xs font-semibold text-blue-600 hover:underline">
+                className="mt-1.5 text-xs font-semibold text-blue-600 hover:underline block">
                 Ver as formas de pagamento
               </button>
             )}
             {showPaymentMethods && paymentMethods.length > 0 && (
-              <div className="mt-1.5 rounded-lg bg-neutral-50 border border-neutral-200 p-2.5 space-y-1.5">
+              <div className="mt-1.5 rounded-lg bg-white border border-neutral-200 p-2.5 space-y-1.5">
                 {paymentMethods.map((m, i) => (
                   <div key={i} className="flex items-start gap-2">
                     <CreditCard className="w-3.5 h-3.5 text-neutral-500 shrink-0 mt-0.5" />
@@ -711,7 +725,9 @@ function ProductDetailModal({
                 ))}
               </div>
             )}
+          </div>
 
+          <div className="pt-1">
             {inStock ? (
               <>
                 <div className="mt-2 flex items-center gap-2">

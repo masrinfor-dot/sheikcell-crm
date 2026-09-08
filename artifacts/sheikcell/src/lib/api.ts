@@ -1089,6 +1089,9 @@ export type TradeInEvaluation = {
   imei?: string | null; finalAgreedPrice?: string | null; closedAt?: string | null;
   // Nota de compra completa: dados extras + fotos de documento/aparelho.
   sellerRg?: string | null; sellerAddress?: string | null; sellerNeighborhood?: string | null; sellerPhone?: string | null;
+  // Aparelho que o cliente deixou no carrinho da vitrine pública ao avaliar
+  // no fluxo "Trocar por este aparelho" — null fora desse fluxo.
+  wantedProduct?: string | null;
   documentPhotos?: string[]; devicePhotos?: string[];
   // Forma de pagamento + dados do Pix (chave/titular) + foto do comprovante.
   paymentMethod?: string | null; pixKey?: string | null; pixKeyHolder?: string | null;
@@ -2086,7 +2089,7 @@ export const api = {
     estimate: (slug: string, data: { brand: string; model: string; memory?: string; color?: string; answers: Record<string, string> }) =>
       req<{ method: "table" | "ai"; device: string; estimatedPrice: string } | { blocked: true; message: string }>(
         `/trade-in-public/${slug}/estimate`, { method: "POST", body: JSON.stringify(data) }),
-    lead: (slug: string, data: { name: string; phone: string; brand: string; model: string; memory?: string; color?: string; answers?: Record<string, string>; estimatedPrice?: string }) =>
+    lead: (slug: string, data: { name: string; phone: string; brand: string; model: string; memory?: string; color?: string; answers?: Record<string, string>; estimatedPrice?: string; wantedProduct?: string }) =>
       req<{ ok: boolean; id: number; updated?: boolean }>(`/trade-in-public/${slug}/lead`, { method: "POST", body: JSON.stringify(data) }),
   },
   results: {

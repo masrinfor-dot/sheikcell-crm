@@ -498,6 +498,19 @@ export default function VitrineAparelhos() {
   const publicTradeInLeads = tradeInLeads.filter((t) => t.source === "public_lead");
   const pendingTradeInLeads = publicTradeInLeads.filter((t) => !t.closedAt);
 
+  // Busca só essa lista (sem recarregar produtos/categorias/etc. inteiros) —
+  // usada pra sincronizar rápido com o que o cliente for avaliando ao vivo
+  // na vitrine pública, sem precisar dar F5 na página inteira. Pedido do
+  // lojista (08/09): "sincroniza as simulações de forma rápida".
+  const refreshTradeInLeads = () => { api.tradeIn.list().then(setTradeInLeads).catch(() => {}); };
+  useEffect(() => {
+    if (!showTradeInLeads) return;
+    refreshTradeInLeads(); // atualiza na hora que abre o modal
+    const id = setInterval(refreshTradeInLeads, 15000); // e a cada 15s enquanto estiver aberto
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showTradeInLeads]);
+
   // "Chamar no WhatsApp" aqui precisa abrir um atendimento DE VERDADE dentro
   // do próprio CRM (mesmo mecanismo do "ir para o atendimento" do CrmBoard e
   // do "Iniciar atendimento com este contato" do Chat Interno) — não um link
@@ -506,6 +519,26 @@ export default function VitrineAparelhos() {
   // POST /chat/conversations (a mesma do resto do CRM) resolve isso e, se já
   // existir uma conversa em andamento com esse telefone, o backend recusa com
   // 409 devolvendo o id dela — tratado abaixo do mesmo jeito que handleGoToChat.
+  // Mensagem pronta mencionando o aparelho avaliado (+ valor estimado) e,
+  // quando veio do fluxo "Trocar por este aparelho", o aparelho que o
+  // cliente deixou no carrinho (t.wantedProduct) — pedido do lojista (08/09):
+  // "criar uma mensagem já pré configurada sobre a avaliação do celular, e o
+  // aparelho que ele deixou no carrinho para quando iniciar a conversa ele
+  // já mande a msg". Só mandada ao ABRIR uma conversa nova (ver abaixo) —
+  // numa conversa já existente o vendedor já tem contexto, não repete.
+  const buildTradeInLeadMessage = (t: TradeInEvaluation): string => {
+    const first = (t.customerName || "").trim().split(/\s+/)[0] || "";
+    const greeting = first ? `Olá, ${first}!` : "Olá!";
+    const priceLine = t.suggestedPrice ? ` (valor estimado: ${t.suggestedPrice})` : "";
+    const lines = [`${greeting} Vi que você avaliou seu ${t.device} aqui na nossa vitrine${priceLine}.`];
+    if (t.wantedProduct) {
+      lines.push(`Vi também que você tinha deixado no carrinho: ${t.wantedProduct} — posso te ajudar a fechar essa troca?`);
+    } else {
+      lines.push("Posso te ajudar a fechar a compra do seu aparelho?");
+    }
+    return lines.join(" ");
+  };
+
   const [startingAtendimentoId, setStartingAtendimentoId] = useState<number | null>(null);
   const handleStartTradeInAtendimento = async (t: TradeInEvaluation) => {
     if (!t.sellerPhone) { toast({ title: "Telefone não informado nesta avaliação", variant: "destructive" }); return; }
@@ -514,6 +547,9 @@ export default function VitrineAparelhos() {
       const conv = await api.chat.createConversation({ phone: t.sellerPhone, name: t.customerName || t.device, channel: "whatsapp" });
       requestChatExpand("atendimento", conv.id);
       setShowTradeInLeads(false);
+      // Best-effort — a conversa já foi criada e aberta; se o envio falhar o
+      // vendedor ainda pode escrever na mão, não trava o fluxo.
+      api.chat.sendMessage(conv.id, buildTradeInLeadMessage(t)).catch(() => {});
     } catch (err) {
       if (err instanceof ApiError && err.conversationId != null) {
         requestChatExpand("atendimento", err.conversationId);
@@ -2660,6 +2696,9 @@ export default function VitrineAparelhos() {
                       </div>
                       <p className="text-xs text-muted-foreground">{t.device}{t.sellerPhone ? ` · ${t.sellerPhone}` : ""}</p>
                       {t.suggestedPrice && <p className="text-xs text-foreground/80 mt-0.5">Valor estimado: <span className="font-semibold">{t.suggestedPrice}</span></p>}
+                      {t.wantedProduct && (
+                        <p className="text-xs text-foreground/80 mt-0.5">Quer trocar por: <span className="font-semibold">{t.wantedProduct}</span></p>
+                      )}
                       <p className="text-[10px] text-muted-foreground mt-0.5">{new Date(t.createdAt).toLocaleString("pt-BR")}</p>
                     </div>
                     {t.sellerPhone && can(user, "criar_atendimento") && (

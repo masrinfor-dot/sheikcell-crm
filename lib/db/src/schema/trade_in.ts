@@ -53,6 +53,14 @@ export const tradeInEvaluationsTable = pgTable("trade_in_evaluations", {
   pixKey: text("pix_key"),
   pixKeyHolder: text("pix_key_holder"), // titular da chave Pix (pode ser diferente do vendedor)
   paymentProofPhotos: jsonb("payment_proof_photos").$type<string[]>().notNull().default([]),
+  // Aparelho que o cliente deixou no carrinho da vitrine pública ao avaliar
+  // o usado no fluxo "Trocar por este aparelho" (?troca=1) — texto composto
+  // (modelo + armazenamento/cor), só de referência/exibição. Null quando a
+  // avaliação foi feita fora desse fluxo (venda avulsa, ou feita por um
+  // atendente). Pedido do lojista (08/09): mandar uma mensagem já pronta pro
+  // vendedor mencionando os dois aparelhos (o avaliado e o desejado) ao
+  // iniciar o atendimento com esse lead.
+  wantedProduct: text("wanted_product"),
 });
 export type TradeInEvaluation = typeof tradeInEvaluationsTable.$inferSelect;
 

@@ -57,6 +57,10 @@ router.get("/trade-in", requireAuth, async (req, res): Promise<void> => {
       sellerAddress: tradeInEvaluationsTable.sellerAddress,
       sellerNeighborhood: tradeInEvaluationsTable.sellerNeighborhood,
       sellerPhone: tradeInEvaluationsTable.sellerPhone,
+      // Aparelho que o cliente deixou no carrinho ao avaliar no fluxo
+      // "Trocar por este aparelho" — null fora desse fluxo. Ver comentário
+      // em tradeInEvaluationsTable.wantedProduct.
+      wantedProduct: tradeInEvaluationsTable.wantedProduct,
       paymentMethod: tradeInEvaluationsTable.paymentMethod,
       pixKey: tradeInEvaluationsTable.pixKey,
       pixKeyHolder: tradeInEvaluationsTable.pixKeyHolder,
@@ -855,8 +859,8 @@ tradeInPublicRouter.post("/trade-in-public/:slug/lead", async (req: Request, res
   if (!tenant) { res.status(404).json({ error: "Avaliação não encontrada" }); return; }
   const tenantId = tenant.id;
 
-  const { name, phone, brand, model, memory, color, answers, estimatedPrice } = req.body as PublicEstimateBody & {
-    name?: string; phone?: string; estimatedPrice?: string;
+  const { name, phone, brand, model, memory, color, answers, estimatedPrice, wantedProduct } = req.body as PublicEstimateBody & {
+    name?: string; phone?: string; estimatedPrice?: string; wantedProduct?: string;
   };
   const fName = clean(name, 120);
   const fPhone = typeof phone === "string" ? phone.replace(/\D/g, "").slice(0, 20) : "";
@@ -864,6 +868,10 @@ tradeInPublicRouter.post("/trade-in-public/:slug/lead", async (req: Request, res
   const fModel = clean(model, 60);
   const fMemory = clean(memory, 20);
   const fColor = clean(color, 30);
+  // Aparelho(s) que o cliente deixou no carrinho da vitrine pública (fluxo
+  // "Trocar por este aparelho") — texto livre montado no front a partir do
+  // carrinho, só de referência/exibição pro vendedor.
+  const fWantedProduct = clean(wantedProduct, 200) || null;
   if (!fName) { res.status(400).json({ error: "Informe seu nome" }); return; }
   if (fPhone.length < 10) { res.status(400).json({ error: "Informe um telefone válido (com DDD)" }); return; }
   if (!fBrand || !fModel) { res.status(400).json({ error: "Informe a marca e o modelo do aparelho" }); return; }
@@ -906,6 +914,10 @@ tradeInPublicRouter.post("/trade-in-public/:slug/lead", async (req: Request, res
     answers: cleanAnswers,
     suggestedPrice: clean(estimatedPrice, 100) || null,
     aiSummary: "Avaliação feita pelo próprio cliente na vitrine pública (sem atendente) — confirme o valor com o cliente antes de fechar.",
+    // Só sobrescreve o que já estava salvo quando vier preenchido — assim um
+    // 2º lead do mesmo telefone sem carrinho (ex.: venda avulsa depois de já
+    // ter avaliado pra troca) não apaga o aparelho desejado registrado antes.
+    ...(fWantedProduct ? { wantedProduct: fWantedProduct } : {}),
   };
 
   if (existingPending) {
