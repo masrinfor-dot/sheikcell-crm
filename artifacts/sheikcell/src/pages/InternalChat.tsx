@@ -1405,7 +1405,7 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                   </div>
                 )}
                 {pendingAttachment ? (
-                  <div className="flex-1 flex items-center gap-2 rounded-lg border px-3 py-2 bg-muted/30" data-testid="attachment-preview">
+                  <div className="flex-1 min-w-0 flex items-center gap-2 rounded-lg border px-3 py-2 bg-muted/30" data-testid="attachment-preview">
                     {pendingAttachment.kind === "image" && pendingAttachment.previewUrl && (
                       <img src={pendingAttachment.previewUrl} alt="Preview" className="w-11 h-11 rounded-lg object-cover shrink-0" />
                     )}
@@ -1413,9 +1413,13 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                       <audio controls src={pendingAttachment.previewUrl} className="h-8 max-w-[170px] shrink-0" />
                     )}
                     {pendingAttachment.kind === "doc" && (
-                      <div className="flex items-center gap-1.5 shrink-0 max-w-[140px]">
+                      // min-w-0 é essencial aqui: sem ele, um nome de arquivo longo
+                      // (ex.: PDF de campanha com nome extenso) força esta caixa a
+                      // crescer além do max-w e empurra os botões Cancelar/Enviar
+                      // pra fora da área visível do composer (bug reportado 08/09).
+                      <div className="flex items-center gap-1.5 shrink-0 min-w-0 max-w-[140px]">
                         <FileText className="w-5 h-5 shrink-0 text-muted-foreground" />
-                        <span className="text-xs truncate">{pendingAttachment.file.name}</span>
+                        <span className="text-xs truncate min-w-0">{pendingAttachment.file.name}</span>
                       </div>
                     )}
                     <input
