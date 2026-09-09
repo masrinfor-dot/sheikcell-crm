@@ -264,3 +264,50 @@ export function parcelamento12xAtacadoDoProduto(
   const total = aplicarTaxaCartaoSobrePrecoAVista(precoAVista, taxaCartaoPercent, settings.roundPricesUp);
   return { total, parcela: parcelaCartao(total, 12) };
 }
+
+export type OpcaoParcelamento = { parcelas: number; total: number; parcela: number };
+
+// Mesmo teto usado em todo o resto da Vitrine pro "ou 12x de R$X" (varejo E
+// atacado) — a lista de opções de parcelamento (pedido pelo lojista em
+// 09/09: cliente clica e vê o valor de CADA parcela, de 1x até 12x) usa o
+// mesmo teto, pra não anunciar mais parcelas do que a loja já anuncia hoje.
+export const MAX_PARCELAS_VITRINE = 12;
+
+/**
+ * Lista completa de opções de parcelamento (1x até MAX_PARCELAS_VITRINE) a
+ * partir de um preço à vista já calculado — cada opção usa a taxa de cartão
+ * configurada PRA AQUELE número de parcelas (settings.cardFeeTable), com a
+ * mesma fórmula de aplicarTaxaCartaoSobrePrecoAVista (taxa por cima do preço
+ * à vista, não misturada com a margem — ver comentário lá). 1x normalmente
+ * já tem uma taxa pequena configurada (custo de maquininha mesmo à vista no
+ * cartão), diferente do preço à vista no Pix/dinheiro (esse sim sem taxa).
+ */
+function listaDeParcelas(precoAVista: number | null, settings: PricingSettings, maxParcelas: number): OpcaoParcelamento[] {
+  if (precoAVista == null) return [];
+  const out: OpcaoParcelamento[] = [];
+  for (let n = 1; n <= maxParcelas; n++) {
+    const taxaCartaoPercent = settings.cardFeeTable[String(n)] ?? 0;
+    const total = aplicarTaxaCartaoSobrePrecoAVista(precoAVista, taxaCartaoPercent, settings.roundPricesUp);
+    out.push({ parcelas: n, total, parcela: parcelaCartao(total, n) });
+  }
+  return out;
+}
+
+/** Todas as opções de parcelamento (1x-12x) do preço de VAREJO de um produto. */
+export function parcelasDoProduto(
+  produto: { costPrice: number | null; costIncludesInvoice: boolean; marginPercentOverride: number | null },
+  settings: PricingSettings,
+  categoryId?: number | null,
+  maxParcelas: number = MAX_PARCELAS_VITRINE,
+): OpcaoParcelamento[] {
+  return listaDeParcelas(precoAVistaDoProduto(produto, settings, categoryId), settings, maxParcelas);
+}
+
+/** Todas as opções de parcelamento (1x-12x) do preço de ATACADO de um produto. */
+export function parcelasAtacadoDoProduto(
+  produto: { costPrice: number | null; costIncludesInvoice: boolean; wholesaleMarginPercentOverride: number | null },
+  settings: PricingSettings,
+  maxParcelas: number = MAX_PARCELAS_VITRINE,
+): OpcaoParcelamento[] {
+  return listaDeParcelas(precoAtacadoDoProduto(produto, settings), settings, maxParcelas);
+}

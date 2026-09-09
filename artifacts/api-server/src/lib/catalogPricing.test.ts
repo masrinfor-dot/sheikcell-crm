@@ -7,6 +7,7 @@ import {
   precoVendaDoProduto,
   precoAVistaDoProduto,
   parcelamento12xDoProduto,
+  parcelasDoProduto,
   calcularPrecoVenda,
 } from "./catalogPricing";
 
@@ -116,6 +117,31 @@ test("parcelamento12xDoProduto: diferença % entre à vista e 12x bate com a tax
   // ponto do teste é confirmar que NÃO fica perto de 28% (o bug antigo),
   // e sim colado nos 15% configurados.
   assert.ok(Math.abs(savingsPercent - 0.15) < 1e-3, `esperado 15% de diferença, veio ${(savingsPercent * 100).toFixed(2)}%`);
+});
+
+test("parcelasDoProduto: lista 1x-12x, com a opção de 12x batendo com parcelamento12xDoProduto", () => {
+  const settings = sanitizePricingSettings({
+    defaultMarginPercent: 20,
+    categoryMarginOverrides: { "31": 45 },
+    cardFeeTable: { "1": 3, "6": 9, "12": 15 },
+  });
+  const produto = { costPrice: 1000, costIncludesInvoice: true, marginPercentOverride: null };
+
+  const opcoes = parcelasDoProduto(produto, settings, 31);
+  assert.equal(opcoes.length, 12);
+  assert.deepEqual(opcoes.map((o) => o.parcelas), Array.from({ length: 12 }, (_, i) => i + 1));
+
+  const doze = opcoes.find((o) => o.parcelas === 12);
+  const parcelamento12 = parcelamento12xDoProduto(produto, settings, 31);
+  assert.equal(doze?.total, parcelamento12?.total);
+  assert.equal(doze?.parcela, parcelamento12?.parcela);
+
+  // 1x tem taxa própria (3%) — maior que o à vista (0%), mas MENOR que o
+  // total em 12x (a taxa de 12x, 15%, é maior que a de 1x).
+  const umX = opcoes.find((o) => o.parcelas === 1);
+  const precoAVista = precoAVistaDoProduto(produto, settings, 31);
+  assert.ok(umX!.total > precoAVista!);
+  assert.ok(umX!.total < doze!.total);
 });
 
 test("chamadas sem categoryId continuam com o comportamento antigo (compatibilidade)", () => {

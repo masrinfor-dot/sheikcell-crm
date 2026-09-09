@@ -31,7 +31,10 @@ import {
   precoAVistaDoProduto,
   parcelamento12xDoProduto,
   parcelamento12xAtacadoDoProduto,
+  parcelasDoProduto,
+  parcelasAtacadoDoProduto,
   type PricingSettings,
+  type OpcaoParcelamento,
 } from "../lib/catalogPricing";
 import { extractJsonObject, askCatalogAIWithWebSearch, buildMarketCheckPrompt, cleanMarketCheckVerdict } from "../lib/catalogMarketPrice";
 import { CATALOG_CONDITIONS, CATALOG_CONDITION_CRITERIA, type CatalogCondition } from "@workspace/db";
@@ -187,7 +190,9 @@ function toNumberOrNull(v: unknown): number | null {
 // preço, sempre em sincronia se a margem/tabela de cartão mudar depois).
 function withInstallmentPricing<
   T extends { costPrice: string | number | null; costIncludesInvoice: boolean; marginPercentOverride: string | number | null },
->(v: T, settings: PricingSettings, categoryId?: number | null): { priceCash: number | null; installment12Value: number | null } {
+>(v: T, settings: PricingSettings, categoryId?: number | null): {
+  priceCash: number | null; installment12Value: number | null; installmentOptions: OpcaoParcelamento[];
+} {
   const produto = {
     costPrice: toNumberOrNull(v.costPrice),
     costIncludesInvoice: v.costIncludesInvoice,
@@ -197,6 +202,10 @@ function withInstallmentPricing<
   return {
     priceCash: precoAVistaDoProduto(produto, settings, categoryId),
     installment12Value: installment?.parcela ?? null,
+    // Lista completa (1x-12x) pra vitrine pública mostrar o valor de CADA
+    // parcela quando o cliente clica em "ver opções de parcelamento" — ver
+    // parcelasDoProduto em catalogPricing.ts (pedido do lojista em 09/09).
+    installmentOptions: parcelasDoProduto(produto, settings, categoryId),
   };
 }
 
@@ -211,7 +220,9 @@ function withInstallmentPricing<
 // manualmente pelo lojista, sem fórmula).
 function withWholesaleInstallmentPricing<
   T extends { costPrice: string | number | null; costIncludesInvoice: boolean; wholesaleMarginPercentOverride: string | number | null },
->(v: T, settings: PricingSettings): { wholesaleInstallment12Value: number | null; wholesalePriceCash: number | null } {
+>(v: T, settings: PricingSettings): {
+  wholesaleInstallment12Value: number | null; wholesalePriceCash: number | null; wholesaleInstallmentOptions: OpcaoParcelamento[];
+} {
   const produto = {
     costPrice: toNumberOrNull(v.costPrice),
     costIncludesInvoice: v.costIncludesInvoice,
@@ -221,6 +232,7 @@ function withWholesaleInstallmentPricing<
   return {
     wholesaleInstallment12Value: installment?.parcela ?? null,
     wholesalePriceCash: precoAtacadoDoProduto(produto, settings),
+    wholesaleInstallmentOptions: parcelasAtacadoDoProduto(produto, settings),
   };
 }
 

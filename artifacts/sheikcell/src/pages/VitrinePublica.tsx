@@ -169,6 +169,26 @@ function cardFeeSavingsPercent(v: { priceCash?: number | null; installment12Valu
   return pct > 0 ? pct : null;
 }
 
+// Lista de todas as opções de parcelamento (1x-12x) — mostrada quando o
+// cliente clica em "ver parcelas" (pedido do lojista, 09/09: antes só dava
+// pra ver o valor fixo de 12x, sem saber quanto ficava em menos parcelas).
+function InstallmentOptionsTable({ options }: { options?: { parcelas: number; total: number; parcela: number }[] }) {
+  if (!options || options.length === 0) return null;
+  return (
+    <div className="mt-1 rounded-lg bg-white border border-neutral-200 divide-y divide-neutral-100 max-h-56 overflow-y-auto">
+      {options.map((o) => (
+        <div key={o.parcelas} className="flex items-center justify-between gap-2 px-2.5 py-1.5 text-xs" data-testid={`row-installment-${o.parcelas}x`}>
+          <span className="text-neutral-500">{o.parcelas}x {o.parcelas === 1 ? "(à vista no cartão)" : "no cartão"}</span>
+          <span className="flex items-baseline gap-1.5">
+            <span className="font-semibold text-neutral-800">{formatBRL(o.parcela)}</span>
+            {o.parcelas > 1 && <span className="text-neutral-400 text-[10px]">total {formatBRL(o.total)}</span>}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function wholesaleStorageKey(slug: string) {
   return `sheikcell-vitrine-atacado-${slug}`;
 }
@@ -295,6 +315,7 @@ function ProductCard({
     }, null);
   }, [p.variants]);
   const [showCriteria, setShowCriteria] = useState(false);
+  const [showInstallments, setShowInstallments] = useState(false);
   const selected = cheapestVariant ?? p.variants[0] ?? null;
   const memory = memoryRangeLabel(p.variants);
   // À vista (Pix/dinheiro, sem taxa de cartão) é o preço principal mostrado;
@@ -375,7 +396,13 @@ function ProductCard({
             )}
           </div>
           {retailPrice && <p className="text-[10px] text-emerald-600 font-semibold">à vista (Pix)</p>}
-          {installmentLabel && <p className="text-[11px] text-neutral-500">{installmentLabel}</p>}
+          {installmentLabel && (
+            <button type="button" onClick={() => setShowInstallments((v) => !v)} data-testid={`button-toggle-installments-${p.id}`}
+              className="text-[11px] text-blue-600 hover:underline font-semibold text-left">
+              {installmentLabel} · ver parcelas
+            </button>
+          )}
+          {showInstallments && <InstallmentOptionsTable options={selected?.installmentOptions} />}
           {wholesalePrice && (
             <>
               <p className="text-xs font-bold text-amber-700 flex items-center gap-1"><Lock className="w-3 h-3" /> Atacado à vista: {wholesalePrice}</p>
@@ -437,6 +464,7 @@ function ProductDetailModal({
   const [notifyDone, setNotifyDone] = useState(false);
   const [notifyError, setNotifyError] = useState<string | null>(null);
   const [showPaymentMethods, setShowPaymentMethods] = useState(false);
+  const [showInstallments, setShowInstallments] = useState(false);
   // "Avaliar este aparelho" — só aparece pra quem está no modo varejo (sem o
   // código de atacado desbloqueado, ver wholesaleUnlocked acima).
   const [showReviewForm, setShowReviewForm] = useState(false);
@@ -719,8 +747,12 @@ function ProductDetailModal({
             </div>
             {retailPrice && <p className="text-xs text-emerald-600 font-semibold">à vista (Pix)</p>}
             {installmentLabel && (
-              <p className="text-sm text-neutral-700 bg-white border border-neutral-200 rounded-lg px-2 py-1 mt-1.5 inline-block">{installmentLabel}</p>
+              <button type="button" onClick={() => setShowInstallments((v) => !v)} data-testid="button-toggle-installments-detail"
+                className="text-sm text-neutral-700 bg-white border border-neutral-200 rounded-lg px-2 py-1 mt-1.5 inline-flex items-center gap-1.5 hover:border-neutral-300 transition">
+                {installmentLabel} <span className="text-blue-600 font-semibold text-xs">ver parcelas</span>
+              </button>
             )}
+            {showInstallments && <InstallmentOptionsTable options={selected?.installmentOptions} />}
             {wholesalePrice && (
               <>
                 <p className="text-sm font-bold text-amber-700 flex items-center gap-1 mt-1.5"><Lock className="w-3.5 h-3.5" /> Atacado à vista: {wholesalePrice}</p>

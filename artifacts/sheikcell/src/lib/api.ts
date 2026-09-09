@@ -450,9 +450,11 @@ export type CatalogProductVariant = {
   // valor de cada parcela pagando em até 12x no cartão.
   priceCash?: number | null;
   installment12Value?: number | null;
+  installmentOptions?: CatalogInstallmentOption[];
   // Mesma ideia, só que pro preço de atacado — o wholesalePrice já É o valor
   // à vista (sem taxa de cartão); isso aqui é só o valor da parcela em 12x.
   wholesaleInstallment12Value?: number | null;
+  wholesaleInstallmentOptions?: CatalogInstallmentOption[];
 };
 
 // Input de variante enviado pro backend (form de cadastro/edição) — id
@@ -559,6 +561,12 @@ export type CatalogPricingSettings = {
 
 export type CatalogMarketCheckVerdict = "compativel" | "acima" | "abaixo" | "sem_dados";
 
+// Uma opção de parcelamento (1x-12x) — "parcelas" é o número de parcelas,
+// "total" o valor total pagando dessa forma, "parcela" o valor de CADA
+// parcela (total / parcelas). Usado no popover "ver opções de parcelamento"
+// (pedido do lojista em 09/09: cliente clica e vê o valor de cada parcela).
+export type CatalogInstallmentOption = { parcelas: number; total: number; parcela: number };
+
 export type CatalogPublicVariant = {
   id: number; storage: string | null; ram: string | null; network: string | null; color: string | null; salePrice: string | null; inStock: boolean;
   wholesalePrice: string | null;
@@ -567,9 +575,11 @@ export type CatalogPublicVariant = {
   compareAtPrice: string | null;
   priceCash?: number | null;
   installment12Value?: number | null;
+  installmentOptions?: CatalogInstallmentOption[];
   // Só vem preenchido junto com wholesalePrice, ou seja, só pra quem já
   // desbloqueou com o código de acesso de atacado.
   wholesaleInstallment12Value?: number | null;
+  wholesaleInstallmentOptions?: CatalogInstallmentOption[];
 };
 
 export type CatalogPublicProduct = {
