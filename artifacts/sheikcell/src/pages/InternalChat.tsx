@@ -1083,6 +1083,30 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                   <Plus className="w-3.5 h-3.5" /> Novo
                 </button>
               )}
+              {/* Limpeza de conversas 1:1 antigas (de antes de criar direta
+                  ter virado admin-only): apaga todas de uma vez, sem precisar
+                  abrir uma por uma. Só admin vê. Grupos não são afetados. */}
+              {user?.role === "admin" && (
+                <button
+                  onClick={async () => {
+                    if (!confirm("Apagar TODAS as conversas diretas (1:1) da loja? O histórico de mensagens de cada uma será apagado para os dois lados, para sempre. Grupos e a sala geral NÃO são afetados.")) return;
+                    try {
+                      const result = await api.internalChat.deleteAllDirect();
+                      const hadActiveDirectOpen = active?.kind === "direct";
+                      setConversations((prev) => prev.filter((c) => c.kind !== "direct"));
+                      if (hadActiveDirectOpen) setActiveId(null);
+                      toast({ title: result.count > 0 ? `${result.count} conversa${result.count > 1 ? "s" : ""} direta${result.count > 1 ? "s" : ""} apagada${result.count > 1 ? "s" : ""}` : "Não havia conversas diretas para apagar" });
+                    } catch (err) {
+                      alert(err instanceof Error ? err.message : "Erro ao apagar conversas diretas");
+                    }
+                  }}
+                  data-testid="button-delete-all-direct"
+                  title="Apagar todas as conversas diretas (1:1)"
+                  className="p-1 rounded hover:bg-red-50 text-red-600 transition"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
             </div>
           </div>
           <div className="flex-1 overflow-y-auto">

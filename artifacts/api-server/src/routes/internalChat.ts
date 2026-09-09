@@ -1011,6 +1011,43 @@ router.delete("/internal-chat/conversations/:id", requireAdmin, async (req, res)
   res.json({ ok: true });
 });
 
+// ─── Excluir TODAS as conversas diretas (1:1) de uma vez ───────────────────
+// Botão "apagar todas as diretas" no admin (Chat Interno): pedido do lojista
+// pra limpar de uma vez conversas 1:1 antigas de vendedores, que ficaram de
+// antes de criar conversa direta ter virado admin-only. Só kind === "direct"
+// — grupos e a sala geral não são tocados. Sempre só da MESMA loja.
+router.delete("/internal-chat/conversations/direct/all", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+
+  const directConvs = await db.select({ id: internalConversationsTable.id })
+    .from(internalConversationsTable)
+    .where(and(eq(internalConversationsTable.tenantId, tenantId), eq(internalConversationsTable.kind, "direct")));
+  if (directConvs.length === 0) { res.json({ ok: true, count: 0 }); return; }
+
+  // Membros de cada conversa ANTES de apagar (depois do delete não tem mais
+  // como saber quem participava, pra avisar em tempo real).
+  const allMembers = await db
+    .select({ conversationId: internalConversationMembersTable.conversationId, userId: internalConversationMembersTable.userId })
+    .from(internalConversationMembersTable)
+    .where(inArray(internalConversationMembersTable.conversationId, directConvs.map((c) => c.id)));
+  const membersByConv = new Map<number, number[]>();
+  for (const m of allMembers) {
+    const list = membersByConv.get(m.conversationId) ?? [];
+    list.push(m.userId);
+    membersByConv.set(m.conversationId, list);
+  }
+
+  const deleted = await db
+    .delete(internalConversationsTable)
+    .where(and(eq(internalConversationsTable.tenantId, tenantId), eq(internalConversationsTable.kind, "direct")))
+    .returning({ id: internalConversationsTable.id }); // cascade apaga membros e mensagens
+
+  for (const { id } of deleted) {
+    broadcastInternal("internal_conversation_removed", { id }, tenantId, membersByConv.get(id) ?? []);
+  }
+  res.json({ ok: true, count: deleted.length });
+});
+
 // ─── Excluir a sala "Equipe (Geral)" ────────────────────────────────────────
 // Diferente de um grupo comum: marca a loja como "sala geral desativada"
 // ANTES de apagar, senão ensureGeneralRoom() recriaria uma nova (vazia) no

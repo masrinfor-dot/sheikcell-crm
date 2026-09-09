@@ -1926,6 +1926,10 @@ export const api = {
     // Mesma rota do deleteGroup acima (o backend agora aceita grupo OU
     // direta) — nome próprio só pra deixar claro no call-site do 1:1.
     deleteConversation: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}`, { method: "DELETE" }),
+    // Apaga de uma vez TODAS as conversas diretas (1:1) da loja — pedido do
+    // lojista pra limpar conversas antigas de vendedores sem precisar abrir
+    // uma por uma. Grupos e a sala geral não são afetados.
+    deleteAllDirect: () => req<{ ok: boolean; count: number }>("/internal-chat/conversations/direct/all", { method: "DELETE" }),
     deleteGeneral: () => req<{ ok: boolean }>("/internal-chat/general", { method: "DELETE" }),
     groupMembers: (id: number) => req<{ id: number; name: string; role: string }[]>(`/internal-chat/conversations/${id}/members`),
     updateGroup: (id: number, data: { name?: string; memberIds?: number[]; queueMode?: boolean }) =>
