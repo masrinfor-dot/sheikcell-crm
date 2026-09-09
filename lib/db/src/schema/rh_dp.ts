@@ -2,6 +2,7 @@ import { pgTable, serial, text, timestamp, integer, boolean, jsonb, date, unique
 import { sql } from "drizzle-orm";
 import { usersTable } from "./users";
 import { storesTable } from "./stores";
+import { rhCandidatesTable } from "./rh";
 
 // Departamento Pessoal (DP) operacional: colaboradores, escalas, ponto,
 // banco de horas e afastamentos. Vizinho de rh.ts (recrutamento), mas
@@ -31,6 +32,15 @@ export const employeesTable = pgTable("employees", {
   storeId: integer("store_id").references(() => storesTable.id),
   shiftId: integer("shift_id").references(() => workShiftsTable.id),
   isActive: boolean("is_active").notNull().default(true),
+  // Contratação (pedido do lojista, 09/09): candidateId guarda de qual
+  // candidatura do recrutamento (rh_candidates) essa contratação saiu — null
+  // pra cadastro direto, sem processo seletivo (como já era possível antes).
+  // hiringStatus fica 'em_contratacao' enquanto documentos/contrato ainda
+  // estão sendo reunidos no fluxo de "Iniciar contratação"; vira 'ativo' ao
+  // finalizar. Default 'ativo' pra não mudar nada em colaborador já
+  // existente (cadastro direto de sempre continua exatamente igual).
+  candidateId: integer("candidate_id").references(() => rhCandidatesTable.id),
+  hiringStatus: text("hiring_status").notNull().default("ativo"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (t) => [
@@ -128,9 +138,56 @@ export const timeBankClosuresTable = pgTable("time_bank_closures", {
   uniqueIndex("time_bank_closures_unique").on(t.tenantId, t.employeeId, t.periodMonth),
 ]);
 
+// Banco de arquivos do colaborador (contratação): 1 linha por documento —
+// RG, CPF, foto 3x4, carteira de trabalho, comprovante de residência,
+// título de eleitor, PIS/NIT, certidão, exame admissional, contrato de
+// trabalho gerado, ou qualquer outro arquivo. O arquivo em si fica no disco
+// (mesma pasta DOCS_DIR já usada por documents.ts, numa subpasta — usa o
+// MESMO volume persistente já montado em produção, sem exigir nenhuma
+// configuração nova no EasyPanel); aqui só os metadados (storedName é o
+// nome no disco). textContent guarda o texto do contrato quando a linha é
+// o contrato gerado/editado (sem arquivo em disco nesse caso — mimeType e
+// storedName ficam null).
+export const employeeDocumentsTable = pgTable("employee_documents", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  employeeId: integer("employee_id").notNull().references(() => employeesTable.id, { onDelete: "cascade" }),
+  // Chave do tipo de documento (ex.: "foto_3x4", "rg", "ctps", "contrato_trabalho",
+  // "outro") — lista sugerida vive no frontend, aqui é texto livre pra não
+  // travar em nenhuma lista fixa.
+  docType: text("doc_type").notNull(),
+  label: text("label"), // rótulo livre, principalmente pra docType "outro"
+  fileName: text("file_name"),
+  mimeType: text("mime_type"),
+  storedName: text("stored_name"), // nome do arquivo no disco (null quando é só texto, ex.: contrato)
+  sizeBytes: integer("size_bytes"),
+  textContent: text("text_content"), // texto do contrato gerado/editado (docType "contrato_trabalho")
+  uploadedByUserId: integer("uploaded_by_user_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Modelos de contrato de trabalho, personalizáveis pelo admin — texto com
+// placeholders ({{nome}}, {{cpf}}, {{rg}}, {{cargo}}, {{funcao}}, {{salario}},
+// {{admissao}}, {{escala}}, {{loja}}, {{tipo_contrato}}) substituídos na
+// hora de gerar o contrato de um colaborador específico (ver placeholders
+// em routes/employeeHiring.ts). Vários modelos por tenant — ex.: um pra
+// CLT, outro pra PJ/estágio.
+export const employeeContractTemplatesTable = pgTable("employee_contract_templates", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  name: text("name").notNull(),
+  contractType: text("contract_type"), // "clt" | "pj" | "estagio" | null = qualquer
+  bodyText: text("body_text").notNull(),
+  isDefault: boolean("is_default").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+});
+
 export type Employee = typeof employeesTable.$inferSelect;
 export type WorkShift = typeof workShiftsTable.$inferSelect;
 export type TimeClockEntry = typeof timeClockEntriesTable.$inferSelect;
 export type TimeBankAdjustment = typeof timeBankAdjustmentsTable.$inferSelect;
 export type LeaveRecord = typeof leaveRecordsTable.$inferSelect;
 export type TimeBankClosure = typeof timeBankClosuresTable.$inferSelect;
+export type EmployeeDocument = typeof employeeDocumentsTable.$inferSelect;
+export type EmployeeContractTemplate = typeof employeeContractTemplatesTable.$inferSelect;

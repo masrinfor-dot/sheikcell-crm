@@ -4,7 +4,7 @@ import {
   api, API_BASE, canEditModule,
   type RhStage, type RhQuestion, type RhCandidate, type RhPosition, type RhProfileType,
   type Employee, type WorkShift, type TimeClockEntry, type TimeBankResult, type TimeBankSummaryRow, type LeaveRecord, type TimeBankClosure,
-  type Store, type User,
+  type Store, type User, type EmployeeDocument, type EmployeeContractTemplate,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
@@ -12,6 +12,7 @@ import {
   Users, Settings2, Copy, RefreshCw, Plus, Trash2, X, CheckCircle, XCircle,
   Video, ChevronDown, ChevronUp, Save, Link2, UserSquare2, CalendarClock, Clock, Wallet, Pencil, Archive, PlayCircle,
   AlertTriangle, Image as ImageIcon, Smartphone, Printer, Star, Briefcase, Sparkles, MapPin,
+  Upload, Download, FileText, FolderArchive, UserPlus, FileSignature, Eye, IdCard, RotateCcw,
 } from "lucide-react";
 
 // Perfil comportamental (estilo DISC simplificado, 4 tipos definidos pelo
@@ -226,7 +227,12 @@ function groupCandidatesByPerson(list: RhCandidate[]): Map<number, RhCandidate[]
 // ── Recrutamento (processo seletivo, já existia) ────────────────────────────
 function Recrutamento({ canEdit }: { canEdit: boolean }) {
   const { toast } = useToast();
-  const [view, setView] = useState<"candidatos" | "processo">("candidatos");
+  const [view, setView] = useState<"candidatos" | "processo" | "contratacoes">("candidatos");
+  // Colaborador cuja contratação deve abrir automaticamente assim que a
+  // view "Contratações" montar (setado ao clicar "Iniciar contratação" no
+  // candidato aprovado) — consumido uma vez pelo componente Contratacoes.
+  const [hiringToOpen, setHiringToOpen] = useState<number | null>(null);
+  const [startingHiring, setStartingHiring] = useState(false);
   const [token, setToken] = useState("");
   const [stages, setStages] = useState<RhStage[]>([]);
   const [candidates, setCandidates] = useState<RhCandidate[]>([]);
@@ -410,6 +416,24 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
     win.print();
   };
 
+  // Abre (ou reabre, se já existir) a contratação deste candidato aprovado —
+  // cria o colaborador com hiringStatus "em_contratacao" e leva pra view
+  // "Contratação", já abrindo o assistente dele.
+  const startHiring = async (c: RhCandidate) => {
+    if (startingHiring) return;
+    setStartingHiring(true);
+    try {
+      const emp = await api.rhDp.hiring.start({ candidateId: c.id });
+      setOpened(null);
+      setHiringToOpen(emp.id);
+      setView("contratacoes");
+    } catch (err) {
+      toast({ title: "Erro ao iniciar contratação", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setStartingHiring(false);
+    }
+  };
+
   const removeCandidate = async (c: RhCandidate) => {
     if (!window.confirm(`Excluir a candidatura de ${c.name}?`)) return;
     try {
@@ -472,6 +496,10 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
           <button onClick={() => setView("processo")} data-testid="button-rh-processo"
             className={`px-3 py-1.5 rounded-full text-xs font-semibold border flex items-center gap-1 ${view === "processo" ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
             <Settings2 className="w-3.5 h-3.5" /> Personalizar processo
+          </button>
+          <button onClick={() => setView("contratacoes")} data-testid="button-rh-contratacoes"
+            className={`px-3 py-1.5 rounded-full text-xs font-semibold border flex items-center gap-1 ${view === "contratacoes" ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
+            <FolderArchive className="w-3.5 h-3.5" /> Contratação
           </button>
         </div>
       </div>
@@ -582,7 +610,7 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
             </div>
           )}
         </>
-      ) : (
+      ) : view === "processo" ? (
         /* Cargos + editor do processo — some visível pra "view" (mantendo
            tudo navegável e legível), mas nenhum campo/botão aceita interação. */
         <div className="space-y-3">
@@ -650,6 +678,8 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
             <p className="text-[11px] text-muted-foreground">Clique num cargo acima pra editar o processo dele.</p>
           )}
         </div>
+      ) : (
+        <Contratacoes canEdit={canEdit} openEmployeeId={hiringToOpen} onOpenedConsumed={() => setHiringToOpen(null)} />
       )}
 
       {/* Modal do candidato */}
@@ -703,6 +733,12 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                 className="flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border bg-white text-muted-foreground border-border hover:bg-secondary transition">
                 <Printer className="w-3.5 h-3.5" /> Imprimir
               </button>
+              {opened.status === "aprovado" && (
+                <button onClick={() => startHiring(opened)} disabled={!canEdit || startingHiring} data-testid="button-start-hiring"
+                  className="flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700 transition disabled:opacity-50">
+                  <UserPlus className="w-3.5 h-3.5" /> {startingHiring ? "Abrindo..." : "Iniciar contratação"}
+                </button>
+              )}
               <button onClick={() => removeCandidate(opened)} disabled={!canEdit}
                 className="ml-auto p-1.5 rounded-lg hover:bg-red-50 text-red-400 disabled:opacity-40"><Trash2 className="w-4 h-4" /></button>
             </div>
@@ -952,6 +988,694 @@ function StageEditor({ stages, setStages, canEdit, onSave, saving, saveLabel = "
         </button>
       </div>
     </fieldset>
+  );
+}
+
+// ── Contratação (RH > Recrutamento > Contratação) ───────────────────────────
+// Pedido do lojista (09/09): a partir de um candidato aprovado (ou avulso,
+// sem candidatura), iniciar a contratação — reunir documentos pessoais/CLT,
+// preencher cargo e escala, e gerar o contrato de trabalho personalizável —
+// tudo guardado no banco de arquivos do colaborador (employee_documents).
+const HIRING_DOC_TYPES: { key: string; label: string }[] = [
+  { key: "foto_3x4", label: "Foto 3x4" },
+  { key: "rg", label: "RG (frente e verso)" },
+  { key: "cpf", label: "CPF" },
+  { key: "ctps", label: "Carteira de Trabalho (CTPS)" },
+  { key: "comprovante_residencia", label: "Comprovante de residência" },
+  { key: "titulo_eleitor", label: "Título de eleitor" },
+  { key: "pis_nit", label: "PIS/NIT" },
+  { key: "certidao_civil", label: "Certidão de nascimento/casamento" },
+  { key: "carteira_vacinacao", label: "Carteira de vacinação (dependentes)" },
+  { key: "exame_admissional", label: "Exame admissional (ASO)" },
+  { key: "reservista", label: "Certificado de reservista" },
+];
+
+// Ponto de partida genérico e editável — o lojista/contador personaliza
+// antes de usar de verdade (por isso os avisos em maiúsculo e os campos
+// entre colchetes: dados da empresa não são inventados aqui).
+const DEFAULT_CONTRACT_TEMPLATE = `CONTRATO INDIVIDUAL DE TRABALHO
+
+De um lado [RAZÃO SOCIAL DA EMPRESA], inscrita no CNPJ nº [CNPJ], com sede em [ENDEREÇO], doravante denominada EMPREGADORA, e de outro lado {{nome}}, portador(a) do CPF nº {{cpf}} e RG nº {{rg}}, doravante denominado(a) EMPREGADO(A), têm entre si justo e contratado o seguinte:
+
+1. O(A) EMPREGADO(A) exercerá a função de {{cargo}} ({{funcao}}), sob o regime de contratação {{tipo_contrato}}.
+2. Data de admissão: {{admissao}}. Escala/jornada: {{escala}}.
+3. Local de trabalho: {{loja}}.
+4. Remuneração mensal: {{salario}}, paga na forma da legislação vigente.
+5. Este contrato rege-se pelas disposições da CLT e demais normas aplicáveis.
+
+REVISE E ADAPTE ESTE MODELO COM SEU CONTADOR/ADVOGADO ANTES DE USAR — é só um ponto de partida editável, não é aconselhamento jurídico.
+
+Local e data: _______________________, ____/____/______
+
+_________________________________          _________________________________
+        EMPREGADORA                                  {{nome}} (EMPREGADO/A)`;
+
+function readFileAsBase64Generic(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      const idx = dataUrl.indexOf(",");
+      resolve(idx >= 0 ? dataUrl.slice(idx + 1) : dataUrl);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("Erro ao ler arquivo"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function formatDocSize(bytes: number | null): string {
+  if (!bytes) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function printPlainText(text: string, title: string, toastFn: (opts: { title: string; variant?: "destructive" }) => void) {
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title>
+    <style>body{font-family:Arial,Helvetica,sans-serif;color:#111;padding:32px;max-width:720px;margin:0 auto;white-space:pre-wrap;font-size:13px;line-height:1.6;} @media print{body{padding:0;}}</style>
+    </head><body>${esc(text)}</body></html>`;
+  const win = window.open("", "_blank");
+  if (!win) { toastFn({ title: "Não foi possível abrir a janela de impressão — verifique o bloqueador de pop-ups", variant: "destructive" }); return; }
+  win.document.write(html);
+  win.document.close();
+  win.focus();
+  win.print();
+}
+
+function ContractTemplatesManager({ canEdit, templates, onChanged }: {
+  canEdit: boolean; templates: EmployeeContractTemplate[]; onChanged: () => void;
+}) {
+  const { toast } = useToast();
+  const [editing, setEditing] = useState<Partial<EmployeeContractTemplate> | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const startNew = () => setEditing({ name: "", contractType: null, isDefault: templates.length === 0, bodyText: DEFAULT_CONTRACT_TEMPLATE });
+
+  const save = async () => {
+    if (!editing || saving) return;
+    if (!editing.name?.trim()) { toast({ title: "Dê um nome ao modelo", variant: "destructive" }); return; }
+    if (!editing.bodyText?.trim()) { toast({ title: "O texto do contrato não pode ficar vazio", variant: "destructive" }); return; }
+    setSaving(true);
+    try {
+      if (editing.id) await api.rhDp.contractTemplates.update(editing.id, editing);
+      else await api.rhDp.contractTemplates.create(editing as { name: string; bodyText: string; contractType?: string | null; isDefault?: boolean });
+      setEditing(null);
+      onChanged();
+      toast({ title: "Modelo salvo!" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setSaving(false); }
+  };
+
+  const remove = async (t: EmployeeContractTemplate) => {
+    if (!window.confirm(`Excluir o modelo "${t.name}"?`)) return;
+    try { await api.rhDp.contractTemplates.remove(t.id); onChanged(); } catch { toast({ title: "Erro", variant: "destructive" }); }
+  };
+
+  return (
+    <div className="space-y-2">
+      <p className="text-[11px] text-muted-foreground">
+        Placeholders substituídos automaticamente ao gerar: {"{{nome}}"}, {"{{cpf}}"}, {"{{rg}}"}, {"{{cargo}}"}, {"{{funcao}}"}, {"{{salario}}"}, {"{{admissao}}"}, {"{{escala}}"}, {"{{loja}}"}, {"{{tipo_contrato}}"}.
+      </p>
+      {templates.length === 0 && <p className="text-[11px] text-muted-foreground">Nenhum modelo cadastrado ainda.</p>}
+      <div className="space-y-1.5">
+        {templates.map((t) => (
+          <div key={t.id} className="flex items-center gap-2 p-2.5 rounded-xl border border-border">
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-bold flex items-center gap-1.5 flex-wrap">
+                {t.name}
+                {t.isDefault && <span className="text-[10px] font-bold border px-1.5 py-0.5 rounded-full bg-green-50 text-green-700 border-green-100">Padrão</span>}
+                {t.contractType && <span className="text-[10px] font-bold border px-1.5 py-0.5 rounded-full bg-secondary text-muted-foreground border-border">{CONTRACT_LABELS[t.contractType]}</span>}
+              </p>
+            </div>
+            {canEdit && (
+              <div className="flex gap-1 shrink-0">
+                <button onClick={() => setEditing(t)} className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground"><Pencil className="w-3.5 h-3.5" /></button>
+                <button onClick={() => remove(t)} className="p-1.5 rounded-lg hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      {canEdit && !editing && (
+        <button onClick={startNew} data-testid="button-new-contract-template"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border border-border text-xs font-bold text-primary">
+          <Plus className="w-3.5 h-3.5" /> Novo modelo
+        </button>
+      )}
+      {editing && (
+        <div className="border border-border rounded-xl p-3 space-y-2 bg-secondary/20">
+          <input value={editing.name ?? ""} onChange={(ev) => setEditing({ ...editing, name: ev.target.value })}
+            placeholder="Nome do modelo (ex.: Contrato CLT padrão)" data-testid="input-template-name"
+            className="w-full px-3 py-2 rounded-xl border border-border text-sm" />
+          <select value={editing.contractType ?? ""} onChange={(ev) => setEditing({ ...editing, contractType: (ev.target.value || null) as EmployeeContractTemplate["contractType"] })}
+            className="w-full px-3 py-2 rounded-xl border border-border text-sm bg-white">
+            <option value="">Vale para qualquer tipo de contrato</option>
+            <option value="clt">CLT</option>
+            <option value="pj">PJ</option>
+            <option value="estagio">Estágio</option>
+          </select>
+          <textarea value={editing.bodyText ?? ""} onChange={(ev) => setEditing({ ...editing, bodyText: ev.target.value })}
+            rows={10} data-testid="textarea-template-body"
+            className="w-full px-3 py-2 rounded-xl border border-border text-xs font-mono resize-y" />
+          <label className="flex items-center gap-1.5 text-xs font-medium">
+            <input type="checkbox" checked={editing.isDefault === true} onChange={(ev) => setEditing({ ...editing, isDefault: ev.target.checked })} />
+            Modelo padrão (pré-selecionado ao gerar um contrato)
+          </label>
+          <div className="flex gap-2">
+            <button onClick={save} disabled={saving} data-testid="button-save-template"
+              className="flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
+              <Save className="w-3.5 h-3.5" /> {saving ? "Salvando..." : "Salvar modelo"}
+            </button>
+            <button onClick={() => setEditing(null)} className="px-3 py-2 rounded-xl border border-border text-xs font-bold">Cancelar</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HiringWizard({ employee, stores, shifts, templates, canEdit, onClose, onSaved }: {
+  employee: Employee; stores: Store[]; shifts: WorkShift[]; templates: EmployeeContractTemplate[]; canEdit: boolean;
+  onClose: () => void; onSaved: (updated: Employee) => void;
+}) {
+  const { toast } = useToast();
+  const [tab, setTab] = useState<"dados" | "documentos" | "contrato">("dados");
+  const [draft, setDraft] = useState<Partial<Employee>>(employee);
+  const [savingDados, setSavingDados] = useState(false);
+  const [documents, setDocuments] = useState<EmployeeDocument[]>([]);
+  const [loadingDocs, setLoadingDocs] = useState(true);
+  const [uploadingType, setUploadingType] = useState<string | null>(null);
+  const [customLabel, setCustomLabel] = useState("");
+  const [finalizing, setFinalizing] = useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<number | "">("");
+  const [contractDraftText, setContractDraftText] = useState("");
+  const [generatingContract, setGeneratingContract] = useState(false);
+  const [savingContract, setSavingContract] = useState(false);
+  const [editingContractDocId, setEditingContractDocId] = useState<number | null>(null);
+
+  useEffect(() => { setDraft(employee); setTab("dados"); }, [employee.id]);
+
+  const loadDocs = () => {
+    setLoadingDocs(true);
+    api.rhDp.employeeDocuments.list(employee.id).then(setDocuments).catch(() => {}).finally(() => setLoadingDocs(false));
+  };
+  useEffect(loadDocs, [employee.id]);
+
+  useEffect(() => {
+    // Pré-seleciona o modelo padrão (ou o que combina com o tipo de contrato
+    // do colaborador), só quando ainda não há nada escolhido.
+    if (selectedTemplateId !== "" || templates.length === 0) return;
+    const match = templates.find((t) => t.contractType === draft.contractType) ?? templates.find((t) => t.isDefault) ?? templates[0];
+    if (match) setSelectedTemplateId(match.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [templates]);
+
+  const saveDados = async () => {
+    if (savingDados) return;
+    if (!draft.name?.trim()) { toast({ title: "Informe o nome", variant: "destructive" }); return; }
+    setSavingDados(true);
+    try {
+      const updated = await api.rhDp.employees.update(employee.id, draft);
+      onSaved(updated);
+      toast({ title: "Dados salvos!" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setSavingDados(false); }
+  };
+
+  const uploadDoc = async (docType: string, label: string | undefined, file: File) => {
+    setUploadingType(docType === "outro" ? "outro" : docType);
+    try {
+      const base64 = await readFileAsBase64Generic(file);
+      const created = await api.rhDp.employeeDocuments.uploadFile(employee.id, {
+        docType, label, fileName: file.name, mimeType: file.type || "application/octet-stream", data: base64,
+      });
+      setDocuments((prev) => [created, ...prev]);
+    } catch (err) {
+      toast({ title: "Erro ao enviar arquivo", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setUploadingType(null); }
+  };
+
+  const removeDoc = async (d: EmployeeDocument) => {
+    if (!window.confirm(`Excluir "${d.label || d.fileName || d.docType}"?`)) return;
+    try {
+      await api.rhDp.employeeDocuments.remove(employee.id, d.id);
+      setDocuments((prev) => prev.filter((x) => x.id !== d.id));
+      if (editingContractDocId === d.id) { setEditingContractDocId(null); setContractDraftText(""); }
+    } catch { toast({ title: "Erro ao excluir", variant: "destructive" }); }
+  };
+
+  const generateContract = async () => {
+    if (selectedTemplateId === "") { toast({ title: "Escolha um modelo de contrato", variant: "destructive" }); return; }
+    setGeneratingContract(true);
+    try {
+      const { text } = await api.rhDp.employees.contractPreview(employee.id, selectedTemplateId);
+      setContractDraftText(text);
+      setEditingContractDocId(null);
+    } catch (err) {
+      toast({ title: "Erro ao gerar contrato", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setGeneratingContract(false); }
+  };
+
+  const saveContract = async () => {
+    if (!contractDraftText.trim()) { toast({ title: "O contrato está vazio", variant: "destructive" }); return; }
+    setSavingContract(true);
+    try {
+      const templateName = templates.find((t) => t.id === selectedTemplateId)?.name ?? "Contrato de trabalho";
+      if (editingContractDocId) {
+        const updated = await api.rhDp.employeeDocuments.update(employee.id, editingContractDocId, { textContent: contractDraftText });
+        setDocuments((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
+      } else {
+        const created = await api.rhDp.employeeDocuments.saveText(employee.id, { docType: "contrato_trabalho", label: templateName, textContent: contractDraftText });
+        setDocuments((prev) => [created, ...prev]);
+        setEditingContractDocId(created.id);
+      }
+      toast({ title: "Contrato salvo no banco de arquivos!" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar contrato", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setSavingContract(false); }
+  };
+
+  const finalize = async () => {
+    if (finalizing) return;
+    setFinalizing(true);
+    try {
+      const updated = await api.rhDp.employees.finalizeHiring(employee.id);
+      onSaved(updated);
+      toast({ title: "Contratação finalizada! 🎉" });
+      onClose();
+    } catch (err) {
+      toast({ title: "Erro ao finalizar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setFinalizing(false); }
+  };
+
+  const reopen = async () => {
+    try {
+      const updated = await api.rhDp.employees.reopenHiring(employee.id);
+      onSaved(updated);
+      toast({ title: "Contratação reaberta" });
+    } catch { toast({ title: "Erro", variant: "destructive" }); }
+  };
+
+  const contractDocs = documents.filter((d) => d.textContent != null);
+  const otherDocs = documents.filter((d) =>
+    !HIRING_DOC_TYPES.some((t) => t.key === d.docType) && d.docType !== "contrato_trabalho" && d.docType !== "contrato_trabalho_assinado");
+  const signedDocs = documents.filter((d) => d.docType === "contrato_trabalho_assinado");
+
+  return (
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 overflow-y-auto">
+      <div className="shk-card w-full max-w-2xl p-6 my-8 bg-white space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="font-bold flex items-center gap-2 flex-wrap">
+            {employee.name}
+            {employee.hiringStatus === "em_contratacao" ? (
+              <span className="text-[10px] font-bold border px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 border-amber-200">Em contratação</span>
+            ) : (
+              <span className="text-[10px] font-bold border px-2 py-0.5 rounded-full bg-green-50 text-green-700 border-green-100">Ativo</span>
+            )}
+          </h3>
+          <button onClick={onClose}><X className="w-5 h-5 text-muted-foreground" /></button>
+        </div>
+
+        <div className="flex gap-1.5 flex-wrap">
+          {([
+            { key: "dados", label: "Dados, cargo e escala", icon: IdCard },
+            { key: "documentos", label: "Documentos", icon: FolderArchive },
+            { key: "contrato", label: "Contrato de trabalho", icon: FileSignature },
+          ] as const).map(({ key, label, icon: Icon }) => (
+            <button key={key} onClick={() => setTab(key)} data-testid={`hiring-tab-${key}`}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border ${tab === key ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
+              <Icon className="w-3.5 h-3.5" /> {label}
+            </button>
+          ))}
+        </div>
+
+        <div className="max-h-[55vh] overflow-y-auto pr-1 space-y-3">
+          {tab === "dados" && (
+            <div className="grid grid-cols-2 gap-2">
+              <label className="col-span-2 text-xs">Nome
+                <input value={draft.name ?? ""} disabled={!canEdit} onChange={(ev) => setDraft({ ...draft, name: ev.target.value })}
+                  data-testid="input-hiring-name"
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+              </label>
+              <label className="text-xs">Cargo
+                <input value={draft.role ?? ""} disabled={!canEdit} onChange={(ev) => setDraft({ ...draft, role: ev.target.value })}
+                  data-testid="input-hiring-role"
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+              </label>
+              <label className="text-xs">Função
+                <input value={draft.jobFunction ?? ""} disabled={!canEdit} onChange={(ev) => setDraft({ ...draft, jobFunction: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+              </label>
+              <label className="text-xs">Telefone
+                <input value={draft.phone ?? ""} disabled={!canEdit} onChange={(ev) => setDraft({ ...draft, phone: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+              </label>
+              <label className="text-xs">E-mail
+                <input value={draft.email ?? ""} disabled={!canEdit} onChange={(ev) => setDraft({ ...draft, email: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+              </label>
+              <label className="text-xs">CPF
+                <input value={draft.cpf ?? ""} disabled={!canEdit} onChange={(ev) => setDraft({ ...draft, cpf: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+              </label>
+              <label className="text-xs">RG
+                <input value={draft.rg ?? ""} disabled={!canEdit} onChange={(ev) => setDraft({ ...draft, rg: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+              </label>
+              <label className="text-xs">Nascimento
+                <input type="date" value={draft.birthDate ?? ""} disabled={!canEdit} onChange={(ev) => setDraft({ ...draft, birthDate: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+              </label>
+              <label className="text-xs">Admissão
+                <input type="date" value={draft.admissionDate ?? ""} disabled={!canEdit} onChange={(ev) => setDraft({ ...draft, admissionDate: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+              </label>
+              <label className="text-xs">Tipo de contrato
+                <select value={draft.contractType ?? ""} disabled={!canEdit}
+                  onChange={(ev) => setDraft({ ...draft, contractType: (ev.target.value || null) as Employee["contractType"] })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white disabled:opacity-60">
+                  <option value="">—</option>
+                  <option value="clt">CLT</option>
+                  <option value="pj">PJ</option>
+                  <option value="estagio">Estágio</option>
+                </select>
+              </label>
+              <label className="text-xs">Salário (R$)
+                <input type="number" min={0} disabled={!canEdit} value={draft.salaryCents != null ? draft.salaryCents / 100 : ""}
+                  onChange={(ev) => setDraft({ ...draft, salaryCents: ev.target.value ? Math.round(Number(ev.target.value) * 100) : null })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+              </label>
+              <label className="text-xs">Loja
+                <select value={draft.storeId ?? ""} disabled={!canEdit} onChange={(ev) => setDraft({ ...draft, storeId: ev.target.value ? Number(ev.target.value) : null })}
+                  data-testid="select-hiring-store"
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white disabled:opacity-60">
+                  <option value="">—</option>
+                  {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </label>
+              <label className="text-xs">Escala
+                <select value={draft.shiftId ?? ""} disabled={!canEdit} onChange={(ev) => setDraft({ ...draft, shiftId: ev.target.value ? Number(ev.target.value) : null })}
+                  data-testid="select-hiring-shift"
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white disabled:opacity-60">
+                  <option value="">—</option>
+                  {shifts.map((s) => <option key={s.id} value={s.id}>{s.name}{s.type === "flexible" ? " (livre)" : ""}</option>)}
+                </select>
+              </label>
+              {canEdit && (
+                <button onClick={saveDados} disabled={savingDados} data-testid="button-save-hiring-dados"
+                  className="col-span-2 flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
+                  <Save className="w-3.5 h-3.5" /> {savingDados ? "Salvando..." : "Salvar dados"}
+                </button>
+              )}
+            </div>
+          )}
+
+          {tab === "documentos" && (
+            <div className="space-y-3">
+              {loadingDocs ? (
+                <div className="h-16 rounded-xl bg-secondary animate-pulse" />
+              ) : (
+                <>
+                  {HIRING_DOC_TYPES.map(({ key, label }) => {
+                    const files = documents.filter((d) => d.docType === key);
+                    return (
+                      <div key={key} className="border border-border rounded-xl p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-xs font-bold">{label}</p>
+                          {canEdit && (
+                            <label className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold cursor-pointer shrink-0 ${uploadingType === key ? "bg-secondary text-muted-foreground" : "bg-primary/10 text-primary hover:bg-primary/20"}`}>
+                              <Upload className="w-3 h-3" /> {uploadingType === key ? "Enviando..." : "Enviar"}
+                              <input type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" disabled={uploadingType === key}
+                                onChange={(ev) => { const f = ev.target.files?.[0]; if (f) uploadDoc(key, undefined, f); ev.target.value = ""; }} />
+                            </label>
+                          )}
+                        </div>
+                        {files.length > 0 && (
+                          <div className="mt-2 space-y-1">
+                            {files.map((f) => (
+                              <div key={f.id} className="flex items-center gap-2 text-[11px] bg-secondary/30 rounded-lg px-2 py-1">
+                                <FileText className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                                <span className="flex-1 truncate">{f.fileName} · {formatDocSize(f.sizeBytes)}</span>
+                                <a href={api.rhDp.employeeDocuments.fileUrl(employee.id, f.id)} target="_blank" rel="noreferrer" className="p-1 rounded hover:bg-secondary"><Eye className="w-3.5 h-3.5" /></a>
+                                <a href={api.rhDp.employeeDocuments.fileUrl(employee.id, f.id)} download={f.fileName ?? undefined} className="p-1 rounded hover:bg-secondary"><Download className="w-3.5 h-3.5" /></a>
+                                {canEdit && <button onClick={() => removeDoc(f)} className="p-1 rounded hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  <div className="border border-dashed border-border rounded-xl p-3 space-y-2">
+                    <p className="text-xs font-bold">Outro documento</p>
+                    {canEdit && (
+                      <div className="flex gap-2">
+                        <input value={customLabel} onChange={(ev) => setCustomLabel(ev.target.value)} placeholder="Nome do documento"
+                          className="flex-1 px-3 py-1.5 rounded-lg border border-border text-xs" />
+                        <label className={`flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[11px] font-bold cursor-pointer shrink-0 ${uploadingType === "outro" ? "bg-secondary text-muted-foreground" : "bg-primary/10 text-primary hover:bg-primary/20"}`}>
+                          <Upload className="w-3 h-3" /> {uploadingType === "outro" ? "Enviando..." : "Enviar"}
+                          <input type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" disabled={uploadingType === "outro" || !customLabel.trim()}
+                            onChange={(ev) => { const f = ev.target.files?.[0]; if (f) { uploadDoc("outro", customLabel.trim() || undefined, f); setCustomLabel(""); } ev.target.value = ""; }} />
+                        </label>
+                      </div>
+                    )}
+                    {otherDocs.length > 0 && (
+                      <div className="space-y-1">
+                        {otherDocs.map((f) => (
+                          <div key={f.id} className="flex items-center gap-2 text-[11px] bg-secondary/30 rounded-lg px-2 py-1">
+                            <FileText className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                            <span className="flex-1 truncate">{f.label || f.fileName} · {formatDocSize(f.sizeBytes)}</span>
+                            <a href={api.rhDp.employeeDocuments.fileUrl(employee.id, f.id)} target="_blank" rel="noreferrer" className="p-1 rounded hover:bg-secondary"><Eye className="w-3.5 h-3.5" /></a>
+                            <a href={api.rhDp.employeeDocuments.fileUrl(employee.id, f.id)} download={f.fileName ?? undefined} className="p-1 rounded hover:bg-secondary"><Download className="w-3.5 h-3.5" /></a>
+                            {canEdit && <button onClick={() => removeDoc(f)} className="p-1 rounded hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {tab === "contrato" && (
+            <div className="space-y-3">
+              {templates.length === 0 ? (
+                <p className="text-[11px] text-muted-foreground">Nenhum modelo de contrato cadastrado ainda — crie um em "Modelos de contrato" na tela de Contratação.</p>
+              ) : (
+                <div className="flex items-end gap-2">
+                  <label className="flex-1 text-xs">Modelo
+                    <select value={selectedTemplateId} onChange={(ev) => setSelectedTemplateId(ev.target.value ? Number(ev.target.value) : "")}
+                      data-testid="select-contract-template"
+                      className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white">
+                      {templates.map((t) => <option key={t.id} value={t.id}>{t.name}{t.contractType ? ` (${CONTRACT_LABELS[t.contractType]})` : ""}</option>)}
+                    </select>
+                  </label>
+                  {canEdit && (
+                    <button onClick={generateContract} disabled={generatingContract} data-testid="button-generate-contract"
+                      className="px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40 shrink-0">
+                      {generatingContract ? "Gerando..." : "Gerar contrato"}
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {contractDraftText && (
+                <div className="space-y-2">
+                  <textarea value={contractDraftText} disabled={!canEdit} onChange={(ev) => setContractDraftText(ev.target.value)}
+                    rows={14} data-testid="textarea-contract-draft"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-xs font-mono resize-y disabled:opacity-70" />
+                  <div className="flex gap-2 flex-wrap">
+                    {canEdit && (
+                      <button onClick={saveContract} disabled={savingContract} data-testid="button-save-contract"
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
+                        <Save className="w-3.5 h-3.5" /> {savingContract ? "Salvando..." : "Salvar no banco de arquivos"}
+                      </button>
+                    )}
+                    <button onClick={() => printPlainText(contractDraftText, `Contrato — ${employee.name}`, toast)}
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-border text-xs font-bold">
+                      <Printer className="w-3.5 h-3.5" /> Imprimir
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {contractDocs.length > 0 && (
+                <div className="space-y-1.5">
+                  <p className="text-xs font-bold">Contratos salvos</p>
+                  {contractDocs.map((d) => (
+                    <div key={d.id} className="flex items-center gap-2 text-[11px] bg-secondary/30 rounded-lg px-2 py-1.5">
+                      <FileSignature className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                      <span className="flex-1 truncate">{d.label || "Contrato"} · {new Date(d.createdAt).toLocaleDateString("pt-BR")}</span>
+                      <button onClick={() => { setContractDraftText(d.textContent ?? ""); setEditingContractDocId(d.id); }}
+                        className="p-1 rounded hover:bg-secondary"><Pencil className="w-3.5 h-3.5" /></button>
+                      <button onClick={() => printPlainText(d.textContent ?? "", d.label ?? "Contrato", toast)} className="p-1 rounded hover:bg-secondary"><Printer className="w-3.5 h-3.5" /></button>
+                      {canEdit && <button onClick={() => removeDoc(d)} className="p-1 rounded hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="border border-dashed border-border rounded-xl p-3 space-y-2">
+                <p className="text-xs font-bold">Contrato assinado (digitalizado)</p>
+                {canEdit && (
+                  <label className={`flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[11px] font-bold cursor-pointer w-fit ${uploadingType === "contrato_trabalho_assinado" ? "bg-secondary text-muted-foreground" : "bg-primary/10 text-primary hover:bg-primary/20"}`}>
+                    <Upload className="w-3 h-3" /> {uploadingType === "contrato_trabalho_assinado" ? "Enviando..." : "Enviar cópia assinada"}
+                    <input type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" disabled={uploadingType === "contrato_trabalho_assinado"}
+                      onChange={(ev) => { const f = ev.target.files?.[0]; if (f) uploadDoc("contrato_trabalho_assinado", "Contrato assinado", f); ev.target.value = ""; }} />
+                  </label>
+                )}
+                {signedDocs.map((f) => (
+                  <div key={f.id} className="flex items-center gap-2 text-[11px] bg-secondary/30 rounded-lg px-2 py-1">
+                    <FileText className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                    <span className="flex-1 truncate">{f.fileName} · {formatDocSize(f.sizeBytes)}</span>
+                    <a href={api.rhDp.employeeDocuments.fileUrl(employee.id, f.id)} target="_blank" rel="noreferrer" className="p-1 rounded hover:bg-secondary"><Eye className="w-3.5 h-3.5" /></a>
+                    {canEdit && <button onClick={() => removeDoc(f)} className="p-1 rounded hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {canEdit && (
+          <div className="pt-2 border-t border-border">
+            {employee.hiringStatus === "em_contratacao" ? (
+              <button onClick={finalize} disabled={finalizing} data-testid="button-finalize-hiring"
+                className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl bg-green-600 text-white text-sm font-bold disabled:opacity-40">
+                <CheckCircle className="w-4 h-4" /> {finalizing ? "Finalizando..." : "Finalizar contratação"}
+              </button>
+            ) : (
+              <button onClick={reopen} data-testid="button-reopen-hiring"
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl border border-border text-xs font-bold text-muted-foreground">
+                <RotateCcw className="w-3.5 h-3.5" /> Reabrir contratação
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Contratacoes({ canEdit, openEmployeeId, onOpenedConsumed }: {
+  canEdit: boolean; openEmployeeId: number | null; onOpenedConsumed: () => void;
+}) {
+  const { toast } = useToast();
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [stores, setStores] = useState<Store[]>([]);
+  const [shifts, setShifts] = useState<WorkShift[]>([]);
+  const [templates, setTemplates] = useState<EmployeeContractTemplate[]>([]);
+  const [openId, setOpenId] = useState<number | null>(null);
+  const [showTemplates, setShowTemplates] = useState(false);
+
+  const load = () => api.rhDp.employees.list().then(setEmployees).catch(() => {});
+  const loadTemplates = () => api.rhDp.contractTemplates.list().then(setTemplates).catch(() => {});
+  useEffect(() => {
+    load();
+    loadTemplates();
+    api.stores.list(true).then(setStores).catch(() => {});
+    api.rhDp.shifts.list().then(setShifts).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (openEmployeeId != null) {
+      setOpenId(openEmployeeId);
+      onOpenedConsumed();
+    }
+  }, [openEmployeeId, onOpenedConsumed]);
+
+  const startNewHire = async () => {
+    const name = window.prompt("Nome do novo colaborador (contratação sem candidatura):");
+    if (!name?.trim()) return;
+    try {
+      const emp = await api.rhDp.hiring.start({ name: name.trim() });
+      setEmployees((prev) => [...prev, emp]);
+      setOpenId(emp.id);
+    } catch (err) {
+      toast({ title: "Erro ao iniciar contratação", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
+  };
+
+  const emContratacao = employees.filter((e) => e.hiringStatus === "em_contratacao");
+  const ativos = employees.filter((e) => e.hiringStatus !== "em_contratacao");
+  const openEmployee = employees.find((e) => e.id === openId) ?? null;
+
+  return (
+    <div className="space-y-4">
+      {!canEdit && (
+        <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
+          Você só tem acesso de visualização ao RH — peça ao administrador para liberar edição.
+        </p>
+      )}
+
+      <div className="shk-card p-4 space-y-2">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <p className="text-xs font-bold flex items-center gap-1.5"><UserPlus className="w-3.5 h-3.5 text-primary" /> Contratações em andamento</p>
+          {canEdit && (
+            <button onClick={startNewHire} data-testid="button-new-hiring"
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-full bg-primary text-white text-[11px] font-bold">
+              <Plus className="w-3 h-3" /> Nova contratação
+            </button>
+          )}
+        </div>
+        {emContratacao.length === 0 ? (
+          <p className="text-[11px] text-muted-foreground">Nenhuma contratação em andamento. Aprove um candidato e clique em "Iniciar contratação", ou comece uma avulsa acima.</p>
+        ) : (
+          <div className="space-y-1.5">
+            {emContratacao.map((e) => (
+              <button key={e.id} onClick={() => setOpenId(e.id)} data-testid={`hiring-in-progress-${e.id}`}
+                className="w-full text-left flex items-center gap-2 p-2.5 rounded-xl border border-amber-200 bg-amber-50 hover:bg-amber-100 transition">
+                <FolderArchive className="w-4 h-4 text-amber-600 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-bold">{e.name}</p>
+                  <p className="text-[11px] text-muted-foreground">{e.role || "Cargo não definido"}{e.storeName ? ` · ${e.storeName}` : ""}</p>
+                </div>
+                <span className="text-[10px] font-bold border px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 border-amber-200 shrink-0">Em andamento</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="shk-card p-4 space-y-2">
+        <button onClick={() => setShowTemplates((v) => !v)} className="w-full flex items-center justify-between" data-testid="button-toggle-templates">
+          <p className="text-xs font-bold flex items-center gap-1.5"><FileSignature className="w-3.5 h-3.5 text-primary" /> Modelos de contrato de trabalho</p>
+          {showTemplates ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+        </button>
+        {showTemplates && <ContractTemplatesManager canEdit={canEdit} templates={templates} onChanged={loadTemplates} />}
+      </div>
+
+      <div className="shk-card p-4 space-y-2">
+        <p className="text-xs font-bold flex items-center gap-1.5"><IdCard className="w-3.5 h-3.5 text-primary" /> Colaboradores (banco de arquivos)</p>
+        {ativos.length === 0 ? (
+          <p className="text-[11px] text-muted-foreground">Nenhum colaborador ainda.</p>
+        ) : (
+          <div className="space-y-1.5">
+            {ativos.map((e) => (
+              <button key={e.id} onClick={() => setOpenId(e.id)} data-testid={`employee-filebank-${e.id}`}
+                className={`w-full text-left flex items-center gap-2 p-2.5 rounded-xl border border-border hover:bg-secondary/40 transition ${!e.isActive ? "opacity-60" : ""}`}>
+                <FolderArchive className="w-4 h-4 text-muted-foreground shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-bold">{e.name}</p>
+                  <p className="text-[11px] text-muted-foreground">{e.role || "Sem cargo"}{e.storeName ? ` · ${e.storeName}` : ""}</p>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {openEmployee && (
+        <HiringWizard employee={openEmployee} stores={stores} shifts={shifts} templates={templates} canEdit={canEdit}
+          onClose={() => setOpenId(null)}
+          onSaved={(updated) => setEmployees((prev) => prev.map((x) => (x.id === updated.id ? updated : x)))} />
+      )}
+    </div>
   );
 }
 

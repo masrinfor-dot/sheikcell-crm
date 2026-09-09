@@ -1198,10 +1198,43 @@ export type Employee = {
   storeId: number | null;
   shiftId: number | null;
   isActive: boolean;
+  // Contratação: candidateId liga esse colaborador a uma candidatura do
+  // recrutamento (rh_candidates) — null pra cadastro direto, sem processo
+  // seletivo. hiringStatus fica "em_contratacao" enquanto documentos/
+  // contrato ainda estão sendo reunidos; "ativo" quando finalizado (padrão
+  // de sempre, pra colaborador cadastrado direto).
+  candidateId: number | null;
+  hiringStatus: "em_contratacao" | "ativo";
   createdAt: string;
   userName?: string | null;
   storeName?: string | null;
   shiftName?: string | null;
+};
+
+// Banco de arquivos do colaborador (RH > Recrutamento > Contratação):
+// documentos pessoais/CLT (arquivo em disco) OU o contrato de trabalho
+// gerado/editado (textContent, sem arquivo).
+export type EmployeeDocument = {
+  id: number;
+  employeeId: number;
+  docType: string;
+  label: string | null;
+  fileName: string | null;
+  mimeType: string | null;
+  sizeBytes: number | null;
+  textContent: string | null;
+  uploadedByUserId: number | null;
+  createdAt: string;
+};
+
+export type EmployeeContractTemplate = {
+  id: number;
+  name: string;
+  contractType: "clt" | "pj" | "estagio" | null;
+  bodyText: string;
+  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type WorkShift = {
@@ -2345,6 +2378,38 @@ export const api = {
         req<TimeBankResult>(`/rh-dp/employees/${id}/time-bank?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
       addAdjustment: (id: number, data: { minutes: number; reason: string }) =>
         req<{ id: number }>(`/rh-dp/employees/${id}/time-bank/adjustments`, { method: "POST", body: JSON.stringify(data) }),
+      finalizeHiring: (id: number) => req<Employee>(`/rh-dp/employees/${id}/finalize-hiring`, { method: "POST" }),
+      reopenHiring: (id: number) => req<Employee>(`/rh-dp/employees/${id}/reopen-hiring`, { method: "POST" }),
+      contractPreview: (id: number, templateId: number) =>
+        req<{ text: string }>(`/rh-dp/employees/${id}/contract-preview?${new URLSearchParams({ templateId: String(templateId) })}`),
+    },
+    // Iniciar contratação: a partir de um candidato aprovado (candidateId) ou
+    // avulso (name) — cria o colaborador com hiringStatus "em_contratacao".
+    hiring: {
+      start: (data: { candidateId?: number; name?: string }) =>
+        req<Employee>("/rh-dp/hiring/start", { method: "POST", body: JSON.stringify(data) }),
+    },
+    // Banco de arquivos do colaborador — documentos pessoais/CLT (arquivo) ou
+    // o contrato de trabalho gerado/editado (texto).
+    employeeDocuments: {
+      list: (employeeId: number) => req<EmployeeDocument[]>(`/rh-dp/employees/${employeeId}/documents`),
+      uploadFile: (employeeId: number, data: { docType: string; label?: string; fileName: string; mimeType: string; data: string }) =>
+        req<EmployeeDocument>(`/rh-dp/employees/${employeeId}/documents`, { method: "POST", body: JSON.stringify(data) }),
+      saveText: (employeeId: number, data: { docType: string; label?: string; textContent: string }) =>
+        req<EmployeeDocument>(`/rh-dp/employees/${employeeId}/documents`, { method: "POST", body: JSON.stringify(data) }),
+      update: (employeeId: number, docId: number, data: { label?: string; textContent?: string }) =>
+        req<EmployeeDocument>(`/rh-dp/employees/${employeeId}/documents/${docId}`, { method: "PATCH", body: JSON.stringify(data) }),
+      remove: (employeeId: number, docId: number) =>
+        req<{ ok: boolean }>(`/rh-dp/employees/${employeeId}/documents/${docId}`, { method: "DELETE" }),
+      fileUrl: (employeeId: number, docId: number) => `/api/rh-dp/employees/${employeeId}/documents/${docId}/file`,
+    },
+    contractTemplates: {
+      list: () => req<EmployeeContractTemplate[]>("/rh-dp/contract-templates"),
+      create: (data: { name: string; contractType?: string | null; bodyText: string; isDefault?: boolean }) =>
+        req<EmployeeContractTemplate>("/rh-dp/contract-templates", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<{ name: string; contractType: string | null; bodyText: string; isDefault: boolean }>) =>
+        req<EmployeeContractTemplate>(`/rh-dp/contract-templates/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/contract-templates/${id}`, { method: "DELETE" }),
     },
     timeClockEntries: {
       remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/time-clock-entries/${id}`, { method: "DELETE" }),

@@ -18,7 +18,7 @@ const router: IRouter = Router();
 
 const PUNCH_KINDS = ["in", "break_start", "break_end", "out"] as const;
 type PunchKind = (typeof PUNCH_KINDS)[number];
-const CONTRACT_TYPES = ["clt", "pj", "estagio"] as const;
+export const CONTRACT_TYPES = ["clt", "pj", "estagio"] as const;
 const LEAVE_KINDS = ["ferias", "atestado", "falta_justificada", "falta_injustificada", "outro"] as const;
 
 // Aceita: "YYYY-MM-DD" (usa início/fim do dia), "YYYY-MM-DDTHH:MM:SS" sem
@@ -60,7 +60,7 @@ async function getEmployeeForUser(userId: number, tenantId: number) {
   return row ?? null;
 }
 
-async function getEmployee(id: number, tenantId: number) {
+export async function getEmployee(id: number, tenantId: number) {
   const [row] = await db.select().from(employeesTable)
     .where(and(eq(employeesTable.id, id), eq(employeesTable.tenantId, tenantId)));
   return row ?? null;
@@ -306,6 +306,8 @@ router.get("/rh-dp/employees", requireModuleAccess("rh"), async (req, res): Prom
     storeId: employeesTable.storeId,
     shiftId: employeesTable.shiftId,
     isActive: employeesTable.isActive,
+    candidateId: employeesTable.candidateId,
+    hiringStatus: employeesTable.hiringStatus,
     createdAt: employeesTable.createdAt,
     userName: usersTable.name,
     storeName: storesTable.name,
