@@ -83,8 +83,39 @@ test("precoAVistaDoProduto e parcelamento12xDoProduto também respeitam a margem
   assert.equal(priceCashCategoria, calcularPrecoVenda({ custo: 1000, margemPercent: 15, notaFiscalPercent: 0, taxaCartaoPercent: 0, custoJaIncluiNotaFiscal: true }));
 
   const parcelamentoCategoria = parcelamento12xDoProduto(produto, settings, 3);
-  const esperadoTotal = calcularPrecoVenda({ custo: 1000, margemPercent: 15, notaFiscalPercent: 0, taxaCartaoPercent: 10, custoJaIncluiNotaFiscal: true });
+  // Taxa aplicada por CIMA do preço à vista (não misturada com a margem no
+  // mesmo divisor) — ver aplicarTaxaCartaoSobrePrecoAVista em catalogPricing.ts.
+  // Isso garante que a diferença % entre à vista e 12x seja sempre igual à
+  // taxa configurada (10% aqui), em qualquer margem/categoria.
+  const esperadoTotal = Math.round((priceCashCategoria! / (1 - 10 / 100)) * 100) / 100;
   assert.equal(parcelamentoCategoria?.total, esperadoTotal);
+  const savingsPercent = (esperadoTotal - priceCashCategoria!) / esperadoTotal;
+  // Tolerância de 0.1 ponto percentual pra absorver o arredondamento pra
+  // centavos (cash e total são cada um arredondado antes da divisão).
+  assert.ok(Math.abs(savingsPercent - 0.10) < 1e-3, "diferença % entre à vista e 12x deve bater com a taxa configurada (10%), independente da margem");
+});
+
+test("parcelamento12xDoProduto: diferença % entre à vista e 12x bate com a taxa configurada mesmo em categoria de margem alta (bug real de 09/09)", () => {
+  // Cenário real reportado pelo lojista: categoria com margem de 45% (ex.:
+  // "xiaomi") + taxa de 12x configurada em 15% mostrava "-28% à vista" na
+  // Vitrine em vez dos 15% esperados, porque o total do 12x vinha de
+  // custo/(1 - margem - taxa) em vez de precoAVista/(1 - taxa).
+  const settings = sanitizePricingSettings({
+    defaultMarginPercent: 20,
+    categoryMarginOverrides: { "31": 45 },
+    cardFeeTable: { "12": 15 },
+  });
+  const produto = { costPrice: 1000, costIncludesInvoice: true, marginPercentOverride: null };
+
+  const precoAVista = precoAVistaDoProduto(produto, settings, 31);
+  const parcelamento = parcelamento12xDoProduto(produto, settings, 31);
+  assert.ok(precoAVista != null && parcelamento != null);
+  const savingsPercent = (parcelamento!.total - precoAVista!) / parcelamento!.total;
+  // Tolerância de 0.1 ponto percentual pra absorver o arredondamento pra
+  // centavos (cash e total são cada um arredondado antes da divisão) — o
+  // ponto do teste é confirmar que NÃO fica perto de 28% (o bug antigo),
+  // e sim colado nos 15% configurados.
+  assert.ok(Math.abs(savingsPercent - 0.15) < 1e-3, `esperado 15% de diferença, veio ${(savingsPercent * 100).toFixed(2)}%`);
 });
 
 test("chamadas sem categoryId continuam com o comportamento antigo (compatibilidade)", () => {

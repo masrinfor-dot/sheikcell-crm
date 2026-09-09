@@ -203,40 +203,64 @@ export function precoAVistaDoProduto(
 }
 
 /**
- * Preço a prazo em até 12x no cartão: preço total já com a taxa de 12
- * parcelas embutida (mesma fórmula de precoVendaDoProduto, só que fixando a
- * referência em 12 parcelas em vez do padrão de 1x) e o valor de cada
- * parcela — pra mostrar "ou 12x de R$X" ao lado do preço à vista.
+ * Aplica a taxa de cartão de UM número de parcelas por cima de um preço já
+ * pronto (à vista), em vez de misturar a taxa com a margem no mesmo divisor
+ * (ver calcularPrecoVenda) — isso garante que a diferença entre o preço à
+ * vista e o total parcelado seja SEMPRE igual à taxa configurada, em
+ * qualquer categoria, independente da margem daquele produto/categoria.
+ *
+ * Antes disso (bug real, achado em 09/09 pelo próprio lojista: o "-X% à
+ * vista" da Vitrine tava saindo bem maior que a taxa configurada — ex.:
+ * 28% numa categoria com taxa de 12x configurada em só 15%), o total do 12x
+ * vinha de precoVendaDoProduto(..., 12, ...), que soma margem + taxa no
+ * MESMO divisor (1 - (margem+taxa)/100). Isso faz a taxa "aparente" (a
+ * diferença entre à vista e 12x) crescer junto com a margem — em vez dos
+ * 15% configurados, uma categoria de margem 45% mostrava quase 28%
+ * (taxa / (1 - margem), não a taxa pura). Corrigido: agora o total do 12x
+ * SEMPRE é o preço à vista dividido por (1 - taxa/100), o que faz a
+ * diferença % bater exatamente com a taxa da tabela, em qualquer margem.
+ */
+function aplicarTaxaCartaoSobrePrecoAVista(precoAVista: number, taxaCartaoPercent: number, arredondarPraCima: boolean): number {
+  const divisor = 1 - taxaCartaoPercent / 100;
+  // Taxa de 100% ou mais tornaria o preço infinito/negativo — trava num
+  // múltiplo do preço à vista em vez de quebrar a tela do lojista (mesma
+  // trava de segurança usada em calcularPrecoVenda).
+  const total = divisor <= 0.05 ? precoAVista * 3 : precoAVista / divisor;
+  return arredondarPraCima ? roundPriceUpTo50(total) : Math.round(total * 100) / 100;
+}
+
+/**
+ * Preço a prazo em até 12x no cartão: o preço à vista (mesma margem de
+ * varejo do produto, sem taxa) com a taxa de 12 parcelas aplicada por cima
+ * (ver aplicarTaxaCartaoSobrePrecoAVista) — pra mostrar "ou 12x de R$X" ao
+ * lado do preço à vista, com a diferença % sempre igual à taxa configurada.
  */
 export function parcelamento12xDoProduto(
   produto: { costPrice: number | null; costIncludesInvoice: boolean; marginPercentOverride: number | null },
   settings: PricingSettings,
   categoryId?: number | null,
 ): { total: number; parcela: number } | null {
-  const total = precoVendaDoProduto(produto, settings, 12, categoryId);
-  return total != null ? { total, parcela: parcelaCartao(total, 12) } : null;
+  const precoAVista = precoAVistaDoProduto(produto, settings, categoryId);
+  if (precoAVista == null) return null;
+  const taxaCartaoPercent = settings.cardFeeTable["12"] ?? 0;
+  const total = aplicarTaxaCartaoSobrePrecoAVista(precoAVista, taxaCartaoPercent, settings.roundPricesUp);
+  return { total, parcela: parcelaCartao(total, 12) };
 }
 
 /**
  * Preço de atacado a prazo em até 12x no cartão: mesma ideia do parcelamento
- * de varejo (parcelamento12xDoProduto), só que com a margem de atacado do
- * produto — pra mostrar "atacado à vista: R$X · ou 12x de R$Y" junto do
- * preço de atacado já existente (que já é o valor à vista, sem cartão).
+ * de varejo (parcelamento12xDoProduto) — preço de atacado à vista com a taxa
+ * de 12 parcelas aplicada por cima — pra mostrar "atacado à vista: R$X · ou
+ * 12x de R$Y" junto do preço de atacado já existente (que já é o valor à
+ * vista, sem cartão).
  */
 export function parcelamento12xAtacadoDoProduto(
   produto: { costPrice: number | null; costIncludesInvoice: boolean; wholesaleMarginPercentOverride: number | null },
   settings: PricingSettings,
 ): { total: number; parcela: number } | null {
-  if (produto.costPrice == null || !Number.isFinite(produto.costPrice) || produto.costPrice <= 0) return null;
-  const margemPercent = produto.wholesaleMarginPercentOverride ?? settings.wholesaleMarginPercent;
+  const precoAVista = precoAtacadoDoProduto(produto, settings);
+  if (precoAVista == null) return null;
   const taxaCartaoPercent = settings.cardFeeTable["12"] ?? 0;
-  const total = calcularPrecoVenda({
-    custo: produto.costPrice,
-    margemPercent,
-    notaFiscalPercent: settings.invoiceCostPercent,
-    taxaCartaoPercent,
-    custoJaIncluiNotaFiscal: produto.costIncludesInvoice,
-    arredondarPraCima: settings.roundPricesUp,
-  });
+  const total = aplicarTaxaCartaoSobrePrecoAVista(precoAVista, taxaCartaoPercent, settings.roundPricesUp);
   return { total, parcela: parcelaCartao(total, 12) };
 }
