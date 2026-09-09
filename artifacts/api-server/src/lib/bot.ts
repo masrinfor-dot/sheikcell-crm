@@ -1,6 +1,6 @@
 // Robô de pré-atendimento: liga a máquina de estados (botEngine) ao banco,
 // ao WhatsApp e à IA. Nunca lança — falha do robô não pode derrubar o webhook.
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, sql, isNull, lte, notInArray } from "drizzle-orm";
 import {
   db,
   botSettingsTable,
@@ -13,7 +13,7 @@ import {
 import { botStep, type BotSettingsShape, type BotQuestion } from "./botEngine";
 import { sendOutboundText } from "./outbound";
 import { broadcast } from "./sseEmitter";
-import { isPotentialConversation, restrictedRecipients } from "./conversationScope";
+import { isPotentialConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES } from "./conversationScope";
 import { logger } from "./logger";
 import { runBotAgent, type BotTool } from "./botTools";
 
@@ -219,6 +219,28 @@ export async function handleBotInbound(conv: Conv, text: string): Promise<void> 
   if (queues.get(conv.id) === next) queues.delete(conv.id);
 }
 
+// ---------- fila numerada por setor ----------
+// Pedido do lojista (09/09): quando o robô termina a triagem e a conversa
+// entra de fato na fila de "Potenciais" daquele setor, avisa ao cliente — UMA
+// VEZ só, aqui em "triage_done" (decisão dele: não fica atualizando a cada
+// mudança na fila). A posição é aproximada: conta quantos "Potenciais" (sem
+// responsável, e não pending/resolved/archived — mesma regra de
+// isPotentialConversation) do MESMO setor e loja começaram a conversa antes
+// (ou junto) dessa. Inclui a própria conversa, por isso o mínimo é 1.
+async function queuePositionInSector(tenantId: number, sectorId: number, createdAt: Date): Promise<number> {
+  const [row] = await db.select({ count: sql<number>`count(*)::int` })
+    .from(conversationsTable)
+    .where(and(
+      eq(conversationsTable.tenantId, tenantId),
+      eq(conversationsTable.sectorId, sectorId),
+      eq(conversationsTable.isArchived, false),
+      isNull(conversationsTable.assigneeId),
+      notInArray(conversationsTable.status, [...POTENTIAL_EXCLUDED_STATUSES]),
+      lte(conversationsTable.createdAt, createdAt),
+    ));
+  return row?.count ?? 1;
+}
+
 async function handle(conv: Conv, text: string): Promise<void> {
   if (conv.channel !== "whatsapp") return;
   if (conv.assigneeId != null) return; // vendedor já assumiu — robô fica quieto
@@ -290,6 +312,27 @@ async function handle(conv: Conv, text: string): Promise<void> {
     }).returning();
     broadcast("message", { conversationId: conv.id, message: sysMsg },
       { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+
+    // Fila numerada por setor (pedido do lojista, 09/09): agora que a
+    // triagem terminou e o setor está definido, avisa a posição — só nesse
+    // momento, uma vez. Só faz sentido se a conversa continuar sem
+    // responsável (isPotentialConversation) — se por acaso um vendedor já
+    // assumiu enquanto o robô ainda processava, não avisa posição nenhuma.
+    if (isPotentialConversation(conv) && conv.sectorId != null) {
+      try {
+        const [sector] = await db.select({ name: sectorsTable.name })
+          .from(sectorsTable).where(eq(sectorsTable.id, conv.sectorId)).limit(1);
+        const position = await queuePositionInSector(conv.tenantId, conv.sectorId, conv.createdAt);
+        const setorLabel = sector?.name ? ` do setor ${sector.name}` : "";
+        await sendOutboundText(
+          conv.id,
+          `📋 Você está na fila de atendimento${setorLabel}. Posição: Nº ${position}. Já vamos te chamar!`,
+          settings.botName,
+        );
+      } catch (err) {
+        logger.warn({ err, conversationId: conv.id }, "Robô: falha ao avisar posição na fila");
+      }
+    }
     return;
   }
 

@@ -465,8 +465,10 @@ async function tryConsumePontoCheckIn(input: {
   const employee = activeEmployees.find((e) => e.phone && normalizePhone(e.phone) === normalizedInbound);
   if (!employee) return false; // número não cadastrado a nenhum colaborador: mensagem segue fluxo normal
 
+  // Bug de vazamento entre lojas (09/09): faltava o filtro por tenantId — ver
+  // mesma correção em rhDp.ts/timeBank.ts.
   const shift = employee.shiftId
-    ? (await db.select().from(workShiftsTable).where(eq(workShiftsTable.id, employee.shiftId)))[0] ?? null
+    ? (await db.select().from(workShiftsTable).where(and(eq(workShiftsTable.id, employee.shiftId), eq(workShiftsTable.tenantId, tenantId))))[0] ?? null
     : null;
   const hasBreak = !!(shift?.breakStart && shift?.breakEnd);
 

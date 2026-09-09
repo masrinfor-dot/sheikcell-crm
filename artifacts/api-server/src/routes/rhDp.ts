@@ -95,6 +95,16 @@ async function savePunchPhoto(base64: string, rawMimetype: string): Promise<stri
 // rotas sempre liberadas, 423 pro resto. Só se aplica a quem tem employee
 // vinculado com escala "fixed" prevendo expediente hoje — ver
 // employeeNeedsClockInToday em lib/timeBank.ts.
+// DESLIGADO TEMPORARIAMENTE (09/09, a pedido do lojista): enquanto o módulo
+// de RH/Ponto está em reparo (bugs sendo corrigidos), o bloqueio obrigatório
+// estava travando o acesso de vendedores ao sistema inteiro. Com isto em
+// `false`, ninguém é bloqueado por falta de ponto — nem o backend (423) nem
+// a tela cheia (PontoGate.tsx, via /rh-dp/me/clock-status abaixo). O registro
+// de ponto em si continua funcionando normalmente pra quem quiser bater;
+// só a EXIGÊNCIA que está suspensa. Voltar para `true` depois que o RH
+// estiver confirmado corrigido e o lojista quiser reativar a obrigatoriedade.
+export const CLOCK_IN_GATE_ENABLED = false;
+
 const CLOCK_IN_BLOCK_CACHE_MS = 60000;
 const clockInBlockCache = new Map<string, { until: number; blocked: boolean }>();
 export function invalidateClockInBlock(uid: number): void {
@@ -107,6 +117,7 @@ export const CLOCK_IN_GATE_ALLOWLIST = [
 ];
 
 export async function enforceMandatoryClockIn(req: Request, res: Response, next: import("express").NextFunction): Promise<void> {
+  if (!CLOCK_IN_GATE_ENABLED) { next(); return; }
   const uid = req.session?.userId;
   if (!uid) { next(); return; }
   if (CLOCK_IN_GATE_ALLOWLIST.some((r) => r.test(req.path))) { next(); return; }
@@ -126,7 +137,7 @@ export async function enforceMandatoryClockIn(req: Request, res: Response, next:
         blocked = false;
       } else {
         const shift = employee.shiftId
-          ? (await db.select().from(workShiftsTable).where(eq(workShiftsTable.id, employee.shiftId)))[0] ?? null
+          ? (await db.select().from(workShiftsTable).where(and(eq(workShiftsTable.id, employee.shiftId), eq(workShiftsTable.tenantId, tenantId))))[0] ?? null
           : null;
         blocked = await employeeNeedsClockInToday(employee.id, tenantId, shift);
       }
@@ -157,7 +168,7 @@ router.post("/rh-dp/me/punch", requireAuth, async (req, res): Promise<void> => {
   if (!employee) { res.status(404).json({ error: "Você não está vinculado a um cadastro de colaborador." }); return; }
 
   const shift = employee.shiftId
-    ? (await db.select().from(workShiftsTable).where(eq(workShiftsTable.id, employee.shiftId)))[0] ?? null
+    ? (await db.select().from(workShiftsTable).where(and(eq(workShiftsTable.id, employee.shiftId), eq(workShiftsTable.tenantId, tenantId))))[0] ?? null
     : null;
   const hasBreak = !!(shift?.breakStart && shift?.breakEnd);
 
@@ -251,12 +262,15 @@ router.post("/rh-dp/me/punch", requireAuth, async (req, res): Promise<void> => {
 
 router.get("/rh-dp/me/clock-status", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  // Gate desligado temporariamente (ver CLOCK_IN_GATE_ENABLED acima) — não
+  // mostra a tela cheia de bater ponto pra ninguém enquanto o RH está em reparo.
+  if (!CLOCK_IN_GATE_ENABLED) { res.json({ needsClockIn: false }); return; }
   // Admin nunca é obrigado a bater ponto, mesmo com cadastro de RH vinculado.
   if (req.session.userRole === "admin") { res.json({ needsClockIn: false }); return; }
   const employee = await getEmployeeForUser(req.session.userId!, tenantId);
   if (!employee) { res.json({ needsClockIn: false }); return; }
   const shift = employee.shiftId
-    ? (await db.select().from(workShiftsTable).where(eq(workShiftsTable.id, employee.shiftId)))[0] ?? null
+    ? (await db.select().from(workShiftsTable).where(and(eq(workShiftsTable.id, employee.shiftId), eq(workShiftsTable.tenantId, tenantId))))[0] ?? null
     : null;
   const needsClockIn = await employeeNeedsClockInToday(employee.id, tenantId, shift);
   res.json({ needsClockIn });
@@ -299,7 +313,7 @@ router.get("/rh-dp/employees", requireModuleAccess("rh"), async (req, res): Prom
   }).from(employeesTable)
     .leftJoin(usersTable, eq(employeesTable.userId, usersTable.id))
     .leftJoin(storesTable, eq(employeesTable.storeId, storesTable.id))
-    .leftJoin(workShiftsTable, eq(employeesTable.shiftId, workShiftsTable.id))
+    .leftJoin(workShiftsTable, and(eq(employeesTable.shiftId, workShiftsTable.id), eq(workShiftsTable.tenantId, tenantId)))
     .where(eq(employeesTable.tenantId, tenantId))
     .orderBy(asc(employeesTable.name));
   res.json(rows);
@@ -333,6 +347,13 @@ router.post("/rh-dp/employees", requireModuleAccess("rh"), async (req, res): Pro
   if (b.shiftId != null) {
     shiftId = parseInt(String(b.shiftId), 10);
     if (isNaN(shiftId)) { res.status(400).json({ error: "Escala inválida" }); return; }
+    // Bug de vazamento entre lojas (09/09): sem esta checagem, dava pra
+    // vincular o colaborador a uma escala (work_shifts) de OUTRA loja — o
+    // nome/horário/dias dessa escala de outra loja passavam a aparecer pra
+    // esta loja em toda tela e cálculo que depende do turno do colaborador.
+    const [shiftRow] = await db.select({ id: workShiftsTable.id }).from(workShiftsTable)
+      .where(and(eq(workShiftsTable.id, shiftId), eq(workShiftsTable.tenantId, tenantId)));
+    if (!shiftRow) { res.status(400).json({ error: "Escala não encontrada" }); return; }
   }
 
   const [created] = await db.insert(employeesTable).values({
@@ -391,6 +412,12 @@ router.patch("/rh-dp/employees/:id", requireModuleAccess("rh"), async (req, res)
   if ("shiftId" in b) {
     const sid = b.shiftId == null ? null : parseInt(String(b.shiftId), 10);
     if (sid != null && isNaN(sid)) { res.status(400).json({ error: "Escala inválida" }); return; }
+    // Mesma checagem do POST acima: escala precisa ser desta loja.
+    if (sid != null) {
+      const [shiftRow] = await db.select({ id: workShiftsTable.id }).from(workShiftsTable)
+        .where(and(eq(workShiftsTable.id, sid), eq(workShiftsTable.tenantId, tenantId)));
+      if (!shiftRow) { res.status(400).json({ error: "Escala não encontrada" }); return; }
+    }
     update.shiftId = sid;
   }
   if ("userId" in b) {

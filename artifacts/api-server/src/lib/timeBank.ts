@@ -116,8 +116,12 @@ function pairShifts(sortedEntries: TimeClockEntry[]): ShiftResult[] {
 export async function computeTimeBank(employeeId: number, tenantId: number, from: Date, to: Date): Promise<TimeBankResult> {
   const [employee] = await db.select().from(employeesTable)
     .where(and(eq(employeesTable.id, employeeId), eq(employeesTable.tenantId, tenantId)));
+  // Bug de vazamento entre lojas (09/09): faltava filtrar por tenantId aqui —
+  // sem isso, um employee.shiftId apontando (por engano ou má-fé) pra uma
+  // escala de OUTRA loja fazia o banco de horas usar o horário/dias dessa
+  // escala estranha em vez de tratar como "sem escala".
   const shift = employee?.shiftId
-    ? (await db.select().from(workShiftsTable).where(eq(workShiftsTable.id, employee.shiftId)))[0] ?? null
+    ? (await db.select().from(workShiftsTable).where(and(eq(workShiftsTable.id, employee.shiftId), eq(workShiftsTable.tenantId, tenantId))))[0] ?? null
     : null;
 
   const entries = await db.select().from(timeClockEntriesTable)
