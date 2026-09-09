@@ -346,12 +346,41 @@ function MediaUnavailable({ mediaUrl, label }: { mediaUrl: string; label: string
   );
 }
 
+// Tenta de novo (1x, depois de uma pausa) antes de marcar a mídia como
+// indisponível pra sempre — cobre uma falha bem real: o áudio/vídeo carrega
+// bem no meio de um redeploy do servidor (o proxy troca de container por
+// alguns segundos) e o navegador dá "onError" nesse instante exato, mesmo o
+// arquivo estando 100% ok no disco. Sem isso, esse blip de alguns segundos
+// marcava a mídia como "indisponível no servidor" até a pessoa dar F5 na
+// tela (ver checklist 09/09: aconteceu 2x seguidas bem na hora de um
+// redeploy). O "key" com o número da tentativa força o <audio>/<video> a
+// recarregar de verdade (só troca a src não recarrega sozinho).
+function useMediaRetry(mediaUrl: string | null | undefined) {
+  const [attempt, setAttempt] = useState(0);
+  const [failed, setFailed] = useState(false);
+  const retryKey = useRef<number | null>(null);
+  const onError = () => {
+    if (attempt < 1) {
+      if (retryKey.current != null) return; // já tem uma retentativa agendada
+      retryKey.current = window.setTimeout(() => {
+        retryKey.current = null;
+        setAttempt((a) => a + 1);
+      }, 1500);
+    } else {
+      setFailed(true);
+    }
+  };
+  useEffect(() => () => { if (retryKey.current != null) window.clearTimeout(retryKey.current); }, []);
+  const src = mediaUrl ? (attempt === 0 ? mediaUrl : `${mediaUrl}${mediaUrl.includes("?") ? "&" : "?"}retry=${attempt}`) : undefined;
+  return { src, elementKey: attempt, onError, failed };
+}
+
 /** Áudio com botão de transcrição (Whisper). */
 function AudioBubble({ msg }: { msg: ChatMessage }) {
   const [local, setLocal] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [mediaError, setMediaError] = useState(false);
+  const { src, elementKey, onError, failed } = useMediaRetry(msg.mediaUrl);
   const transcript = msg.transcript ?? local;
 
   const handleTranscribe = async () => {
@@ -367,7 +396,7 @@ function AudioBubble({ msg }: { msg: ChatMessage }) {
     }
   };
 
-  if (mediaError && msg.mediaUrl) {
+  if (failed && msg.mediaUrl) {
     return <MediaUnavailable mediaUrl={msg.mediaUrl} label="Áudio indisponível no servidor" />;
   }
 
@@ -375,8 +404,8 @@ function AudioBubble({ msg }: { msg: ChatMessage }) {
     <div className="mb-1">
       <div className="flex items-center gap-2 bg-black/5 rounded-xl px-3 py-2 min-w-[200px]">
         <Volume2 className="w-4 h-4 text-primary shrink-0" />
-        <audio controls className="flex-1 h-8 max-w-[200px]" style={{ minWidth: 0 }} onError={() => setMediaError(true)}>
-          <source src={msg.mediaUrl ?? undefined} />
+        <audio key={elementKey} controls className="flex-1 h-8 max-w-[200px]" style={{ minWidth: 0 }} onError={onError}>
+          <source src={src} />
         </audio>
         <a href={`${msg.mediaUrl}?download=1`} download title="Baixar áudio"
           className="text-gray-500 hover:text-primary shrink-0">
@@ -403,12 +432,12 @@ function AudioBubble({ msg }: { msg: ChatMessage }) {
  * alguns navegadores): nesses casos o <video> dispara onError, e mostramos
  * baixar/abrir em vez de um player preto travado. */
 function VideoBubble({ msg }: { msg: ChatMessage }) {
-  const [mediaError, setMediaError] = useState(false);
+  const { src, elementKey, onError, failed } = useMediaRetry(msg.mediaUrl);
   const openLightbox = useMediaLightbox();
   if (!msg.mediaUrl) return null;
   const url = msg.mediaUrl;
 
-  if (mediaError) {
+  if (failed) {
     return <MediaUnavailable mediaUrl={url} label="Não foi possível tocar este vídeo no navegador" />;
   }
 
@@ -416,13 +445,14 @@ function VideoBubble({ msg }: { msg: ChatMessage }) {
     <div className="mb-1">
       <div className="relative w-fit">
         <video
+          key={elementKey}
           controls
           preload="metadata"
           className="max-w-full rounded-xl max-h-64 bg-black"
           style={{ minWidth: 200 }}
-          onError={() => setMediaError(true)}
+          onError={onError}
         >
-          <source src={url} />
+          <source src={src} />
         </video>
         <button
           onClick={() => openLightbox({ type: "video", src: url, mimeType: msg.metadata?.mimeType })}
