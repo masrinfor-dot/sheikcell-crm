@@ -173,6 +173,27 @@ function wholesaleStorageKey(slug: string) {
   return `sheikcell-vitrine-atacado-${slug}`;
 }
 
+// Reforço pra guardar o código de atacado desbloqueado (09/09): reportado
+// que o cliente precisa digitar o código de novo a cada visita. O
+// localStorage já devolvia o código salvo automaticamente (ver loadData
+// abaixo) — a suspeita principal é o navegador embutido do WhatsApp/
+// Instagram (muito comum ser o link que o cliente usa pra entrar), que em
+// vários aparelhos Android limpa localStorage entre uma abertura e outra
+// do link, mas mantém cookies. Por isso agora grava nos dois lugares e lê
+// de cookie como plano B se o localStorage vier vazio — cobre mais casos
+// sem trocar o comportamento pra quem já funcionava.
+function wholesaleCookieKey(slug: string) {
+  return `sheikcell_atacado_${slug}`;
+}
+function readCookie(name: string): string | null {
+  const match = document.cookie.match(new RegExp("(?:^|; )" + name.replace(/([.$?*|{}()[\]\\/+^])/g, "\\$1") + "=([^;]*)"));
+  return match ? decodeURIComponent(match[1]) : null;
+}
+function writeCookie(name: string, value: string, days: number) {
+  const expires = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toUTCString();
+  document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
+}
+
 function cartStorageKey(slug: string) {
   return `sheikcell-vitrine-carrinho-${slug}`;
 }
@@ -890,6 +911,7 @@ export default function VitrinePublica() {
     if (!slug) { setError("Link inválido"); return; }
     let savedCode: string | null = null;
     try { savedCode = localStorage.getItem(wholesaleStorageKey(slug)); } catch { /* privado/bloqueado — segue sem código salvo */ }
+    if (!savedCode) { try { savedCode = readCookie(wholesaleCookieKey(slug)); } catch { /* idem */ } }
     loadData(savedCode ?? undefined);
     // Carrinho e desconto de troca ficam salvos localmente — sem isso, ir
     // pra tela de avaliação (rota separada) e voltar apagaria o pedido que
@@ -928,6 +950,7 @@ export default function VitrinePublica() {
       setData(r);
       if (r.wholesaleUnlocked) {
         try { localStorage.setItem(wholesaleStorageKey(slug), codeInput.trim()); } catch { /* segue sem persistir */ }
+        try { writeCookie(wholesaleCookieKey(slug), codeInput.trim(), 395); } catch { /* segue sem persistir */ }
         setShowUnlock(false);
         setCodeInput("");
       } else {

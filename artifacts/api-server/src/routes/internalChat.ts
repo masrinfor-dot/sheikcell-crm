@@ -1,6 +1,6 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import { db, internalConversationsTable, internalConversationMembersTable, internalMessagesTable, usersTable, tenantsTable } from "@workspace/db";
-import { eq, and, asc, inArray, sql, ne } from "drizzle-orm";
+import { eq, and, asc, desc, inArray, sql, ne } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { requireAuth, requireAdmin, requireAdminOrSupervisor, requireTenant, isTenantSuspended } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
@@ -502,8 +502,15 @@ router.get("/internal-chat/conversations/:id/messages", requireAuth, async (req,
     .leftJoin(repliedMsg, eq(internalMessagesTable.replyToId, repliedMsg.id))
     .leftJoin(repliedSender, eq(repliedMsg.senderId, repliedSender.id))
     .where(eq(internalMessagesTable.conversationId, convId))
-    .orderBy(asc(internalMessagesTable.createdAt))
+    // Bug real (09/09): isto pegava os 500 PRIMEIROS (mais antigos) da
+    // conversa — em grupos com histórico grande (ex. "Assistência Técnica -
+    // Reparos"), mensagens novas nunca apareciam ao abrir a conversa, porque
+    // ficavam fora da janela dos 500 mais antigos. Busca os 500 MAIS
+    // RECENTES (desc + limit) e depois reordena pra ascendente, que é a
+    // ordem que a tela espera.
+    .orderBy(desc(internalMessagesTable.createdAt))
     .limit(500);
+  rows.reverse();
 
   // Mark as read.
   await db
