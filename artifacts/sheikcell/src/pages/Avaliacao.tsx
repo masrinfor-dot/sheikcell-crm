@@ -1,11 +1,11 @@
 import { useState, useEffect } from "react";
-import { api, canEditModule, type TradeInEvaluation, type TradeInMargins, type TradeInQuestion, type TradeInQuestionsConfig, type TradeInBaseValue } from "@/lib/api";
+import { api, canEditModule, type TradeInEvaluation, type TradeInMargins, type TradeInQuestion, type TradeInQuestionsConfig, type TradeInBaseValue, type Store } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import { AddressAutocompleteInput } from "@/components/AddressAutocompleteInput";
 import {
   Smartphone, Sparkles, History, ChevronDown, ChevronLeft, RefreshCw, BadgeDollarSign, Settings, X,
-  ListChecks, Plus, Trash2, ArrowUp, ArrowDown, ImagePlus, Printer, Wallet, TrendingUp, LayoutDashboard,
+  ListChecks, Plus, Trash2, ArrowUp, ArrowDown, ImagePlus, Printer, Wallet, TrendingUp, LayoutDashboard, Landmark,
 } from "lucide-react";
 
 // Formas de pagamento oferecidas ao fechar a compra (nota de compra) — texto
@@ -97,6 +97,11 @@ export default function Avaliacao() {
   const [dealPaymentMethod, setDealPaymentMethod] = useState("");
   const [dealPixKey, setDealPixKey] = useState("");
   const [dealPixKeyHolder, setDealPixKeyHolder] = useState("");
+  // Loja da rede que está comprando o aparelho — pedido do lojista (09/09).
+  // "" = não escolhida explicitamente ainda (o select mostra a loja do
+  // próprio vendedor como sugestão, ver defaultStoreId mais abaixo; o
+  // backend também cai nela por conta própria se nada for enviado).
+  const [dealStoreId, setDealStoreId] = useState<number | "">("");
   const [documentPhotos, setDocumentPhotos] = useState<string[]>([]);
   const [devicePhotos, setDevicePhotos] = useState<string[]>([]);
   const [paymentProofPhotos, setPaymentProofPhotos] = useState<string[]>([]);
@@ -118,6 +123,9 @@ export default function Avaliacao() {
   const [histSearch, setHistSearch] = useState("");
   const [histBrand, setHistBrand] = useState("");
   const [histMemory, setHistMemory] = useState("");
+  // Filtro por loja compradora (pedido do lojista 09/09) — mesmo padrão de
+  // marca/memória, comparando pelo nome já salvo na avaliação.
+  const [histStore, setHistStore] = useState("");
   // Finalizar compra direto de dentro do histórico (avaliação feita numa
   // sessão anterior, ou o cliente saiu pra pensar e voltou depois) — mesmos
   // campos da etapa 4, mas fechando uma avaliação passada em vez da atual.
@@ -133,6 +141,9 @@ export default function Avaliacao() {
   const [histDealPaymentMethod, setHistDealPaymentMethod] = useState("");
   const [histDealPixKey, setHistDealPixKey] = useState("");
   const [histDealPixKeyHolder, setHistDealPixKeyHolder] = useState("");
+  // Mesma loja acima, só que pro fechamento reaberto pelo histórico/"Celulares
+  // comprados" (openHistoryClose já pré-preenche com o que estiver salvo).
+  const [histDealStoreId, setHistDealStoreId] = useState<number | "">("");
   const [histClosing, setHistClosing] = useState(false);
   // Fotos da avaliação sendo finalizada/completada pelo histórico ou pela aba
   // "Celulares comprados" — mesmo padrão da etapa 4, mas usando o id
@@ -172,6 +183,11 @@ export default function Avaliacao() {
   const [bvImportText, setBvImportText] = useState("");
   const [importingBaseValues, setImportingBaseValues] = useState(false);
 
+  // Lojas da rede — pra identificar qual loja está comprando o aparelho
+  // (pedido do lojista 09/09). Lista completa (all=1): mesmo que uma loja
+  // tenha sido desativada, uma avaliação antiga fechada com ela continua
+  // mostrando o nome certo no histórico.
+  const [stores, setStores] = useState<Store[]>([]);
   const fetchBaseValues = () => { api.tradeIn.baseValues().then(setBaseValues).catch(() => {}); };
   const fetchHistory = () => { api.tradeIn.list().then(setHistory).catch(() => {}); };
   useEffect(() => {
@@ -179,8 +195,15 @@ export default function Avaliacao() {
     api.tradeIn.margins().then(setMargins).catch(() => {});
     api.tradeIn.questions().then(setQConfig).catch(() => {});
     api.tradeIn.paymentMethods().then(setPaymentMethods).catch(() => {});
+    api.stores.list(true).then(setStores).catch(() => {});
     fetchBaseValues();
   }, []);
+  // Loja sugerida quando ninguém escolheu nada ainda: a própria loja do
+  // vendedor logado (users.storeName), se ela bater com uma loja cadastrada.
+  const defaultStoreId = stores.find((s) => s.name === user?.storeName)?.id ?? "";
+  const dealStoreIdEffective = dealStoreId !== "" ? dealStoreId : defaultStoreId;
+  const histDealStoreIdEffective = histDealStoreId !== "" ? histDealStoreId : defaultStoreId;
+  const storeNameById = (id: number | "" ) => (id === "" ? null : stores.find((s) => s.id === id)?.name ?? null);
 
   const deviceOk = Boolean(brand.trim() && model.trim());
   const customerNameOk = Boolean(customerName.trim());
@@ -260,7 +283,7 @@ export default function Avaliacao() {
     setAnswers({}); setResult(null); setStep(1);
     setDealName(""); setDealCpf(""); setDealImei(""); setDealPrice("");
     setDealRg(""); setDealAddress(""); setDealNeighborhood(""); setDealPhone("");
-    setDealPaymentMethod(""); setDealPixKey(""); setDealPixKeyHolder("");
+    setDealPaymentMethod(""); setDealPixKey(""); setDealPixKeyHolder(""); setDealStoreId("");
     setDocumentPhotos([]); setDevicePhotos([]); setPaymentProofPhotos([]);
     setClosingDeal(false); setDealClosed(false);
   };
@@ -286,6 +309,7 @@ export default function Avaliacao() {
         sellerNeighborhood: dealNeighborhood.trim() || undefined, sellerPhone: dealPhone.trim() || undefined,
         paymentMethod: dealPaymentMethod.trim() || undefined, pixKey: dealPixKey.trim() || undefined,
         pixKeyHolder: dealPixKeyHolder.trim() || undefined,
+        storeId: dealStoreIdEffective === "" ? undefined : dealStoreIdEffective,
       });
       setDealClosed(true);
       toast({ title: "Negócio fechado com sucesso" });
@@ -354,7 +378,7 @@ export default function Avaliacao() {
     device: string; brand: string; model: string; name: string; cpf: string; rg: string;
     address: string; neighborhood: string; phone: string;
     imei: string; price: string; dateStr: string;
-    paymentMethod: string; pixKey: string; pixKeyHolder: string;
+    paymentMethod: string; pixKey: string; pixKeyHolder: string; storeName?: string | null;
     documentPhotos?: string[]; devicePhotos?: string[]; paymentProofPhotos?: string[];
   }) => {
     const isPix = /pix/i.test(data.paymentMethod);
@@ -362,6 +386,7 @@ export default function Avaliacao() {
       ["Aparelho", data.device],
       ["Marca", data.brand || "—"],
       ["Modelo", data.model || "—"],
+      ...(data.storeName ? ([["Loja", data.storeName]] as [string, string][]) : []),
       ["Nome do vendedor", data.name || "—"],
       ["CPF", data.cpf || "—"],
       ["RG", data.rg || "—"],
@@ -427,6 +452,7 @@ ${photosHtml}
       neighborhood: dealNeighborhood, phone: dealPhone, imei: dealImei, price: dealPrice,
       dateStr: new Date().toLocaleString("pt-BR"),
       paymentMethod: dealPaymentMethod, pixKey: dealPixKey, pixKeyHolder: dealPixKeyHolder,
+      storeName: storeNameById(dealStoreIdEffective),
       documentPhotos, devicePhotos, paymentProofPhotos,
     });
   };
@@ -440,6 +466,7 @@ ${photosHtml}
       phone: h.sellerPhone ?? "", imei: h.imei ?? "", price: h.finalAgreedPrice ?? "",
       dateStr: h.closedAt ? new Date(h.closedAt).toLocaleString("pt-BR") : new Date().toLocaleString("pt-BR"),
       paymentMethod: h.paymentMethod ?? "", pixKey: h.pixKey ?? "", pixKeyHolder: h.pixKeyHolder ?? "",
+      storeName: h.storeName ?? null,
       documentPhotos: h.documentPhotos ?? [], devicePhotos: h.devicePhotos ?? [], paymentProofPhotos: h.paymentProofPhotos ?? [],
     });
   };
@@ -464,6 +491,7 @@ ${photosHtml}
     setHistDealPaymentMethod(h.paymentMethod ?? "");
     setHistDealPixKey(h.pixKey ?? "");
     setHistDealPixKeyHolder(h.pixKeyHolder ?? "");
+    setHistDealStoreId(h.storeId ?? "");
     setHistDocumentPhotos(h.documentPhotos ?? []);
     setHistDevicePhotos(h.devicePhotos ?? []);
     setHistPaymentProofPhotos(h.paymentProofPhotos ?? []);
@@ -538,6 +566,7 @@ ${photosHtml}
         sellerNeighborhood: histDealNeighborhood.trim() || undefined, sellerPhone: histDealPhone.trim() || undefined,
         paymentMethod: histDealPaymentMethod.trim() || undefined, pixKey: histDealPixKey.trim() || undefined,
         pixKeyHolder: histDealPixKeyHolder.trim() || undefined,
+        storeId: histDealStoreIdEffective === "" ? undefined : histDealStoreIdEffective,
       });
       // Atualiza a linha na hora, sem esperar um refetch — soma ao fetchHistory()
       // (que também roda) pra manter tudo consistente com o servidor.
@@ -555,10 +584,12 @@ ${photosHtml}
   // Filtros do histórico: pesquisa livre (aparelho/vendedor/cliente/cor) + marca + memória.
   const brandOptions = [...new Set(history.map((h) => h.brand).filter(Boolean))] as string[];
   const memoryOptions = [...new Set(history.map((h) => h.memory).filter(Boolean))] as string[];
+  const storeOptions = [...new Set(history.map((h) => h.storeName).filter(Boolean))] as string[];
   const q = histSearch.trim().toLowerCase();
   const filteredHistory = history.filter((h) => {
     if (histBrand && h.brand !== histBrand) return false;
     if (histMemory && h.memory !== histMemory) return false;
+    if (histStore && h.storeName !== histStore) return false;
     if (!q) return true;
     const hay = [h.device, h.brand, h.model, h.memory, h.color, h.userName, h.customerName, h.sellerCustomerName]
       .filter(Boolean).join(" ").toLowerCase();
@@ -570,7 +601,7 @@ ${photosHtml}
   const pq = purchSearch.trim().toLowerCase();
   const filteredPurchased = purchasedList.filter((h) => {
     if (!pq) return true;
-    const hay = [h.device, h.brand, h.model, h.sellerCustomerName, h.customerName, h.sellerCpf, h.imei, h.pixKeyHolder]
+    const hay = [h.device, h.brand, h.model, h.sellerCustomerName, h.customerName, h.sellerCpf, h.imei, h.pixKeyHolder, h.storeName]
       .filter(Boolean).join(" ").toLowerCase();
     return hay.includes(pq);
   });
@@ -698,6 +729,11 @@ ${photosHtml}
                       <Wallet className="w-3 h-3" /> {h.paymentMethod}
                     </span>
                   )}
+                  {h.storeName && (
+                    <span className="flex items-center gap-1 text-[10px] font-bold text-blue-700 bg-blue-50 border border-blue-100 rounded-full px-2 py-0.5">
+                      <Landmark className="w-3 h-3" /> {h.storeName}
+                    </span>
+                  )}
                   {canManagePurchased && histClosingId !== h.id && (
                     <button onClick={() => openHistoryClose(h)} data-testid={`button-purchased-edit-${h.id}`}
                       className="text-[10px] font-bold text-primary underline">
@@ -748,6 +784,14 @@ ${photosHtml}
                       <input value={histDealAddress} onChange={(e) => setHistDealAddress(e.target.value)}
                         placeholder="Endereço" data-testid={`input-purchased-address-${h.id}`}
                         className="w-full px-2.5 py-2 rounded-lg border border-border text-xs sm:col-span-2" />
+                      {stores.length > 0 && (
+                        <select value={histDealStoreIdEffective} onChange={(e) => setHistDealStoreId(e.target.value ? Number(e.target.value) : "")}
+                          data-testid={`select-purchased-store-${h.id}`}
+                          className="w-full px-2.5 py-2 rounded-lg border border-border text-xs bg-white">
+                          <option value="">Loja: não informar</option>
+                          {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                        </select>
+                      )}
                       <PaymentFields testIdPrefix={`purchased-${h.id}`}
                         neighborhood={histDealNeighborhood} onNeighborhood={setHistDealNeighborhood}
                         paymentMethod={histDealPaymentMethod} onPaymentMethod={setHistDealPaymentMethod}
@@ -804,8 +848,16 @@ ${photosHtml}
               <option value="">Memória: todas</option>
               {memoryOptions.map((m) => <option key={m} value={m}>{m}</option>)}
             </select>
-            {(histSearch || histBrand || histMemory) && (
-              <button onClick={() => { setHistSearch(""); setHistBrand(""); setHistMemory(""); }}
+            {storeOptions.length > 0 && (
+              <select value={histStore} onChange={(e) => setHistStore(e.target.value)}
+                data-testid="select-tradein-history-store"
+                className="px-2.5 py-2 rounded-xl border border-border text-xs bg-white">
+                <option value="">Loja: todas</option>
+                {storeOptions.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            )}
+            {(histSearch || histBrand || histMemory || histStore) && (
+              <button onClick={() => { setHistSearch(""); setHistBrand(""); setHistMemory(""); setHistStore(""); }}
                 className="text-xs font-semibold text-primary underline">Limpar</button>
             )}
           </div>
@@ -846,6 +898,11 @@ ${photosHtml}
                       <span className="text-[10px] font-bold text-green-700 bg-green-50 border border-green-100 px-2 py-0.5 rounded-full">
                         ✓ Negócio fechado{h.finalAgreedPrice ? ` · ${h.finalAgreedPrice}` : ""}
                       </span>
+                      {h.storeName && (
+                        <span className="flex items-center gap-1 text-[10px] font-bold text-blue-700 bg-blue-50 border border-blue-100 rounded-full px-2 py-0.5">
+                          <Landmark className="w-3 h-3" /> {h.storeName}
+                        </span>
+                      )}
                       <button onClick={() => printNoteFromHistory(h)} data-testid={`button-history-print-${h.id}`}
                         className="flex items-center gap-1 text-[10px] font-semibold text-primary">
                         <Printer className="w-3 h-3" /> Reimprimir nota
@@ -887,6 +944,14 @@ ${photosHtml}
                       <input value={histDealAddress} onChange={(e) => setHistDealAddress(e.target.value)}
                         placeholder="Endereço" data-testid={`input-history-address-${h.id}`}
                         className="w-full px-2.5 py-2 rounded-lg border border-border text-xs sm:col-span-2" />
+                      {stores.length > 0 && (
+                        <select value={histDealStoreIdEffective} onChange={(e) => setHistDealStoreId(e.target.value ? Number(e.target.value) : "")}
+                          data-testid={`select-history-store-${h.id}`}
+                          className="w-full px-2.5 py-2 rounded-lg border border-border text-xs bg-white">
+                          <option value="">Loja: não informar</option>
+                          {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                        </select>
+                      )}
                       <PaymentFields testIdPrefix={`history-${h.id}`}
                         neighborhood={histDealNeighborhood} onNeighborhood={setHistDealNeighborhood}
                         paymentMethod={histDealPaymentMethod} onPaymentMethod={setHistDealPaymentMethod}
@@ -1265,6 +1330,17 @@ ${photosHtml}
                     placeholder="R$ 0,00" data-testid="input-deal-price"
                     className="w-full mt-1 px-3 py-2 rounded-xl border border-border text-sm" />
                 </div>
+                {stores.length > 0 && (
+                  <div>
+                    <label className="text-[10px] font-semibold text-muted-foreground uppercase">Loja que está comprando</label>
+                    <select value={dealStoreIdEffective} onChange={(e) => setDealStoreId(e.target.value ? Number(e.target.value) : "")}
+                      data-testid="select-deal-store"
+                      className="w-full mt-1 px-3 py-2 rounded-xl border border-border text-sm bg-white">
+                      <option value="">Não informar</option>
+                      {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    </select>
+                  </div>
+                )}
                 <div>
                   <label className="text-[10px] font-semibold text-muted-foreground uppercase">Forma de pagamento</label>
                   <select value={dealPaymentMethod} onChange={(e) => setDealPaymentMethod(e.target.value)}

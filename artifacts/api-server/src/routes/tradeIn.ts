@@ -1,5 +1,5 @@
 import { Router, type IRouter, type Request, type Response } from "express";
-import { db, tradeInEvaluationsTable, tradeInBaseValuesTable, usersTable, appSettingsTable, tenantsTable } from "@workspace/db";
+import { db, tradeInEvaluationsTable, tradeInBaseValuesTable, usersTable, appSettingsTable, tenantsTable, storesTable } from "@workspace/db";
 import { eq, and, desc, sql, isNull } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
 import { requirePerm } from "../lib/permissions";
@@ -61,6 +61,9 @@ router.get("/trade-in", requireAuth, async (req, res): Promise<void> => {
       // "Trocar por este aparelho" — null fora desse fluxo. Ver comentário
       // em tradeInEvaluationsTable.wantedProduct.
       wantedProduct: tradeInEvaluationsTable.wantedProduct,
+      // Loja da rede que comprou o aparelho — ver comentário na tabela.
+      storeId: tradeInEvaluationsTable.storeId,
+      storeName: tradeInEvaluationsTable.storeName,
       paymentMethod: tradeInEvaluationsTable.paymentMethod,
       pixKey: tradeInEvaluationsTable.pixKey,
       pixKeyHolder: tradeInEvaluationsTable.pixKeyHolder,
@@ -534,11 +537,12 @@ router.patch("/trade-in/:id/close", requireAuth, async (req, res): Promise<void>
 
   const {
     sellerCustomerName, sellerCpf, imei, finalAgreedPrice, sellerRg, sellerAddress, sellerPhone,
-    sellerNeighborhood, paymentMethod, pixKey, pixKeyHolder,
+    sellerNeighborhood, paymentMethod, pixKey, pixKeyHolder, storeId: storeIdRaw,
   } = req.body as {
     sellerCustomerName?: string; sellerCpf?: string; imei?: string; finalAgreedPrice?: string;
     sellerRg?: string; sellerAddress?: string; sellerPhone?: string;
     sellerNeighborhood?: string; paymentMethod?: string; pixKey?: string; pixKeyHolder?: string;
+    storeId?: unknown;
   };
   const name = clean(sellerCustomerName, 120);
   const cpf = typeof sellerCpf === "string" ? sellerCpf.trim().slice(0, 20) : "";
@@ -566,7 +570,10 @@ router.patch("/trade-in/:id/close", requireAuth, async (req, res): Promise<void>
   }
   if (!finalPrice) { res.status(400).json({ error: "Informe o valor final negociado" }); return; }
 
-  const [existing] = await db.select({ id: tradeInEvaluationsTable.id, closedAt: tradeInEvaluationsTable.closedAt })
+  const [existing] = await db.select({
+    id: tradeInEvaluationsTable.id, closedAt: tradeInEvaluationsTable.closedAt,
+    storeId: tradeInEvaluationsTable.storeId, storeName: tradeInEvaluationsTable.storeName,
+  })
     .from(tradeInEvaluationsTable)
     .where(and(eq(tradeInEvaluationsTable.id, id), eq(tradeInEvaluationsTable.tenantId, tenantId))).limit(1);
   if (!existing) { res.status(404).json({ error: "Avaliação não encontrada" }); return; }
@@ -575,6 +582,31 @@ router.patch("/trade-in/:id/close", requireAuth, async (req, res): Promise<void>
   if (existing.closedAt && !isManager(req)) {
     res.status(403).json({ error: "Somente admin ou supervisor pode editar uma compra já fechada" });
     return;
+  }
+
+  // Loja que está comprando o aparelho — pedido do lojista (09/09), pra
+  // saber qual das lojas da rede fechou cada negócio. Se vier storeId no
+  // corpo, valida contra as lojas do tenant; senão preserva a loja que já
+  // estava salva (ex.: só completando o IMEI depois) ou, no primeiro
+  // fechamento, cai na loja do próprio usuário que está fechando (se tiver
+  // uma cadastrada) — sempre editável depois por admin/supervisor.
+  let resolvedStoreId: number | null = existing.storeId ?? null;
+  let resolvedStoreName: string | null = existing.storeName ?? null;
+  if (storeIdRaw !== undefined && storeIdRaw !== null && storeIdRaw !== "") {
+    const sId = Number(storeIdRaw);
+    if (!Number.isInteger(sId) || sId <= 0) { res.status(400).json({ error: "Loja inválida" }); return; }
+    const [store] = await db.select({ id: storesTable.id, name: storesTable.name })
+      .from(storesTable).where(and(eq(storesTable.id, sId), eq(storesTable.tenantId, tenantId))).limit(1);
+    if (!store) { res.status(400).json({ error: "Loja inválida" }); return; }
+    resolvedStoreId = store.id;
+    resolvedStoreName = store.name;
+  } else if (resolvedStoreId == null) {
+    const [closer] = await db.select({ storeId: usersTable.storeId, storeName: usersTable.storeName })
+      .from(usersTable).where(eq(usersTable.id, req.session.userId!)).limit(1);
+    if (closer) {
+      resolvedStoreId = closer.storeId ?? null;
+      resolvedStoreName = closer.storeName ?? null;
+    }
   }
 
   const [saved] = await db.update(tradeInEvaluationsTable)
@@ -590,6 +622,8 @@ router.patch("/trade-in/:id/close", requireAuth, async (req, res): Promise<void>
       paymentMethod: payMethod || null,
       pixKey: pKey || null,
       pixKeyHolder: pKeyHolder || null,
+      storeId: resolvedStoreId,
+      storeName: resolvedStoreName,
       // Preserva a data original do fechamento se já estava fechado (ex.:
       // só voltando pra completar o IMEI depois) — só grava agora na
       // primeira vez.

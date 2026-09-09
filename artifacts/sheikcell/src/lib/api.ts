@@ -1130,6 +1130,9 @@ export type TradeInEvaluation = {
   // Aparelho que o cliente deixou no carrinho da vitrine pública ao avaliar
   // no fluxo "Trocar por este aparelho" — null fora desse fluxo.
   wantedProduct?: string | null;
+  // Loja da rede que comprou o aparelho — preenchida ao fechar o negócio
+  // (etapa 4), com a loja do vendedor que fechou como padrão (editável).
+  storeId?: number | null; storeName?: string | null;
   documentPhotos?: string[]; devicePhotos?: string[];
   // Forma de pagamento + dados do Pix (chave/titular) + foto do comprovante.
   paymentMethod?: string | null; pixKey?: string | null; pixKeyHolder?: string | null;
@@ -2099,7 +2102,7 @@ export const api = {
     close: (id: number, data: {
       sellerCustomerName: string; sellerCpf: string; imei: string; finalAgreedPrice: string;
       sellerRg?: string; sellerAddress?: string; sellerNeighborhood?: string; sellerPhone?: string;
-      paymentMethod?: string; pixKey?: string; pixKeyHolder?: string;
+      paymentMethod?: string; pixKey?: string; pixKeyHolder?: string; storeId?: number | null;
     }) =>
       req<TradeInEvaluation>(`/trade-in/${id}/close`, { method: "PATCH", body: JSON.stringify(data) }),
     uploadPhoto: (id: number, kind: "document" | "device" | "payment", base64: string, mimetype: string) =>

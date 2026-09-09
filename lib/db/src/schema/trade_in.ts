@@ -1,5 +1,6 @@
 import { pgTable, serial, text, integer, timestamp, jsonb, numeric } from "drizzle-orm/pg-core";
 import { usersTable } from "./users";
+import { storesTable } from "./stores";
 
 // Avaliações de compra de celulares usados (estilo Trocafone): o vendedor
 // descreve o aparelho e o estado, a IA pesquisa preços e sugere valor.
@@ -61,6 +62,15 @@ export const tradeInEvaluationsTable = pgTable("trade_in_evaluations", {
   // vendedor mencionando os dois aparelhos (o avaliado e o desejado) ao
   // iniciar o atendimento com esse lead.
   wantedProduct: text("wanted_product"),
+  // Loja da rede que está comprando o aparelho — pedido do lojista (09/09):
+  // com várias lojas cadastradas, precisa aparecer no histórico/nota de
+  // compra qual loja fechou aquele negócio. storeId é FK de verdade (pra
+  // relatório agrupar por loja); storeName é o texto copiado, mesmo padrão
+  // de users.storeName/storeId (continua legível mesmo se a loja for
+  // renomeada/removida depois). Preenchido ao FECHAR o negócio (etapa 4),
+  // com a loja do usuário que está fechando como padrão (editável).
+  storeId: integer("store_id").references(() => storesTable.id),
+  storeName: text("store_name"),
 });
 export type TradeInEvaluation = typeof tradeInEvaluationsTable.$inferSelect;
 

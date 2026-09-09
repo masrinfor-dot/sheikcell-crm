@@ -36,6 +36,7 @@ import TaskBoard from "./TaskBoard";
 import SystemBoard from "./SystemBoard";
 import ConfiguracoesAparencia from "./ConfiguracoesAparencia";
 import ConfiguracoesIntegracoes from "./ConfiguracoesIntegracoes";
+import ConfiguracoesPrecos from "./ConfiguracoesPrecos";
 import BrandLogo from "@/components/BrandLogo";
 import AdminTopBar from "@/components/AdminTopBar";
 import {
@@ -44,13 +45,13 @@ import {
   PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck,
   AlertTriangle, WifiOff,
   FolderArchive, Headphones, BarChart3, SlidersHorizontal, Palette, ChevronDown, Wrench,
-  ArrowRight, Filter, BookUser, LifeBuoy, FileBarChart2, Plug, Tv, ListChecks, PanelTop, ArrowLeftRight, Eye, History,
+  ArrowRight, Filter, BookUser, LifeBuoy, FileBarChart2, Plug, Tv, ListChecks, PanelTop, ArrowLeftRight, Eye, History, Tags,
 } from "lucide-react";
 import Resultados from "./Resultados";
 import Relatorios from "./Relatorios";
 import TvBox from "./TvBox";
 
-type Tab = "dashboard" | "resultados" | "relatorios" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "vitrine" | "treinamentos" | "documentos" | "rh" | "meuponto" | "sorteios" | "robo" | "financeiro" | "pagamentos" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "integracoes" | "sistema" | "diretorio" | "suporte" | "tvbox" | "rotinas";
+type Tab = "dashboard" | "resultados" | "relatorios" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "vitrine" | "treinamentos" | "documentos" | "rh" | "meuponto" | "sorteios" | "robo" | "financeiro" | "pagamentos" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "integracoes" | "precos" | "sistema" | "diretorio" | "suporte" | "tvbox" | "rotinas";
 
 // Categorias colapsáveis do menu lateral — cada aba pertence a um único grupo.
 type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabIds: Tab[] };
@@ -61,7 +62,7 @@ const TAB_GROUPS: TabGroup[] = [
   { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["dashboard", "chat", "equipe", "crm", "avaliacao", "vitrine", "financeiras", "sorteios"] },
   { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["relatorios", "tarefas", "documentos", "meuponto", "rh"] },
   { key: "administracao", label: "Administração", icon: Settings, tabIds: ["users", "sectors", "financeiro", "pagamentos", "quickreplies", "whatsapp", "robo", "tvbox"] },
-  { key: "configuracoes", label: "Configurações", icon: SlidersHorizontal, tabIds: ["aparencia", "integracoes"] },
+  { key: "configuracoes", label: "Configurações", icon: SlidersHorizontal, tabIds: ["aparencia", "integracoes", "precos"] },
   { key: "sistema", label: "Sistema (Dev)", icon: Wrench, tabIds: ["sistema"] },
 ];
 
@@ -597,6 +598,7 @@ export default function AdminDashboard() {
     { id: "whatsapp" as Tab, label: "WhatsApp", icon: PhoneCall, adminOnly: true },
     { id: "aparencia" as Tab, label: "Aparência", icon: Palette, adminOnly: true },
     { id: "integracoes" as Tab, label: "Integrações", icon: Plug, adminOnly: true },
+    { id: "precos" as Tab, label: "Tabela de Preço", icon: Tags, adminOnly: true },
     { id: "sistema" as Tab, label: "Sistema (Dev)", icon: Wrench, adminOnly: true },
   ];
   // Aba de admin aparece para admin OU para quem recebeu a função no cadastro
@@ -1079,6 +1081,7 @@ export default function AdminDashboard() {
 
         {tab === "aparencia" && <ConfiguracoesAparencia />}
         {tab === "integracoes" && <ConfiguracoesIntegracoes />}
+        {tab === "precos" && <ConfiguracoesPrecos />}
 
         {tab === "sistema" && <SystemBoard />}
 
