@@ -73,13 +73,34 @@ export function requireTenant(req: Request, res: Response): number | null {
   return t;
 }
 
+/**
+ * Responde 403 — com uma mensagem mais clara quando a causa provável é a
+ * sessão ainda estar em "modo espiar"/"entrar como" (req.session.impersonatorId
+ * setado): a sessão do navegador virou de fato a do usuário espiado (ex.:
+ * vendedor), então perde acesso admin em TODAS as abas — mesmo numa aba que
+ * ainda mostra a tela de Admin em memória — até alguém clicar em "Sair do
+ * modo espiar"/"Voltar ao Painel do Sistema". Sem essa mensagem, isso vira
+ * um "Forbidden" que parece bug aleatório (ver checklist 09/09: "Erro ao
+ * inativar" — a causa real era exatamente essa, só que sem explicação na
+ * tela pra quem bateu nela).
+ */
+function respondForbidden(req: Request, res: Response): void {
+  if (req.session?.impersonatorId != null) {
+    res.status(403).json({
+      error: "Essa aba ainda está no modo espiar/entrar como (atuando como outro usuário) — clique em \"Sair do modo espiar\" no topo da tela pra recuperar seu acesso normal.",
+    });
+    return;
+  }
+  res.status(403).json({ error: "Forbidden" });
+}
+
 export function requireSuperadmin(req: Request, res: Response, next: NextFunction): void {
   if (!req.session?.userId) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
   if (req.session.userRole !== "superadmin") {
-    res.status(403).json({ error: "Forbidden" });
+    respondForbidden(req, res);
     return;
   }
   next();
@@ -134,7 +155,7 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction): v
     return;
   }
   if (req.session.userRole !== "admin") {
-    res.status(403).json({ error: "Forbidden" });
+    respondForbidden(req, res);
     return;
   }
   blockIfTenantSuspended(req, res, next);
@@ -163,7 +184,7 @@ export function requireFeature(feature: string) {
         .from(usersTable).where(eq(usersTable.id, req.session.userId));
       if (Array.isArray(u?.adminAccess) && u.adminAccess.includes(feature)) { next(); return; }
     } catch { /* fail closed */ }
-    res.status(403).json({ error: "Forbidden" });
+    respondForbidden(req, res);
   };
 }
 
@@ -208,7 +229,7 @@ export function requireAdminOrSupervisor(req: Request, res: Response, next: Next
     return;
   }
   if (req.session.userRole !== "admin" && req.session.userRole !== "supervisor") {
-    res.status(403).json({ error: "Forbidden" });
+    respondForbidden(req, res);
     return;
   }
   blockIfTenantSuspended(req, res, next);
