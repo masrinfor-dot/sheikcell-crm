@@ -98,6 +98,7 @@ type UserRow = {
   id: number; name: string; email: string; role: string;
   isActive: boolean; sector: Sector | null; sectorId: number | null; storeName?: string | null; extension?: string | null; adminAccess?: string[] | null; moduleAccess?: UserModuleAccess | null; accessHours?: { start: string; end: string; days: number[] } | null; allowedSessionKeys?: string[] | null; createdAt: string;
   permissions?: Record<string, boolean> | null;
+  internalChatSingleTask?: boolean;
 };
 
 function formatDuration(sec: number | null): string {
@@ -193,6 +194,7 @@ export default function AdminDashboard() {
   // Modal de permissões individuais do vendedor
   const [permUser, setPermUser] = useState<UserRow | null>(null);
   const [permDraft, setPermDraft] = useState<Record<string, boolean>>({});
+  const [singleTaskDraft, setSingleTaskDraft] = useState(false);
   const [savingPerms, setSavingPerms] = useState(false);
   const [showAddSector, setShowAddSector] = useState(false);
   const [editSector, setEditSector] = useState<Sector | null>(null);
@@ -1532,6 +1534,7 @@ export default function AdminDashboard() {
                                   const draft: Record<string, boolean> = {};
                                   for (const k of PERMISSION_KEYS) draft[k] = u.permissions?.[k] !== false;
                                   setPermDraft(draft);
+                                  setSingleTaskDraft(!!u.internalChatSingleTask);
                                   setPermUser(u);
                                 }}
                                 data-testid={`button-perms-user-${u.id}`}
@@ -1801,6 +1804,20 @@ export default function AdminDashboard() {
                 </label>
               ))}
             </div>
+            <div className="mt-3 pt-3 border-t border-border">
+              <label className="flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-secondary/50 cursor-pointer text-sm" data-testid="perm-single-task">
+                <input
+                  type="checkbox"
+                  checked={singleTaskDraft}
+                  onChange={(e) => setSingleTaskDraft(e.target.checked)}
+                  className="w-4 h-4 accent-[var(--primary)] shrink-0"
+                />
+                <span>Limitar a 1 atendimento por vez no Chat Interno (fila)</span>
+              </label>
+              <p className="text-[11px] text-muted-foreground px-2 -mt-0.5">
+                Em grupos com "modo fila" ativado, {permUser.name.split(" ")[0]} não vai conseguir assumir uma segunda conversa enquanto tiver uma em aberto.
+              </p>
+            </div>
             <div className="flex gap-2 mt-4">
               <button onClick={() => setPermUser(null)}
                 className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold border border-border hover:bg-secondary transition">
@@ -1812,7 +1829,7 @@ export default function AdminDashboard() {
                 onClick={async () => {
                   setSavingPerms(true);
                   try {
-                    await api.admin.users.update(permUser.id, { permissions: permDraft });
+                    await api.admin.users.update(permUser.id, { permissions: permDraft, internalChatSingleTask: singleTaskDraft });
                     toast({ title: "Permissões salvas", description: `Permissões de ${permUser.name} atualizadas.` });
                     setPermUser(null);
                     fetchUsersAndSectors();

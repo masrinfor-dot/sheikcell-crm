@@ -308,6 +308,7 @@ router.get("/admin/users", requireAdmin, async (req, res): Promise<void> => {
       allowedSessionKeys: usersTable.allowedSessionKeys,
       isActive: usersTable.isActive,
       permissions: usersTable.permissions,
+      internalChatSingleTask: usersTable.internalChatSingleTask,
       createdAt: usersTable.createdAt,
     })
     .from(usersTable)
@@ -515,7 +516,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   // que ela carregue este tenant_id (coluna NOT NULL sem valor "sem loja").
   if (existingUser.role === "superadmin") { res.status(403).json({ error: "Operação não permitida" }); return; }
 
-  const { name, email, password, role, sectorId, isActive, permissions, storeName, extension, adminAccess, accessHours, allowedSessionKeys, moduleAccess } = req.body as {
+  const { name, email, password, role, sectorId, isActive, permissions, storeName, extension, adminAccess, accessHours, allowedSessionKeys, moduleAccess, internalChatSingleTask } = req.body as {
     adminAccess?: unknown;
     accessHours?: unknown;
     allowedSessionKeys?: unknown;
@@ -529,6 +530,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
     permissions?: unknown;
     storeName?: string | null;
     extension?: string | null;
+    internalChatSingleTask?: boolean;
   };
 
   const updateData: Record<string, unknown> = {};
@@ -574,6 +576,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   }
   if (isActive !== undefined) updateData.isActive = isActive;
   if (permissions !== undefined) updateData.permissions = sanitizePermissions(permissions);
+  if (internalChatSingleTask !== undefined) updateData.internalChatSingleTask = !!internalChatSingleTask;
   if (password) {
     updateData.passwordHash = await bcrypt.hash(password, 10);
     // Senha resetada pelo admin (recuperação): usuário troca no próximo login

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, can, canEditModule, type InternalConversation, type InternalMessage, type MessageMetadata } from "@/lib/api";
+import { api, can, canEditModule, ApiError, type InternalConversation, type InternalMessage, type MessageMetadata } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { reportInternalChatUnread } from "@/hooks/useInternalChatNotifier";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -241,7 +241,9 @@ export default function InternalChat({ docked = false, onActiveConversationChang
   const [editName, setEditName] = useState("");
   const [editMembers, setEditMembers] = useState<number[]>([]);
   const [editSearch, setEditSearch] = useState("");
+  const [editQueueMode, setEditQueueMode] = useState(false);
   const [savingGroup, setSavingGroup] = useState(false);
+  const [assumingConv, setAssumingConv] = useState(false);
   // @menção: sugestões enquanto digita "@..." no composer.
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   // Criar tarefa a partir de uma mensagem do chat (vínculo com o quadro).
@@ -550,6 +552,17 @@ export default function InternalChat({ docked = false, onActiveConversationChang
       setConversations((prev) => prev.map((c) => (c.id === conversationId ? { ...c, pinnedMessage: null } : c)));
     };
     es.addEventListener("internal_conversation_unpinned", onConversationUnpinned);
+    // Fila de atendimento: alguém assumiu/concluiu uma conversa em modo fila,
+    // ou um admin ligou/desligou o modo fila no grupo — atualiza pra todo mundo
+    // vinculado, sem precisar recarregar.
+    const onConversationQueueChanged = (e: Event) => {
+      const payload = JSON.parse((e as MessageEvent).data) as
+        { id: number; queueMode: boolean; activeHandlerId: number | null; activeHandlerName: string | null; activeHandlerSince: string | null };
+      setConversations((prev) => prev.map((c) => (c.id === payload.id
+        ? { ...c, queueMode: payload.queueMode, activeHandlerId: payload.activeHandlerId, activeHandlerName: payload.activeHandlerName, activeHandlerSince: payload.activeHandlerSince }
+        : c)));
+    };
+    es.addEventListener("internal_conversation_queue_changed", onConversationQueueChanged);
     const onResync = () => { reconcileAfterReconnect(); };
     es.addEventListener("resync", onResync);
     // After a within-buffer reconnect, the server replays missed messages (which
@@ -565,6 +578,7 @@ export default function InternalChat({ docked = false, onActiveConversationChang
       es.removeEventListener("internal_message_updated", onMessageUpdated);
       es.removeEventListener("internal_conversation_pinned", onConversationPinned);
       es.removeEventListener("internal_conversation_unpinned", onConversationUnpinned);
+      es.removeEventListener("internal_conversation_queue_changed", onConversationQueueChanged);
       es.removeEventListener("resync", onResync);
       es.removeEventListener("internal_reconnect", onInternalReconnect);
       releaseSharedEventSource(INTERNAL_CHAT_EVENTS_URL);
@@ -662,6 +676,7 @@ export default function InternalChat({ docked = false, onActiveConversationChang
     setEditName(conv.name);
     setEditSearch("");
     setEditMembers([]);
+    setEditQueueMode(!!conv.queueMode);
     try {
       const members = await api.internalChat.groupMembers(conv.id);
       setEditMembers(members.map((m) => m.id));
@@ -680,11 +695,13 @@ export default function InternalChat({ docked = false, onActiveConversationChang
     try {
       // A lista é enviada exatamente como escolhida: o admin pode inclusive
       // sair do grupo desmarcando a si mesmo (o servidor não readiciona ninguém).
-      const updated = await api.internalChat.updateGroup(editingGroupId, { name, memberIds: editMembers });
+      const updated = await api.internalChat.updateGroup(editingGroupId, { name, memberIds: editMembers, queueMode: editQueueMode });
       const stillMember = user != null && (updated.members ?? []).some((m) => m.id === user.id);
       if (stillMember) {
         const memberNames = (updated.members ?? []).filter((m) => m.id !== user?.id).map((m) => m.name);
-        setConversations((prev) => prev.map((c) => (c.id === editingGroupId ? { ...c, name: updated.name, memberNames } : c)));
+        setConversations((prev) => prev.map((c) => (c.id === editingGroupId
+          ? { ...c, name: updated.name, memberNames, queueMode: updated.queueMode, activeHandlerId: updated.activeHandlerId, activeHandlerName: updated.activeHandlerName, activeHandlerSince: updated.activeHandlerSince }
+          : c)));
       } else {
         // Saí do grupo: ele some da minha lista (o SSE também manda o evento).
         setConversations((prev) => prev.filter((c) => c.id !== editingGroupId));
@@ -914,6 +931,36 @@ export default function InternalChat({ docked = false, onActiveConversationChang
     } finally { setPinning(false); }
   };
 
+  // ── Fila de atendimento (grupos em "modo fila"): assumir = fico com essa
+  // conversa até concluir; se eu tiver "1 atendimento por vez" ligado no meu
+  // usuário, o servidor bloqueia se eu já estiver com outra conversa aberta.
+  const handleAssumeConversation = async () => {
+    if (activeId == null || assumingConv) return;
+    setAssumingConv(true);
+    try {
+      const r = await api.internalChat.assume(activeId);
+      setConversations((prev) => prev.map((c) => (c.id === activeId
+        ? { ...c, activeHandlerId: user?.id ?? null, activeHandlerName: r.activeHandlerName, activeHandlerSince: r.activeHandlerSince }
+        : c)));
+    } catch (err) {
+      if (err instanceof ApiError && err.code === "SINGLE_TASK_BLOCKED") {
+        toast({ title: "Você já está em outro atendimento", description: err.message, variant: "destructive" });
+      } else {
+        toast({ title: "Erro ao assumir conversa", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+      }
+    } finally { setAssumingConv(false); }
+  };
+  const handleReleaseConversation = async () => {
+    if (activeId == null || assumingConv) return;
+    setAssumingConv(true);
+    try {
+      await api.internalChat.release(activeId);
+      setConversations((prev) => prev.map((c) => (c.id === activeId ? { ...c, activeHandlerId: null, activeHandlerName: null, activeHandlerSince: null } : c)));
+    } catch (err) {
+      toast({ title: "Erro ao concluir atendimento", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setAssumingConv(false); }
+  };
+
   // ── Editar/apagar mensagem própria (igual ao Atendimento) — só o registro
   // aqui dentro do sistema; ver comentário no backend (internalChat.ts).
   // setMessages aqui é só um fallback imediato: o SSE internal_message_updated
@@ -1058,11 +1105,23 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center justify-between gap-1">
-                    <span className="text-sm font-medium truncate">{c.name}</span>
+                    <span className="text-sm font-medium truncate flex items-center gap-1">
+                      {c.name}
+                      {c.queueMode && (
+                        <span
+                          title={c.activeHandlerId ? `Em atendimento por ${c.activeHandlerName ?? "alguém"}` : "Modo fila — ninguém assumiu ainda"}
+                          className={`shrink-0 w-1.5 h-1.5 rounded-full ${c.activeHandlerId ? "bg-violet-500" : "bg-amber-500"}`}
+                        />
+                      )}
+                    </span>
                     <span className="text-[10px] text-muted-foreground shrink-0">{timeLabel(c.lastMessageAt)}</span>
                   </div>
                   <div className="flex items-center justify-between gap-1">
-                    <span className="text-xs text-muted-foreground truncate">{c.lastMessage ?? (c.kind === "general" ? "Sala da equipe" : c.kind === "group" ? "Grupo da equipe" : "Iniciar conversa")}</span>
+                    <span className="text-xs text-muted-foreground truncate">
+                      {c.queueMode && c.activeHandlerId
+                        ? `Com ${c.activeHandlerName ?? "alguém"}`
+                        : c.lastMessage ?? (c.kind === "general" ? "Sala da equipe" : c.kind === "group" ? "Grupo da equipe" : "Iniciar conversa")}
+                    </span>
                     {c.unreadCount > 0 && (
                       <span className="shrink-0 bg-primary text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] px-1 flex items-center justify-center">
                         {c.unreadCount}
@@ -1167,6 +1226,37 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                   </button>
                 )}
               </header>
+
+              {active?.queueMode && (
+                <div className="flex items-center gap-2 px-4 py-2 bg-violet-50 border-b border-violet-200 shrink-0" data-testid="banner-queue-mode">
+                  <Users className="w-3.5 h-3.5 text-violet-600 shrink-0" />
+                  <div className="flex-1 min-w-0 text-xs">
+                    {active.activeHandlerId ? (
+                      <span className="text-violet-900">
+                        {active.activeHandlerId === user?.id ? (
+                          <span className="font-semibold">Você está com este atendimento</span>
+                        ) : (
+                          <>Em atendimento por <span className="font-semibold">{active.activeHandlerName ?? "alguém"}</span></>
+                        )}
+                      </span>
+                    ) : (
+                      <span className="text-violet-700 font-medium">Nenhum atendente assumiu esta conversa ainda</span>
+                    )}
+                  </div>
+                  {active.activeHandlerId == null && (
+                    <button onClick={handleAssumeConversation} disabled={assumingConv} data-testid="button-assume-conversation"
+                      className="shrink-0 px-2.5 py-1 rounded-md bg-violet-600 text-white text-[11px] font-semibold hover:bg-violet-700 transition disabled:opacity-50">
+                      {assumingConv ? "..." : "Assumir"}
+                    </button>
+                  )}
+                  {active.activeHandlerId === user?.id && (
+                    <button onClick={handleReleaseConversation} disabled={assumingConv} data-testid="button-release-conversation"
+                      className="shrink-0 px-2.5 py-1 rounded-md border border-violet-300 text-violet-700 text-[11px] font-semibold hover:bg-violet-100 transition disabled:opacity-50">
+                      {assumingConv ? "..." : "Concluir"}
+                    </button>
+                  )}
+                </div>
+              )}
 
               {active?.pinnedMessage && (
                 <div className="flex items-center gap-2 px-4 py-2 bg-amber-50 border-b border-amber-200 shrink-0" data-testid="banner-pinned-message">
@@ -1803,6 +1893,20 @@ export default function InternalChat({ docked = false, onActiveConversationChang
               </button>
             );
           })}
+        </div>
+        <div className="p-3 border-t">
+          <label className="flex items-start gap-2.5 px-1 py-1.5 cursor-pointer text-sm" data-testid="checkbox-edit-group-queue-mode">
+            <input
+              type="checkbox"
+              checked={editQueueMode}
+              onChange={(e) => setEditQueueMode(e.target.checked)}
+              className="w-4 h-4 mt-0.5 accent-violet-600 shrink-0"
+            />
+            <span>
+              <span className="font-medium">Modo fila (1 atendimento por vez)</span>
+              <span className="block text-xs text-muted-foreground">Alguém da equipe precisa "assumir" a conversa antes de responder — evita que dois vendedores atendam o mesmo pedido ao mesmo tempo.</span>
+            </span>
+          </label>
         </div>
         <div className="p-3 border-t">
           <button onClick={saveGroup} disabled={savingGroup} data-testid="button-save-group"

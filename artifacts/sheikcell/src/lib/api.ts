@@ -122,6 +122,10 @@ export type User = {
   accessHours?: { start: string; end: string; days: number[] } | null;
   sector: Sector | null;
   permissions?: VendedorPermissions;
+  // Fila de atendimento do Chat Interno: restringe este usuário a "assumir"
+  // só uma conversa em modo fila por vez em toda a loja (ver assume/release
+  // em internalChat.ts). Default false — sem restrição.
+  internalChatSingleTask?: boolean;
   // Módulos opcionais contratados pela loja (teto do tenant — null pro
   // superadmin, que não pertence a loja nenhuma).
   enabledModules?: string[] | null;
@@ -242,6 +246,12 @@ export type InternalConversation = {
   lastMessageAt: string | null;
   unreadCount: number;
   pinnedMessage: { id: number; senderName: string; content: string; type: "text" | "image" | "audio" | "doc" } | null;
+  // Fila de atendimento (grupos usados como canal de pedidos): ver
+  // POST .../assume e .../release em internalChat.ts.
+  queueMode?: boolean;
+  activeHandlerId?: number | null;
+  activeHandlerName?: string | null;
+  activeHandlerSince?: string | null;
 };
 
 export type Store = {
@@ -1908,9 +1918,16 @@ export const api = {
     deleteConversation: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}`, { method: "DELETE" }),
     deleteGeneral: () => req<{ ok: boolean }>("/internal-chat/general", { method: "DELETE" }),
     groupMembers: (id: number) => req<{ id: number; name: string; role: string }[]>(`/internal-chat/conversations/${id}/members`),
-    updateGroup: (id: number, data: { name?: string; memberIds?: number[] }) =>
+    updateGroup: (id: number, data: { name?: string; memberIds?: number[]; queueMode?: boolean }) =>
       req<InternalConversation & { members?: { id: number; name: string }[] }>(
         `/internal-chat/conversations/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    // Fila de atendimento: "assumir" fica em evidência pra todo mundo do
+    // grupo quem está cuidando agora; "concluir" libera pro próximo. 409 com
+    // code "SINGLE_TASK_BLOCKED" quando quem tenta assumir tem a restrição
+    // "1 atendimento por vez" ligada e já está com outra conversa em aberto.
+    assume: (id: number) => req<{ ok: boolean; activeHandlerId?: number; activeHandlerName?: string | null; activeHandlerSince?: string }>(
+      `/internal-chat/conversations/${id}/assume`, { method: "POST" }),
+    release: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}/release`, { method: "POST" }),
     sendMedia: (id: number, file: File, caption?: string, replyToId?: number): Promise<InternalMessage> => {
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -2641,7 +2658,7 @@ export const api = {
       list: () => req<(User & { isActive: boolean; createdAt: string })[]>("/admin/users"),
       create: (data: { name: string; email: string; password: string; role: string; sectorId: number; storeName?: string; extension?: string; adminAccess?: string[] | null; moduleAccess?: UserModuleAccess | null; accessHours?: { start: string; end: string; days: number[] } | null; allowedSessionKeys?: string[] | null }) =>
         req<User>("/admin/users", { method: "POST", body: JSON.stringify(data) }),
-      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; extension: string; isActive: boolean; permissions: Record<string, boolean>; adminAccess: string[] | null; moduleAccess: UserModuleAccess | null; accessHours: { start: string; end: string; days: number[] } | null; allowedSessionKeys: string[] | null }>) =>
+      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; extension: string; isActive: boolean; permissions: Record<string, boolean>; adminAccess: string[] | null; moduleAccess: UserModuleAccess | null; accessHours: { start: string; end: string; days: number[] } | null; allowedSessionKeys: string[] | null; internalChatSingleTask: boolean }>) =>
         req<User>(`/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number, transferToId: number | null) =>
         req<{ ok: boolean; transferredConversations: number }>(`/admin/users/${id}`, { method: "DELETE", body: JSON.stringify({ transferToId }) }),

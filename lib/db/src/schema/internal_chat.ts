@@ -23,6 +23,15 @@ export const internalConversationsTable = pgTable(
     pinnedMessageId: integer("pinned_message_id").references((): AnyPgColumn => internalMessagesTable.id, { onDelete: "set null" }),
     pinnedAt: timestamp("pinned_at", { withTimezone: true }),
     pinnedBy: integer("pinned_by").references(() => usersTable.id, { onDelete: "set null" }),
+    // Fila de atendimento (pedido 09/09): grupos usados como canal de pedidos
+    // (ex.: "Assistência Técnica - Reparos") podem ativar esse modo — quem vai
+    // responder "assume" a conversa (fica em evidência pra todo mundo quem
+    // está cuidando, evitando duplicidade/confusão) e "conclui" quando termina.
+    // Só grupos podem ativar (não faz sentido pra sala geral/direto). Ver
+    // POST .../assume e .../release em internalChat.ts.
+    queueMode: boolean("queue_mode").notNull().default(false),
+    activeHandlerId: integer("active_handler_id").references(() => usersTable.id, { onDelete: "set null" }),
+    activeHandlerSince: timestamp("active_handler_since", { withTimezone: true }),
   },
   // Guarantee at most one shared general/team room, even under concurrent creation.
   // No máximo UMA sala geral por loja (tenant), mesmo sob criação concorrente.

@@ -61,6 +61,14 @@ export const usersTable = pgTable("users", {
   // usar_ia, enviar_midia — todas boolean. Visibilidade de módulo/aba não
   // entra mais aqui, ver moduleAccess acima. Admin ignora isto.
   permissions: jsonb("permissions").$type<Record<string, boolean> | null>(),
+  // Fila de atendimento do Chat Interno (pedido 09/09): quando true, este
+  // usuário só pode "assumir" UMA conversa em modo fila por vez em toda a
+  // loja — precisa "concluir" a atual antes de assumir outra. Default false
+  // (comportamento de sempre, sem restrição) — é uma restrição opcional que
+  // o admin liga por pessoa, não uma permissão de "pode fazer algo" como as
+  // de `permissions` acima, por isso é uma coluna própria em vez de entrar
+  // nesse jsonb (lá, chave ausente = liberado; aqui teria que ser o oposto).
+  internalChatSingleTask: boolean("internal_chat_single_task").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });

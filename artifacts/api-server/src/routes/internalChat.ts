@@ -191,6 +191,9 @@ router.get("/internal-chat/conversations", requireAuth, async (req, res): Promis
       lastMessageAt: internalConversationsTable.lastMessageAt,
       createdAt: internalConversationsTable.createdAt,
       pinnedMessageId: internalConversationsTable.pinnedMessageId,
+      queueMode: internalConversationsTable.queueMode,
+      activeHandlerId: internalConversationsTable.activeHandlerId,
+      activeHandlerSince: internalConversationsTable.activeHandlerSince,
     })
     .from(internalConversationMembersTable)
     .innerJoin(internalConversationsTable, eq(internalConversationMembersTable.conversationId, internalConversationsTable.id))
@@ -258,6 +261,16 @@ router.get("/internal-chat/conversations", requireAuth, async (req, res): Promis
   const pinnedMap: Record<number, { id: number; senderName: string; content: string; type: string }> = {};
   for (const p of pinnedRows) pinnedMap[p.id] = p;
 
+  // Fila de atendimento: nome de quem está com cada conversa em modo fila
+  // "assumida" agora — uma busca em lote (mesmo padrão de "others"/"pinnedRows"
+  // acima) em vez de uma query por conversa.
+  const handlerIds = [...new Set(memberships.map((m) => m.activeHandlerId).filter((id): id is number => id != null))];
+  const handlerRows = handlerIds.length > 0
+    ? await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable).where(inArray(usersTable.id, handlerIds))
+    : [];
+  const handlerMap: Record<number, string> = {};
+  for (const h of handlerRows) handlerMap[h.id] = h.name;
+
   const result = memberships.map((m) => {
     const other = otherMap[m.conversationId] ?? null;
     return {
@@ -272,6 +285,10 @@ router.get("/internal-chat/conversations", requireAuth, async (req, res): Promis
       lastMessageAt: m.lastMessageAt,
       unreadCount: unreadMap[m.conversationId] ?? 0,
       pinnedMessage: m.pinnedMessageId != null ? (pinnedMap[m.pinnedMessageId] ?? null) : null,
+      queueMode: m.queueMode,
+      activeHandlerId: m.activeHandlerId,
+      activeHandlerName: m.activeHandlerId != null ? (handlerMap[m.activeHandlerId] ?? null) : null,
+      activeHandlerSince: m.activeHandlerSince,
     };
   });
 
@@ -328,6 +345,10 @@ router.post("/internal-chat/conversations/group", requireAdminOrSupervisor, asyn
     lastMessage: null,
     lastMessageAt: null,
     unreadCount: 0,
+    queueMode: false,
+    activeHandlerId: null,
+    activeHandlerName: null,
+    activeHandlerSince: null,
   };
   // Avisa os participantes em tempo real para o grupo aparecer na lista deles.
   broadcastInternal("internal_conversation_new", conv, tenantId, [userId, ...valid.map((v) => v.id)]);
@@ -1049,13 +1070,22 @@ router.patch("/internal-chat/conversations/:id", requireAdmin, async (req, res):
   if (!conv) { res.status(404).json({ error: "Grupo não encontrado" }); return; }
   if (conv.kind !== "group") { res.status(400).json({ error: "Só grupos podem ser editados" }); return; }
 
-  const { name, memberIds } = req.body as { name?: string; memberIds?: number[] };
+  const { name, memberIds, queueMode } = req.body as { name?: string; memberIds?: number[]; queueMode?: boolean };
 
   let newName = conv.name;
   if (name !== undefined) {
     const cleanName = (name ?? "").trim().slice(0, 80);
     if (!cleanName) { res.status(400).json({ error: "Dê um nome ao grupo" }); return; }
     newName = cleanName;
+  }
+
+  if (queueMode !== undefined && queueMode !== conv.queueMode) {
+    // Desligar o modo fila libera quem estava "com" a conversa — sem isso,
+    // religar o modo depois reapareceria com um responsável de uma sessão
+    // antiga sem sentido nenhum pra quem está vendo agora.
+    await db.update(internalConversationsTable)
+      .set({ queueMode, ...(queueMode ? {} : { activeHandlerId: null, activeHandlerSince: null }) })
+      .where(eq(internalConversationsTable.id, convId));
   }
 
   // Membros atuais (antes da mudança) — necessários para saber quem avisar.
@@ -1112,6 +1142,9 @@ router.patch("/internal-chat/conversations/:id", requireAdmin, async (req, res):
         .where(inArray(usersTable.id, finalIds))
     : [];
 
+  const finalQueueMode = queueMode !== undefined ? queueMode : conv.queueMode;
+  const finalActiveHandlerId = finalQueueMode ? conv.activeHandlerId : null;
+
   const convPayload = {
     id: convId,
     kind: "group" as const,
@@ -1121,6 +1154,9 @@ router.patch("/internal-chat/conversations/:id", requireAdmin, async (req, res):
     lastMessage: conv.lastMessage,
     lastMessageAt: conv.lastMessageAt,
     unreadCount: 0,
+    queueMode: finalQueueMode,
+    activeHandlerId: finalActiveHandlerId,
+    activeHandlerSince: finalQueueMode ? conv.activeHandlerSince : null,
   };
 
   // Adicionados: grupo aparece na lista deles na hora.
@@ -1131,9 +1167,95 @@ router.patch("/internal-chat/conversations/:id", requireAdmin, async (req, res):
   const staying = finalIds.filter((id) => !addedIds.includes(id));
   if (staying.length > 0) {
     broadcastInternal("internal_conversation_updated", { id: convId, name: newName ?? "Grupo", members: finalMembers }, tenantId, staying);
+    if (queueMode !== undefined && queueMode !== conv.queueMode) {
+      broadcastInternal("internal_conversation_queue_changed", {
+        id: convId, queueMode: finalQueueMode, activeHandlerId: finalActiveHandlerId, activeHandlerName: null, activeHandlerSince: null,
+      }, tenantId, staying);
+    }
   }
 
   res.json(convPayload);
+});
+
+// ─── Fila de atendimento: assumir/concluir uma conversa em modo fila ───────
+// "Assumir" marca quem está cuidando dela agora (visível em tempo real pra
+// todo mundo do grupo, evita duplicidade/confusão quando várias pessoas
+// podem responder). "Concluir" libera pro próximo. Quem tem a restrição
+// "1 atendimento por vez" ligada (usersTable.internalChatSingleTask) não
+// consegue assumir uma segunda conversa em modo fila enquanto ainda tiver
+// uma em aberto em QUALQUER outro grupo da loja — precisa concluir primeiro.
+router.post("/internal-chat/conversations/:id/assume", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const userId = req.session.userId!;
+  const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
+  if (Number.isNaN(convId)) { res.status(400).json({ error: "Conversa inválida" }); return; }
+
+  const conv = await getAccessibleConversation(convId, userId, tenantId);
+  if (!conv) { res.status(403).json({ error: "Acesso negado" }); return; }
+  if (!conv.queueMode) { res.status(400).json({ error: "Esta conversa não está em modo fila de atendimento" }); return; }
+  if (conv.activeHandlerId != null && conv.activeHandlerId !== userId) {
+    res.status(409).json({ error: "Esta conversa já foi assumida por outra pessoa" });
+    return;
+  }
+  if (conv.activeHandlerId === userId) { res.json({ ok: true }); return; } // já era eu, no-op
+
+  const [me] = await db.select({ singleTask: usersTable.internalChatSingleTask, name: usersTable.name })
+    .from(usersTable).where(eq(usersTable.id, userId)).limit(1);
+  if (me?.singleTask) {
+    const [openElsewhere] = await db.select({ id: internalConversationsTable.id, name: internalConversationsTable.name })
+      .from(internalConversationsTable)
+      .where(and(
+        eq(internalConversationsTable.tenantId, tenantId),
+        eq(internalConversationsTable.activeHandlerId, userId),
+        ne(internalConversationsTable.id, convId),
+      )).limit(1);
+    if (openElsewhere) {
+      res.status(409).json({
+        error: `Finalize o atendimento em "${openElsewhere.name ?? "outra conversa"}" antes de assumir este.`,
+        code: "SINGLE_TASK_BLOCKED",
+      });
+      return;
+    }
+  }
+
+  const since = new Date();
+  await db.update(internalConversationsTable)
+    .set({ activeHandlerId: userId, activeHandlerSince: since })
+    .where(eq(internalConversationsTable.id, convId));
+
+  const recipients = await recipientsFor(conv);
+  broadcastInternal("internal_conversation_queue_changed", {
+    id: convId, queueMode: true, activeHandlerId: userId, activeHandlerName: me?.name ?? null, activeHandlerSince: since,
+  }, tenantId, recipients);
+
+  res.json({ ok: true, activeHandlerId: userId, activeHandlerName: me?.name ?? null, activeHandlerSince: since });
+});
+
+router.post("/internal-chat/conversations/:id/release", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const userId = req.session.userId!;
+  const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0]! : req.params.id!, 10);
+  if (Number.isNaN(convId)) { res.status(400).json({ error: "Conversa inválida" }); return; }
+
+  const conv = await getAccessibleConversation(convId, userId, tenantId);
+  if (!conv) { res.status(403).json({ error: "Acesso negado" }); return; }
+  // Quem concluiu, admin ou supervisor — nunca um terceiro qualquer.
+  const role = req.session.userRole;
+  if (conv.activeHandlerId !== userId && role !== "admin" && role !== "supervisor") {
+    res.status(403).json({ error: "Só quem assumiu (ou admin/supervisor) pode concluir este atendimento" });
+    return;
+  }
+
+  await db.update(internalConversationsTable)
+    .set({ activeHandlerId: null, activeHandlerSince: null })
+    .where(eq(internalConversationsTable.id, convId));
+
+  const recipients = await recipientsFor(conv);
+  broadcastInternal("internal_conversation_queue_changed", {
+    id: convId, queueMode: conv.queueMode, activeHandlerId: null, activeHandlerName: null, activeHandlerSince: null,
+  }, tenantId, recipients);
+
+  res.json({ ok: true });
 });
 
 // ─── Mark a conversation as read ───────────────────────────────────────────
