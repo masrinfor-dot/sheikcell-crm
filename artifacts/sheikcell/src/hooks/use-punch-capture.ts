@@ -98,20 +98,62 @@ export function usePunchCapture(active: boolean) {
     }
   }, []);
 
+  // Mensagem de erro específica por causa — mesmo padrão do cameraErrorMessage
+  // acima. Antes era um texto genérico só de "permissão" pra qualquer falha,
+  // mas geolocalização falha por motivos bem diferentes (permissão negada,
+  // sinal de GPS/rede fraco, timeout) e cada um pede uma ação diferente.
+  function geoErrorMessage(err: GeolocationPositionError): string {
+    switch (err.code) {
+      case err.PERMISSION_DENIED:
+        return "Permissão de localização negada. Clique no ícone de cadeado/localização ao lado do endereço no navegador, libere a localização para este site e clique em \"Tentar de novo\".";
+      case err.POSITION_UNAVAILABLE:
+        return "Não foi possível determinar sua localização agora (sinal de GPS/rede fraco). Tente se aproximar de uma janela ou área aberta e clique em \"Tentar de novo\".";
+      case err.TIMEOUT:
+        return "A localização demorou demais para responder. Verifique se a localização/GPS está ativada no aparelho e tente de novo.";
+      default:
+        return "Não foi possível obter sua localização. Libere a permissão de localização no navegador e tente de novo.";
+    }
+  }
+
   const startGeo = useCallback(() => {
+    // Localização é sempre obrigatória pra bater ponto (sem via de escape,
+    // ao contrário da câmera — decisão intencional contra fraude) — então
+    // aqui o que dá pra melhorar é só a confiabilidade/clareza do próprio
+    // pedido de localização, nunca dispensá-lo.
+    if (typeof window !== "undefined" && window.isSecureContext === false) {
+      setGeo({ status: "error", error: "A página precisa ser aberta em HTTPS para obter sua localização. Confira o endereço no navegador." });
+      return;
+    }
     if (!navigator.geolocation) {
       setGeo({ status: "error", error: "Seu navegador não suporta geolocalização." });
       return;
     }
     setGeo({ status: "loading" });
+    const onOk = (pos: GeolocationPosition) => setGeo({
+      status: "ok",
+      lat: pos.coords.latitude,
+      lng: pos.coords.longitude,
+      accuracyMeters: pos.coords.accuracy,
+    });
     navigator.geolocation.getCurrentPosition(
-      (pos) => setGeo({
-        status: "ok",
-        lat: pos.coords.latitude,
-        lng: pos.coords.longitude,
-        accuracyMeters: pos.coords.accuracy,
-      }),
-      () => setGeo({ status: "error", error: "Não foi possível obter sua localização. Libere a permissão de localização no navegador e tente de novo." }),
+      onOk,
+      (err) => {
+        // 1ª tentativa pede alta precisão (GPS) — pode dar timeout em local
+        // fechado/sinal fraco (relatado em produção: "fica dando erro" ao
+        // bater ponto). Antes de mostrar erro pro colaborador, tenta de novo
+        // com precisão mais baixa (rede/wifi — responde mais rápido e
+        // funciona melhor indoor). Só mostra erro se essa 2ª tentativa também
+        // falhar — a localização em si continua sempre exigida.
+        if (err.code === err.TIMEOUT) {
+          navigator.geolocation.getCurrentPosition(
+            onOk,
+            (err2) => setGeo({ status: "error", error: geoErrorMessage(err2) }),
+            { enableHighAccuracy: false, timeout: 15000, maximumAge: 60000 },
+          );
+          return;
+        }
+        setGeo({ status: "error", error: geoErrorMessage(err) });
+      },
       { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 },
     );
   }, []);
