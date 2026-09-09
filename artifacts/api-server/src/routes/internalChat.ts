@@ -726,6 +726,15 @@ router.post("/internal-chat/conversations/:id/media", requireAuth, async (req, r
     base64?: string; mimetype?: string; filename?: string; caption?: string; replyToId?: number;
   };
   if (!base64) { res.status(400).json({ error: "Arquivo obrigatório" }); return; }
+
+  // Decodifica ANTES de validar o tipo — precisa dos bytes reais pra checar
+  // a assinatura do arquivo (ver sniff abaixo), não só mimetype/extensão.
+  const buf = Buffer.from(base64, "base64");
+  if (buf.byteLength === 0 || buf.byteLength > MEDIA_MAX_BYTES) {
+    res.status(400).json({ error: "Arquivo inválido ou muito grande (máximo 20 MB)" });
+    return;
+  }
+
   let mimetype = (rawMimetype ?? "").split(";")[0]!.trim().toLowerCase();
   let ext = MEDIA_MIME_TO_EXT[mimetype];
   // mimetype ausente, vazio ou genérico ("application/octet-stream", comum
@@ -739,18 +748,24 @@ router.post("/internal-chat/conversations/:id/media", requireAuth, async (req, r
       ext = MEDIA_MIME_TO_EXT[mimetype];
     }
   }
+  // Último recurso: assinatura do próprio arquivo ("%PDF" nos 4 primeiros
+  // bytes é o cabeçalho oficial de todo PDF válido). Pedido do lojista
+  // (09/09): alguns vendedores ainda recebiam "Tipo de arquivo não
+  // suportado" mesmo depois do fallback por extensão — caso real de PDF
+  // reenviado/salvo por outro app (ex.: encaminhado de e-mail, WhatsApp
+  // Desktop, scanner), onde tanto o mimetype quanto o nome do arquivo
+  // chegam sem indicar que é PDF (nome sem ".pdf", ou renomeado). Checar o
+  // conteúdo em si resolve independente do que o navegador/SO informaram.
+  if (!ext && buf.length >= 4 && buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46) {
+    mimetype = "application/pdf";
+    ext = "pdf";
+  }
   if (!ext) { res.status(400).json({ error: "Tipo de arquivo não suportado" }); return; }
 
   const conv = await getAccessibleConversation(convId, userId, tenantId);
   if (!conv) { res.status(403).json({ error: "Acesso negado" }); return; }
 
   const { replyToId, replyTo } = await resolveReplyTo(replyToIdRaw, convId, tenantId);
-
-  const buf = Buffer.from(base64, "base64");
-  if (buf.byteLength === 0 || buf.byteLength > MEDIA_MAX_BYTES) {
-    res.status(400).json({ error: "Arquivo inválido ou muito grande (máximo 20 MB)" });
-    return;
-  }
 
   await mkdir(MEDIA_DIR, { recursive: true });
   const savedFilename = `${randomUUID()}.${ext}`;

@@ -834,6 +834,17 @@ router.post("/chat/conversations/:id/media", requireAuth, requireChatAccess(), r
     res.status(400).json({ error: "Arquivo obrigatório" });
     return;
   }
+
+  // Decodifica ANTES de validar o tipo — precisa dos bytes reais pra checar
+  // a assinatura do arquivo quando mimetype/extensão não bastam (ver sniff
+  // abaixo). O tamanho máximo também é checado aqui, mais cedo que antes.
+  const buf = Buffer.from(base64, "base64");
+  const MAX_BYTES = 20 * 1024 * 1024;
+  if (buf.byteLength > MAX_BYTES) {
+    res.status(400).json({ error: "Arquivo muito grande (máximo 20 MB)" });
+    return;
+  }
+
   // Navegadores mandam tipos com parâmetros, ex. "audio/webm;codecs=opus" —
   // normaliza para o tipo base antes de validar.
   let mimetype = (rawMimetype ?? "").split(";")[0]!.trim().toLowerCase();
@@ -864,6 +875,14 @@ router.post("/chat/conversations/:id/media", requireAuth, requireChatAccess(), r
     const fileExt = filename?.split(".").pop()?.toLowerCase();
     const fallbackMime = fileExt ? EXT_FALLBACK_TO_MIME[fileExt] : undefined;
     if (fallbackMime) mimetype = fallbackMime;
+  }
+  // Último recurso: assinatura do próprio arquivo ("%PDF" nos 4 primeiros
+  // bytes é o cabeçalho oficial de todo PDF válido). Pedido do lojista
+  // (09/09): mesmo bug do Chat Interno — PDF reenviado/salvo por outro app
+  // (e-mail, WhatsApp Desktop, scanner) chega sem mimetype nem nome que
+  // indiquem ser PDF. Checar o conteúdo em si resolve nesses casos.
+  if (!ALLOWED_MIMES_OUT.has(mimetype) && buf.length >= 4 && buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46) {
+    mimetype = "application/pdf";
   }
   if (!ALLOWED_MIMES_OUT.has(mimetype)) {
     res.status(400).json({ error: "Tipo de arquivo não suportado" });
@@ -908,13 +927,8 @@ router.post("/chat/conversations/:id/media", requireAuth, requireChatAccess(), r
   };
   const ext = mimeToExt[mimetype] ?? "bin";
   const savedFilename = `${randomUUID()}.${ext}`;
-  const buf = Buffer.from(base64, "base64");
-
-  const MAX_BYTES = 20 * 1024 * 1024;
-  if (buf.byteLength > MAX_BYTES) {
-    res.status(400).json({ error: "Arquivo muito grande (máximo 20 MB)" });
-    return;
-  }
+  // buf e o limite de tamanho já foram checados mais acima (antes da
+  // validação de mimetype, pra poder usar os bytes no sniff de assinatura).
 
   await writeFile(path.join(MEDIA_DIR, savedFilename), buf);
   const mediaUrl = `/api/chat/media/${savedFilename}`;
