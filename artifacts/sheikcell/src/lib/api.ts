@@ -1574,6 +1574,25 @@ export type ChatLabel = {
   createdAt: string;
 };
 
+// Filtro salvo da lista de Conversas — combinação do painel de filtro
+// avançado (vendedor/setor/nível/linha/etiqueta/"não respondidas") salva
+// com um nome, pessoal por usuário.
+export type ChatSavedFilterValues = {
+  onlyUnanswered?: boolean;
+  vendedor?: string;
+  setor?: string;
+  nivel?: string;
+  sessionKey?: string;
+  label?: string;
+};
+export type ChatSavedFilter = {
+  id: number;
+  name: string;
+  filters: ChatSavedFilterValues;
+  sortOrder: number;
+  createdAt: string;
+};
+
 export type ChatMessage = {
   id: number;
   conversationId: number;
@@ -2019,6 +2038,12 @@ export const api = {
       update: (id: number, data: Partial<{ name: string; color: string; sortOrder: number; isActive: boolean }>) =>
         req<ChatLabel>(`/chat/labels/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number) => req<{ ok: boolean }>(`/chat/labels/${id}`, { method: "DELETE" }),
+    },
+    savedFilters: {
+      list: () => req<ChatSavedFilter[]>("/chat/saved-filters"),
+      create: (data: { name: string; filters: ChatSavedFilterValues }) =>
+        req<ChatSavedFilter>("/chat/saved-filters", { method: "POST", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/chat/saved-filters/${id}`, { method: "DELETE" }),
     },
   },
   chatUsers: () => req<{ id: number; name: string; role: string; sectorId: number | null }[]>("/chat/users"),

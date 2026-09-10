@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo, Fragment } from "react";
 import { createPortal } from "react-dom";
-import { api, can, ApiError, type Conversation, type ChatMessage, type PinnedMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata, type CatalogCoupon } from "@/lib/api";
+import { api, can, ApiError, type Conversation, type ChatMessage, type PinnedMessage, type Sector, type ChatLabel, type ChatSavedFilter, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata, type CatalogCoupon } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useActivityGuard } from "@/lib/activityGuard";
 import { useToast } from "@/hooks/use-toast";
@@ -1178,6 +1178,11 @@ export default function ChatCenter({
   const [showNewConv, setShowNewConv] = useState(false);
   const [showLabelPicker, setShowLabelPicker] = useState(false);
   const [labels, setLabels] = useState<ChatLabel[]>([]);
+  // Filtros salvos da lista de Conversas (combinação de vendedor/setor/
+  // nível/linha/etiqueta/"não respondidas" salva com um nome, pra aplicar
+  // com 1 clique depois em vez de escolher tudo de novo toda vez).
+  const [savedFilters, setSavedFilters] = useState<ChatSavedFilter[]>([]);
+  const [savingFilter, setSavingFilter] = useState(false);
   const [showLabelManager, setShowLabelManager] = useState(false);
   const [labelForm, setLabelForm] = useState<{ name: string; color: string }>({ name: "", color: LABEL_COLOR_PRESETS[0] });
   const [savingLabel, setSavingLabel] = useState(false);
@@ -1966,6 +1971,7 @@ export default function ChatCenter({
     }).catch(() => {});
     api.chat.quickReplies.list().then(setQuickReplies).catch(() => {});
     api.chat.labels.list().then(setLabels).catch(() => {});
+    api.chat.savedFilters.list().then(setSavedFilters).catch(() => {});
     api.chat.waSessions().then(setWaSessions).catch(() => {});
   }, []);
 
@@ -1973,6 +1979,54 @@ export default function ChatCenter({
   const fetchLabels = useCallback(async () => {
     try { setLabels(await api.chat.labels.list()); } catch { /* silent */ }
   }, []);
+
+  // ── Filtros salvos ──
+  const fetchSavedFilters = useCallback(async () => {
+    try { setSavedFilters(await api.chat.savedFilters.list()); } catch { /* silent */ }
+  }, []);
+
+  const handleSaveCurrentFilter = async () => {
+    const name = window.prompt("Nome para este filtro (ex: \"Vendedor João + linha SAFIRA\"):");
+    if (!name || !name.trim()) return;
+    setSavingFilter(true);
+    try {
+      await api.chat.savedFilters.create({
+        name: name.trim(),
+        filters: {
+          onlyUnanswered: onlyUnanswered || undefined,
+          vendedor: filterVendedor || undefined,
+          setor: filterSetor || undefined,
+          nivel: filterNivel || undefined,
+          sessionKey: filterSessionKey || undefined,
+          label: labelFilter || undefined,
+        },
+      });
+      await fetchSavedFilters();
+      toast({ title: "Filtro salvo" });
+    } catch (e) {
+      toast({ title: e instanceof ApiError ? e.message : "Não foi possível salvar o filtro", variant: "destructive" });
+    } finally {
+      setSavingFilter(false);
+    }
+  };
+
+  const handleApplySavedFilter = (f: ChatSavedFilter) => {
+    setOnlyUnanswered(!!f.filters.onlyUnanswered);
+    setFilterVendedor(f.filters.vendedor ?? "");
+    setFilterSetor(f.filters.setor ?? "");
+    setFilterNivel(f.filters.nivel ?? "");
+    setFilterSessionKey(f.filters.sessionKey ?? "");
+    setLabelFilter(f.filters.label ?? "");
+  };
+
+  const handleDeleteSavedFilter = async (id: number) => {
+    try {
+      await api.chat.savedFilters.remove(id);
+      setSavedFilters((prev) => prev.filter((f) => f.id !== id));
+    } catch (e) {
+      toast({ title: e instanceof ApiError ? e.message : "Não foi possível remover o filtro", variant: "destructive" });
+    }
+  };
 
   const handleCreateLabel = async () => {
     const name = labelForm.name.trim();
@@ -3364,7 +3418,33 @@ export default function ChatCenter({
                   Limpar
                 </button>
               )}
+              {(hasAdvancedFilter || onlyUnanswered || labelFilter) && (
+                <button onClick={handleSaveCurrentFilter} disabled={savingFilter}
+                  data-testid="button-save-current-filter"
+                  className="text-xs px-2 py-1 rounded-lg border border-border bg-white text-muted-foreground font-semibold disabled:opacity-50">
+                  💾 Salvar filtro
+                </button>
+              )}
             </div>
+            {/* Filtros salvos: combinação de filtros salva com nome, pra
+                aplicar com 1 clique em vez de escolher tudo de novo. */}
+            {savedFilters.length > 0 && (
+              <div className="flex gap-1.5 flex-wrap">
+                {savedFilters.map((f) => (
+                  <span key={f.id} className="inline-flex items-center gap-1 text-xs pl-2.5 pr-1 py-1 rounded-full border border-border bg-white">
+                    <button onClick={() => handleApplySavedFilter(f)} data-testid={`button-apply-saved-filter-${f.id}`}
+                      className="font-semibold text-foreground">
+                      ⭐ {f.name}
+                    </button>
+                    <button onClick={() => handleDeleteSavedFilter(f.id)} title="Remover filtro salvo"
+                      data-testid={`button-delete-saved-filter-${f.id}`}
+                      className="w-4 h-4 flex items-center justify-center rounded-full text-muted-foreground hover:bg-red-50 hover:text-red-600">
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             {labels.length === 0 ? (
               <p className="text-xs text-muted-foreground">Nenhuma etiqueta criada.</p>
             ) : (

@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
-import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, messagePinsTable, attendanceLogsTable, attendanceStartEventsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, taskAssigneesTable, crmPurchasesTable, appSettingsTable, tradeInEvaluationsTable, timeClockEntriesTable } from "@workspace/db";
+import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, messagePinsTable, attendanceLogsTable, attendanceStartEventsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, chatSavedFiltersTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, taskAssigneesTable, crmPurchasesTable, appSettingsTable, tradeInEvaluationsTable, timeClockEntriesTable } from "@workspace/db";
 import { eq, desc, and, or, lt, gte, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { requireAuth, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
@@ -2232,6 +2232,48 @@ router.delete("/chat/labels/:labelId", requireAdminOrSupervisor, async (req, res
   const labelId = parseInt(String(req.params.labelId), 10);
   if (isNaN(labelId)) { res.status(400).json({ error: "ID inválido" }); return; }
   await db.delete(chatLabelsTable).where(and(eq(chatLabelsTable.id, labelId), eq(chatLabelsTable.tenantId, tenantId)));
+  res.json({ ok: true });
+});
+
+// ─── Filtros salvos da lista de Conversas (pedido 10/09) ────────────────────
+// Combinação do painel de filtro avançado (vendedor/setor/nível/linha/
+// etiqueta/"não respondidas") salva com um nome — pessoal por usuário, não
+// compartilhado com o resto da equipe (cada um monta os próprios atalhos).
+const SAVED_FILTER_KEYS = ["onlyUnanswered", "vendedor", "setor", "nivel", "sessionKey", "label"] as const;
+function sanitizeSavedFilterValues(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== "object") return {};
+  const out: Record<string, unknown> = {};
+  const obj = raw as Record<string, unknown>;
+  for (const k of SAVED_FILTER_KEYS) if (obj[k] !== undefined && obj[k] !== null && obj[k] !== "") out[k] = obj[k];
+  return out;
+}
+
+router.get("/chat/saved-filters", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rows = await db.select().from(chatSavedFiltersTable)
+    .where(and(eq(chatSavedFiltersTable.tenantId, tenantId), eq(chatSavedFiltersTable.userId, req.session.userId!)))
+    .orderBy(asc(chatSavedFiltersTable.sortOrder), asc(chatSavedFiltersTable.id));
+  res.json(rows);
+});
+
+router.post("/chat/saved-filters", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { name, filters } = req.body as { name?: string; filters?: unknown };
+  if (!name || !name.trim()) { res.status(400).json({ error: "Dê um nome ao filtro" }); return; }
+  const clean = sanitizeSavedFilterValues(filters);
+  if (Object.keys(clean).length === 0) { res.status(400).json({ error: "Escolha pelo menos um filtro antes de salvar" }); return; }
+  const [created] = await db.insert(chatSavedFiltersTable).values({
+    tenantId, userId: req.session.userId!, name: name.trim().slice(0, 60), filters: clean,
+  }).returning();
+  res.status(201).json(created);
+});
+
+router.delete("/chat/saved-filters/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  await db.delete(chatSavedFiltersTable)
+    .where(and(eq(chatSavedFiltersTable.id, id), eq(chatSavedFiltersTable.tenantId, tenantId), eq(chatSavedFiltersTable.userId, req.session.userId!)));
   res.json({ ok: true });
 });
 
