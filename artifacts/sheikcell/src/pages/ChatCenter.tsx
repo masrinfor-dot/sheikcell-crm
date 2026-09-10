@@ -2760,7 +2760,16 @@ export default function ChatCenter({
   const startConversationWith = async ({ name, phone }: { name: string; phone: string | null }) => {
     if (!phone) { toast({ title: "Número não disponível para este contato", variant: "destructive" }); return; }
     try {
-      const conv = await api.chat.createConversation({ phone, name, channel: "whatsapp" });
+      // Bug (10/09): nunca mandava sessionKey — o backend sempre criava na
+      // linha literal "default", mesmo clicando num contato compartilhado
+      // ou num nome de grupo DENTRO de uma conversa que estava rolando
+      // numa linha de verdade (ex. "SAFIRA"). Vendedor restrito às linhas
+      // reais (allowedSessionKeys) tomava 403 "sem acesso a essa linha"
+      // mesmo tendo acesso à própria linha que estava vendo na hora.
+      // Agora usa a linha da conversa ativa (o contexto óbvio) e, sem
+      // conversa ativa, a única linha da loja quando só existe uma.
+      const sessionKey = activeConv?.sessionKey ?? (waSessions.length > 0 ? waSessions[0]!.sessionKey : undefined);
+      const conv = await api.chat.createConversation({ phone, name, channel: "whatsapp", sessionKey });
       // O insert no backend não devolve o objeto assignee (só assigneeId) —
       // preenche localmente com o que já temos em chatUsers pra não ficar
       // preso na tela de "Iniciar atendimento" quando já tem responsável.
@@ -3204,7 +3213,29 @@ export default function ChatCenter({
               <Filter className="w-4 h-4 text-muted-foreground" />
             </button>
             {can(user, "criar_atendimento") && (
-              <button onClick={() => setShowNewConv(true)} data-testid="button-new-conv"
+              <button onClick={() => {
+                // Bug (10/09): o formulário sempre nascia com sessionKey
+                // "default" — em loja com uma única linha de WhatsApp
+                // conectada (nome real, ex. "SAFIRA"), o seletor de linha
+                // fica escondido (só aparece com mais de uma linha) e o
+                // atendimento manual saía sempre pela linha literal
+                // "default", que não existe de verdade. Vendedor restrito
+                // às linhas reais (allowedSessionKeys) tomava 403 "sem
+                // acesso a essa linha" mesmo tendo acesso à única linha da
+                // loja. Com mais de uma linha o seletor até aparecia, mas o
+                // <select> controlado nascia com um value ("default") que
+                // não batia com nenhuma <option> real — visualmente parecia
+                // a primeira linha selecionada, mas o valor enviado
+                // continuava sendo "default" até o usuário mexer no
+                // dropdown. Agora, ao abrir o formulário, já pré-seleciona
+                // uma linha de verdade: a que está filtrada na lista de
+                // conversas, ou a primeira linha da loja quando existe
+                // alguma — só cai no literal "default" quando a loja não
+                // tem nenhuma linha de WhatsApp configurada.
+                const defaultSessionKey = filterSessionKey || (waSessions.length > 0 ? waSessions[0]!.sessionKey : "default");
+                setNewForm((f) => ({ ...f, sessionKey: defaultSessionKey }));
+                setShowNewConv(true);
+              }} data-testid="button-new-conv"
                 className="p-1.5 rounded-lg hover:bg-secondary transition">
                 <Plus className="w-4 h-4 text-muted-foreground" />
               </button>
