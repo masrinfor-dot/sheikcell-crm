@@ -11,6 +11,14 @@ export const queueEntriesTable = pgTable("queue_entries", {
   channel: text("channel").notNull().default("manual"), // "whatsapp" | "instagram" | "manual"
   status: text("status").notNull().default("waiting"), // "waiting" | "in_progress" | "completed" | "transferred"
   attendantId: integer("attendant_id"),
+  // Direcionamento manual (pedido 10/09): quando um vendedor_chefe/
+  // supervisor/admin direciona esta entrada pra um vendedor específico,
+  // fica registrado aqui — o vendedor alvo passa a poder chamá-la mesmo
+  // fora do próprio setor, e (se tiver queueRestrictToAssigned) só vê
+  // entradas com este campo apontando pra ele. routedBy guarda quem
+  // direcionou, só para auditoria/exibição ("direcionado por X").
+  targetUserId: integer("target_user_id"),
+  routedBy: integer("routed_by"),
   notes: text("notes"),
   position: integer("position").notNull().default(0),
   calledAt: timestamp("called_at", { withTimezone: true }),

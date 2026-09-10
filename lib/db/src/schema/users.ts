@@ -15,7 +15,7 @@ export const usersTable = pgTable("users", {
   name: text("name").notNull(),
   email: text("email").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
-  role: text("role").notNull().default("vendedor"), // "vendedor" | "supervisor" | "admin" | "superadmin"
+  role: text("role").notNull().default("vendedor"), // "vendedor" | "vendedor_chefe" | "supervisor" | "admin" | "superadmin"
   sectorId: integer("sector_id").references(() => sectorsTable.id),
   // Loja da rede a que o vendedor pertence (texto livre; ex.: "Loja Centro")
   storeName: text("store_name"),
@@ -69,6 +69,16 @@ export const usersTable = pgTable("users", {
   // de `permissions` acima, por isso é uma coluna própria em vez de entrar
   // nesse jsonb (lá, chave ausente = liberado; aqui teria que ser o oposto).
   internalChatSingleTask: boolean("internal_chat_single_task").notNull().default(false),
+  // Fila de atendimento REAL (Central de Atendimento + aba "Fila" legada),
+  // pedido 10/09: quando true, este vendedor deixa de ver o pool geral
+  // (potenciais/pendentes/fila livre do setor) — só vê o que um
+  // vendedor_chefe/supervisor/admin direcionou especificamente pra ele
+  // (assigneeId/targetUserId = ele), um atendimento por vez, em ordem de
+  // fila (o mais antigo direcionado primeiro). Default false (comportamento
+  // de sempre, sem restrição) — mesmo padrão de coluna própria de
+  // internalChatSingleTask acima (aqui também não cabe em `permissions`,
+  // que é fail-open — esta é fail-closed por natureza).
+  queueRestrictToAssigned: boolean("queue_restrict_to_assigned").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });

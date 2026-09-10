@@ -309,6 +309,7 @@ router.get("/admin/users", requireAdmin, async (req, res): Promise<void> => {
       isActive: usersTable.isActive,
       permissions: usersTable.permissions,
       internalChatSingleTask: usersTable.internalChatSingleTask,
+      queueRestrictToAssigned: usersTable.queueRestrictToAssigned,
       createdAt: usersTable.createdAt,
     })
     .from(usersTable)
@@ -439,7 +440,10 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
 
   const resolvedRole = role ?? "vendedor";
   // O papel "superadmin" (dono do sistema, sem loja) NUNCA é criado por aqui.
-  const ALLOWED_ROLES = ["vendedor", "supervisor", "admin"];
+  // "vendedor_chefe" (pedido 10/09): direciona atendimentos pra vendedores
+  // específicos, mesma visão ampla de supervisor no Atendimento/Fila, sem
+  // as demais permissões administrativas de loja.
+  const ALLOWED_ROLES = ["vendedor", "vendedor_chefe", "supervisor", "admin"];
   if (!ALLOWED_ROLES.includes(resolvedRole)) {
     res.status(400).json({ error: "Função inválida" });
     return;
@@ -448,8 +452,9 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
   // Limite do plano (Fase 3 — Planos & Limites): checa tanto o teto do
   // cargo específico (admin/supervisor/atendente) quanto o de usuários
   // totais da loja. Bloqueio real no backend, não só no botão da tela.
+  // vendedor_chefe conta no mesmo teto de atendentes (não tem teto próprio).
   const ROLE_LIMIT_FIELD: Record<string, LimitField> = {
-    admin: "maxAdmins", supervisor: "maxSupervisors", vendedor: "maxAttendants",
+    admin: "maxAdmins", supervisor: "maxSupervisors", vendedor: "maxAttendants", vendedor_chefe: "maxAttendants",
   };
   const roleLimitCheck = await assertWithinLimit(tenantId, ROLE_LIMIT_FIELD[resolvedRole]);
   if (!roleLimitCheck.ok) { res.status(400).json({ error: roleLimitCheck.error }); return; }
@@ -516,7 +521,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   // que ela carregue este tenant_id (coluna NOT NULL sem valor "sem loja").
   if (existingUser.role === "superadmin") { res.status(403).json({ error: "Operação não permitida" }); return; }
 
-  const { name, email, password, role, sectorId, isActive, permissions, storeName, extension, adminAccess, accessHours, allowedSessionKeys, moduleAccess, internalChatSingleTask } = req.body as {
+  const { name, email, password, role, sectorId, isActive, permissions, storeName, extension, adminAccess, accessHours, allowedSessionKeys, moduleAccess, internalChatSingleTask, queueRestrictToAssigned } = req.body as {
     adminAccess?: unknown;
     accessHours?: unknown;
     allowedSessionKeys?: unknown;
@@ -531,6 +536,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
     storeName?: string | null;
     extension?: string | null;
     internalChatSingleTask?: boolean;
+    queueRestrictToAssigned?: boolean;
   };
 
   const updateData: Record<string, unknown> = {};
@@ -538,7 +544,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   if (email) updateData.email = email.toLowerCase();
   if (role) {
     // Nunca é permitido promover ninguém a "superadmin" por aqui.
-    const ALLOWED_ROLES = ["vendedor", "supervisor", "admin"];
+    const ALLOWED_ROLES = ["vendedor", "vendedor_chefe", "supervisor", "admin"];
     if (!ALLOWED_ROLES.includes(role)) { res.status(400).json({ error: "Função inválida" }); return; }
     updateData.role = role;
   }
@@ -577,6 +583,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   if (isActive !== undefined) updateData.isActive = isActive;
   if (permissions !== undefined) updateData.permissions = sanitizePermissions(permissions);
   if (internalChatSingleTask !== undefined) updateData.internalChatSingleTask = !!internalChatSingleTask;
+  if (queueRestrictToAssigned !== undefined) updateData.queueRestrictToAssigned = !!queueRestrictToAssigned;
   if (password) {
     updateData.passwordHash = await bcrypt.hash(password, 10);
     // Senha resetada pelo admin (recuperação): usuário troca no próximo login

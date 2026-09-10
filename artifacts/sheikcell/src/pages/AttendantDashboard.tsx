@@ -29,7 +29,7 @@ import Documentos from "./Documentos";
 import {
   LogOut, KeyRound, Clock, PhoneCall, CheckCircle,
   ArrowRightLeft, UserPlus, X, RefreshCw, Users, Kanban, MessageCircle, MessagesSquare, ListTodo, Landmark, BadgeDollarSign, GraduationCap, Gift, Bot, UserSearch, ClipboardList, TrendingUp,
-  FolderArchive, BookUser, LifeBuoy, Tv, Smartphone, ChevronsRight, ChevronsLeft,
+  FolderArchive, BookUser, LifeBuoy, Tv, Smartphone, ChevronsRight, ChevronsLeft, UserCog,
 } from "lucide-react";
 import Resultados from "./Resultados";
 import TeamDirectory from "./TeamDirectory";
@@ -162,8 +162,13 @@ export default function AttendantDashboard() {
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [showTransfer, setShowTransfer] = useState<number | null>(null);
+  const [showRoute, setShowRoute] = useState<number | null>(null);
   const [addForm, setAddForm] = useState({ clientName: "", clientContact: "", channel: "manual", notes: "" });
   const [actionLoading, setActionLoading] = useState<number | null>(null);
+  const [vendedores, setVendedores] = useState<{ id: number; name: string; role: string; sectorId: number | null }[]>([]);
+  // Direcionamento manual (pedido 10/09): admin, supervisor e vendedor_chefe
+  // escolhem pra qual vendedor cada entrada da fila vai.
+  const canRoute = user?.role === "admin" || user?.role === "supervisor" || user?.role === "vendedor_chefe";
 
   const sectorId = user?.sectorId ?? 0;
   const sectorInfo = user?.sector;
@@ -182,9 +187,10 @@ export default function AttendantDashboard() {
   useEffect(() => {
     fetchQueue();
     api.sectors.list().then(setSectors).catch(() => {});
+    if (canRoute) api.chatUsers().then((us) => setVendedores(us.filter((u) => u.role === "vendedor"))).catch(() => {});
     const interval = setInterval(fetchQueue, 5000);
     return () => clearInterval(interval);
-  }, [fetchQueue]);
+  }, [fetchQueue, canRoute]);
 
   const waiting = queue.filter((q) => q.status === "waiting");
   const inProgress = queue.filter((q) => q.status === "in_progress");
@@ -237,6 +243,20 @@ export default function AttendantDashboard() {
       fetchQueue();
     } catch (e: unknown) {
       toast({ title: "Erro", description: e instanceof Error ? e.message : "Erro ao transferir", variant: "destructive" });
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleRoute = async (id: number, targetUserId: number | null) => {
+    setActionLoading(id);
+    try {
+      await api.queue.route(id, targetUserId);
+      toast({ title: targetUserId ? "Atendimento direcionado!" : "Direcionamento removido" });
+      setShowRoute(null);
+      fetchQueue();
+    } catch (e: unknown) {
+      toast({ title: "Erro", description: e instanceof Error ? e.message : "Erro ao direcionar", variant: "destructive" });
     } finally {
       setActionLoading(null);
     }
@@ -483,6 +503,11 @@ export default function AttendantDashboard() {
                   setShowTransfer={setShowTransfer}
                   actionLoading={actionLoading}
                   variant="in_progress"
+                  vendedores={vendedores}
+                  canRoute={canRoute}
+                  onRoute={handleRoute}
+                  showRoute={showRoute}
+                  setShowRoute={setShowRoute}
                 />
               ))}
             </div>
@@ -517,6 +542,11 @@ export default function AttendantDashboard() {
                   setShowTransfer={setShowTransfer}
                   actionLoading={actionLoading}
                   variant="waiting"
+                  vendedores={vendedores}
+                  canRoute={canRoute}
+                  onRoute={handleRoute}
+                  showRoute={showRoute}
+                  setShowRoute={setShowRoute}
                 />
               ))}
             </div>
@@ -675,12 +705,19 @@ type QueueCardProps = {
   showTransfer: number | null;
   setShowTransfer: (id: number | null) => void;
   actionLoading: number | null;
+  // Direcionamento manual pra um vendedor específico (pedido 10/09).
+  vendedores?: { id: number; name: string; role: string; sectorId: number | null }[];
+  canRoute?: boolean;
+  onRoute?: (id: number, targetUserId: number | null) => void;
+  showRoute?: number | null;
+  setShowRoute?: (id: number | null) => void;
 };
 
 function QueueCard({
   entry, sectors, position, variant,
   onCall, onComplete, onRemove, onTransfer,
-  showTransfer, setShowTransfer, actionLoading
+  showTransfer, setShowTransfer, actionLoading,
+  vendedores, canRoute, onRoute, showRoute, setShowRoute,
 }: QueueCardProps) {
   const busy = actionLoading === entry.id;
 
@@ -712,6 +749,14 @@ function QueueCard({
                 <Clock className="w-3 h-3" />
                 {formatWait(entry.createdAt)}
               </span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-secondary text-foreground/70 font-semibold" title="Protocolo deste atendimento, gerado desde o início">
+                Protocolo #{entry.id}
+              </span>
+              {entry.targetUserId != null && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary font-semibold">
+                  Direcionado: {vendedores?.find((v) => v.id === entry.targetUserId)?.name ?? `#${entry.targetUserId}`}
+                </span>
+              )}
             </div>
             {entry.notes && (
               <p className="text-xs text-muted-foreground mt-1 italic truncate">"{entry.notes}"</p>
@@ -742,6 +787,16 @@ function QueueCard({
               Finalizar
             </button>
           )}
+          {canRoute && onRoute && setShowRoute && variant === "waiting" && (
+            <button
+              onClick={() => setShowRoute(showRoute === entry.id ? null : entry.id)}
+              data-testid={`button-route-${entry.id}`}
+              title="Direcionar pra um vendedor específico"
+              className="p-1.5 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded-xl transition"
+            >
+              <UserCog className="w-3.5 h-3.5" />
+            </button>
+          )}
           <button
             onClick={() => setShowTransfer(showTransfer === entry.id ? null : entry.id)}
             data-testid={`button-transfer-${entry.id}`}
@@ -761,6 +816,37 @@ function QueueCard({
           )}
         </div>
       </div>
+
+      {/* Direcionar pra vendedor dropdown */}
+      {showRoute === entry.id && (
+        <div className="mt-3 pt-3 border-t border-border">
+          <p className="text-xs font-medium text-muted-foreground mb-2">Direcionar este atendimento para:</p>
+          <div className="flex flex-wrap gap-2">
+            {entry.targetUserId != null && (
+              <button
+                onClick={() => onRoute && onRoute(entry.id, null)}
+                data-testid={`button-route-clear-${entry.id}`}
+                className="text-xs px-3 py-1.5 rounded-xl border border-destructive/40 text-destructive hover:bg-destructive/10 transition font-medium"
+              >
+                Remover direcionamento
+              </button>
+            )}
+            {(vendedores ?? []).map((v) => (
+              <button
+                key={v.id}
+                onClick={() => onRoute && onRoute(entry.id, v.id)}
+                data-testid={`button-route-to-${v.id}`}
+                className={`text-xs px-3 py-1.5 rounded-xl border transition font-medium ${entry.targetUserId === v.id ? "border-primary bg-primary/10 text-primary" : "border-border hover:bg-secondary"}`}
+              >
+                {v.name}
+              </button>
+            ))}
+            {(vendedores ?? []).length === 0 && (
+              <p className="text-xs text-muted-foreground">Nenhum vendedor cadastrado ainda.</p>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Transfer dropdown */}
       {showTransfer === entry.id && (

@@ -80,9 +80,12 @@ function isRestrictedConv(c: Conversation): boolean {
 
 function isVisibleToMe(c: Conversation, user: User | null): boolean {
   if (!user) return false;
-  // Admin e supervisor enxergam tudo, em qualquer setor, sem restrição —
-  // privacidade entre vendedores continua valendo só para o papel vendedor.
-  if (user.role === "admin" || user.role === "supervisor") return true;
+  // Admin, supervisor e vendedor_chefe (direciona atendimentos) enxergam
+  // tudo, em qualquer setor, sem restrição — privacidade entre vendedores
+  // continua valendo só pra quem não pode direcionar.
+  if (user.role === "admin" || user.role === "supervisor" || user.role === "vendedor_chefe") return true;
+  // Fila restrita (pedido 10/09): só o que já é dele — nunca potencial/setor.
+  if (user.queueRestrictToAssigned) return c.assigneeId === user.id || (c.participants ?? []).some((p) => p.id === user.id);
   if (isRestrictedConv(c)) {
     if (c.assigneeId === user.id) return true;
     // Eventos SSE trazem a linha crua (sem participants); nesse caso não dá
@@ -3475,6 +3478,15 @@ export default function ChatCenter({
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 {channelIcon(activeConv.channel, isGroupConv(activeConv))}
                 <span>{activeConv.isCommunity ? "Comunidade do WhatsApp" : isGroupConv(activeConv) ? "Grupo do WhatsApp" : activeConv.phone}</span>
+                {activeConv.assigneeId != null && (
+                  <span
+                    className="px-1.5 py-0.5 rounded-full font-semibold bg-secondary text-foreground/70"
+                    style={{ fontSize: "10px" }}
+                    title="Protocolo deste atendimento, gerado desde o início"
+                  >
+                    Protocolo #{activeConv.id}
+                  </span>
+                )}
                 {activeConv.channel === "whatsapp" && (waSessions.length > 1 || activeConv.sessionKey !== "default") && (
                   <span
                     className="px-1.5 py-0.5 rounded-full font-semibold truncate max-w-[140px]"

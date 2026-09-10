@@ -79,9 +79,10 @@ router.get("/chat/events", requireAuth, requireChatAccess(), async (req: Request
     // Sem loja na sessão (superadmin / sessão antiga) = não recebe nada.
     if (sessionTenantId == null || ev.tenantId !== sessionTenantId) return false;
     if (userRole === "admin") return true;
-    // Supervisor: enxerga tudo, em qualquer setor, sem restrição — a
-    // privacidade entre vendedores continua valendo só para o papel vendedor.
-    if (userRole === "supervisor") return true;
+    // Supervisor e vendedor_chefe (pedido 10/09, direciona atendimentos):
+    // enxergam tudo, em qualquer setor, sem restrição — a privacidade entre
+    // vendedores continua valendo só para o papel vendedor.
+    if (userRole === "supervisor" || userRole === "vendedor_chefe") return true;
     // Conversa RESTRITA (já tem responsável/participante) sempre chega pra
     // quem é responsável/participante, MESMO fora das linhas de WhatsApp
     // liberadas — foi transferida de propósito pra esse vendedor. Checar
@@ -197,11 +198,12 @@ async function canAccessConversation(
   if (userRole === "admin") return true;
   const userId = req.session.userId!;
   const userSectorId = req.session.userSectorId;
-  // Supervisor: acesso irrestrito a qualquer conversa, em qualquer setor
-  // (inclusive já assumidas/finalizadas por outro vendedor). A privacidade
-  // entre vendedores foi mantida de propósito — só admin/supervisor têm
+  // Supervisor e vendedor_chefe (pedido 10/09, direciona atendimentos):
+  // acesso irrestrito a qualquer conversa, em qualquer setor (inclusive já
+  // assumidas/finalizadas por outro vendedor). A privacidade entre
+  // vendedores foi mantida de propósito — só quem pode direcionar tem
   // visão global.
-  if (userRole === "supervisor") return true;
+  if (userRole === "supervisor" || userRole === "vendedor_chefe") return true;
   if (isRestrictedConversation(conv)) {
     // Conversa já tem dono (ou foi finalizada): responsável/participante
     // sempre acessa, MESMO fora das linhas de WhatsApp liberadas — foi
@@ -219,6 +221,11 @@ async function canAccessConversation(
       .limit(1);
     return !!p;
   }
+  // Fila restrita (pedido 10/09): só vê o que já é dele (checado acima) —
+  // nunca o pool geral do setor nem potenciais.
+  const [meRestrict] = await db.select({ v: usersTable.queueRestrictToAssigned }).from(usersTable)
+    .where(eq(usersTable.id, userId)).limit(1);
+  if (meRestrict?.v) return false;
   // Vendedor com restrição de linha de WhatsApp (allowedSessionKeys): fora
   // das linhas liberadas, nem potencial nem conversa do próprio setor conta.
   const allowedSessionKeys = await getCurrentAllowedSessionKeys(req);
@@ -256,11 +263,11 @@ async function buildConversationVisibilityConditions(
     inArray(conversationsTable.status, ["resolved", "archived"]),
   )!;
 
-  if (userRole === "admin" || userRole === "supervisor") {
-    // Admin e supervisor enxergam tudo (qualquer setor, qualquer status,
-    // inclusive já assumidas/resolvidas por outro vendedor). O filtro de
-    // setor abaixo é só o filtro OPCIONAL escolhido na tela, não uma
-    // restrição de visibilidade.
+  if (userRole === "admin" || userRole === "supervisor" || userRole === "vendedor_chefe") {
+    // Admin, supervisor e vendedor_chefe (pedido 10/09) enxergam tudo
+    // (qualquer setor, qualquer status, inclusive já assumidas/resolvidas
+    // por outro vendedor). O filtro de setor abaixo é só o filtro OPCIONAL
+    // escolhido na tela, não uma restrição de visibilidade.
     if (opts.sectorId) conditions.push(eq(conversationsTable.sectorId, opts.sectorId));
     // Filtro opcional por vendedor (assignee) na tela do admin/supervisor.
     // Sem isso, o filtro de vendedor era só client-side em cima do lote já
@@ -273,6 +280,17 @@ async function buildConversationVisibilityConditions(
     // - conversas do próprio setor NÃO restritas (ex.: pendentes);
     // - conversas restritas apenas quando é o responsável ou participante.
     const userId = req.session.userId!;
+    // Fila restrita (pedido 10/09): só o que foi direcionado a ele
+    // (assigneeId = ele) — nunca potenciais nem o pool geral do setor.
+    const [meRestrict] = await db.select({ v: usersTable.queueRestrictToAssigned }).from(usersTable)
+      .where(eq(usersTable.id, userId)).limit(1);
+    if (meRestrict?.v) {
+      conditions.push(or(
+        eq(conversationsTable.assigneeId, userId),
+        sql`EXISTS (SELECT 1 FROM ${conversationParticipantsTable} WHERE ${conversationParticipantsTable.conversationId} = ${conversationsTable.id} AND ${conversationParticipantsTable.userId} = ${userId})`,
+      )!);
+      return conditions;
+    }
     // Restrição por linha de WhatsApp (allowedSessionKeys, sempre fresca do
     // banco — ver getCurrentAllowedSessionKeys): vale pra "descobrir" conversa
     // por potencial/setor fora das linhas liberadas, mas NÃO deve esconder
@@ -1395,6 +1413,22 @@ router.patch("/chat/conversations/:id", requireAuth, requireChatAccess(), async 
       res.status(400).json({ error: "Esse vendedor só recebe conversas de uma linha específica de WhatsApp e não pode ser responsável por esta conversa." });
       return;
     }
+    // Fila restrita (pedido 10/09): vendedor alvo só atende UM cliente por
+    // vez — precisa concluir/finalizar o atual antes de receber outro.
+    if (target.queueRestrictToAssigned) {
+      const [alreadyActive] = await db.select({ id: conversationsTable.id }).from(conversationsTable)
+        .where(and(
+          eq(conversationsTable.tenantId, tenantId),
+          eq(conversationsTable.assigneeId, target.id),
+          notInArray(conversationsTable.status, ["resolved", "archived"]),
+          eq(conversationsTable.isArchived, false),
+        ))
+        .limit(1);
+      if (alreadyActive && alreadyActive.id !== conv.id) {
+        res.status(409).json({ error: `${target.name} já está em atendimento com outro cliente. Conclua o atual antes de direcionar outro.`, code: "QUEUE_SINGLE_TASK_BLOCKED" });
+        return;
+      }
+    }
   } else if (userRole === "vendedor" && assigneeId === null && conv.assigneeId != null) {
     res.status(403).json({ error: "Apenas admin ou supervisor podem remover o responsável" });
     return;
@@ -1413,11 +1447,12 @@ router.patch("/chat/conversations/:id", requireAuth, requireChatAccess(), async 
   if (update.status === "resolved" || update.status === "archived" || update.isArchived === true) {
     update.unreadCount = 0;
   }
-  // Reatribuir responsável segue exclusivo de admin/supervisor; transferir de
-  // setor também é permitido ao vendedor autorizado (permissão "transferir").
+  // Reatribuir responsável segue exclusivo de admin/supervisor/vendedor_chefe
+  // (pedido 10/09: chefe também direciona); transferir de setor também é
+  // permitido ao vendedor autorizado (permissão "transferir").
   let isSectorTransfer = false;
   let isGenuineStart = false;
-  if (userRole === "admin" || userRole === "supervisor" || userRole === "vendedor") {
+  if (userRole === "admin" || userRole === "supervisor" || userRole === "vendedor_chefe" || userRole === "vendedor") {
     if (sectorId !== undefined && (userRole !== "vendedor" || sectorId !== conv.sectorId)) update.sectorId = sectorId;
     // Vendedor autorizado transfere para outro vendedor (nunca "des-atribui" —
     // já bloqueado acima); a conversa vai direto para os Ativos do destino.

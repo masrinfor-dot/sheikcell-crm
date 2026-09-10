@@ -126,6 +126,11 @@ export type User = {
   // só uma conversa em modo fila por vez em toda a loja (ver assume/release
   // em internalChat.ts). Default false — sem restrição.
   internalChatSingleTask?: boolean;
+  // Fila de atendimento REAL (Atendimento + Fila legada), pedido 10/09:
+  // quando true, este usuário só vê o que foi direcionado especificamente a
+  // ele por um vendedor_chefe/supervisor/admin — nunca o pool geral do
+  // setor/fila livre. Default false — sem restrição.
+  queueRestrictToAssigned?: boolean;
   // Módulos opcionais contratados pela loja (teto do tenant — null pro
   // superadmin, que não pertence a loja nenhuma).
   enabledModules?: string[] | null;
@@ -760,6 +765,11 @@ export type QueueEntry = {
   channel: string;
   status: string;
   attendantId: number | null;
+  // Direcionamento manual (pedido 10/09): vendedor_chefe/supervisor/admin
+  // escolhe pra qual vendedor esta entrada vai — targetUserId. routedBy
+  // guarda quem direcionou (auditoria/exibição).
+  targetUserId: number | null;
+  routedBy: number | null;
   notes: string | null;
   position: number;
   calledAt: string | null;
@@ -1808,6 +1818,10 @@ export const api = {
     complete: (id: number) => req<QueueEntry>(`/queue/${id}/complete`, { method: "PATCH" }),
     transfer: (id: number, targetSectorId: number) =>
       req<QueueEntry>(`/queue/${id}/transfer`, { method: "PATCH", body: JSON.stringify({ targetSectorId }) }),
+    // Direcionar pra um vendedor específico (pedido 10/09) — targetUserId
+    // null remove o direcionamento, voltando pro pool geral do setor.
+    route: (id: number, targetUserId: number | null) =>
+      req<QueueEntry>(`/queue/${id}/route`, { method: "PATCH", body: JSON.stringify({ targetUserId }) }),
     remove: (id: number) => req<{ ok: boolean }>(`/queue/${id}`, { method: "DELETE" }),
   },
   chat: {
@@ -2740,7 +2754,7 @@ export const api = {
       list: () => req<(User & { isActive: boolean; createdAt: string })[]>("/admin/users"),
       create: (data: { name: string; email: string; password: string; role: string; sectorId: number; storeName?: string; extension?: string; adminAccess?: string[] | null; moduleAccess?: UserModuleAccess | null; accessHours?: { start: string; end: string; days: number[] } | null; allowedSessionKeys?: string[] | null }) =>
         req<User>("/admin/users", { method: "POST", body: JSON.stringify(data) }),
-      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; extension: string; isActive: boolean; permissions: Record<string, boolean>; adminAccess: string[] | null; moduleAccess: UserModuleAccess | null; accessHours: { start: string; end: string; days: number[] } | null; allowedSessionKeys: string[] | null; internalChatSingleTask: boolean }>) =>
+      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; extension: string; isActive: boolean; permissions: Record<string, boolean>; adminAccess: string[] | null; moduleAccess: UserModuleAccess | null; accessHours: { start: string; end: string; days: number[] } | null; allowedSessionKeys: string[] | null; internalChatSingleTask: boolean; queueRestrictToAssigned: boolean }>) =>
         req<User>(`/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number, transferToId: number | null) =>
         req<{ ok: boolean; transferredConversations: number }>(`/admin/users/${id}`, { method: "DELETE", body: JSON.stringify({ transferToId }) }),

@@ -100,6 +100,7 @@ type UserRow = {
   isActive: boolean; sector: Sector | null; sectorId: number | null; storeName?: string | null; extension?: string | null; adminAccess?: string[] | null; moduleAccess?: UserModuleAccess | null; accessHours?: { start: string; end: string; days: number[] } | null; allowedSessionKeys?: string[] | null; createdAt: string;
   permissions?: Record<string, boolean> | null;
   internalChatSingleTask?: boolean;
+  queueRestrictToAssigned?: boolean;
 };
 
 function formatDuration(sec: number | null): string {
@@ -196,6 +197,7 @@ export default function AdminDashboard() {
   const [permUser, setPermUser] = useState<UserRow | null>(null);
   const [permDraft, setPermDraft] = useState<Record<string, boolean>>({});
   const [singleTaskDraft, setSingleTaskDraft] = useState(false);
+  const [queueRestrictDraft, setQueueRestrictDraft] = useState(false);
   const [savingPerms, setSavingPerms] = useState(false);
   const [showAddSector, setShowAddSector] = useState(false);
   const [editSector, setEditSector] = useState<Sector | null>(null);
@@ -1483,10 +1485,12 @@ export default function AdminDashboard() {
                           <span className={
                             u.role === "admin" ? "shk-badge-progress" :
                             u.role === "supervisor" ? "shk-badge-done" :
+                            u.role === "vendedor_chefe" ? "shk-badge-done" :
                             "shk-badge-waiting"
                           }>
                             {u.role === "admin" ? "Admin" :
                              u.role === "supervisor" ? "Supervisor" :
+                             u.role === "vendedor_chefe" ? "Vendedor chefe" :
                              "Vendedor"}
                           </span>
                         </td>
@@ -1538,6 +1542,7 @@ export default function AdminDashboard() {
                                   for (const k of PERMISSION_KEYS) draft[k] = u.permissions?.[k] !== false;
                                   setPermDraft(draft);
                                   setSingleTaskDraft(!!u.internalChatSingleTask);
+                                  setQueueRestrictDraft(!!u.queueRestrictToAssigned);
                                   setPermUser(u);
                                 }}
                                 data-testid={`button-perms-user-${u.id}`}
@@ -1821,6 +1826,22 @@ export default function AdminDashboard() {
                 Em grupos com "modo fila" ativado, {permUser.name.split(" ")[0]} não vai conseguir assumir uma segunda conversa enquanto tiver uma em aberto.
               </p>
             </div>
+            {permUser.role === "vendedor" && (
+              <div className="mt-3 pt-3 border-t border-border">
+                <label className="flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-secondary/50 cursor-pointer text-sm" data-testid="perm-queue-restrict">
+                  <input
+                    type="checkbox"
+                    checked={queueRestrictDraft}
+                    onChange={(e) => setQueueRestrictDraft(e.target.checked)}
+                    className="w-4 h-4 accent-[var(--primary)] shrink-0"
+                  />
+                  <span>Restringir fila de atendimento (só vê o que foi direcionado a ele)</span>
+                </label>
+                <p className="text-[11px] text-muted-foreground px-2 -mt-0.5">
+                  Com isso ativado, {permUser.name.split(" ")[0]} deixa de ver Potenciais/Pendentes do setor — só recebe clientes direcionados por um vendedor chefe, supervisor ou admin, um por vez, em ordem de fila.
+                </p>
+              </div>
+            )}
             <div className="flex gap-2 mt-4">
               <button onClick={() => setPermUser(null)}
                 className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold border border-border hover:bg-secondary transition">
@@ -1832,7 +1853,7 @@ export default function AdminDashboard() {
                 onClick={async () => {
                   setSavingPerms(true);
                   try {
-                    await api.admin.users.update(permUser.id, { permissions: permDraft, internalChatSingleTask: singleTaskDraft });
+                    await api.admin.users.update(permUser.id, { permissions: permDraft, internalChatSingleTask: singleTaskDraft, queueRestrictToAssigned: queueRestrictDraft });
                     toast({ title: "Permissões salvas", description: `Permissões de ${permUser.name} atualizadas.` });
                     setPermUser(null);
                     fetchUsersAndSectors();
@@ -2043,6 +2064,7 @@ export default function AdminDashboard() {
                         <select value={userForm.role} onChange={(e) => setUserForm({ ...userForm, role: e.target.value })}
                           className="w-full px-3 py-2 rounded-xl border border-border text-sm">
                           <option value="vendedor">Vendedor</option>
+                          <option value="vendedor_chefe">Vendedor chefe (direciona atendimentos)</option>
                           <option value="supervisor">Supervisor</option>
                           <option value="admin">Administrador</option>
                         </select>
