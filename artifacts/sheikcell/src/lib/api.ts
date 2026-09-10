@@ -1218,6 +1218,18 @@ export type Employee = {
   // Link público de upload de documentos (candidato sobe os próprios
   // arquivos sem login) — null = nenhum link ativo agora.
   documentsUploadToken: string | null;
+  // Ficha cadastral (endereço completo, estado civil, escolaridade, dias do
+  // contrato de experiência) — pedido 10/09, comparado ao modelo de ficha de
+  // admissão da contabilidade. Todos opcionais.
+  address: string | null;
+  addressNumber: string | null;
+  neighborhood: string | null;
+  city: string | null;
+  state: string | null;
+  zipCode: string | null;
+  maritalStatus: string | null;
+  educationLevel: string | null;
+  experienceDays: number | null;
   createdAt: string;
   userName?: string | null;
   storeName?: string | null;
@@ -1256,6 +1268,9 @@ export type EmployeeContractTemplate = {
   contractType: "clt" | "pj" | "estagio" | null;
   bodyText: string;
   isDefault: boolean;
+  // "contrato" (padrão) | "regimento" — Regimento interno usa o mesmo
+  // mecanismo de modelo+placeholder+geração do Contrato de trabalho.
+  kind: "contrato" | "regimento";
   createdAt: string;
   updatedAt: string;
 };
@@ -2485,9 +2500,9 @@ export const api = {
     },
     contractTemplates: {
       list: () => req<EmployeeContractTemplate[]>("/rh-dp/contract-templates"),
-      create: (data: { name: string; contractType?: string | null; bodyText: string; isDefault?: boolean }) =>
+      create: (data: { name: string; contractType?: string | null; bodyText: string; isDefault?: boolean; kind?: "contrato" | "regimento" }) =>
         req<EmployeeContractTemplate>("/rh-dp/contract-templates", { method: "POST", body: JSON.stringify(data) }),
-      update: (id: number, data: Partial<{ name: string; contractType: string | null; bodyText: string; isDefault: boolean }>) =>
+      update: (id: number, data: Partial<{ name: string; contractType: string | null; bodyText: string; isDefault: boolean; kind: "contrato" | "regimento" }>) =>
         req<EmployeeContractTemplate>(`/rh-dp/contract-templates/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/contract-templates/${id}`, { method: "DELETE" }),
     },
@@ -2499,9 +2514,18 @@ export const api = {
     },
     // Linha oficial de check-in de ponto por WhatsApp (uma por tenant).
     settings: {
-      get: () => req<{ pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean }>("/rh-dp/settings"),
-      update: (data: Partial<{ pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean }>) =>
-        req<{ pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean }>("/rh-dp/settings", { method: "PATCH", body: JSON.stringify(data) }),
+      get: () => req<{
+        pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean;
+        companyMission: string | null; companyVision: string | null; companyValues: string | null;
+      }>("/rh-dp/settings"),
+      update: (data: Partial<{
+        pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean;
+        companyMission: string | null; companyVision: string | null; companyValues: string | null;
+      }>) =>
+        req<{
+          pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean;
+          companyMission: string | null; companyVision: string | null; companyValues: string | null;
+        }>("/rh-dp/settings", { method: "PATCH", body: JSON.stringify(data) }),
     },
     shifts: {
       list: () => req<WorkShift[]>("/rh-dp/shifts"),

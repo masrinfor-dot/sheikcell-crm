@@ -47,6 +47,19 @@ export const employeesTable = pgTable("employees", {
   // precisar de login. Null = nenhum link gerado (ou já revogado). Ver
   // GET/POST /rh-dp/public/:token em employeeHiring.ts.
   documentsUploadToken: text("documents_upload_token"),
+  // Ficha cadastral (pedido 10/09, modelo de admissão da contabilidade) —
+  // endereço completo, estado civil, escolaridade e duração do contrato de
+  // experiência. Todos opcionais/texto livre, sem validação de formato
+  // (mesmo espírito de cpf/rg acima).
+  address: text("address"), // rua/logradouro
+  addressNumber: text("address_number"),
+  neighborhood: text("neighborhood"), // bairro
+  city: text("city"),
+  state: text("state"), // UF
+  zipCode: text("zip_code"), // CEP
+  maritalStatus: text("marital_status"), // estado civil
+  educationLevel: text("education_level"), // grau de escolaridade
+  experienceDays: integer("experience_days"), // dias do contrato de experiência
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (t) => [
@@ -256,6 +269,10 @@ export const employeeContractTemplatesTable = pgTable("employee_contract_templat
   contractType: text("contract_type"), // "clt" | "pj" | "estagio" | null = qualquer
   bodyText: text("body_text").notNull(),
   isDefault: boolean("is_default").notNull().default(false),
+  // "contrato" (padrão) | "regimento" — pedido 10/09: o Regimento interno
+  // usa o mesmo mecanismo de modelo+placeholder+geração do Contrato de
+  // trabalho, só separado na listagem/cadastro do admin por este campo.
+  kind: text("kind").notNull().default("contrato"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });

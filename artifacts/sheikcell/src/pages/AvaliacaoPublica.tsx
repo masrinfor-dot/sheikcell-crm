@@ -120,9 +120,13 @@ export default function AvaliacaoPublica() {
   const deviceOk = Boolean(brand.trim() && model.trim());
   const allAnswered = questionList.length > 0 && questionList.every((q) => answers[q.key]);
   const device = [brand.trim(), model.trim(), memory, color].filter(Boolean).join(" ");
+  // Pedido do lojista (10/09): mandar resumido pro WhatsApp, sem repetir a
+  // pergunta inteira — usa o título curto de cada pergunta (`q.key`, o mesmo
+  // "título curto" cadastrado em Editar perguntas) em vez do texto completo
+  // (`q.label`), que só aparece no questionário na tela (acima).
   const conditionLines = questionList
     .filter((q) => answers[q.key])
-    .map((q) => `${q.label}: ${answers[q.key]}`);
+    .map((q) => `${q.key}: ${answers[q.key]}`);
 
   // Mensagem pronta pro WhatsApp — calculada sempre (não só depois do
   // clique), assim o link fica pronto num <a> normal em vez de window.open

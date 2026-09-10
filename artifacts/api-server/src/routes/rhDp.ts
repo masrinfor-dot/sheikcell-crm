@@ -409,6 +409,15 @@ router.get("/rh-dp/employees", requireModuleAccess("rh"), async (req, res): Prom
     candidateId: employeesTable.candidateId,
     hiringStatus: employeesTable.hiringStatus,
     documentsUploadToken: employeesTable.documentsUploadToken,
+    address: employeesTable.address,
+    addressNumber: employeesTable.addressNumber,
+    neighborhood: employeesTable.neighborhood,
+    city: employeesTable.city,
+    state: employeesTable.state,
+    zipCode: employeesTable.zipCode,
+    maritalStatus: employeesTable.maritalStatus,
+    educationLevel: employeesTable.educationLevel,
+    experienceDays: employeesTable.experienceDays,
     createdAt: employeesTable.createdAt,
     userName: usersTable.name,
     storeName: storesTable.name,
@@ -474,6 +483,15 @@ router.post("/rh-dp/employees", requireModuleAccess("rh"), async (req, res): Pro
     admissionDate: typeof b.admissionDate === "string" && b.admissionDate ? b.admissionDate : null,
     contractType, salaryCents, storeId, shiftId,
     isActive: b.isActive !== false,
+    address: typeof b.address === "string" ? b.address.trim().slice(0, 200) || null : null,
+    addressNumber: typeof b.addressNumber === "string" ? b.addressNumber.trim().slice(0, 20) || null : null,
+    neighborhood: typeof b.neighborhood === "string" ? b.neighborhood.trim().slice(0, 120) || null : null,
+    city: typeof b.city === "string" ? b.city.trim().slice(0, 120) || null : null,
+    state: typeof b.state === "string" ? b.state.trim().slice(0, 2).toUpperCase() || null : null,
+    zipCode: typeof b.zipCode === "string" ? b.zipCode.trim().slice(0, 12) || null : null,
+    maritalStatus: typeof b.maritalStatus === "string" ? b.maritalStatus.trim().slice(0, 40) || null : null,
+    educationLevel: typeof b.educationLevel === "string" ? b.educationLevel.trim().slice(0, 80) || null : null,
+    experienceDays: typeof b.experienceDays === "number" && Number.isFinite(b.experienceDays) && b.experienceDays >= 0 ? Math.round(b.experienceDays) : null,
   }).returning();
   res.status(201).json(created);
 });
@@ -507,6 +525,17 @@ router.patch("/rh-dp/employees/:id", requireModuleAccess("rh"), async (req, res)
     update.salaryCents = typeof b.salaryCents === "number" && Number.isFinite(b.salaryCents) && b.salaryCents >= 0 ? Math.round(b.salaryCents) : null;
   }
   if ("isActive" in b) update.isActive = b.isActive !== false;
+  if ("address" in b) update.address = typeof b.address === "string" ? b.address.trim().slice(0, 200) || null : null;
+  if ("addressNumber" in b) update.addressNumber = typeof b.addressNumber === "string" ? b.addressNumber.trim().slice(0, 20) || null : null;
+  if ("neighborhood" in b) update.neighborhood = typeof b.neighborhood === "string" ? b.neighborhood.trim().slice(0, 120) || null : null;
+  if ("city" in b) update.city = typeof b.city === "string" ? b.city.trim().slice(0, 120) || null : null;
+  if ("state" in b) update.state = typeof b.state === "string" ? b.state.trim().slice(0, 2).toUpperCase() || null : null;
+  if ("zipCode" in b) update.zipCode = typeof b.zipCode === "string" ? b.zipCode.trim().slice(0, 12) || null : null;
+  if ("maritalStatus" in b) update.maritalStatus = typeof b.maritalStatus === "string" ? b.maritalStatus.trim().slice(0, 40) || null : null;
+  if ("educationLevel" in b) update.educationLevel = typeof b.educationLevel === "string" ? b.educationLevel.trim().slice(0, 80) || null : null;
+  if ("experienceDays" in b) {
+    update.experienceDays = typeof b.experienceDays === "number" && Number.isFinite(b.experienceDays) && b.experienceDays >= 0 ? Math.round(b.experienceDays) : null;
+  }
   if ("storeId" in b) {
     const sid = b.storeId == null ? null : parseInt(String(b.storeId), 10);
     if (sid != null && isNaN(sid)) { res.status(400).json({ error: "Loja inválida" }); return; }
@@ -560,22 +589,40 @@ router.get("/rh-dp/settings", requireModuleAccess("rh"), async (req, res): Promi
   const [row] = await db.select({
     pontoCheckInSessionKey: tenantsTable.pontoCheckInSessionKey,
     facialRecognitionEnabled: tenantsTable.facialRecognitionEnabled,
+    companyMission: tenantsTable.companyMission,
+    companyVision: tenantsTable.companyVision,
+    companyValues: tenantsTable.companyValues,
   }).from(tenantsTable).where(eq(tenantsTable.id, tenantId));
-  res.json({ pontoCheckInSessionKey: row?.pontoCheckInSessionKey ?? null, facialRecognitionEnabled: row?.facialRecognitionEnabled ?? false });
+  res.json({
+    pontoCheckInSessionKey: row?.pontoCheckInSessionKey ?? null,
+    facialRecognitionEnabled: row?.facialRecognitionEnabled ?? false,
+    companyMission: row?.companyMission ?? null,
+    companyVision: row?.companyVision ?? null,
+    companyValues: row?.companyValues ?? null,
+  });
 });
 
 router.patch("/rh-dp/settings", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const b = (req.body ?? {}) as { pontoCheckInSessionKey?: string | null; facialRecognitionEnabled?: boolean };
-  const update: { pontoCheckInSessionKey?: string | null; facialRecognitionEnabled?: boolean } = {};
+  const b = (req.body ?? {}) as {
+    pontoCheckInSessionKey?: string | null; facialRecognitionEnabled?: boolean;
+    companyMission?: string | null; companyVision?: string | null; companyValues?: string | null;
+  };
+  const update: Record<string, unknown> = {};
   if ("pontoCheckInSessionKey" in b) {
     update.pontoCheckInSessionKey = typeof b.pontoCheckInSessionKey === "string" && b.pontoCheckInSessionKey.trim()
       ? b.pontoCheckInSessionKey.trim() : null;
   }
   if ("facialRecognitionEnabled" in b) update.facialRecognitionEnabled = b.facialRecognitionEnabled === true;
+  if ("companyMission" in b) update.companyMission = typeof b.companyMission === "string" ? b.companyMission.trim().slice(0, 4000) || null : null;
+  if ("companyVision" in b) update.companyVision = typeof b.companyVision === "string" ? b.companyVision.trim().slice(0, 4000) || null : null;
+  if ("companyValues" in b) update.companyValues = typeof b.companyValues === "string" ? b.companyValues.trim().slice(0, 4000) || null : null;
   const [updated] = await db.update(tenantsTable).set(update)
     .where(eq(tenantsTable.id, tenantId))
-    .returning({ pontoCheckInSessionKey: tenantsTable.pontoCheckInSessionKey, facialRecognitionEnabled: tenantsTable.facialRecognitionEnabled });
+    .returning({
+      pontoCheckInSessionKey: tenantsTable.pontoCheckInSessionKey, facialRecognitionEnabled: tenantsTable.facialRecognitionEnabled,
+      companyMission: tenantsTable.companyMission, companyVision: tenantsTable.companyVision, companyValues: tenantsTable.companyValues,
+    });
   res.json(updated);
 });
 

@@ -75,6 +75,13 @@ export const tenantsTable = pgTable("tenants", {
   // com técnicos/lojistas de confiança (não é login individual, é uma senha
   // única). Null = preço de atacado desligado (ninguém vê, nem com código).
   catalogWholesaleCode: text("catalog_wholesale_code"),
+  // Propósito da empresa (Missão/Visão/Valores, pedido 10/09) — texto único
+  // por tenant, editado pelo admin em RH > Contratação e apresentado pro
+  // colaborador confirmar no ato da contratação (aba "Propósito" do
+  // assistente de contratação). Null = ainda não cadastrado.
+  companyMission: text("company_mission"),
+  companyVision: text("company_vision"),
+  companyValues: text("company_values"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

@@ -1010,6 +1010,13 @@ const HIRING_DOC_TYPES: { key: string; label: string }[] = [
   { key: "carteira_vacinacao", label: "Carteira de vacinação (dependentes)" },
   { key: "exame_admissional", label: "Exame admissional (ASO)" },
   { key: "reservista", label: "Certificado de reservista" },
+  // Comparado ao modelo de ficha cadastral de admissão da contabilidade
+  // (pedido 10/09) — os demais itens da ficha já tinham tipo equivalente
+  // acima (foto 3x4, RG, CPF, CTPS, comprovante de residência, título de
+  // eleitor, certidão civil, carteira de vacinação).
+  { key: "declaracao_frequencia_escolar", label: "Declaração de frequência escolar (filhos 7-14 anos)" },
+  { key: "cnh", label: "Carteira de habilitação (CNH) — se o cargo exigir" },
+  { key: "cpf_filhos", label: "CPF dos filhos (7 a 14 anos)" },
 ];
 
 // Ponto de partida genérico e editável — o lojista/contador personaliza
@@ -1024,6 +1031,24 @@ De um lado [RAZÃO SOCIAL DA EMPRESA], inscrita no CNPJ nº [CNPJ], com sede em 
 3. Local de trabalho: {{loja}}.
 4. Remuneração mensal: {{salario}}, paga na forma da legislação vigente.
 5. Este contrato rege-se pelas disposições da CLT e demais normas aplicáveis.
+
+REVISE E ADAPTE ESTE MODELO COM SEU CONTADOR/ADVOGADO ANTES DE USAR — é só um ponto de partida editável, não é aconselhamento jurídico.
+
+Local e data: _______________________, ____/____/______
+
+_________________________________          _________________________________
+        EMPREGADORA                                  {{nome}} (EMPREGADO/A)`;
+
+// Idem acima, mas pro Regimento interno (pedido 10/09) — mesmo mecanismo de
+// placeholders, só o texto padrão de partida muda.
+const DEFAULT_REGIMENTO_TEMPLATE = `REGIMENTO INTERNO
+
+Este documento estabelece as normas de conduta e funcionamento de [RAZÃO SOCIAL DA EMPRESA], das quais {{nome}}, colaborador(a) admitido(a) em {{admissao}} no cargo de {{cargo}}, declara ter ciência e concordar ao assinar.
+
+1. Horário de trabalho e jornada conforme escala {{escala}}, loja {{loja}}.
+2. Normas de conduta, uso de uniforme, pontualidade e assiduidade.
+3. Uso de equipamentos, sistemas e informações da empresa.
+4. Política de faltas, atrasos e justificativas.
 
 REVISE E ADAPTE ESTE MODELO COM SEU CONTADOR/ADVOGADO ANTES DE USAR — é só um ponto de partida editável, não é aconselhamento jurídico.
 
@@ -1065,23 +1090,29 @@ function printPlainText(text: string, title: string, toastFn: (opts: { title: st
   win.print();
 }
 
-function ContractTemplatesManager({ canEdit, templates, onChanged }: {
+// Reutilizado pro Contrato de trabalho E pro Regimento interno (pedido
+// 10/09) — mesmo mecanismo de modelo+placeholder, só filtrado por `kind`.
+// "Padrão" e a lista de modelos ficam sempre restritos ao `kind` desta
+// instância (ver isDefault escopado por kind no backend).
+function ContractTemplatesManager({ canEdit, templates, onChanged, kind, defaultBodyText, newButtonLabel }: {
   canEdit: boolean; templates: EmployeeContractTemplate[]; onChanged: () => void;
+  kind: "contrato" | "regimento"; defaultBodyText: string; newButtonLabel: string;
 }) {
   const { toast } = useToast();
   const [editing, setEditing] = useState<Partial<EmployeeContractTemplate> | null>(null);
   const [saving, setSaving] = useState(false);
+  const list = templates.filter((t) => t.kind === kind);
 
-  const startNew = () => setEditing({ name: "", contractType: null, isDefault: templates.length === 0, bodyText: DEFAULT_CONTRACT_TEMPLATE });
+  const startNew = () => setEditing({ name: "", contractType: null, isDefault: list.length === 0, bodyText: defaultBodyText, kind });
 
   const save = async () => {
     if (!editing || saving) return;
     if (!editing.name?.trim()) { toast({ title: "Dê um nome ao modelo", variant: "destructive" }); return; }
-    if (!editing.bodyText?.trim()) { toast({ title: "O texto do contrato não pode ficar vazio", variant: "destructive" }); return; }
+    if (!editing.bodyText?.trim()) { toast({ title: "O texto não pode ficar vazio", variant: "destructive" }); return; }
     setSaving(true);
     try {
       if (editing.id) await api.rhDp.contractTemplates.update(editing.id, editing);
-      else await api.rhDp.contractTemplates.create(editing as { name: string; bodyText: string; contractType?: string | null; isDefault?: boolean });
+      else await api.rhDp.contractTemplates.create({ ...editing, kind } as { name: string; bodyText: string; contractType?: string | null; isDefault?: boolean; kind: "contrato" | "regimento" });
       setEditing(null);
       onChanged();
       toast({ title: "Modelo salvo!" });
@@ -1100,9 +1131,9 @@ function ContractTemplatesManager({ canEdit, templates, onChanged }: {
       <p className="text-[11px] text-muted-foreground">
         Placeholders substituídos automaticamente ao gerar: {"{{nome}}"}, {"{{cpf}}"}, {"{{rg}}"}, {"{{cargo}}"}, {"{{funcao}}"}, {"{{salario}}"}, {"{{admissao}}"}, {"{{escala}}"}, {"{{loja}}"}, {"{{tipo_contrato}}"}.
       </p>
-      {templates.length === 0 && <p className="text-[11px] text-muted-foreground">Nenhum modelo cadastrado ainda.</p>}
+      {list.length === 0 && <p className="text-[11px] text-muted-foreground">Nenhum modelo cadastrado ainda.</p>}
       <div className="space-y-1.5">
-        {templates.map((t) => (
+        {list.map((t) => (
           <div key={t.id} className="flex items-center gap-2 p-2.5 rounded-xl border border-border">
             <div className="flex-1 min-w-0">
               <p className="text-xs font-bold flex items-center gap-1.5 flex-wrap">
@@ -1121,29 +1152,31 @@ function ContractTemplatesManager({ canEdit, templates, onChanged }: {
         ))}
       </div>
       {canEdit && !editing && (
-        <button onClick={startNew} data-testid="button-new-contract-template"
+        <button onClick={startNew} data-testid={`button-new-${kind}-template`}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border border-border text-xs font-bold text-primary">
-          <Plus className="w-3.5 h-3.5" /> Novo modelo
+          <Plus className="w-3.5 h-3.5" /> {newButtonLabel}
         </button>
       )}
       {editing && (
         <div className="border border-border rounded-xl p-3 space-y-2 bg-secondary/20">
           <input value={editing.name ?? ""} onChange={(ev) => setEditing({ ...editing, name: ev.target.value })}
-            placeholder="Nome do modelo (ex.: Contrato CLT padrão)" data-testid="input-template-name"
+            placeholder="Nome do modelo" data-testid="input-template-name"
             className="w-full px-3 py-2 rounded-xl border border-border text-sm" />
-          <select value={editing.contractType ?? ""} onChange={(ev) => setEditing({ ...editing, contractType: (ev.target.value || null) as EmployeeContractTemplate["contractType"] })}
-            className="w-full px-3 py-2 rounded-xl border border-border text-sm bg-white">
-            <option value="">Vale para qualquer tipo de contrato</option>
-            <option value="clt">CLT</option>
-            <option value="pj">PJ</option>
-            <option value="estagio">Estágio</option>
-          </select>
+          {kind === "contrato" && (
+            <select value={editing.contractType ?? ""} onChange={(ev) => setEditing({ ...editing, contractType: (ev.target.value || null) as EmployeeContractTemplate["contractType"] })}
+              className="w-full px-3 py-2 rounded-xl border border-border text-sm bg-white">
+              <option value="">Vale para qualquer tipo de contrato</option>
+              <option value="clt">CLT</option>
+              <option value="pj">PJ</option>
+              <option value="estagio">Estágio</option>
+            </select>
+          )}
           <textarea value={editing.bodyText ?? ""} onChange={(ev) => setEditing({ ...editing, bodyText: ev.target.value })}
             rows={10} data-testid="textarea-template-body"
             className="w-full px-3 py-2 rounded-xl border border-border text-xs font-mono resize-y" />
           <label className="flex items-center gap-1.5 text-xs font-medium">
             <input type="checkbox" checked={editing.isDefault === true} onChange={(ev) => setEditing({ ...editing, isDefault: ev.target.checked })} />
-            Modelo padrão (pré-selecionado ao gerar um contrato)
+            Modelo padrão (pré-selecionado ao gerar)
           </label>
           <div className="flex gap-2">
             <button onClick={save} disabled={saving} data-testid="button-save-template"
@@ -1163,7 +1196,7 @@ function HiringWizard({ employee, stores, shifts, templates, canEdit, onClose, o
   onClose: () => void; onSaved: (updated: Employee) => void;
 }) {
   const { toast } = useToast();
-  const [tab, setTab] = useState<"dados" | "documentos" | "contrato">("dados");
+  const [tab, setTab] = useState<"dados" | "documentos" | "contrato" | "regimento" | "proposito">("dados");
   const [draft, setDraft] = useState<Partial<Employee>>(employee);
   const [savingDados, setSavingDados] = useState(false);
   const [documents, setDocuments] = useState<EmployeeDocument[]>([]);
@@ -1176,10 +1209,29 @@ function HiringWizard({ employee, stores, shifts, templates, canEdit, onClose, o
   const [generatingContract, setGeneratingContract] = useState(false);
   const [savingContract, setSavingContract] = useState(false);
   const [editingContractDocId, setEditingContractDocId] = useState<number | null>(null);
+  // Regimento interno (pedido 10/09) — mesmo mecanismo do Contrato de
+  // trabalho acima (modelo → gerar → revisar → salvar/assinar), só separado
+  // por docType e pelos modelos kind="regimento".
+  const [selectedRegimentoTemplateId, setSelectedRegimentoTemplateId] = useState<number | "">("");
+  const [regimentoDraftText, setRegimentoDraftText] = useState("");
+  const [generatingRegimento, setGeneratingRegimento] = useState(false);
+  const [savingRegimento, setSavingRegimento] = useState(false);
+  const [editingRegimentoDocId, setEditingRegimentoDocId] = useState<number | null>(null);
+  // Propósito da empresa (Missão/Visão/Valores, pedido 10/09) — texto único
+  // do tenant (RH > Contratação > "Propósito da empresa"), confirmado pelo
+  // colaborador aqui (vira um employee_documents docType="proposito_confirmado").
+  const [purpose, setPurpose] = useState<{ companyMission: string; companyVision: string; companyValues: string } | null>(null);
+  const [confirmingProposito, setConfirmingProposito] = useState(false);
   const [uploadToken, setUploadToken] = useState<string | null>(employee.documentsUploadToken ?? null);
   const [linkBusy, setLinkBusy] = useState(false);
 
   useEffect(() => { setDraft(employee); setTab("dados"); setUploadToken(employee.documentsUploadToken ?? null); }, [employee.id]);
+
+  useEffect(() => {
+    api.rhDp.settings.get().then((s) => setPurpose({
+      companyMission: s.companyMission ?? "", companyVision: s.companyVision ?? "", companyValues: s.companyValues ?? "",
+    })).catch(() => {});
+  }, []);
 
   const loadDocs = () => {
     setLoadingDocs(true);
@@ -1187,12 +1239,22 @@ function HiringWizard({ employee, stores, shifts, templates, canEdit, onClose, o
   };
   useEffect(loadDocs, [employee.id]);
 
+  const contractTemplatesList = templates.filter((t) => t.kind !== "regimento");
+  const regimentoTemplatesList = templates.filter((t) => t.kind === "regimento");
+
   useEffect(() => {
     // Pré-seleciona o modelo padrão (ou o que combina com o tipo de contrato
     // do colaborador), só quando ainda não há nada escolhido.
-    if (selectedTemplateId !== "" || templates.length === 0) return;
-    const match = templates.find((t) => t.contractType === draft.contractType) ?? templates.find((t) => t.isDefault) ?? templates[0];
+    if (selectedTemplateId !== "" || contractTemplatesList.length === 0) return;
+    const match = contractTemplatesList.find((t) => t.contractType === draft.contractType) ?? contractTemplatesList.find((t) => t.isDefault) ?? contractTemplatesList[0];
     if (match) setSelectedTemplateId(match.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [templates]);
+
+  useEffect(() => {
+    if (selectedRegimentoTemplateId !== "" || regimentoTemplatesList.length === 0) return;
+    const match = regimentoTemplatesList.find((t) => t.isDefault) ?? regimentoTemplatesList[0];
+    if (match) setSelectedRegimentoTemplateId(match.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [templates]);
 
@@ -1272,6 +1334,59 @@ function HiringWizard({ employee, stores, shifts, templates, canEdit, onClose, o
     } finally { setSavingContract(false); }
   };
 
+  // Regimento interno — mesma lógica de generateContract/saveContract acima,
+  // só usando os modelos kind="regimento" e docType "regimento_interno".
+  const generateRegimento = async () => {
+    if (selectedRegimentoTemplateId === "") { toast({ title: "Escolha um modelo de regimento", variant: "destructive" }); return; }
+    setGeneratingRegimento(true);
+    try {
+      const { text } = await api.rhDp.employees.contractPreview(employee.id, selectedRegimentoTemplateId);
+      setRegimentoDraftText(text);
+      setEditingRegimentoDocId(null);
+    } catch (err) {
+      toast({ title: "Erro ao gerar regimento", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setGeneratingRegimento(false); }
+  };
+
+  const saveRegimento = async () => {
+    if (!regimentoDraftText.trim()) { toast({ title: "O regimento está vazio", variant: "destructive" }); return; }
+    setSavingRegimento(true);
+    try {
+      const templateName = templates.find((t) => t.id === selectedRegimentoTemplateId)?.name ?? "Regimento interno";
+      if (editingRegimentoDocId) {
+        const updated = await api.rhDp.employeeDocuments.update(employee.id, editingRegimentoDocId, { textContent: regimentoDraftText });
+        setDocuments((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
+      } else {
+        const created = await api.rhDp.employeeDocuments.saveText(employee.id, { docType: "regimento_interno", label: templateName, textContent: regimentoDraftText });
+        setDocuments((prev) => [created, ...prev]);
+        setEditingRegimentoDocId(created.id);
+      }
+      toast({ title: "Regimento salvo no banco de arquivos!" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar regimento", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setSavingRegimento(false); }
+  };
+
+  // Confirmação de leitura do Propósito (Missão/Visão/Valores) — assinatura
+  // simples (mesmo espírito da assinatura do espelho de ponto): vira um
+  // documento no banco de arquivos do colaborador, com o texto vigente no
+  // momento da confirmação (não muda retroativamente se o admin editar
+  // depois — igual ao "congelado" já usado em outros lugares do RH).
+  const confirmProposito = async () => {
+    if (!purpose || confirmingProposito) return;
+    setConfirmingProposito(true);
+    try {
+      const textContent = `Missão: ${purpose.companyMission || "—"}\n\nVisão: ${purpose.companyVision || "—"}\n\nValores: ${purpose.companyValues || "—"}`;
+      const created = await api.rhDp.employeeDocuments.saveText(employee.id, {
+        docType: "proposito_confirmado", label: "Confirmação de leitura — Missão, Visão e Valores", textContent,
+      });
+      setDocuments((prev) => [created, ...prev]);
+      toast({ title: "Leitura confirmada!" });
+    } catch (err) {
+      toast({ title: "Erro ao confirmar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setConfirmingProposito(false); }
+  };
+
   const finalize = async () => {
     if (finalizing) return;
     setFinalizing(true);
@@ -1328,10 +1443,14 @@ function HiringWizard({ employee, stores, shifts, templates, canEdit, onClose, o
     finally { setLinkBusy(false); }
   };
 
-  const contractDocs = documents.filter((d) => d.textContent != null);
+  const contractDocs = documents.filter((d) => d.docType === "contrato_trabalho");
+  const regimentoDocs = documents.filter((d) => d.docType === "regimento_interno");
+  const KNOWN_TEXT_DOC_TYPES = ["contrato_trabalho", "contrato_trabalho_assinado", "regimento_interno", "regimento_interno_assinado", "proposito_confirmado"];
   const otherDocs = documents.filter((d) =>
-    !HIRING_DOC_TYPES.some((t) => t.key === d.docType) && d.docType !== "contrato_trabalho" && d.docType !== "contrato_trabalho_assinado");
+    !HIRING_DOC_TYPES.some((t) => t.key === d.docType) && !KNOWN_TEXT_DOC_TYPES.includes(d.docType));
   const signedDocs = documents.filter((d) => d.docType === "contrato_trabalho_assinado");
+  const regimentoSignedDocs = documents.filter((d) => d.docType === "regimento_interno_assinado");
+  const propositoConfirmation = documents.find((d) => d.docType === "proposito_confirmado") ?? null;
 
   return (
     <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 overflow-y-auto">
@@ -1353,6 +1472,8 @@ function HiringWizard({ employee, stores, shifts, templates, canEdit, onClose, o
             { key: "dados", label: "Dados, cargo e escala", icon: IdCard },
             { key: "documentos", label: "Documentos", icon: FolderArchive },
             { key: "contrato", label: "Contrato de trabalho", icon: FileSignature },
+            { key: "regimento", label: "Regimento interno", icon: Archive },
+            { key: "proposito", label: "Propósito", icon: Sparkles },
           ] as const).map(({ key, label, icon: Icon }) => (
             <button key={key} onClick={() => setTab(key)} data-testid={`hiring-tab-${key}`}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border ${tab === key ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
@@ -1431,6 +1552,59 @@ function HiringWizard({ employee, stores, shifts, templates, canEdit, onClose, o
                   className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white disabled:opacity-60">
                   <option value="">—</option>
                   {shifts.map((s) => <option key={s.id} value={s.id}>{s.name}{s.type === "flexible" ? " (livre)" : ""}</option>)}
+                </select>
+              </label>
+              <label className="text-xs">Dias de contrato de experiência
+                <input type="number" min={0} disabled={!canEdit} value={draft.experienceDays ?? ""}
+                  onChange={(ev) => setDraft({ ...draft, experienceDays: ev.target.value ? Math.round(Number(ev.target.value)) : null })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+              </label>
+              <label className="col-span-2 text-xs">Endereço
+                <input value={draft.address ?? ""} disabled={!canEdit} onChange={(ev) => setDraft({ ...draft, address: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+              </label>
+              <label className="text-xs">Número
+                <input value={draft.addressNumber ?? ""} disabled={!canEdit} onChange={(ev) => setDraft({ ...draft, addressNumber: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+              </label>
+              <label className="text-xs">Bairro
+                <input value={draft.neighborhood ?? ""} disabled={!canEdit} onChange={(ev) => setDraft({ ...draft, neighborhood: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+              </label>
+              <label className="text-xs">Cidade
+                <input value={draft.city ?? ""} disabled={!canEdit} onChange={(ev) => setDraft({ ...draft, city: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+              </label>
+              <label className="text-xs">UF
+                <input value={draft.state ?? ""} disabled={!canEdit} maxLength={2} onChange={(ev) => setDraft({ ...draft, state: ev.target.value.toUpperCase() })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+              </label>
+              <label className="text-xs">CEP
+                <input value={draft.zipCode ?? ""} disabled={!canEdit} onChange={(ev) => setDraft({ ...draft, zipCode: ev.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+              </label>
+              <label className="text-xs">Estado civil
+                <select value={draft.maritalStatus ?? ""} disabled={!canEdit} onChange={(ev) => setDraft({ ...draft, maritalStatus: ev.target.value || null })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white disabled:opacity-60">
+                  <option value="">—</option>
+                  <option value="solteiro">Solteiro(a)</option>
+                  <option value="casado">Casado(a)</option>
+                  <option value="divorciado">Divorciado(a)</option>
+                  <option value="viuvo">Viúvo(a)</option>
+                  <option value="uniao_estavel">União estável</option>
+                </select>
+              </label>
+              <label className="text-xs">Grau de escolaridade
+                <select value={draft.educationLevel ?? ""} disabled={!canEdit} onChange={(ev) => setDraft({ ...draft, educationLevel: ev.target.value || null })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white disabled:opacity-60">
+                  <option value="">—</option>
+                  <option value="fundamental_incompleto">Fundamental incompleto</option>
+                  <option value="fundamental_completo">Fundamental completo</option>
+                  <option value="medio_incompleto">Médio incompleto</option>
+                  <option value="medio_completo">Médio completo</option>
+                  <option value="superior_incompleto">Superior incompleto</option>
+                  <option value="superior_completo">Superior completo</option>
+                  <option value="pos_graduacao">Pós-graduação</option>
                 </select>
               </label>
               {canEdit && (
@@ -1548,7 +1722,7 @@ function HiringWizard({ employee, stores, shifts, templates, canEdit, onClose, o
 
           {tab === "contrato" && (
             <div className="space-y-3">
-              {templates.length === 0 ? (
+              {contractTemplatesList.length === 0 ? (
                 <p className="text-[11px] text-muted-foreground">Nenhum modelo de contrato cadastrado ainda — crie um em "Modelos de contrato" na tela de Contratação.</p>
               ) : (
                 <div className="flex items-end gap-2">
@@ -1556,7 +1730,7 @@ function HiringWizard({ employee, stores, shifts, templates, canEdit, onClose, o
                     <select value={selectedTemplateId} onChange={(ev) => setSelectedTemplateId(ev.target.value ? Number(ev.target.value) : "")}
                       data-testid="select-contract-template"
                       className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white">
-                      {templates.map((t) => <option key={t.id} value={t.id}>{t.name}{t.contractType ? ` (${CONTRACT_LABELS[t.contractType]})` : ""}</option>)}
+                      {contractTemplatesList.map((t) => <option key={t.id} value={t.id}>{t.name}{t.contractType ? ` (${CONTRACT_LABELS[t.contractType]})` : ""}</option>)}
                     </select>
                   </label>
                   {canEdit && (
@@ -1624,6 +1798,125 @@ function HiringWizard({ employee, stores, shifts, templates, canEdit, onClose, o
               </div>
             </div>
           )}
+
+          {tab === "regimento" && (
+            <div className="space-y-3">
+              {regimentoTemplatesList.length === 0 ? (
+                <p className="text-[11px] text-muted-foreground">Nenhum modelo de regimento cadastrado ainda — crie um em "Modelos de regimento interno" na tela de Contratação.</p>
+              ) : (
+                <div className="flex items-end gap-2">
+                  <label className="flex-1 text-xs">Modelo
+                    <select value={selectedRegimentoTemplateId} onChange={(ev) => setSelectedRegimentoTemplateId(ev.target.value ? Number(ev.target.value) : "")}
+                      data-testid="select-regimento-template"
+                      className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white">
+                      {regimentoTemplatesList.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                    </select>
+                  </label>
+                  {canEdit && (
+                    <button onClick={generateRegimento} disabled={generatingRegimento} data-testid="button-generate-regimento"
+                      className="px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40 shrink-0">
+                      {generatingRegimento ? "Gerando..." : "Gerar regimento"}
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {regimentoDraftText && (
+                <div className="space-y-2">
+                  <textarea value={regimentoDraftText} disabled={!canEdit} onChange={(ev) => setRegimentoDraftText(ev.target.value)}
+                    rows={14} data-testid="textarea-regimento-draft"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-xs font-mono resize-y disabled:opacity-70" />
+                  <div className="flex gap-2 flex-wrap">
+                    {canEdit && (
+                      <button onClick={saveRegimento} disabled={savingRegimento} data-testid="button-save-regimento"
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
+                        <Save className="w-3.5 h-3.5" /> {savingRegimento ? "Salvando..." : "Salvar no banco de arquivos"}
+                      </button>
+                    )}
+                    <button onClick={() => printPlainText(regimentoDraftText, `Regimento interno — ${employee.name}`, toast)}
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-border text-xs font-bold">
+                      <Printer className="w-3.5 h-3.5" /> Imprimir
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {regimentoDocs.length > 0 && (
+                <div className="space-y-1.5">
+                  <p className="text-xs font-bold">Regimentos salvos</p>
+                  {regimentoDocs.map((d) => (
+                    <div key={d.id} className="flex items-center gap-2 text-[11px] bg-secondary/30 rounded-lg px-2 py-1.5">
+                      <Archive className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                      <span className="flex-1 truncate">{d.label || "Regimento"} · {new Date(d.createdAt).toLocaleDateString("pt-BR")}</span>
+                      <button onClick={() => { setRegimentoDraftText(d.textContent ?? ""); setEditingRegimentoDocId(d.id); }}
+                        className="p-1 rounded hover:bg-secondary"><Pencil className="w-3.5 h-3.5" /></button>
+                      <button onClick={() => printPlainText(d.textContent ?? "", d.label ?? "Regimento", toast)} className="p-1 rounded hover:bg-secondary"><Printer className="w-3.5 h-3.5" /></button>
+                      {canEdit && <button onClick={() => removeDoc(d)} className="p-1 rounded hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="border border-dashed border-border rounded-xl p-3 space-y-2">
+                <p className="text-xs font-bold">Regimento assinado (digitalizado)</p>
+                {canEdit && (
+                  <label className={`flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[11px] font-bold cursor-pointer w-fit ${uploadingType === "regimento_interno_assinado" ? "bg-secondary text-muted-foreground" : "bg-primary/10 text-primary hover:bg-primary/20"}`}>
+                    <Upload className="w-3 h-3" /> {uploadingType === "regimento_interno_assinado" ? "Enviando..." : "Enviar cópia assinada"}
+                    <input type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" className="hidden" disabled={uploadingType === "regimento_interno_assinado"}
+                      onChange={(ev) => { const f = ev.target.files?.[0]; if (f) uploadDoc("regimento_interno_assinado", "Regimento assinado", f); ev.target.value = ""; }} />
+                  </label>
+                )}
+                {regimentoSignedDocs.map((f) => (
+                  <div key={f.id} className="flex items-center gap-2 text-[11px] bg-secondary/30 rounded-lg px-2 py-1">
+                    <FileText className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                    <span className="flex-1 truncate">{f.fileName} · {formatDocSize(f.sizeBytes)}</span>
+                    <a href={api.rhDp.employeeDocuments.fileUrl(employee.id, f.id)} target="_blank" rel="noreferrer" className="p-1 rounded hover:bg-secondary"><Eye className="w-3.5 h-3.5" /></a>
+                    {canEdit && <button onClick={() => removeDoc(f)} className="p-1 rounded hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {tab === "proposito" && (
+            <div className="space-y-3">
+              {!purpose || (!purpose.companyMission && !purpose.companyVision && !purpose.companyValues) ? (
+                <p className="text-[11px] text-muted-foreground">Ainda não foi cadastrado o Propósito da empresa — cadastre em "Propósito da empresa" na tela de Contratação.</p>
+              ) : (
+                <div className="space-y-2">
+                  {purpose.companyMission && (
+                    <div className="border border-border rounded-xl p-3">
+                      <p className="text-xs font-bold mb-1">Missão</p>
+                      <p className="text-xs whitespace-pre-wrap">{purpose.companyMission}</p>
+                    </div>
+                  )}
+                  {purpose.companyVision && (
+                    <div className="border border-border rounded-xl p-3">
+                      <p className="text-xs font-bold mb-1">Visão</p>
+                      <p className="text-xs whitespace-pre-wrap">{purpose.companyVision}</p>
+                    </div>
+                  )}
+                  {purpose.companyValues && (
+                    <div className="border border-border rounded-xl p-3">
+                      <p className="text-xs font-bold mb-1">Valores</p>
+                      <p className="text-xs whitespace-pre-wrap">{purpose.companyValues}</p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {propositoConfirmation ? (
+                <p className="text-[11px] text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-1.5 flex items-center gap-1.5">
+                  <CheckCircle className="w-3.5 h-3.5" /> Leitura confirmada em {new Date(propositoConfirmation.createdAt).toLocaleDateString("pt-BR")}.
+                </p>
+              ) : canEdit ? (
+                <button onClick={confirmProposito} disabled={confirmingProposito} data-testid="button-confirm-proposito"
+                  className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
+                  <CheckCircle className="w-3.5 h-3.5" /> {confirmingProposito ? "Confirmando..." : "Confirmar leitura e concordância"}
+                </button>
+              ) : null}
+            </div>
+          )}
         </div>
 
         {canEdit && (
@@ -1656,15 +1949,38 @@ function Contratacoes({ canEdit, openEmployeeId, onOpenedConsumed }: {
   const [templates, setTemplates] = useState<EmployeeContractTemplate[]>([]);
   const [openId, setOpenId] = useState<number | null>(null);
   const [showTemplates, setShowTemplates] = useState(false);
+  const [showRegimentoTemplates, setShowRegimentoTemplates] = useState(false);
+
+  // Propósito da empresa (Missão/Visão/Valores, pedido 10/09) — texto único
+  // por tenant, apresentado pro colaborador confirmar na aba "Propósito" do
+  // assistente de contratação (ver HiringWizard).
+  const [showPurpose, setShowPurpose] = useState(false);
+  const [purpose, setPurpose] = useState({ companyMission: "", companyVision: "", companyValues: "" });
+  const [savingPurpose, setSavingPurpose] = useState(false);
 
   const load = () => api.rhDp.employees.list().then(setEmployees).catch(() => {});
   const loadTemplates = () => api.rhDp.contractTemplates.list().then(setTemplates).catch(() => {});
+  const loadPurpose = () => api.rhDp.settings.get().then((s) => setPurpose({
+    companyMission: s.companyMission ?? "", companyVision: s.companyVision ?? "", companyValues: s.companyValues ?? "",
+  })).catch(() => {});
   useEffect(() => {
     load();
     loadTemplates();
+    loadPurpose();
     api.stores.list(true).then(setStores).catch(() => {});
     api.rhDp.shifts.list().then(setShifts).catch(() => {});
   }, []);
+
+  const savePurpose = async () => {
+    if (savingPurpose) return;
+    setSavingPurpose(true);
+    try {
+      await api.rhDp.settings.update(purpose);
+      toast({ title: "Propósito da empresa salvo!" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setSavingPurpose(false); }
+  };
 
   useEffect(() => {
     if (openEmployeeId != null) {
@@ -1731,7 +2047,55 @@ function Contratacoes({ canEdit, openEmployeeId, onOpenedConsumed }: {
           <p className="text-xs font-bold flex items-center gap-1.5"><FileSignature className="w-3.5 h-3.5 text-primary" /> Modelos de contrato de trabalho</p>
           {showTemplates ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
         </button>
-        {showTemplates && <ContractTemplatesManager canEdit={canEdit} templates={templates} onChanged={loadTemplates} />}
+        {showTemplates && (
+          <ContractTemplatesManager canEdit={canEdit} templates={templates} onChanged={loadTemplates}
+            kind="contrato" defaultBodyText={DEFAULT_CONTRACT_TEMPLATE} newButtonLabel="Novo modelo" />
+        )}
+      </div>
+
+      <div className="shk-card p-4 space-y-2">
+        <button onClick={() => setShowRegimentoTemplates((v) => !v)} className="w-full flex items-center justify-between" data-testid="button-toggle-regimento-templates">
+          <p className="text-xs font-bold flex items-center gap-1.5"><Archive className="w-3.5 h-3.5 text-primary" /> Modelos de regimento interno</p>
+          {showRegimentoTemplates ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+        </button>
+        {showRegimentoTemplates && (
+          <ContractTemplatesManager canEdit={canEdit} templates={templates} onChanged={loadTemplates}
+            kind="regimento" defaultBodyText={DEFAULT_REGIMENTO_TEMPLATE} newButtonLabel="Novo modelo" />
+        )}
+      </div>
+
+      <div className="shk-card p-4 space-y-2">
+        <button onClick={() => setShowPurpose((v) => !v)} className="w-full flex items-center justify-between" data-testid="button-toggle-purpose">
+          <p className="text-xs font-bold flex items-center gap-1.5"><Sparkles className="w-3.5 h-3.5 text-primary" /> Propósito da empresa (Missão, Visão e Valores)</p>
+          {showPurpose ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+        </button>
+        {showPurpose && (
+          <div className="space-y-2">
+            <p className="text-[11px] text-muted-foreground">Texto único da empresa — o colaborador vê e confirma a leitura na aba "Propósito" ao ser contratado.</p>
+            {canEdit ? (
+              <>
+                <label className="text-xs block">Missão
+                  <textarea value={purpose.companyMission} onChange={(ev) => setPurpose({ ...purpose, companyMission: ev.target.value })}
+                    rows={3} className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-xs resize-y" />
+                </label>
+                <label className="text-xs block">Visão
+                  <textarea value={purpose.companyVision} onChange={(ev) => setPurpose({ ...purpose, companyVision: ev.target.value })}
+                    rows={3} className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-xs resize-y" />
+                </label>
+                <label className="text-xs block">Valores
+                  <textarea value={purpose.companyValues} onChange={(ev) => setPurpose({ ...purpose, companyValues: ev.target.value })}
+                    rows={3} className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-xs resize-y" />
+                </label>
+                <button onClick={savePurpose} disabled={savingPurpose} data-testid="button-save-purpose"
+                  className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
+                  <Save className="w-3.5 h-3.5" /> {savingPurpose ? "Salvando..." : "Salvar propósito"}
+                </button>
+              </>
+            ) : (
+              <p className="text-[11px] text-muted-foreground">Nenhuma permissão de edição.</p>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="shk-card p-4 space-y-2">

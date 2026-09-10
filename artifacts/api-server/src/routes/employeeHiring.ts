@@ -395,12 +395,16 @@ router.post("/rh-dp/contract-templates", requireModuleAccess("rh"), async (req, 
   const bodyText = typeof b.bodyText === "string" ? b.bodyText.trim() : "";
   if (!bodyText) { res.status(400).json({ error: "O texto do contrato não pode ficar vazio" }); return; }
   const contractType = typeof b.contractType === "string" && CONTRACT_TYPES.includes(b.contractType as typeof CONTRACT_TYPES[number]) ? b.contractType : null;
+  const kind = b.kind === "regimento" ? "regimento" : "contrato";
   const isDefault = b.isDefault === true;
   if (isDefault) {
-    await db.update(employeeContractTemplatesTable).set({ isDefault: false }).where(eq(employeeContractTemplatesTable.tenantId, tenantId));
+    // "Padrão" é por kind — marcar um modelo de regimento como padrão não
+    // deve tirar o padrão do modelo de contrato (e vice-versa).
+    await db.update(employeeContractTemplatesTable).set({ isDefault: false })
+      .where(and(eq(employeeContractTemplatesTable.tenantId, tenantId), eq(employeeContractTemplatesTable.kind, kind)));
   }
   const [created] = await db.insert(employeeContractTemplatesTable).values({
-    tenantId, name, contractType, bodyText: bodyText.slice(0, 50_000), isDefault,
+    tenantId, name, contractType, bodyText: bodyText.slice(0, 50_000), isDefault, kind,
   }).returning();
   res.status(201).json(created);
 });
@@ -424,8 +428,15 @@ router.patch("/rh-dp/contract-templates/:id", requireModuleAccess("rh"), async (
   if ("contractType" in b) {
     update.contractType = typeof b.contractType === "string" && CONTRACT_TYPES.includes(b.contractType as typeof CONTRACT_TYPES[number]) ? b.contractType : null;
   }
+  if (typeof b.kind === "string") update.kind = b.kind === "regimento" ? "regimento" : "contrato";
   if (b.isDefault === true) {
-    await db.update(employeeContractTemplatesTable).set({ isDefault: false }).where(eq(employeeContractTemplatesTable.tenantId, tenantId));
+    const [current] = await db.select({ kind: employeeContractTemplatesTable.kind })
+      .from(employeeContractTemplatesTable)
+      .where(and(eq(employeeContractTemplatesTable.id, id), eq(employeeContractTemplatesTable.tenantId, tenantId)));
+    const kind = typeof update.kind === "string" ? update.kind : current?.kind ?? "contrato";
+    // "Padrão" é por kind — ver comentário equivalente no POST acima.
+    await db.update(employeeContractTemplatesTable).set({ isDefault: false })
+      .where(and(eq(employeeContractTemplatesTable.tenantId, tenantId), eq(employeeContractTemplatesTable.kind, kind)));
     update.isDefault = true;
   } else if (b.isDefault === false) {
     update.isDefault = false;
