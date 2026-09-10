@@ -33,12 +33,18 @@ type TaskFormData = {
   // Agenda: cliente vinculado (id + rótulo pra mostrar no campo de busca),
   // duração em minutos e alerta prévio em minutos (string vazia = sem alerta).
   contactId: string; contactLabel: string; durationMinutes: string; alertMinutesBefore: string;
+  // Mensagem automática pro cliente (pedido 10/09: "cadastra msg automática
+  // para cliente retornar") — só faz sentido com Cliente + Prazo definidos;
+  // agenda um envio de WhatsApp pro cliente no horário do prazo (mesmo
+  // mecanismo do "Agendar" dentro da conversa).
+  clientMessage: string;
 };
 
 const emptyForm: TaskFormData = {
   title: "", description: "", status: "todo", priority: "media",
   assigneeIds: [], sectorId: "", dueDate: "",
   contactId: "", contactLabel: "", durationMinutes: "", alertMinutesBefore: "15",
+  clientMessage: "",
 };
 
 const DURATION_OPTIONS = [15, 30, 45, 60, 90, 120] as const;
@@ -331,8 +337,21 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
       } catch { /* evento mal formado, ignora */ }
     };
     es.addEventListener("task_reminder", onReminder);
+    // Lembrete diário do setor (pedido 10/09: "informa o setor responsável
+    // com alertas automáticos todos os dias") — quem estiver com o quadro
+    // aberto no setor da tarefa recebe um toast; o SSE já filtra por
+    // sectorId no backend, então qualquer evento que chegue aqui é do setor
+    // de quem está vendo.
+    const onDailyDigest = (ev: MessageEvent) => {
+      try {
+        const data = JSON.parse(ev.data) as { taskId: number; title: string; overdue: boolean };
+        toast({ title: data.overdue ? "🔴 Tarefa atrasada no setor" : "🟡 Prazo vencendo no setor", description: data.title });
+      } catch { /* evento mal formado, ignora */ }
+    };
+    es.addEventListener("task_daily_digest", onDailyDigest);
     return () => {
       es.removeEventListener("task_reminder", onReminder);
+      es.removeEventListener("task_daily_digest", onDailyDigest);
       releaseSharedEventSource(EVENTS_URL);
     };
   }, [toast]);
@@ -377,6 +396,7 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
       contactLabel: t.contact?.name ?? "",
       durationMinutes: t.durationMinutes ? String(t.durationMinutes) : "",
       alertMinutesBefore: t.alertMinutesBefore != null ? String(t.alertMinutesBefore) : "",
+      clientMessage: "",
     });
     setContactQuery("");
     setShowForm(true);
@@ -533,16 +553,22 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
       contactId: form.contactId ? Number(form.contactId) : null,
       durationMinutes: form.durationMinutes ? Number(form.durationMinutes) : null,
       alertMinutesBefore: form.dueDate && form.alertMinutesBefore ? Number(form.alertMinutesBefore) : null,
+      // Só manda se tiver texto — cliente/prazo sendo obrigatórios pra
+      // funcionar é validado no backend, que devolve um aviso (não erro) se
+      // faltar algo, pra não travar o salvamento da tarefa em si.
+      clientMessage: form.clientMessage.trim() || undefined,
     };
     try {
       if (editTarget) {
         const updated = await api.tasks.update(editTarget.id, payload);
         setTasks((prev) => prev.map((t) => t.id === editTarget.id ? updated : t));
         toast({ title: "Tarefa atualizada!" });
+        if (updated.clientMessageWarning) toast({ title: "Mensagem automática não agendada", description: updated.clientMessageWarning, variant: "destructive" });
       } else {
         const created = await api.tasks.create(payload);
         setTasks((prev) => [created, ...prev]);
         toast({ title: "Tarefa criada!" });
+        if (created.clientMessageWarning) toast({ title: "Mensagem automática não agendada", description: created.clientMessageWarning, variant: "destructive" });
       }
       setShowForm(false);
     } catch (err: unknown) {
@@ -1088,6 +1114,18 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
                   </div>
                 )}
               </div>
+              {form.contactId && form.dueDate && (
+                <div>
+                  <label className="text-xs font-medium mb-1 block">Mensagem automática para o cliente (opcional)</label>
+                  <textarea
+                    value={form.clientMessage}
+                    onChange={(e) => setForm((f) => ({ ...f, clientMessage: e.target.value }))}
+                    placeholder="Ex: Oi! Passando pra saber se ficou alguma dúvida sobre o orçamento."
+                    rows={2} data-testid="input-task-client-message"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm resize-y focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                  <p className="text-[11px] text-muted-foreground mt-1">Enviada automaticamente pro WhatsApp do cliente no horário do prazo — precisa já existir um atendimento com ele.</p>
+                </div>
+              )}
               <div className="flex gap-2 pt-1">
                 <button type="button" onClick={() => setShowForm(false)}
                   className="flex-1 py-2 rounded-xl border border-border text-sm font-medium text-muted-foreground hover:bg-secondary transition">

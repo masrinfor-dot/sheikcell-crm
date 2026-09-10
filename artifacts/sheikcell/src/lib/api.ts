@@ -909,6 +909,10 @@ export type Task = {
   subtaskTotal?: number;
   subtaskDone?: number;
   commentCount?: number;
+  // Presente só na resposta de create/update quando `clientMessage` foi
+  // enviado mas não deu pra agendar (sem cliente/prazo, cliente sem
+  // conversa etc.) — a tarefa é salva normalmente mesmo assim.
+  clientMessageWarning?: string;
 };
 
 export type TaskComment = {
@@ -2616,12 +2620,16 @@ export const api = {
       title: string; description?: string; status?: TaskStatus; priority?: TaskPriority;
       assigneeIds?: number[]; sectorId?: number | null; dueDate?: string | null;
       contactId?: number | null; durationMinutes?: number | null; alertMinutesBefore?: number | null;
+      // Mensagem automática pro cliente (Cliente + prazo já preenchidos) —
+      // agenda um envio de WhatsApp no horário do prazo.
+      clientMessage?: string;
     }) => req<Task>("/tasks", { method: "POST", body: JSON.stringify(data) }),
     update: (id: number, data: Partial<{
       title: string; description: string; status: TaskStatus; priority: TaskPriority;
       assigneeIds: number[]; sectorId: number | null; dueDate: string | null;
       position: number; isArchived: boolean;
       contactId: number | null; durationMinutes: number | null; alertMinutesBefore: number | null;
+      clientMessage: string;
     }>) => req<Task>(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     report: () => req<{ bySector: TaskReportBucket[]; byUser: TaskReportBucket[] }>("/tasks/report"),
     comments: (id: number) => req<TaskComment[]>(`/tasks/${id}/comments`),

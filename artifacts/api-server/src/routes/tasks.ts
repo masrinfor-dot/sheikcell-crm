@@ -1,9 +1,13 @@
 import { Router, type IRouter } from "express";
-import { db, tasksTable, sectorsTable, usersTable, taskCommentsTable, taskSubtasksTable, taskNotificationsTable, taskAssigneesTable, crmContactsTable, taskRemindersTable } from "@workspace/db";
+import {
+  db, tasksTable, sectorsTable, usersTable, taskCommentsTable, taskSubtasksTable, taskNotificationsTable,
+  taskAssigneesTable, crmContactsTable, taskRemindersTable, conversationsTable, scheduledMessagesTable,
+} from "@workspace/db";
 import { eq, and, desc, asc, inArray, sql } from "drizzle-orm";
 import { requireAuth, isGlobalRole, requireTenant } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import { MEDIA_DIR } from "../lib/whatsappInbound";
+import { phoneVariants } from "../lib/phone";
 import { writeFile, mkdir } from "fs/promises";
 import { randomUUID } from "crypto";
 import path from "path";
@@ -75,6 +79,41 @@ async function resolveContactId(tenantId: number, raw: unknown): Promise<number 
   const [row] = await db.select({ id: crmContactsTable.id }).from(crmContactsTable)
     .where(and(eq(crmContactsTable.id, id), eq(crmContactsTable.tenantId, tenantId))).limit(1);
   return row ? id : { error: "Cliente não encontrado" };
+}
+
+// Mensagem automática pro cliente ao criar/editar uma tarefa com Cliente +
+// prazo (pedido 10/09: "cadastra msg automática para cliente retornar") —
+// mesmo mecanismo de scheduled_messages já usado pelo "Agendar" dentro de
+// uma conversa (ver /chat/conversations/:id/schedules), só disparado a
+// partir do quadro de Tarefas em vez de dentro do chat. Reaproveita a
+// conversa mais recente do cliente (qualquer status — o job de envio só
+// precisa do telefone/linha, não importa se está resolvida/arquivada);
+// nunca cria uma conversa nova aqui (isso tem regras próprias de
+// anti-spam/linha de WhatsApp em POST /chat/conversations que não fazem
+// sentido reaplicar por trás de uma tarefa). Falha aqui NUNCA impede a
+// tarefa de ser criada/salva — só volta um aviso pro usuário resolver.
+async function scheduleClientMessageForTask(
+  tenantId: number,
+  task: { id: number; contactId: number | null; dueDate: Date | null },
+  content: string,
+  userId: number | null,
+): Promise<string | null> {
+  if (!task.contactId) return "Selecione um cliente na tarefa para agendar a mensagem automática.";
+  if (!task.dueDate) return "Defina um prazo na tarefa para agendar a mensagem automática.";
+  if (task.dueDate.getTime() < Date.now() - 60_000) return "O prazo já passou — mensagem automática não agendada.";
+  const [contact] = await db.select({ phone: crmContactsTable.phone }).from(crmContactsTable)
+    .where(and(eq(crmContactsTable.id, task.contactId), eq(crmContactsTable.tenantId, tenantId))).limit(1);
+  const variants = phoneVariants(contact?.phone);
+  if (variants.length === 0) return "Esse cliente não tem telefone cadastrado — mensagem automática não agendada.";
+  const [conv] = await db.select({ id: conversationsTable.id }).from(conversationsTable)
+    .where(and(eq(conversationsTable.tenantId, tenantId), inArray(conversationsTable.phone, variants)))
+    .orderBy(desc(conversationsTable.lastMessageAt)).limit(1);
+  if (!conv) return "Esse cliente ainda não tem nenhum atendimento registrado — inicie uma conversa com ele antes de agendar a mensagem automática.";
+  await db.insert(scheduledMessagesTable).values({
+    tenantId, conversationId: conv.id, kind: "mensagem",
+    content: content.trim().slice(0, 2000), sendAt: task.dueDate, createdById: userId, taskId: task.id,
+  });
+  return null;
 }
 
 // Duração e alerta prévio: minutos, dentro de faixas razoáveis (evita valor
@@ -445,10 +484,11 @@ router.delete("/tasks/:id/subtasks/:subId", requireAuth, async (req, res): Promi
 // ─── Create task ─────────────────────────────────────────────────────────────
 router.post("/tasks", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { title, description, status, priority, assigneeIds, sectorId, dueDate, contactId, durationMinutes, alertMinutesBefore } = req.body as {
+  const { title, description, status, priority, assigneeIds, sectorId, dueDate, contactId, durationMinutes, alertMinutesBefore, clientMessage } = req.body as {
     title?: string; description?: string; status?: string; priority?: string;
     assigneeIds?: number[] | null; sectorId?: number | null; dueDate?: string | null;
     contactId?: number | null; durationMinutes?: number | null; alertMinutesBefore?: number | null;
+    clientMessage?: string | null;
   };
   if (!title || !title.trim()) { res.status(400).json({ error: "Título é obrigatório" }); return; }
   const userRole = req.session.userRole!;
@@ -460,6 +500,7 @@ router.post("/tasks", requireAuth, async (req, res): Promise<void> => {
   if ("error" in resolvedAssignees) { res.status(400).json({ error: resolvedAssignees.error }); return; }
   const resolvedContact = await resolveContactId(tenantId, contactId);
   if (resolvedContact != null && typeof resolvedContact === "object") { res.status(400).json({ error: resolvedContact.error }); return; }
+  const resolvedDueDate = dueDate ? new Date(dueDate) : null;
   const [created] = await db.insert(tasksTable).values({
     tenantId,
     title: title.trim(),
@@ -468,13 +509,19 @@ router.post("/tasks", requireAuth, async (req, res): Promise<void> => {
     priority: PRIORITIES.includes(priority ?? "") ? priority! : "media",
     createdById: req.session.userId ?? null,
     sectorId: effectiveSectorId,
-    dueDate: dueDate ? new Date(dueDate) : null,
+    dueDate: resolvedDueDate,
     contactId: resolvedContact,
     durationMinutes: cleanMinutes(durationMinutes, 24 * 60),
     alertMinutesBefore: cleanMinutes(alertMinutesBefore, 7 * 24 * 60),
   }).returning();
   if (resolvedAssignees.length > 0) await setTaskAssignees(created!.id, tenantId, resolvedAssignees);
-  res.status(201).json(await enrichTask(created!));
+  let clientMessageWarning: string | null = null;
+  if (clientMessage?.trim()) {
+    clientMessageWarning = await scheduleClientMessageForTask(
+      tenantId, { id: created!.id, contactId: resolvedContact, dueDate: resolvedDueDate }, clientMessage, req.session.userId ?? null,
+    );
+  }
+  res.status(201).json({ ...(await enrichTask(created!)), ...(clientMessageWarning ? { clientMessageWarning } : {}) });
 });
 
 // ─── Update task ─────────────────────────────────────────────────────────────
@@ -485,11 +532,12 @@ router.patch("/tasks/:id", requireAuth, async (req, res): Promise<void> => {
   const existing = await loadTaskWithAccess(id, tenantId, req.session, res);
   if (!existing) return;
   const userRole = req.session.userRole!;
-  const { title, description, status, priority, assigneeIds, sectorId, dueDate, position, isArchived, contactId, durationMinutes, alertMinutesBefore } = req.body as {
+  const { title, description, status, priority, assigneeIds, sectorId, dueDate, position, isArchived, contactId, durationMinutes, alertMinutesBefore, clientMessage } = req.body as {
     title?: string; description?: string; status?: string; priority?: string;
     assigneeIds?: number[] | null; sectorId?: number | null; dueDate?: string | null;
     position?: number; isArchived?: boolean;
     contactId?: number | null; durationMinutes?: number | null; alertMinutesBefore?: number | null;
+    clientMessage?: string | null;
   };
   // Qualquer um dos responsáveis pode marcar a tarefa como concluída.
   // (Tarefas sem responsável podem ser concluídas por qualquer pessoa com acesso.)
@@ -524,7 +572,13 @@ router.patch("/tasks/:id", requireAuth, async (req, res): Promise<void> => {
   const [updated] = await db.update(tasksTable).set(update)
     .where(and(eq(tasksTable.id, id), eq(tasksTable.tenantId, tenantId))).returning();
   if (resolvedAssignees !== null) await setTaskAssignees(id, tenantId, resolvedAssignees);
-  res.json(await enrichTask(updated!));
+  let clientMessageWarning: string | null = null;
+  if (clientMessage?.trim() && updated) {
+    clientMessageWarning = await scheduleClientMessageForTask(
+      tenantId, { id: updated.id, contactId: updated.contactId, dueDate: updated.dueDate }, clientMessage, req.session.userId ?? null,
+    );
+  }
+  res.json({ ...(await enrichTask(updated!)), ...(clientMessageWarning ? { clientMessageWarning } : {}) });
 });
 
 // ─── Delete (archive) ────────────────────────────────────────────────────────

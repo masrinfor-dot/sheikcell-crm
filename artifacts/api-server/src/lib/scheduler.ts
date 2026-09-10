@@ -320,6 +320,13 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("./taskReminders").then((m) => m.runTaskReminders()).catch(() => {});
   }, 60_000);
+  // Lembrete DIÁRIO de tarefas pendentes/atrasadas (pedido 10/09): diferente
+  // do lembrete pontual acima (perto do horário marcado), este avisa todo
+  // dia enquanto a tarefa segue atrasada ou vencendo em até 24h — dedupe por
+  // dia, então checar a cada 30 minutos é seguro (idempotente).
+  setInterval(() => {
+    void import("./taskDailyDigest").then((m) => m.runDailyTaskDigest()).catch(() => {});
+  }, 30 * 60_000);
   // Lembrete de ponto por WhatsApp (RH): entrada atrasada ou saída esquecida
   // — checa a cada 10 minutos (idempotente via ponto_reminders, então rodar
   // de novo antes de dar a folga de 15min é seguro).
