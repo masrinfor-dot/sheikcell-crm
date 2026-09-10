@@ -49,6 +49,15 @@ export const tenantsTable = pgTable("tenants", {
   // check-in (ver lib/whatsappInbound.ts). Null = feature desligada (opt-in,
   // nenhuma mensagem é interceptada até o admin escolher a linha).
   pontoCheckInSessionKey: text("ponto_check_in_session_key"),
+  // Reconhecimento facial na batida de ponto (pedido 10/09, análise
+  // Tangerino) — opt-in de propósito: compara a selfie da entrada contra a
+  // foto de referência (documento "foto_3x4" do colaborador) usando IA de
+  // visão, mas NUNCA bloqueia a batida — só marca `flagged`/`flagReason`
+  // pra revisão humana, exatamente como já acontece hoje pra "duas fotos em
+  // pouco tempo" e "sem foto disponível" (ver POST /rh-dp/me/punch). Dado
+  // biométrico é sensível (LGPD): default false, e só roda se o colaborador
+  // já tiver uma foto de referência cadastrada.
+  facialRecognitionEnabled: boolean("facial_recognition_enabled").notNull().default(false),
   // Endereço público da Vitrine de Aparelhos (/vitrine/:slug) — null = a loja
   // ainda não escolheu um endereço (link desligado). Único entre lojas.
   catalogSlug: text("catalog_slug"),

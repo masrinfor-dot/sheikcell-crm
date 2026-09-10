@@ -41,10 +41,17 @@ export const employeesTable = pgTable("employees", {
   // existente (cadastro direto de sempre continua exatamente igual).
   candidateId: integer("candidate_id").references(() => rhCandidatesTable.id),
   hiringStatus: text("hiring_status").notNull().default("ativo"),
+  // Link público de upload de documentos (pedido 10/09): token secreto
+  // (32 hex, mesmo padrão do link de candidatura em rh.ts) que o RH gera e
+  // manda pro candidato/colaborador — ele mesmo sobe RG/CPF/CTPS etc. sem
+  // precisar de login. Null = nenhum link gerado (ou já revogado). Ver
+  // GET/POST /rh-dp/public/:token em employeeHiring.ts.
+  documentsUploadToken: text("documents_upload_token"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (t) => [
   uniqueIndex("employees_user_id_unique").on(t.userId).where(sql`${t.userId} is not null`),
+  uniqueIndex("employees_documents_upload_token_unique").on(t.documentsUploadToken).where(sql`${t.documentsUploadToken} is not null`),
 ]);
 
 export const workShiftsTable = pgTable("work_shifts", {
@@ -117,6 +124,45 @@ export const leaveRecordsTable = pgTable("leave_records", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// Pedido de férias (pedido 10/09, análise Tangerino): o colaborador solicita
+// pelo próprio self-service (MeuPonto), o RH/admin aprova ou rejeita. Ao
+// aprovar, gera automaticamente um leave_records (kind="ferias") — igual ao
+// que já era lançado manualmente — pra não duplicar a lógica de "afastamento
+// vigente" em nenhum outro lugar do sistema (relatórios, fechamento etc. já
+// leem leave_records normalmente). leaveRecordId fica null enquanto
+// pendente/rejeitado, e aponta pro leave_records criado quando aprovado.
+export const vacationRequestsTable = pgTable("vacation_requests", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  employeeId: integer("employee_id").notNull().references(() => employeesTable.id, { onDelete: "cascade" }),
+  startDate: date("start_date").notNull(),
+  endDate: date("end_date").notNull(),
+  daysCount: integer("days_count").notNull(),
+  status: text("status").notNull().default("pendente"), // "pendente" | "aprovado" | "rejeitado"
+  requestedByUserId: integer("requested_by_user_id").notNull(),
+  reviewedByUserId: integer("reviewed_by_user_id"),
+  reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+  reviewNote: text("review_note"),
+  leaveRecordId: integer("leave_record_id").references(() => leaveRecordsTable.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Controle de idempotência do lembrete de ponto por WhatsApp (pedido 10/09,
+// análise Tangerino): um lembrete por colaborador, por dia, por tipo
+// ("entrada" atrasada | "saida" esquecida) — índice único garante que o job
+// periódico (lib/pontoReminders.ts) nunca manda dois lembretes iguais no
+// mesmo dia, mesmo que o tick rode de novo antes do próximo.
+export const pontoRemindersTable = pgTable("ponto_reminders", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  employeeId: integer("employee_id").notNull(),
+  dateKey: text("date_key").notNull(), // "YYYY-MM-DD", fuso America/Sao_Paulo
+  kind: text("kind").notNull(), // "entrada" | "saida"
+  sentAt: timestamp("sent_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("ponto_reminders_unique").on(t.employeeId, t.dateKey, t.kind),
+]);
+
 // Fechamento mensal do banco de horas — fato CONGELADO no momento do
 // fechamento (não recalcula depois, mesmo que ajustes/batidas antigos sejam
 // editados). employeeId sem FK e employeeName snapshotado: mesmo padrão de
@@ -148,6 +194,30 @@ export const timeBankClosuresTable = pgTable("time_bank_closures", {
 // nome no disco). textContent guarda o texto do contrato quando a linha é
 // o contrato gerado/editado (sem arquivo em disco nesse caso — mimeType e
 // storedName ficam null).
+// Assinatura eletrônica do espelho de ponto (pedido 10/09, análise
+// Tangerino) — "assinatura simples" (clique de confirmação), conforme
+// decidido: o colaborador só pode assinar um mês DEPOIS que ele foi
+// fechado (time_bank_closures já existe pra esse período — números
+// oficiais/congelados), e os totais são copiados pra esta linha no momento
+// da assinatura (mesmo espírito "congelado" do fechamento: se o fechamento
+// for excluído/refeito depois, a assinatura antiga não muda de baixo pra
+// cima). Um só por colaborador/mês (não dá pra assinar de novo).
+export const timesheetSignaturesTable = pgTable("timesheet_signatures", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  employeeId: integer("employee_id").notNull(),
+  periodMonth: text("period_month").notNull(), // "YYYY-MM"
+  closureId: integer("closure_id").notNull().references(() => timeBankClosuresTable.id),
+  workedMinutes: integer("worked_minutes").notNull(),
+  expectedMinutes: integer("expected_minutes").notNull(),
+  adjustmentMinutes: integer("adjustment_minutes").notNull(),
+  balanceMinutes: integer("balance_minutes").notNull(),
+  signedByUserId: integer("signed_by_user_id").notNull(),
+  signedAt: timestamp("signed_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("timesheet_signatures_unique").on(t.employeeId, t.periodMonth),
+]);
+
 export const employeeDocumentsTable = pgTable("employee_documents", {
   tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
@@ -163,6 +233,13 @@ export const employeeDocumentsTable = pgTable("employee_documents", {
   sizeBytes: integer("size_bytes"),
   textContent: text("text_content"), // texto do contrato gerado/editado (docType "contrato_trabalho")
   uploadedByUserId: integer("uploaded_by_user_id"),
+  // Vencimento (GED, pedido 10/09, análise Tangerino): opcional — só faz
+  // sentido pra documentos com validade (ASO/exame periódico, certificações,
+  // vistos/carteiras de trabalho de estrangeiro etc.). Nulo = sem vencimento
+  // (a maioria dos documentos de admissão, RG/CPF/CTPS, não expira).
+  // GET /rh-dp/documents-expiring lista, sem cron, todo documento com
+  // vencimento próximo ou já vencido.
+  expiresAt: date("expires_at"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -188,6 +265,9 @@ export type WorkShift = typeof workShiftsTable.$inferSelect;
 export type TimeClockEntry = typeof timeClockEntriesTable.$inferSelect;
 export type TimeBankAdjustment = typeof timeBankAdjustmentsTable.$inferSelect;
 export type LeaveRecord = typeof leaveRecordsTable.$inferSelect;
+export type VacationRequest = typeof vacationRequestsTable.$inferSelect;
+export type PontoReminder = typeof pontoRemindersTable.$inferSelect;
 export type TimeBankClosure = typeof timeBankClosuresTable.$inferSelect;
+export type TimesheetSignature = typeof timesheetSignaturesTable.$inferSelect;
 export type EmployeeDocument = typeof employeeDocumentsTable.$inferSelect;
 export type EmployeeContractTemplate = typeof employeeContractTemplatesTable.$inferSelect;

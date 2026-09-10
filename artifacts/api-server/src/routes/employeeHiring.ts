@@ -3,14 +3,14 @@ import {
   db, employeesTable, employeeDocumentsTable, employeeContractTemplatesTable,
   rhCandidatesTable, storesTable, workShiftsTable,
 } from "@workspace/db";
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, asc, lte, isNotNull } from "drizzle-orm";
 import { requireTenant } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import { normalizePhone } from "../lib/phone";
 import { getEmployee, CONTRACT_TYPES } from "./rhDp";
 import { DOCS_DIR } from "./documents";
 import path from "path";
-import { randomUUID } from "crypto";
+import { randomUUID, randomBytes } from "crypto";
 import { existsSync } from "fs";
 import { mkdir, writeFile, unlink } from "fs/promises";
 
@@ -133,6 +133,92 @@ router.post("/rh-dp/employees/:id/reopen-hiring", requireModuleAccess("rh"), asy
   res.json(updated);
 });
 
+// ── Link público de upload de documentos (pedido 10/09) ────────────────────
+// O RH gera um link (token secreto de 32 hex, mesmo padrão do link de
+// candidatura em rh.ts) e manda pro candidato/colaborador via WhatsApp/
+// e-mail — ele mesmo sobe RG/CPF/CTPS/foto etc. sem precisar de login. Só
+// aceita os tipos de documento pessoal da lista fixa abaixo (mesma do
+// checklist de contratação do painel) + "outro" com rótulo livre — nunca
+// contrato_trabalho/contrato_trabalho_assinado, que são geridos pelo RH.
+const PUBLIC_DOC_TYPES = new Set([
+  "foto_3x4", "rg", "cpf", "ctps", "comprovante_residencia", "titulo_eleitor",
+  "pis_nit", "certidao_civil", "carteira_vacinacao", "exame_admissional", "reservista", "outro",
+]);
+
+router.post("/rh-dp/employees/:id/documents-upload-link", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const existing = await getEmployee(id, tenantId);
+  if (!existing) { res.status(404).json({ error: "Colaborador não encontrado" }); return; }
+  // Já tem um link ativo? Devolve o mesmo (idempotente) em vez de invalidar
+  // um link que o candidato já pode ter recebido — "Gerar novo link" (DELETE
+  // + POST de novo) é o caminho explícito pra revogar e trocar.
+  if (existing.documentsUploadToken) { res.json({ token: existing.documentsUploadToken }); return; }
+  const token = randomBytes(16).toString("hex");
+  await db.update(employeesTable).set({ documentsUploadToken: token })
+    .where(and(eq(employeesTable.id, id), eq(employeesTable.tenantId, tenantId)));
+  res.json({ token });
+});
+
+router.delete("/rh-dp/employees/:id/documents-upload-link", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const existing = await getEmployee(id, tenantId);
+  if (!existing) { res.status(404).json({ error: "Colaborador não encontrado" }); return; }
+  await db.update(employeesTable).set({ documentsUploadToken: null })
+    .where(and(eq(employeesTable.id, id), eq(employeesTable.tenantId, tenantId)));
+  res.json({ ok: true });
+});
+
+// Sem requireTenant/requireModuleAccess de propósito — o candidato abre isto
+// sem estar logado em loja nenhuma. O token (não o header de sessão) é a
+// única credencial; por isso é gerado com 16 bytes aleatórios (32 hex).
+router.get("/rh-dp/public/:token", async (req, res): Promise<void> => {
+  const token = String(req.params.token || "");
+  if (!token) { res.status(404).json({ error: "Link inválido" }); return; }
+  const [employee] = await db.select().from(employeesTable).where(eq(employeesTable.documentsUploadToken, token));
+  if (!employee) { res.status(404).json({ error: "Link inválido ou expirado. Peça um novo link para o RH." }); return; }
+  const docs = await db.select({ docType: employeeDocumentsTable.docType }).from(employeeDocumentsTable)
+    .where(and(eq(employeeDocumentsTable.employeeId, employee.id), eq(employeeDocumentsTable.tenantId, employee.tenantId)));
+  res.json({ employeeName: employee.name, uploadedDocTypes: [...new Set(docs.map((d) => d.docType))] });
+});
+
+router.post("/rh-dp/public/:token/documents", async (req, res): Promise<void> => {
+  const token = String(req.params.token || "");
+  if (!token) { res.status(404).json({ error: "Link inválido" }); return; }
+  const [employee] = await db.select().from(employeesTable).where(eq(employeesTable.documentsUploadToken, token));
+  if (!employee) { res.status(404).json({ error: "Link inválido ou expirado. Peça um novo link para o RH." }); return; }
+
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const docTypeRaw = sanitizeDocType(b.docType);
+  if (!docTypeRaw || !PUBLIC_DOC_TYPES.has(docTypeRaw)) { res.status(400).json({ error: "Tipo de documento inválido" }); return; }
+  const label = docTypeRaw === "outro" && typeof b.label === "string" ? b.label.trim().slice(0, 120) || null : null;
+
+  const { data, mimeType, fileName } = b as { data?: unknown; mimeType?: unknown; fileName?: unknown };
+  const mime = typeof mimeType === "string" ? mimeType.split(";")[0].trim() : "";
+  const ext = ALLOWED_MIME[mime];
+  if (!ext) { res.status(400).json({ error: "Tipo de arquivo não permitido. Use foto (JPG/PNG/WEBP) ou PDF." }); return; }
+  if (typeof data !== "string" || !data) { res.status(400).json({ error: "Arquivo vazio" }); return; }
+  const buf = Buffer.from(data, "base64");
+  if (buf.length === 0) { res.status(400).json({ error: "Arquivo vazio" }); return; }
+  if (!contentMatchesMime(buf, mime)) { res.status(400).json({ error: "O conteúdo do arquivo não corresponde ao tipo informado" }); return; }
+  if (buf.length > MAX_SIZE) { res.status(400).json({ error: "Arquivo muito grande (máximo 15MB)" }); return; }
+
+  await mkdir(EMPLOYEE_DOCS_DIR, { recursive: true });
+  const storedName = `${randomUUID()}.${ext}`;
+  await writeFile(path.join(EMPLOYEE_DOCS_DIR, storedName), buf);
+
+  const [created] = await db.insert(employeeDocumentsTable).values({
+    tenantId: employee.tenantId, employeeId: employee.id, docType: docTypeRaw, label,
+    fileName: typeof fileName === "string" && fileName.trim() ? fileName.trim().slice(0, 255) : `${docTypeRaw}.${ext}`,
+    mimeType: mime, storedName, sizeBytes: buf.length,
+    uploadedByUserId: null, // veio do candidato, não de um usuário logado
+  }).returning({ id: employeeDocumentsTable.id, docType: employeeDocumentsTable.docType });
+  res.status(201).json({ ok: true, docType: created!.docType });
+});
+
 // ── Banco de arquivos do colaborador ─────────────────────────────────────
 router.get("/rh-dp/employees/:id/documents", requireModuleAccess("rh"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
@@ -150,10 +236,38 @@ router.get("/rh-dp/employees/:id/documents", requireModuleAccess("rh"), async (r
     sizeBytes: employeeDocumentsTable.sizeBytes,
     textContent: employeeDocumentsTable.textContent,
     uploadedByUserId: employeeDocumentsTable.uploadedByUserId,
+    expiresAt: employeeDocumentsTable.expiresAt,
     createdAt: employeeDocumentsTable.createdAt,
   }).from(employeeDocumentsTable)
     .where(and(eq(employeeDocumentsTable.employeeId, employeeId), eq(employeeDocumentsTable.tenantId, tenantId)))
     .orderBy(desc(employeeDocumentsTable.createdAt));
+  res.json(rows);
+});
+
+// GED: lista, pra qualquer colaborador ativo, documentos com vencimento
+// cadastrado que já venceu ou vence nos próximos 60 dias — sem tabela/cron
+// própria (mesmo espírito de /rh-dp/vacation-deadlines), sempre recalculado.
+router.get("/rh-dp/documents-expiring", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const horizon = new Date();
+  horizon.setDate(horizon.getDate() + 60);
+  const horizonStr = horizon.toISOString().slice(0, 10);
+  const rows = await db.select({
+    id: employeeDocumentsTable.id,
+    employeeId: employeeDocumentsTable.employeeId,
+    employeeName: employeesTable.name,
+    docType: employeeDocumentsTable.docType,
+    label: employeeDocumentsTable.label,
+    expiresAt: employeeDocumentsTable.expiresAt,
+  }).from(employeeDocumentsTable)
+    .innerJoin(employeesTable, eq(employeeDocumentsTable.employeeId, employeesTable.id))
+    .where(and(
+      eq(employeeDocumentsTable.tenantId, tenantId),
+      eq(employeesTable.isActive, true),
+      isNotNull(employeeDocumentsTable.expiresAt),
+      lte(employeeDocumentsTable.expiresAt, horizonStr),
+    ))
+    .orderBy(asc(employeeDocumentsTable.expiresAt));
   res.json(rows);
 });
 
@@ -170,10 +284,11 @@ router.post("/rh-dp/employees/:id/documents", requireModuleAccess("rh"), async (
   const docType = sanitizeDocType(b.docType);
   if (!docType) { res.status(400).json({ error: "Informe o tipo do documento" }); return; }
   const label = typeof b.label === "string" ? b.label.trim().slice(0, 120) || null : null;
+  const expiresAt = typeof b.expiresAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(b.expiresAt) ? b.expiresAt : null;
 
   if (typeof b.textContent === "string" && b.textContent.trim()) {
     const [created] = await db.insert(employeeDocumentsTable).values({
-      tenantId, employeeId, docType, label,
+      tenantId, employeeId, docType, label, expiresAt,
       textContent: b.textContent.slice(0, 50_000),
       uploadedByUserId: req.session.userId ?? null,
     }).returning();
@@ -196,7 +311,7 @@ router.post("/rh-dp/employees/:id/documents", requireModuleAccess("rh"), async (
   await writeFile(path.join(EMPLOYEE_DOCS_DIR, storedName), buf);
 
   const [created] = await db.insert(employeeDocumentsTable).values({
-    tenantId, employeeId, docType, label,
+    tenantId, employeeId, docType, label, expiresAt,
     fileName: typeof fileName === "string" && fileName.trim() ? fileName.trim().slice(0, 255) : `${docType}.${ext}`,
     mimeType: mime, storedName, sizeBytes: buf.length,
     uploadedByUserId: req.session.userId ?? null,
@@ -221,6 +336,9 @@ router.patch("/rh-dp/employees/:id/documents/:docId", requireModuleAccess("rh"),
   if ("textContent" in b) {
     if (doc.storedName) { res.status(400).json({ error: "Este documento é um arquivo — não é possível editar o texto" }); return; }
     update.textContent = typeof b.textContent === "string" ? b.textContent.slice(0, 50_000) : null;
+  }
+  if ("expiresAt" in b) {
+    update.expiresAt = typeof b.expiresAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(b.expiresAt) ? b.expiresAt : null;
   }
   if (Object.keys(update).length === 0) { res.status(400).json({ error: "Nada para atualizar" }); return; }
   const [updated] = await db.update(employeeDocumentsTable).set(update)

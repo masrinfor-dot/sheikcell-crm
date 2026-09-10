@@ -14,6 +14,7 @@ import ForgotPassword from "@/pages/ForgotPassword";
 import ResetPassword from "@/pages/ResetPassword";
 import VitrinePublica from "@/pages/VitrinePublica";
 import AvaliacaoPublica from "@/pages/AvaliacaoPublica";
+import HiringDocumentsUpload from "@/pages/HiringDocumentsUpload";
 import { useVisualViewportVar } from "@/hooks/useVisualViewportVar";
 
 const queryClient = new QueryClient();
@@ -42,6 +43,9 @@ function AppRoutes() {
       </Route>
       <Route path="/avaliar/:slug">
         <AvaliacaoPublica />
+      </Route>
+      <Route path="/contratacao-documentos/:token">
+        <HiringDocumentsUpload />
       </Route>
       <Route path="/forgot-password">
         {user ? <Redirect to="/" /> : <ForgotPassword />}

@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
-import { api, type Employee, type TimeBankResult } from "@/lib/api";
+import { api, type Employee, type TimeBankResult, type VacationDeadline, type VacationRequest, type TimesheetMonth } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { usePunchCapture } from "@/hooks/use-punch-capture";
-import { Clock, Wallet, CheckCircle2, Loader2, Camera, MapPin } from "lucide-react";
+import { Clock, Wallet, CheckCircle2, Loader2, Camera, MapPin, Palmtree, X, Send, FileSignature } from "lucide-react";
 
 const KIND_LABELS: Record<string, string> = { in: "Entrada", break_start: "Início do intervalo", break_end: "Fim do intervalo", out: "Saída" };
 
@@ -36,6 +36,20 @@ export default function MeuPonto() {
   const [today, setToday] = useState<TimeBankResult | null>(null);
   const [month, setMonth] = useState<TimeBankResult | null>(null);
   const [punching, setPunching] = useState(false);
+  const [vacationDeadline, setVacationDeadline] = useState<VacationDeadline | null>(null);
+  const [vacationRequests, setVacationRequests] = useState<VacationRequest[]>([]);
+  const [requestingVacation, setRequestingVacation] = useState(false);
+  const [vacationForm, setVacationForm] = useState({ startDate: "", endDate: "" });
+  const [sendingVacation, setSendingVacation] = useState(false);
+  const [timesheetMonths, setTimesheetMonths] = useState<TimesheetMonth[]>([]);
+  const [signingMonth, setSigningMonth] = useState<string | null>(null);
+
+  const loadVacation = useCallback(() => {
+    api.rhDp.me.vacation().then((r) => { setVacationDeadline(r.deadline); setVacationRequests(r.requests); }).catch(() => {});
+  }, []);
+  const loadTimesheet = useCallback(() => {
+    api.rhDp.me.timesheetMonths().then(setTimesheetMonths).catch(() => {});
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -48,14 +62,57 @@ export default function MeuPonto() {
       ]);
       setToday(t);
       setMonth(m);
+      loadVacation();
+      loadTimesheet();
     } catch {
       setNotLinked(true);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [loadVacation, loadTimesheet]);
 
   useEffect(() => { load(); }, [load]);
+
+  const monthLabel = (m: string): string => {
+    const [y, mo] = m.split("-").map(Number);
+    return new Date(y!, mo! - 1, 1).toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+  };
+
+  const signMonth = async (m: string) => {
+    setSigningMonth(m);
+    try {
+      await api.rhDp.me.signTimesheet(m);
+      toast({ title: "Espelho de ponto assinado!", description: `Confirmação registrada para ${monthLabel(m)}.` });
+      loadTimesheet();
+    } catch (err) {
+      toast({ title: "Erro ao assinar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSigningMonth(null);
+    }
+  };
+
+  const sendVacationRequest = async () => {
+    if (!vacationForm.startDate || !vacationForm.endDate) { toast({ title: "Preencha o período", variant: "destructive" }); return; }
+    setSendingVacation(true);
+    try {
+      await api.rhDp.me.requestVacation(vacationForm);
+      toast({ title: "Pedido de férias enviado!", description: "O RH vai analisar e te avisar." });
+      setRequestingVacation(false);
+      setVacationForm({ startDate: "", endDate: "" });
+      loadVacation();
+    } catch (err) {
+      toast({ title: "Erro ao enviar pedido", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSendingVacation(false);
+    }
+  };
+
+  const VACATION_STATUS_LABELS: Record<VacationRequest["status"], string> = { pendente: "Em análise", aprovado: "Aprovado", rejeitado: "Rejeitado" };
+  const VACATION_STATUS_CLASSES: Record<VacationRequest["status"], string> = {
+    pendente: "bg-amber-50 text-amber-700 border-amber-100",
+    aprovado: "bg-green-50 text-green-700 border-green-100",
+    rejeitado: "bg-red-50 text-red-600 border-red-100",
+  };
 
   const todayEntries = today?.days[0]?.entries ?? [];
   const doneForToday = todayEntries.length > 0 && todayEntries[todayEntries.length - 1]!.kind === "out";
@@ -192,6 +249,93 @@ export default function MeuPonto() {
               <p className={`font-bold ${month.balanceMinutes < 0 ? "text-red-600" : "text-green-700"}`}>{formatMinutes(month.balanceMinutes)}</p>
               <p className="text-muted-foreground">Saldo</p>
             </div>
+          </div>
+        </div>
+      )}
+
+      <div className="shk-card p-5 space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Palmtree className="w-4 h-4 text-primary" />
+            <h3 className="font-bold text-sm">Férias</h3>
+          </div>
+          <button onClick={() => setRequestingVacation(true)} data-testid="button-request-vacation"
+            className="text-xs font-bold px-3 py-1.5 rounded-xl bg-primary text-white">
+            Solicitar férias
+          </button>
+        </div>
+
+        {vacationDeadline && (
+          <div className={`rounded-xl p-3 text-xs ${vacationDeadline.overdue ? "bg-red-50 text-red-700" : vacationDeadline.daysUntilDue <= 30 ? "bg-amber-50 text-amber-700" : "bg-secondary/40 text-foreground"}`}>
+            {vacationDeadline.overdue
+              ? `Suas férias venceram em ${new Date(`${vacationDeadline.dueDate}T12:00:00`).toLocaleDateString("pt-BR")}. Solicite o quanto antes.`
+              : `Você tem férias disponíveis — vencem em ${new Date(`${vacationDeadline.dueDate}T12:00:00`).toLocaleDateString("pt-BR")} (${vacationDeadline.daysUntilDue} dia(s)).`}
+          </div>
+        )}
+
+        {vacationRequests.length > 0 && (
+          <div className="space-y-1.5">
+            {vacationRequests.map((r) => (
+              <div key={r.id} className="flex items-center justify-between gap-2 text-xs bg-secondary/30 rounded-xl px-3 py-2" data-testid={`vacation-request-${r.id}`}>
+                <span>
+                  {new Date(`${r.startDate}T12:00:00`).toLocaleDateString("pt-BR")} – {new Date(`${r.endDate}T12:00:00`).toLocaleDateString("pt-BR")} ({r.daysCount}d)
+                </span>
+                <span className={`text-[10px] font-bold border px-2 py-0.5 rounded-full ${VACATION_STATUS_CLASSES[r.status]}`}>{VACATION_STATUS_LABELS[r.status]}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {timesheetMonths.length > 0 && (
+        <div className="shk-card p-5 space-y-2">
+          <div className="flex items-center gap-2">
+            <FileSignature className="w-4 h-4 text-primary" />
+            <h3 className="font-bold text-sm">Espelho de ponto</h3>
+          </div>
+          <div className="space-y-1.5">
+            {timesheetMonths.map((t) => (
+              <div key={t.closureId} className="flex items-center justify-between gap-2 text-xs bg-secondary/30 rounded-xl px-3 py-2" data-testid={`timesheet-month-${t.periodMonth}`}>
+                <span className="capitalize">{monthLabel(t.periodMonth)}</span>
+                {t.signedAt ? (
+                  <span className="text-[10px] font-bold text-green-700 flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /> Assinado</span>
+                ) : (
+                  <button onClick={() => signMonth(t.periodMonth)} disabled={signingMonth === t.periodMonth} data-testid={`button-sign-timesheet-${t.periodMonth}`}
+                    className="text-[10px] font-bold px-2.5 py-1 rounded-full bg-primary text-white disabled:opacity-40">
+                    {signingMonth === t.periodMonth ? "Assinando..." : "Confirmar e assinar"}
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          <p className="text-[10px] text-muted-foreground">Ao assinar, você confirma que revisou e concorda com o total de horas trabalhadas, esperadas e o saldo do mês.</p>
+        </div>
+      )}
+
+      {requestingVacation && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="shk-card w-full max-w-sm p-6 bg-white space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold">Solicitar férias</h3>
+              <button onClick={() => setRequestingVacation(false)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="text-xs">
+                Início
+                <input type="date" value={vacationForm.startDate} onChange={(e) => setVacationForm({ ...vacationForm, startDate: e.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+              <label className="text-xs">
+                Fim
+                <input type="date" value={vacationForm.endDate} onChange={(e) => setVacationForm({ ...vacationForm, endDate: e.target.value })}
+                  className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              </label>
+            </div>
+            <button onClick={sendVacationRequest} disabled={sendingVacation} data-testid="button-confirm-vacation-request"
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
+              {sendingVacation ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+              Enviar pedido
+            </button>
           </div>
         </div>
       )}

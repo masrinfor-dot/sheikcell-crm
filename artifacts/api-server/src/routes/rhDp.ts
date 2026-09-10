@@ -1,12 +1,14 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import {
   db, employeesTable, workShiftsTable, timeClockEntriesTable, timeBankAdjustmentsTable, leaveRecordsTable,
-  timeBankClosuresTable, usersTable, storesTable, tenantsTable,
+  timeBankClosuresTable, usersTable, storesTable, tenantsTable, vacationRequestsTable, timesheetSignaturesTable,
 } from "@workspace/db";
 import { eq, and, desc, asc, gte, lte, inArray } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireTenant, tenantIdOf } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import { computeTimeBank, nextPunchKind, dayKeySaoPaulo, employeeNeedsClockInToday } from "../lib/timeBank";
+import { computeVacationDeadline } from "../lib/vacationDeadline";
+import { checkFaceMatch } from "../lib/facialRecognition";
 import { normalizePhone } from "../lib/phone";
 import { generateClosuresForMonth, previousMonthKey, currentMonthKey } from "../lib/timeBankClosures";
 import { MEDIA_DIR } from "../lib/whatsappInbound";
@@ -243,6 +245,16 @@ router.post("/rh-dp/me/punch", requireAuth, async (req, res): Promise<void> => {
         res.status(400).json({ error: err instanceof Error ? err.message : "Não foi possível salvar a foto." });
         return;
       }
+      // Reconhecimento facial (pedido 10/09, análise Tangerino) — opt-in por
+      // loja, nunca bloqueia: só marca a batida pra revisão humana quando a
+      // IA aponta rosto diferente da foto de referência. null = sem sinal
+      // (feature desligada, sem foto de referência, ou a própria checagem
+      // falhou) — nesse caso não marca nada.
+      const faceCheck = await checkFaceMatch(employee.id, tenantId, photoBase64, mimetype);
+      if (faceCheck && !faceCheck.match) {
+        flagged = true;
+        flagReason = `Reconhecimento facial: rosto pode não corresponder à foto de referência. ${faceCheck.reason}`.trim();
+      }
     } else {
       flagged = true;
       flagReason = `Sem foto (câmera indisponível no aparelho do colaborador): ${skipReason}`;
@@ -285,6 +297,94 @@ router.get("/rh-dp/me/time-bank", requireAuth, async (req, res): Promise<void> =
   res.json(result);
 });
 
+// ── Férias: auto-serviço (pedido 10/09, análise Tangerino) ─────────────────
+// O colaborador vê o próprio vencimento (se tiver período aquisitivo
+// completo em aberto) e o histórico dos seus pedidos; solicita novas férias
+// aqui mesmo, sem precisar do RH lançar manualmente.
+
+router.get("/rh-dp/me/vacation", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const employee = await getEmployeeForUser(req.session.userId!, tenantId);
+  if (!employee) { res.status(404).json({ error: "Você não está vinculado a um cadastro de colaborador." }); return; }
+  let deadline = null;
+  if (employee.admissionDate) {
+    const taken = await db.select({ startDate: leaveRecordsTable.startDate }).from(leaveRecordsTable)
+      .where(and(eq(leaveRecordsTable.employeeId, employee.id), eq(leaveRecordsTable.tenantId, tenantId), eq(leaveRecordsTable.kind, "ferias")));
+    deadline = computeVacationDeadline(employee.admissionDate, taken.map((t) => t.startDate));
+  }
+  const requests = await db.select().from(vacationRequestsTable)
+    .where(and(eq(vacationRequestsTable.employeeId, employee.id), eq(vacationRequestsTable.tenantId, tenantId)))
+    .orderBy(desc(vacationRequestsTable.createdAt)).limit(50);
+  res.json({ deadline, requests });
+});
+
+router.post("/rh-dp/me/vacation-requests", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const employee = await getEmployeeForUser(req.session.userId!, tenantId);
+  if (!employee) { res.status(404).json({ error: "Você não está vinculado a um cadastro de colaborador." }); return; }
+  const b = (req.body ?? {}) as { startDate?: string; endDate?: string };
+  const startDate = typeof b.startDate === "string" ? b.startDate : "";
+  const endDate = typeof b.endDate === "string" ? b.endDate : "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate) || endDate < startDate) {
+    res.status(400).json({ error: "Informe um período de datas válido" }); return;
+  }
+  const daysCount = Math.round((new Date(`${endDate}T00:00:00Z`).getTime() - new Date(`${startDate}T00:00:00Z`).getTime()) / 86_400_000) + 1;
+  if (daysCount < 1 || daysCount > 30) { res.status(400).json({ error: "O período de férias deve ter entre 1 e 30 dias" }); return; }
+  const [created] = await db.insert(vacationRequestsTable).values({
+    tenantId, employeeId: employee.id, startDate, endDate, daysCount,
+    requestedByUserId: req.session.userId!,
+  }).returning();
+  res.status(201).json(created);
+});
+
+// ── Espelho de ponto: assinatura eletrônica (pedido 10/09, análise
+// Tangerino) ────────────────────────────────────────────────────────────────
+// "Assinatura simples" (clique de confirmação), conforme decidido — sem
+// certificado digital nem desenho de assinatura. Só é possível assinar um
+// mês que já foi fechado (time_bank_closures existe pra esse período):
+// evita assinar números que ainda podem mudar.
+
+router.get("/rh-dp/me/timesheet", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const employee = await getEmployeeForUser(req.session.userId!, tenantId);
+  if (!employee) { res.status(404).json({ error: "Você não está vinculado a um cadastro de colaborador." }); return; }
+  const rows = await db.select({
+    closureId: timeBankClosuresTable.id,
+    periodMonth: timeBankClosuresTable.periodMonth,
+    workedMinutes: timeBankClosuresTable.workedMinutes,
+    expectedMinutes: timeBankClosuresTable.expectedMinutes,
+    adjustmentMinutes: timeBankClosuresTable.adjustmentMinutes,
+    balanceMinutes: timeBankClosuresTable.balanceMinutes,
+    signedAt: timesheetSignaturesTable.signedAt,
+  }).from(timeBankClosuresTable)
+    .leftJoin(timesheetSignaturesTable, eq(timesheetSignaturesTable.closureId, timeBankClosuresTable.id))
+    .where(and(eq(timeBankClosuresTable.employeeId, employee.id), eq(timeBankClosuresTable.tenantId, tenantId)))
+    .orderBy(desc(timeBankClosuresTable.periodMonth));
+  res.json(rows);
+});
+
+router.post("/rh-dp/me/timesheet-signatures", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const employee = await getEmployeeForUser(req.session.userId!, tenantId);
+  if (!employee) { res.status(404).json({ error: "Você não está vinculado a um cadastro de colaborador." }); return; }
+  const b = (req.body ?? {}) as { periodMonth?: string };
+  const periodMonth = typeof b.periodMonth === "string" ? b.periodMonth : "";
+  if (!/^\d{4}-\d{2}$/.test(periodMonth)) { res.status(400).json({ error: "Mês inválido" }); return; }
+  const [closure] = await db.select().from(timeBankClosuresTable)
+    .where(and(eq(timeBankClosuresTable.employeeId, employee.id), eq(timeBankClosuresTable.tenantId, tenantId), eq(timeBankClosuresTable.periodMonth, periodMonth)));
+  if (!closure) { res.status(404).json({ error: "Este mês ainda não foi fechado pelo RH — aguarde o fechamento pra poder assinar." }); return; }
+  const [existing] = await db.select({ id: timesheetSignaturesTable.id }).from(timesheetSignaturesTable)
+    .where(and(eq(timesheetSignaturesTable.employeeId, employee.id), eq(timesheetSignaturesTable.periodMonth, periodMonth)));
+  if (existing) { res.status(409).json({ error: "Você já assinou o espelho de ponto deste mês" }); return; }
+  const [created] = await db.insert(timesheetSignaturesTable).values({
+    tenantId, employeeId: employee.id, periodMonth, closureId: closure.id,
+    workedMinutes: closure.workedMinutes, expectedMinutes: closure.expectedMinutes,
+    adjustmentMinutes: closure.adjustmentMinutes, balanceMinutes: closure.balanceMinutes,
+    signedByUserId: req.session.userId!,
+  }).returning();
+  res.status(201).json(created);
+});
+
 // ── Gestão (requireModuleAccess("rh")) ───────────────────────────────────────
 
 router.get("/rh-dp/employees", requireModuleAccess("rh"), async (req, res): Promise<void> => {
@@ -308,6 +408,7 @@ router.get("/rh-dp/employees", requireModuleAccess("rh"), async (req, res): Prom
     isActive: employeesTable.isActive,
     candidateId: employeesTable.candidateId,
     hiringStatus: employeesTable.hiringStatus,
+    documentsUploadToken: employeesTable.documentsUploadToken,
     createdAt: employeesTable.createdAt,
     userName: usersTable.name,
     storeName: storesTable.name,
@@ -456,18 +557,25 @@ router.delete("/rh-dp/employees/:id", requireModuleAccess("rh"), async (req, res
 
 router.get("/rh-dp/settings", requireModuleAccess("rh"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const [row] = await db.select({ pontoCheckInSessionKey: tenantsTable.pontoCheckInSessionKey })
-    .from(tenantsTable).where(eq(tenantsTable.id, tenantId));
-  res.json({ pontoCheckInSessionKey: row?.pontoCheckInSessionKey ?? null });
+  const [row] = await db.select({
+    pontoCheckInSessionKey: tenantsTable.pontoCheckInSessionKey,
+    facialRecognitionEnabled: tenantsTable.facialRecognitionEnabled,
+  }).from(tenantsTable).where(eq(tenantsTable.id, tenantId));
+  res.json({ pontoCheckInSessionKey: row?.pontoCheckInSessionKey ?? null, facialRecognitionEnabled: row?.facialRecognitionEnabled ?? false });
 });
 
 router.patch("/rh-dp/settings", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const b = (req.body ?? {}) as { pontoCheckInSessionKey?: string | null };
-  const value = typeof b.pontoCheckInSessionKey === "string" && b.pontoCheckInSessionKey.trim()
-    ? b.pontoCheckInSessionKey.trim() : null;
-  const [updated] = await db.update(tenantsTable).set({ pontoCheckInSessionKey: value })
-    .where(eq(tenantsTable.id, tenantId)).returning({ pontoCheckInSessionKey: tenantsTable.pontoCheckInSessionKey });
+  const b = (req.body ?? {}) as { pontoCheckInSessionKey?: string | null; facialRecognitionEnabled?: boolean };
+  const update: { pontoCheckInSessionKey?: string | null; facialRecognitionEnabled?: boolean } = {};
+  if ("pontoCheckInSessionKey" in b) {
+    update.pontoCheckInSessionKey = typeof b.pontoCheckInSessionKey === "string" && b.pontoCheckInSessionKey.trim()
+      ? b.pontoCheckInSessionKey.trim() : null;
+  }
+  if ("facialRecognitionEnabled" in b) update.facialRecognitionEnabled = b.facialRecognitionEnabled === true;
+  const [updated] = await db.update(tenantsTable).set(update)
+    .where(eq(tenantsTable.id, tenantId))
+    .returning({ pontoCheckInSessionKey: tenantsTable.pontoCheckInSessionKey, facialRecognitionEnabled: tenantsTable.facialRecognitionEnabled });
   res.json(updated);
 });
 
@@ -805,6 +913,84 @@ router.delete("/rh-dp/leave-records/:id", requireModuleAccess("rh"), async (req,
   res.json({ ok: true });
 });
 
+// ── Férias: vencimento (dashboard) + aprovação de pedidos ──────────────────
+
+// Lista, pra cada colaborador ativo com admissão cadastrada, o período
+// aquisitivo em aberto (se houver) — mesmo cálculo do auto-serviço, só que
+// pra todo mundo de uma vez. Sempre recalculado (sem tabela/cron): é rápido
+// (poucas centenas de colaboradores no máximo) e nunca fica desatualizado.
+router.get("/rh-dp/vacation-deadlines", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const employees = await db.select().from(employeesTable)
+    .where(and(eq(employeesTable.tenantId, tenantId), eq(employeesTable.isActive, true)));
+  const takenByEmployee = new Map<number, string[]>();
+  const taken = await db.select({ employeeId: leaveRecordsTable.employeeId, startDate: leaveRecordsTable.startDate }).from(leaveRecordsTable)
+    .where(and(eq(leaveRecordsTable.tenantId, tenantId), eq(leaveRecordsTable.kind, "ferias")));
+  for (const t of taken) takenByEmployee.set(t.employeeId, [...(takenByEmployee.get(t.employeeId) ?? []), t.startDate]);
+  const rows = employees
+    .filter((e) => !!e.admissionDate)
+    .map((e) => ({
+      employeeId: e.id,
+      employeeName: e.name,
+      deadline: computeVacationDeadline(e.admissionDate!, takenByEmployee.get(e.id) ?? []),
+    }))
+    .filter((r) => r.deadline != null)
+    .sort((a, b) => a.deadline!.daysUntilDue - b.deadline!.daysUntilDue);
+  res.json(rows);
+});
+
+router.get("/rh-dp/vacation-requests", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rows = await db.select({
+    id: vacationRequestsTable.id,
+    employeeId: vacationRequestsTable.employeeId,
+    employeeName: employeesTable.name,
+    startDate: vacationRequestsTable.startDate,
+    endDate: vacationRequestsTable.endDate,
+    daysCount: vacationRequestsTable.daysCount,
+    status: vacationRequestsTable.status,
+    reviewedByUserId: vacationRequestsTable.reviewedByUserId,
+    reviewedAt: vacationRequestsTable.reviewedAt,
+    reviewNote: vacationRequestsTable.reviewNote,
+    createdAt: vacationRequestsTable.createdAt,
+  }).from(vacationRequestsTable)
+    .leftJoin(employeesTable, eq(vacationRequestsTable.employeeId, employeesTable.id))
+    .where(eq(vacationRequestsTable.tenantId, tenantId))
+    .orderBy(desc(vacationRequestsTable.createdAt)).limit(300);
+  res.json(rows);
+});
+
+router.patch("/rh-dp/vacation-requests/:id", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const [request] = await db.select().from(vacationRequestsTable)
+    .where(and(eq(vacationRequestsTable.id, id), eq(vacationRequestsTable.tenantId, tenantId)));
+  if (!request) { res.status(404).json({ error: "Pedido não encontrado" }); return; }
+  if (request.status !== "pendente") { res.status(409).json({ error: "Este pedido já foi analisado" }); return; }
+  const b = (req.body ?? {}) as { action?: string; reviewNote?: string };
+  const reviewNote = typeof b.reviewNote === "string" ? b.reviewNote.trim().slice(0, 1000) || null : null;
+  if (b.action === "aprovar") {
+    const [leave] = await db.insert(leaveRecordsTable).values({
+      tenantId, employeeId: request.employeeId, kind: "ferias",
+      startDate: request.startDate, endDate: request.endDate,
+      notes: reviewNote ? `Aprovado via pedido de férias: ${reviewNote}` : "Aprovado via pedido de férias do colaborador",
+      createdByUserId: req.session.userId!,
+    }).returning();
+    const [updated] = await db.update(vacationRequestsTable).set({
+      status: "aprovado", reviewedByUserId: req.session.userId!, reviewedAt: new Date(), reviewNote, leaveRecordId: leave!.id,
+    }).where(eq(vacationRequestsTable.id, id)).returning();
+    res.json(updated);
+  } else if (b.action === "rejeitar") {
+    const [updated] = await db.update(vacationRequestsTable).set({
+      status: "rejeitado", reviewedByUserId: req.session.userId!, reviewedAt: new Date(), reviewNote,
+    }).where(eq(vacationRequestsTable.id, id)).returning();
+    res.json(updated);
+  } else {
+    res.status(400).json({ error: "Ação inválida (use aprovar ou rejeitar)" });
+  }
+});
+
 // ── Relatórios ────────────────────────────────────────────────────────────
 
 router.get("/rh-dp/reports/timesheet", requireModuleAccess("rh"), async (req, res): Promise<void> => {
@@ -882,7 +1068,21 @@ router.get("/rh-dp/closures", requireModuleAccess("rh"), async (req, res): Promi
   const month = typeof req.query.month === "string" ? req.query.month : "";
   const conditions = [eq(timeBankClosuresTable.tenantId, tenantId)];
   if (/^\d{4}-\d{2}$/.test(month)) conditions.push(eq(timeBankClosuresTable.periodMonth, month));
-  const rows = await db.select().from(timeBankClosuresTable)
+  const rows = await db.select({
+    id: timeBankClosuresTable.id,
+    employeeId: timeBankClosuresTable.employeeId,
+    employeeName: timeBankClosuresTable.employeeName,
+    periodMonth: timeBankClosuresTable.periodMonth,
+    workedMinutes: timeBankClosuresTable.workedMinutes,
+    expectedMinutes: timeBankClosuresTable.expectedMinutes,
+    adjustmentMinutes: timeBankClosuresTable.adjustmentMinutes,
+    balanceMinutes: timeBankClosuresTable.balanceMinutes,
+    closedAt: timeBankClosuresTable.closedAt,
+    // Assinatura eletrônica do espelho de ponto (pedido 10/09) — null = o
+    // colaborador ainda não confirmou este mês.
+    signedAt: timesheetSignaturesTable.signedAt,
+  }).from(timeBankClosuresTable)
+    .leftJoin(timesheetSignaturesTable, eq(timesheetSignaturesTable.closureId, timeBankClosuresTable.id))
     .where(and(...conditions))
     .orderBy(desc(timeBankClosuresTable.periodMonth), asc(timeBankClosuresTable.employeeName));
   res.json(rows);

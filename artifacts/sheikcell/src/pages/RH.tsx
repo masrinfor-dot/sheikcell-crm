@@ -4,7 +4,7 @@ import {
   api, API_BASE, canEditModule,
   type RhStage, type RhQuestion, type RhCandidate, type RhPosition, type RhProfileType,
   type Employee, type WorkShift, type TimeClockEntry, type TimeBankResult, type TimeBankSummaryRow, type LeaveRecord, type TimeBankClosure,
-  type Store, type User, type EmployeeDocument, type EmployeeContractTemplate,
+  type Store, type User, type EmployeeDocument, type EmployeeContractTemplate, type VacationRequest,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
@@ -12,7 +12,7 @@ import {
   Users, Settings2, Copy, RefreshCw, Plus, Trash2, X, CheckCircle, XCircle,
   Video, ChevronDown, ChevronUp, Save, Link2, UserSquare2, CalendarClock, Clock, Wallet, Pencil, Archive, PlayCircle,
   AlertTriangle, Image as ImageIcon, Smartphone, Printer, Star, Briefcase, Sparkles, MapPin,
-  Upload, Download, FileText, FolderArchive, UserPlus, FileSignature, Eye, IdCard, RotateCcw,
+  Upload, Download, FileText, FolderArchive, UserPlus, FileSignature, Eye, IdCard, RotateCcw, Palmtree,
 } from "lucide-react";
 
 // Perfil comportamental (estilo DISC simplificado, 4 tipos definidos pelo
@@ -95,7 +95,7 @@ export default function RH() {
   const { user } = useAuth();
   const canEdit = canEditModule(user, "rh");
   const [group, setGroup] = useState<"recrutamento" | "dp">("recrutamento");
-  const [dpView, setDpView] = useState<"colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos" | "fechamentos">("colaboradores");
+  const [dpView, setDpView] = useState<"colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos" | "ferias" | "fechamentos">("colaboradores");
 
   return (
     <div className="space-y-4">
@@ -124,6 +124,7 @@ export default function RH() {
               { key: "ponto", label: "Registros de Ponto", icon: Clock },
               { key: "banco-horas", label: "Banco de horas", icon: Wallet },
               { key: "afastamentos", label: "Afastamentos", icon: CalendarClock },
+              { key: "ferias", label: "Férias", icon: Palmtree },
               { key: "fechamentos", label: "Fechamentos", icon: Archive },
             ] as const).map(({ key, label, icon: Icon }) => (
               <button key={key} onClick={() => setDpView(key)} data-testid={`button-dp-${key}`}
@@ -137,6 +138,7 @@ export default function RH() {
           {dpView === "ponto" && <PontoAdmin canEdit={canEdit} isAdmin={user?.role === "admin"} />}
           {dpView === "banco-horas" && <BancoHoras canEdit={canEdit} />}
           {dpView === "afastamentos" && <Afastamentos canEdit={canEdit} />}
+          {dpView === "ferias" && <Ferias canEdit={canEdit} />}
           {dpView === "fechamentos" && <Fechamentos canEdit={canEdit} />}
         </div>
       )}
@@ -1174,8 +1176,10 @@ function HiringWizard({ employee, stores, shifts, templates, canEdit, onClose, o
   const [generatingContract, setGeneratingContract] = useState(false);
   const [savingContract, setSavingContract] = useState(false);
   const [editingContractDocId, setEditingContractDocId] = useState<number | null>(null);
+  const [uploadToken, setUploadToken] = useState<string | null>(employee.documentsUploadToken ?? null);
+  const [linkBusy, setLinkBusy] = useState(false);
 
-  useEffect(() => { setDraft(employee); setTab("dados"); }, [employee.id]);
+  useEffect(() => { setDraft(employee); setTab("dados"); setUploadToken(employee.documentsUploadToken ?? null); }, [employee.id]);
 
   const loadDocs = () => {
     setLoadingDocs(true);
@@ -1225,6 +1229,16 @@ function HiringWizard({ employee, stores, shifts, templates, canEdit, onClose, o
       setDocuments((prev) => prev.filter((x) => x.id !== d.id));
       if (editingContractDocId === d.id) { setEditingContractDocId(null); setContractDraftText(""); }
     } catch { toast({ title: "Erro ao excluir", variant: "destructive" }); }
+  };
+
+  // Vencimento (GED, pedido 10/09): a maioria dos documentos não tem
+  // validade — este campo fica escondido até o usuário clicar "+ vencimento"
+  // (ver renderização abaixo). "" limpa o vencimento (envia null).
+  const updateDocExpiry = async (d: EmployeeDocument, expiresAt: string) => {
+    try {
+      const updated = await api.rhDp.employeeDocuments.update(employee.id, d.id, { expiresAt: expiresAt || null });
+      setDocuments((prev) => prev.map((x) => (x.id === d.id ? updated : x)));
+    } catch { toast({ title: "Erro ao salvar vencimento", variant: "destructive" }); }
   };
 
   const generateContract = async () => {
@@ -1277,6 +1291,41 @@ function HiringWizard({ employee, stores, shifts, templates, canEdit, onClose, o
       onSaved(updated);
       toast({ title: "Contratação reaberta" });
     } catch { toast({ title: "Erro", variant: "destructive" }); }
+  };
+
+  // Link público (sem login) pro candidato/colaborador subir os próprios
+  // documentos de admissão — pedido 10/09 ("criar link para o candidato
+  // fazer o upload dos documentos"). Geração é idempotente (mantém o token
+  // se já existir); revogar é a única forma de invalidar/trocar o link.
+  const uploadLinkUrl = uploadToken
+    ? `${window.location.origin}${import.meta.env.BASE_URL.replace(/\/$/, "")}/contratacao-documentos/${uploadToken}`
+    : null;
+
+  const generateUploadLink = async () => {
+    setLinkBusy(true);
+    try {
+      const { token } = await api.rhDp.documentsUploadLink.generate(employee.id);
+      setUploadToken(token);
+    } catch (err) {
+      toast({ title: "Erro ao gerar link", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setLinkBusy(false); }
+  };
+
+  const copyUploadLink = () => {
+    if (!uploadLinkUrl) return;
+    navigator.clipboard.writeText(uploadLinkUrl)
+      .then(() => toast({ title: "Link copiado! Envie para o candidato." }))
+      .catch(() => toast({ title: uploadLinkUrl }));
+  };
+
+  const revokeUploadLink = async () => {
+    if (!window.confirm("Revogar este link? Quem já tiver o link não vai mais conseguir enviar documentos por ele.")) return;
+    setLinkBusy(true);
+    try {
+      await api.rhDp.documentsUploadLink.revoke(employee.id);
+      setUploadToken(null);
+    } catch { toast({ title: "Erro ao revogar link", variant: "destructive" }); }
+    finally { setLinkBusy(false); }
   };
 
   const contractDocs = documents.filter((d) => d.textContent != null);
@@ -1395,6 +1444,27 @@ function HiringWizard({ employee, stores, shifts, templates, canEdit, onClose, o
 
           {tab === "documentos" && (
             <div className="space-y-3">
+              {canEdit && (
+                <div className="border border-dashed border-primary/30 bg-primary/5 rounded-xl p-3 space-y-2">
+                  <p className="text-xs font-bold flex items-center gap-1.5"><Link2 className="w-3.5 h-3.5" /> Link para o candidato enviar os documentos</p>
+                  <p className="text-[11px] text-muted-foreground">Gere um link e envie por WhatsApp/e-mail — o próprio candidato sobe RG, CPF, foto 3x4 etc. sem precisar de login.</p>
+                  {uploadLinkUrl ? (
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="text-[11px] text-muted-foreground truncate flex-1 min-w-[120px]">{uploadLinkUrl}</p>
+                      <button onClick={copyUploadLink} data-testid="button-copy-upload-link"
+                        className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-primary text-white text-xs font-semibold"><Copy className="w-3.5 h-3.5" /> Copiar</button>
+                      <button onClick={revokeUploadLink} disabled={linkBusy} data-testid="button-revoke-upload-link"
+                        className="flex items-center gap-1 px-3 py-1.5 rounded-xl border border-red-200 text-red-500 text-xs font-semibold disabled:opacity-40"><XCircle className="w-3.5 h-3.5" /> Revogar</button>
+                    </div>
+                  ) : (
+                    <button onClick={generateUploadLink} disabled={linkBusy} data-testid="button-generate-upload-link"
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
+                      <Link2 className="w-3.5 h-3.5" /> {linkBusy ? "Gerando..." : "Gerar link"}
+                    </button>
+                  )}
+                </div>
+              )}
+
               {loadingDocs ? (
                 <div className="h-16 rounded-xl bg-secondary animate-pulse" />
               ) : (
@@ -1419,6 +1489,13 @@ function HiringWizard({ employee, stores, shifts, templates, canEdit, onClose, o
                               <div key={f.id} className="flex items-center gap-2 text-[11px] bg-secondary/30 rounded-lg px-2 py-1">
                                 <FileText className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                                 <span className="flex-1 truncate">{f.fileName} · {formatDocSize(f.sizeBytes)}</span>
+                                {canEdit ? (
+                                  <input type="date" value={f.expiresAt ?? ""} onChange={(ev) => updateDocExpiry(f, ev.target.value)}
+                                    title="Vencimento (opcional)" data-testid={`input-doc-expiry-${f.id}`}
+                                    className={`text-[10px] px-1 py-0.5 rounded border shrink-0 w-[92px] ${f.expiresAt ? "border-amber-200 bg-amber-50 text-amber-700" : "border-border text-muted-foreground"}`} />
+                                ) : f.expiresAt ? (
+                                  <span className="text-[10px] shrink-0">vence {new Date(`${f.expiresAt}T12:00:00`).toLocaleDateString("pt-BR")}</span>
+                                ) : null}
                                 <a href={api.rhDp.employeeDocuments.fileUrl(employee.id, f.id)} target="_blank" rel="noreferrer" className="p-1 rounded hover:bg-secondary"><Eye className="w-3.5 h-3.5" /></a>
                                 <a href={api.rhDp.employeeDocuments.fileUrl(employee.id, f.id)} download={f.fileName ?? undefined} className="p-1 rounded hover:bg-secondary"><Download className="w-3.5 h-3.5" /></a>
                                 {canEdit && <button onClick={() => removeDoc(f)} className="p-1 rounded hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>}
@@ -1449,6 +1526,13 @@ function HiringWizard({ employee, stores, shifts, templates, canEdit, onClose, o
                           <div key={f.id} className="flex items-center gap-2 text-[11px] bg-secondary/30 rounded-lg px-2 py-1">
                             <FileText className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                             <span className="flex-1 truncate">{f.label || f.fileName} · {formatDocSize(f.sizeBytes)}</span>
+                            {canEdit ? (
+                              <input type="date" value={f.expiresAt ?? ""} onChange={(ev) => updateDocExpiry(f, ev.target.value)}
+                                title="Vencimento (opcional)" data-testid={`input-doc-expiry-${f.id}`}
+                                className={`text-[10px] px-1 py-0.5 rounded border shrink-0 w-[92px] ${f.expiresAt ? "border-amber-200 bg-amber-50 text-amber-700" : "border-border text-muted-foreground"}`} />
+                            ) : f.expiresAt ? (
+                              <span className="text-[10px] shrink-0">vence {new Date(`${f.expiresAt}T12:00:00`).toLocaleDateString("pt-BR")}</span>
+                            ) : null}
                             <a href={api.rhDp.employeeDocuments.fileUrl(employee.id, f.id)} target="_blank" rel="noreferrer" className="p-1 rounded hover:bg-secondary"><Eye className="w-3.5 h-3.5" /></a>
                             <a href={api.rhDp.employeeDocuments.fileUrl(employee.id, f.id)} download={f.fileName ?? undefined} className="p-1 rounded hover:bg-secondary"><Download className="w-3.5 h-3.5" /></a>
                             {canEdit && <button onClick={() => removeDoc(f)} className="p-1 rounded hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>}
@@ -1688,6 +1772,7 @@ function Colaboradores({ canEdit }: { canEdit: boolean }) {
   const [users, setUsers] = useState<User[]>([]);
   const [editing, setEditing] = useState<Partial<Employee> | null>(null);
   const [saving, setSaving] = useState(false);
+  const [expiringDocs, setExpiringDocs] = useState<{ id: number; employeeId: number; employeeName: string; docType: string; label: string | null; expiresAt: string }[]>([]);
 
   const load = () => api.rhDp.employees.list().then(setEmployees).catch(() => {});
   useEffect(() => {
@@ -1695,6 +1780,7 @@ function Colaboradores({ canEdit }: { canEdit: boolean }) {
     api.rhDp.shifts.list().then(setShifts).catch(() => {});
     api.stores.list(true).then(setStores).catch(() => {});
     api.admin.users.list().then(setUsers).catch(() => {});
+    api.rhDp.employeeDocuments.expiring().then(setExpiringDocs).catch(() => {});
   }, []);
 
   const save = async () => {
@@ -1721,6 +1807,19 @@ function Colaboradores({ canEdit }: { canEdit: boolean }) {
 
   return (
     <div className="space-y-3">
+      {expiringDocs.length > 0 && (
+        <div className="shk-card p-3 space-y-1.5 border-amber-200 bg-amber-50/50" data-testid="card-documents-expiring">
+          <p className="text-xs font-bold text-amber-800 flex items-center gap-1.5"><FolderArchive className="w-3.5 h-3.5" /> Documentos vencendo (GED)</p>
+          {expiringDocs.map((d) => {
+            const days = Math.round((new Date(`${d.expiresAt}T00:00:00Z`).getTime() - Date.now()) / 86_400_000);
+            return (
+              <p key={d.id} className="text-[11px] text-amber-800" data-testid={`document-expiring-${d.id}`}>
+                <span className="font-semibold">{d.employeeName}</span> — {d.label || d.docType}: {days < 0 ? "vencido" : `vence em ${days}d`} ({new Date(`${d.expiresAt}T12:00:00`).toLocaleDateString("pt-BR")})
+              </p>
+            );
+          })}
+        </div>
+      )}
       {canEdit && (
         <button onClick={() => setEditing({ isActive: true })} data-testid="button-new-employee"
           className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold">
@@ -2045,17 +2144,30 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
   // tenant) — só admin edita; qualquer um com acesso ao módulo vê qual está.
   const [waSessions, setWaSessions] = useState<{ sessionKey: string; displayName: string | null; phoneNumber: string | null }[]>([]);
   const [checkInSessionKey, setCheckInSessionKey] = useState<string>("");
+  const [facialRecognitionEnabled, setFacialRecognitionEnabled] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   useEffect(() => {
     api.chat.waSessions().then(setWaSessions).catch(() => {});
-    api.rhDp.settings.get().then((s) => setCheckInSessionKey(s.pontoCheckInSessionKey ?? "")).catch(() => {});
+    api.rhDp.settings.get().then((s) => { setCheckInSessionKey(s.pontoCheckInSessionKey ?? ""); setFacialRecognitionEnabled(s.facialRecognitionEnabled); }).catch(() => {});
   }, []);
   const saveCheckInSession = async (value: string) => {
     setSavingSettings(true);
     try {
-      await api.rhDp.settings.update(value || null);
+      await api.rhDp.settings.update({ pontoCheckInSessionKey: value || null });
       setCheckInSessionKey(value);
       toast({ title: value ? "Linha de check-in configurada" : "Check-in por WhatsApp desligado" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+  const saveFacialRecognition = async (value: boolean) => {
+    setSavingSettings(true);
+    try {
+      await api.rhDp.settings.update({ facialRecognitionEnabled: value });
+      setFacialRecognitionEnabled(value);
+      toast({ title: value ? "Reconhecimento facial ligado" : "Reconhecimento facial desligado" });
     } catch (err) {
       toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     } finally {
@@ -2174,6 +2286,24 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
               : "Desligado"}
             <span className="text-[11px] font-normal text-muted-foreground"> · só admin altera</span>
           </p>
+        )}
+      </div>
+
+      <div className="shk-card p-4 space-y-1.5">
+        <p className="text-xs font-semibold flex items-center gap-1.5"><IdCard className="w-3.5 h-3.5 text-primary" /> Reconhecimento facial na batida</p>
+        <p className="text-[11px] text-muted-foreground">
+          Compara a selfie da entrada com a foto 3x4 cadastrada do colaborador (documentos → foto_3x4). Não bloqueia
+          ninguém — só sinaliza a batida pra revisão aqui embaixo quando o rosto parece diferente. Dado biométrico,
+          então fica desligado por padrão.
+        </p>
+        {isAdmin ? (
+          <label className="flex items-center gap-2 text-xs font-semibold mt-1 cursor-pointer">
+            <input type="checkbox" checked={facialRecognitionEnabled} disabled={savingSettings}
+              onChange={(e) => saveFacialRecognition(e.target.checked)} data-testid="checkbox-facial-recognition" />
+            {facialRecognitionEnabled ? "Ligado" : "Desligado"}
+          </label>
+        ) : (
+          <p className="text-xs font-semibold mt-1">{facialRecognitionEnabled ? "Ligado" : "Desligado"} <span className="text-[11px] font-normal text-muted-foreground">· só admin altera</span></p>
         )}
       </div>
 
@@ -2607,6 +2737,132 @@ function Afastamentos({ canEdit }: { canEdit: boolean }) {
   );
 }
 
+// ── Férias (pedido 10/09, análise Tangerino) ─────────────────────────────
+// Dashboard de vencimento (calculado a partir da admissão + afastamentos já
+// lançados, sem tabela/cron própria) + fila de pedidos do colaborador
+// aguardando aprovação. Aprovar gera automaticamente um Afastamento
+// kind="ferias" (mesma tabela lida por relatórios/fechamento).
+const VACATION_STATUS_LABELS: Record<VacationRequest["status"], string> = { pendente: "Em análise", aprovado: "Aprovado", rejeitado: "Rejeitado" };
+const VACATION_STATUS_CLASSES: Record<VacationRequest["status"], string> = {
+  pendente: "bg-amber-50 text-amber-700 border-amber-100",
+  aprovado: "bg-green-50 text-green-700 border-green-100",
+  rejeitado: "bg-red-50 text-red-600 border-red-100",
+};
+
+function Ferias({ canEdit }: { canEdit: boolean }) {
+  const { toast } = useToast();
+  const [deadlines, setDeadlines] = useState<{ employeeId: number; employeeName: string; deadline: { dueDate: string; daysUntilDue: number; overdue: boolean } }[]>([]);
+  const [requests, setRequests] = useState<VacationRequest[]>([]);
+  const [reviewing, setReviewing] = useState<{ id: number; action: "aprovar" | "rejeitar"; note: string } | null>(null);
+
+  const load = () => {
+    api.rhDp.vacation.deadlines().then(setDeadlines).catch(() => {});
+    api.rhDp.vacation.requests.list().then(setRequests).catch(() => {});
+  };
+  useEffect(() => { load(); }, []);
+
+  const pending = requests.filter((r) => r.status === "pendente");
+  const decided = requests.filter((r) => r.status !== "pendente");
+
+  const confirmReview = async () => {
+    if (!reviewing) return;
+    try {
+      await api.rhDp.vacation.requests.review(reviewing.id, reviewing.action, reviewing.note);
+      toast({ title: reviewing.action === "aprovar" ? "Pedido aprovado" : "Pedido rejeitado" });
+      setReviewing(null);
+      load();
+    } catch (err) {
+      toast({ title: "Erro", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="font-bold text-sm mb-2 flex items-center gap-1.5"><Palmtree className="w-4 h-4 text-primary" /> Vencimento de férias</h3>
+        {deadlines.length === 0 ? (
+          <div className="shk-card p-6 text-center text-muted-foreground text-xs">Nenhum colaborador com férias pendentes de vencimento.</div>
+        ) : (
+          <div className="space-y-1.5">
+            {deadlines.map((d) => (
+              <div key={d.employeeId} className="shk-card p-3 flex items-center justify-between gap-2 text-xs" data-testid={`vacation-deadline-${d.employeeId}`}>
+                <span className="font-semibold">{d.employeeName}</span>
+                <span className={`font-bold px-2 py-0.5 rounded-full border ${d.deadline.overdue ? "bg-red-50 text-red-600 border-red-100" : d.deadline.daysUntilDue <= 30 ? "bg-amber-50 text-amber-700 border-amber-100" : "bg-green-50 text-green-700 border-green-100"}`}>
+                  {d.deadline.overdue ? "Vencido" : `${d.deadline.daysUntilDue}d`} · vence {new Date(`${d.deadline.dueDate}T12:00:00`).toLocaleDateString("pt-BR")}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div>
+        <h3 className="font-bold text-sm mb-2">Pedidos aguardando aprovação</h3>
+        {pending.length === 0 ? (
+          <div className="shk-card p-6 text-center text-muted-foreground text-xs">Nenhum pedido pendente.</div>
+        ) : (
+          <div className="space-y-2">
+            {pending.map((r) => (
+              <div key={r.id} className="shk-card p-4 flex items-center gap-3 flex-wrap" data-testid={`vacation-request-${r.id}`}>
+                <div className="flex-1 min-w-0">
+                  <p className="font-bold text-sm">{r.employeeName ?? "—"}</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    {new Date(`${r.startDate}T12:00:00`).toLocaleDateString("pt-BR")} – {new Date(`${r.endDate}T12:00:00`).toLocaleDateString("pt-BR")} ({r.daysCount} dias)
+                  </p>
+                </div>
+                {canEdit && (
+                  <div className="flex gap-2">
+                    <button onClick={() => setReviewing({ id: r.id, action: "rejeitar", note: "" })} data-testid={`button-reject-vacation-${r.id}`}
+                      className="px-3 py-1.5 rounded-xl border border-red-200 text-red-600 text-xs font-bold">Rejeitar</button>
+                    <button onClick={() => setReviewing({ id: r.id, action: "aprovar", note: "" })} data-testid={`button-approve-vacation-${r.id}`}
+                      className="px-3 py-1.5 rounded-xl bg-primary text-white text-xs font-bold">Aprovar</button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {decided.length > 0 && (
+        <div>
+          <h3 className="font-bold text-sm mb-2">Histórico</h3>
+          <div className="space-y-1.5">
+            {decided.map((r) => (
+              <div key={r.id} className="shk-card p-3 flex items-center justify-between gap-2 text-xs" data-testid={`vacation-history-${r.id}`}>
+                <span>
+                  <span className="font-semibold">{r.employeeName ?? "—"}</span> · {new Date(`${r.startDate}T12:00:00`).toLocaleDateString("pt-BR")} – {new Date(`${r.endDate}T12:00:00`).toLocaleDateString("pt-BR")}
+                </span>
+                <span className={`text-[10px] font-bold border px-2 py-0.5 rounded-full ${VACATION_STATUS_CLASSES[r.status]}`}>{VACATION_STATUS_LABELS[r.status]}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {reviewing && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="shk-card w-full max-w-sm p-6 bg-white space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold">{reviewing.action === "aprovar" ? "Aprovar pedido de férias" : "Rejeitar pedido de férias"}</h3>
+              <button onClick={() => setReviewing(null)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <label className="text-xs block">
+              Observação (opcional)
+              <textarea value={reviewing.note} onChange={(e) => setReviewing({ ...reviewing, note: e.target.value })} rows={2}
+                className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm resize-none" />
+            </label>
+            <button onClick={confirmReview} data-testid="button-confirm-vacation-review"
+              className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-white text-xs font-bold ${reviewing.action === "aprovar" ? "bg-primary" : "bg-red-600"}`}>
+              <Save className="w-3.5 h-3.5" /> Confirmar
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Fechamentos ──────────────────────────────────────────────────────────
 function previousMonthStr(): string {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit" }).formatToParts(new Date());
@@ -2697,6 +2953,7 @@ function Fechamentos({ canEdit }: { canEdit: boolean }) {
                 <th className="text-right py-2 px-3 font-semibold">Esperado</th>
                 <th className="text-right py-2 px-3 font-semibold">Ajustes</th>
                 <th className="text-right py-2 px-3 font-semibold">Saldo</th>
+                <th className="text-center py-2 px-3 font-semibold">Espelho assinado</th>
                 {canEdit && <th></th>}
               </tr>
             </thead>
@@ -2708,6 +2965,13 @@ function Fechamentos({ canEdit }: { canEdit: boolean }) {
                   <td className="py-2 px-3 text-right">{formatMinutes(c.expectedMinutes)}</td>
                   <td className="py-2 px-3 text-right">{formatMinutes(c.adjustmentMinutes)}</td>
                   <td className={`py-2 px-3 text-right font-bold ${c.balanceMinutes < 0 ? "text-red-600" : "text-green-700"}`}>{formatMinutes(c.balanceMinutes)}</td>
+                  <td className="py-2 px-3 text-center">
+                    {c.signedAt ? (
+                      <span className="text-[10px] font-bold text-green-700">{new Date(c.signedAt).toLocaleDateString("pt-BR")}</span>
+                    ) : (
+                      <span className="text-[10px] font-semibold text-amber-600">Pendente</span>
+                    )}
+                  </td>
                   {canEdit && (
                     <td className="py-2 px-3 text-right">
                       <button onClick={() => removeClosure(c)} className="p-1 rounded-lg hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>
@@ -2721,6 +2985,7 @@ function Fechamentos({ canEdit }: { canEdit: boolean }) {
                 <td className="py-2 px-3">Total</td>
                 <td></td><td></td><td></td>
                 <td className={`py-2 px-3 text-right ${totalBalance < 0 ? "text-red-600" : "text-green-700"}`}>{formatMinutes(totalBalance)}</td>
+                <td></td>
                 {canEdit && <td></td>}
               </tr>
             </tfoot>

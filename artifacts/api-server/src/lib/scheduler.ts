@@ -320,5 +320,11 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("./taskReminders").then((m) => m.runTaskReminders()).catch(() => {});
   }, 60_000);
+  // Lembrete de ponto por WhatsApp (RH): entrada atrasada ou saída esquecida
+  // — checa a cada 10 minutos (idempotente via ponto_reminders, então rodar
+  // de novo antes de dar a folga de 15min é seguro).
+  setInterval(() => {
+    void import("./pontoReminders").then((m) => m.sendPontoReminders()).catch(() => {});
+  }, 10 * 60_000);
   logger.info("Agendador de mensagens iniciado (tick 30s)");
 }

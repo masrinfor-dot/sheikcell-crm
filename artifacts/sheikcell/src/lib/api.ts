@@ -1215,6 +1215,9 @@ export type Employee = {
   // de sempre, pra colaborador cadastrado direto).
   candidateId: number | null;
   hiringStatus: "em_contratacao" | "ativo";
+  // Link público de upload de documentos (candidato sobe os próprios
+  // arquivos sem login) — null = nenhum link ativo agora.
+  documentsUploadToken: string | null;
   createdAt: string;
   userName?: string | null;
   storeName?: string | null;
@@ -1234,7 +1237,17 @@ export type EmployeeDocument = {
   sizeBytes: number | null;
   textContent: string | null;
   uploadedByUserId: number | null;
+  expiresAt: string | null;
   createdAt: string;
+};
+
+export type ExpiringDocument = {
+  id: number;
+  employeeId: number;
+  employeeName: string;
+  docType: string;
+  label: string | null;
+  expiresAt: string;
 };
 
 export type EmployeeContractTemplate = {
@@ -1269,6 +1282,7 @@ export type TimeBankClosure = {
   adjustmentMinutes: number;
   balanceMinutes: number;
   closedAt: string;
+  signedAt?: string | null;
 };
 
 export type TimeClockEntry = {
@@ -1321,6 +1335,38 @@ export type LeaveRecord = {
   endDate: string;
   notes: string | null;
   createdAt?: string;
+};
+
+export type VacationDeadline = {
+  cycleStart: string;
+  acquisitionDue: string;
+  dueDate: string;
+  daysUntilDue: number;
+  overdue: boolean;
+};
+
+export type VacationRequest = {
+  id: number;
+  employeeId: number;
+  employeeName?: string | null;
+  startDate: string;
+  endDate: string;
+  daysCount: number;
+  status: "pendente" | "aprovado" | "rejeitado";
+  reviewedByUserId: number | null;
+  reviewedAt: string | null;
+  reviewNote: string | null;
+  createdAt: string;
+};
+
+export type TimesheetMonth = {
+  closureId: number;
+  periodMonth: string;
+  workedMinutes: number;
+  expectedMinutes: number;
+  adjustmentMinutes: number;
+  balanceMinutes: number;
+  signedAt: string | null;
 };
 
 export type PartnerLink = {
@@ -2374,6 +2420,12 @@ export const api = {
       timeBank: (from?: string, to?: string) =>
         req<TimeBankResult>(`/rh-dp/me/time-bank?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
       clockStatus: () => req<{ needsClockIn: boolean }>("/rh-dp/me/clock-status"),
+      vacation: () => req<{ deadline: VacationDeadline | null; requests: VacationRequest[] }>("/rh-dp/me/vacation"),
+      requestVacation: (data: { startDate: string; endDate: string }) =>
+        req<VacationRequest>("/rh-dp/me/vacation-requests", { method: "POST", body: JSON.stringify(data) }),
+      timesheetMonths: () => req<TimesheetMonth[]>("/rh-dp/me/timesheet"),
+      signTimesheet: (periodMonth: string) =>
+        req<{ id: number }>("/rh-dp/me/timesheet-signatures", { method: "POST", body: JSON.stringify({ periodMonth }) }),
     },
     employees: {
       list: () => req<Employee[]>("/rh-dp/employees"),
@@ -2403,19 +2455,33 @@ export const api = {
       start: (data: { candidateId?: number; name?: string }) =>
         req<Employee>("/rh-dp/hiring/start", { method: "POST", body: JSON.stringify(data) }),
     },
+    // Link público (sem login) pro candidato/colaborador subir os próprios
+    // documentos de contratação.
+    documentsUploadLink: {
+      generate: (employeeId: number) => req<{ token: string }>(`/rh-dp/employees/${employeeId}/documents-upload-link`, { method: "POST" }),
+      revoke: (employeeId: number) => req<{ ok: boolean }>(`/rh-dp/employees/${employeeId}/documents-upload-link`, { method: "DELETE" }),
+    },
+    // Página pública (sem login) de upload de documentos pelo próprio
+    // candidato/colaborador — ver HiringDocumentsUpload.tsx.
+    public: {
+      get: (token: string) => req<{ employeeName: string; uploadedDocTypes: string[] }>(`/rh-dp/public/${token}`),
+      uploadDocument: (token: string, data: { docType: string; label?: string; fileName: string; mimeType: string; data: string }) =>
+        req<{ ok: boolean; docType: string }>(`/rh-dp/public/${token}/documents`, { method: "POST", body: JSON.stringify(data) }),
+    },
     // Banco de arquivos do colaborador — documentos pessoais/CLT (arquivo) ou
     // o contrato de trabalho gerado/editado (texto).
     employeeDocuments: {
       list: (employeeId: number) => req<EmployeeDocument[]>(`/rh-dp/employees/${employeeId}/documents`),
-      uploadFile: (employeeId: number, data: { docType: string; label?: string; fileName: string; mimeType: string; data: string }) =>
+      uploadFile: (employeeId: number, data: { docType: string; label?: string; fileName: string; mimeType: string; data: string; expiresAt?: string | null }) =>
         req<EmployeeDocument>(`/rh-dp/employees/${employeeId}/documents`, { method: "POST", body: JSON.stringify(data) }),
-      saveText: (employeeId: number, data: { docType: string; label?: string; textContent: string }) =>
+      saveText: (employeeId: number, data: { docType: string; label?: string; textContent: string; expiresAt?: string | null }) =>
         req<EmployeeDocument>(`/rh-dp/employees/${employeeId}/documents`, { method: "POST", body: JSON.stringify(data) }),
-      update: (employeeId: number, docId: number, data: { label?: string; textContent?: string }) =>
+      update: (employeeId: number, docId: number, data: { label?: string; textContent?: string; expiresAt?: string | null }) =>
         req<EmployeeDocument>(`/rh-dp/employees/${employeeId}/documents/${docId}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (employeeId: number, docId: number) =>
         req<{ ok: boolean }>(`/rh-dp/employees/${employeeId}/documents/${docId}`, { method: "DELETE" }),
       fileUrl: (employeeId: number, docId: number) => `/api/rh-dp/employees/${employeeId}/documents/${docId}/file`,
+      expiring: () => req<ExpiringDocument[]>("/rh-dp/documents-expiring"),
     },
     contractTemplates: {
       list: () => req<EmployeeContractTemplate[]>("/rh-dp/contract-templates"),
@@ -2433,9 +2499,9 @@ export const api = {
     },
     // Linha oficial de check-in de ponto por WhatsApp (uma por tenant).
     settings: {
-      get: () => req<{ pontoCheckInSessionKey: string | null }>("/rh-dp/settings"),
-      update: (pontoCheckInSessionKey: string | null) =>
-        req<{ pontoCheckInSessionKey: string | null }>("/rh-dp/settings", { method: "PATCH", body: JSON.stringify({ pontoCheckInSessionKey }) }),
+      get: () => req<{ pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean }>("/rh-dp/settings"),
+      update: (data: Partial<{ pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean }>) =>
+        req<{ pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean }>("/rh-dp/settings", { method: "PATCH", body: JSON.stringify(data) }),
     },
     shifts: {
       list: () => req<WorkShift[]>("/rh-dp/shifts"),
@@ -2448,6 +2514,14 @@ export const api = {
       create: (data: { employeeId: number; kind: LeaveRecord["kind"]; startDate: string; endDate: string; notes?: string }) =>
         req<LeaveRecord>("/rh-dp/leave-records", { method: "POST", body: JSON.stringify(data) }),
       remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/leave-records/${id}`, { method: "DELETE" }),
+    },
+    vacation: {
+      deadlines: () => req<{ employeeId: number; employeeName: string; deadline: VacationDeadline }[]>("/rh-dp/vacation-deadlines"),
+      requests: {
+        list: () => req<VacationRequest[]>("/rh-dp/vacation-requests"),
+        review: (id: number, action: "aprovar" | "rejeitar", reviewNote?: string) =>
+          req<VacationRequest>(`/rh-dp/vacation-requests/${id}`, { method: "PATCH", body: JSON.stringify({ action, reviewNote }) }),
+      },
     },
     reports: {
       timesheet: (from?: string, to?: string, employeeId?: number) =>
