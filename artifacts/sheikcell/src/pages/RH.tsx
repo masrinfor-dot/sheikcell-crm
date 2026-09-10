@@ -248,6 +248,9 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
   // diferentes com nome parecido).
   const [cityFilter, setCityFilter] = useState<string>("todas");
   const [bairroFilter, setBairroFilter] = useState<string>("todos");
+  // Filtro por vaga/cargo escolhido pelo candidato (ex: "Técnico Vendedor") —
+  // mesmo padrão do filtro de cidade/bairro. "todas" = sem filtro.
+  const [positionFilter, setPositionFilter] = useState<string>("todas");
   const [notesDraft, setNotesDraft] = useState("");
   const [expandedHistory, setExpandedHistory] = useState<Set<number>>(new Set());
 
@@ -466,10 +469,17 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
       .filter((v): v is string => !!v),
   )).sort((a, b) => a.localeCompare(b, "pt-BR"));
 
+  // Vagas com pelo menos 1 candidato — mesmo raciocínio de cityOptions
+  // (dropdown em vez de texto livre). "Sem vaga" cobre candidatura do
+  // processo legado (loja sem cargo configurado na época).
+  const positionOptions = Array.from(new Set(candidates.map((c) => c.positionName).filter((v): v is string => !!v))).sort((a, b) => a.localeCompare(b, "pt-BR"));
+  const hasLegacyCandidate = candidates.some((c) => !c.positionName);
+
   const shown = candidates.filter((c) =>
     (filter === "todos" || c.status === filter) &&
     (cityFilter === "todas" || c.city === cityFilter) &&
-    (bairroFilter === "todos" || c.neighborhood === bairroFilter));
+    (bairroFilter === "todos" || c.neighborhood === bairroFilter) &&
+    (positionFilter === "todas" || (positionFilter === "sem_vaga" ? !c.positionName : c.positionName === positionFilter)));
 
   // Outras candidaturas da mesma pessoa (por CPF/telefone/e-mail), mais
   // recentes primeiro — calculado sobre TODOS os candidatos (não só os que
@@ -529,6 +539,18 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                 {f === "todos" ? "Todos" : STATUS_META[f].label}
               </button>
             ))}
+            {/* Filtro por vaga/cargo escolhido (ex: "Técnico Vendedor") — só
+                aparece quando há pelo menos 1 cargo cadastrado, senão não faz
+                sentido (toda candidatura seria "sem vaga"). */}
+            {positions.length > 0 && (
+              <select value={positionFilter} data-testid="select-rh-position-filter"
+                onChange={(e) => setPositionFilter(e.target.value)}
+                className="px-2.5 py-1.5 rounded-full text-xs font-semibold border bg-white text-foreground border-border">
+                <option value="todas">Todas as vagas</option>
+                {positionOptions.map((p) => <option key={p} value={p}>{p}</option>)}
+                {hasLegacyCandidate && <option value="sem_vaga">Sem vaga (processo antigo)</option>}
+              </select>
+            )}
             {/* Filtro por cidade/bairro — só aparece quando há pelo menos 1
                 candidato com cidade preenchida (campo novo, opcional, ver
                 Candidatura.tsx); candidatura antiga não tem esse dado. */}
