@@ -1737,6 +1737,44 @@ router.delete("/chat/conversations/:id", requireAdminOrSupervisor, async (req, r
   const recipients = await restrictedRecipients(conv);
 
   await db.transaction(async (tx) => {
+    // Excluir a conversa não pode apagar o histórico de atendimento do
+    // cliente (visível no CRM) — só existia registro em attendance_logs
+    // quando o atendimento era finalizado; se alguém exclui direto (sem
+    // finalizar), o histórico ficava zerado. Cria aqui um registro de
+    // fallback (uma vez só, por isso o dedupe check) ANTES de apagar as
+    // mensagens, pra preservar quem era o cliente/atendente/setor mesmo
+    // sem o atendimento ter sido finalizado normalmente. Sem log se a
+    // conversa nunca teve nenhuma mensagem (não houve atendimento de fato)
+    // ou já existe um log dela (já foi finalizada antes de excluir).
+    const [hasMessage] = await tx.select({ id: messagesTable.id }).from(messagesTable).where(eq(messagesTable.conversationId, id)).limit(1);
+    const [existingLog] = await tx.select({ id: attendanceLogsTable.id }).from(attendanceLogsTable).where(eq(attendanceLogsTable.conversationId, id)).limit(1);
+    if (hasMessage && !existingLog) {
+      const [attendant] = conv.assigneeId
+        ? await tx.select().from(usersTable).where(eq(usersTable.id, conv.assigneeId)).limit(1)
+        : [];
+      const effectiveSectorId = conv.sectorId ?? attendant?.sectorId ?? null;
+      if (effectiveSectorId != null) {
+        const [sector] = await tx.select().from(sectorsTable).where(and(eq(sectorsTable.id, effectiveSectorId), eq(sectorsTable.tenantId, tenantId))).limit(1);
+        const serviceStart = conv.attendanceStartedAt ?? conv.createdAt;
+        const serviceSeconds = Math.max(0, Math.round((Date.now() - serviceStart.getTime()) / 1000));
+        await tx.insert(attendanceLogsTable).values({
+          tenantId,
+          queueEntryId: 0,
+          conversationId: id,
+          clientName: conv.name,
+          clientContact: conv.phone,
+          sectorId: effectiveSectorId,
+          sectorName: sector?.name ?? "Desconhecido",
+          attendantId: conv.assigneeId,
+          attendantName: attendant?.name ?? null,
+          storeId: conv.storeId ?? attendant?.storeId ?? null,
+          channel: conv.channel,
+          outcome: "excluido",
+          notes: "Conversa excluída sem finalizar o atendimento — registro preservado automaticamente.",
+          serviceTimeSeconds: serviceSeconds,
+        });
+      }
+    }
     await tx.delete(messagesTable).where(eq(messagesTable.conversationId, id));
     await tx.delete(conversationParticipantsTable).where(eq(conversationParticipantsTable.conversationId, id));
     await tx.delete(conversationPinsTable).where(eq(conversationPinsTable.conversationId, id));
