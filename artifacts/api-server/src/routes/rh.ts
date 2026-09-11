@@ -588,7 +588,7 @@ router.patch("/rh/candidates/:id", requireModuleAccess("rh"), async (req, res): 
     // "contratado" não entra aqui de propósito: é setado só automaticamente
     // (ver finalize-hiring/reopen-hiring em employeeHiring.ts), pra não
     // divergir do hiringStatus real do colaborador vinculado.
-    if (!["novo", "pre_aprovado", "teste_loja", "aprovado", "banco_talentos", "reprovado"].includes(status)) { res.status(400).json({ error: "Status inválido" }); return; }
+    if (!["novo", "pre_aprovado", "entrevista_online", "entrevista_presencial", "teste_loja", "aprovado", "banco_talentos", "reprovado"].includes(status)) { res.status(400).json({ error: "Status inválido" }); return; }
     update.status = status;
   }
   if (notes !== undefined) update.notes = typeof notes === "string" ? notes.trim().slice(0, 5000) || null : null;

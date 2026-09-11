@@ -56,18 +56,20 @@ export const rhCandidatesTable = pgTable("rh_candidates", {
   // stagesSnapshot): renomear/excluir o cargo depois não apaga o histórico.
   positionId: integer("position_id"),
   positionName: text("position_name"),
-  // novo | pre_aprovado | teste_loja | aprovado | banco_talentos |
-  // reprovado | contratado.
-  // "teste_loja" e "contratado" foram adicionados no pedido 11/09 ("criar
-  // teste na loja... contratado"): teste_loja é setado manualmente (mesmo
-  // fluxo de pré-aprovar/aprovar/reprovar, ver STATUS_META em RH.tsx);
+  // Pipeline (pedido 11/09, reorganizado): novo | pre_aprovado |
+  // entrevista_online | entrevista_presencial | teste_loja | aprovado |
+  // banco_talentos | reprovado | contratado. "teste_loja" manteve a chave
+  // antiga (só o rótulo virou "Teste de campo" na reorganização) pra não
+  // invalidar candidatos que já estavam nesse status. Ver STATUS_META em
+  // RH.tsx pros rótulos/ordem exibidos.
   // "contratado" é setado AUTOMATICAMENTE quando a contratação do
   // colaborador vinculado (employees.candidateId) é finalizada — ver
   // finalize-hiring/reopen-hiring em employeeHiring.ts. Não junta infra
   // nova, só espelha o hiringStatus "ativo" que já existia.
-  // "banco_talentos" (pedido 11/09: "aprovado mas vaga com quadro cheio") —
-  // aprovado, mas sem vaga disponível agora; fica guardado e pode ser
-  // contratado depois (Iniciar contratação também funciona a partir dele).
+  // "banco_talentos" (aprovado mas vaga com quadro cheio) e "reprovado" são
+  // saídas que podem acontecer em qualquer etapa, fora da sequência
+  // principal — aprovado, mas sem vaga disponível agora; fica guardado e
+  // pode ser contratado depois (Iniciar contratação funciona a partir dele).
   status: text("status").notNull().default("novo"),
   // Motivo do status atual (ex: "Foi bem na entrevista", "Falta de conta
   // bancária") — escolhido de uma lista pré-definida por status (ver

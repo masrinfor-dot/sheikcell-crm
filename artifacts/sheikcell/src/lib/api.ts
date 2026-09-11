@@ -1186,7 +1186,7 @@ export type RhCandidate = {
   id: number; name: string; phone: string; email: string | null;
   city: string | null; neighborhood: string | null;
   cpf: string | null; positionId: number | null; positionName: string | null;
-  status: "novo" | "pre_aprovado" | "teste_loja" | "aprovado" | "banco_talentos" | "reprovado" | "contratado";
+  status: "novo" | "pre_aprovado" | "entrevista_online" | "entrevista_presencial" | "teste_loja" | "aprovado" | "banco_talentos" | "reprovado" | "contratado";
   statusReason: string | null;
   answers: Record<string, Record<string, string>>;
   stagesSnapshot: RhStage[] | null;

@@ -55,10 +55,19 @@ const PROFILE_META: Record<RhProfileType, {
   },
 };
 
+// Pipeline definido pelo lojista (pedido 11/09): novo → pré-aprovado →
+// entrevista online → entrevista presencial → teste de campo → aprovado →
+// contratado (documentos etc). "teste_loja" manteve a chave antiga (só o
+// rótulo mudou pra "Teste de campo") pra não invalidar candidatos que já
+// tinham sido movidos pra esse status antes desta reorganização.
+// "banco_talentos" e "reprovado" são saídas que podem acontecer em
+// praticamente qualquer etapa, por isso ficam fora da sequência principal.
 const STATUS_META: Record<RhCandidate["status"], { label: string; cls: string }> = {
   novo: { label: "Novo", cls: "bg-blue-50 text-blue-600 border-blue-100" },
   pre_aprovado: { label: "Pré-aprovado", cls: "bg-indigo-50 text-indigo-600 border-indigo-100" },
-  teste_loja: { label: "Teste na loja", cls: "bg-amber-50 text-amber-700 border-amber-100" },
+  entrevista_online: { label: "Entrevista online", cls: "bg-sky-50 text-sky-700 border-sky-100" },
+  entrevista_presencial: { label: "Entrevista presencial", cls: "bg-violet-50 text-violet-700 border-violet-100" },
+  teste_loja: { label: "Teste de campo", cls: "bg-amber-50 text-amber-700 border-amber-100" },
   aprovado: { label: "Aprovado", cls: "bg-green-50 text-green-700 border-green-100" },
   // Pedido 11/09: "aprovado mas a vaga tá com quadro cheio" — candidato bom,
   // mas sem vaga disponível AGORA. Fica guardado pra quando abrir uma vaga
@@ -77,10 +86,12 @@ const STATUS_META: Record<RhCandidate["status"], { label: string; cls: string }>
 // no Chat) — nenhum motivo é obrigatório, só ajuda a não deixar solto.
 const STATUS_REASON_OPTIONS: Record<Exclude<RhCandidate["status"], "novo">, string[]> = {
   pre_aprovado: ["Foi bem na pré-entrevista", "Perfil alinhado com a vaga", "Aguardando segunda etapa/entrevista"],
-  teste_loja: ["Foi bem no teste da loja", "Precisa de mais um dia de teste", "Não performou bem no teste"],
-  aprovado: ["Foi bem na entrevista", "Foi bem no teste na loja", "Perfil ideal para a vaga", "Referências confirmadas"],
+  entrevista_online: ["Entrevista agendada", "Entrevista online realizada", "Aguardando entrevista presencial"],
+  entrevista_presencial: ["Entrevista presencial realizada", "Foi bem na entrevista presencial", "Aguardando teste de campo"],
+  teste_loja: ["Foi bem no teste de campo", "Precisa de mais um dia de teste", "Não performou bem no teste"],
+  aprovado: ["Foi bem na entrevista", "Foi bem no teste de campo", "Perfil ideal para a vaga", "Referências confirmadas"],
   banco_talentos: ["Quadro cheio no momento", "Bom perfil, aguardando abrir vaga", "Vaga já foi preenchida por outro candidato"],
-  reprovado: ["Não compareceu à entrevista", "Não foi bem no teste na loja", "Falta de conta bancária", "Perfil não alinhado com a vaga", "Pretensão salarial incompatível", "Já contratado por outra vaga"],
+  reprovado: ["Não compareceu à entrevista", "Não foi bem no teste de campo", "Falta de conta bancária", "Perfil não alinhado com a vaga", "Pretensão salarial incompatível", "Já contratado por outra vaga"],
   // Nunca aparece no seletor de motivo (contratado não passa pelo botão de
   // troca de status) — só existe pra satisfazer o Record exaustivo acima.
   contratado: [],
@@ -498,7 +509,7 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
       const result = await api.rh.updateCandidate(opened.id, { storeTestChecklist: cleaned, storeTestNotes: storeTestNotesDraft });
       setCandidates((prev) => prev.map((x) => (x.id === opened.id ? { ...x, storeTestChecklist: result.storeTestChecklist, storeTestNotes: result.storeTestNotes } : x)));
       setOpened((o) => (o?.id === opened.id ? { ...o, storeTestChecklist: result.storeTestChecklist, storeTestNotes: result.storeTestNotes } : o));
-      toast({ title: "Teste na loja salvo" });
+      toast({ title: "Teste de campo salvo" });
     } catch { toast({ title: "Erro", variant: "destructive" }); } finally { setSavingStoreTest(false); }
   };
 
@@ -879,9 +890,17 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                 className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border disabled:opacity-40 ${opened.status === "pre_aprovado" ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-indigo-600 border-indigo-200"}`}>
                 <Star className="w-3.5 h-3.5" /> Pré-aprovar
               </button>
+              <button onClick={() => setPendingStatusChange({ status: "entrevista_online", reason: "", customReason: "" })} data-testid="button-interview-online-candidate" disabled={!canEdit}
+                className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border disabled:opacity-40 ${opened.status === "entrevista_online" ? "bg-sky-600 text-white border-sky-600" : "bg-white text-sky-700 border-sky-200"}`}>
+                <Video className="w-3.5 h-3.5" /> Entrevista online
+              </button>
+              <button onClick={() => setPendingStatusChange({ status: "entrevista_presencial", reason: "", customReason: "" })} data-testid="button-interview-inperson-candidate" disabled={!canEdit}
+                className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border disabled:opacity-40 ${opened.status === "entrevista_presencial" ? "bg-violet-600 text-white border-violet-600" : "bg-white text-violet-700 border-violet-200"}`}>
+                <Users className="w-3.5 h-3.5" /> Entrevista presencial
+              </button>
               <button onClick={() => setPendingStatusChange({ status: "teste_loja", reason: "", customReason: "" })} data-testid="button-store-test-candidate" disabled={!canEdit}
                 className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border disabled:opacity-40 ${opened.status === "teste_loja" ? "bg-amber-500 text-white border-amber-500" : "bg-white text-amber-700 border-amber-200"}`}>
-                <Building2 className="w-3.5 h-3.5" /> Teste na loja
+                <Building2 className="w-3.5 h-3.5" /> Teste de campo
               </button>
               <button onClick={() => setPendingStatusChange({ status: "aprovado", reason: "", customReason: "" })} data-testid="button-approve-candidate" disabled={!canEdit}
                 className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border disabled:opacity-40 ${opened.status === "aprovado" ? "bg-green-600 text-white border-green-600" : "bg-white text-green-700 border-green-200"}`}>
@@ -991,11 +1010,11 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                 )}
               </div>
 
-              {/* Teste na loja — checklist com nota por item (pedido 11/09).
+              {/* Teste de campo — checklist com nota por item (pedido 11/09).
                   Aparece sempre (não só quando status = teste_loja), pra dar
                   pra preencher antes de mudar o status oficialmente. */}
               <div className="rounded-xl border border-border p-3">
-                <p className="text-xs font-bold flex items-center gap-1.5 mb-2"><ListChecks className="w-3.5 h-3.5 text-amber-600" /> Teste na loja</p>
+                <p className="text-xs font-bold flex items-center gap-1.5 mb-2"><ListChecks className="w-3.5 h-3.5 text-amber-600" /> Teste de campo</p>
                 <div className="space-y-2">
                   {STORE_TEST_CHECKLIST.map((item) => (
                     <div key={item.id} className="flex items-center justify-between gap-2 flex-wrap">
