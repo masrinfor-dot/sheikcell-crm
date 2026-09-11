@@ -53,6 +53,27 @@ import TvBox from "./TvBox";
 
 type Tab = "dashboard" | "resultados" | "relatorios" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "vitrine" | "treinamentos" | "documentos" | "rh" | "meuponto" | "sorteios" | "robo" | "financeiro" | "pagamentos" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "quickreplies" | "aparencia" | "integracoes" | "precos" | "sistema" | "diretorio" | "suporte" | "tvbox" | "rotinas";
 
+// Mesma lista de valores do type Tab acima (manter em sincronia) — usada só
+// pra validar o valor salvo em sessionStorage antes de confiar nele (ver
+// TAB_STORAGE_KEY abaixo). Sem essa validação, um valor antigo/inválido
+// salvo antes de uma aba ser removida do sistema quebraria o app inteiro
+// ao carregar de novo.
+const ALL_TAB_IDS: Tab[] = ["dashboard", "resultados", "relatorios", "chat", "equipe", "tarefas", "financeiras", "avaliacao", "vitrine", "treinamentos", "documentos", "rh", "meuponto", "sorteios", "robo", "financeiro", "pagamentos", "crm", "history", "users", "sectors", "whatsapp", "quickreplies", "aparencia", "integracoes", "precos", "sistema", "diretorio", "suporte", "tvbox", "rotinas"];
+
+// Pedido do lojista (11/09): atualizar a página (F5) não pode voltar pra
+// tela inicial — mantém a última aba aberta. sessionStorage (não
+// localStorage) porque isso deve durar só enquanto a aba do navegador
+// estiver aberta, não pra sempre — reabrir o sistema outro dia começa do
+// Dashboard normalmente.
+const TAB_STORAGE_KEY = "sheikcell_admin_tab";
+function readStoredTab(): Tab {
+  try {
+    const saved = sessionStorage.getItem(TAB_STORAGE_KEY);
+    if (saved && (ALL_TAB_IDS as string[]).includes(saved)) return saved as Tab;
+  } catch { /* sessionStorage indisponível (ex.: modo privado) — ignora */ }
+  return "dashboard";
+}
+
 // Categorias colapsáveis do menu lateral — cada aba pertence a um único grupo.
 type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabIds: Tab[] };
 // Reorganização de grupos (produção + prévia nova) — Suporte não entra em
@@ -121,7 +142,10 @@ export default function AdminDashboard() {
   const [showChangePassword, setShowChangePassword] = useState(false);
   const [showMySessions, setShowMySessions] = useState(false);
   const { toast } = useToast();
-  const [tab, setTab] = useState<Tab>("dashboard");
+  const [tab, setTab] = useState<Tab>(readStoredTab);
+  useEffect(() => {
+    try { sessionStorage.setItem(TAB_STORAGE_KEY, tab); } catch { /* sessionStorage indisponível — ignora */ }
+  }, [tab]);
   const internalChatUnread = useInternalChatNotifier(user?.id, tab === "equipe");
 
   // Some/aparece o balão flutuante global (GlobalChatWidget) conforme a aba

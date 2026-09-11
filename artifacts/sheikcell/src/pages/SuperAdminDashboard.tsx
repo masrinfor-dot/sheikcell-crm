@@ -214,6 +214,19 @@ const TABS: { id: Tab; label: string; icon: typeof Building2 }[] = [
   { id: "auditoria", label: "Auditoria", icon: History },
 ];
 
+// Pedido do lojista (11/09): atualizar a página (F5) não pode voltar pra
+// tela inicial — mantém a última aba aberta. sessionStorage (não
+// localStorage) porque isso deve durar só enquanto a aba do navegador
+// estiver aberta, não pra sempre.
+const SUPERADMIN_TAB_STORAGE_KEY = "sheikcell_superadmin_tab";
+function readStoredSuperAdminTab(): Tab {
+  try {
+    const saved = sessionStorage.getItem(SUPERADMIN_TAB_STORAGE_KEY);
+    if (saved && TABS.some((t) => t.id === saved)) return saved as Tab;
+  } catch { /* sessionStorage indisponível (ex.: modo privado) — ignora */ }
+  return "visaogeral";
+}
+
 // Motivos fixos do "Entrar como" (mesmos do backend) — "Outro" libera um
 // campo de texto livre que vira o motivo final gravado no log.
 const IMPERSONATE_REASONS = ["Suporte", "Configuração", "Treinamento", "Outro"] as const;
@@ -231,7 +244,10 @@ const TENANT_STATUS_META: Record<TenantSummary["saasStatus"], { label: string; c
 export default function SuperAdminDashboard() {
   const { user, logout, setUser } = useAuth();
   const { toast } = useToast();
-  const [tab, setTab] = useState<Tab>("visaogeral");
+  const [tab, setTab] = useState<Tab>(readStoredSuperAdminTab);
+  useEffect(() => {
+    try { sessionStorage.setItem(SUPERADMIN_TAB_STORAGE_KEY, tab); } catch { /* sessionStorage indisponível — ignora */ }
+  }, [tab]);
 
   // Meu Cadastro: edição do próprio nome/e-mail (PATCH /auth/me — nunca um
   // id de outra conta) + troca de senha (reaproveita o mesmo modal usado no
