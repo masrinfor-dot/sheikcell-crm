@@ -91,7 +91,7 @@ const STATUS_REASON_OPTIONS: Record<Exclude<RhCandidate["status"], "novo">, stri
   teste_loja: ["Foi bem no teste de campo", "Precisa de mais um dia de teste", "Não performou bem no teste"],
   aprovado: ["Foi bem na entrevista", "Foi bem no teste de campo", "Perfil ideal para a vaga", "Referências confirmadas"],
   banco_talentos: ["Quadro cheio no momento", "Bom perfil, aguardando abrir vaga", "Vaga já foi preenchida por outro candidato"],
-  reprovado: ["Não compareceu à entrevista", "Não foi bem no teste de campo", "Falta de conta bancária", "Perfil não alinhado com a vaga", "Pretensão salarial incompatível", "Já contratado por outra vaga"],
+  reprovado: ["Não compareceu à entrevista", "Não foi bem no teste de campo", "Perfil não alinhado com a vaga", "Pretensão salarial incompatível", "Já contratado por outra vaga"],
   // Nunca aparece no seletor de motivo (contratado não passa pelo botão de
   // troca de status) — só existe pra satisfazer o Record exaustivo acima.
   contratado: [],
