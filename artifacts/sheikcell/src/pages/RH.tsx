@@ -13,6 +13,7 @@ import {
   Video, ChevronDown, ChevronUp, Save, Link2, UserSquare2, CalendarClock, Clock, Wallet, Pencil, Archive, PlayCircle,
   AlertTriangle, Image as ImageIcon, Smartphone, Printer, Star, Briefcase, Sparkles, MapPin,
   Upload, Download, FileText, FolderArchive, UserPlus, FileSignature, Eye, IdCard, RotateCcw, Palmtree,
+  ListChecks, Building2,
 } from "lucide-react";
 
 // Perfil comportamental (estilo DISC simplificado, 4 tipos definidos pelo
@@ -57,8 +58,13 @@ const PROFILE_META: Record<RhProfileType, {
 const STATUS_META: Record<RhCandidate["status"], { label: string; cls: string }> = {
   novo: { label: "Novo", cls: "bg-blue-50 text-blue-600 border-blue-100" },
   pre_aprovado: { label: "Pré-aprovado", cls: "bg-indigo-50 text-indigo-600 border-indigo-100" },
+  teste_loja: { label: "Teste na loja", cls: "bg-amber-50 text-amber-700 border-amber-100" },
   aprovado: { label: "Aprovado", cls: "bg-green-50 text-green-700 border-green-100" },
   reprovado: { label: "Reprovado", cls: "bg-red-50 text-red-600 border-red-100" },
+  // "Contratado" nunca é escolhido pelos botões abaixo — é setado sozinho
+  // quando a contratação do colaborador vinculado é finalizada (ver
+  // finalize-hiring/reopen-hiring em employeeHiring.ts).
+  contratado: { label: "Contratado", cls: "bg-emerald-50 text-emerald-700 border-emerald-100" },
 };
 
 // Motivos rápidos pra registrar junto da troca de status (pedido 11/09:
@@ -67,9 +73,31 @@ const STATUS_META: Record<RhCandidate["status"], { label: string; cls: string }>
 // no Chat) — nenhum motivo é obrigatório, só ajuda a não deixar solto.
 const STATUS_REASON_OPTIONS: Record<Exclude<RhCandidate["status"], "novo">, string[]> = {
   pre_aprovado: ["Foi bem na pré-entrevista", "Perfil alinhado com a vaga", "Aguardando segunda etapa/entrevista"],
-  aprovado: ["Foi bem na entrevista", "Perfil ideal para a vaga", "Referências confirmadas"],
-  reprovado: ["Não compareceu à entrevista", "Falta de conta bancária", "Perfil não alinhado com a vaga", "Pretensão salarial incompatível", "Já contratado por outra vaga"],
+  teste_loja: ["Foi bem no teste da loja", "Precisa de mais um dia de teste", "Não performou bem no teste"],
+  aprovado: ["Foi bem na entrevista", "Foi bem no teste na loja", "Perfil ideal para a vaga", "Referências confirmadas"],
+  reprovado: ["Não compareceu à entrevista", "Não foi bem no teste na loja", "Falta de conta bancária", "Perfil não alinhado com a vaga", "Pretensão salarial incompatível", "Já contratado por outra vaga"],
+  // Nunca aparece no seletor de motivo (contratado não passa pelo botão de
+  // troca de status) — só existe pra satisfazer o Record exaustivo acima.
+  contratado: [],
 };
+
+// Checklist do teste prático na loja (pedido 11/09: "criar teste na loja...
+// checklist do teste em campo com produtividade, adaptação, trabalho em
+// equipe, disposição, confirmação do perfil etc"). Cada item recebe uma
+// nota rápida (Bom/Regular/Fraco) — ver storeTestChecklist em RhCandidate.
+const STORE_TEST_CHECKLIST: { id: string; label: string }[] = [
+  { id: "produtividade", label: "Produtividade" },
+  { id: "adaptacao", label: "Adaptação ao dia a dia da loja" },
+  { id: "trabalho_equipe", label: "Trabalho em equipe" },
+  { id: "disposicao", label: "Disposição / proatividade" },
+  { id: "atendimento", label: "Atendimento ao cliente" },
+  { id: "confirmacao_perfil", label: "Confirmação do perfil (bateu com a entrevista)" },
+];
+const CHECKLIST_RATINGS: { value: "bom" | "regular" | "fraco"; label: string; cls: string; clsActive: string }[] = [
+  { value: "bom", label: "Bom", cls: "text-green-700 border-green-200", clsActive: "bg-green-600 text-white border-green-600" },
+  { value: "regular", label: "Regular", cls: "text-amber-700 border-amber-200", clsActive: "bg-amber-500 text-white border-amber-500" },
+  { value: "fraco", label: "Fraco", cls: "text-red-600 border-red-200", clsActive: "bg-red-600 text-white border-red-600" },
+];
 
 // Roteiro fixo da entrevista online (Google Meet) — pedido 11/09: "criar
 // roteiro de perguntas para entrevista virtual, confirmação de dados
@@ -311,6 +339,12 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
   // salvo manualmente (mesmo padrão de notesDraft/saveNotes acima).
   const [interviewDraft, setInterviewDraft] = useState<Record<string, string>>({});
   const [savingInterview, setSavingInterview] = useState(false);
+  // Checklist do teste na loja — rascunho local (nota por item + observação
+  // livre), carregado do candidato aberto e salvo manualmente (mesmo padrão
+  // de interviewDraft acima).
+  const [storeTestDraft, setStoreTestDraft] = useState<Record<string, string>>({});
+  const [storeTestNotesDraft, setStoreTestNotesDraft] = useState("");
+  const [savingStoreTest, setSavingStoreTest] = useState(false);
 
   // Cargos (item: processo seletivo personalizado por função). Sem nenhum
   // cargo cadastrado, o processo é o único de sempre (stages acima). Assim
@@ -449,6 +483,18 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
       setOpened((o) => (o?.id === opened.id ? { ...o, interviewNotes: result.interviewNotes } : o));
       toast({ title: "Anotações da entrevista salvas" });
     } catch { toast({ title: "Erro", variant: "destructive" }); } finally { setSavingInterview(false); }
+  };
+
+  const saveStoreTest = async () => {
+    if (!opened || savingStoreTest) return;
+    setSavingStoreTest(true);
+    try {
+      const cleaned = Object.fromEntries(Object.entries(storeTestDraft).filter(([, v]) => v));
+      const result = await api.rh.updateCandidate(opened.id, { storeTestChecklist: cleaned, storeTestNotes: storeTestNotesDraft });
+      setCandidates((prev) => prev.map((x) => (x.id === opened.id ? { ...x, storeTestChecklist: result.storeTestChecklist, storeTestNotes: result.storeTestNotes } : x)));
+      setOpened((o) => (o?.id === opened.id ? { ...o, storeTestChecklist: result.storeTestChecklist, storeTestNotes: result.storeTestNotes } : o));
+      toast({ title: "Teste na loja salvo" });
+    } catch { toast({ title: "Erro", variant: "destructive" }); } finally { setSavingStoreTest(false); }
   };
 
   // Imprime a entrevista: abre uma aba só com o conteúdo formatado (em vez de
@@ -669,7 +715,7 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                 const expanded = expandedHistory.has(c.id);
                 return (
                   <div key={c.id}>
-                    <button onClick={() => { setOpened(c); setNotesDraft(c.notes ?? ""); setInterviewDraft(c.interviewNotes ?? {}); setPendingStatusChange(null); }} data-testid={`candidate-${c.id}`}
+                    <button onClick={() => { setOpened(c); setNotesDraft(c.notes ?? ""); setInterviewDraft(c.interviewNotes ?? {}); setStoreTestDraft(c.storeTestChecklist ?? {}); setStoreTestNotesDraft(c.storeTestNotes ?? ""); setPendingStatusChange(null); }} data-testid={`candidate-${c.id}`}
                       className="shk-card p-4 w-full text-left flex items-center gap-3 hover:bg-secondary/30 transition">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
@@ -828,6 +874,10 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                 className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border disabled:opacity-40 ${opened.status === "pre_aprovado" ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-indigo-600 border-indigo-200"}`}>
                 <Star className="w-3.5 h-3.5" /> Pré-aprovar
               </button>
+              <button onClick={() => setPendingStatusChange({ status: "teste_loja", reason: "", customReason: "" })} data-testid="button-store-test-candidate" disabled={!canEdit}
+                className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border disabled:opacity-40 ${opened.status === "teste_loja" ? "bg-amber-500 text-white border-amber-500" : "bg-white text-amber-700 border-amber-200"}`}>
+                <Building2 className="w-3.5 h-3.5" /> Teste na loja
+              </button>
               <button onClick={() => setPendingStatusChange({ status: "aprovado", reason: "", customReason: "" })} data-testid="button-approve-candidate" disabled={!canEdit}
                 className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border disabled:opacity-40 ${opened.status === "aprovado" ? "bg-green-600 text-white border-green-600" : "bg-white text-green-700 border-green-200"}`}>
                 <CheckCircle className="w-3.5 h-3.5" /> Aprovar
@@ -840,10 +890,17 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                 className="flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border bg-white text-muted-foreground border-border hover:bg-secondary transition">
                 <Printer className="w-3.5 h-3.5" /> Imprimir
               </button>
-              {opened.status === "aprovado" && (
+              {/* "Iniciar contratação" já reúne documentos pessoais/contrato
+                  (fluxo existente, ver Contratacoes abaixo) — pedido 11/09
+                  ("contratado... so junta a que ja criamos") só precisava
+                  liberar o botão também depois do teste na loja, não a
+                  entrada. Uma vez contratado, o botão vira "Ver contratação"
+                  (mesma chamada — idempotente, devolve o colaborador já
+                  criado em vez de duplicar). */}
+              {(opened.status === "aprovado" || opened.status === "teste_loja" || opened.status === "contratado") && (
                 <button onClick={() => startHiring(opened)} disabled={!canEdit || startingHiring} data-testid="button-start-hiring"
                   className="flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700 transition disabled:opacity-50">
-                  <UserPlus className="w-3.5 h-3.5" /> {startingHiring ? "Abrindo..." : "Iniciar contratação"}
+                  <UserPlus className="w-3.5 h-3.5" /> {startingHiring ? "Abrindo..." : opened.status === "contratado" ? "Ver contratação" : "Iniciar contratação"}
                 </button>
               )}
               <button onClick={() => removeCandidate(opened)} disabled={!canEdit}
@@ -918,6 +975,39 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                   <button onClick={saveInterviewNotes} disabled={savingInterview} data-testid="button-save-interview"
                     className="mt-2 px-3 py-1.5 rounded-xl bg-primary text-white text-[11px] font-bold disabled:opacity-50">
                     {savingInterview ? "Salvando..." : "Salvar anotações da entrevista"}
+                  </button>
+                )}
+              </div>
+
+              {/* Teste na loja — checklist com nota por item (pedido 11/09).
+                  Aparece sempre (não só quando status = teste_loja), pra dar
+                  pra preencher antes de mudar o status oficialmente. */}
+              <div className="rounded-xl border border-border p-3">
+                <p className="text-xs font-bold flex items-center gap-1.5 mb-2"><ListChecks className="w-3.5 h-3.5 text-amber-600" /> Teste na loja</p>
+                <div className="space-y-2">
+                  {STORE_TEST_CHECKLIST.map((item) => (
+                    <div key={item.id} className="flex items-center justify-between gap-2 flex-wrap">
+                      <p className="text-[11px] text-muted-foreground flex-1 min-w-[140px]">{item.label}</p>
+                      <div className="flex gap-1">
+                        {CHECKLIST_RATINGS.map((r) => (
+                          <button key={r.value} type="button" disabled={!canEdit}
+                            onClick={() => setStoreTestDraft((prev) => ({ ...prev, [item.id]: prev[item.id] === r.value ? "" : r.value }))}
+                            data-testid={`button-storetest-${item.id}-${r.value}`}
+                            className={`text-[10px] px-2 py-1 rounded-full border font-semibold disabled:opacity-40 ${storeTestDraft[item.id] === r.value ? r.clsActive : `bg-white ${r.cls}`}`}>
+                            {r.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <textarea value={storeTestNotesDraft} onChange={(e) => setStoreTestNotesDraft(e.target.value)} disabled={!canEdit}
+                  rows={2} placeholder="Outras observações do teste..." data-testid="textarea-storetest-notes"
+                  className="w-full mt-2 px-2.5 py-1.5 rounded-lg border border-border text-xs resize-none disabled:opacity-60" />
+                {canEdit && (
+                  <button onClick={saveStoreTest} disabled={savingStoreTest} data-testid="button-save-storetest"
+                    className="mt-2 px-3 py-1.5 rounded-xl bg-primary text-white text-[11px] font-bold disabled:opacity-50">
+                    {savingStoreTest ? "Salvando..." : "Salvar teste na loja"}
                   </button>
                 )}
               </div>

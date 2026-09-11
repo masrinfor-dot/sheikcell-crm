@@ -546,6 +546,8 @@ router.get("/rh/candidates", requireModuleAccess("rh"), async (req, res): Promis
     answers: rhCandidatesTable.answers,
     notes: rhCandidatesTable.notes,
     interviewNotes: rhCandidatesTable.interviewNotes,
+    storeTestChecklist: rhCandidatesTable.storeTestChecklist,
+    storeTestNotes: rhCandidatesTable.storeTestNotes,
     stagesSnapshot: rhCandidatesTable.stagesSnapshot,
     hasVideo: rhCandidatesTable.videoMime,
     profileResult: rhCandidatesTable.profileResult,
@@ -577,12 +579,16 @@ router.patch("/rh/candidates/:id", requireModuleAccess("rh"), async (req, res): 
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const { status, notes, statusReason, interviewNotes } = (req.body ?? {}) as {
+  const { status, notes, statusReason, interviewNotes, storeTestChecklist, storeTestNotes } = (req.body ?? {}) as {
     status?: string; notes?: string; statusReason?: string | null; interviewNotes?: Record<string, string> | null;
+    storeTestChecklist?: Record<string, string> | null; storeTestNotes?: string | null;
   };
   const update: Record<string, unknown> = {};
   if (status !== undefined) {
-    if (!["novo", "pre_aprovado", "aprovado", "reprovado"].includes(status)) { res.status(400).json({ error: "Status inválido" }); return; }
+    // "contratado" não entra aqui de propósito: é setado só automaticamente
+    // (ver finalize-hiring/reopen-hiring em employeeHiring.ts), pra não
+    // divergir do hiringStatus real do colaborador vinculado.
+    if (!["novo", "pre_aprovado", "teste_loja", "aprovado", "reprovado"].includes(status)) { res.status(400).json({ error: "Status inválido" }); return; }
     update.status = status;
   }
   if (notes !== undefined) update.notes = typeof notes === "string" ? notes.trim().slice(0, 5000) || null : null;
@@ -600,12 +606,26 @@ router.patch("/rh/candidates/:id", requireModuleAccess("rh"), async (req, res): 
       update.interviewNotes = Object.keys(clean).length > 0 ? clean : null;
     }
   }
+  // Checklist do teste na loja — { [itemId]: "bom" | "regular" | "fraco" }.
+  if (storeTestChecklist !== undefined) {
+    if (storeTestChecklist === null) {
+      update.storeTestChecklist = null;
+    } else if (typeof storeTestChecklist === "object") {
+      const clean: Record<string, string> = {};
+      for (const [k, v] of Object.entries(storeTestChecklist)) {
+        if (typeof v === "string" && ["bom", "regular", "fraco"].includes(v)) clean[k.slice(0, 100)] = v;
+      }
+      update.storeTestChecklist = Object.keys(clean).length > 0 ? clean : null;
+    }
+  }
+  if (storeTestNotes !== undefined) update.storeTestNotes = typeof storeTestNotes === "string" ? storeTestNotes.trim().slice(0, 4000) || null : null;
   if (Object.keys(update).length === 0) { res.status(400).json({ error: "Nada para atualizar" }); return; }
   const [updated] = await db.update(rhCandidatesTable).set(update)
     .where(and(eq(rhCandidatesTable.id, id), eq(rhCandidatesTable.tenantId, tenantId)))
     .returning({
       id: rhCandidatesTable.id, status: rhCandidatesTable.status, notes: rhCandidatesTable.notes,
       statusReason: rhCandidatesTable.statusReason, interviewNotes: rhCandidatesTable.interviewNotes,
+      storeTestChecklist: rhCandidatesTable.storeTestChecklist, storeTestNotes: rhCandidatesTable.storeTestNotes,
     });
   if (!updated) { res.status(404).json({ error: "Candidato não encontrado" }); return; }
   res.json(updated);

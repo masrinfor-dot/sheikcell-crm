@@ -1186,7 +1186,7 @@ export type RhCandidate = {
   id: number; name: string; phone: string; email: string | null;
   city: string | null; neighborhood: string | null;
   cpf: string | null; positionId: number | null; positionName: string | null;
-  status: "novo" | "pre_aprovado" | "aprovado" | "reprovado";
+  status: "novo" | "pre_aprovado" | "teste_loja" | "aprovado" | "reprovado" | "contratado";
   statusReason: string | null;
   answers: Record<string, Record<string, string>>;
   stagesSnapshot: RhStage[] | null;
@@ -1194,6 +1194,9 @@ export type RhCandidate = {
   profileResult: RhProfileType | null;
   profileScores: Record<RhProfileType, number> | null;
   interviewNotes: Record<string, string> | null;
+  // Checklist do teste na loja — { [itemId]: "bom" | "regular" | "fraco" }.
+  storeTestChecklist: Record<string, "bom" | "regular" | "fraco"> | null;
+  storeTestNotes: string | null;
 };
 
 // ── RH: Departamento Pessoal ────────────────────────────────────────────────
@@ -2448,8 +2451,11 @@ export const api = {
       remove: (id: number) => req<{ ok: boolean }>(`/rh/positions/${id}`, { method: "DELETE" }),
     },
     candidates: () => req<RhCandidate[]>("/rh/candidates"),
-    updateCandidate: (id: number, data: { status?: string; notes?: string; statusReason?: string | null; interviewNotes?: Record<string, string> | null }) =>
-      req<Pick<RhCandidate, "id" | "status" | "notes" | "statusReason" | "interviewNotes">>(`/rh/candidates/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    updateCandidate: (id: number, data: {
+      status?: string; notes?: string; statusReason?: string | null; interviewNotes?: Record<string, string> | null;
+      storeTestChecklist?: Record<string, string> | null; storeTestNotes?: string | null;
+    }) =>
+      req<Pick<RhCandidate, "id" | "status" | "notes" | "statusReason" | "interviewNotes" | "storeTestChecklist" | "storeTestNotes">>(`/rh/candidates/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     removeCandidate: (id: number) => req<{ ok: boolean }>(`/rh/candidates/${id}`, { method: "DELETE" }),
   },
   rhDp: {

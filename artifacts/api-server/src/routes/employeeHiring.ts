@@ -117,6 +117,15 @@ router.post("/rh-dp/employees/:id/finalize-hiring", requireModuleAccess("rh"), a
   if (!existing) { res.status(404).json({ error: "Colaborador não encontrado" }); return; }
   const [updated] = await db.update(employeesTable).set({ hiringStatus: "ativo" })
     .where(and(eq(employeesTable.id, id), eq(employeesTable.tenantId, tenantId))).returning();
+  // Espelha no candidato de origem (pedido 11/09: "contratado... só junta
+  // com o que já criamos") — não cria nenhuma infra nova, só reflete no
+  // recrutamento que este colaborador terminou a contratação. Sem
+  // candidateId (colaborador cadastrado direto, sem processo seletivo),
+  // não há nada pra atualizar.
+  if (updated?.candidateId != null) {
+    await db.update(rhCandidatesTable).set({ status: "contratado" })
+      .where(and(eq(rhCandidatesTable.id, updated.candidateId), eq(rhCandidatesTable.tenantId, tenantId)));
+  }
   res.json(updated);
 });
 
@@ -130,6 +139,13 @@ router.post("/rh-dp/employees/:id/reopen-hiring", requireModuleAccess("rh"), asy
   if (!existing) { res.status(404).json({ error: "Colaborador não encontrado" }); return; }
   const [updated] = await db.update(employeesTable).set({ hiringStatus: "em_contratacao" })
     .where(and(eq(employeesTable.id, id), eq(employeesTable.tenantId, tenantId))).returning();
+  // Simétrico ao finalizar acima — volta o candidato pra "aprovado" (só se
+  // ele estava "contratado", pra não sobrescrever algum status manual
+  // diferente que o admin tenha setado nesse meio-tempo).
+  if (updated?.candidateId != null) {
+    await db.update(rhCandidatesTable).set({ status: "aprovado" })
+      .where(and(eq(rhCandidatesTable.id, updated.candidateId), eq(rhCandidatesTable.tenantId, tenantId), eq(rhCandidatesTable.status, "contratado")));
+  }
   res.json(updated);
 });
 
