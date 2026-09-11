@@ -61,6 +61,55 @@ const STATUS_META: Record<RhCandidate["status"], { label: string; cls: string }>
   reprovado: { label: "Reprovado", cls: "bg-red-50 text-red-600 border-red-100" },
 };
 
+// Motivos rápidos pra registrar junto da troca de status (pedido 11/09:
+// "criar motivo para pre aprovação, aprovado e reprovado"). "Outro" sempre
+// último, abre campo de texto livre (mesmo padrão de finalizeReasonOptions
+// no Chat) — nenhum motivo é obrigatório, só ajuda a não deixar solto.
+const STATUS_REASON_OPTIONS: Record<Exclude<RhCandidate["status"], "novo">, string[]> = {
+  pre_aprovado: ["Foi bem na pré-entrevista", "Perfil alinhado com a vaga", "Aguardando segunda etapa/entrevista"],
+  aprovado: ["Foi bem na entrevista", "Perfil ideal para a vaga", "Referências confirmadas"],
+  reprovado: ["Não compareceu à entrevista", "Falta de conta bancária", "Perfil não alinhado com a vaga", "Pretensão salarial incompatível", "Já contratado por outra vaga"],
+};
+
+// Roteiro fixo da entrevista online (Google Meet) — pedido 11/09: "criar
+// roteiro de perguntas para entrevista virtual, confirmação de dados
+// pessoais, perguntas sobre perfil, experiência e motivo de querer
+// trabalhar". Cada pergunta tem uma anotação (texto livre) preenchida em
+// tempo real durante a ligação — ver interviewNotes em RhCandidate.
+const INTERVIEW_SCRIPT: { category: string; questions: { id: string; label: string }[] }[] = [
+  {
+    category: "Confirmação de dados pessoais",
+    questions: [
+      { id: "confirma_nome", label: "Confirme seu nome completo e telefone." },
+      { id: "confirma_endereco", label: "Você mora no bairro/cidade que informou na candidatura?" },
+      { id: "confirma_disponibilidade", label: "Tem disponibilidade para o horário/escala da vaga?" },
+    ],
+  },
+  {
+    category: "Perfil",
+    questions: [
+      { id: "perfil_descricao", label: "Como você se descreveria em 3 palavras?" },
+      { id: "perfil_pressao", label: "Como você lida com pressão ou prazo apertado?" },
+      { id: "perfil_equipe", label: "Prefere trabalhar em equipe ou individualmente? Por quê?" },
+    ],
+  },
+  {
+    category: "Experiência",
+    questions: [
+      { id: "exp_recente", label: "Fale sobre sua experiência profissional mais recente." },
+      { id: "exp_vendas", label: "Já trabalhou com vendas/atendimento ao cliente? Como foi?" },
+      { id: "exp_desafio", label: "Conte uma situação difícil no trabalho e como resolveu." },
+    ],
+  },
+  {
+    category: "Motivo de querer trabalhar aqui",
+    questions: [
+      { id: "motivo_vaga", label: "Por que você quer trabalhar nessa vaga/empresa?" },
+      { id: "motivo_atrai", label: "O que mais te atrai nessa oportunidade?" },
+    ],
+  },
+];
+
 const CONTRACT_LABELS: Record<string, string> = { clt: "CLT", pj: "PJ", estagio: "Estágio" };
 const LEAVE_LABELS: Record<string, string> = {
   ferias: "Férias", atestado: "Atestado", falta_justificada: "Falta justificada",
@@ -253,6 +302,15 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
   const [positionFilter, setPositionFilter] = useState<string>("todas");
   const [notesDraft, setNotesDraft] = useState("");
   const [expandedHistory, setExpandedHistory] = useState<Set<number>>(new Set());
+  // Motivo da troca de status (pré-aprovar/aprovar/reprovar) — abre um
+  // seletor de motivos rápidos + "Outro" antes de confirmar a troca de fato.
+  const [pendingStatusChange, setPendingStatusChange] = useState<{ status: Exclude<RhCandidate["status"], "novo">; reason: string; customReason: string } | null>(null);
+  const [savingStatus, setSavingStatus] = useState(false);
+  // Anotações da entrevista online (Meet) — rascunho local por pergunta do
+  // roteiro fixo (ver INTERVIEW_SCRIPT), carregado do candidato aberto e
+  // salvo manualmente (mesmo padrão de notesDraft/saveNotes acima).
+  const [interviewDraft, setInterviewDraft] = useState<Record<string, string>>({});
+  const [savingInterview, setSavingInterview] = useState(false);
 
   // Cargos (item: processo seletivo personalizado por função). Sem nenhum
   // cargo cadastrado, o processo é o único de sempre (stages acima). Assim
@@ -360,12 +418,37 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
     } finally { setSaving(false); }
   };
 
-  const setStatus = async (c: RhCandidate, status: RhCandidate["status"]) => {
+  const setStatus = async (c: RhCandidate, status: RhCandidate["status"], reason?: string | null) => {
+    setSavingStatus(true);
     try {
-      await api.rh.updateCandidate(c.id, { status });
-      setCandidates((prev) => prev.map((x) => (x.id === c.id ? { ...x, status } : x)));
-      setOpened((o) => (o?.id === c.id ? { ...o, status } : o));
-    } catch { toast({ title: "Erro", variant: "destructive" }); }
+      const patch: { status: RhCandidate["status"]; statusReason?: string | null } = { status };
+      if (reason !== undefined) patch.statusReason = reason;
+      await api.rh.updateCandidate(c.id, patch);
+      setCandidates((prev) => prev.map((x) => (x.id === c.id ? { ...x, status, ...(reason !== undefined ? { statusReason: reason } : {}) } : x)));
+      setOpened((o) => (o?.id === c.id ? { ...o, status, ...(reason !== undefined ? { statusReason: reason } : {}) } : o));
+      setPendingStatusChange(null);
+    } catch { toast({ title: "Erro", variant: "destructive" }); } finally { setSavingStatus(false); }
+  };
+
+  // Confirma a troca de status pendente com o motivo escolhido (chip ou
+  // "Outro" com texto livre). Motivo em branco = troca sem motivo mesmo
+  // (não é obrigatório, só ajuda a não deixar solto).
+  const confirmStatusChange = () => {
+    if (!opened || !pendingStatusChange) return;
+    const reason = pendingStatusChange.reason === "outro" ? pendingStatusChange.customReason.trim() : pendingStatusChange.reason;
+    setStatus(opened, pendingStatusChange.status, reason || null);
+  };
+
+  const saveInterviewNotes = async () => {
+    if (!opened || savingInterview) return;
+    setSavingInterview(true);
+    try {
+      const cleaned = Object.fromEntries(Object.entries(interviewDraft).filter(([, v]) => v.trim()));
+      const result = await api.rh.updateCandidate(opened.id, { interviewNotes: cleaned });
+      setCandidates((prev) => prev.map((x) => (x.id === opened.id ? { ...x, interviewNotes: result.interviewNotes } : x)));
+      setOpened((o) => (o?.id === opened.id ? { ...o, interviewNotes: result.interviewNotes } : o));
+      toast({ title: "Anotações da entrevista salvas" });
+    } catch { toast({ title: "Erro", variant: "destructive" }); } finally { setSavingInterview(false); }
   };
 
   // Imprime a entrevista: abre uma aba só com o conteúdo formatado (em vez de
@@ -586,7 +669,7 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                 const expanded = expandedHistory.has(c.id);
                 return (
                   <div key={c.id}>
-                    <button onClick={() => { setOpened(c); setNotesDraft(c.notes ?? ""); }} data-testid={`candidate-${c.id}`}
+                    <button onClick={() => { setOpened(c); setNotesDraft(c.notes ?? ""); setInterviewDraft(c.interviewNotes ?? {}); setPendingStatusChange(null); }} data-testid={`candidate-${c.id}`}
                       className="shk-card p-4 w-full text-left flex items-center gap-3 hover:bg-secondary/30 transition">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
@@ -712,7 +795,7 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
           <div className="shk-card w-full max-w-lg p-6 my-8 bg-white">
             <div className="flex items-center justify-between mb-1">
               <h3 className="font-bold">{opened.name}</h3>
-              <button onClick={() => setOpened(null)}><X className="w-5 h-5 text-muted-foreground" /></button>
+              <button onClick={() => { setOpened(null); setPendingStatusChange(null); }}><X className="w-5 h-5 text-muted-foreground" /></button>
             </div>
             <div className="mb-3">
               <p className="text-xs text-muted-foreground">
@@ -740,16 +823,16 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
               </div>
             )}
 
-            <div className="flex gap-1.5 mb-4 flex-wrap">
-              <button onClick={() => setStatus(opened, "pre_aprovado")} data-testid="button-preapprove-candidate" disabled={!canEdit}
+            <div className="flex gap-1.5 mb-1 flex-wrap">
+              <button onClick={() => setPendingStatusChange({ status: "pre_aprovado", reason: "", customReason: "" })} data-testid="button-preapprove-candidate" disabled={!canEdit}
                 className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border disabled:opacity-40 ${opened.status === "pre_aprovado" ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-indigo-600 border-indigo-200"}`}>
                 <Star className="w-3.5 h-3.5" /> Pré-aprovar
               </button>
-              <button onClick={() => setStatus(opened, "aprovado")} data-testid="button-approve-candidate" disabled={!canEdit}
+              <button onClick={() => setPendingStatusChange({ status: "aprovado", reason: "", customReason: "" })} data-testid="button-approve-candidate" disabled={!canEdit}
                 className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border disabled:opacity-40 ${opened.status === "aprovado" ? "bg-green-600 text-white border-green-600" : "bg-white text-green-700 border-green-200"}`}>
                 <CheckCircle className="w-3.5 h-3.5" /> Aprovar
               </button>
-              <button onClick={() => setStatus(opened, "reprovado")} disabled={!canEdit}
+              <button onClick={() => setPendingStatusChange({ status: "reprovado", reason: "", customReason: "" })} disabled={!canEdit}
                 className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border disabled:opacity-40 ${opened.status === "reprovado" ? "bg-red-600 text-white border-red-600" : "bg-white text-red-600 border-red-200"}`}>
                 <XCircle className="w-3.5 h-3.5" /> Reprovar
               </button>
@@ -766,8 +849,79 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
               <button onClick={() => removeCandidate(opened)} disabled={!canEdit}
                 className="ml-auto p-1.5 rounded-lg hover:bg-red-50 text-red-400 disabled:opacity-40"><Trash2 className="w-4 h-4" /></button>
             </div>
+            {opened.statusReason && !pendingStatusChange && (
+              <p className="text-[11px] text-muted-foreground mb-3">Motivo: <span className="font-medium">{opened.statusReason}</span></p>
+            )}
+
+            {/* Motivo da troca de status — some sozinho depois de confirmar
+                (setPendingStatusChange(null) dentro de setStatus/confirmStatusChange). */}
+            {pendingStatusChange && (
+              <div className="rounded-xl border border-border bg-secondary/30 p-3 mb-4 space-y-2">
+                <p className="text-xs font-bold">Motivo pra {STATUS_META[pendingStatusChange.status].label.toLowerCase()} (opcional)</p>
+                <div className="flex gap-1.5 flex-wrap">
+                  {STATUS_REASON_OPTIONS[pendingStatusChange.status].map((r) => (
+                    <button key={r} onClick={() => setPendingStatusChange((p) => (p ? { ...p, reason: r } : p))}
+                      className={`text-[11px] px-2.5 py-1 rounded-full border font-medium ${pendingStatusChange.reason === r ? "bg-primary text-white border-primary" : "bg-white text-foreground border-border"}`}>
+                      {r}
+                    </button>
+                  ))}
+                  <button onClick={() => setPendingStatusChange((p) => (p ? { ...p, reason: "outro" } : p))}
+                    className={`text-[11px] px-2.5 py-1 rounded-full border font-medium ${pendingStatusChange.reason === "outro" ? "bg-primary text-white border-primary" : "bg-white text-foreground border-border"}`}>
+                    Outro
+                  </button>
+                </div>
+                {pendingStatusChange.reason === "outro" && (
+                  <input value={pendingStatusChange.customReason} onChange={(e) => setPendingStatusChange((p) => (p ? { ...p, customReason: e.target.value } : p))}
+                    placeholder="Descreva o motivo..." maxLength={300}
+                    className="w-full px-3 py-1.5 rounded-lg border border-border text-xs" />
+                )}
+                <div className="flex gap-1.5 justify-end">
+                  <button onClick={() => setPendingStatusChange(null)} className="text-[11px] px-3 py-1.5 rounded-lg text-muted-foreground font-semibold">Cancelar</button>
+                  <button onClick={confirmStatusChange} disabled={savingStatus} data-testid="button-confirm-status-reason"
+                    className="text-[11px] px-3 py-1.5 rounded-lg bg-primary text-white font-bold disabled:opacity-50">
+                    {savingStatus ? "Salvando..." : "Confirmar"}
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div className="space-y-4 max-h-[50vh] overflow-y-auto pr-1">
+              {/* Entrevista online (Google Meet) — roteiro fixo com anotação
+                  por pergunta, preenchida em tempo real durante a ligação. */}
+              <div className="rounded-xl border border-border p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-xs font-bold flex items-center gap-1.5"><Video className="w-3.5 h-3.5 text-primary" /> Entrevista online</p>
+                  <a href="https://meet.google.com/new" target="_blank" rel="noopener noreferrer" data-testid="button-open-meet"
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold border bg-white text-primary border-primary/30 hover:bg-primary/5 transition">
+                    <Video className="w-3 h-3" /> Abrir Google Meet
+                  </a>
+                </div>
+                <div className="space-y-3">
+                  {INTERVIEW_SCRIPT.map((section) => (
+                    <div key={section.category}>
+                      <p className="text-[11px] font-bold text-muted-foreground mb-1">{section.category}</p>
+                      <div className="space-y-1.5">
+                        {section.questions.map((q) => (
+                          <div key={q.id}>
+                            <p className="text-[11px] text-muted-foreground mb-0.5">{q.label}</p>
+                            <textarea value={interviewDraft[q.id] ?? ""} disabled={!canEdit}
+                              onChange={(e) => setInterviewDraft((prev) => ({ ...prev, [q.id]: e.target.value }))}
+                              rows={1} placeholder="Anotação da resposta..." data-testid={`textarea-interview-${q.id}`}
+                              className="w-full px-2.5 py-1.5 rounded-lg border border-border text-xs resize-none disabled:opacity-60" />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {canEdit && (
+                  <button onClick={saveInterviewNotes} disabled={savingInterview} data-testid="button-save-interview"
+                    className="mt-2 px-3 py-1.5 rounded-xl bg-primary text-white text-[11px] font-bold disabled:opacity-50">
+                    {savingInterview ? "Salvando..." : "Salvar anotações da entrevista"}
+                  </button>
+                )}
+              </div>
+
               {(opened.stagesSnapshot ?? stages).map((s) => {
                 const ans = opened.answers?.[s.id];
                 if (s.type === "video") {

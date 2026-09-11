@@ -57,8 +57,18 @@ export const rhCandidatesTable = pgTable("rh_candidates", {
   positionId: integer("position_id"),
   positionName: text("position_name"),
   status: text("status").notNull().default("novo"), // novo | pre_aprovado | aprovado | reprovado
+  // Motivo do status atual (ex: "Foi bem na entrevista", "Falta de conta
+  // bancária") — escolhido de uma lista pré-definida por status (ver
+  // STATUS_REASON_OPTIONS em RH.tsx) ou texto livre ("Outro"). null =
+  // mudança de status sem motivo registrado (ex: candidaturas antigas).
+  statusReason: text("status_reason"),
   // { [stageId]: { [questionId]: string } }
   answers: jsonb("answers").notNull(),
+  // Anotações da entrevista online (Google Meet) feita com o candidato —
+  // { [questionId]: string }, preenchido em tempo real durante a ligação a
+  // partir do roteiro fixo (INTERVIEW_SCRIPT em RH.tsx). null = entrevista
+  // ainda não realizada/anotada.
+  interviewNotes: jsonb("interview_notes"),
   // Cópia das etapas no momento da candidatura — assim editar o processo
   // depois não bagunça a leitura das respostas antigas.
   stagesSnapshot: jsonb("stages_snapshot"),

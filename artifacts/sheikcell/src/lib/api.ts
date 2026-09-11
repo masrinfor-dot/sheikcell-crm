@@ -1187,11 +1187,13 @@ export type RhCandidate = {
   city: string | null; neighborhood: string | null;
   cpf: string | null; positionId: number | null; positionName: string | null;
   status: "novo" | "pre_aprovado" | "aprovado" | "reprovado";
+  statusReason: string | null;
   answers: Record<string, Record<string, string>>;
   stagesSnapshot: RhStage[] | null;
   notes: string | null; hasVideo: boolean; createdAt: string;
   profileResult: RhProfileType | null;
   profileScores: Record<RhProfileType, number> | null;
+  interviewNotes: Record<string, string> | null;
 };
 
 // ── RH: Departamento Pessoal ────────────────────────────────────────────────
@@ -2446,8 +2448,8 @@ export const api = {
       remove: (id: number) => req<{ ok: boolean }>(`/rh/positions/${id}`, { method: "DELETE" }),
     },
     candidates: () => req<RhCandidate[]>("/rh/candidates"),
-    updateCandidate: (id: number, data: { status?: string; notes?: string }) =>
-      req<Pick<RhCandidate, "id" | "status" | "notes">>(`/rh/candidates/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    updateCandidate: (id: number, data: { status?: string; notes?: string; statusReason?: string | null; interviewNotes?: Record<string, string> | null }) =>
+      req<Pick<RhCandidate, "id" | "status" | "notes" | "statusReason" | "interviewNotes">>(`/rh/candidates/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     removeCandidate: (id: number) => req<{ ok: boolean }>(`/rh/candidates/${id}`, { method: "DELETE" }),
   },
   rhDp: {

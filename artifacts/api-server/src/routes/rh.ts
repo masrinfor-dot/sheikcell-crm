@@ -542,8 +542,10 @@ router.get("/rh/candidates", requireModuleAccess("rh"), async (req, res): Promis
     positionId: rhCandidatesTable.positionId,
     positionName: rhCandidatesTable.positionName,
     status: rhCandidatesTable.status,
+    statusReason: rhCandidatesTable.statusReason,
     answers: rhCandidatesTable.answers,
     notes: rhCandidatesTable.notes,
+    interviewNotes: rhCandidatesTable.interviewNotes,
     stagesSnapshot: rhCandidatesTable.stagesSnapshot,
     hasVideo: rhCandidatesTable.videoMime,
     profileResult: rhCandidatesTable.profileResult,
@@ -575,17 +577,36 @@ router.patch("/rh/candidates/:id", requireModuleAccess("rh"), async (req, res): 
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const { status, notes } = (req.body ?? {}) as { status?: string; notes?: string };
+  const { status, notes, statusReason, interviewNotes } = (req.body ?? {}) as {
+    status?: string; notes?: string; statusReason?: string | null; interviewNotes?: Record<string, string> | null;
+  };
   const update: Record<string, unknown> = {};
   if (status !== undefined) {
     if (!["novo", "pre_aprovado", "aprovado", "reprovado"].includes(status)) { res.status(400).json({ error: "Status inválido" }); return; }
     update.status = status;
   }
   if (notes !== undefined) update.notes = typeof notes === "string" ? notes.trim().slice(0, 5000) || null : null;
+  // statusReason só é aceito junto com uma troca de status (ou explicitamente
+  // limpo com null) — não faz sentido setar sozinho sem status junto.
+  if (statusReason !== undefined) update.statusReason = typeof statusReason === "string" ? statusReason.trim().slice(0, 300) || null : null;
+  if (interviewNotes !== undefined) {
+    if (interviewNotes === null) {
+      update.interviewNotes = null;
+    } else if (typeof interviewNotes === "object") {
+      const clean: Record<string, string> = {};
+      for (const [k, v] of Object.entries(interviewNotes)) {
+        if (typeof v === "string" && v.trim()) clean[k.slice(0, 100)] = v.trim().slice(0, 4000);
+      }
+      update.interviewNotes = Object.keys(clean).length > 0 ? clean : null;
+    }
+  }
   if (Object.keys(update).length === 0) { res.status(400).json({ error: "Nada para atualizar" }); return; }
   const [updated] = await db.update(rhCandidatesTable).set(update)
     .where(and(eq(rhCandidatesTable.id, id), eq(rhCandidatesTable.tenantId, tenantId)))
-    .returning({ id: rhCandidatesTable.id, status: rhCandidatesTable.status, notes: rhCandidatesTable.notes });
+    .returning({
+      id: rhCandidatesTable.id, status: rhCandidatesTable.status, notes: rhCandidatesTable.notes,
+      statusReason: rhCandidatesTable.statusReason, interviewNotes: rhCandidatesTable.interviewNotes,
+    });
   if (!updated) { res.status(404).json({ error: "Candidato não encontrado" }); return; }
   res.json(updated);
 });
