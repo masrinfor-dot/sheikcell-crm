@@ -177,8 +177,16 @@ router.get("/admin/dashboard-attention", requireAdminOrSupervisor, async (req, r
     .orderBy(asc(tasksTable.dueDate))
     .limit(5);
 
+  // "Tempo Médio" do card do dashboard: usa MEDIANA (percentile_cont 0.5), não
+  // média aritmética. serviceTimeSeconds conta desde que o vendedor assumiu a
+  // conversa até o encerramento — inclui qualquer tempo parado esperando o
+  // cliente responder (às vezes horas ou dias). Poucas conversas assim,
+  // encerradas tarde, bastavam pra inflar a MÉDIA pro dia inteiro (ex.: uma
+  // conversa de 2 dias parada fazia o "tempo médio" mostrar 851min, quando a
+  // maioria dos atendimentos reais durava poucos minutos). A mediana ignora
+  // esses poucos casos extremos e reflete o tempo típico de verdade.
   const [avgRow] = await db
-    .select({ avgSeconds: sql<number | null>`avg(${attendanceLogsTable.serviceTimeSeconds})::int` })
+    .select({ avgSeconds: sql<number | null>`percentile_cont(0.5) within group (order by ${attendanceLogsTable.serviceTimeSeconds})::int` })
     .from(attendanceLogsTable)
     .where(and(
       eq(attendanceLogsTable.tenantId, tenantId),
