@@ -8,7 +8,7 @@ import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/shared
 const INTERNAL_CHAT_EVENTS_URL = "/api/internal-chat/events";
 import {
   Users, Send, Plus, X, Search, MessagesSquare, ChevronLeft, SquareKanban, ClipboardPlus, Trash2, Pencil,
-  Paperclip, Mic, Square, Reply, Forward, FileText, Volume2, VolumeX, Bell, BellOff, Loader2, SpellCheck, RefreshCw, Pin, PinOff,
+  Paperclip, Mic, Square, Reply, Forward, FileText, Volume2, VolumeX, Bell, BellOff, Loader2, RefreshCw, Pin, PinOff,
   FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Image, Check, Ban,
 } from "lucide-react";
 import TaskBoard from "./TaskBoard";
@@ -269,7 +269,6 @@ export default function InternalChat({ docked = false, onActiveConversationChang
   // temporário ao pular para a mensagem original clicando na citação.
   const [replyTarget, setReplyTarget] = useState<InternalMessage | null>(null);
   const [highlightedMsgId, setHighlightedMsgId] = useState<number | null>(null);
-  const [correcting, setCorrecting] = useState(false);
 
   const activeIdRef = useRef<number | null>(null);
   activeIdRef.current = activeId;
@@ -585,6 +584,26 @@ export default function InternalChat({ docked = false, onActiveConversationChang
     };
   }, [user?.id, loadConversations, reconcileAfterReconnect]);
 
+  // Resync ao voltar pra tela (pedido 11/09: "a digitação voltou ficar
+  // atrasada, dificulta acompanhar pelo celular"). No celular, o navegador
+  // suspende/atrasa a conexão SSE assim que o app vai pra segundo plano
+  // (troca de app, tela apagada) — o servidor só reconcilia via o evento
+  // "internal_reconnect" acima, que depende da stream realmente cair e
+  // reconectar, e isso pode demorar bem mais no celular do que seria de
+  // esperar. Reaproveitando reconcileAfterReconnect direto ao voltar a
+  // ficar visível, sem esperar a stream se resolver sozinha.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void reconcileAfterReconnect();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, [reconcileAfterReconnect]);
+
   const openNew = async () => {
     setShowNew(true);
     // Cliente pediu (04/09/2026): só grupos daqui pra frente — conversa 1:1
@@ -716,21 +735,6 @@ export default function InternalChat({ docked = false, onActiveConversationChang
     }
   };
 
-  const handleCorrectText = async () => {
-    const text = draft.trim();
-    if (!text || correcting || sending) return;
-    setCorrecting(true);
-    try {
-      const { corrected } = await api.chat.correctText(text);
-      // Só aplica se o usuário não editou o texto enquanto a IA respondia.
-      setDraft((prev) => (prev.trim() === text ? corrected : prev));
-      textareaRef.current?.focus();
-      if (corrected === text) toast({ title: "Nenhum erro encontrado" });
-      else toast({ title: "Texto corrigido — revise antes de enviar" });
-    } catch (err: unknown) {
-      toast({ title: "Correção indisponível", description: err instanceof Error ? err.message : "Erro ao corrigir texto", variant: "destructive" });
-    } finally { setCorrecting(false); }
-  };
 
   const handleSend = async () => {
     const content = draft.trim();
@@ -1590,21 +1594,6 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                     data-testid="input-internal-message"
                     className="flex-1 resize-none rounded-lg border px-3 py-2 text-sm max-h-32 overflow-y-auto focus:outline-none focus:ring-2 focus:ring-primary/40"
                   />
-                )}
-                {!pendingAttachment && !recording && can(user, "usar_ia") && (
-                  <button
-                    type="button"
-                    onClick={handleCorrectText}
-                    disabled={!draft.trim() || correcting || sending}
-                    title="Corrigir ortografia com IA"
-                    data-testid="button-correct-internal-text"
-                    className="shrink-0 h-10 px-3 rounded-lg flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-100 hover:bg-emerald-200 transition disabled:opacity-40"
-                  >
-                    {correcting
-                      ? <RefreshCw className="w-4 h-4 animate-spin" />
-                      : <SpellCheck className="w-4 h-4" />}
-                    <span className="hidden sm:inline">Corrigir</span>
-                  </button>
                 )}
                 <input
                   ref={fileInputRef}

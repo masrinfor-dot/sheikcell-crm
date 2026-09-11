@@ -1711,6 +1711,29 @@ export default function ChatCenter({
     msgsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // Resync ao voltar pra tela (pedido 11/09: "a digitação voltou ficar
+  // atrasada, dificulta acompanhar pelo celular"). No celular, o navegador
+  // suspende/atrasa a conexão SSE assim que o app vai pra segundo plano
+  // (troca de app, tela apagada) — o heartbeat do servidor eventualmente
+  // percebe e reconecta sozinho, mas isso pode demorar bem mais no celular
+  // do que no computador, dando a impressão de mensagem "atrasada" até
+  // reabrir. Buscando de novo assim que a aba/app volta a ficar visível,
+  // a lista e a conversa aberta já chegam atualizadas na hora, sem esperar
+  // a reconexão da stream se resolver sozinha.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      void fetchConvs();
+      if (activeIdRef.current != null) void fetchMsgs(activeIdRef.current);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, [fetchConvs, fetchMsgs]);
+
   // ── SSE real-time ──
   useEffect(() => {
     const es = acquireSharedEventSource(CHAT_EVENTS_URL);

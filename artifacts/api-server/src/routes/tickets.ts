@@ -139,7 +139,6 @@ router.post("/tickets/:id/messages", requireAuth, async (req, res): Promise<void
 
 // ── Serve anexo (imagem/vídeo/pdf) do chamado ──────────────────────────────
 router.get("/tickets/media/:filename", requireAuth, async (req: Request, res: Response): Promise<void> => {
-  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const filename = path.basename(req.params.filename as string);
   const filepath = path.join(MEDIA_DIR, filename);
   if (!existsSync(filepath)) { res.status(404).json({ error: "Arquivo não encontrado" }); return; }
@@ -148,6 +147,19 @@ router.get("/tickets/media/:filename", requireAuth, async (req: Request, res: Re
   const [owningMsg] = await db.select({ ticketId: saasTicketMessagesTable.ticketId })
     .from(saasTicketMessagesTable).where(eq(saasTicketMessagesTable.mediaUrl, mediaUrl)).limit(1);
   if (!owningMsg) { res.status(403).json({ error: "Acesso negado" }); return; }
+
+  // Superadmin faz a triagem de chamados de QUALQUER loja (cross-tenant) —
+  // sem este atalho, requireTenant logo abaixo sempre barrava (sessão de
+  // superadmin não tem tenantId: "Sessão sem loja"), e a foto/anexo do
+  // chamado nunca abria pra quem estava atendendo (bug reportado 11/09:
+  // "foto não abrem no suporte"). Loja dona do chamado já foi confirmada
+  // acima (owningMsg existe); aqui só falta decidir QUEM pode ver.
+  if (req.session.userRole === "superadmin") {
+    res.sendFile(filepath);
+    return;
+  }
+
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const ticket = await loadOwnTicket(owningMsg.ticketId, tenantId);
   if (!ticket) { res.status(403).json({ error: "Acesso negado" }); return; }
 
