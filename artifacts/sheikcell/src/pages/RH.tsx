@@ -678,7 +678,7 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
       {view === "candidatos" ? (
         <>
           <div className="flex gap-1.5 flex-wrap">
-            {(["todos", "novo", "pre_aprovado", "aprovado", "reprovado"] as const).map((f) => (
+            {(["todos", "novo", "pre_aprovado", "entrevista_online", "entrevista_presencial", "teste_loja", "aprovado", "banco_talentos", "reprovado", "contratado"] as const).map((f) => (
               <button key={f} onClick={() => setFilter(f)}
                 className={`px-3 py-1.5 rounded-full text-xs font-semibold border capitalize ${filter === f ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
                 {f === "todos" ? "Todos" : STATUS_META[f].label}
