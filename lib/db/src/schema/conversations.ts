@@ -40,6 +40,11 @@ export const conversationsTable = pgTable("conversations", {
   assigneeId: integer("assignee_id").references(() => usersTable.id),
   status: text("status").notNull().default("open"), // open | pending | resolved | archived
   labels: text("labels"), // comma-separated
+  // Prioridade manual do atendimento (pedido 11/09: diferenciar urgente / que
+  // precisa de retorno / que pode aguardar, pra organizar a fila e não
+  // perder atendimento novo ou prioritário no meio de conversas antigas).
+  // Null = sem prioridade definida (padrão, não afeta a ordenação).
+  priority: text("priority"), // urgente | retorno | pode_esperar | null
   unreadCount: integer("unread_count").notNull().default(0),
   lastMessage: text("last_message"),
   // "inbound" = cliente falou por último (não respondida); "outbound" = já respondida.

@@ -1537,6 +1537,9 @@ export type Conversation = {
   participants: { id: number; name: string }[];
   crmProfile?: string | null;
   pinned?: boolean;
+  // Prioridade manual do atendimento (pedido 11/09): "urgente" | "retorno" |
+  // "pode_esperar", ou null/undefined quando não definida (padrão).
+  priority?: string | null;
 };
 
 export type ScheduledMessage = {
@@ -1996,7 +1999,7 @@ export const api = {
         reader.readAsDataURL(file);
       });
     },
-    updateConversation: (id: number, data: Partial<{ status: string; labels: string; sectorId: number; assigneeId: number; name: string; isArchived: boolean; resolutionReason: string | null; hadSale: boolean; saleAmount: number; saleDescription: string }>) =>
+    updateConversation: (id: number, data: Partial<{ status: string; labels: string; sectorId: number; assigneeId: number; name: string; isArchived: boolean; resolutionReason: string | null; hadSale: boolean; saleAmount: number; saleDescription: string; priority: string | null }>) =>
       req<Conversation>(`/chat/conversations/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     deleteConversation: (id: number) =>
       req<{ ok: boolean }>(`/chat/conversations/${id}`, { method: "DELETE" }),

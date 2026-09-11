@@ -6,7 +6,7 @@ import { useActivityGuard } from "@/lib/activityGuard";
 import { useToast } from "@/hooks/use-toast";
 import { useClickOutside } from "@/hooks/useClickOutside";
 import {
-  Search, Plus, Send, RefreshCw, X, ChevronDown, SpellCheck,
+  Search, Plus, Send, RefreshCw, X, ChevronDown,
   MessageCircle, CheckCheck, AlertCircle, Tag, Filter,
   Smartphone, Instagram, UserCircle2, Circle,
   ArrowRightLeft, FileText, Volume2, Image, Video, Mic, Users, Paperclip, IdCard,
@@ -14,7 +14,7 @@ import {
   Pin, PinOff, Reply, StickyNote, Star, StarOff, ChevronLeft, ChevronRight,
   MapPin, ShoppingBag, CreditCard, BarChart3, Ban, UserPlus, ExternalLink,
   FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Download, Maximize2, Pencil,
-  MoreVertical, RotateCcw, Percent, FolderOpen,
+  MoreVertical, RotateCcw, Percent, FolderOpen, Flag,
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -32,6 +32,22 @@ const STATUS_COLORS: Record<string, string> = {
 const STATUS_LABELS: Record<string, string> = {
   open: "Aberto", pending: "Pendente", resolved: "Resolvido",
 };
+
+// Prioridade manual do atendimento (pedido 11/09: diferenciar urgente / precisa
+// de retorno / pode aguardar, pra não perder atendimento novo/prioritário no
+// meio de conversas antigas). Sem prioridade definida = null, não entra aqui
+// e não afeta a ordenação (comportamento de sempre). "rank" define a ordem:
+// urgente primeiro, retorno depois, sem prioridade no meio, pode_esperar por
+// último — usado no sort da lista (ver PRIORITY_RANK mais abaixo).
+const PRIORITY_META: Record<string, { label: string; dot: string; border: string; badge: string }> = {
+  urgente: { label: "Urgente", dot: "bg-red-500", border: "border-l-4 border-l-red-500", badge: "bg-red-50 text-red-600 border-red-200" },
+  retorno: { label: "Precisa de retorno", dot: "bg-amber-500", border: "border-l-4 border-l-amber-500", badge: "bg-amber-50 text-amber-700 border-amber-200" },
+  pode_esperar: { label: "Pode aguardar", dot: "bg-slate-400", border: "border-l-4 border-l-slate-300", badge: "bg-slate-50 text-slate-600 border-slate-200" },
+};
+const PRIORITY_RANK: Record<string, number> = { urgente: 0, retorno: 1, pode_esperar: 3 };
+function priorityRank(p?: string | null): number {
+  return p ? (PRIORITY_RANK[p] ?? 2) : 2;
+}
 
 // Motivos pré-definidos para finalizar (resolver) um atendimento. "Outro"
 // libera um campo de texto para o vendedor detalhar.
@@ -243,11 +259,12 @@ function waSessionIcon(key: string, sessions: WaSessionInfo[]): string | null {
 
 // ─── Conversation list item ─────────────────────────────────────────────────
 function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, sessionColor, sessionIcon, overdue }: { conv: Conversation; active: boolean; onClick: () => void; onTogglePin: () => void; sessionBadge?: string | null; sessionColor?: string | null; sessionIcon?: string | null; overdue?: boolean }) {
+  const prio = conv.priority ? PRIORITY_META[conv.priority] : null;
   return (
     <button
       onClick={onClick}
       data-testid={`conv-item-${conv.id}`}
-      className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-secondary/60 transition border-b border-border/50 ${active ? "bg-primary/5 border-l-2 border-l-primary" : ""}`}
+      className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-secondary/60 transition border-b border-border/50 ${active ? "bg-primary/5 border-l-2 border-l-primary" : prio ? prio.border : ""}`}
     >
       <div className="relative shrink-0">
         <Avatar name={conv.name} src={conv.avatarUrl} size="md" />
@@ -256,6 +273,7 @@ function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, sessionCol
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-1 mb-0.5">
           <span className="font-semibold text-sm text-foreground truncate flex items-center gap-1">
+            {prio && <span className={`w-2 h-2 rounded-full shrink-0 ${prio.dot}`} title={prio.label} data-testid={`priority-dot-${conv.id}`} />}
             {conv.name}
           </span>
           <span className="flex items-center gap-1 shrink-0">
@@ -1189,13 +1207,17 @@ export default function ChatCenter({
   const [showTransferPicker, setShowTransferPicker] = useState(false);
   const [showParticipantPicker, setShowParticipantPicker] = useState(false);
   const [showStatusPicker, setShowStatusPicker] = useState(false);
-  // Fecha os dropdowns de Status/Etiqueta/Transferir/Vendedores do
+  // Prioridade manual do atendimento (urgente/retorno/pode aguardar) — mesmo
+  // padrão de dropdown do Status/Etiqueta logo abaixo.
+  const [showPriorityPicker, setShowPriorityPicker] = useState(false);
+  // Fecha os dropdowns de Status/Prioridade/Etiqueta/Transferir/Vendedores do
   // cabeçalho da conversa ao clicar em qualquer lugar fora deles (antes só
   // fechavam clicando explicitamente num item, ou abrindo outro — ficavam
   // abertos pra sempre se você clicasse em outra parte da tela).
-  const headerPickersOpen = showStatusPicker || showLabelPicker || showTransferPicker || showParticipantPicker;
+  const headerPickersOpen = showStatusPicker || showPriorityPicker || showLabelPicker || showTransferPicker || showParticipantPicker;
   const headerPickersRef = useClickOutside<HTMLDivElement>(() => {
     setShowStatusPicker(false);
+    setShowPriorityPicker(false);
     setShowLabelPicker(false);
     setShowTransferPicker(false);
     setShowParticipantPicker(false);
@@ -1318,7 +1340,6 @@ export default function ChatCenter({
 
   // AI reply suggestion in the composer
   const [suggesting, setSuggesting] = useState(false);
-  const [correcting, setCorrecting] = useState(false);
 
   // Notification bell: inbound messages accumulated in arrival order
   const [showNotifications, setShowNotifications] = useState(false);
@@ -2497,6 +2518,19 @@ export default function ChatCenter({
     }
   };
 
+  // Definir/remover a prioridade manual do atendimento (urgente/retorno/pode
+  // aguardar, ver PRIORITY_META) — mesmo padrão otimista do favoritar acima.
+  const handleSetPriority = async (conv: Conversation, priority: string | null) => {
+    const prev = conv.priority ?? null;
+    setConvs((cs) => cs.map((c) => (c.id === conv.id ? { ...c, priority } : c)));
+    try {
+      await api.chat.updateConversation(conv.id, { priority });
+    } catch {
+      setConvs((cs) => cs.map((c) => (c.id === conv.id ? { ...c, priority: prev } : c)));
+      toast({ title: "Não foi possível alterar a prioridade", variant: "destructive" });
+    }
+  };
+
   // ── Pendente → Ativo (iniciar atendimento: assume a conversa) ──
   const handleClaim = async (id: number) => {
     try {
@@ -2790,22 +2824,6 @@ export default function ChatCenter({
     } finally { setSuggesting(false); }
   };
 
-  // ── AI: fix spelling/grammar of the drafted message ──
-  const handleCorrectText = async () => {
-    const text = msgText.trim();
-    if (!text || correcting || sending) return;
-    setCorrecting(true);
-    try {
-      const { corrected } = await api.chat.correctText(text);
-      // Só aplica se o atendente não editou o texto enquanto a IA respondia.
-      setMsgText((prev) => (prev.trim() === text ? corrected : prev));
-      inputRef.current?.focus();
-      if (corrected === text) toast({ title: "Nenhum erro encontrado" });
-      else toast({ title: "Texto corrigido — revise antes de enviar" });
-    } catch (err: unknown) {
-      toast({ title: "Correção indisponível", description: err instanceof Error ? err.message : "Erro ao corrigir texto", variant: "destructive" });
-    } finally { setCorrecting(false); }
-  };
 
   // Abre (ou cria, se não existir) uma conversa individual com um número —
   // usado pelo cartão de contato compartilhado e pelo nome clicável de quem
@@ -3057,9 +3075,14 @@ export default function ChatCenter({
   // Favoritos é ortogonal às outras categorias: mostra qualquer conversa
   // marcada, não importa o status. Fixadas (favoritas) sempre no topo dentro
   // do grupo; dentro de cada grupo mantém a ordem por última mensagem.
+  // Prioridade (pedido 11/09): dentro de cada grupo de favoritos, urgente vem
+  // primeiro, depois "precisa de retorno", depois sem prioridade, e por
+  // último "pode aguardar" — pra atendimento novo/prioritário não se perder
+  // no meio de conversas antigas. Favoritar continua sendo o critério mais
+  // forte (intenção manual do próprio vendedor), prioridade decide o resto.
   const filteredConvs = visibleConvs
     .filter((c) => category === "favoritos" ? !!c.pinned : conversationCategory(c) === category)
-    .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned));
+    .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || priorityRank(a.priority) - priorityRank(b.priority));
   const activeCategory = activeConv ? conversationCategory(activeConv) : null;
 
   const currentLabels = activeConv?.labels ? activeConv.labels.split(",").map((l) => l.trim()).filter(Boolean) : [];
@@ -3771,7 +3794,7 @@ export default function ChatCenter({
               {/* Status quick-set */}
               <div className="relative">
                 <button
-                  onClick={() => { setShowStatusPicker((v) => !v); setShowLabelPicker(false); setShowTransferPicker(false); setShowParticipantPicker(false); }}
+                  onClick={() => { setShowStatusPicker((v) => !v); setShowPriorityPicker(false); setShowLabelPicker(false); setShowTransferPicker(false); setShowParticipantPicker(false); }}
                   className="flex items-center gap-1 p-2 rounded-lg bg-white border border-border hover:bg-secondary transition"
                   title={`Status: ${STATUS_LABELS[activeConv.status] ?? activeConv.status}`}
                 >
@@ -3801,9 +3824,41 @@ export default function ChatCenter({
                   </div>
                 )}
               </div>
+              {/* Prioridade manual (pedido 11/09): urgente / precisa de retorno /
+                  pode aguardar — pra organizar a fila e não perder atendimento
+                  novo/prioritário no meio de conversas antigas (ver PRIORITY_META
+                  e o sort de filteredConvs mais acima). */}
+              <div className="relative">
+                <button
+                  onClick={() => { setShowPriorityPicker((v) => !v); setShowStatusPicker(false); setShowLabelPicker(false); setShowTransferPicker(false); setShowParticipantPicker(false); }}
+                  className={`flex items-center gap-1 p-2 rounded-lg border transition ${activeConv.priority ? PRIORITY_META[activeConv.priority]?.badge ?? "bg-white border-border" : "bg-white border-border hover:bg-secondary"}`}
+                  title={activeConv.priority ? `Prioridade: ${PRIORITY_META[activeConv.priority]?.label}` : "Definir prioridade"}
+                >
+                  <Flag className={`w-3.5 h-3.5 ${activeConv.priority ? "fill-current" : ""}`} />
+                  <ChevronDown className="w-3 h-3" />
+                </button>
+                {showPriorityPicker && (
+                  <div className="absolute right-0 top-11 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden w-48">
+                    <button
+                      onClick={() => { handleSetPriority(activeConv, null); setShowPriorityPicker(false); }}
+                      className={`w-full text-left flex items-center gap-2 text-xs px-3 py-2.5 hover:bg-secondary transition ${!activeConv.priority ? "font-semibold text-primary" : ""}`}>
+                      <Circle className="w-2 h-2 fill-current text-gray-300" />
+                      Sem prioridade
+                    </button>
+                    {(["urgente", "retorno", "pode_esperar"] as const).map((p) => (
+                      <button key={p}
+                        onClick={() => { handleSetPriority(activeConv, p); setShowPriorityPicker(false); }}
+                        className={`w-full text-left flex items-center gap-2 text-xs px-3 py-2.5 hover:bg-secondary transition ${activeConv.priority === p ? "font-semibold text-primary" : ""}`}>
+                        <Circle className={`w-2 h-2 fill-current ${PRIORITY_META[p].dot.replace("bg-", "text-")}`} />
+                        {PRIORITY_META[p].label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               {/* Labels */}
               <div className="relative">
-                <button onClick={() => { setShowLabelPicker((v) => !v); setShowTransferPicker(false); setShowParticipantPicker(false); setShowStatusPicker(false); }}
+                <button onClick={() => { setShowLabelPicker((v) => !v); setShowTransferPicker(false); setShowParticipantPicker(false); setShowStatusPicker(false); setShowPriorityPicker(false); }}
                   className="p-2 rounded-lg bg-white border border-border hover:bg-secondary transition"
                   title="Etiquetas">
                   <Tag className="w-3.5 h-3.5" />
@@ -3834,7 +3889,7 @@ export default function ChatCenter({
               {can(user, "transferir") && (
               <div className="relative">
                 <button
-                  onClick={() => { setShowTransferPicker((v) => !v); setShowLabelPicker(false); setShowParticipantPicker(false); setShowStatusPicker(false); }}
+                  onClick={() => { setShowTransferPicker((v) => !v); setShowLabelPicker(false); setShowParticipantPicker(false); setShowStatusPicker(false); setShowPriorityPicker(false); }}
                   className="p-2 rounded-lg bg-white border border-border hover:bg-secondary transition"
                   title="Transferir para outro setor"
                 >
@@ -3883,7 +3938,7 @@ export default function ChatCenter({
               {/* Participants / Vendedores */}
               <div className="relative">
                 <button
-                  onClick={() => { setShowParticipantPicker((v) => !v); setShowLabelPicker(false); setShowTransferPicker(false); setShowStatusPicker(false); }}
+                  onClick={() => { setShowParticipantPicker((v) => !v); setShowLabelPicker(false); setShowTransferPicker(false); setShowStatusPicker(false); setShowPriorityPicker(false); }}
                   className="relative p-2 rounded-lg bg-white border border-border hover:bg-secondary transition"
                   title="Vendedores nesta conversa"
                 >
@@ -4316,8 +4371,11 @@ export default function ChatCenter({
             </div>
             {can(user, "usar_ia") && (<>
             {/* Ícone só (sem texto) -- com o painel de Informações e/ou o Chat
-                Interno abertos ao lado, a coluna do meio fica estreita e os
-                rótulos "Sugerir (IA)"/"Corrigir" espremiam a área de digitar. */}
+                Interno abertos ao lado, a coluna do meio fica estreita e o
+                rótulo "Sugerir (IA)" espremia a área de digitar. Botão de
+                "Corrigir ortografia com IA" removido (pedido 11/09): a
+                correção automática já roda no navegador (spellCheck+lang
+                pt-BR no textarea abaixo), sem precisar de IA sob demanda. */}
             <button
               type="button"
               onClick={handleSuggestReply}
@@ -4329,18 +4387,6 @@ export default function ChatCenter({
               {suggesting
                 ? <RefreshCw className="w-4 h-4 animate-spin" />
                 : <Sparkles className="w-4 h-4" />}
-            </button>
-            <button
-              type="button"
-              onClick={handleCorrectText}
-              disabled={!msgText.trim() || correcting || sending}
-              title="Corrigir ortografia com IA"
-              data-testid="button-correct-text"
-              className="w-9 h-9 rounded-full flex items-center justify-center text-emerald-700 bg-emerald-100 hover:bg-emerald-200 transition shrink-0 disabled:opacity-40"
-            >
-              {correcting
-                ? <RefreshCw className="w-4 h-4 animate-spin" />
-                : <SpellCheck className="w-4 h-4" />}
             </button>
             </>)}
             <textarea

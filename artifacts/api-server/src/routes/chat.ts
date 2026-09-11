@@ -1353,12 +1353,22 @@ async function syncResolvedConversation(
 router.patch("/chat/conversations/:id", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
-  const { status, labels, sectorId, assigneeId, name, isArchived, resolutionReason, hadSale, saleAmount, saleDescription } = req.body as {
+  const { status, labels, sectorId, assigneeId, name, isArchived, resolutionReason, hadSale, saleAmount, saleDescription, priority } = req.body as {
     status?: string; labels?: string; sectorId?: number;
     assigneeId?: number; name?: string; isArchived?: boolean;
     resolutionReason?: string;
     hadSale?: boolean; saleAmount?: number | string; saleDescription?: string;
+    priority?: string | null;
   };
+
+  // Prioridade manual (pedido 11/09): urgente / retorno / pode_esperar, ou
+  // null pra remover. Igual às etiquetas, qualquer usuário com acesso à
+  // conversa pode marcar — não é uma ação sensível como transferir/finalizar.
+  const PRIORITY_VALUES = ["urgente", "retorno", "pode_esperar"];
+  if (priority !== undefined && priority !== null && !PRIORITY_VALUES.includes(priority)) {
+    res.status(400).json({ error: "Prioridade inválida" });
+    return;
+  }
 
   const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
@@ -1437,6 +1447,7 @@ router.patch("/chat/conversations/:id", requireAuth, requireChatAccess(), async 
   const update: Record<string, unknown> = { updatedAt: new Date() };
   if (status !== undefined) update.status = status;
   if (labels !== undefined) update.labels = labels;
+  if (priority !== undefined) update.priority = priority;
   if (name !== undefined) update.name = name;
   if (isArchived !== undefined) update.isArchived = isArchived;
   // Finalizar/arquivar encerra a pendência — zera o contador de não lidas
