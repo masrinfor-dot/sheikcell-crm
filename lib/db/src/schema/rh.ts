@@ -56,7 +56,8 @@ export const rhCandidatesTable = pgTable("rh_candidates", {
   // stagesSnapshot): renomear/excluir o cargo depois não apaga o histórico.
   positionId: integer("position_id"),
   positionName: text("position_name"),
-  // novo | pre_aprovado | teste_loja | aprovado | reprovado | contratado.
+  // novo | pre_aprovado | teste_loja | aprovado | banco_talentos |
+  // reprovado | contratado.
   // "teste_loja" e "contratado" foram adicionados no pedido 11/09 ("criar
   // teste na loja... contratado"): teste_loja é setado manualmente (mesmo
   // fluxo de pré-aprovar/aprovar/reprovar, ver STATUS_META em RH.tsx);
@@ -64,6 +65,9 @@ export const rhCandidatesTable = pgTable("rh_candidates", {
   // colaborador vinculado (employees.candidateId) é finalizada — ver
   // finalize-hiring/reopen-hiring em employeeHiring.ts. Não junta infra
   // nova, só espelha o hiringStatus "ativo" que já existia.
+  // "banco_talentos" (pedido 11/09: "aprovado mas vaga com quadro cheio") —
+  // aprovado, mas sem vaga disponível agora; fica guardado e pode ser
+  // contratado depois (Iniciar contratação também funciona a partir dele).
   status: text("status").notNull().default("novo"),
   // Motivo do status atual (ex: "Foi bem na entrevista", "Falta de conta
   // bancária") — escolhido de uma lista pré-definida por status (ver

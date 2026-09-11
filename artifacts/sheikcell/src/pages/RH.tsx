@@ -60,6 +60,10 @@ const STATUS_META: Record<RhCandidate["status"], { label: string; cls: string }>
   pre_aprovado: { label: "Pré-aprovado", cls: "bg-indigo-50 text-indigo-600 border-indigo-100" },
   teste_loja: { label: "Teste na loja", cls: "bg-amber-50 text-amber-700 border-amber-100" },
   aprovado: { label: "Aprovado", cls: "bg-green-50 text-green-700 border-green-100" },
+  // Pedido 11/09: "aprovado mas a vaga tá com quadro cheio" — candidato bom,
+  // mas sem vaga disponível AGORA. Fica guardado pra quando abrir uma vaga
+  // (não passa pelo fluxo de contratação enquanto estiver aqui).
+  banco_talentos: { label: "Banco de talentos", cls: "bg-cyan-50 text-cyan-700 border-cyan-100" },
   reprovado: { label: "Reprovado", cls: "bg-red-50 text-red-600 border-red-100" },
   // "Contratado" nunca é escolhido pelos botões abaixo — é setado sozinho
   // quando a contratação do colaborador vinculado é finalizada (ver
@@ -75,6 +79,7 @@ const STATUS_REASON_OPTIONS: Record<Exclude<RhCandidate["status"], "novo">, stri
   pre_aprovado: ["Foi bem na pré-entrevista", "Perfil alinhado com a vaga", "Aguardando segunda etapa/entrevista"],
   teste_loja: ["Foi bem no teste da loja", "Precisa de mais um dia de teste", "Não performou bem no teste"],
   aprovado: ["Foi bem na entrevista", "Foi bem no teste na loja", "Perfil ideal para a vaga", "Referências confirmadas"],
+  banco_talentos: ["Quadro cheio no momento", "Bom perfil, aguardando abrir vaga", "Vaga já foi preenchida por outro candidato"],
   reprovado: ["Não compareceu à entrevista", "Não foi bem no teste na loja", "Falta de conta bancária", "Perfil não alinhado com a vaga", "Pretensão salarial incompatível", "Já contratado por outra vaga"],
   // Nunca aparece no seletor de motivo (contratado não passa pelo botão de
   // troca de status) — só existe pra satisfazer o Record exaustivo acima.
@@ -882,6 +887,11 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                 className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border disabled:opacity-40 ${opened.status === "aprovado" ? "bg-green-600 text-white border-green-600" : "bg-white text-green-700 border-green-200"}`}>
                 <CheckCircle className="w-3.5 h-3.5" /> Aprovar
               </button>
+              <button onClick={() => setPendingStatusChange({ status: "banco_talentos", reason: "", customReason: "" })} data-testid="button-talentpool-candidate" disabled={!canEdit}
+                title="Aprovado, mas sem vaga disponível agora — fica guardado pra quando abrir"
+                className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border disabled:opacity-40 ${opened.status === "banco_talentos" ? "bg-cyan-600 text-white border-cyan-600" : "bg-white text-cyan-700 border-cyan-200"}`}>
+                <Archive className="w-3.5 h-3.5" /> Banco de talentos
+              </button>
               <button onClick={() => setPendingStatusChange({ status: "reprovado", reason: "", customReason: "" })} disabled={!canEdit}
                 className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border disabled:opacity-40 ${opened.status === "reprovado" ? "bg-red-600 text-white border-red-600" : "bg-white text-red-600 border-red-200"}`}>
                 <XCircle className="w-3.5 h-3.5" /> Reprovar
@@ -894,10 +904,12 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                   (fluxo existente, ver Contratacoes abaixo) — pedido 11/09
                   ("contratado... so junta a que ja criamos") só precisava
                   liberar o botão também depois do teste na loja, não a
-                  entrada. Uma vez contratado, o botão vira "Ver contratação"
-                  (mesma chamada — idempotente, devolve o colaborador já
-                  criado em vez de duplicar). */}
-              {(opened.status === "aprovado" || opened.status === "teste_loja" || opened.status === "contratado") && (
+                  entrada. Também liberado no banco de talentos (pedido
+                  11/09: "aprovado mas vaga com quadro cheio") — quando abrir
+                  uma vaga, o admin contrata direto dali. Uma vez contratado,
+                  o botão vira "Ver contratação" (mesma chamada — idempotente,
+                  devolve o colaborador já criado em vez de duplicar). */}
+              {(opened.status === "aprovado" || opened.status === "teste_loja" || opened.status === "banco_talentos" || opened.status === "contratado") && (
                 <button onClick={() => startHiring(opened)} disabled={!canEdit || startingHiring} data-testid="button-start-hiring"
                   className="flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700 transition disabled:opacity-50">
                   <UserPlus className="w-3.5 h-3.5" /> {startingHiring ? "Abrindo..." : opened.status === "contratado" ? "Ver contratação" : "Iniciar contratação"}
