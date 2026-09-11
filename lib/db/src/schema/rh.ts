@@ -92,6 +92,14 @@ export const rhCandidatesTable = pgTable("rh_candidates", {
   // Observações livres do avaliador sobre o teste na loja (além do
   // checklist com nota por item acima). null = sem observação.
   storeTestNotes: text("store_test_notes"),
+  // Data/hora do teste de campo e nome do responsável da loja que avaliou
+  // (pedido 11/09: "na parte de teste de campo colocar data e hora e
+  // checklist de avaliação do responsável pela loja"). storeTestAt guarda
+  // quando o teste ACONTECEU (preenchido manualmente pelo avaliador, não é
+  // o timestamp de quando o registro foi salvo). null = ainda não
+  // preenchido.
+  storeTestAt: timestamp("store_test_at", { withTimezone: true }),
+  storeTestEvaluatorName: text("store_test_evaluator_name"),
   // Cópia das etapas no momento da candidatura — assim editar o processo
   // depois não bagunça a leitura das respostas antigas.
   stagesSnapshot: jsonb("stages_snapshot"),

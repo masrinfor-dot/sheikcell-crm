@@ -115,6 +115,22 @@ const CHECKLIST_RATINGS: { value: "bom" | "regular" | "fraco"; label: string; cl
   { value: "fraco", label: "Fraco", cls: "text-red-600 border-red-200", clsActive: "bg-red-600 text-white border-red-600" },
 ];
 
+// Converte ISO (storeTestAt vindo da API) pro formato que <input
+// type="datetime-local"> espera ("YYYY-MM-DDTHH:mm", hora LOCAL do navegador
+// — por isso não dá pra só cortar a string ISO, que vem em UTC) e vice-versa.
+function isoToDatetimeLocal(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function datetimeLocalToIso(value: string): string | null {
+  if (!value) return null;
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
 // Roteiro fixo da entrevista online (Google Meet) — pedido 11/09: "criar
 // roteiro de perguntas para entrevista virtual, confirmação de dados
 // pessoais, perguntas sobre perfil, experiência e motivo de querer
@@ -322,6 +338,7 @@ function groupCandidatesByPerson(list: RhCandidate[]): Map<number, RhCandidate[]
 // ── Recrutamento (processo seletivo, já existia) ────────────────────────────
 function Recrutamento({ canEdit }: { canEdit: boolean }) {
   const { toast } = useToast();
+  const { user } = useAuth();
   const [view, setView] = useState<"candidatos" | "processo" | "contratacoes">("candidatos");
   // Colaborador cuja contratação deve abrir automaticamente assim que a
   // view "Contratações" montar (setado ao clicar "Iniciar contratação" no
@@ -360,6 +377,11 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
   // de interviewDraft acima).
   const [storeTestDraft, setStoreTestDraft] = useState<Record<string, string>>({});
   const [storeTestNotesDraft, setStoreTestNotesDraft] = useState("");
+  // Data/hora do teste (input datetime-local, "YYYY-MM-DDTHH:mm") e nome do
+  // responsável da loja que avaliou (pedido 11/09: "colocar data e hora e
+  // checklist de avaliação do responsável pela loja").
+  const [storeTestAtDraft, setStoreTestAtDraft] = useState("");
+  const [storeTestEvaluatorDraft, setStoreTestEvaluatorDraft] = useState("");
   const [savingStoreTest, setSavingStoreTest] = useState(false);
 
   // Cargos (item: processo seletivo personalizado por função). Sem nenhum
@@ -506,9 +528,16 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
     setSavingStoreTest(true);
     try {
       const cleaned = Object.fromEntries(Object.entries(storeTestDraft).filter(([, v]) => v));
-      const result = await api.rh.updateCandidate(opened.id, { storeTestChecklist: cleaned, storeTestNotes: storeTestNotesDraft });
-      setCandidates((prev) => prev.map((x) => (x.id === opened.id ? { ...x, storeTestChecklist: result.storeTestChecklist, storeTestNotes: result.storeTestNotes } : x)));
-      setOpened((o) => (o?.id === opened.id ? { ...o, storeTestChecklist: result.storeTestChecklist, storeTestNotes: result.storeTestNotes } : o));
+      const result = await api.rh.updateCandidate(opened.id, {
+        storeTestChecklist: cleaned, storeTestNotes: storeTestNotesDraft,
+        storeTestAt: datetimeLocalToIso(storeTestAtDraft), storeTestEvaluatorName: storeTestEvaluatorDraft,
+      });
+      const patch = {
+        storeTestChecklist: result.storeTestChecklist, storeTestNotes: result.storeTestNotes,
+        storeTestAt: result.storeTestAt, storeTestEvaluatorName: result.storeTestEvaluatorName,
+      };
+      setCandidates((prev) => prev.map((x) => (x.id === opened.id ? { ...x, ...patch } : x)));
+      setOpened((o) => (o?.id === opened.id ? { ...o, ...patch } : o));
       toast({ title: "Teste de campo salvo" });
     } catch { toast({ title: "Erro", variant: "destructive" }); } finally { setSavingStoreTest(false); }
   };
@@ -731,7 +760,7 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                 const expanded = expandedHistory.has(c.id);
                 return (
                   <div key={c.id}>
-                    <button onClick={() => { setOpened(c); setNotesDraft(c.notes ?? ""); setInterviewDraft(c.interviewNotes ?? {}); setStoreTestDraft(c.storeTestChecklist ?? {}); setStoreTestNotesDraft(c.storeTestNotes ?? ""); setPendingStatusChange(null); }} data-testid={`candidate-${c.id}`}
+                    <button onClick={() => { setOpened(c); setNotesDraft(c.notes ?? ""); setInterviewDraft(c.interviewNotes ?? {}); setStoreTestDraft(c.storeTestChecklist ?? {}); setStoreTestNotesDraft(c.storeTestNotes ?? ""); setStoreTestAtDraft(isoToDatetimeLocal(c.storeTestAt)); setStoreTestEvaluatorDraft(c.storeTestEvaluatorName ?? ""); setPendingStatusChange(null); }} data-testid={`candidate-${c.id}`}
                       className="shk-card p-4 w-full text-left flex items-center gap-3 hover:bg-secondary/30 transition">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
@@ -1015,6 +1044,33 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                   pra preencher antes de mudar o status oficialmente. */}
               <div className="rounded-xl border border-border p-3">
                 <p className="text-xs font-bold flex items-center gap-1.5 mb-2"><ListChecks className="w-3.5 h-3.5 text-amber-600" /> Teste de campo</p>
+                {/* Data/hora do teste + responsável da loja que avaliou
+                    (pedido 11/09: "colocar data e hora e checklist de
+                    avaliação do responsável pela loja"). */}
+                <div className="grid grid-cols-2 gap-2 mb-2.5">
+                  <div>
+                    <p className="text-[10px] text-muted-foreground mb-0.5">Data e hora do teste</p>
+                    <input type="datetime-local" value={storeTestAtDraft} disabled={!canEdit}
+                      onChange={(e) => setStoreTestAtDraft(e.target.value)} data-testid="input-storetest-at"
+                      className="w-full px-2 py-1.5 rounded-lg border border-border text-xs disabled:opacity-60" />
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-muted-foreground mb-0.5">Responsável pela loja</p>
+                    <div className="flex gap-1">
+                      <input value={storeTestEvaluatorDraft} disabled={!canEdit} maxLength={120}
+                        onChange={(e) => setStoreTestEvaluatorDraft(e.target.value)} placeholder="Nome de quem avaliou"
+                        data-testid="input-storetest-evaluator"
+                        className="w-full px-2 py-1.5 rounded-lg border border-border text-xs disabled:opacity-60" />
+                      {canEdit && user?.name && (
+                        <button type="button" onClick={() => setStoreTestEvaluatorDraft(user.name)} title="Usar meu nome"
+                          data-testid="button-storetest-use-my-name"
+                          className="shrink-0 px-2 rounded-lg border border-border text-[10px] font-semibold text-muted-foreground hover:bg-secondary transition">
+                          Eu
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
                 <div className="space-y-2">
                   {STORE_TEST_CHECKLIST.map((item) => (
                     <div key={item.id} className="flex items-center justify-between gap-2 flex-wrap">
@@ -1038,7 +1094,7 @@ function Recrutamento({ canEdit }: { canEdit: boolean }) {
                 {canEdit && (
                   <button onClick={saveStoreTest} disabled={savingStoreTest} data-testid="button-save-storetest"
                     className="mt-2 px-3 py-1.5 rounded-xl bg-primary text-white text-[11px] font-bold disabled:opacity-50">
-                    {savingStoreTest ? "Salvando..." : "Salvar teste na loja"}
+                    {savingStoreTest ? "Salvando..." : "Salvar teste de campo"}
                   </button>
                 )}
               </div>

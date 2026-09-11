@@ -1197,6 +1197,8 @@ export type RhCandidate = {
   // Checklist do teste na loja — { [itemId]: "bom" | "regular" | "fraco" }.
   storeTestChecklist: Record<string, "bom" | "regular" | "fraco"> | null;
   storeTestNotes: string | null;
+  storeTestAt: string | null;
+  storeTestEvaluatorName: string | null;
 };
 
 // ── RH: Departamento Pessoal ────────────────────────────────────────────────
@@ -2457,8 +2459,9 @@ export const api = {
     updateCandidate: (id: number, data: {
       status?: string; notes?: string; statusReason?: string | null; interviewNotes?: Record<string, string> | null;
       storeTestChecklist?: Record<string, string> | null; storeTestNotes?: string | null;
+      storeTestAt?: string | null; storeTestEvaluatorName?: string | null;
     }) =>
-      req<Pick<RhCandidate, "id" | "status" | "notes" | "statusReason" | "interviewNotes" | "storeTestChecklist" | "storeTestNotes">>(`/rh/candidates/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+      req<Pick<RhCandidate, "id" | "status" | "notes" | "statusReason" | "interviewNotes" | "storeTestChecklist" | "storeTestNotes" | "storeTestAt" | "storeTestEvaluatorName">>(`/rh/candidates/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     removeCandidate: (id: number) => req<{ ok: boolean }>(`/rh/candidates/${id}`, { method: "DELETE" }),
   },
   rhDp: {

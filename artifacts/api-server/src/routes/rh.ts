@@ -548,6 +548,8 @@ router.get("/rh/candidates", requireModuleAccess("rh"), async (req, res): Promis
     interviewNotes: rhCandidatesTable.interviewNotes,
     storeTestChecklist: rhCandidatesTable.storeTestChecklist,
     storeTestNotes: rhCandidatesTable.storeTestNotes,
+    storeTestAt: rhCandidatesTable.storeTestAt,
+    storeTestEvaluatorName: rhCandidatesTable.storeTestEvaluatorName,
     stagesSnapshot: rhCandidatesTable.stagesSnapshot,
     hasVideo: rhCandidatesTable.videoMime,
     profileResult: rhCandidatesTable.profileResult,
@@ -579,9 +581,10 @@ router.patch("/rh/candidates/:id", requireModuleAccess("rh"), async (req, res): 
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const { status, notes, statusReason, interviewNotes, storeTestChecklist, storeTestNotes } = (req.body ?? {}) as {
+  const { status, notes, statusReason, interviewNotes, storeTestChecklist, storeTestNotes, storeTestAt, storeTestEvaluatorName } = (req.body ?? {}) as {
     status?: string; notes?: string; statusReason?: string | null; interviewNotes?: Record<string, string> | null;
     storeTestChecklist?: Record<string, string> | null; storeTestNotes?: string | null;
+    storeTestAt?: string | null; storeTestEvaluatorName?: string | null;
   };
   const update: Record<string, unknown> = {};
   if (status !== undefined) {
@@ -619,6 +622,18 @@ router.patch("/rh/candidates/:id", requireModuleAccess("rh"), async (req, res): 
     }
   }
   if (storeTestNotes !== undefined) update.storeTestNotes = typeof storeTestNotes === "string" ? storeTestNotes.trim().slice(0, 4000) || null : null;
+  // Data/hora em que o teste de campo aconteceu (preenchida manualmente pelo
+  // avaliador — não confundir com createdAt/updatedAt do registro).
+  if (storeTestAt !== undefined) {
+    if (storeTestAt === null) {
+      update.storeTestAt = null;
+    } else {
+      const parsed = new Date(storeTestAt);
+      if (isNaN(parsed.getTime())) { res.status(400).json({ error: "Data do teste de campo inválida" }); return; }
+      update.storeTestAt = parsed;
+    }
+  }
+  if (storeTestEvaluatorName !== undefined) update.storeTestEvaluatorName = typeof storeTestEvaluatorName === "string" ? storeTestEvaluatorName.trim().slice(0, 120) || null : null;
   if (Object.keys(update).length === 0) { res.status(400).json({ error: "Nada para atualizar" }); return; }
   const [updated] = await db.update(rhCandidatesTable).set(update)
     .where(and(eq(rhCandidatesTable.id, id), eq(rhCandidatesTable.tenantId, tenantId)))
@@ -626,6 +641,7 @@ router.patch("/rh/candidates/:id", requireModuleAccess("rh"), async (req, res): 
       id: rhCandidatesTable.id, status: rhCandidatesTable.status, notes: rhCandidatesTable.notes,
       statusReason: rhCandidatesTable.statusReason, interviewNotes: rhCandidatesTable.interviewNotes,
       storeTestChecklist: rhCandidatesTable.storeTestChecklist, storeTestNotes: rhCandidatesTable.storeTestNotes,
+      storeTestAt: rhCandidatesTable.storeTestAt, storeTestEvaluatorName: rhCandidatesTable.storeTestEvaluatorName,
     });
   if (!updated) { res.status(404).json({ error: "Candidato não encontrado" }); return; }
   res.json(updated);
