@@ -20,6 +20,12 @@ export const sectorsTable = pgTable("sectors", {
   // "vendedor" — admin sempre vê tudo, supervisor não fica preso a um setor
   // só (ver lib/moduleAccess.ts no backend).
   enabledModules: jsonb("enabled_modules").$type<OptionalModule[] | null>(),
+  // Pedido 14/09 (Atacado): todo vendedor DESTE setor pode ver/reabrir
+  // QUALQUER atendimento Resolvido do setor (não só o que ele mesmo
+  // finalizou) — pra reiniciar contato e prospectar cliente antigo. Default
+  // false: nenhum setor muda de comportamento (vendedor comum continua sem
+  // ver Resolvidos) até o admin ligar explicitamente neste setor.
+  vendorsSeeResolved: boolean("vendors_see_resolved").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });

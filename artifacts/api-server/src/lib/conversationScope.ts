@@ -1,4 +1,4 @@
-import { db, conversationParticipantsTable, conversationsTable } from "@workspace/db";
+import { db, conversationParticipantsTable, conversationsTable, sectorsTable } from "@workspace/db";
 import { and, eq, notInArray, sql } from "drizzle-orm";
 
 // Shared "potencial" (new, unclaimed lead) scoping helpers.
@@ -58,6 +58,19 @@ export async function countActiveConversations(tenantId: number, userId: number)
       sql`${conversationsTable.phone} NOT LIKE '%@g.us'`,
     ));
   return Number(row?.count ?? 0);
+}
+
+// Pedido 14/09 (Atacado): setor com "vendorsSeeResolved" ligado libera pra
+// TODO vendedor daquele setor ver/reabrir qualquer atendimento Resolvido do
+// setor (não só o que ele mesmo finalizou) — pra reiniciar contato e
+// prospectar cliente antigo. Usado tanto na listagem (buildConversation
+// VisibilityConditions em chat.ts) quanto no acesso a uma conversa
+// específica (canAccessConversation).
+export async function sectorAllowsResolvedAccess(sectorId: number | null | undefined): Promise<boolean> {
+  if (sectorId == null) return false;
+  const [row] = await db.select({ v: sectorsTable.vendorsSeeResolved }).from(sectorsTable)
+    .where(eq(sectorsTable.id, sectorId)).limit(1);
+  return !!row?.v;
 }
 
 export function isPotentialConversation(

@@ -76,18 +76,19 @@ router.patch("/sectors/:id", requireAdmin, async (req, res): Promise<void> => {
     res.status(400).json({ error: "ID inválido" });
     return;
   }
-  const { name, description, icon, color, isActive, enabledModules } = req.body as {
+  const { name, description, icon, color, isActive, enabledModules, vendorsSeeResolved } = req.body as {
     name?: string;
     description?: string;
     icon?: string;
     color?: string;
     isActive?: boolean;
     enabledModules?: unknown;
+    vendorsSeeResolved?: boolean;
   };
   const [sector] = await db
     .update(sectorsTable)
     .set({
-      name, description, icon, color, isActive,
+      name, description, icon, color, isActive, vendorsSeeResolved,
       enabledModules: enabledModules !== undefined ? sanitizeSectorModules(enabledModules, await tenantEnabledModules(tenantId)) : undefined,
     })
     .where(and(eq(sectorsTable.id, id), eq(sectorsTable.tenantId, tenantId)))

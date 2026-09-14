@@ -115,6 +115,7 @@ type WASession = {
   color: string;
   icon: string | null;
   queueAutoAssignEnabled: boolean;
+  surveyDisabled: boolean;
 };
 
 type UserRow = {
@@ -195,6 +196,12 @@ export default function AdminDashboard() {
   const [logLabelOptions, setLogLabelOptions] = useState<ChatLabel[]>([]);
   const [reopeningLogId, setReopeningLogId] = useState<number | null>(null);
   const [sectors, setSectors] = useState<Sector[]>([]);
+  // Setor desativado não pode ser oferecido pra colocar um vendedor nele —
+  // "listAll" (acima) traz todos (inclusive inativos) porque a aba "Setores"
+  // precisa mostrar/reativar os desativados; qualquer lugar que serve pra
+  // ESCOLHER o setor de alguém (novo vendedor, editar vendedor) usa esta
+  // lista filtrada em vez de `sectors` direto.
+  const activeSectors = sectors.filter((s) => s.isActive);
   const [stores, setStores] = useState<Store[]>([]);
   const [newStoreName, setNewStoreName] = useState("");
   const [userRows, setUserRows] = useState<UserRow[]>([]);
@@ -264,7 +271,7 @@ export default function AdminDashboard() {
   };
 
   const [userForm, setUserForm] = useState<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; extension: string; adminAccess: string[]; moduleAccess: UserModuleAccess; ahEnabled: boolean; ahStart: string; ahEnd: string; ahDays: number[]; waEnabled: boolean; waKeys: string[] }>({ name: "", email: "", password: "", role: "vendedor", sectorId: 1, storeName: "", extension: "", adminAccess: [], moduleAccess: {}, ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [] });
-  const [sectorForm, setSectorForm] = useState<{ name: string; description: string; icon: string; color: string; isActive: boolean; enabledModules: OptionalModule[] | null }>({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true, enabledModules: null });
+  const [sectorForm, setSectorForm] = useState<{ name: string; description: string; icon: string; color: string; isActive: boolean; enabledModules: OptionalModule[] | null; vendorsSeeResolved: boolean }>({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true, enabledModules: null, vendorsSeeResolved: false });
 
   const fetchAll = useCallback(async () => {
     try {
@@ -424,7 +431,7 @@ export default function AdminDashboard() {
   // ---- User handlers ----
   const openAddUser = () => {
     setEditUser(null);
-    setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorId: sectors[0]?.id ?? 1, storeName: "", extension: "", adminAccess: [], moduleAccess: {}, ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [] });
+    setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorId: activeSectors[0]?.id ?? sectors[0]?.id ?? 1, storeName: "", extension: "", adminAccess: [], moduleAccess: {}, ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [] });
     setOpenUserSections(new Set(["basico"]));
     setShowAddUser(true);
   };
@@ -475,12 +482,12 @@ export default function AdminDashboard() {
   // ---- Sector handlers ----
   const openAddSector = () => {
     setEditSector(null);
-    setSectorForm({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true, enabledModules: null });
+    setSectorForm({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true, enabledModules: null, vendorsSeeResolved: false });
     setShowAddSector(true);
   };
   const openEditSector = (s: Sector) => {
     setEditSector(s);
-    setSectorForm({ name: s.name, description: s.description ?? "", icon: s.icon, color: s.color, isActive: s.isActive, enabledModules: s.enabledModules ?? null });
+    setSectorForm({ name: s.name, description: s.description ?? "", icon: s.icon, color: s.color, isActive: s.isActive, enabledModules: s.enabledModules ?? null, vendorsSeeResolved: s.vendorsSeeResolved ?? false });
     setShowAddSector(true);
   };
   const handleSaveSector = async (e: React.FormEvent) => {
@@ -1264,6 +1271,36 @@ export default function AdminDashboard() {
                       Com isso ligado, um cliente novo (ou que volta) por este número já entra direto em "Ativos"
                       do próximo vendedor ocioso com fila ligada (em rodízio, sempre dentro do mesmo setor) — sem
                       precisar que ele clique pra assumir.
+                    </p>
+                  </span>
+                </label>
+
+                {/* Pesquisa de satisfação desligada POR LINHA (pedido 14/09:
+                    público do Atacado não gosta de receber a pesquisa ao
+                    finalizar) — quando ligado, finalizar por este número
+                    nunca dispara a pesquisa, mesmo com ela ligada na loja
+                    toda (Configurações → Pesquisa de satisfação). */}
+                <label className="flex items-start gap-2.5 mb-3 px-2 py-2 rounded-lg hover:bg-secondary/50 cursor-pointer text-sm"
+                  data-testid={`checkbox-wa-survey-disabled-${s.sessionKey}`}>
+                  <input
+                    type="checkbox"
+                    checked={s.surveyDisabled}
+                    onChange={async (e) => {
+                      const disabled = e.target.checked;
+                      await fetch(`/api/whatsapp/sessions/${s.sessionKey}/survey-disabled`, {
+                        method: "POST", credentials: "include",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ disabled }),
+                      });
+                      fetchWAStatus();
+                    }}
+                    className="w-4 h-4 mt-0.5 accent-[var(--primary)] shrink-0"
+                  />
+                  <span>
+                    <span className="font-medium">Não pedir avaliação ao finalizar nesta linha</span>
+                    <p className="text-[11px] text-muted-foreground -mt-0.5">
+                      Com isso ligado, finalizar um atendimento por este número nunca manda a pesquisa de satisfação
+                      (mesmo ligada em Configurações) — o atendimento só é transferido pra Resolvidos, sem pedir nota.
                     </p>
                   </span>
                 </label>
@@ -2184,7 +2221,16 @@ export default function AdminDashboard() {
                         <label className="text-xs font-medium mb-1 block">Setor</label>
                         <select value={userForm.sectorId} onChange={(e) => setUserForm({ ...userForm, sectorId: Number(e.target.value) })}
                           className="w-full px-3 py-2 rounded-xl border border-border text-sm">
-                          {sectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                          {/* Setor desativado não é oferecido pra escolher — exceto o que
+                              esse vendedor já está, senão editar o cadastro dele trocaria
+                              o setor sem querer (mostrado marcado "(inativo)" pra ficar claro). */}
+                          {activeSectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                          {(() => {
+                            const current = sectors.find((s) => s.id === userForm.sectorId);
+                            return current && !current.isActive
+                              ? <option key={current.id} value={current.id}>{current.name} (inativo)</option>
+                              : null;
+                          })()}
                         </select>
                       </div>
                     </div>
@@ -2427,6 +2473,18 @@ export default function AdminDashboard() {
                   <label htmlFor="sectorActive" className="text-sm font-medium">Setor ativo</label>
                 </div>
               )}
+              <div className="pt-2 border-t border-border">
+                <label className="flex items-center gap-2 text-xs font-medium">
+                  <input type="checkbox" id="sectorVendorsSeeResolved" data-testid="toggle-sector-vendors-see-resolved"
+                    checked={sectorForm.vendorsSeeResolved}
+                    onChange={(e) => setSectorForm({ ...sectorForm, vendorsSeeResolved: e.target.checked })}
+                    className="w-4 h-4 rounded" />
+                  Vendedores veem todos os atendimentos Resolvidos do setor
+                </label>
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  Sem marcar (padrão), vendedor comum nunca vê Resolvidos — nem o que ele mesmo finalizou. Marcando, TODO vendedor deste setor pode ver e reabrir QUALQUER atendimento resolvido do setor (não só o próprio) pra prospectar cliente antigo de novo. Pensado pro Atacado, mas vale pra qualquer setor.
+                </p>
+              </div>
               <div className="pt-2 border-t border-border">
                 <label className="flex items-center gap-2 text-xs font-medium">
                   <input type="checkbox" id="sectorRestrictModules" data-testid="toggle-sector-restrict-modules"

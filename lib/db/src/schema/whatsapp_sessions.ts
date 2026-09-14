@@ -23,6 +23,12 @@ export const whatsappSessionsTable = pgTable("whatsapp_sessions", {
   // comportamento até o admin ligar explicitamente em Administração →
   // WhatsApp.
   queueAutoAssignEnabled: boolean("queue_auto_assign_enabled").notNull().default(false),
+  // Pesquisa de satisfação desligada POR LINHA (pedido 14/09: público do
+  // Atacado não gosta de receber a pesquisa ao finalizar) — quando true,
+  // finalizar um atendimento NESTA linha nunca dispara a pesquisa
+  // (survey_settings continua tenant-wide, isto só é uma exceção por cima).
+  // Default false: nenhuma linha muda de comportamento até o admin ligar.
+  surveyDisabled: boolean("survey_disabled").notNull().default(false),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

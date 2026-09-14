@@ -17,7 +17,7 @@ import {
   presenceDisconnect,
   type BufferedEvent,
 } from "../lib/sseEmitter";
-import { isPotentialConversation, isRestrictedConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES, countActiveConversations } from "../lib/conversationScope";
+import { isPotentialConversation, isRestrictedConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES, countActiveConversations, sectorAllowsResolvedAccess } from "../lib/conversationScope";
 import { autoAssignOnNewPoolConversation, autoAssignOnVendorFreed } from "../lib/queueAutoAssign";
 import { ensureCrmContactForConversation, syncCrmAttendant } from "../lib/crmSync";
 import { sendOutboundText } from "../lib/outbound";
@@ -220,7 +220,17 @@ async function canAccessConversation(
         eq(conversationParticipantsTable.userId, userId),
       ))
       .limit(1);
-    return !!p;
+    if (p) return true;
+    // Resolvida/arquivada do PRÓPRIO setor do vendedor, com o setor
+    // liberando "todo vendedor vê Resolvidos" (pedido 14/09, Atacado) —
+    // mesmo não sendo o responsável original nem participante. NÃO libera
+    // conversa ativa (só tem dono) de outro vendedor — só resolvida/arquivada.
+    if ((conv.status === "resolved" || conv.status === "archived" || conv.isArchived === true)
+      && conv.sectorId != null && conv.sectorId === userSectorId
+      && (await sectorAllowsResolvedAccess(conv.sectorId))) {
+      return true;
+    }
+    return false;
   }
   // Fila restrita (pedido 10/09): só vê o que já é dele (checado acima) —
   // nunca o pool geral do setor nem potenciais.
@@ -307,15 +317,29 @@ async function buildConversationVisibilityConditions(
     // - conversas do próprio setor NÃO restritas (ex.: pendentes);
     // - conversas restritas apenas quando é o responsável ou participante.
     const userId = req.session.userId!;
+
+    // Setor com "todo vendedor vê Resolvidos" ligado (pedido 14/09, Atacado):
+    // condição extra que libera QUALQUER resolvida/arquivada do próprio
+    // setor, não só a que esse vendedor finalizou — pra reiniciar contato e
+    // prospectar cliente antigo. null quando o setor não liga essa opção
+    // (comportamento de sempre).
+    const sectorResolved = (userSectorId != null && await sectorAllowsResolvedAccess(userSectorId))
+      ? and(
+          inArray(conversationsTable.status, ["resolved", "archived"]),
+          eq(conversationsTable.sectorId, userSectorId),
+        )
+      : null;
+
     // Fila restrita (pedido 10/09): só o que foi direcionado a ele
     // (assigneeId = ele) — nunca potenciais nem o pool geral do setor.
     const [meRestrict] = await db.select({ v: usersTable.queueRestrictToAssigned }).from(usersTable)
       .where(eq(usersTable.id, userId)).limit(1);
     if (meRestrict?.v) {
-      conditions.push(or(
+      const mineRestrict = or(
         eq(conversationsTable.assigneeId, userId),
         sql`EXISTS (SELECT 1 FROM ${conversationParticipantsTable} WHERE ${conversationParticipantsTable.conversationId} = ${conversationsTable.id} AND ${conversationParticipantsTable.userId} = ${userId})`,
-      )!);
+      )!;
+      conditions.push(sectorResolved ? or(mineRestrict, sectorResolved)! : mineRestrict);
       return conditions;
     }
     // Restrição por linha de WhatsApp (allowedSessionKeys) e potenciais/
@@ -339,23 +363,29 @@ async function buildConversationVisibilityConditions(
     if (meQueue?.v) {
       const activeCount = await countActiveConversations(tenantId, userId);
       if (activeCount > 0) {
-        conditions.push(mine);
+        conditions.push(sectorResolved ? or(mine, sectorResolved)! : mine);
       } else {
         const pool = await vendorClaimablePoolCondition(req, userSectorId ?? null);
         const [next] = await db.select({ id: conversationsTable.id }).from(conversationsTable)
           .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.isArchived, false), pool))
           .orderBy(asc(conversationsTable.createdAt)).limit(1);
-        conditions.push(next ? or(mine, eq(conversationsTable.id, next.id))! : mine);
+        const base = next ? or(mine, eq(conversationsTable.id, next.id))! : mine;
+        conditions.push(sectorResolved ? or(base, sectorResolved)! : base);
       }
-      conditions.push(notInArray(conversationsTable.status, ["resolved", "archived"]));
+      conditions.push(sectorResolved
+        ? or(notInArray(conversationsTable.status, ["resolved", "archived"]), sectorResolved)!
+        : notInArray(conversationsTable.status, ["resolved", "archived"]));
       return conditions;
     }
 
     const pool = await vendorClaimablePoolCondition(req, userSectorId ?? null);
-    conditions.push(or(pool, mine)!);
-    // Resolvidas só aparecem para admin/supervisor: vendedor não vê
-    // conversas finalizadas, nem as que ele mesmo finalizou.
-    conditions.push(notInArray(conversationsTable.status, ["resolved", "archived"]));
+    conditions.push(sectorResolved ? or(pool, mine, sectorResolved)! : or(pool, mine)!);
+    // Resolvidas só aparecem para admin/supervisor (ou pro setor que ligou
+    // "todo vendedor vê Resolvidos" acima): vendedor comum não vê conversas
+    // finalizadas, nem as que ele mesmo finalizou.
+    conditions.push(sectorResolved
+      ? or(notInArray(conversationsTable.status, ["resolved", "archived"]), sectorResolved)!
+      : notInArray(conversationsTable.status, ["resolved", "archived"]));
   }
 
   return conditions;
@@ -1424,8 +1454,21 @@ router.patch("/chat/conversations/:id", requireAuth, requireChatAccess(), async 
       return;
     }
     if (assigneeId !== undefined && assigneeId !== conv.assigneeId && !(await checkPerm(req, "transferir"))) {
-      res.status(403).json({ error: "Você não tem permissão para transferir conversas. Fale com o administrador." });
-      return;
+      // Exceção (pedido 14/09, Atacado): reabrir um Resolvido do PRÓPRIO
+      // setor e assumir pra si mesmo (não pra outro vendedor) não é uma
+      // "transferência" no sentido de mexer no trabalho de outro atendente —
+      // é pegar de volta um lead já finalizado pra prospectar de novo, mesmo
+      // espírito de auto-serviço do /claim. Só vale com o setor liberando
+      // "vendedores veem todos os Resolvidos" — sem isso, comportamento de
+      // sempre (precisa de "transferir").
+      const selfClaimResolvedInSector = assigneeId === req.session.userId!
+        && (conv.status === "resolved" || conv.status === "archived" || conv.isArchived === true)
+        && conv.sectorId != null && conv.sectorId === req.session.userSectorId
+        && (await sectorAllowsResolvedAccess(conv.sectorId));
+      if (!selfClaimResolvedInSector) {
+        res.status(403).json({ error: "Você não tem permissão para transferir conversas. Fale com o administrador." });
+        return;
+      }
     }
   }
 
@@ -1595,6 +1638,13 @@ router.patch("/chat/conversations/:id", requireAuth, requireChatAccess(), async 
     !updated.phone.includes("@g.us")
   ) {
     try {
+      // Exceção POR LINHA de WhatsApp (pedido 14/09: público do Atacado não
+      // gosta de receber a pesquisa) — checada antes da config tenant-wide.
+      const [session] = await db.select({ surveyDisabled: whatsappSessionsTable.surveyDisabled })
+        .from(whatsappSessionsTable)
+        .where(and(eq(whatsappSessionsTable.sessionKey, updated.sessionKey), eq(whatsappSessionsTable.tenantId, tenantId)))
+        .limit(1);
+      if (session?.surveyDisabled) throw new SurveyDisabled();
       const surveyCfg = await getSurveySettings(tenantId);
       if (!surveyCfg.enabled) throw new SurveyDisabled();
       // Marca a espera ANTES do envio: o cliente pode responder no instante em
@@ -1877,6 +1927,72 @@ router.delete("/chat/conversations/:id", requireAdminOrSupervisor, async (req, r
   // são restritas a quem podia vê-las antes (setor/participantes/responsável).
   broadcast("conversation_deleted", { id }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: wasPotential, restrictedTo: wasPotential ? null : recipients });
   res.json({ ok: true });
+});
+
+// ─── Disparo em massa pra Resolvidos (pedido 14/09, Atacado) ─────────────
+// "Lista de transmissão": reabre e manda a MESMA mensagem pra vários
+// atendimentos Resolvidos de uma vez, pra reativar cliente antigo em
+// volume. Reaproveita sendOutboundText — mesmo caminho do envio manual, que
+// passa pela fila anti-ban do bridge (ritmo humano, 1 de cada vez, nunca em
+// paralelo). Só aceita conversas Resolvidas/Arquivadas (nunca uma ativa por
+// engano) e só as que o requisitante já pode acessar (canAccessConversation
+// — respeita a mesma regra de setor/vendorsSeeResolved de sempre). Um teto
+// por chamada (MAX_BATCH) evita uma única requisição virar um disparo
+// gigante de uma vez só — quem precisa de mais repete em outra leva.
+const BROADCAST_MAX_BATCH = 60;
+router.post("/chat/conversations/broadcast", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { conversationIds, message } = req.body as { conversationIds?: unknown; message?: string };
+  const text = (message ?? "").trim();
+  if (!text) { res.status(400).json({ error: "Escreva a mensagem." }); return; }
+  const ids = Array.isArray(conversationIds)
+    ? [...new Set(conversationIds.map((v) => Number(v)).filter((n) => Number.isFinite(n)))]
+    : [];
+  if (ids.length === 0) { res.status(400).json({ error: "Selecione ao menos um atendimento." }); return; }
+  if (ids.length > BROADCAST_MAX_BATCH) {
+    res.status(400).json({ error: `No máximo ${BROADCAST_MAX_BATCH} de cada vez — selecione menos e repita em outra leva.` });
+    return;
+  }
+
+  const userRole = req.session.userRole!;
+  const userId = req.session.userId!;
+  const senderName = req.session.userName ?? "Atendente";
+
+  const results: { id: number; ok: boolean; reason?: string }[] = [];
+  for (const id of ids) {
+    const [conv] = await db.select().from(conversationsTable)
+      .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
+    if (!conv) { results.push({ id, ok: false, reason: "Não encontrado" }); continue; }
+    if (conv.phone.includes("@g.us")) { results.push({ id, ok: false, reason: "É um grupo — grupo não entra em disparo" }); continue; }
+    if (conv.status !== "resolved" && conv.status !== "archived" && !conv.isArchived) {
+      results.push({ id, ok: false, reason: "Não está Resolvido" });
+      continue;
+    }
+    if (!(await canAccessConversation(conv, req))) { results.push({ id, ok: false, reason: "Sem acesso" }); continue; }
+
+    // Vendedor sempre assume pra si (é ele quem vai prospectar); admin/
+    // supervisor mantém o responsável original quando houver.
+    const targetAssigneeId = userRole === "vendedor" ? userId : (conv.assigneeId ?? userId);
+    const [updated] = await db.update(conversationsTable)
+      .set({
+        assigneeId: targetAssigneeId, status: "open", isArchived: false,
+        attendanceStartedAt: new Date(), updatedAt: new Date(),
+      })
+      .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)))
+      .returning();
+    if (!updated) { results.push({ id, ok: false, reason: "Falha ao reabrir" }); continue; }
+
+    const recipients = await restrictedRecipients(updated);
+    broadcast("conversation_updated", updated, {
+      tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey, isPotential: false, restrictedTo: recipients,
+    });
+
+    const delivered = await sendOutboundText(id, text, senderName);
+    results.push({ id, ok: delivered, reason: delivered ? undefined : "Falha no envio (WhatsApp)" });
+  }
+
+  const sent = results.filter((r) => r.ok).length;
+  res.json({ ok: true, sent, total: ids.length, results });
 });
 
 // ─── Uso atual da trava anti-disparo em massa (Atendimento ativo) ─────────

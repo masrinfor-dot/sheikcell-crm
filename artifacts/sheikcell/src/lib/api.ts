@@ -764,6 +764,9 @@ export type Sector = {
   // explícito (mesmo [] de propósito) = só esses módulos aparecem pra quem
   // é "vendedor" nesse setor — admin e supervisor não são afetados.
   enabledModules?: OptionalModule[] | null;
+  // Todo vendedor deste setor vê/reabre QUALQUER atendimento Resolvido do
+  // setor, não só o que ele mesmo finalizou (pedido 14/09, Atacado).
+  vendorsSeeResolved: boolean;
 };
 
 export type QueueEntry = {
@@ -2014,6 +2017,13 @@ export const api = {
       req<Conversation>(`/chat/conversations/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     deleteConversation: (id: number) =>
       req<{ ok: boolean }>(`/chat/conversations/${id}`, { method: "DELETE" }),
+    // Disparo em massa pra Resolvidos (pedido 14/09, Atacado): reabre +
+    // manda a mesma mensagem pra vários atendimentos de uma vez.
+    broadcast: (conversationIds: number[], message: string) =>
+      req<{ ok: boolean; sent: number; total: number; results: { id: number; ok: boolean; reason?: string }[] }>(
+        "/chat/conversations/broadcast",
+        { method: "POST", body: JSON.stringify({ conversationIds, message }) },
+      ),
     outboundUsage: (assigneeId?: number) =>
       req<OutboundUsage>(`/chat/outbound-usage${assigneeId ? `?assigneeId=${assigneeId}` : ""}`),
     createConversation: (data: { phone: string; name: string; channel?: string; sectorId?: number; assigneeId?: number; sessionKey?: string }) =>

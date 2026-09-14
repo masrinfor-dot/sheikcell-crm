@@ -89,18 +89,22 @@ router.patch("/settings", requireAdminOrSupervisor, async (req, res): Promise<vo
     }
     updates.push(["alert_unanswered_minutes", String(m)]);
   }
+  // Teto máximo levantado (pedido 14/09) — continua existindo um limite (é
+  // a trava anti-ban do WhatsApp não-oficial: cada atendimento manual novo
+  // manda a 1ª mensagem na hora), só que bem mais folgado, pra quem precisa
+  // prospectar em volume poder subir o número aqui sem depender de deploy.
   if (outboundHourlyLimit !== undefined) {
     const h = Math.round(Number(outboundHourlyLimit));
-    if (!Number.isFinite(h) || h < 1 || h > 200) {
-      res.status(400).json({ error: "Limite por hora deve ser entre 1 e 200" });
+    if (!Number.isFinite(h) || h < 1 || h > 1000) {
+      res.status(400).json({ error: "Limite por hora deve ser entre 1 e 1000" });
       return;
     }
     updates.push(["outbound_hourly_limit", String(h)]);
   }
   if (outboundDailyLimit !== undefined) {
     const d = Math.round(Number(outboundDailyLimit));
-    if (!Number.isFinite(d) || d < 1 || d > 1000) {
-      res.status(400).json({ error: "Limite por dia deve ser entre 1 e 1000" });
+    if (!Number.isFinite(d) || d < 1 || d > 20000) {
+      res.status(400).json({ error: "Limite por dia deve ser entre 1 e 20000" });
       return;
     }
     updates.push(["outbound_daily_limit", String(d)]);

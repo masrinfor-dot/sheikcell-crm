@@ -46,6 +46,7 @@ export interface AdminWAState extends BridgeWAState {
   color: string;
   icon: string | null;
   queueAutoAssignEnabled: boolean;
+  surveyDisabled: boolean;
 }
 
 async function persistSessionState(tenantId: number, key: string, state: BridgeWAState): Promise<void> {
@@ -127,6 +128,7 @@ function offlineState(
     color: row?.color ?? "#10b981",
     icon: row?.icon ?? null,
     queueAutoAssignEnabled: row?.queueAutoAssignEnabled ?? false,
+    surveyDisabled: row?.surveyDisabled ?? false,
   };
 }
 
@@ -172,6 +174,7 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         color: row?.color ?? "#10b981",
         icon: row?.icon ?? null,
         queueAutoAssignEnabled: row?.queueAutoAssignEnabled ?? false,
+        surveyDisabled: row?.surveyDisabled ?? false,
       });
     } else if (bridgeAvailable) {
       // Bridge is up but doesn't know this session yet — ask it to start it.
@@ -189,6 +192,7 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         color: row?.color ?? "#10b981",
         icon: row?.icon ?? null,
         queueAutoAssignEnabled: row?.queueAutoAssignEnabled ?? false,
+        surveyDisabled: row?.surveyDisabled ?? false,
       });
       void fetchFromBridge("/whatsapp/sessions", "POST", { session: key }).catch(() => {});
     } else {
@@ -315,6 +319,22 @@ router.post("/whatsapp/sessions/:key/queue-auto-assign", requireFeature("whatsap
     .returning();
   if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
   res.json({ ok: true, queueAutoAssignEnabled: updated.queueAutoAssignEnabled });
+});
+
+// Pesquisa de satisfação desligada POR LINHA (pedido 14/09: público do
+// Atacado não gosta de receber a pesquisa ao finalizar) — ver surveyDisabled
+// em whatsapp_sessions.ts e o trigger em routes/chat.ts (PATCH conversa).
+router.post("/whatsapp/sessions/:key/survey-disabled", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const disabled = !!(req.body as { disabled?: boolean } | undefined)?.disabled;
+  const [updated] = await db
+    .update(whatsappSessionsTable)
+    .set({ surveyDisabled: disabled, updatedAt: new Date() })
+    .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId)))
+    .returning();
+  if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+  res.json({ ok: true, surveyDisabled: updated.surveyDisabled });
 });
 
 // ─── Reiniciar a fila desta linha (pedido 14/09, pra testar do zero) ──────
@@ -452,6 +472,7 @@ router.get("/whatsapp/status", requireFeature("whatsapp"), async (req, res): Pro
         color: row?.color ?? "#10b981",
         icon: row?.icon ?? null,
         queueAutoAssignEnabled: row?.queueAutoAssignEnabled ?? false,
+        surveyDisabled: row?.surveyDisabled ?? false,
       };
       res.json(result);
       return;

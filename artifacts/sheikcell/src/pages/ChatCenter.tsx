@@ -1301,6 +1301,19 @@ export default function ChatCenter({
   const [finalizeSaleAmount, setFinalizeSaleAmount] = useState("");
   const [finalizeSaleDesc, setFinalizeSaleDesc] = useState("");
   const [sectors, setSectors] = useState<Sector[]>([]);
+  // Resolvidas: sempre visível pra admin/supervisor; vendedor comum só
+  // quando o PRÓPRIO setor liga "vendedores veem todos os Resolvidos"
+  // (pedido 14/09, Atacado — reiniciar contato/prospectar cliente antigo).
+  const canSeeResolved = user?.role === "admin" || user?.role === "supervisor"
+    || user?.sector?.vendorsSeeResolved === true;
+  // Disparo em massa pra Resolvidos (pedido 14/09, Atacado): "lista de
+  // transmissão" — seleciona vários atendimentos finalizados e manda a
+  // mesma mensagem pra todos de uma vez (reabre + envia, ver
+  // POST /chat/conversations/broadcast no backend).
+  const [broadcastMode, setBroadcastMode] = useState(false);
+  const [broadcastSelected, setBroadcastSelected] = useState<Set<number>>(new Set());
+  const [broadcastMessage, setBroadcastMessage] = useState("");
+  const [broadcastSending, setBroadcastSending] = useState(false);
   const [chatUsers, setChatUsers] = useState<{ id: number; name: string; role: string; sectorId?: number | null }[]>([]);
   const [quickReplies, setQuickReplies] = useState<QuickReply[]>([]);
   const [showQuickReplies, setShowQuickReplies] = useState(false);
@@ -2672,9 +2685,17 @@ export default function ChatCenter({
   // pra fila em "Pendentes". isArchived: false garante que sai de fato da
   // categoria "Resolvidas" mesmo que tenha sido arquivada por outro caminho.
   const handleReopenConv = async (id: number, assigneeId: number | null | undefined) => {
-    const status = assigneeId != null ? "open" : "pending";
+    // Vendedor comum reabrindo um Resolvido que NÃO é dele (setor libera
+    // "veem todos os Resolvidos", pedido 14/09 Atacado) assume o
+    // atendimento pra si — é ele quem vai reiniciar o contato.
+    // Admin/supervisor mantém o de sempre: devolve pro responsável original.
+    const takeOver = user?.role === "vendedor" && assigneeId !== user.id;
+    const targetAssignee = takeOver ? user!.id : assigneeId;
+    const status = targetAssignee != null ? "open" : "pending";
     try {
-      const updated = await api.chat.updateConversation(id, { status, isArchived: false });
+      const updated = await api.chat.updateConversation(id, {
+        status, isArchived: false, ...(takeOver ? { assigneeId: user!.id } : {}),
+      });
       setConvs((prev) => prev.map((c) => c.id === id ? { ...c, ...updated, status, isArchived: false } : c));
       toast({ title: "Atendimento reaberto" });
       // Fila do Central de Atendimento por ordem (chatQueueSingleTask):
@@ -3431,8 +3452,9 @@ export default function ChatCenter({
         <div className="flex border-b border-border bg-white">
           {CATEGORIES.filter((cat) =>
             (cat.id !== "potenciais" || can(user, "ver_potenciais")) &&
-            // Resolvidas só para admin/supervisor
-            (cat.id !== "resolvidas" || user?.role === "admin" || user?.role === "supervisor")
+            // Resolvidas: admin/supervisor sempre; vendedor comum só se o
+            // setor liga "vendedores veem todos os Resolvidos" (Atacado).
+            (cat.id !== "resolvidas" || canSeeResolved)
           ).map((cat) => {
             const isActive = category === cat.id;
             return (
@@ -3458,6 +3480,87 @@ export default function ChatCenter({
             );
           })}
         </div>
+
+        {/* Disparo em massa pra Resolvidos (pedido 14/09, Atacado): "lista de
+            transmissão" — seleciona vários e manda a mesma mensagem. Só
+            aparece pra quem já pode ver Resolvidos (canSeeResolved). */}
+        {category === "resolvidas" && canSeeResolved && (
+          <div className="px-3 py-2 bg-[#ededed] border-b border-border">
+            {!broadcastMode ? (
+              <button
+                onClick={() => { setBroadcastMode(true); setBroadcastSelected(new Set()); }}
+                data-testid="button-broadcast-mode-start"
+                className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-primary/30 bg-white text-primary text-xs font-semibold hover:bg-primary/5 transition"
+              >
+                <Send className="w-3.5 h-3.5" />
+                Disparar mensagem para vários (lista de transmissão)
+              </button>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold">{broadcastSelected.size} selecionado(s)</span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setBroadcastSelected(new Set(filteredConvs.map((c) => c.id)))}
+                      className="text-primary hover:underline"
+                    >
+                      Selecionar todos ({filteredConvs.length})
+                    </button>
+                    <button
+                      onClick={() => { setBroadcastMode(false); setBroadcastSelected(new Set()); setBroadcastMessage(""); }}
+                      className="text-muted-foreground hover:underline"
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                </div>
+                <textarea
+                  value={broadcastMessage}
+                  onChange={(e) => setBroadcastMessage(e.target.value)}
+                  placeholder="Mensagem que vai ser enviada pra todos os selecionados..."
+                  rows={2}
+                  data-testid="input-broadcast-message"
+                  className="w-full text-sm rounded-lg border border-border px-2.5 py-1.5 outline-none focus:ring-2 focus:ring-primary/20 resize-none"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  Reabre cada atendimento selecionado e manda essa mensagem — atenção ao volume: disparo grande pro mesmo tipo
+                  de contato repetido pode fazer o WhatsApp banir o número. No máximo 60 por leva.
+                </p>
+                <button
+                  onClick={async () => {
+                    const ids = [...broadcastSelected];
+                    const text = broadcastMessage.trim();
+                    if (ids.length === 0) { toast({ title: "Selecione ao menos um atendimento", variant: "destructive" }); return; }
+                    if (!text) { toast({ title: "Escreva a mensagem", variant: "destructive" }); return; }
+                    if (!window.confirm(`Mandar essa mensagem para ${ids.length} atendimento(s) resolvido(s)?`)) return;
+                    setBroadcastSending(true);
+                    try {
+                      const res = await api.chat.broadcast(ids, text);
+                      toast({
+                        title: `${res.sent}/${res.total} enviado(s)`,
+                        description: res.sent < res.total ? "Alguns não foram enviados — confira o motivo na lista." : undefined,
+                      });
+                      setBroadcastMode(false);
+                      setBroadcastSelected(new Set());
+                      setBroadcastMessage("");
+                      void fetchConvs();
+                    } catch (e) {
+                      toast({ title: e instanceof Error ? e.message : "Erro ao disparar", variant: "destructive" });
+                    } finally {
+                      setBroadcastSending(false);
+                    }
+                  }}
+                  disabled={broadcastSending || broadcastSelected.size === 0 || !broadcastMessage.trim()}
+                  data-testid="button-broadcast-send"
+                  className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary/90 transition disabled:opacity-50"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  {broadcastSending ? "Enviando..." : `Enviar para ${broadcastSelected.size}`}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Filters */}
         {showFilter && (
@@ -3602,23 +3705,56 @@ export default function ChatCenter({
             </div>
           ) : (
             filteredConvs.map((conv) => (
-              <ConvItem
-                key={conv.id}
-                conv={conv}
-                active={conv.id === activeId}
-                onClick={() => setActiveId(conv.id)}
-                onTogglePin={() => void handleTogglePin(conv)}
-                overdue={isOverdue(conv)}
-                sessionBadge={
-                  // Só etiqueta quando há mais de um número de atendimento
-                  // pareado (ou a conversa vem de uma conexão secundária).
-                  conv.channel === "whatsapp" && (waSessions.length > 1 || conv.sessionKey !== "default")
-                    ? waSessionLabel(conv.sessionKey, waSessions)
-                    : null
-                }
-                sessionColor={conv.channel === "whatsapp" ? waSessionColor(conv.sessionKey, waSessions) : null}
-                sessionIcon={conv.channel === "whatsapp" ? waSessionIcon(conv.sessionKey, waSessions) : null}
-              />
+              <div key={conv.id} className="relative">
+                {broadcastMode && (
+                  <label
+                    className="absolute top-1/2 -translate-y-1/2 left-2 z-10 w-5 h-5 flex items-center justify-center"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={broadcastSelected.has(conv.id)}
+                      onChange={(e) => {
+                        setBroadcastSelected((prev) => {
+                          const next = new Set(prev);
+                          if (e.target.checked) next.add(conv.id); else next.delete(conv.id);
+                          return next;
+                        });
+                      }}
+                      data-testid={`checkbox-broadcast-${conv.id}`}
+                      className="w-4 h-4 rounded accent-[var(--primary)]"
+                    />
+                  </label>
+                )}
+                <div className={broadcastMode ? "pl-6" : undefined}>
+                  <ConvItem
+                    conv={conv}
+                    active={conv.id === activeId}
+                    onClick={() => {
+                      if (broadcastMode) {
+                        setBroadcastSelected((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(conv.id)) next.delete(conv.id); else next.add(conv.id);
+                          return next;
+                        });
+                      } else {
+                        setActiveId(conv.id);
+                      }
+                    }}
+                    onTogglePin={() => void handleTogglePin(conv)}
+                    overdue={isOverdue(conv)}
+                    sessionBadge={
+                      // Só etiqueta quando há mais de um número de atendimento
+                      // pareado (ou a conversa vem de uma conexão secundária).
+                      conv.channel === "whatsapp" && (waSessions.length > 1 || conv.sessionKey !== "default")
+                        ? waSessionLabel(conv.sessionKey, waSessions)
+                        : null
+                    }
+                    sessionColor={conv.channel === "whatsapp" ? waSessionColor(conv.sessionKey, waSessions) : null}
+                    sessionIcon={conv.channel === "whatsapp" ? waSessionIcon(conv.sessionKey, waSessions) : null}
+                  />
+                </div>
+              </div>
             ))
           )}
         </div>
@@ -3873,10 +4009,12 @@ export default function ChatCenter({
                   <span className="hidden lg:inline">Finalizar</span>
                 </button>
               )}
-              {/* Reabrir atendimento — só na aba Resolvidas (já é admin/supervisor
-                  só por estarem vendo essa aba). Volta com o mesmo vendedor pra
-                  Ativos, ou pra fila em Pendentes se não tiver mais responsável. */}
-              {activeCategory === "resolvidas" && (user?.role === "admin" || user?.role === "supervisor") && (
+              {/* Reabrir atendimento — só na aba Resolvidas, e só quem pode vê-la
+                  (admin/supervisor sempre; vendedor comum só com o setor
+                  liberando "veem todos os Resolvidos", pedido 14/09 Atacado).
+                  Volta com o mesmo vendedor pra Ativos, ou pra fila em
+                  Pendentes se não tiver mais responsável. */}
+              {activeCategory === "resolvidas" && canSeeResolved && (
                 <button
                   onClick={() => handleReopenConv(activeConv.id, activeConv.assigneeId)}
                   data-testid="button-reopen-conv"
@@ -5123,14 +5261,14 @@ export default function ChatCenter({
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="text-xs text-muted-foreground">Por hora</label>
-                  <input type="number" min={1} max={200} value={cfgOutboundHourly}
+                  <input type="number" min={1} max={1000} value={cfgOutboundHourly}
                     onChange={(e) => setCfgOutboundHourly(Number(e.target.value))}
                     data-testid="input-outbound-hourly-limit"
                     className="w-full px-3 py-2 rounded-xl border border-border text-sm mt-1" />
                 </div>
                 <div>
                   <label className="text-xs text-muted-foreground">Por dia</label>
-                  <input type="number" min={1} max={1000} value={cfgOutboundDaily}
+                  <input type="number" min={1} max={20000} value={cfgOutboundDaily}
                     onChange={(e) => setCfgOutboundDaily(Number(e.target.value))}
                     data-testid="input-outbound-daily-limit"
                     className="w-full px-3 py-2 rounded-xl border border-border text-sm mt-1" />
