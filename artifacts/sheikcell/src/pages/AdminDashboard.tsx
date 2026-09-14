@@ -114,6 +114,7 @@ type WASession = {
   bridgeAvailable: boolean;
   color: string;
   icon: string | null;
+  queueAutoAssignEnabled: boolean;
 };
 
 type UserRow = {
@@ -1236,6 +1237,37 @@ export default function AdminDashboard() {
                   {s.errorMessage && <p className="text-xs text-red-600">{s.errorMessage}</p>}
                 </div>
 
+                {/* Fila com auto-atribuição, opt-in por linha (pedido 14/09):
+                    liga se conversas novas/liberadas que chegam POR ESTE
+                    número podem ser atribuídas sozinhas (sem clicar) a um
+                    vendedor ocioso com "Usar fila no Central de Atendimento"
+                    ligado. Default desligado — o admin escolhe linha por linha. */}
+                <label className="flex items-start gap-2.5 mb-3 px-2 py-2 rounded-lg hover:bg-secondary/50 cursor-pointer text-sm"
+                  data-testid={`checkbox-wa-queue-auto-assign-${s.sessionKey}`}>
+                  <input
+                    type="checkbox"
+                    checked={s.queueAutoAssignEnabled}
+                    onChange={async (e) => {
+                      const enabled = e.target.checked;
+                      await fetch(`/api/whatsapp/sessions/${s.sessionKey}/queue-auto-assign`, {
+                        method: "POST", credentials: "include",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ enabled }),
+                      });
+                      fetchWAStatus();
+                    }}
+                    className="w-4 h-4 mt-0.5 accent-[var(--primary)] shrink-0"
+                  />
+                  <span>
+                    <span className="font-medium">Auto-atribuir da fila nesta linha</span>
+                    <p className="text-[11px] text-muted-foreground -mt-0.5">
+                      Com isso ligado, um cliente novo (ou que volta) por este número já entra direto em "Ativos"
+                      do próximo vendedor ocioso com fila ligada (em rodízio, sempre dentro do mesmo setor) — sem
+                      precisar que ele clique pra assumir.
+                    </p>
+                  </span>
+                </label>
+
                 {/* QR code */}
                 {s.status === "qr" && s.qrDataUrl && (
                   <div className="text-center mb-3">
@@ -1881,7 +1913,7 @@ export default function AdminDashboard() {
                   <span>Usar fila no Central de Atendimento (1 atendimento novo por vez, em ordem)</span>
                 </label>
                 <p className="text-[11px] text-muted-foreground px-2 -mt-0.5">
-                  Com isso ativado, {permUser.name.split(" ")[0]} só consegue assumir um novo cliente de Potenciais/Pendentes depois de concluir os que já tem em aberto — e sempre o mais antigo da fila, sem escolher a dedo. Atendimentos que ele já tinha antes de ligar a opção não são mexidos. Diferente da restrição acima: aqui ele se auto-serve, não depende de alguém direcionar na mão.
+                  Com isso ativado, {permUser.name.split(" ")[0]} só consegue assumir um novo cliente de Potenciais/Pendentes depois de concluir os que já tem em aberto — e sempre o mais antigo da fila, sem escolher a dedo. Atendimentos que ele já tinha antes de ligar a opção não são mexidos. Diferente da restrição acima: aqui ele se auto-serve, não depende de alguém direcionar na mão. Em linhas de WhatsApp com "Auto-atribuir da fila" ligado (Administração → WhatsApp), ele nem precisa clicar — o próximo cliente já entra direto em Ativos assim que ele fica ocioso.
                 </p>
               </div>
             )}

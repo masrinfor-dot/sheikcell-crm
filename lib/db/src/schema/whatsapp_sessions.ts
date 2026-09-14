@@ -1,4 +1,4 @@
-import { pgTable, serial, text, timestamp, integer } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, timestamp, integer, boolean } from "drizzle-orm/pg-core";
 
 export const whatsappSessionsTable = pgTable("whatsapp_sessions", {
   tenantId: integer("tenant_id").notNull().default(1),
@@ -15,6 +15,14 @@ export const whatsappSessionsTable = pgTable("whatsapp_sessions", {
   // reduzir erro de responder pelo número errado quando há mais de um.
   color: text("color").notNull().default("#10b981"),
   icon: text("icon"), // emoji opcional (ex.: "🏬"), mostrado junto da etiqueta
+  // Fila do Central de Atendimento com auto-atribuição (pedido 14/09): opt-in
+  // POR LINHA de WhatsApp — quando true, conversas novas/liberadas que
+  // chegam por ESTE número podem ser atribuídas automaticamente (sem
+  // clicar) ao vendedor ocioso da fila (chatQueueSingleTask, ver
+  // schema/users.ts). Default false: nenhuma linha existente muda de
+  // comportamento até o admin ligar explicitamente em Administração →
+  // WhatsApp.
+  queueAutoAssignEnabled: boolean("queue_auto_assign_enabled").notNull().default(false),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

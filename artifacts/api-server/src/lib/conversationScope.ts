@@ -1,5 +1,5 @@
-import { db, conversationParticipantsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { db, conversationParticipantsTable, conversationsTable } from "@workspace/db";
+import { and, eq, notInArray, sql } from "drizzle-orm";
 
 // Shared "potencial" (new, unclaimed lead) scoping helpers.
 //
@@ -35,6 +35,23 @@ export async function restrictedRecipients(
   const ids = new Set(parts.map((p) => p.userId));
   if (conv.assigneeId != null) ids.add(conv.assigneeId);
   return [...ids];
+}
+
+// Quantos atendimentos um vendedor já tem abertos agora (assigneeId = ele,
+// não arquivado, não resolvido/arquivado) — usado pela fila do Central de
+// Atendimento (chatQueueSingleTask) tanto pra decidir o que ele vê
+// (visibilidade) quanto pra bloquear/liberar o /claim e o auto-atribuir de
+// um atendimento novo além dos que já tem.
+export async function countActiveConversations(tenantId: number, userId: number): Promise<number> {
+  const [row] = await db.select({ count: sql<string>`count(*)` })
+    .from(conversationsTable)
+    .where(and(
+      eq(conversationsTable.tenantId, tenantId),
+      eq(conversationsTable.isArchived, false),
+      eq(conversationsTable.assigneeId, userId),
+      notInArray(conversationsTable.status, ["resolved", "archived"]),
+    ));
+  return Number(row?.count ?? 0);
 }
 
 export function isPotentialConversation(

@@ -42,6 +42,7 @@ export interface AdminWAState extends BridgeWAState {
   bridgeAvailable: boolean;
   color: string;
   icon: string | null;
+  queueAutoAssignEnabled: boolean;
 }
 
 async function persistSessionState(tenantId: number, key: string, state: BridgeWAState): Promise<void> {
@@ -122,6 +123,7 @@ function offlineState(
     bridgeAvailable: false,
     color: row?.color ?? "#10b981",
     icon: row?.icon ?? null,
+    queueAutoAssignEnabled: row?.queueAutoAssignEnabled ?? false,
   };
 }
 
@@ -166,6 +168,7 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         bridgeAvailable: true,
         color: row?.color ?? "#10b981",
         icon: row?.icon ?? null,
+        queueAutoAssignEnabled: row?.queueAutoAssignEnabled ?? false,
       });
     } else if (bridgeAvailable) {
       // Bridge is up but doesn't know this session yet — ask it to start it.
@@ -182,6 +185,7 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         bridgeAvailable: true,
         color: row?.color ?? "#10b981",
         icon: row?.icon ?? null,
+        queueAutoAssignEnabled: row?.queueAutoAssignEnabled ?? false,
       });
       void fetchFromBridge("/whatsapp/sessions", "POST", { session: key }).catch(() => {});
     } else {
@@ -291,6 +295,25 @@ router.post("/whatsapp/sessions/:key/appearance", requireFeature("whatsapp"), as
   res.json({ ok: true, color: updated.color, icon: updated.icon });
 });
 
+// ─── Fila com auto-atribuição, opt-in por linha (pedido 14/09) ────────────
+// Quando ligado NESTA conexão, conversas novas/liberadas que chegam por ela
+// podem ser atribuídas automaticamente (sem clicar) a um vendedor ocioso
+// que tenha "Usar fila no Central de Atendimento" ligado (Administração →
+// Usuários → Permissões). Default desligado — o admin escolhe linha por
+// linha. Ver lib/queueAutoAssign.ts.
+router.post("/whatsapp/sessions/:key/queue-auto-assign", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const enabled = !!(req.body as { enabled?: boolean } | undefined)?.enabled;
+  const [updated] = await db
+    .update(whatsappSessionsTable)
+    .set({ queueAutoAssignEnabled: enabled, updatedAt: new Date() })
+    .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId)))
+    .returning();
+  if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+  res.json({ ok: true, queueAutoAssignEnabled: updated.queueAutoAssignEnabled });
+});
+
 // ─── Remove a connection ────────────────────────────────────────────────────
 router.delete("/whatsapp/sessions/:key", requireFeature("whatsapp"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
@@ -369,6 +392,7 @@ router.get("/whatsapp/status", requireFeature("whatsapp"), async (req, res): Pro
         bridgeAvailable: true,
         color: row?.color ?? "#10b981",
         icon: row?.icon ?? null,
+        queueAutoAssignEnabled: row?.queueAutoAssignEnabled ?? false,
       };
       res.json(result);
       return;

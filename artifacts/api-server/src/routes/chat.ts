@@ -17,7 +17,8 @@ import {
   presenceDisconnect,
   type BufferedEvent,
 } from "../lib/sseEmitter";
-import { isPotentialConversation, isRestrictedConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES } from "../lib/conversationScope";
+import { isPotentialConversation, isRestrictedConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES, countActiveConversations } from "../lib/conversationScope";
+import { autoAssignOnNewPoolConversation, autoAssignOnVendorFreed } from "../lib/queueAutoAssign";
 import { ensureCrmContactForConversation, syncCrmAttendant } from "../lib/crmSync";
 import { sendOutboundText } from "../lib/outbound";
 import { normalizePhone, phoneVariants } from "../lib/phone";
@@ -266,22 +267,6 @@ async function vendorClaimablePoolCondition(req: Request, userSectorId: number |
     sectorUnrestricted = and(sectorUnrestricted, sessionScope)!;
   }
   return or(potencial, sectorUnrestricted)!;
-}
-
-/** Quantos atendimentos o vendedor já tem abertos agora (assigneeId = ele,
- * não resolvido/arquivado) — usado pela fila do Central de Atendimento
- * (chatQueueSingleTask) tanto pra decidir o que ele vê (visibilidade)
- * quanto pra bloquear o /claim de um novo além dos que já tem. */
-async function countActiveConversations(tenantId: number, userId: number): Promise<number> {
-  const [row] = await db.select({ count: sql<string>`count(*)` })
-    .from(conversationsTable)
-    .where(and(
-      eq(conversationsTable.tenantId, tenantId),
-      eq(conversationsTable.isArchived, false),
-      eq(conversationsTable.assigneeId, userId),
-      notInArray(conversationsTable.status, ["resolved", "archived"]),
-    ));
-  return Number(row?.count ?? 0);
 }
 
 // ─── List conversations ────────────────────────────────────────────────────
@@ -1676,6 +1661,27 @@ router.patch("/chat/conversations/:id", requireAuth, requireChatAccess(), async 
     broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: false });
   }
   res.json(updated);
+
+  // Fila do Central de Atendimento com auto-atribuição por linha de WhatsApp
+  // (pedido 14/09): dispara em segundo plano, depois de responder — nunca
+  // atrasa nem pode derrubar esta requisição (as duas funções nunca lançam).
+  // (1) A conversa acabou de ficar sem responsável (transferência de setor,
+  // remoção manual pelo admin/supervisor/vendedor_chefe) — tenta atribuir a
+  // um vendedor ocioso da fila no NOVO setor dela.
+  if ("assigneeId" in update && updated.assigneeId == null) {
+    void autoAssignOnNewPoolConversation(updated);
+  }
+  // (2) O antigo responsável acabou de ficar ocioso — finalizou/arquivou o
+  // único atendimento que tinha, ou perdeu esta conversa pra outra pessoa —
+  // tenta pegar pra ele, na hora, o mais antigo do pool do setor dele.
+  const freedVendorId = conv.assigneeId != null && (
+    updated.assigneeId !== conv.assigneeId ||
+    (updated.status === "resolved" && conv.status !== "resolved") ||
+    (updated.isArchived === true && conv.isArchived !== true)
+  ) ? conv.assigneeId : null;
+  if (freedVendorId != null) {
+    void autoAssignOnVendorFreed(tenantId, freedVendorId);
+  }
 });
 
 // ─── Claim conversation (self-assign / take from queue) ────────────────────

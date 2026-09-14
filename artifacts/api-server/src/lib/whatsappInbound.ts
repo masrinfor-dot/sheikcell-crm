@@ -7,6 +7,7 @@ import { nextPunchKind, dayKeySaoPaulo } from "./timeBank";
 import { normalizePhone, phoneVariants } from "./phone";
 import { broadcast } from "./sseEmitter";
 import { isPotentialConversation, restrictedRecipients } from "./conversationScope";
+import { autoAssignOnNewPoolConversation } from "./queueAutoAssign";
 import { classifyText } from "./autoRouter";
 import { ensureCrmContactForConversation, syncCrmAttendant } from "./crmSync";
 import { getSurveySettings, SURVEY_DEFAULTS, surveyScaleMin, buildThankYouMessage } from "./surveySettings";
@@ -374,6 +375,10 @@ async function upsertConversation(
     // Keep the CRM in sync with atendimentos: register the customer as soon as
     // the conversation starts, not only when it is resolved.
     await ensureCrmContactForConversation(conv);
+    // Fila do Central de Atendimento com auto-atribuição (pedido 14/09, opt-in
+    // por linha de WhatsApp): tenta atribuir esta conversa nova a um vendedor
+    // ocioso da fila, em segundo plano — nunca lança nem atrasa o webhook.
+    void autoAssignOnNewPoolConversation(conv);
   } else {
     // Se o atendimento já foi finalizado (resolvido/arquivado) e o cliente volta
     // a mandar mensagem, reabrimos a conversa para "Potenciais": status "open" e
@@ -407,6 +412,9 @@ async function upsertConversation(
       broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey, isPotential: isPotentialConversation(updated), restrictedTo: await restrictedRecipients(updated) });
       // Cliente voltou: cartão do CRM volta para "Potenciais" e perde o atendente.
       await syncCrmAttendant(updated);
+      // Fila com auto-atribuição (pedido 14/09): a conversa reaberta também
+      // entra no pool sem dono — mesma tentativa de auto-atribuir de cima.
+      void autoAssignOnNewPoolConversation(updated);
     }
   }
 

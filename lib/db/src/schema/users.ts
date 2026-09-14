@@ -93,6 +93,13 @@ export const usersTable = pgTable("users", {
   // Default false (comportamento de sempre). Só tem efeito para role
   // "vendedor" (mesmo padrão de queueRestrictToAssigned).
   chatQueueSingleTask: boolean("chat_queue_single_task").notNull().default(false),
+  // Rodízio da fila com auto-atribuição (pedido 14/09): registra a última
+  // vez que este vendedor RECEBEU um atendimento novo pela fila (seja
+  // auto-atribuído ou pego por ele mesmo no /claim) — usado só pra escolher,
+  // entre vários vendedores ociosos do mesmo setor, quem está "há mais
+  // tempo esperando" e deve receber o próximo primeiro. null = nunca
+  // recebeu nada pela fila ainda (entra na frente de todo mundo).
+  chatQueueLastAssignedAt: timestamp("chat_queue_last_assigned_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });
