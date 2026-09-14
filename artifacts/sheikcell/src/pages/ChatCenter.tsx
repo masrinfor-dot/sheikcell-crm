@@ -2716,10 +2716,9 @@ export default function ChatCenter({
       toast({ title: "Descreva o motivo da finalização", variant: "destructive" });
       return;
     }
-    if (finalizeHadSale == null) {
-      toast({ title: "Informe se teve venda neste atendimento", variant: "destructive" });
-      return;
-    }
+    // Pedido 14/09: "Teve venda?" deixou de ser obrigatório pra finalizar —
+    // continua aparecendo na tela (finalizeHadSale pode ficar null se o
+    // vendedor não responder), só não bloqueia mais o botão Finalizar.
     const saleAmount = parseFloat(finalizeSaleAmount.replace(",", "."));
     if (finalizeHadSale && (!Number.isFinite(saleAmount) || saleAmount <= 0)) {
       toast({ title: "Informe o valor da venda", variant: "destructive" });
@@ -2729,7 +2728,7 @@ export default function ChatCenter({
     try {
       const updated = await api.chat.updateConversation(id, {
         status: "resolved", resolutionReason,
-        hadSale: finalizeHadSale,
+        ...(finalizeHadSale != null ? { hadSale: finalizeHadSale } : {}),
         ...(finalizeHadSale ? { saleAmount, saleDescription: finalizeSaleDesc.trim() } : {}),
       });
       setConvs((prev) => prev.map((c) => c.id === id ? { ...c, ...updated, status: "resolved" } : c));
