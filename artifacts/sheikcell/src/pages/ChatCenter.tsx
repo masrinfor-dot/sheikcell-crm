@@ -2609,7 +2609,7 @@ export default function ChatCenter({
   // ── Ativo → Resolvida (finalizar atendimento) ──
   // Abre o modal para o vendedor escolher o motivo antes de finalizar.
   const handleDeleteConv = async (id: number, name: string) => {
-    if (!window.confirm(`Excluir o atendimento de "${name}"? Todo o histórico de mensagens dessa conversa será apagado de vez (a ficha do cliente no CRM não é afetada). Essa ação não pode ser desfeita.`)) return;
+    if (!window.confirm(`Excluir o atendimento de "${name}"? Ele some da sua lista (Favoritos/Ativos/Pendentes/Potenciais) e libera a vaga da fila, mas o histórico de mensagens NÃO é apagado — fica arquivado (a ficha do cliente no CRM também não é afetada).`)) return;
     try {
       await api.chat.deleteConversation(id);
       setConvs((prev) => prev.filter((c) => c.id !== id));

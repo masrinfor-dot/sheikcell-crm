@@ -42,6 +42,11 @@ export async function restrictedRecipients(
 // Atendimento (chatQueueSingleTask) tanto pra decidir o que ele vê
 // (visibilidade) quanto pra bloquear/liberar o /claim e o auto-atribuir de
 // um atendimento novo além dos que já tem.
+//
+// Grupo de WhatsApp (JID "...@g.us") NUNCA conta aqui (pedido 14/09): um
+// grupo (ex.: "Clientes VIPs") atribuído a um vendedor não pode ocupar a
+// vaga de "1 atendimento por vez" da fila — senão ele fica travado pra
+// sempre sem receber cliente de verdade só por ter um grupo aberto.
 export async function countActiveConversations(tenantId: number, userId: number): Promise<number> {
   const [row] = await db.select({ count: sql<string>`count(*)` })
     .from(conversationsTable)
@@ -50,6 +55,7 @@ export async function countActiveConversations(tenantId: number, userId: number)
       eq(conversationsTable.isArchived, false),
       eq(conversationsTable.assigneeId, userId),
       notInArray(conversationsTable.status, ["resolved", "archived"]),
+      sql`${conversationsTable.phone} NOT LIKE '%@g.us'`,
     ));
   return Number(row?.count ?? 0);
 }

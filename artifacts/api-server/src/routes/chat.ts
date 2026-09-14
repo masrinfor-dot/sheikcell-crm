@@ -1825,15 +1825,14 @@ router.delete("/chat/conversations/:id", requireAdminOrSupervisor, async (req, r
   const recipients = await restrictedRecipients(conv);
 
   await db.transaction(async (tx) => {
-    // Excluir a conversa não pode apagar o histórico de atendimento do
-    // cliente (visível no CRM) — só existia registro em attendance_logs
-    // quando o atendimento era finalizado; se alguém exclui direto (sem
-    // finalizar), o histórico ficava zerado. Cria aqui um registro de
-    // fallback (uma vez só, por isso o dedupe check) ANTES de apagar as
-    // mensagens, pra preservar quem era o cliente/atendente/setor mesmo
-    // sem o atendimento ter sido finalizado normalmente. Sem log se a
-    // conversa nunca teve nenhuma mensagem (não houve atendimento de fato)
-    // ou já existe um log dela (já foi finalizada antes de excluir).
+    // Pedido 14/09 (revisão): "excluir atendimento" NÃO PODE apagar o
+    // histórico de mensagens de vez — só tirar a conversa das listas
+    // (Favoritos/Ativos/Pendentes/Potenciais, que já filtram isArchived=false
+    // na base). Antes isto DELETAVA messages/participants/pins/agendamentos e
+    // a própria conversa; agora é um arquivamento: mensagens, anexos e a
+    // ficha continuam no banco (recuperáveis), só saem de circulação. Ainda
+    // criamos o log de atendimento de fallback abaixo (mesma lógica de
+    // antes) pra garantir que o CRM tenha o registro mesmo sem finalizar.
     const [hasMessage] = await tx.select({ id: messagesTable.id }).from(messagesTable).where(eq(messagesTable.conversationId, id)).limit(1);
     const [existingLog] = await tx.select({ id: attendanceLogsTable.id }).from(attendanceLogsTable).where(eq(attendanceLogsTable.conversationId, id)).limit(1);
     if (hasMessage && !existingLog) {
@@ -1858,19 +1857,20 @@ router.delete("/chat/conversations/:id", requireAdminOrSupervisor, async (req, r
           storeId: conv.storeId ?? attendant?.storeId ?? null,
           channel: conv.channel,
           outcome: "excluido",
-          notes: "Conversa excluída sem finalizar o atendimento — registro preservado automaticamente.",
+          notes: "Conversa excluída (arquivada) sem finalizar o atendimento — registro preservado automaticamente.",
           serviceTimeSeconds: serviceSeconds,
         });
       }
     }
-    await tx.delete(messagesTable).where(eq(messagesTable.conversationId, id));
-    await tx.delete(conversationParticipantsTable).where(eq(conversationParticipantsTable.conversationId, id));
-    await tx.delete(conversationPinsTable).where(eq(conversationPinsTable.conversationId, id));
-    // scheduled_messages não tem cascade -- sem isso a exclusão falharia
-    // (violação de FK) sempre que a conversa tivesse um agendamento pendente.
-    await tx.delete(scheduledMessagesTable).where(eq(scheduledMessagesTable.conversationId, id));
-    await tx.delete(attendanceStartEventsTable).where(eq(attendanceStartEventsTable.conversationId, id));
-    await tx.delete(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
+    // Cancela agendamentos pendentes (mensagem/retorno) — não faz sentido
+    // disparar depois numa conversa que saiu de circulação — mas mantém o
+    // registro (auditoria), só muda o status.
+    await tx.update(scheduledMessagesTable)
+      .set({ status: "cancelled" })
+      .where(and(eq(scheduledMessagesTable.conversationId, id), eq(scheduledMessagesTable.status, "pending")));
+    await tx.update(conversationsTable)
+      .set({ isArchived: true, updatedAt: new Date() })
+      .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
   });
 
   // Potenciais são visíveis a todos DA LOJA; conversas já assumidas/resolvidas

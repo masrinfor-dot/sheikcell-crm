@@ -80,11 +80,15 @@ async function findIdleQueueVendor(tenantId: number, sectorId: number, sessionKe
       eq(usersTable.isActive, true),
       eq(usersTable.chatQueueSingleTask, true),
       eq(usersTable.sectorId, sectorId),
+      // Grupo de WhatsApp (@g.us) não conta como "atendimento aberto" pra
+      // decidir se o vendedor está ocioso — mesmo motivo de
+      // countActiveConversations em conversationScope.ts.
       sql`NOT EXISTS (
         SELECT 1 FROM ${conversationsTable}
         WHERE ${conversationsTable.assigneeId} = ${usersTable.id}
           AND ${conversationsTable.isArchived} = false
           AND ${conversationsTable.status} NOT IN ('resolved', 'archived')
+          AND ${conversationsTable.phone} NOT LIKE '%@g.us'
       )`,
     ))
     .orderBy(sql`${usersTable.chatQueueLastAssignedAt} ASC NULLS FIRST`);
@@ -123,6 +127,9 @@ async function findPoolConversationForVendor(
       isNull(conversationsTable.assigneeId),
       notInArray(conversationsTable.status, ["resolved", "archived"]),
       inArray(conversationsTable.sessionKey, keys),
+      // Grupo de WhatsApp nunca entra na fila automática — só conversa
+      // individual de cliente (pedido 14/09).
+      sql`${conversationsTable.phone} NOT LIKE '%@g.us'`,
     ))
     .orderBy(asc(conversationsTable.createdAt))
     .limit(1);

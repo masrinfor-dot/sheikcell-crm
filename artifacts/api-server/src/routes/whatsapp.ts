@@ -8,7 +8,7 @@ import { Router, type IRouter } from "express";
 import { createHmac } from "node:crypto";
 import { requireFeature, requireTenant } from "../middlewares/auth";
 import { db, whatsappSessionsTable, conversationsTable } from "@workspace/db";
-import { and, eq, isNotNull, notInArray } from "drizzle-orm";
+import { and, eq, isNotNull, notInArray, sql } from "drizzle-orm";
 import { assertWithinLimit } from "../lib/planLimits";
 import { broadcast } from "../lib/sseEmitter";
 import { restrictedRecipients } from "../lib/conversationScope";
@@ -344,6 +344,9 @@ router.post("/whatsapp/sessions/:key/queue-reset", requireFeature("whatsapp"), a
     eq(conversationsTable.isArchived, false),
     isNotNull(conversationsTable.assigneeId),
     notInArray(conversationsTable.status, ["resolved", "archived"]),
+    // Grupo de WhatsApp não é atendimento de fila — reiniciar a fila não
+    // pode tirar um grupo de quem já estava com ele (pedido 14/09).
+    sql`${conversationsTable.phone} NOT LIKE '%@g.us'`,
   ));
 
   let released = 0;
