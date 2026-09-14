@@ -9,5 +9,17 @@ RUN pnpm --filter @workspace/api-server run build
 ENV NODE_ENV=production
 ENV PORT=8080
 EXPOSE 8080
-# Aplica o schema no banco e inicia a API
-CMD ["sh", "-c", "pnpm --filter @workspace/db run push && node --enable-source-maps artifacts/api-server/dist/index.mjs"]
+# Aplica o schema no banco e inicia a API.
+#
+# --force (não interativo): o container não tem terminal/stdin pra responder
+# a nenhuma pergunta que o drizzle-kit push faça (ex.: "isso é uma coluna
+# nova ou renomeou outra?"). Descoberto em 14/09 depois de um deploy real: o
+# push aparentava terminar bem (container subiu, ficou servindo requisição
+# normal) mas colunas novas simplesmente NÃO foram criadas — nenhum erro
+# visível, só quebrou depois, nas rotas que usam essas colunas ("column ...
+# does not exist"). Sem --force, uma pergunta sem stdin pra responder deixa o
+# push incompleto (não necessariamente com saída de erro) e o resto do deploy
+# segue como se nada tivesse acontecido. --force sempre confirma a leitura
+# mais direta do schema.ts (útil pra mudanças puramente aditivas como essa
+# — nunca use isso como substituto de revisar o que está sendo mudado).
+CMD ["sh", "-c", "pnpm --filter @workspace/db run push-force && node --enable-source-maps artifacts/api-server/dist/index.mjs"]

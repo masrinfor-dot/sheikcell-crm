@@ -27,7 +27,10 @@ echo "==> Instalando dependências (pnpm install)"
 pnpm install --frozen-lockfile
 
 echo "==> Aplicando mudanças no banco (drizzle push)"
-pnpm --filter @workspace/db run push
+# --force: sem isso, uma pergunta interativa do drizzle-kit (ex.: "é coluna
+# nova ou renomeou outra?") sem terminal pra responder pode deixar o push
+# incompleto sem dar erro — ver comentário equivalente no Dockerfile.api.
+pnpm --filter @workspace/db run push-force
 
 echo "==> Compilando serviços"
 pnpm --filter @workspace/api-server run build
