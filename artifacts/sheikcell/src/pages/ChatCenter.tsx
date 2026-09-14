@@ -4343,7 +4343,14 @@ export default function ChatCenter({
               Nota interna
             </button>
           </div>
-          <form onSubmit={handleSend} className={`border-t border-border px-3 py-2.5 flex items-center gap-2 ${composerMode === "note" ? "bg-amber-50" : "bg-[#f0f2f5]"}`}>
+          {/* flex-wrap (só até sm): em celulares estreitos, os 4 botões de
+              ação (anexo, respostas rápidas, cupom, IA) já somam quase 180px
+              — sobrava pouco espaço pro campo de digitar, que ficava
+              espremido numa "pílula" minúscula quebrando em 2 linhas mesmo
+              pra mensagens curtas. O grupo campo+enviar abaixo força
+              w-full nesse breakpoint, then joga pra própria linha; a partir
+              de sm (tablet/desktop) volta tudo numa linha só, como sempre foi. */}
+          <form onSubmit={handleSend} className={`border-t border-border px-3 py-2.5 flex items-center flex-wrap sm:flex-nowrap gap-2 ${composerMode === "note" ? "bg-amber-50" : "bg-[#f0f2f5]"}`}>
             <input
               ref={fileInputRef}
               type="file"
@@ -4487,64 +4494,70 @@ export default function ChatCenter({
                 : <Sparkles className="w-4 h-4" />}
             </button>
             </>)}
-            <textarea
-              ref={inputRef as React.RefObject<HTMLTextAreaElement>}
-              value={msgText}
-              onChange={(e) => setMsgText(e.target.value)}
-              placeholder={composerMode === "note" ? "Escreva uma nota interna (só a equipe vê)..." : "Digite uma mensagem..."}
-              spellCheck
-              lang="pt-BR"
-              rows={1}
-              data-testid="input-message"
-              className="flex-1 min-w-0 resize-none bg-white rounded-2xl px-4 py-2.5 text-sm border border-border outline-none focus:ring-2 focus:ring-primary/20 max-h-40 overflow-y-auto"
-              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(e); } }}
-              onPaste={(e) => {
-                if (can(user, "enviar_midia")) {
-                  const images = Array.from(e.clipboardData.items)
-                    .filter((item) => item.type.startsWith("image/"))
-                    .map((item) => item.getAsFile())
-                    .filter((f): f is File => f != null);
-                  if (images.length > 0) {
-                    e.preventDefault();
-                    handleFilesSelected(images);
-                    return;
+            {/* Campo + botão de enviar sempre juntos — em telas estreitas
+                (abaixo de sm) esse grupo ocupa a linha inteira sozinho (ver
+                comentário no <form> acima); a partir de sm volta a dividir a
+                linha com os ícones de ação, como sempre foi. */}
+            <div className="flex items-center gap-2 w-full sm:w-auto sm:flex-1 sm:min-w-0">
+              <textarea
+                ref={inputRef as React.RefObject<HTMLTextAreaElement>}
+                value={msgText}
+                onChange={(e) => setMsgText(e.target.value)}
+                placeholder={composerMode === "note" ? "Escreva uma nota interna (só a equipe vê)..." : "Digite uma mensagem..."}
+                spellCheck
+                lang="pt-BR"
+                rows={1}
+                data-testid="input-message"
+                className="flex-1 min-w-0 resize-none bg-white rounded-2xl px-4 py-2.5 text-sm border border-border outline-none focus:ring-2 focus:ring-primary/20 max-h-40 overflow-y-auto"
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(e); } }}
+                onPaste={(e) => {
+                  if (can(user, "enviar_midia")) {
+                    const images = Array.from(e.clipboardData.items)
+                      .filter((item) => item.type.startsWith("image/"))
+                      .map((item) => item.getAsFile())
+                      .filter((f): f is File => f != null);
+                    if (images.length > 0) {
+                      e.preventDefault();
+                      handleFilesSelected(images);
+                      return;
+                    }
                   }
-                }
-                // Texto colado de Word/sites vem com aspas curvas, espaço
-                // sem quebra e caracteres invisíveis — normaliza pra texto
-                // limpo antes de ir pro WhatsApp (item 3 do roadmap).
-                const text = e.clipboardData.getData("text/plain");
-                if (!text) return;
-                e.preventDefault();
-                const clean = cleanPastedText(text);
-                const el = e.currentTarget;
-                const start = el.selectionStart;
-                const end = el.selectionEnd;
-                const next = msgText.slice(0, start) + clean + msgText.slice(end);
-                setMsgText(next);
-                requestAnimationFrame(() => {
-                  const pos = start + clean.length;
-                  el.setSelectionRange(pos, pos);
-                });
-              }}
-            />
-            {msgText.trim() ? (
-              <button type="submit" disabled={sending} data-testid="button-send-message"
-                className={`w-10 h-10 rounded-full flex items-center justify-center text-white disabled:opacity-40 transition shrink-0 ${composerMode === "note" ? "bg-amber-500 hover:bg-amber-600" : "bg-primary hover:bg-primary/90"}`}>
-                <Send className="w-4 h-4" />
-              </button>
-            ) : composerMode === "message" && can(user, "enviar_midia") ? (
-              <button type="button" onClick={handleStartRecording} disabled={sending || requestingMic}
-                title={requestingMic ? "Aguardando o navegador liberar o microfone..." : "Gravar nota de voz"} data-testid="button-record-audio"
-                className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white hover:bg-primary/90 disabled:opacity-40 transition shrink-0">
-                {requestingMic ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Mic className="w-4 h-4" />}
-              </button>
-            ) : (
-              <button type="submit" disabled data-testid="button-send-message-disabled"
-                className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white opacity-40 transition shrink-0">
-                <Send className="w-4 h-4" />
-              </button>
-            )}
+                  // Texto colado de Word/sites vem com aspas curvas, espaço
+                  // sem quebra e caracteres invisíveis — normaliza pra texto
+                  // limpo antes de ir pro WhatsApp (item 3 do roadmap).
+                  const text = e.clipboardData.getData("text/plain");
+                  if (!text) return;
+                  e.preventDefault();
+                  const clean = cleanPastedText(text);
+                  const el = e.currentTarget;
+                  const start = el.selectionStart;
+                  const end = el.selectionEnd;
+                  const next = msgText.slice(0, start) + clean + msgText.slice(end);
+                  setMsgText(next);
+                  requestAnimationFrame(() => {
+                    const pos = start + clean.length;
+                    el.setSelectionRange(pos, pos);
+                  });
+                }}
+              />
+              {msgText.trim() ? (
+                <button type="submit" disabled={sending} data-testid="button-send-message"
+                  className={`w-10 h-10 rounded-full flex items-center justify-center text-white disabled:opacity-40 transition shrink-0 ${composerMode === "note" ? "bg-amber-500 hover:bg-amber-600" : "bg-primary hover:bg-primary/90"}`}>
+                  <Send className="w-4 h-4" />
+                </button>
+              ) : composerMode === "message" && can(user, "enviar_midia") ? (
+                <button type="button" onClick={handleStartRecording} disabled={sending || requestingMic}
+                  title={requestingMic ? "Aguardando o navegador liberar o microfone..." : "Gravar nota de voz"} data-testid="button-record-audio"
+                  className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white hover:bg-primary/90 disabled:opacity-40 transition shrink-0">
+                  {requestingMic ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Mic className="w-4 h-4" />}
+                </button>
+              ) : (
+                <button type="submit" disabled data-testid="button-send-message-disabled"
+                  className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white opacity-40 transition shrink-0">
+                  <Send className="w-4 h-4" />
+                </button>
+              )}
+            </div>
           </form>
           </>
           ))}
