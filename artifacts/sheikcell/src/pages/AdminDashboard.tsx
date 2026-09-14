@@ -1268,6 +1268,42 @@ export default function AdminDashboard() {
                   </span>
                 </label>
 
+                {/* Reiniciar fila desta linha (pedido 14/09): tira todo mundo
+                    que está com atendimento ativo por este número e devolve
+                    pro Pendentes, pra fila recomeçar do zero preenchendo um
+                    vendedor de cada vez. Ação em massa — só admin/supervisor
+                    vê o botão, mesmo que o usuário tenha permissão individual
+                    de "transferir". */}
+                {(user?.role === "admin" || user?.role === "supervisor") && (
+                  <button
+                    onClick={async () => {
+                      if (!window.confirm(
+                        `Reiniciar a fila da linha "${s.displayName || s.phoneNumber || s.sessionKey}"?\n\n` +
+                        "Isso vai tirar TODOS os atendimentos ativos desta linha de quem estiver com eles agora " +
+                        "e devolver pro Pendentes. A fila então preenche de novo, um vendedor de cada vez, " +
+                        "respeitando a ordem de chegada original. Essa ação não pode ser desfeita.",
+                      )) return;
+                      setWaLoading(true);
+                      try {
+                        const res = await fetch(`/api/whatsapp/sessions/${s.sessionKey}/queue-reset`, {
+                          method: "POST", credentials: "include",
+                        });
+                        const data = await res.json();
+                        if (!res.ok) {
+                          toast({ title: "Erro ao reiniciar fila", description: data.error ?? "Erro", variant: "destructive" });
+                        } else {
+                          toast({ title: "Fila reiniciada", description: `${data.released} atendimento(s) voltaram pro Pendentes e a fila já começou a redistribuir.` });
+                        }
+                      } finally { setWaLoading(false); }
+                    }}
+                    disabled={waLoading}
+                    data-testid={`button-wa-queue-reset-${s.sessionKey}`}
+                    className="flex items-center gap-2 mb-3 px-3 py-1.5 rounded-lg border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 transition text-xs font-semibold disabled:opacity-50">
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    Reiniciar fila desta linha (tira todos os ativos e devolve pro Pendentes)
+                  </button>
+                )}
+
                 {/* QR code */}
                 {s.status === "qr" && s.qrDataUrl && (
                   <div className="text-center mb-3">

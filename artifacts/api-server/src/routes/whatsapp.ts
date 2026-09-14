@@ -8,8 +8,11 @@ import { Router, type IRouter } from "express";
 import { createHmac } from "node:crypto";
 import { requireFeature, requireTenant } from "../middlewares/auth";
 import { db, whatsappSessionsTable, conversationsTable } from "@workspace/db";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNotNull, notInArray } from "drizzle-orm";
 import { assertWithinLimit } from "../lib/planLimits";
+import { broadcast } from "../lib/sseEmitter";
+import { restrictedRecipients } from "../lib/conversationScope";
+import { fillIdleQueueVendors } from "../lib/queueAutoAssign";
 
 const router: IRouter = Router();
 
@@ -312,6 +315,59 @@ router.post("/whatsapp/sessions/:key/queue-auto-assign", requireFeature("whatsap
     .returning();
   if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
   res.json({ ok: true, queueAutoAssignEnabled: updated.queueAutoAssignEnabled });
+});
+
+// ─── Reiniciar a fila desta linha (pedido 14/09, pra testar do zero) ──────
+// Tira TODOS os atendimentos ativos desta linha de quem estiver com eles
+// agora e devolve pro pool (Pendentes) — a fila então preenche de novo os
+// vendedores com "Usar fila" ligado, um de cada vez, respeitando a ordem
+// original de chegada (conversationsTable.createdAt, nunca mexida aqui) e
+// separação por setor/linha permitida (mesma lógica de sempre em
+// queueAutoAssign.ts). É uma ação EM MASSA — bem mais impactante que
+// transferir uma conversa por vez — por isso só admin/supervisor pode
+// disparar, mesmo que o usuário tenha a permissão individual "transferir".
+router.post("/whatsapp/sessions/:key/queue-reset", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const userRole = req.session.userRole;
+  if (userRole !== "admin" && userRole !== "supervisor") {
+    res.status(403).json({ error: "Só admin ou supervisor pode reiniciar a fila desta linha." });
+    return;
+  }
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const [session] = await db.select().from(whatsappSessionsTable)
+    .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId))).limit(1);
+  if (!session) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+
+  const toRelease = await db.select().from(conversationsTable).where(and(
+    eq(conversationsTable.tenantId, tenantId),
+    eq(conversationsTable.sessionKey, key),
+    eq(conversationsTable.isArchived, false),
+    isNotNull(conversationsTable.assigneeId),
+    notInArray(conversationsTable.status, ["resolved", "archived"]),
+  ));
+
+  let released = 0;
+  for (const conv of toRelease) {
+    // UPDATE condicional (mesmo padrão do auto-atribuir): só libera se
+    // ainda estiver com o mesmo responsável de quando lemos — protege
+    // contra corrida com alguém transferindo/finalizando na hora.
+    const [updated] = await db.update(conversationsTable)
+      .set({ assigneeId: null, attendanceStartedAt: null, updatedAt: new Date() })
+      .where(and(eq(conversationsTable.id, conv.id), eq(conversationsTable.assigneeId, conv.assigneeId!)))
+      .returning();
+    if (!updated) continue;
+    released++;
+    const restrictedTo = await restrictedRecipients(updated);
+    broadcast("conversation_updated", updated, {
+      tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey, isPotential: false, restrictedTo,
+    });
+  }
+
+  // Preenche na hora quem já está ocioso, um por vez — sem esperar o tick
+  // de 1 min do agendador (ver fillIdleQueueVendors em queueAutoAssign.ts).
+  await fillIdleQueueVendors();
+
+  res.json({ ok: true, released });
 });
 
 // ─── Remove a connection ────────────────────────────────────────────────────
