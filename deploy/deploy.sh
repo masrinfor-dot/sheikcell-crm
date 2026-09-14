@@ -26,11 +26,12 @@ set +a
 echo "==> Instalando dependências (pnpm install)"
 pnpm install --frozen-lockfile
 
-echo "==> Aplicando mudanças no banco (drizzle push)"
-# --force: sem isso, uma pergunta interativa do drizzle-kit (ex.: "é coluna
-# nova ou renomeou outra?") sem terminal pra responder pode deixar o push
-# incompleto sem dar erro — ver comentário equivalente no Dockerfile.api.
-pnpm --filter @workspace/db run push-force
+# O schema é aplicado pelo próprio processo Node no boot (runMigrations()
+# em src/index.ts, roda migrations/*.sql hand-escritos e idempotentes, antes
+# de abrir a porta) — não precisa (e não deve) rodar "drizzle-kit push" aqui.
+# Removido em 14/09: além de redundante, "push --force" aceita sozinho
+# qualquer confirmação do drizzle-kit, inclusive as de perda de dado, sem
+# ninguém revisar — ver comentário equivalente no Dockerfile.api.
 
 echo "==> Compilando serviços"
 pnpm --filter @workspace/api-server run build

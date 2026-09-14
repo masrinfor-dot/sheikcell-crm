@@ -9,17 +9,21 @@ RUN pnpm --filter @workspace/api-server run build
 ENV NODE_ENV=production
 ENV PORT=8080
 EXPOSE 8080
-# Aplica o schema no banco e inicia a API.
+# Inicia a API. O schema é aplicado pelo próprio processo Node, ANTES de
+# abrir a porta (runMigrations() em src/index.ts) — roda os arquivos
+# migrations/*.sql (hand-escritos, idempotentes, revisados) na ordem, e
+# derruba o processo sem servir tráfego se algum falhar.
 #
-# --force (não interativo): o container não tem terminal/stdin pra responder
-# a nenhuma pergunta que o drizzle-kit push faça (ex.: "isso é uma coluna
-# nova ou renomeou outra?"). Descoberto em 14/09 depois de um deploy real: o
-# push aparentava terminar bem (container subiu, ficou servindo requisição
-# normal) mas colunas novas simplesmente NÃO foram criadas — nenhum erro
-# visível, só quebrou depois, nas rotas que usam essas colunas ("column ...
-# does not exist"). Sem --force, uma pergunta sem stdin pra responder deixa o
-# push incompleto (não necessariamente com saída de erro) e o resto do deploy
-# segue como se nada tivesse acontecido. --force sempre confirma a leitura
-# mais direta do schema.ts (útil pra mudanças puramente aditivas como essa
-# — nunca use isso como substituto de revisar o que está sendo mudado).
-CMD ["sh", "-c", "pnpm --filter @workspace/db run push-force && node --enable-source-maps artifacts/api-server/dist/index.mjs"]
+# 14/09: aqui tinha um "pnpm --filter @workspace/db run push-force" antes do
+# node, pra tentar aplicar o schema.ts direto via drizzle-kit. Foi tentado
+# como correção de um deploy que subiu sem 3 colunas novas, mas mesmo com
+# --force elas continuaram faltando — a causa real era outra: os commits que
+# adicionaram essas colunas ao schema.ts nunca criaram o migrations/*.sql
+# correspondente (mesma classe de bug do apagão de 11/09, já documentada em
+# migrate.ts). Removido de vez: além de redundante (a fonte de verdade real
+# é migrations/*.sql, revisado por humano), rodar push --force sem revisão
+# NENHUMA a cada boot é perigoso de verdade — --force aceita automaticamente
+# QUALQUER confirmação do drizzle-kit, inclusive as de perda de dado
+# (DROP COLUMN, mudança de tipo incompatível, rename adivinhado errado),
+# baseado só num palpite heurístico, sem ninguém olhando.
+CMD ["sh", "-c", "node --enable-source-maps artifacts/api-server/dist/index.mjs"]
