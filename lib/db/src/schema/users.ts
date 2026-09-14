@@ -79,6 +79,20 @@ export const usersTable = pgTable("users", {
   // internalChatSingleTask acima (aqui também não cabe em `permissions`,
   // que é fail-open — esta é fail-closed por natureza).
   queueRestrictToAssigned: boolean("queue_restrict_to_assigned").notNull().default(false),
+  // Fila do Central de Atendimento por ORDEM, sem direcionamento manual
+  // (pedido 14/09: "só fazer um atendimento por vez... só conseguem
+  // iniciar após seguir a fila"). Diferente de queueRestrictToAssigned
+  // acima (que exige um vendedor_chefe/supervisor/admin direcionar cada
+  // atendimento na mão): aqui o vendedor se auto-serve, só que travado em
+  // 1 por vez e em ordem — enquanto tiver pelo menos 1 atendimento aberto
+  // (assigneeId = ele, não resolvido), o pool de Potenciais/Pendentes do
+  // setor fica escondido; com zero abertos, só o mais antigo do pool
+  // aparece (não dá pra escolher a dedo). Quem já tinha vários abertos
+  // ANTES de ligar a opção continua vendo e trabalhando todos eles
+  // normalmente — a trava só entra pra pegar um NOVO além dos que já tem.
+  // Default false (comportamento de sempre). Só tem efeito para role
+  // "vendedor" (mesmo padrão de queueRestrictToAssigned).
+  chatQueueSingleTask: boolean("chat_queue_single_task").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });

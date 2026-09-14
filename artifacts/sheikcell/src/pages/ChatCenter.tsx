@@ -102,6 +102,13 @@ function isVisibleToMe(c: Conversation, user: User | null): boolean {
   if (user.role === "admin" || user.role === "supervisor" || user.role === "vendedor_chefe") return true;
   // Fila restrita (pedido 10/09): só o que já é dele — nunca potencial/setor.
   if (user.queueRestrictToAssigned) return c.assigneeId === user.id || (c.participants ?? []).some((p) => p.id === user.id);
+  // Fila do Central de Atendimento por ordem (pedido 14/09, chatQueueSingleTask):
+  // eventos em tempo real (SSE) de conversas do pool geral (potencial/pendente
+  // do setor, ainda sem dono) nunca entram direto na tela pra quem tem essa
+  // opção ligada — só o que já é dele. A "próxima da fila" (se já concluiu
+  // tudo que tinha) chega pela busca normal (fetchConvs), que já reflete a
+  // regra do servidor; isso só evita que o pool inteiro vaze em tempo real.
+  if (user.chatQueueSingleTask && c.assigneeId !== user.id) return (c.participants ?? []).some((p) => p.id === user.id);
   if (isRestrictedConv(c)) {
     if (c.assigneeId === user.id) return true;
     // Eventos SSE trazem a linha crua (sem participants); nesse caso não dá
@@ -2670,6 +2677,11 @@ export default function ChatCenter({
       const updated = await api.chat.updateConversation(id, { status, isArchived: false });
       setConvs((prev) => prev.map((c) => c.id === id ? { ...c, ...updated, status, isArchived: false } : c));
       toast({ title: "Atendimento reaberto" });
+      // Fila do Central de Atendimento por ordem (chatQueueSingleTask):
+      // reabrir volta a contar como atendimento aberto — reconsulta pra
+      // esconder de novo a "próxima da fila" que só era exibida por causa
+      // dos 0 abertos de antes (ver isVisibleToMe/buildConversationVisibilityConditions).
+      if (user?.chatQueueSingleTask) void fetchConvs();
     } catch { toast({ title: "Erro ao reabrir atendimento", variant: "destructive" }); }
   };
 
@@ -2702,6 +2714,12 @@ export default function ChatCenter({
       setConvs((prev) => prev.map((c) => c.id === id ? { ...c, ...updated, status: "resolved" } : c));
       toast({ title: "Atendimento finalizado" });
       setFinalizeTarget(null);
+      // Fila do Central de Atendimento por ordem (chatQueueSingleTask):
+      // finalizar pode zerar os atendimentos abertos e liberar a "próxima
+      // da fila" — sem reconsultar, ela só apareceria depois de um refresh
+      // manual, já que eventos SSE do pool ficam de propósito escondidos
+      // pra quem tem essa opção (ver isVisibleToMe).
+      if (user?.chatQueueSingleTask) void fetchConvs();
     } catch { toast({ title: "Erro ao finalizar atendimento", variant: "destructive" }); }
     finally { setFinalizing(false); }
   };
@@ -3570,9 +3588,17 @@ export default function ChatCenter({
               </div>
             ))
           ) : filteredConvs.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-40 text-muted-foreground">
+            <div className="flex flex-col items-center justify-center h-40 text-muted-foreground px-6 text-center">
               <MessageCircle className="w-8 h-8 mb-2 opacity-30" />
-              <p className="text-sm">Nenhuma conversa</p>
+              {/* Fila do Central de Atendimento por ordem (pedido 14/09): quando
+                  a lista de Potenciais/Pendentes vem vazia por causa dessa
+                  opção (não porque não tem ninguém esperando), explica o
+                  motivo em vez de parecer que a fila real está zerada. */}
+              {user?.chatQueueSingleTask && (category === "pendentes" || category === "potenciais") ? (
+                <p className="text-sm">Conclua seu atendimento em aberto para ver o próximo da fila</p>
+              ) : (
+                <p className="text-sm">Nenhuma conversa</p>
+              )}
             </div>
           ) : (
             filteredConvs.map((conv) => (

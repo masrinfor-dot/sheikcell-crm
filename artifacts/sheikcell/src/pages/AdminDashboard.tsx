@@ -122,6 +122,7 @@ type UserRow = {
   permissions?: Record<string, boolean> | null;
   internalChatSingleTask?: boolean;
   queueRestrictToAssigned?: boolean;
+  chatQueueSingleTask?: boolean;
 };
 
 function formatDuration(sec: number | null): string {
@@ -222,6 +223,7 @@ export default function AdminDashboard() {
   const [permDraft, setPermDraft] = useState<Record<string, boolean>>({});
   const [singleTaskDraft, setSingleTaskDraft] = useState(false);
   const [queueRestrictDraft, setQueueRestrictDraft] = useState(false);
+  const [chatQueueDraft, setChatQueueDraft] = useState(false);
   const [savingPerms, setSavingPerms] = useState(false);
   const [showAddSector, setShowAddSector] = useState(false);
   const [editSector, setEditSector] = useState<Sector | null>(null);
@@ -1567,6 +1569,7 @@ export default function AdminDashboard() {
                                   setPermDraft(draft);
                                   setSingleTaskDraft(!!u.internalChatSingleTask);
                                   setQueueRestrictDraft(!!u.queueRestrictToAssigned);
+                                  setChatQueueDraft(!!u.chatQueueSingleTask);
                                   setPermUser(u);
                                 }}
                                 data-testid={`button-perms-user-${u.id}`}
@@ -1866,6 +1869,22 @@ export default function AdminDashboard() {
                 </p>
               </div>
             )}
+            {permUser.role === "vendedor" && (
+              <div className="mt-3 pt-3 border-t border-border">
+                <label className="flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-secondary/50 cursor-pointer text-sm" data-testid="perm-chat-queue">
+                  <input
+                    type="checkbox"
+                    checked={chatQueueDraft}
+                    onChange={(e) => setChatQueueDraft(e.target.checked)}
+                    className="w-4 h-4 accent-[var(--primary)] shrink-0"
+                  />
+                  <span>Usar fila no Central de Atendimento (1 atendimento novo por vez, em ordem)</span>
+                </label>
+                <p className="text-[11px] text-muted-foreground px-2 -mt-0.5">
+                  Com isso ativado, {permUser.name.split(" ")[0]} só consegue assumir um novo cliente de Potenciais/Pendentes depois de concluir os que já tem em aberto — e sempre o mais antigo da fila, sem escolher a dedo. Atendimentos que ele já tinha antes de ligar a opção não são mexidos. Diferente da restrição acima: aqui ele se auto-serve, não depende de alguém direcionar na mão.
+                </p>
+              </div>
+            )}
             <div className="flex gap-2 mt-4">
               <button onClick={() => setPermUser(null)}
                 className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold border border-border hover:bg-secondary transition">
@@ -1877,7 +1896,7 @@ export default function AdminDashboard() {
                 onClick={async () => {
                   setSavingPerms(true);
                   try {
-                    await api.admin.users.update(permUser.id, { permissions: permDraft, internalChatSingleTask: singleTaskDraft, queueRestrictToAssigned: queueRestrictDraft });
+                    await api.admin.users.update(permUser.id, { permissions: permDraft, internalChatSingleTask: singleTaskDraft, queueRestrictToAssigned: queueRestrictDraft, chatQueueSingleTask: chatQueueDraft });
                     toast({ title: "Permissões salvas", description: `Permissões de ${permUser.name} atualizadas.` });
                     setPermUser(null);
                     fetchUsersAndSectors();

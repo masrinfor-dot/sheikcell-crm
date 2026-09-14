@@ -234,6 +234,56 @@ async function canAccessConversation(
   return isPotentialConversation(conv) && (await checkPerm(req, "ver_potenciais"));
 }
 
+/** Pool de conversas "pegáveis" por um vendedor comum: potenciais (leads
+ * sem dono, span de setor, se tiver a permissão) + pendentes do próprio
+ * setor ainda sem dono. Extraído da visibilidade normal (ver
+ * buildConversationVisibilityConditions) pra ser reusado pela fila do
+ * Central de Atendimento (chatQueueSingleTask, pedido 14/09): tanto pra
+ * decidir a mais antiga do pool (o que aparece pra quem tem 0 atendimento
+ * aberto) quanto pra validar, no /claim, que quem está pegando um novo
+ * está pegando mesmo essa — não uma escolhida a dedo direto pela API,
+ * ainda que a lista já esconda as outras. */
+async function vendorClaimablePoolCondition(req: Request, userSectorId: number | null) {
+  const userAllowedSessionKeys = await getCurrentAllowedSessionKeys(req);
+  const sessionScope = userAllowedSessionKeys != null
+    ? (userAllowedSessionKeys.length ? inArray(conversationsTable.sessionKey, userAllowedSessionKeys) : sql`FALSE`)
+    : null;
+  let potencial = (await checkPerm(req, "ver_potenciais"))
+    ? and(
+        isNull(conversationsTable.assigneeId),
+        notInArray(conversationsTable.status, [...POTENTIAL_EXCLUDED_STATUSES]),
+      )!
+    : sql`FALSE`;
+  const restricted = or(
+    sql`${conversationsTable.assigneeId} IS NOT NULL`,
+    inArray(conversationsTable.status, ["resolved", "archived"]),
+  )!;
+  let sectorUnrestricted = userSectorId
+    ? and(eq(conversationsTable.sectorId, userSectorId), sql`NOT (${restricted})`)!
+    : sql`FALSE`;
+  if (sessionScope) {
+    potencial = and(potencial, sessionScope)!;
+    sectorUnrestricted = and(sectorUnrestricted, sessionScope)!;
+  }
+  return or(potencial, sectorUnrestricted)!;
+}
+
+/** Quantos atendimentos o vendedor já tem abertos agora (assigneeId = ele,
+ * não resolvido/arquivado) — usado pela fila do Central de Atendimento
+ * (chatQueueSingleTask) tanto pra decidir o que ele vê (visibilidade)
+ * quanto pra bloquear o /claim de um novo além dos que já tem. */
+async function countActiveConversations(tenantId: number, userId: number): Promise<number> {
+  const [row] = await db.select({ count: sql<string>`count(*)` })
+    .from(conversationsTable)
+    .where(and(
+      eq(conversationsTable.tenantId, tenantId),
+      eq(conversationsTable.isArchived, false),
+      eq(conversationsTable.assigneeId, userId),
+      notInArray(conversationsTable.status, ["resolved", "archived"]),
+    ));
+  return Number(row?.count ?? 0);
+}
+
 // ─── List conversations ────────────────────────────────────────────────────
 // Condições de VISIBILIDADE de conversas, compartilhadas entre a listagem
 // (GET /chat/conversations, paginada em 100) e a contagem real por categoria
@@ -254,14 +304,6 @@ async function buildConversationVisibilityConditions(
 
   // Multi-loja: base de tudo é a loja do usuário.
   const conditions = [eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.isArchived, false)];
-
-  // Conversas RESTRITAS (com responsável ou finalizadas) têm visibilidade
-  // reduzida: só o responsável/participantes (vendedor), o admin e o
-  // supervisor do MESMO setor as veem.
-  const restricted = or(
-    sql`${conversationsTable.assigneeId} IS NOT NULL`,
-    inArray(conversationsTable.status, ["resolved", "archived"]),
-  )!;
 
   if (userRole === "admin" || userRole === "supervisor" || userRole === "vendedor_chefe") {
     // Admin, supervisor e vendedor_chefe (pedido 10/09) enxergam tudo
@@ -291,38 +333,41 @@ async function buildConversationVisibilityConditions(
       )!);
       return conditions;
     }
-    // Restrição por linha de WhatsApp (allowedSessionKeys, sempre fresca do
-    // banco — ver getCurrentAllowedSessionKeys): vale pra "descobrir" conversa
-    // por potencial/setor fora das linhas liberadas, mas NÃO deve esconder
-    // uma conversa que já é sua (responsável/participante) — por isso entra
-    // dentro de potencial/sectorUnrestricted abaixo, e não como condição
-    // solta que também pegaria "mine". Sem essa distinção, um atendimento
-    // transferido pra um vendedor de outra linha sumia de vez, sem aparecer
-    // nem pro antigo nem pro novo responsável.
-    const userAllowedSessionKeys = await getCurrentAllowedSessionKeys(req);
-    const sessionScope = userAllowedSessionKeys != null
-      ? (userAllowedSessionKeys.length ? inArray(conversationsTable.sessionKey, userAllowedSessionKeys) : sql`FALSE`)
-      : null;
-    // Permissão "ver_potenciais" desligada: o vendedor não vê os leads novos
-    // de outros setores (só o escopo do próprio setor).
-    let potencial = (await checkPerm(req, "ver_potenciais"))
-      ? and(
-          isNull(conversationsTable.assigneeId),
-          notInArray(conversationsTable.status, [...POTENTIAL_EXCLUDED_STATUSES]),
-        )!
-      : sql`FALSE`;
+    // Restrição por linha de WhatsApp (allowedSessionKeys) e potenciais/
+    // pendentes do setor: extraído pra vendorClaimablePoolCondition (acima),
+    // reusado também pela fila do Central de Atendimento logo abaixo.
     const mine = or(
       eq(conversationsTable.assigneeId, userId),
       sql`EXISTS (SELECT 1 FROM ${conversationParticipantsTable} WHERE ${conversationParticipantsTable.conversationId} = ${conversationsTable.id} AND ${conversationParticipantsTable.userId} = ${userId})`,
     )!;
-    let sectorUnrestricted = userSectorId
-      ? and(eq(conversationsTable.sectorId, userSectorId), sql`NOT (${restricted})`)!
-      : sql`FALSE`;
-    if (sessionScope) {
-      potencial = and(potencial, sessionScope)!;
-      sectorUnrestricted = and(sectorUnrestricted, sessionScope)!;
+
+    // Fila do Central de Atendimento por ordem (pedido 14/09, ver
+    // chatQueueSingleTask em users.ts): quem tem essa opção ligada só
+    // enxerga o pool geral (potenciais/pendentes do setor) quando não tem
+    // NENHUM atendimento aberto — e, mesmo assim, só o mais antigo dele
+    // (a "próxima da fila"), nunca a lista inteira. Quem já tinha vários
+    // atendimentos abertos antes de ligar a opção continua vendo e
+    // trabalhando todos eles normalmente (bloco "mine" abaixo) — só o pool
+    // de NOVOS fica travado.
+    const [meQueue] = await db.select({ v: usersTable.chatQueueSingleTask }).from(usersTable)
+      .where(eq(usersTable.id, userId)).limit(1);
+    if (meQueue?.v) {
+      const activeCount = await countActiveConversations(tenantId, userId);
+      if (activeCount > 0) {
+        conditions.push(mine);
+      } else {
+        const pool = await vendorClaimablePoolCondition(req, userSectorId ?? null);
+        const [next] = await db.select({ id: conversationsTable.id }).from(conversationsTable)
+          .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.isArchived, false), pool))
+          .orderBy(asc(conversationsTable.createdAt)).limit(1);
+        conditions.push(next ? or(mine, eq(conversationsTable.id, next.id))! : mine);
+      }
+      conditions.push(notInArray(conversationsTable.status, ["resolved", "archived"]));
+      return conditions;
     }
-    conditions.push(or(potencial, mine, sectorUnrestricted)!);
+
+    const pool = await vendorClaimablePoolCondition(req, userSectorId ?? null);
+    conditions.push(or(pool, mine)!);
     // Resolvidas só aparecem para admin/supervisor: vendedor não vê
     // conversas finalizadas, nem as que ele mesmo finalizou.
     conditions.push(notInArray(conversationsTable.status, ["resolved", "archived"]));
@@ -1662,6 +1707,32 @@ router.post("/chat/conversations/:id/claim", requireAuth, requireChatAccess(), a
   const userRole = req.session.userRole!;
   const userSectorId = req.session.userSectorId;
   const isGenuineStart = conv.assigneeId == null;
+
+  // Fila do Central de Atendimento por ordem (pedido 14/09, ver
+  // chatQueueSingleTask em users.ts): revalida no servidor, não só na
+  // lista — mesmo que a tela já esconda o resto, a API não deve aceitar um
+  // /claim de outra conversa vindo de um estado desatualizado no navegador.
+  // Re-claim da própria conversa (isGenuineStart=false) nunca é bloqueado.
+  if (isGenuineStart && userRole === "vendedor") {
+    const [meQueue] = await db.select({ v: usersTable.chatQueueSingleTask }).from(usersTable)
+      .where(eq(usersTable.id, req.session.userId!)).limit(1);
+    if (meQueue?.v) {
+      const activeCount = await countActiveConversations(tenantId, req.session.userId!);
+      if (activeCount > 0) {
+        res.status(409).json({ error: "Conclua um atendimento em aberto antes de assumir um novo.", code: "QUEUE_SINGLE_TASK_BLOCKED" });
+        return;
+      }
+      const pool = await vendorClaimablePoolCondition(req, userSectorId ?? null);
+      const [next] = await db.select({ id: conversationsTable.id }).from(conversationsTable)
+        .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.isArchived, false), pool))
+        .orderBy(asc(conversationsTable.createdAt)).limit(1);
+      if (next && next.id !== conv.id) {
+        res.status(409).json({ error: "Siga a ordem da fila — assuma o atendimento mais antigo primeiro.", code: "QUEUE_SINGLE_TASK_BLOCKED" });
+        return;
+      }
+    }
+  }
+
   const [claimant] = await db.select({ storeId: usersTable.storeId }).from(usersTable)
     .where(eq(usersTable.id, req.session.userId!)).limit(1);
   const claimSet: Partial<typeof conversationsTable.$inferInsert> = {

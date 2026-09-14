@@ -318,6 +318,7 @@ router.get("/admin/users", requireAdmin, async (req, res): Promise<void> => {
       permissions: usersTable.permissions,
       internalChatSingleTask: usersTable.internalChatSingleTask,
       queueRestrictToAssigned: usersTable.queueRestrictToAssigned,
+      chatQueueSingleTask: usersTable.chatQueueSingleTask,
       createdAt: usersTable.createdAt,
     })
     .from(usersTable)
@@ -529,7 +530,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   // que ela carregue este tenant_id (coluna NOT NULL sem valor "sem loja").
   if (existingUser.role === "superadmin") { res.status(403).json({ error: "Operação não permitida" }); return; }
 
-  const { name, email, password, role, sectorId, isActive, permissions, storeName, extension, adminAccess, accessHours, allowedSessionKeys, moduleAccess, internalChatSingleTask, queueRestrictToAssigned } = req.body as {
+  const { name, email, password, role, sectorId, isActive, permissions, storeName, extension, adminAccess, accessHours, allowedSessionKeys, moduleAccess, internalChatSingleTask, queueRestrictToAssigned, chatQueueSingleTask } = req.body as {
     adminAccess?: unknown;
     accessHours?: unknown;
     allowedSessionKeys?: unknown;
@@ -545,6 +546,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
     extension?: string | null;
     internalChatSingleTask?: boolean;
     queueRestrictToAssigned?: boolean;
+    chatQueueSingleTask?: boolean;
   };
 
   const updateData: Record<string, unknown> = {};
@@ -592,6 +594,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   if (permissions !== undefined) updateData.permissions = sanitizePermissions(permissions);
   if (internalChatSingleTask !== undefined) updateData.internalChatSingleTask = !!internalChatSingleTask;
   if (queueRestrictToAssigned !== undefined) updateData.queueRestrictToAssigned = !!queueRestrictToAssigned;
+  if (chatQueueSingleTask !== undefined) updateData.chatQueueSingleTask = !!chatQueueSingleTask;
   if (password) {
     updateData.passwordHash = await bcrypt.hash(password, 10);
     // Senha resetada pelo admin (recuperação): usuário troca no próximo login
