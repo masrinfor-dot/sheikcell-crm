@@ -6,10 +6,6 @@ import connectPgSimple from "connect-pg-simple";
 import { pool } from "@workspace/db";
 import router from "./routes";
 import { logger } from "./lib/logger";
-import { exec } from "node:child_process";
-import { promisify } from "node:util";
-
-const execAsync = promisify(exec);
 
 const app: Express = express();
 
@@ -128,30 +124,39 @@ app.get("/api/__diag_schema", async (req, res) => {
   }
 });
 
-// DIAGNÓSTICO TEMPORÁRIO (14/09) — remover junto com o /api/__diag_schema
-// acima. Roda o EXATO MESMO comando que o CMD do Dockerfile roda no boot do
-// container (pnpm --filter @workspace/db run push-force), mas aqui dentro
-// de uma request, pra capturar o stdout/stderr reais do drizzle-kit — sem
-// isso não dá pra saber o que o push realmente decidiu (aplicou? achou que
-// não tinha nada pra aplicar? perguntou algo e ficou pendurado?). É seguro
-// rodar de novo: é o mesmo comando idempotente que já roda a cada deploy.
-app.get("/api/__diag_push", async (req, res) => {
+// CORREÇÃO PONTUAL TEMPORÁRIA (14/09) — remover junto com o /api/__diag_schema
+// acima assim que confirmado. O __diag_schema mostrou que 3 colunas do
+// schema.ts nunca foram criadas de verdade no banco (mesmo depois do deploy
+// com "drizzle-kit push --force" — o push aparentemente decide, sem avisar
+// em lugar nenhum visível, não aplicar essas 3 mudanças específicas; a causa
+// exata disso ainda não foi confirmada). Em vez de tentar capturar a decisão
+// interna do drizzle-kit (o que exigiria rodar um comando de shell arbitrário
+// disparado por uma request HTTP — uma superfície de execução remota que não
+// vale o risco pra um diagnóstico), aplica direto e uma única vez o DDL que
+// falta — SQL fixo, sem nenhuma entrada do usuário, idêntico em espírito ao
+// "push" que o próprio deploy já roda sozinho a cada boot. IF NOT EXISTS
+// torna seguro rodar mais de uma vez.
+app.get("/api/__diag_fix_columns", async (req, res) => {
   if (req.query["t"] !== "sheik-diag-14set-temp") { res.status(404).end(); return; }
   try {
-    const { stdout, stderr } = await execAsync(
-      "pnpm --filter @workspace/db run push-force",
-      { cwd: "/app", timeout: 60_000, env: process.env },
+    await pool.query(
+      `alter table "sectors" add column if not exists "vendors_see_resolved" boolean not null default false`,
     );
-    res.json({ ok: true, stdout, stderr });
+    await pool.query(
+      `alter table "conversations" add column if not exists "origin" text`,
+    );
+    await pool.query(
+      `alter table "conversations" add column if not exists "queue_number" integer`,
+    );
+    const { rows } = await pool.query(
+      `select table_name, column_name from information_schema.columns
+       where table_schema = 'public' and table_name in ('sectors','conversations')
+       and column_name in ('vendors_see_resolved','origin','queue_number')
+       order by table_name, column_name`,
+    );
+    res.json({ ok: true, columns: rows });
   } catch (err) {
-    const e = err as { stdout?: string; stderr?: string; code?: number; message?: string };
-    res.json({
-      ok: false,
-      code: e.code,
-      message: e.message,
-      stdout: e.stdout,
-      stderr: e.stderr,
-    });
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });
 
