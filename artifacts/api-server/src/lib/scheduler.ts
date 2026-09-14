@@ -273,6 +273,17 @@ export function startScheduler(): void {
   setInterval(() => { void deliverScheduledMessages(); }, 30_000);
   // Lembrete da pesquisa de satisfação: granularidade de minutos basta.
   setInterval(() => { void sendSurveyReminders(); }, 60_000);
+  // Preenche vendedores ociosos da fila do Central de Atendimento que os
+  // gatilhos por evento (conversa nova / vendedor liberado — ver
+  // queueAutoAssign.ts) não cobrem: quem já estava zerado antes de ligar
+  // "Usar fila" ou antes da linha de WhatsApp ter o auto-atribuir ligado.
+  // Roda uma vez logo no boot também (cobre reinício/deploy com gente já
+  // esperando) e depois a cada minuto — granularidade de fila de
+  // atendimento ao cliente pede resposta rápida, não os 5 min dos sorteios.
+  void import("./queueAutoAssign").then((m) => m.fillIdleQueueVendors()).catch(() => {});
+  setInterval(() => {
+    void import("./queueAutoAssign").then((m) => m.fillIdleQueueVendors()).catch(() => {});
+  }, 60_000);
   // Sorteios recorrentes: checa a cada 5 minutos (roda no dia certo, após as 10h).
   setInterval(() => {
     void import("../routes/raffles").then((m) => m.runDueRaffles()).catch(() => {});

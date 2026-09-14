@@ -182,3 +182,48 @@ export async function autoAssignOnVendorFreed(tenantId: number, vendorId: number
     console.error("[queueAutoAssign] falha ao preencher vendedor liberado:", err);
   }
 }
+
+/** Chamado periodicamente pelo agendador (ver scheduler.ts) — cobre o caso
+ * que os dois gatilhos acima (conversa nova / vendedor liberado) NÃO
+ * cobrem: um vendedor que já está ocioso (0 atendimentos abertos) mas nunca
+ * passou por uma transição de estado que disparasse o auto-atribuir. Ex.:
+ * acabou de marcar "Usar fila no Central de Atendimento" agora e já estava
+ * zerado antes disso; ou a linha de WhatsApp só teve "Auto-atribuir da
+ * fila" ligada agora, com conversas antigas já esperando no pool. Sem este
+ * tick, esse vendedor ficaria zerado pra sempre até uma conversa nova
+ * chegar — ele nunca "vira" ocioso de novo porque já está. Idempotente e
+ * seguro rodar em qualquer cadência: cada atribuição é a mesma UPDATE
+ * condicional (`WHERE assignee_id IS NULL`) dos outros gatilhos. Nunca lança. */
+export async function fillIdleQueueVendors(): Promise<void> {
+  try {
+    const vendors = await db.select({
+      id: usersTable.id,
+      tenantId: usersTable.tenantId,
+      sectorId: usersTable.sectorId,
+      allowedSessionKeys: usersTable.allowedSessionKeys,
+    })
+      .from(usersTable)
+      .where(and(
+        eq(usersTable.role, "vendedor"),
+        eq(usersTable.isActive, true),
+        eq(usersTable.chatQueueSingleTask, true),
+      ));
+    for (const v of vendors) {
+      try {
+        if (v.sectorId == null) continue;
+        const activeCount = await countActiveConversations(v.tenantId, v.id);
+        if (activeCount > 0) continue;
+        const convId = await findPoolConversationForVendor(v.tenantId, v.sectorId, v.allowedSessionKeys);
+        if (!convId) continue;
+        const updated = await atomicAssign(convId, v.id);
+        if (!updated) continue; // outro processo já pegou essa conversa
+        await markVendorServed(v.id);
+        await notifyAssigned(updated);
+      } catch (err) {
+        console.error("[queueAutoAssign] falha ao preencher vendedor ocioso (tick):", err, { vendorId: v.id });
+      }
+    }
+  } catch (err) {
+    console.error("[queueAutoAssign] tick de preenchimento de ociosos falhou:", err);
+  }
+}
