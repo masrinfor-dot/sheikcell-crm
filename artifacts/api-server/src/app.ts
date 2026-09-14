@@ -6,6 +6,10 @@ import connectPgSimple from "connect-pg-simple";
 import { pool } from "@workspace/db";
 import router from "./routes";
 import { logger } from "./lib/logger";
+import { exec } from "node:child_process";
+import { promisify } from "node:util";
+
+const execAsync = promisify(exec);
 
 const app: Express = express();
 
@@ -121,6 +125,33 @@ app.get("/api/__diag_schema", async (req, res) => {
     res.json({ columns: rows });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// DIAGNÓSTICO TEMPORÁRIO (14/09) — remover junto com o /api/__diag_schema
+// acima. Roda o EXATO MESMO comando que o CMD do Dockerfile roda no boot do
+// container (pnpm --filter @workspace/db run push-force), mas aqui dentro
+// de uma request, pra capturar o stdout/stderr reais do drizzle-kit — sem
+// isso não dá pra saber o que o push realmente decidiu (aplicou? achou que
+// não tinha nada pra aplicar? perguntou algo e ficou pendurado?). É seguro
+// rodar de novo: é o mesmo comando idempotente que já roda a cada deploy.
+app.get("/api/__diag_push", async (req, res) => {
+  if (req.query["t"] !== "sheik-diag-14set-temp") { res.status(404).end(); return; }
+  try {
+    const { stdout, stderr } = await execAsync(
+      "pnpm --filter @workspace/db run push-force",
+      { cwd: "/app", timeout: 60_000, env: process.env },
+    );
+    res.json({ ok: true, stdout, stderr });
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string; code?: number; message?: string };
+    res.json({
+      ok: false,
+      code: e.code,
+      message: e.message,
+      stdout: e.stdout,
+      stderr: e.stderr,
+    });
   }
 });
 
