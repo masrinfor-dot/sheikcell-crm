@@ -106,26 +106,6 @@ app.use("/api", async (req, _res, next) => {
   next();
 });
 
-// DIAGNÓSTICO TEMPORÁRIO (14/09, 2ª rodada) — remover assim que resolvido.
-// Um log ao vivo mostrou "column vendors_see_resolved does not exist" numa
-// query recente mesmo depois da migration 0110 (que devia ter criado essa
-// coluna); preciso confirmar o estado real do schema em produção sem
-// depender de rolar o log gigante de requisição. Só leitura de metadata
-// (nome de coluna), nenhum dado de cliente, protegido por token fixo.
-app.get("/api/__diag_schema2", async (req, res) => {
-  if (req.query["t"] !== "sheik-diag-14set-r2") { res.status(404).end(); return; }
-  try {
-    const { rows } = await pool.query(
-      `select table_name, column_name from information_schema.columns
-       where table_schema = 'public' and table_name in ('sectors','conversations','whatsapp_sessions','attendance_logs')
-       order by table_name, ordinal_position`,
-    );
-    res.json({ columns: rows });
-  } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
-  }
-});
-
 app.use("/api", router);
 
 // Sem isto, qualquer exceção não tratada numa rota (Express 5 encaminha
