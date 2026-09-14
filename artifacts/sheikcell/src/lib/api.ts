@@ -1607,6 +1607,7 @@ export type ChatLabel = {
 // com um nome, pessoal por usuário.
 export type ChatSavedFilterValues = {
   onlyUnanswered?: boolean;
+  onlyGroups?: boolean;
   vendedor?: string;
   setor?: string;
   nivel?: string;

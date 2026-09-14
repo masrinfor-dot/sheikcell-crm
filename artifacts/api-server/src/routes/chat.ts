@@ -2492,7 +2492,7 @@ router.delete("/chat/labels/:labelId", requireAdminOrSupervisor, async (req, res
 // Combinação do painel de filtro avançado (vendedor/setor/nível/linha/
 // etiqueta/"não respondidas") salva com um nome — pessoal por usuário, não
 // compartilhado com o resto da equipe (cada um monta os próprios atalhos).
-const SAVED_FILTER_KEYS = ["onlyUnanswered", "vendedor", "setor", "nivel", "sessionKey", "label"] as const;
+const SAVED_FILTER_KEYS = ["onlyUnanswered", "onlyGroups", "vendedor", "setor", "nivel", "sessionKey", "label"] as const;
 function sanitizeSavedFilterValues(raw: unknown): Record<string, unknown> {
   if (!raw || typeof raw !== "object") return {};
   const out: Record<string, unknown> = {};

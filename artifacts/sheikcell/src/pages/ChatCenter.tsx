@@ -1265,6 +1265,10 @@ export default function ChatCenter({
   const [savingConvName, setSavingConvName] = useState(false);
   const [showFilter, setShowFilter] = useState(false);
   const [onlyUnanswered, setOnlyUnanswered] = useState(false);
+  // Pedido 14/09: filtro pra achar rápido só os grupos do WhatsApp na lista
+  // de Conversas (ex.: grupo de compras com vários fornecedores misturado
+  // com atendimentos individuais).
+  const [onlyGroups, setOnlyGroups] = useState(false);
   // Filtros avançados da lista: vendedor, setor e nível do cliente no CRM.
   const [filterVendedor, setFilterVendedor] = useState("");
   const [filterSetor, setFilterSetor] = useState("");
@@ -2080,6 +2084,7 @@ export default function ChatCenter({
         name: name.trim(),
         filters: {
           onlyUnanswered: onlyUnanswered || undefined,
+          onlyGroups: onlyGroups || undefined,
           vendedor: filterVendedor || undefined,
           setor: filterSetor || undefined,
           nivel: filterNivel || undefined,
@@ -2098,6 +2103,7 @@ export default function ChatCenter({
 
   const handleApplySavedFilter = (f: ChatSavedFilter) => {
     setOnlyUnanswered(!!f.filters.onlyUnanswered);
+    setOnlyGroups(!!f.filters.onlyGroups);
     setFilterVendedor(f.filters.vendedor ?? "");
     setFilterSetor(f.filters.setor ?? "");
     setFilterNivel(f.filters.nivel ?? "");
@@ -3159,6 +3165,7 @@ export default function ChatCenter({
     (!search || c.name.toLowerCase().includes(search.toLowerCase()) || c.phone.includes(search) || c.phone.replace(/\D/g, "").includes(search.replace(/\D/g, "") || "\u0000")) &&
     // Filtro "não respondidas": o cliente falou por último (ou há não lidas).
     (!onlyUnanswered || c.lastMessageDirection === "inbound" || c.unreadCount > 0) &&
+    (!onlyGroups || isGroupConv(c)) &&
     (!filterVendedor || String(c.assigneeId ?? "") === filterVendedor) &&
     (!filterSetor || String(c.sectorId ?? "") === filterSetor) &&
     (!filterNivel || (c.crmProfile ?? "") === filterNivel) &&
@@ -3573,6 +3580,15 @@ export default function ChatCenter({
             >
               ● Não respondidas
             </button>
+            <button
+              onClick={() => setOnlyGroups((v) => !v)}
+              data-testid="button-filter-only-groups"
+              className={`text-xs px-2.5 py-1 rounded-full transition border font-semibold ${onlyGroups
+                ? "bg-indigo-50 text-indigo-600 border-indigo-200"
+                : "bg-white text-muted-foreground border-border"}`}
+            >
+              👥 Só grupos
+            </button>
             {/* Alerta de sem resposta: só admin/supervisor liga/desliga */}
             {(user?.role === "admin" || user?.role === "supervisor") && (
               <button
@@ -3632,7 +3648,7 @@ export default function ChatCenter({
                   Limpar
                 </button>
               )}
-              {(hasAdvancedFilter || onlyUnanswered || labelFilter) && (
+              {(hasAdvancedFilter || onlyUnanswered || onlyGroups || labelFilter) && (
                 <button onClick={handleSaveCurrentFilter} disabled={savingFilter}
                   data-testid="button-save-current-filter"
                   className="text-xs px-2 py-1 rounded-lg border border-border bg-white text-muted-foreground font-semibold disabled:opacity-50">
