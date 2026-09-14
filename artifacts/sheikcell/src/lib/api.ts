@@ -742,7 +742,10 @@ export type SurveySettings = {
   reminderHours: number;
 };
 
-export type RaffleWinner = { phone: string; name: string; conversationId: number; sent: boolean; error?: string };
+export type RaffleWinner = {
+  phone: string; name: string; conversationId: number; sent: boolean; error?: string;
+  attempts?: number; lastAttemptAt?: string;
+};
 
 export type RaffleDraw = {
   id: number; raffleId: number; periodKey: string; eligibleCount: number;
@@ -2428,10 +2431,13 @@ export const api = {
     update: (id: number, data: Partial<Raffle>) => req<Raffle>(`/raffles/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/raffles/${id}`, { method: "DELETE" }),
     eligible: (id: number) => req<{ count: number }>(`/raffles/${id}/eligible`),
-    run: (id: number) => req<{ draw: RaffleDraw; eligible: number }>(`/raffles/${id}/run`, { method: "POST" }),
+    run: (id: number, autoSend?: boolean) =>
+      req<{ draw: RaffleDraw; eligible: number }>(`/raffles/${id}/run`, { method: "POST", body: JSON.stringify({ autoSend }) }),
     draws: (id: number) => req<RaffleDraw[]>(`/raffles/${id}/draws`),
     resend: (id: number, drawId: number, phone: string) =>
       req<{ draw: RaffleDraw; sent: boolean }>(`/raffles/${id}/draws/${drawId}/resend`, { method: "POST", body: JSON.stringify({ phone }) }),
+    sendAll: (id: number, drawId: number) =>
+      req<{ draw: RaffleDraw; sentCount: number; totalPending: number }>(`/raffles/${id}/draws/${drawId}/send-all`, { method: "POST" }),
   },
   rh: {
     // positions === null → loja sem cargo configurado, `stages` já vem pronto

@@ -277,6 +277,12 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("../routes/raffles").then((m) => m.runDueRaffles()).catch(() => {});
   }, 5 * 60_000);
+  // Reenvio automático de sorteios (pedido 14/09): reexamina ganhadores cujo
+  // envio falhou e tenta de novo, até MAX_AUTO_ATTEMPTS, na mesma cadência do
+  // tick de sorteios recorrentes.
+  setInterval(() => {
+    void import("../routes/raffles").then((m) => m.retryFailedRaffleWinners()).catch(() => {});
+  }, 5 * 60_000);
   // Mensalidades dos lojistas: garante que as cobranças do mês corrente
   // existam. Idempotente (não duplica), então rodar a cada hora é seguro e
   // cobre reinícios/quedas no dia 1º. Roda uma vez logo no boot também.

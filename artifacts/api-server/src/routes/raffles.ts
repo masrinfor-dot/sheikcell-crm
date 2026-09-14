@@ -9,7 +9,20 @@ import { normalizePhone } from "../lib/phone";
 const router: IRouter = Router();
 router.use("/raffles", requireModule("sorteios"));
 
-type Winner = { phone: string; name: string; conversationId: number; sent: boolean; error?: string };
+// attempts/lastAttemptAt são opcionais pra não quebrar draws antigos já
+// gravados no banco antes desta mudança (trata ausente como "nunca tentou").
+type Winner = {
+  phone: string; name: string; conversationId: number; sent: boolean; error?: string;
+  attempts?: number; lastAttemptAt?: string;
+};
+
+// Reenvio automático (pedido 14/09): até 2 tentativas A MAIS além do envio
+// inicial (3 no total) antes de desistir e deixar só o "Reenviar" manual (sem
+// limite, como já era). Um ganhador com attempts=0 nunca é tocado pelo job
+// automático — é o estado de um sorteio criado em modo "revisar antes de
+// enviar" (ver doRunRaffleDraw), que só é enviado quando alguém aciona na mão.
+const MAX_AUTO_ATTEMPTS = 3;
+const AUTO_RETRY_INTERVAL_MS = 10 * 60_000;
 
 // ---------- validação ----------
 
@@ -271,23 +284,56 @@ async function sendWhatsAppText(conversationId: number, content: string, tenantI
   return delivered;
 }
 
+/** Tenta enviar (ou reenviar) a mensagem de um ganhador, e devolve a cópia
+ * atualizada do Winner — usado pelo sorteio automático, pelo "Reenviar"
+ * manual, pelo "Enviar para todos" e pelo reenvio automático (até 2x). Nunca
+ * lança: falha vira `sent: false` + `error` preenchido, igual sempre foi. */
+async function attemptSendToWinner(raffle: Raffle, w: Winner): Promise<Winner> {
+  let sent = false;
+  let error: string | undefined;
+  try {
+    const vendedorStore = raffle.storeName ? null : await storeOfConversation(w.conversationId, raffle.tenantId);
+    sent = await sendWhatsAppText(w.conversationId, fillTemplate(raffle.messageTemplate, w, raffle, vendedorStore), raffle.tenantId);
+    if (!sent) error = "Falha no envio pelo WhatsApp";
+  } catch (err) {
+    error = err instanceof Error ? err.message : "Erro no envio";
+  }
+  const updated: Winner = { ...w, sent, attempts: (w.attempts ?? 0) + 1, lastAttemptAt: new Date().toISOString() };
+  if (error) updated.error = error; else delete updated.error;
+  return updated;
+}
+
 // Evita dois sorteios do MESMO sorteio ao mesmo tempo neste processo
 // (clique duplo no "Sortear agora" ou tick do agendador junto com manual).
 const drawInProgress = new Set<number>();
 
-/** Executa um sorteio: escolhe ganhadores ao acaso e envia a mensagem automática. */
-export async function runRaffleDraw(raffle: Raffle, periodKey: string): Promise<{ draw: typeof raffleDrawsTable.$inferSelect; eligible: number }> {
+/** Executa um sorteio: escolhe ganhadores ao acaso e, por padrão, já envia a
+ * mensagem automática (`autoSend: true`, comportamento de sempre — usado por
+ * TODO sorteio recorrente/agendado, sem exceção). `autoSend: false` (pedido
+ * 14/09, só disponível no "Sortear agora" manual) sorteia e grava os
+ * ganhadores SEM tentar mandar nada ainda — fica pendente de revisão, e
+ * alguém dispara o envio depois (por ganhador, ou "Enviar para todos"). */
+export async function runRaffleDraw(
+  raffle: Raffle,
+  periodKey: string,
+  opts: { autoSend?: boolean } = {},
+): Promise<{ draw: typeof raffleDrawsTable.$inferSelect; eligible: number }> {
   if (drawInProgress.has(raffle.id)) throw new Error("Este sorteio já está sendo executado — aguarde");
   drawInProgress.add(raffle.id);
   try {
-    return await doRunRaffleDraw(raffle, periodKey);
+    return await doRunRaffleDraw(raffle, periodKey, opts.autoSend !== false);
   } finally {
     drawInProgress.delete(raffle.id);
   }
 }
 
-async function doRunRaffleDraw(raffle: Raffle, periodKey: string): Promise<{ draw: typeof raffleDrawsTable.$inferSelect; eligible: number }> {
+async function doRunRaffleDraw(raffle: Raffle, periodKey: string, autoSend: boolean): Promise<{ draw: typeof raffleDrawsTable.$inferSelect; eligible: number }> {
   const pool = await eligibleClients(raffle);
+  // isAuto = disparado pelo AGENDADOR (recorrência), não pelo botão "Sortear
+  // agora" — não confundir com o parâmetro `autoSend` (se as mensagens já
+  // saem sozinhas ou ficam pendentes de revisão): um sorteio agendado é
+  // SEMPRE isAuto=true E autoSend=true (o agendador nunca cria em modo
+  // revisão); só o "Sortear agora" manual pode escolher autoSend=false.
   const isAuto = !periodKey.startsWith("manual-");
   // Backstop no banco: registra o período ANTES de enviar qualquer mensagem.
   // Se outro processo já sorteou este período, o índice único barra aqui.
@@ -311,16 +357,15 @@ async function doRunRaffleDraw(raffle: Raffle, periodKey: string): Promise<{ dra
 
   const winners: Winner[] = [];
   for (const w of picked) {
-    let sent = false;
-    let error: string | undefined;
-    try {
-      const vendedorStore = raffle.storeName ? null : await storeOfConversation(w.conversationId, raffle.tenantId);
-      sent = await sendWhatsAppText(w.conversationId, fillTemplate(raffle.messageTemplate, w, raffle, vendedorStore), raffle.tenantId);
-      if (!sent) error = "Falha no envio pelo WhatsApp";
-    } catch (err) {
-      error = err instanceof Error ? err.message : "Erro no envio";
+    if (autoSend) {
+      winners.push(await attemptSendToWinner(raffle, { ...w, sent: false }));
+    } else {
+      // Modo "revisar antes de enviar" (pedido 14/09): grava o ganhador
+      // sorteado sem tentar mandar nada — attempts=0 é o sinal de "nunca
+      // tentou", tanto pro job de reenvio automático (que ignora esse
+      // estado) quanto pra tela mostrar "aguardando envio" em vez de "falhou".
+      winners.push({ ...w, sent: false, attempts: 0 });
     }
-    winners.push({ ...w, sent, ...(error ? { error } : {}) });
   }
 
   let draw: typeof raffleDrawsTable.$inferSelect;
@@ -389,6 +434,57 @@ export async function runDueRaffles(): Promise<void> {
     logger.warn({ err }, "Tick de sorteios falhou");
   } finally {
     ticking = false;
+  }
+}
+
+let retrying = false;
+
+/** Reenvio automático (até 2 tentativas a mais, pedido 14/09) pra ganhadores
+ * cujo envio falhou — chamado pelo agendador na mesma cadência do tick de
+ * sorteios recorrentes (5 min). Só mexe em quem JÁ tentou pelo menos uma vez
+ * (attempts >= 1) e ainda não bateu o teto (MAX_AUTO_ATTEMPTS); nunca toca
+ * num ganhador com attempts=0 (sorteio em modo "revisar antes de enviar" —
+ * esse só sai quando alguém aciona na mão, nunca sozinho) nem num que já
+ * esgotou as tentativas automáticas (aí só o "Reenviar" manual resolve).
+ * Espera AUTO_RETRY_INTERVAL_MS desde a última tentativa antes de tentar de
+ * novo, pra dar chance de uma falha passageira (WhatsApp reconectando etc.)
+ * se resolver sozinha. Escopo de 7 dias: um draw mais velho que isso já
+ * teria esgotado as tentativas automáticas há muito tempo, não precisa mais
+ * ser reexaminado a cada tick. */
+export async function retryFailedRaffleWinners(): Promise<void> {
+  if (retrying) return;
+  retrying = true;
+  try {
+    const cutoff = new Date(Date.now() - AUTO_RETRY_INTERVAL_MS);
+    const recentSince = new Date(Date.now() - 7 * 86_400_000);
+    const candidateDraws = await db.select().from(raffleDrawsTable)
+      .where(gte(raffleDrawsTable.createdAt, recentSince));
+    for (const draw of candidateDraws) {
+      const winners = ((draw.winners as Winner[] | null) ?? []).map((w) => ({ ...w }));
+      let changed = false;
+      for (let i = 0; i < winners.length; i++) {
+        const w = winners[i]!;
+        const attempts = w.attempts ?? 0;
+        if (w.sent || attempts === 0 || attempts >= MAX_AUTO_ATTEMPTS) continue;
+        const lastAttempt = w.lastAttemptAt ? new Date(w.lastAttemptAt) : null;
+        if (lastAttempt && lastAttempt > cutoff) continue; // ainda dentro do intervalo — espera mais
+        const [raffle] = await db.select().from(rafflesTable).where(eq(rafflesTable.id, draw.raffleId)).limit(1);
+        if (!raffle) continue;
+        try {
+          winners[i] = await attemptSendToWinner(raffle, w);
+          changed = true;
+        } catch (err) {
+          logger.warn({ err, drawId: draw.id, phone: w.phone }, "Falha no reenvio automático de sorteio");
+        }
+      }
+      if (changed) {
+        await db.update(raffleDrawsTable).set({ winners }).where(eq(raffleDrawsTable.id, draw.id));
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, "Tick de reenvio automático de sorteios falhou");
+  } finally {
+    retrying = false;
   }
 }
 
@@ -508,7 +604,10 @@ router.get("/raffles/:id/eligible", requireAuth, async (req, res): Promise<void>
   res.json({ count: pool.length });
 });
 
-// Sortear agora (manual).
+// Sortear agora (manual). Por padrão já manda a mensagem pros ganhadores,
+// igual sempre — corpo `{ autoSend: false }` (pedido 14/09) sorteia e grava a
+// lista sem mandar nada ainda, pra revisar antes de disparar (ver
+// send-all/resend abaixo).
 router.post("/raffles/:id/run", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
@@ -516,8 +615,9 @@ router.post("/raffles/:id/run", requireAuth, async (req, res): Promise<void> => 
   if (!raffle) { res.status(status!).json({ error }); return; }
   const pool = await eligibleClients(raffle);
   if (pool.length === 0) { res.status(400).json({ error: "Nenhum cliente elegível com esses filtros" }); return; }
+  const autoSend = (req.body as Record<string, unknown> | undefined)?.["autoSend"] !== false;
   try {
-    const { draw, eligible } = await runRaffleDraw(raffle, `manual-${Date.now()}`);
+    const { draw, eligible } = await runRaffleDraw(raffle, `manual-${Date.now()}`, { autoSend });
     res.json({ draw, eligible });
   } catch (err) {
     res.status(409).json({ error: err instanceof Error ? err.message : "Não foi possível sortear agora" });
@@ -534,7 +634,9 @@ router.get("/raffles/:id/draws", requireAuth, async (req, res): Promise<void> =>
   res.json(rows);
 });
 
-// Reenviar a mensagem para um ganhador cujo envio falhou.
+// Enviar (1ª tentativa de um ganhador em modo revisão) ou reenviar (envio
+// anterior falhou) a mensagem de UM ganhador — sem limite de cliques manuais
+// (diferente do reenvio automático, que para em MAX_AUTO_ATTEMPTS).
 router.post("/raffles/:id/draws/:drawId/resend", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
@@ -548,23 +650,43 @@ router.post("/raffles/:id/draws/:drawId/resend", requireAuth, async (req, res): 
 
   const phone = String((req.body as Record<string, unknown> | undefined)?.["phone"] ?? "");
   const winners = ((draw.winners as Winner[] | null) ?? []).map((w) => ({ ...w }));
-  const target = winners.find((w) => w.phone === phone && !w.sent);
-  if (!target) { res.status(400).json({ error: "Ganhador não encontrado ou mensagem já enviada" }); return; }
+  const idx = winners.findIndex((w) => w.phone === phone && !w.sent);
+  if (idx === -1) { res.status(400).json({ error: "Ganhador não encontrado ou mensagem já enviada" }); return; }
 
-  let sent = false;
-  let sendError: string | undefined;
-  try {
-    const vendedorStore = raffle.storeName ? null : await storeOfConversation(target.conversationId, raffle.tenantId);
-    sent = await sendWhatsAppText(target.conversationId, fillTemplate(raffle.messageTemplate, target, raffle, vendedorStore), raffle.tenantId);
-    if (!sent) sendError = "Falha no envio pelo WhatsApp — confira se o WhatsApp está conectado";
-  } catch (err) {
-    sendError = err instanceof Error ? err.message : "Erro no envio";
-  }
-  target.sent = sent;
-  if (sendError) target.error = sendError; else delete target.error;
+  winners[idx] = await attemptSendToWinner(raffle, winners[idx]!);
   const [updated] = await db.update(raffleDrawsTable).set({ winners })
     .where(eq(raffleDrawsTable.id, drawId)).returning();
-  res.json({ draw: updated, sent });
+  res.json({ draw: updated, sent: winners[idx]!.sent });
+});
+
+// Envia (ou reenvia) de uma vez só pra TODOS os ganhadores ainda sem
+// confirmação de entrega num sorteio — sobretudo útil pro sorteio criado em
+// modo "revisar antes de enviar" (pedido 14/09), onde ninguém foi mandado
+// ainda e clicar um por um seria inviável com dezenas/centenas de ganhadores.
+router.post("/raffles/:id/draws/:drawId/send-all", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  const drawId = parseInt(String(req.params.drawId), 10);
+  const { raffle, status, error } = await loadOwnRaffle(req, id, tenantId);
+  if (!raffle) { res.status(status!).json({ error }); return; }
+  if (isNaN(drawId)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const [draw] = await db.select().from(raffleDrawsTable)
+    .where(and(eq(raffleDrawsTable.id, drawId), eq(raffleDrawsTable.raffleId, id))).limit(1);
+  if (!draw) { res.status(404).json({ error: "Sorteio não encontrado" }); return; }
+
+  const winners = ((draw.winners as Winner[] | null) ?? []).map((w) => ({ ...w }));
+  const pendingCount = winners.filter((w) => !w.sent).length;
+  if (pendingCount === 0) { res.status(400).json({ error: "Nenhum ganhador pendente de envio" }); return; }
+
+  let sentCount = 0;
+  for (let i = 0; i < winners.length; i++) {
+    if (winners[i]!.sent) continue;
+    winners[i] = await attemptSendToWinner(raffle, winners[i]!);
+    if (winners[i]!.sent) sentCount++;
+  }
+  const [updated] = await db.update(raffleDrawsTable).set({ winners })
+    .where(eq(raffleDrawsTable.id, drawId)).returning();
+  res.json({ draw: updated, sentCount, totalPending: pendingCount });
 });
 
 export default router;

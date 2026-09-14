@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { api, type Raffle, type RaffleDraw, type Sector, type User } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
-import { Gift, Plus, X, Trash2, Pencil, Play, History, Users, RefreshCw } from "lucide-react";
+import { Gift, Plus, X, Trash2, Pencil, Play, History, Users, RefreshCw, Eye, Send } from "lucide-react";
 
 const WEEKDAYS = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
 
@@ -160,6 +160,26 @@ export default function Sorteios() {
     }
   };
 
+  // Sorteia mas NÃO envia nada ainda — grava os ganhadores pra revisar e
+  // disparar manualmente depois (um por um ou tudo de uma vez), pelo modal
+  // de Histórico. Pedido 14/09.
+  const handleRunReview = async (r: Raffle) => {
+    const n = eligibleCount[r.id];
+    const msg = `Sortear "${r.name}" para revisar antes de enviar?\n\n${n != null ? `${n} cliente(s) participando. ` : ""}O(s) ganhador(es) será(ão) sorteado(s), mas a mensagem só sai quando você confirmar no histórico.`;
+    if (!window.confirm(msg)) return;
+    setRunningId(r.id);
+    try {
+      const { draw } = await api.raffles.run(r.id, false);
+      const names = draw.winners.map((w) => w.name || w.phone).join(", ");
+      toast({ title: `🎉 Ganhador(es) sorteado(s): ${names}`, description: "Abra o histórico para enviar a mensagem quando quiser." });
+      await openDraws(r);
+    } catch (err) {
+      toast({ title: "Erro no sorteio", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setRunningId(null);
+    }
+  };
+
   const [resending, setResending] = useState<string | null>(null);
   const handleResend = async (drawId: number, phone: string) => {
     if (!drawsOf || resending) return;
@@ -174,6 +194,23 @@ export default function Sorteios() {
       toast({ title: "Erro ao reenviar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     } finally {
       setResending(null);
+    }
+  };
+
+  const [sendingAllId, setSendingAllId] = useState<number | null>(null);
+  const handleSendAll = async (drawId: number) => {
+    if (!drawsOf || sendingAllId != null) return;
+    setSendingAllId(drawId);
+    try {
+      const { sentCount, totalPending } = await api.raffles.sendAll(drawsOf.id, drawId);
+      setDraws(await api.raffles.draws(drawsOf.id));
+      toast(sentCount === totalPending
+        ? { title: `Mensagem enviada para ${sentCount} ganhador(es)! 🎉` }
+        : { title: `${sentCount} de ${totalPending} enviada(s)`, description: "Os que falharam continuam tentando automaticamente.", variant: sentCount === 0 ? "destructive" : undefined });
+    } catch (err) {
+      toast({ title: "Erro ao enviar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSendingAllId(null);
     }
   };
 
@@ -237,6 +274,11 @@ export default function Sorteios() {
                   <button onClick={() => handleRun(r)} disabled={runningId === r.id} data-testid={`button-run-raffle-${r.id}`}
                     className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-primary/10 text-primary text-[11px] font-bold hover:bg-primary/20 transition disabled:opacity-50">
                     {runningId === r.id ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />} Sortear agora
+                  </button>
+                  <button onClick={() => handleRunReview(r)} disabled={runningId === r.id} title="Sorteia, mas você revisa e envia a mensagem depois"
+                    data-testid={`button-run-raffle-review-${r.id}`}
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-secondary text-muted-foreground text-[11px] font-bold hover:bg-secondary/80 transition disabled:opacity-50">
+                    <Eye className="w-3 h-3" /> Sortear p/ revisar
                   </button>
                   <button onClick={() => openDraws(r)} title="Histórico"
                     className="p-1.5 rounded-lg hover:bg-secondary transition"><History className="w-4 h-4 text-muted-foreground" /></button>
@@ -452,24 +494,43 @@ export default function Sorteios() {
                       {d.periodKey.startsWith("manual") ? " · manual" : " · automático"}
                     </p>
                     <div className="mt-1.5 space-y-1">
-                      {d.winners.map((w, i) => (
-                        <div key={i} className="flex items-center justify-between gap-2 text-xs">
-                          <span className="font-semibold truncate">🏆 {w.name || w.phone}</span>
-                          <span className="flex items-center gap-1.5 shrink-0">
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${w.sent ? "bg-green-500/10 text-green-600" : "bg-destructive/10 text-destructive"}`}>
-                              {w.sent ? "mensagem enviada" : "envio falhou"}
+                      {d.winners.map((w, i) => {
+                        const attempts = w.attempts ?? 0;
+                        // 4 estados: enviado / aguardando (nunca tentou — sorteio em
+                        // modo revisão) / tentando de novo sozinho (falhou, ainda
+                        // dentro do limite automático) / falhou de vez (esgotou as
+                        // tentativas automáticas, só o clique manual resolve).
+                        const badgeClass = w.sent ? "bg-green-500/10 text-green-600"
+                          : attempts >= 3 ? "bg-destructive/10 text-destructive"
+                          : "bg-amber-500/10 text-amber-600";
+                        const badgeLabel = w.sent ? "mensagem enviada"
+                          : attempts === 0 ? "aguardando envio"
+                          : attempts >= 3 ? "envio falhou"
+                          : `tentando de novo (${attempts}/3)`;
+                        return (
+                          <div key={i} className="flex items-center justify-between gap-2 text-xs">
+                            <span className="font-semibold truncate">🏆 {w.name || w.phone}</span>
+                            <span className="flex items-center gap-1.5 shrink-0">
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${badgeClass}`}>{badgeLabel}</span>
+                              {!w.sent && (
+                                <button onClick={() => handleResend(d.id, w.phone)} disabled={resending != null}
+                                  data-testid={`button-resend-winner-${d.id}-${i}`}
+                                  className="text-[10px] px-1.5 py-0.5 rounded font-bold bg-primary text-white hover:opacity-90 disabled:opacity-50 transition">
+                                  {resending === `${d.id}:${w.phone}` ? "Enviando..." : attempts === 0 ? "Enviar" : "Reenviar"}
+                                </button>
+                              )}
                             </span>
-                            {!w.sent && (
-                              <button onClick={() => handleResend(d.id, w.phone)} disabled={resending != null}
-                                data-testid={`button-resend-winner-${d.id}-${i}`}
-                                className="text-[10px] px-1.5 py-0.5 rounded font-bold bg-primary text-white hover:opacity-90 disabled:opacity-50 transition">
-                                {resending === `${d.id}:${w.phone}` ? "Enviando..." : "Reenviar"}
-                              </button>
-                            )}
-                          </span>
-                        </div>
-                      ))}
+                          </div>
+                        );
+                      })}
                     </div>
+                    {d.winners.some((w) => !w.sent) && (
+                      <button onClick={() => handleSendAll(d.id)} disabled={sendingAllId != null}
+                        data-testid={`button-send-all-${d.id}`}
+                        className="mt-2 w-full flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg bg-primary/10 text-primary text-[11px] font-bold hover:bg-primary/20 transition disabled:opacity-50">
+                        <Send className="w-3 h-3" /> {sendingAllId === d.id ? "Enviando..." : "Enviar para todos pendentes"}
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
