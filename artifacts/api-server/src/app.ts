@@ -106,24 +106,6 @@ app.use("/api", async (req, _res, next) => {
   next();
 });
 
-// DIAGNÓSTICO TEMPORÁRIO (14/09) — remover assim que resolvido. Sem sessão
-// (não dá pra logar como admin pra investigar um login quebrado), protegido
-// só por um token fixo na query string. Não expõe dados de clientes, só
-// metadata de schema (nome de colunas).
-app.get("/api/__diag_schema", async (req, res) => {
-  if (req.query["t"] !== "sheik-diag-14set-temp") { res.status(404).end(); return; }
-  try {
-    const { rows } = await pool.query(
-      `select table_name, column_name from information_schema.columns
-       where table_schema = 'public' and table_name in ('sectors','conversations','whatsapp_sessions')
-       order by table_name, ordinal_position`,
-    );
-    res.json({ columns: rows });
-  } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
-  }
-});
-
 app.use("/api", router);
 
 // Sem isto, qualquer exceção não tratada numa rota (Express 5 encaminha
