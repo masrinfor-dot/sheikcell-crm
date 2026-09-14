@@ -73,6 +73,27 @@ export async function sectorAllowsResolvedAccess(sectorId: number | null | undef
   return !!row?.v;
 }
 
+// Pedido 14/09: número sequencial exibido como "Fila #N" pra todo atendimento
+// que ganhou responsável vindo da fila (origin="fila" — ver conversations.ts).
+// Mesmo padrão de "última posição + 1 calculada na hora" já usado em
+// queue_entries.position (queue.ts) — sem sequence do Postgres. Escopo por
+// loja (storeId), não por tenant inteiro: cada loja tem sua própria contagem
+// de fila, do jeito que o relatório de loja já separa os outros números.
+// storeId null (vendedor sem loja definida) cai num escopo próprio (também
+// null) em vez de misturar com os numerados.
+export async function nextQueueNumber(tenantId: number, storeId: number | null): Promise<number> {
+  const [last] = await db.select({ n: conversationsTable.queueNumber })
+    .from(conversationsTable)
+    .where(and(
+      eq(conversationsTable.tenantId, tenantId),
+      eq(conversationsTable.origin, "fila"),
+      storeId == null ? sql`${conversationsTable.storeId} IS NULL` : eq(conversationsTable.storeId, storeId),
+    ))
+    .orderBy(sql`${conversationsTable.queueNumber} DESC NULLS LAST`)
+    .limit(1);
+  return (last?.n ?? 0) + 1;
+}
+
 export function isPotentialConversation(
   conv: { assigneeId: number | null; status: string; isArchived?: boolean | null },
 ): boolean {

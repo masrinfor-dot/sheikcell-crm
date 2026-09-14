@@ -17,7 +17,7 @@ import {
   presenceDisconnect,
   type BufferedEvent,
 } from "../lib/sseEmitter";
-import { isPotentialConversation, isRestrictedConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES, countActiveConversations, sectorAllowsResolvedAccess } from "../lib/conversationScope";
+import { isPotentialConversation, isRestrictedConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES, countActiveConversations, sectorAllowsResolvedAccess, nextQueueNumber } from "../lib/conversationScope";
 import { autoAssignOnNewPoolConversation, autoAssignOnVendorFreed } from "../lib/queueAutoAssign";
 import { ensureCrmContactForConversation, syncCrmAttendant } from "../lib/crmSync";
 import { sendOutboundText } from "../lib/outbound";
@@ -1791,13 +1791,18 @@ router.post("/chat/conversations/:id/claim", requireAuth, requireChatAccess(), a
 
   const [claimant] = await db.select({ storeId: usersTable.storeId }).from(usersTable)
     .where(eq(usersTable.id, req.session.userId!)).limit(1);
+  // Origem "fila" (pedido 14/09): /claim é um dos dois jeitos de ganhar
+  // responsável vindo da fila (o outro é o auto-atribuir, atomicAssign em
+  // queueAutoAssign.ts) — só marca na primeira vez que a conversa sai do
+  // pool (isGenuineStart), nunca num re-claim da própria conversa.
+  const claimQueueNumber = isGenuineStart ? await nextQueueNumber(tenantId, claimant?.storeId ?? null) : null;
   const claimSet: Partial<typeof conversationsTable.$inferInsert> = {
     assigneeId: req.session.userId,
     status: "pending",
     updatedAt: new Date(),
     storeId: claimant?.storeId ?? null,
     // Início do atendimento: só marca na primeira vez (re-claim é idempotente).
-    ...(isGenuineStart ? { attendanceStartedAt: new Date() } : {}),
+    ...(isGenuineStart ? { attendanceStartedAt: new Date(), origin: "fila", queueNumber: claimQueueNumber } : {}),
   };
   if (userRole !== "admin" && userRole !== "supervisor" && userSectorId && conv.sectorId !== userSectorId) {
     claimSet.sectorId = userSectorId;
@@ -2205,6 +2210,10 @@ router.post("/chat/conversations", requireAuth, requireChatAccess(), requirePerm
     attendanceStartedAt: targetAssigneeId != null ? new Date() : null,
     storeId: targetStoreId,
     lastMessageAt: new Date(),
+    // Já nasce com dono aqui = "Criar atendimento" manual (pedido 14/09) —
+    // sem dono ainda (admin joga na fila) não é nem manual nem fila até
+    // alguém/a fila assumir de verdade.
+    origin: targetAssigneeId != null ? "manual" : null,
   }).returning();
 
   if (targetAssigneeId != null) {

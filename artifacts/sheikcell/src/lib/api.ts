@@ -1554,6 +1554,12 @@ export type Conversation = {
   // Prioridade manual do atendimento (pedido 11/09): "urgente" | "retorno" |
   // "pode_esperar", ou null/undefined quando não definida (padrão).
   priority?: string | null;
+  // Como ganhou responsável (pedido 14/09): "manual" (Criar atendimento) |
+  // "fila" (auto-atribuído ou assumido via fila) | null/undefined (nenhum
+  // dos dois ainda, ex. potencial no pool, ou transferência manual).
+  origin?: string | null;
+  // Só presente com origin="fila": número sequencial da fila ("Fila #N").
+  queueNumber?: number | null;
 };
 
 export type ScheduledMessage = {

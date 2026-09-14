@@ -3854,6 +3854,24 @@ export default function ChatCenter({
                     Protocolo #{activeConv.id}
                   </span>
                 )}
+                {activeConv.origin === "fila" && (
+                  <span
+                    className="px-1.5 py-0.5 rounded-full font-semibold bg-blue-500/10 text-blue-600"
+                    style={{ fontSize: "10px" }}
+                    title="Veio da fila do Central de Atendimento (auto-atribuído ou assumido)"
+                  >
+                    Fila #{activeConv.queueNumber}
+                  </span>
+                )}
+                {activeConv.origin === "manual" && (
+                  <span
+                    className="px-1.5 py-0.5 rounded-full font-semibold bg-amber-500/10 text-amber-600"
+                    style={{ fontSize: "10px" }}
+                    title="Atendimento criado manualmente (Criar atendimento)"
+                  >
+                    Manual
+                  </span>
+                )}
                 {activeConv.channel === "whatsapp" && (waSessions.length > 1 || activeConv.sessionKey !== "default") && (
                   <span
                     className="px-1.5 py-0.5 rounded-full font-semibold truncate max-w-[140px]"

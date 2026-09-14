@@ -27,7 +27,7 @@
 import { db, conversationsTable, usersTable, whatsappSessionsTable } from "@workspace/db";
 import { and, asc, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import { broadcast } from "./sseEmitter";
-import { restrictedRecipients, countActiveConversations } from "./conversationScope";
+import { restrictedRecipients, countActiveConversations, nextQueueNumber } from "./conversationScope";
 
 type ConversationRow = typeof conversationsTable.$inferSelect;
 
@@ -42,9 +42,24 @@ async function isSessionQueueAutoAssignEnabled(tenantId: number, sessionKey: str
 // Atribui a conversa a um vendedor SÓ SE ela ainda estiver sem responsável —
 // protege contra corrida entre dois gatilhos (ex.: um webhook e um /claim
 // manual) tentando pegar a mesma conversa ao mesmo tempo.
-async function atomicAssign(conversationId: number, vendorId: number): Promise<ConversationRow | null> {
+//
+// Origem "fila" (pedido 14/09): todo atendimento que passa por aqui SAIU do
+// pool via auto-atribuir (nunca via /claim manual, que marca isso por conta
+// própria em chat.ts) — sempre marca origin="fila" + o número sequencial da
+// loja do vendedor (mesmo helper usado pelo /claim, nextQueueNumber).
+async function atomicAssign(tenantId: number, conversationId: number, vendorId: number): Promise<ConversationRow | null> {
+  const [vendor] = await db.select({ storeId: usersTable.storeId }).from(usersTable)
+    .where(eq(usersTable.id, vendorId)).limit(1);
+  const queueNumber = await nextQueueNumber(tenantId, vendor?.storeId ?? null);
   const [updated] = await db.update(conversationsTable)
-    .set({ assigneeId: vendorId, status: "open", attendanceStartedAt: new Date(), updatedAt: new Date() })
+    .set({
+      assigneeId: vendorId,
+      status: "open",
+      attendanceStartedAt: new Date(),
+      updatedAt: new Date(),
+      origin: "fila",
+      queueNumber,
+    })
     .where(and(eq(conversationsTable.id, conversationId), isNull(conversationsTable.assigneeId)))
     .returning();
   return updated ?? null;
@@ -152,7 +167,7 @@ export async function autoAssignOnNewPoolConversation(conv: {
     if (!(await isSessionQueueAutoAssignEnabled(conv.tenantId, conv.sessionKey))) return;
     const vendorId = await findIdleQueueVendor(conv.tenantId, conv.sectorId, conv.sessionKey);
     if (!vendorId) return;
-    const updated = await atomicAssign(conv.id, vendorId);
+    const updated = await atomicAssign(conv.tenantId, conv.id, vendorId);
     if (!updated) return; // outro processo já pegou essa conversa
     await markVendorServed(vendorId);
     await notifyAssigned(updated);
@@ -181,7 +196,7 @@ export async function autoAssignOnVendorFreed(tenantId: number, vendorId: number
     if (activeCount > 0) return;
     const convId = await findPoolConversationForVendor(tenantId, vendor.sectorId, vendor.allowedSessionKeys);
     if (!convId) return;
-    const updated = await atomicAssign(convId, vendorId);
+    const updated = await atomicAssign(tenantId, convId, vendorId);
     if (!updated) return; // outro processo já pegou essa conversa
     await markVendorServed(vendorId);
     await notifyAssigned(updated);
@@ -222,7 +237,7 @@ export async function fillIdleQueueVendors(): Promise<void> {
         if (activeCount > 0) continue;
         const convId = await findPoolConversationForVendor(v.tenantId, v.sectorId, v.allowedSessionKeys);
         if (!convId) continue;
-        const updated = await atomicAssign(convId, v.id);
+        const updated = await atomicAssign(v.tenantId, convId, v.id);
         if (!updated) continue; // outro processo já pegou essa conversa
         await markVendorServed(v.id);
         await notifyAssigned(updated);

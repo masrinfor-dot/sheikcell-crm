@@ -38,6 +38,22 @@ export const conversationsTable = pgTable("conversations", {
   sessionKey: text("session_key").notNull().default("default"), // qual conexão de WhatsApp recebeu a conversa
   sectorId: integer("sector_id").references(() => sectorsTable.id),
   assigneeId: integer("assignee_id").references(() => usersTable.id),
+  // Como esse atendimento ganhou responsável (pedido 14/09): "manual"
+  // (vendedor/admin usou "Criar atendimento" e já nasceu com dono) ou
+  // "fila" (veio do Central de Atendimento — auto-atribuído ou assumido via
+  // /claim enquanto ocioso na fila, ver queueAutoAssign.ts). null = nenhum
+  // dos dois ainda (ex.: conversa de cliente novo esperando no pool, ou foi
+  // direcionada manualmente por um vendedor_chefe/admin/supervisor, que não
+  // é "fila" nem "criação manual"). Setado uma vez só, na hora que o
+  // responsável é definido por um desses dois caminhos — nunca sobrescrito
+  // depois (uma transferência não muda a origem original).
+  origin: text("origin"), // manual | fila | null
+  // Só setado junto com origin="fila": número sequencial por loja de QUAL
+  // atendimento da fila este representa (ex.: "Fila #47") — mesmo padrão de
+  // "última posição + 1 calculada na hora" já usado em queue_entries.position
+  // (queue.ts), não uma sequence do Postgres. Puramente informativo/de
+  // exibição — nunca usado como chave.
+  queueNumber: integer("queue_number"),
   status: text("status").notNull().default("open"), // open | pending | resolved | archived
   labels: text("labels"), // comma-separated
   // Prioridade manual do atendimento (pedido 11/09: diferenciar urgente / que
