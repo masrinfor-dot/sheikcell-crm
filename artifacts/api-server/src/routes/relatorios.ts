@@ -1,6 +1,6 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import { db, usersTable, attendanceLogsTable, attendanceStartEventsTable, conversationsTable, storesTable } from "@workspace/db";
-import { and, eq, gte, lte, isNotNull, inArray, sql } from "drizzle-orm";
+import { and, eq, gte, lte, isNotNull, inArray, sql, desc } from "drizzle-orm";
 import { requireTenant } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 
@@ -201,6 +201,89 @@ router.get("/relatorios/lojas", async (req, res): Promise<void> => {
   if (semLoja.atendimentos > 0 || semLoja.iniciados > 0 || semLoja.naoResolvidos > 0) rows.push(semLoja);
 
   res.json({ from: from.toISOString(), to: to.toISOString(), rows });
+});
+
+// ── Lista detalhada de atendimentos (individual e coletivo) ─────────────────
+// GET /relatorios/atendimentos?from=&to=&sectorId=&attendantId=&store=&resolutionReason=&hadSale=&origin=&outcome=&limit=&offset=
+// Um registro por atendimento finalizado (attendance_logs) — a visão "crua"
+// por trás dos comparativos acima. Sem attendantId = coletivo (todo mundo);
+// com attendantId = individual (só aquele vendedor) — mesma tela, o filtro
+// é o que muda a visão, sem precisar de duas rotas/páginas diferentes.
+// "motivos" na resposta: todo motivo de finalização já usado no tenant
+// (todo o histórico, não só o período filtrado — senão a lista de opções do
+// filtro "pisca" toda vez que o período muda), pra popular o <select> sem
+// precisar digitar o texto exato.
+router.get("/relatorios/atendimentos", async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const range = parseDateRange(req, res); if (!range) return;
+  const { from, to } = range;
+
+  const sectorId = req.query.sectorId ? parseInt(String(req.query.sectorId), 10) || null : null;
+  const attendantId = req.query.attendantId ? parseInt(String(req.query.attendantId), 10) || null : null;
+  const store = typeof req.query.store === "string" && req.query.store.trim() ? req.query.store.trim().slice(0, 120) : null;
+  const resolutionReason = typeof req.query.resolutionReason === "string" && req.query.resolutionReason.trim()
+    ? req.query.resolutionReason.trim().slice(0, 200) : null;
+  const hadSale = req.query.hadSale === "true" ? true : req.query.hadSale === "false" ? false : null;
+  const origin = req.query.origin === "manual" ? "manual" : req.query.origin === "fila" ? "fila" : null;
+  const outcome = typeof req.query.outcome === "string" && req.query.outcome.trim() ? req.query.outcome.trim().slice(0, 40) : null;
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "50"), 10) || 50, 1), 200);
+  const offset = Math.max(parseInt(String(req.query.offset ?? "0"), 10) || 0, 0);
+
+  let storeUserIds: number[] | null = null;
+  if (store) {
+    const storeUsers = await db.select({ id: usersTable.id }).from(usersTable)
+      .where(and(eq(usersTable.tenantId, tenantId), eq(usersTable.storeName, store)));
+    storeUserIds = storeUsers.map((u) => u.id);
+  }
+
+  const conds = [eq(attendanceLogsTable.tenantId, tenantId), gte(attendanceLogsTable.createdAt, from), lte(attendanceLogsTable.createdAt, to)];
+  if (sectorId) conds.push(eq(attendanceLogsTable.sectorId, sectorId));
+  if (attendantId) conds.push(eq(attendanceLogsTable.attendantId, attendantId));
+  if (storeUserIds) conds.push(storeUserIds.length ? inArray(attendanceLogsTable.attendantId, storeUserIds) : sql`false`);
+  if (resolutionReason) conds.push(eq(attendanceLogsTable.resolutionReason, resolutionReason));
+  if (hadSale != null) conds.push(eq(attendanceLogsTable.hadSale, hadSale));
+  if (origin) conds.push(eq(attendanceLogsTable.origin, origin));
+  if (outcome) conds.push(eq(attendanceLogsTable.outcome, outcome));
+  const where = and(...conds)!;
+
+  const [totalRow] = await db.select({ n: sql<number>`count(*)::int` }).from(attendanceLogsTable).where(where);
+
+  const rows = await db.select({
+    id: attendanceLogsTable.id,
+    createdAt: attendanceLogsTable.createdAt,
+    clientName: attendanceLogsTable.clientName,
+    clientContact: attendanceLogsTable.clientContact,
+    sectorName: attendanceLogsTable.sectorName,
+    attendantId: attendanceLogsTable.attendantId,
+    attendantName: attendanceLogsTable.attendantName,
+    outcome: attendanceLogsTable.outcome,
+    resolutionReason: attendanceLogsTable.resolutionReason,
+    origin: attendanceLogsTable.origin,
+    hadSale: attendanceLogsTable.hadSale,
+    saleAmount: attendanceLogsTable.saleAmount,
+    conversationId: attendanceLogsTable.conversationId,
+  }).from(attendanceLogsTable).where(where)
+    .orderBy(desc(attendanceLogsTable.createdAt))
+    .limit(limit).offset(offset);
+
+  const motivoRows = await db.selectDistinct({ resolutionReason: attendanceLogsTable.resolutionReason })
+    .from(attendanceLogsTable)
+    .where(and(eq(attendanceLogsTable.tenantId, tenantId), isNotNull(attendanceLogsTable.resolutionReason)));
+  const motivos = motivoRows.map((m) => m.resolutionReason!).filter(Boolean).sort((a, b) => a.localeCompare(b, "pt-BR"));
+
+  res.json({
+    from: from.toISOString(),
+    to: to.toISOString(),
+    total: Number(totalRow?.n ?? 0),
+    limit,
+    offset,
+    motivos,
+    rows: rows.map((r) => ({
+      ...r,
+      createdAt: r.createdAt.toISOString(),
+      saleAmount: r.saleAmount != null ? Number(r.saleAmount) : null,
+    })),
+  });
 });
 
 export default router;

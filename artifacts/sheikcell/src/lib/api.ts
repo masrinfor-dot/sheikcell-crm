@@ -2376,6 +2376,27 @@ export const api = {
       if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
       return req<{ from: string; to: string; rows: StoreConsolidatedRow[] }>(`/relatorios/lojas?${qs.toString()}`);
     },
+    atendimentos: (params?: {
+      from?: string; to?: string; sectorId?: number; attendantId?: number; store?: string;
+      resolutionReason?: string; hadSale?: boolean; origin?: "manual" | "fila"; outcome?: string;
+      limit?: number; offset?: number;
+    }) => {
+      const qs = new URLSearchParams();
+      if (params?.from) qs.set("from", params.from);
+      if (params?.to) qs.set("to", params.to);
+      if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      if (params?.attendantId) qs.set("attendantId", String(params.attendantId));
+      if (params?.store) qs.set("store", params.store);
+      if (params?.resolutionReason) qs.set("resolutionReason", params.resolutionReason);
+      if (params?.hadSale != null) qs.set("hadSale", String(params.hadSale));
+      if (params?.origin) qs.set("origin", params.origin);
+      if (params?.outcome) qs.set("outcome", params.outcome);
+      if (params?.limit) qs.set("limit", String(params.limit));
+      if (params?.offset) qs.set("offset", String(params.offset));
+      return req<{ from: string; to: string; total: number; limit: number; offset: number; motivos: string[]; rows: AtendimentoRow[] }>(
+        `/relatorios/atendimentos?${qs.toString()}`,
+      );
+    },
   },
   teamDirectory: {
     list: () => req<TeamContact[]>("/team-directory"),
@@ -2980,6 +3001,22 @@ export type StoreConsolidatedRow = {
   storeId: number | null; name: string;
   atendimentos: number; iniciados: number; finalizados: number; naoResolvidos: number;
   vendas: number; totalVendido: number; conversao: number; avgSatisfactionPercent: number;
+};
+
+export type AtendimentoRow = {
+  id: number;
+  createdAt: string;
+  clientName: string;
+  clientContact: string | null;
+  sectorName: string;
+  attendantId: number | null;
+  attendantName: string | null;
+  outcome: string | null;
+  resolutionReason: string | null;
+  origin: string | null; // "manual" | "fila" | null
+  hadSale: boolean | null;
+  saleAmount: number | null;
+  conversationId: number | null;
 };
 
 export type TeamContact = {

@@ -48,6 +48,14 @@ export const attendanceLogsTable = pgTable("attendance_logs", {
   // chat associada. Usado pra "Reabrir pelo Histórico" e pro filtro por
   // etiqueta (join em conversations.labels).
   conversationId: integer("conversation_id"),
+  // Snapshot de conversations.origin no momento da finalização: "manual"
+  // (Criar atendimento) ou "fila" (auto-atribuído/assumido via fila) — mesmo
+  // motivo de snapshot do storeId/sectorName acima (fato histórico não pode
+  // depender da conversa ainda existir). Nulo pra atendimentos de antes dessa
+  // coluna existir e pra transferência manual de responsável (que não conta
+  // como nenhuma das duas origens — ver comentário em conversations.origin).
+  // Usado pro filtro "iniciado manualmente x vindo da fila" em Relatórios.
+  origin: text("origin"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
