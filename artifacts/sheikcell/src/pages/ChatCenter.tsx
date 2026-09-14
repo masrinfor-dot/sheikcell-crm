@@ -14,7 +14,7 @@ import {
   Pin, PinOff, Reply, StickyNote, Star, StarOff, ChevronLeft, ChevronRight,
   MapPin, ShoppingBag, CreditCard, BarChart3, Ban, UserPlus, ExternalLink,
   FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Download, Maximize2, Pencil,
-  MoreVertical, RotateCcw, Percent, FolderOpen, Flag,
+  MoreVertical, RotateCcw, Percent, FolderOpen, Flag, Lock,
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -814,13 +814,19 @@ function IconTextCard({ icon: Icon, content }: { icon: typeof CreditCard; conten
 }
 
 // ─── Message bubble ─────────────────────────────────────────────────────────
-function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConversation, currentUserId, isModerator, onEdit, onDelete, isPinned, onPin, onUnpin }: {
+function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConversation, onReplyPrivately, currentUserId, isModerator, onEdit, onDelete, isPinned, onPin, onUnpin }: {
   msg: ChatMessage;
   onReply: (m: ChatMessage) => void;
   highlighted: boolean;
   onJumpTo: (id: number) => void;
   isGroup: boolean;
   onStartConversation?: (c: { name: string; phone: string | null }) => void;
+  // "Responder em particular" (pedido 14/09): igual ao WhatsApp, sai da
+  // mensagem do grupo direto pra conversa individual com quem mandou —
+  // diferente de onReply, que responde (com citação) DENTRO do próprio
+  // grupo. Só aparece pra mensagem recebida (!out) num grupo, com telefone
+  // do participante disponível. Ver comentário em replyPrivately.
+  onReplyPrivately?: (m: ChatMessage) => void;
   currentUserId?: number;
   isModerator?: boolean;
   onEdit: (id: number, content: string) => Promise<void>;
@@ -891,6 +897,22 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConver
       <Reply className="w-3.5 h-3.5" />
     </button>
   );
+
+  // "Responder em particular" (pedido 14/09): só em mensagem recebida DENTRO
+  // de um grupo — abre (ou cria) a conversa individual com quem mandou e já
+  // leva a mensagem do grupo como citação no campo de digitação, pra sair do
+  // grupo direto pra uma resposta privada sem precisar copiar/colar (ver
+  // replyPrivately, mais abaixo no componente pai).
+  const replyPrivatelyButton = isGroup && !out && msg.senderPhone && onReplyPrivately ? (
+    <button
+      onClick={() => onReplyPrivately(msg)}
+      data-testid={`button-reply-private-msg-${msg.id}`}
+      title="Responder em particular"
+      className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-full text-gray-500 hover:text-primary hover:bg-black/5 shrink-0"
+    >
+      <Lock className="w-3.5 h-3.5" />
+    </button>
+  ) : null;
 
   // "Marcar mensagem" (igual WhatsApp): fixa/desafixa essa mensagem no topo da
   // conversa, visível pra todo mundo que atende. Só aparece com hover, junto
@@ -1062,7 +1084,7 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConver
           )}
         </div>
       </div>
-      {!out && <>{pinButton}{replyButton}</>}
+      {!out && <>{pinButton}{replyButton}{replyPrivatelyButton}</>}
     </div>
   );
 }
@@ -2849,11 +2871,14 @@ export default function ChatCenter({
 
 
   // Abre (ou cria, se não existir) uma conversa individual com um número —
-  // usado pelo cartão de contato compartilhado e pelo nome clicável de quem
-  // mandou uma mensagem dentro de um grupo. Se já existe uma conversa aberta
+  // usado pelo cartão de contato compartilhado, pelo nome clicável de quem
+  // mandou uma mensagem dentro de um grupo, e pelo botão "Responder em
+  // particular" (replyPrivately, abaixo). Se já existe uma conversa aberta
   // com esse número, o backend responde 409 com o id dela — só abre.
-  const startConversationWith = async ({ name, phone }: { name: string; phone: string | null }) => {
-    if (!phone) { toast({ title: "Número não disponível para este contato", variant: "destructive" }); return; }
+  // Devolve o id da conversa (nova ou já existente) pra quem chamou poder
+  // continuar (ex.: preencher o campo de digitação já com uma citação).
+  const startConversationWith = async ({ name, phone }: { name: string; phone: string | null }): Promise<number | undefined> => {
+    if (!phone) { toast({ title: "Número não disponível para este contato", variant: "destructive" }); return undefined; }
     try {
       // Bug (10/09): nunca mandava sessionKey — o backend sempre criava na
       // linha literal "default", mesmo clicando num contato compartilhado
@@ -2877,16 +2902,39 @@ export default function ChatCenter({
         : [convWithAssignee, ...prev]);
       setActiveId(conv.id);
       setCategory(conversationCategory(conv));
+      return conv.id;
     } catch (err: unknown) {
       if (err instanceof ApiError && err.conversationId != null) {
         // Já existe uma conversa aberta com esse número — só abre ela.
         setActiveId(err.conversationId);
         const existing = convs.find((c) => c.id === err.conversationId);
         if (existing) setCategory(conversationCategory(existing));
-        return;
+        return err.conversationId;
       }
       toast({ title: "Erro ao iniciar conversa", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+      return undefined;
     }
+  };
+
+  // "Responder em particular" (pedido 14/09: "cria opção de responder
+  // conversa no grupo em particular, seleciona a conversa e ir para
+  // particular") — igual ao recurso nativo do WhatsApp: sai de uma mensagem
+  // recebida dentro de um grupo direto pra uma conversa individual com quem
+  // mandou. Reusa o mesmo startConversationWith do nome clicável (abre a
+  // conversa se já existir, cria se não existir) e, além disso, já deixa a
+  // mensagem original do grupo citada no campo de digitação — assim quem
+  // responde não perde o contexto do que estava sendo respondido, mesmo sem
+  // dar pra citar de verdade (replyToId) entre conversas diferentes.
+  const replyPrivately = async (msg: ChatMessage) => {
+    if (!msg.senderName || !msg.senderPhone) return;
+    const convId = await startConversationWith({ name: msg.senderName, phone: msg.senderPhone });
+    if (convId == null) return;
+    const snippet = (msg.content ?? "").trim();
+    if (snippet) {
+      const truncated = snippet.length > 160 ? `${snippet.slice(0, 160)}…` : snippet;
+      setMsgText(`_Sobre a mensagem de ${msg.senderName} no grupo:_ "${truncated}"\n\n`);
+    }
+    inputRef.current?.focus();
   };
 
   // ── Toggle label ──
@@ -4175,6 +4223,7 @@ export default function ChatCenter({
                         onJumpTo={scrollToMessage}
                         isGroup={!!activeConv && isGroupConv(activeConv)}
                         onStartConversation={can(user, "criar_atendimento") ? startConversationWith : undefined}
+                        onReplyPrivately={can(user, "criar_atendimento") ? replyPrivately : undefined}
                         currentUserId={user?.id}
                         isModerator={user?.role === "admin" || user?.role === "supervisor"}
                         onEdit={handleEditMessage}
