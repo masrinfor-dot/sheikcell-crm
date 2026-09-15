@@ -65,11 +65,39 @@ router.patch("/finance/bank-accounts/:id", requireAuth, async (req, res): Promis
   }
   if ("label" in body) update.label = clean(body.label, 80) || null;
   if (typeof body.isActive === "boolean") update.isActive = body.isActive;
+  if (body.storeId !== undefined) {
+    const storeId = Number(body.storeId);
+    if (!Number.isInteger(storeId) || storeId <= 0) { res.status(400).json({ error: "Filial inválida" }); return; }
+    if (!(await assertStoreOwned(tenantId, storeId))) { res.status(400).json({ error: "Filial inválida" }); return; }
+    update.storeId = storeId;
+  }
   if (Object.keys(update).length === 0) { res.status(400).json({ error: "Nada para atualizar" }); return; }
   const [updated] = await db.update(financeBankAccountsTable).set(update)
     .where(and(eq(financeBankAccountsTable.id, id), eq(financeBankAccountsTable.tenantId, tenantId))).returning();
   if (!updated) { res.status(404).json({ error: "Conta não encontrada" }); return; }
   res.json(updated);
+});
+
+// Só permite excluir de verdade se nenhum pagamento já lançado usa essa
+// conta como pagadora (sem ON DELETE no schema — de propósito, pra nunca
+// perder o vínculo de um lançamento já existente). Se estiver em uso, a
+// saída recomendada pro usuário é marcar como "Inativa" em vez de excluir.
+router.delete("/finance/bank-accounts/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (!Number.isInteger(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const [account] = await db.select().from(financeBankAccountsTable)
+    .where(and(eq(financeBankAccountsTable.id, id), eq(financeBankAccountsTable.tenantId, tenantId))).limit(1);
+  if (!account) { res.status(404).json({ error: "Conta não encontrada" }); return; }
+  const [inUse] = await db.select({ id: financePaymentsTable.id }).from(financePaymentsTable)
+    .where(eq(financePaymentsTable.payingBankAccountId, id)).limit(1);
+  if (inUse) {
+    res.status(400).json({ error: "Essa conta já tem pagamento lançado — não é possível excluir. Marque como Inativa em vez disso." });
+    return;
+  }
+  await db.delete(financeBankAccountsTable)
+    .where(and(eq(financeBankAccountsTable.id, id), eq(financeBankAccountsTable.tenantId, tenantId)));
+  res.status(204).send();
 });
 
 // ─── Pagamentos + rateio entre filiais ───

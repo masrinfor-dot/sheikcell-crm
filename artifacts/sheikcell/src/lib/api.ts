@@ -2445,8 +2445,9 @@ export const api = {
       list: (storeId?: number | null) => req<FinanceBankAccount[]>(`/finance/bank-accounts${storeId ? `?storeId=${storeId}` : ""}`),
       create: (data: { storeId: number; bankName: string; label?: string }) =>
         req<FinanceBankAccount>("/finance/bank-accounts", { method: "POST", body: JSON.stringify(data) }),
-      update: (id: number, data: Partial<{ bankName: string; label: string; isActive: boolean }>) =>
+      update: (id: number, data: Partial<{ bankName: string; label: string; isActive: boolean; storeId: number }>) =>
         req<FinanceBankAccount>(`/finance/bank-accounts/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+      remove: (id: number) => req<void>(`/finance/bank-accounts/${id}`, { method: "DELETE" }),
     },
     list: (params?: { storeId?: number | null; bankAccountId?: number | null; status?: "aberto" | "pago" | null; from?: string | null; to?: string | null }) => {
       const qs = new URLSearchParams();
