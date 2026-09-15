@@ -12,6 +12,7 @@ export const PERMISSION_KEYS = [
   "criar_atendimento",// criar novo atendimento manualmente
   "usar_ia",          // sugestão de resposta / correção com IA
   "enviar_midia",     // enviar fotos, áudios e arquivos
+  "adicionar_participante", // adicionar outro vendedor numa conversa do Atendimento
 ] as const;
 export type PermissionKey = (typeof PERMISSION_KEYS)[number];
 

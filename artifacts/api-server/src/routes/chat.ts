@@ -2541,7 +2541,7 @@ router.get("/chat/users", requireAuth, async (req, res): Promise<void> => {
 });
 
 // ─── Conversation participants ─────────────────────────────────────────────
-router.post("/chat/conversations/:id/participants", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+router.post("/chat/conversations/:id/participants", requireAuth, requireChatAccess(), requirePerm("adicionar_participante"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const { userId } = req.body as { userId?: number };

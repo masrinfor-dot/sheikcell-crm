@@ -3,7 +3,7 @@ import {
   db, employeesTable, workShiftsTable, timeClockEntriesTable, timeBankAdjustmentsTable, leaveRecordsTable,
   timeBankClosuresTable, usersTable, storesTable, tenantsTable, vacationRequestsTable, timesheetSignaturesTable,
 } from "@workspace/db";
-import { eq, and, desc, asc, gte, lte, inArray } from "drizzle-orm";
+import { eq, and, desc, asc, gte, lte, inArray, sql } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireTenant, tenantIdOf } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import { computeTimeBank, nextPunchKind, dayKeySaoPaulo, employeeNeedsClockInToday } from "../lib/timeBank";
@@ -1068,6 +1068,83 @@ router.get("/rh-dp/reports/timesheet", requireModuleAccess("rh"), async (req, re
     .where(and(...conditions))
     .orderBy(desc(timeClockEntriesTable.at)).limit(2000);
   res.json(rows);
+});
+
+// Painel DP (pedido 15/09, comparativo com a Visão Geral do Tangerino): 4
+// indicadores reais do dia/mês corrente pra abrir Departamento Pessoal já
+// mostrando o que precisa de atenção, sem precisar entrar em cada aba.
+// Cada número aqui já existe em algum lugar do sistema (ponto, afastamentos,
+// férias, banco de horas) — este endpoint só agrega, não cria dado novo.
+router.get("/rh-dp/dashboard-summary", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+
+  const todaySP = new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
+  const startOfDay = new Date(`${todaySP}T00:00:00-03:00`);
+  const endOfDay = new Date(`${todaySP}T23:59:59-03:00`);
+
+  const employees = await db.select({ id: employeesTable.id, shiftType: workShiftsTable.type })
+    .from(employeesTable)
+    .leftJoin(workShiftsTable, eq(employeesTable.shiftId, workShiftsTable.id))
+    .where(and(eq(employeesTable.tenantId, tenantId), eq(employeesTable.isActive, true)));
+  const activeEmployeeIds = employees.map((e) => e.id);
+
+  // Sem presença hoje: colaborador ativo sem nenhuma batida "in" hoje.
+  let noPresenceToday = 0;
+  if (activeEmployeeIds.length > 0) {
+    const presentRows = await db.select({ employeeId: timeClockEntriesTable.employeeId })
+      .from(timeClockEntriesTable)
+      .where(and(
+        eq(timeClockEntriesTable.tenantId, tenantId),
+        eq(timeClockEntriesTable.kind, "in"),
+        gte(timeClockEntriesTable.at, startOfDay),
+        lte(timeClockEntriesTable.at, endOfDay),
+        inArray(timeClockEntriesTable.employeeId, activeEmployeeIds),
+      ));
+    const presentSet = new Set(presentRows.map((r) => r.employeeId));
+    noPresenceToday = activeEmployeeIds.filter((id) => !presentSet.has(id)).length;
+  }
+
+  // Atestados e afastamentos: pedidos de férias pendentes de aprovação
+  // (único fluxo com status real) + atestados/faltas lançados nos últimos 7
+  // dias (leave_records não tem status — é lançamento direto, então "recente"
+  // é a aproximação de "precisa de atenção/conferência").
+  const [pendingVacationRow] = await db.select({ count: sql<number>`count(*)::int` })
+    .from(vacationRequestsTable)
+    .where(and(eq(vacationRequestsTable.tenantId, tenantId), eq(vacationRequestsTable.status, "pendente")));
+  const sevenDaysAgoStr = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+  const [recentLeavesRow] = await db.select({ count: sql<number>`count(*)::int` })
+    .from(leaveRecordsTable)
+    .where(and(
+      eq(leaveRecordsTable.tenantId, tenantId),
+      inArray(leaveRecordsTable.kind, ["atestado", "falta_justificada", "falta_injustificada"]),
+      gte(leaveRecordsTable.startDate, sevenDaysAgoStr),
+    ));
+
+  // Inconsistências: pontos sinalizados pra revisão humana (foto/facial não
+  // bateu, ou duas fotos em pouco tempo) — ver flagged em time_clock_entries.
+  const [flaggedRow] = await db.select({ count: sql<number>`count(*)::int` })
+    .from(timeClockEntriesTable)
+    .where(and(eq(timeClockEntriesTable.tenantId, tenantId), eq(timeClockEntriesTable.flagged, true)));
+
+  // Horas excedentes: só colaboradores em escala "flexible" (banco de horas
+  // só soma o trabalhado, nunca desconta esperado) com saldo positivo no mês
+  // corrente — mesmo cálculo de /rh-dp/reports/time-bank-summary, só que
+  // filtrado a quem realmente pode ter "excedente" nesse sentido.
+  const flexibleEmployees = employees.filter((e) => e.shiftType === "flexible");
+  const monthStart = new Date(`${todaySP.slice(0, 7)}-01T00:00:00-03:00`);
+  const overtimeResults = await Promise.all(flexibleEmployees.map((e) => computeTimeBank(e.id, tenantId, monthStart, endOfDay)));
+  const overtimeEmployeesCount = overtimeResults.filter((r) => r.balanceMinutes > 0).length;
+  const overtimeMinutesTotal = overtimeResults.reduce((sum, r) => sum + Math.max(0, r.balanceMinutes), 0);
+
+  res.json({
+    activeEmployees: activeEmployeeIds.length,
+    noPresenceToday,
+    pendingVacationRequests: Number(pendingVacationRow?.count ?? 0),
+    recentLeaveRecords: Number(recentLeavesRow?.count ?? 0),
+    flaggedPunches: Number(flaggedRow?.count ?? 0),
+    overtimeEmployeesCount,
+    overtimeMinutesTotal,
+  });
 });
 
 router.get("/rh-dp/reports/time-bank-summary", requireModuleAccess("rh"), async (req, res): Promise<void> => {

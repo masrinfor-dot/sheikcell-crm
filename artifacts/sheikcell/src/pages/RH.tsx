@@ -13,7 +13,7 @@ import {
   Video, ChevronDown, ChevronUp, Save, Link2, UserSquare2, CalendarClock, Clock, Wallet, Pencil, Archive, PlayCircle,
   AlertTriangle, Image as ImageIcon, Smartphone, Printer, Star, Briefcase, Sparkles, MapPin,
   Upload, Download, FileText, FolderArchive, UserPlus, FileSignature, Eye, IdCard, RotateCcw, Palmtree,
-  ListChecks, Building2,
+  ListChecks, Building2, LayoutDashboard,
 } from "lucide-react";
 
 // Perfil comportamental (estilo DISC simplificado, 4 tipos definidos pelo
@@ -204,7 +204,7 @@ export default function RH() {
   const { user } = useAuth();
   const canEdit = canEditModule(user, "rh");
   const [group, setGroup] = useState<"recrutamento" | "dp">("recrutamento");
-  const [dpView, setDpView] = useState<"colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos" | "ferias" | "fechamentos">("colaboradores");
+  const [dpView, setDpView] = useState<"painel" | "colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos" | "ferias" | "fechamentos">("painel");
 
   return (
     <div className="space-y-4">
@@ -228,6 +228,7 @@ export default function RH() {
         <div className="space-y-4">
           <div className="flex gap-1.5 flex-wrap">
             {([
+              { key: "painel", label: "Painel DP", icon: LayoutDashboard },
               { key: "colaboradores", label: "Colaboradores", icon: UserSquare2 },
               { key: "escalas", label: "Escalas", icon: CalendarClock },
               { key: "ponto", label: "Registros de Ponto", icon: Clock },
@@ -242,6 +243,7 @@ export default function RH() {
               </button>
             ))}
           </div>
+          {dpView === "painel" && <PainelDP onNavigate={setDpView} />}
           {dpView === "colaboradores" && <Colaboradores canEdit={canEdit} />}
           {dpView === "escalas" && <Escalas canEdit={canEdit} />}
           {dpView === "ponto" && <PontoAdmin canEdit={canEdit} isAdmin={user?.role === "admin"} />}
@@ -3206,6 +3208,89 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
             </button>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+// ── Painel DP ────────────────────────────────────────────────────────────
+// Visão geral ao abrir Departamento Pessoal (pedido 15/09, comparativo com
+// a "Visão Geral" do Tangerino) — 4 indicadores reais, cada um já calculado
+// em algum lugar do sistema (ponto, afastamentos, férias, banco de horas).
+// Sem métrica inventada: "Dispositivos"/"relógios de ponto" e "Alertas" do
+// Tangerino ficaram de fora por enquanto (não se aplicam ou não têm dado
+// real aqui ainda) — ver claude/backlog-pendencias.md.
+type DpView = "painel" | "colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos" | "ferias" | "fechamentos";
+function PainelDP({ onNavigate }: { onNavigate: (view: DpView) => void }) {
+  const [summary, setSummary] = useState<{
+    activeEmployees: number; noPresenceToday: number;
+    pendingVacationRequests: number; recentLeaveRecords: number;
+    flaggedPunches: number; overtimeEmployeesCount: number; overtimeMinutesTotal: number;
+  } | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const load = () => {
+    setLoading(true);
+    api.rhDp.dashboardSummary().then(setSummary).catch(() => {}).finally(() => setLoading(false));
+  };
+  useEffect(() => { load(); }, []);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs text-muted-foreground">Visão geral de hoje e do mês corrente — clique num card pra ver os detalhes.</p>
+        <button onClick={load} data-testid="button-painel-dp-refresh"
+          className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground shrink-0">
+          <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} /> Atualizar
+        </button>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <button onClick={() => onNavigate("ponto")} data-testid="card-painel-colaboradores"
+          className="shk-card p-4 text-left hover:border-primary/40 transition">
+          <p className="text-[10px] font-bold text-muted-foreground uppercase">Colaboradores ativos</p>
+          <p className="text-2xl font-extrabold text-primary mt-1">{summary?.activeEmployees ?? "—"}</p>
+          <p className={`text-[11px] mt-1 ${summary && summary.noPresenceToday > 0 ? "text-amber-600" : "text-muted-foreground"}`}>
+            {summary ? `${summary.noPresenceToday} sem presença hoje` : "carregando..."}
+          </p>
+        </button>
+
+        <button onClick={() => onNavigate("afastamentos")} data-testid="card-painel-afastamentos"
+          className="shk-card p-4 text-left hover:border-primary/40 transition">
+          <p className="text-[10px] font-bold text-muted-foreground uppercase">Atestados e afastamentos</p>
+          <p className="text-2xl font-extrabold text-primary mt-1">{summary?.pendingVacationRequests ?? "—"}</p>
+          <p className="text-[11px] text-muted-foreground mt-1">
+            {summary ? `pedido(s) de férias pendente(s) · ${summary.recentLeaveRecords} lançado(s) nos últimos 7 dias` : "carregando..."}
+          </p>
+        </button>
+
+        <button onClick={() => onNavigate("ponto")} data-testid="card-painel-inconsistencias"
+          className="shk-card p-4 text-left hover:border-primary/40 transition">
+          <p className="text-[10px] font-bold text-muted-foreground uppercase">Inconsistências</p>
+          <p className={`text-2xl font-extrabold mt-1 ${summary && summary.flaggedPunches > 0 ? "text-red-600" : "text-primary"}`}>
+            {summary?.flaggedPunches ?? "—"}
+          </p>
+          <p className="text-[11px] text-muted-foreground mt-1">pontos sinalizados pra revisão</p>
+        </button>
+
+        <button onClick={() => onNavigate("banco-horas")} data-testid="card-painel-horas-excedentes"
+          className="shk-card p-4 text-left hover:border-primary/40 transition">
+          <p className="text-[10px] font-bold text-muted-foreground uppercase">Horas excedentes (mês)</p>
+          <p className="text-2xl font-extrabold text-primary mt-1">{summary ? formatMinutes(summary.overtimeMinutesTotal) : "—"}</p>
+          <p className="text-[11px] text-muted-foreground mt-1">
+            {summary ? `${summary.overtimeEmployeesCount} colaborador(es) em escala livre` : "carregando..."}
+          </p>
+        </button>
+      </div>
+
+      {!loading && summary && summary.flaggedPunches > 0 && (
+        <button onClick={() => onNavigate("ponto")} data-testid="alert-painel-flagged"
+          className="w-full shk-card p-3 flex items-center gap-2 border-red-200 bg-red-50 text-left hover:bg-red-100/60 transition">
+          <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" />
+          <p className="text-xs text-red-700">
+            Tem {summary.flaggedPunches} ponto{summary.flaggedPunches === 1 ? "" : "s"} sinalizado{summary.flaggedPunches === 1 ? "" : "s"} pra revisão — confira em "Registros de Ponto".
+          </p>
+        </button>
       )}
     </div>
   );

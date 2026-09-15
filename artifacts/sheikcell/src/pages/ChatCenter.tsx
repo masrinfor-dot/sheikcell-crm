@@ -2811,7 +2811,9 @@ export default function ChatCenter({
       if (newStatus === "pending") {
         toast({ title: "Vendedor adicionado", description: "Conversa enviada para Pendentes para aprovar o atendimento." });
       }
-    } catch { toast({ title: "Erro ao adicionar vendedor", variant: "destructive" }); }
+    } catch (err) {
+      toast({ title: "Erro ao adicionar vendedor", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
   };
 
   const handleRemoveParticipant = async (userId: number) => {

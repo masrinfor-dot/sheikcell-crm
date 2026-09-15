@@ -92,6 +92,7 @@ export const PERMISSION_KEYS = [
   "criar_atendimento",
   "usar_ia",
   "enviar_midia",
+  "adicionar_participante",
 ] as const;
 
 export const PERMISSION_LABELS: Record<string, string> = {
@@ -101,6 +102,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   criar_atendimento: "Criar novo atendimento manualmente",
   usar_ia: "Usar sugestão de resposta com IA",
   enviar_midia: "Enviar fotos, áudios e arquivos",
+  adicionar_participante: "Adicionar outro vendedor numa conversa",
 };
 
 export type User = {
@@ -2568,6 +2570,13 @@ export const api = {
       signTimesheet: (periodMonth: string) =>
         req<{ id: number }>("/rh-dp/me/timesheet-signatures", { method: "POST", body: JSON.stringify({ periodMonth }) }),
     },
+    // Painel DP — 4 indicadores agregados (colaboradores/presença hoje,
+    // atestados e afastamentos, inconsistências de ponto, horas excedentes).
+    dashboardSummary: () => req<{
+      activeEmployees: number; noPresenceToday: number;
+      pendingVacationRequests: number; recentLeaveRecords: number;
+      flaggedPunches: number; overtimeEmployeesCount: number; overtimeMinutesTotal: number;
+    }>("/rh-dp/dashboard-summary"),
     employees: {
       list: () => req<Employee[]>("/rh-dp/employees"),
       create: (data: Partial<Employee>) => req<Employee>("/rh-dp/employees", { method: "POST", body: JSON.stringify(data) }),
