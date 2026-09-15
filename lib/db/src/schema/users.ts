@@ -5,6 +5,16 @@ import { sectorsTable } from "./sectors";
 import { storesTable } from "./stores";
 import type { OptionalModule } from "./tenants";
 
+// Sub-perfis do superadmin (Painel do Sistema — Fase 1, gap pendente): um
+// superadmin restrito só enxerga/mexe nos escopos aqui listados. "tenants"
+// = lojas (criar/suspender/planos), "billing" = financeiro SaaS (contratos/
+// mensalidades), "support" = chamados. Ações mais sensíveis (entrar como,
+// auditoria/sessões globais, gerenciar a própria equipe do superadmin)
+// SEMPRE exigem acesso completo (superadminScopes null), nunca liberam só
+// com um escopo — ver requireFullSuperadmin em middlewares/auth.ts.
+export const SUPERADMIN_SCOPES = ["tenants", "billing", "support"] as const;
+export type SuperadminScope = typeof SUPERADMIN_SCOPES[number];
+
 export const usersTable = pgTable("users", {
   // tenant_id=0 é reservado pro Super Admin (role "superadmin") — ele não
   // pertence a nenhuma loja real (lojas começam em 1), então nunca bate com
@@ -100,6 +110,11 @@ export const usersTable = pgTable("users", {
   // tempo esperando" e deve receber o próximo primeiro. null = nunca
   // recebeu nada pela fila ainda (entra na frente de todo mundo).
   chatQueueLastAssignedAt: timestamp("chat_queue_last_assigned_at", { withTimezone: true }),
+  // Só tem efeito quando role="superadmin". null (padrão) = acesso completo
+  // — todo superadmin já existente continua exatamente como sempre foi.
+  // Um array restringe esse membro da equipe aos escopos ali listados (ver
+  // SUPERADMIN_SCOPES acima). Ignorado para qualquer outra role.
+  superadminScopes: jsonb("superadmin_scopes").$type<SuperadminScope[] | null>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });

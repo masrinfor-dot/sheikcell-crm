@@ -18,6 +18,7 @@ import {
   type Plan,
   type LimitField,
   type PlanUsage,
+  type TeamMember,
   OPTIONAL_MODULES,
   MODULE_LABELS,
   MODULE_PACKAGES,
@@ -49,7 +50,7 @@ import {
   CheckCircle2, DollarSign, FileText, Wrench, Pencil, AlertTriangle, Trash2,
   Bug, HelpCircle, Sparkles, Clock, Send, LogIn, LayoutGrid, UserCog,
   LayoutDashboard, Search, MoreVertical, WifiOff, HardHat, ArrowRight, History,
-  Gauge,
+  Gauge, Users, ShieldCheck,
 } from "lucide-react";
 
 // Compara duas listas de módulos ignorando ordem (usado pra destacar o botão
@@ -202,7 +203,7 @@ function attentionItemLabel(item: AttentionItem) {
   }
 }
 
-type Tab = "visaogeral" | "lojistas" | "planos" | "financeiro" | "contratos" | "suporte" | "auditoria";
+type Tab = "visaogeral" | "lojistas" | "planos" | "financeiro" | "contratos" | "suporte" | "auditoria" | "equipe";
 
 const TABS: { id: Tab; label: string; icon: typeof Building2 }[] = [
   { id: "visaogeral", label: "Visão Geral", icon: LayoutDashboard },
@@ -212,7 +213,28 @@ const TABS: { id: Tab; label: string; icon: typeof Building2 }[] = [
   { id: "contratos", label: "Contratos", icon: FileText },
   { id: "suporte", label: "Suporte", icon: Wrench },
   { id: "auditoria", label: "Auditoria", icon: History },
+  { id: "equipe", label: "Equipe", icon: Users },
 ];
+
+// Sub-perfis do superadmin (Fase 1 - gaps): escopos possíveis pra um membro
+// restrito da equipe, e o que cada um libera — mesma lista de
+// SUPERADMIN_SCOPES no backend (lib/db/src/schema/users.ts).
+const SUPERADMIN_SCOPE_OPTIONS = ["tenants", "billing", "support"] as const;
+const SUPERADMIN_SCOPE_LABELS: Record<string, string> = {
+  tenants: "Lojas (Lojistas)",
+  billing: "Financeiro (Planos, Financeiro, Contratos)",
+  support: "Suporte",
+};
+// Quais abas cada escopo libera — "Visão Geral" é sempre visível (é só um
+// resumo, sem ação sensível); "Auditoria" e "Equipe" nunca aparecem pra
+// quem não tem acesso completo (ver requireFullSuperadmin no backend).
+const TAB_SCOPE: Partial<Record<Tab, string>> = {
+  lojistas: "tenants",
+  planos: "billing",
+  financeiro: "billing",
+  contratos: "billing",
+  suporte: "support",
+};
 
 // Pedido do lojista (11/09): atualizar a página (F5) não pode voltar pra
 // tela inicial — mantém a última aba aberta. sessionStorage (não
@@ -244,10 +266,30 @@ const TENANT_STATUS_META: Record<TenantSummary["saasStatus"], { label: string; c
 export default function SuperAdminDashboard() {
   const { user, logout, setUser } = useAuth();
   const { toast } = useToast();
+
+  // Sub-perfis do superadmin (Fase 1 - gaps): null/undefined = acesso
+  // completo. Um membro restrito só vê as abas cobertas pelos escopos dele
+  // (ver TAB_SCOPE acima) — "Auditoria" e "Equipe" nunca aparecem pra quem
+  // não tem acesso completo, mesmo com todos os 3 escopos marcados.
+  const superadminScopes = user?.superadminScopes ?? null;
+  const isFullAccess = superadminScopes === null;
+  const visibleTabs = TABS.filter((t) => {
+    if (t.id === "auditoria" || t.id === "equipe") return isFullAccess;
+    const needed = TAB_SCOPE[t.id];
+    return !needed || isFullAccess || (superadminScopes?.includes(needed) ?? false);
+  });
+
   const [tab, setTab] = useState<Tab>(readStoredSuperAdminTab);
   useEffect(() => {
     try { sessionStorage.setItem(SUPERADMIN_TAB_STORAGE_KEY, tab); } catch { /* sessionStorage indisponível — ignora */ }
   }, [tab]);
+  // Aba salva de uma sessão anterior pode não ser mais acessível pra este
+  // membro (ex.: virou restrito depois de já ter usado "Auditoria") — volta
+  // pra Visão Geral em vez de mostrar uma aba vazia/quebrada.
+  useEffect(() => {
+    if (!visibleTabs.some((t) => t.id === tab)) setTab("visaogeral");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isFullAccess, superadminScopes]);
 
   // Meu Cadastro: edição do próprio nome/e-mail (PATCH /auth/me — nunca um
   // id de outra conta) + troca de senha (reaproveita o mesmo modal usado no
@@ -284,6 +326,7 @@ export default function SuperAdminDashboard() {
   const [tickets, setTickets] = useState<SaasTicket[]>([]);
   const [auditEntries, setAuditEntries] = useState<SuperadminAuditEntry[]>([]);
   const [plans, setPlans] = useState<Plan[]>([]);
+  const [team, setTeam] = useState<TeamMember[]>([]);
   const [template, setTemplate] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -399,6 +442,56 @@ export default function SuperAdminDashboard() {
   const [invoiceForm, setInvoiceForm] = useState({ tenantId: "", description: "Mensalidade", amount: "", dueDate: "" });
   const [ticketForm, setTicketForm] = useState({ tenantId: "", title: "", description: "" });
 
+  // Equipe do superadmin (Fase 1 - gaps): criar/editar outros membros com
+  // role "superadmin", com acesso completo ou restrito a um ou mais
+  // escopos (ver SUPERADMIN_SCOPE_OPTIONS acima).
+  const [teamOpen, setTeamOpen] = useState(false);
+  const [teamForm, setTeamForm] = useState<{ name: string; email: string; password: string; fullAccess: boolean; scopes: string[] }>(
+    { name: "", email: "", password: "", fullAccess: true, scopes: [] },
+  );
+  const openNewTeamMember = () => {
+    setTeamForm({ name: "", email: "", password: "", fullAccess: true, scopes: [] });
+    setTeamOpen(true);
+  };
+  const saveTeamMember = () => {
+    const name = teamForm.name.trim();
+    const email = teamForm.email.trim();
+    if (!name) { toast({ title: "Informe o nome", variant: "destructive" }); return; }
+    if (!email.includes("@")) { toast({ title: "E-mail inválido", variant: "destructive" }); return; }
+    if (teamForm.password.length < 6) { toast({ title: "Senha precisa ter pelo menos 6 caracteres", variant: "destructive" }); return; }
+    if (!teamForm.fullAccess && teamForm.scopes.length === 0) { toast({ title: "Marque ao menos um escopo, ou deixe como acesso completo", variant: "destructive" }); return; }
+    void run(
+      () => api.superadmin.team.create({ name, email, password: teamForm.password, superadminScopes: teamForm.fullAccess ? null : teamForm.scopes }),
+      "Membro da equipe criado",
+      () => setTeamOpen(false),
+    );
+  };
+
+  const [teamEditFor, setTeamEditFor] = useState<TeamMember | null>(null);
+  const [teamEditForm, setTeamEditForm] = useState<{ name: string; isActive: boolean; fullAccess: boolean; scopes: string[]; newPassword: string }>(
+    { name: "", isActive: true, fullAccess: true, scopes: [], newPassword: "" },
+  );
+  const openEditTeamMember = (m: TeamMember) => {
+    setTeamEditFor(m);
+    setTeamEditForm({ name: m.name, isActive: m.isActive, fullAccess: m.superadminScopes == null, scopes: m.superadminScopes ?? [], newPassword: "" });
+  };
+  const saveTeamEdit = () => {
+    if (!teamEditFor) return;
+    const name = teamEditForm.name.trim();
+    if (!name) { toast({ title: "Nome não pode ficar vazio", variant: "destructive" }); return; }
+    if (!teamEditForm.fullAccess && teamEditForm.scopes.length === 0) { toast({ title: "Marque ao menos um escopo, ou deixe como acesso completo", variant: "destructive" }); return; }
+    if (teamEditForm.newPassword && teamEditForm.newPassword.length < 6) { toast({ title: "Senha precisa ter pelo menos 6 caracteres", variant: "destructive" }); return; }
+    void run(
+      () => api.superadmin.team.update(teamEditFor.id, {
+        name, isActive: teamEditForm.isActive,
+        superadminScopes: teamEditForm.fullAccess ? null : teamEditForm.scopes,
+        ...(teamEditForm.newPassword ? { newPassword: teamEditForm.newPassword } : {}),
+      }),
+      "Membro da equipe atualizado",
+      () => setTeamEditFor(null),
+    );
+  };
+
   const fail = (title: string) => (e: unknown) =>
     toast({ title, description: (e as Error).message, variant: "destructive" });
 
@@ -410,12 +503,17 @@ export default function SuperAdminDashboard() {
       api.superadmin.listInvoices().then((r) => setInvoices(r.invoices)),
       api.superadmin.listContracts().then((r) => setContracts(r.contracts)),
       api.superadmin.getContractTemplate().then((r) => setTemplate(r.template)),
-      api.superadmin.auditLog().then((r) => setAuditEntries(r.entries)),
       api.superadmin.listPlans().then((r) => setPlans(r.plans)),
+      // Auditoria e Equipe exigem acesso completo no backend — nem tenta
+      // buscar pra um membro restrito (evitaria só um 403 barulhento).
+      ...(isFullAccess ? [
+        api.superadmin.auditLog().then((r) => setAuditEntries(r.entries)),
+        api.superadmin.team.list().then((r) => setTeam(r.team)),
+      ] : []),
     ])
       .catch(fail("Erro ao carregar dados"))
       .finally(() => setLoading(false));
-  }, []);
+  }, [isFullAccess]);
   useEffect(loadAll, [loadAll]);
 
   // Lista de chamados: refaz sempre que um filtro muda.
@@ -631,7 +729,7 @@ export default function SuperAdminDashboard() {
       </header>
 
       <nav className="border-b bg-card px-4 flex gap-1 overflow-x-auto">
-        {TABS.map(({ id, label, icon: Icon }) => (
+        {visibleTabs.map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             onClick={() => setTab(id)}
@@ -1138,6 +1236,71 @@ export default function SuperAdminDashboard() {
                             <TableCell className="text-sm">{e.description}</TableCell>
                             <TableCell className="text-sm text-muted-foreground">{e.reason ?? "—"}</TableCell>
                             <TableCell className="text-sm">{e.superadminName ?? "—"}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </Card>
+                )}
+              </>
+            )}
+
+            {/* --------------------------------------------- EQUIPE */}
+            {tab === "equipe" && (
+              <>
+                <div className="flex items-center justify-between">
+                  <p className="text-sm text-muted-foreground max-w-xl">
+                    Outros membros com acesso ao Painel do Sistema. Acesso completo enxerga tudo, igual você;
+                    um membro restrito só vê/mexe nas abas dos escopos marcados — nunca em Auditoria ou Equipe.
+                  </p>
+                  <Button size="sm" onClick={openNewTeamMember} data-testid="button-new-team-member">
+                    <Plus className="w-4 h-4 mr-1" /> Novo membro
+                  </Button>
+                </div>
+                {team.length === 0 ? (
+                  <p className="text-muted-foreground text-sm">Nenhum outro membro ainda.</p>
+                ) : (
+                  <Card>
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Nome</TableHead>
+                          <TableHead>E-mail</TableHead>
+                          <TableHead>Acesso</TableHead>
+                          <TableHead>Situação</TableHead>
+                          <TableHead className="w-10" />
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {team.map((m) => (
+                          <TableRow key={m.id} data-testid={`row-team-${m.id}`}>
+                            <TableCell className="text-sm font-medium">
+                              {m.name} {m.id === user?.id && <span className="text-xs text-muted-foreground">(você)</span>}
+                            </TableCell>
+                            <TableCell className="text-sm text-muted-foreground">{m.email}</TableCell>
+                            <TableCell>
+                              {m.superadminScopes == null ? (
+                                <Badge variant="secondary" className="flex items-center gap-1 w-fit">
+                                  <ShieldCheck className="w-3 h-3" /> Acesso completo
+                                </Badge>
+                              ) : (
+                                <div className="flex flex-wrap gap-1">
+                                  {m.superadminScopes.map((s) => (
+                                    <Badge key={s} variant="outline" className="text-xs">{SUPERADMIN_SCOPE_LABELS[s] ?? s}</Badge>
+                                  ))}
+                                </div>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {m.isActive
+                                ? <Badge variant="secondary" className="text-green-700">Ativo</Badge>
+                                : <Badge variant="outline" className="text-muted-foreground">Inativo</Badge>}
+                            </TableCell>
+                            <TableCell>
+                              <Button size="icon" variant="ghost" onClick={() => openEditTeamMember(m)} data-testid={`button-edit-team-${m.id}`}>
+                                <Pencil className="w-4 h-4" />
+                              </Button>
+                            </TableCell>
                           </TableRow>
                         ))}
                       </TableBody>
@@ -1755,6 +1918,100 @@ export default function SuperAdminDashboard() {
               </div>
             </>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Equipe: novo membro (Fase 1 - gaps) */}
+      <Dialog open={teamOpen} onOpenChange={setTeamOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Novo membro da equipe</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <Label className="text-xs">Nome</Label>
+              <Input value={teamForm.name} onChange={(e) => setTeamForm({ ...teamForm, name: e.target.value })} data-testid="input-team-name" />
+            </div>
+            <div>
+              <Label className="text-xs">E-mail</Label>
+              <Input type="email" value={teamForm.email} onChange={(e) => setTeamForm({ ...teamForm, email: e.target.value })} data-testid="input-team-email" />
+            </div>
+            <div>
+              <Label className="text-xs">Senha inicial</Label>
+              <Input type="password" value={teamForm.password} onChange={(e) => setTeamForm({ ...teamForm, password: e.target.value })} data-testid="input-team-password" />
+              <p className="text-xs text-muted-foreground mt-1">Pelo menos 6 caracteres — a pessoa troca no primeiro acesso.</p>
+            </div>
+            <div className="border-t pt-3">
+              <label className="flex items-center gap-2 text-sm font-medium mb-2">
+                <input type="checkbox" checked={teamForm.fullAccess} data-testid="checkbox-team-full-access"
+                  onChange={(e) => setTeamForm({ ...teamForm, fullAccess: e.target.checked })} />
+                Acesso completo (igual você)
+              </label>
+              {!teamForm.fullAccess && (
+                <div className="space-y-1.5 pl-1">
+                  {SUPERADMIN_SCOPE_OPTIONS.map((s) => (
+                    <label key={s} className="flex items-center gap-2 text-sm">
+                      <input type="checkbox" checked={teamForm.scopes.includes(s)} data-testid={`checkbox-team-scope-${s}`}
+                        onChange={(e) => setTeamForm({ ...teamForm, scopes: e.target.checked ? [...teamForm.scopes, s] : teamForm.scopes.filter((x) => x !== s) })} />
+                      {SUPERADMIN_SCOPE_LABELS[s]}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setTeamOpen(false)}>Cancelar</Button>
+            <Button onClick={saveTeamMember} disabled={busy} data-testid="button-save-team-member">Criar</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Equipe: editar membro (Fase 1 - gaps) */}
+      <Dialog open={!!teamEditFor} onOpenChange={(open) => { if (!open) setTeamEditFor(null); }}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Editar {teamEditFor?.name}</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <Label className="text-xs">Nome</Label>
+              <Input value={teamEditForm.name} onChange={(e) => setTeamEditForm({ ...teamEditForm, name: e.target.value })} data-testid="input-team-edit-name" />
+            </div>
+            {teamEditFor?.id !== user?.id && (
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={teamEditForm.isActive} data-testid="checkbox-team-edit-active"
+                  onChange={(e) => setTeamEditForm({ ...teamEditForm, isActive: e.target.checked })} />
+                Conta ativa
+              </label>
+            )}
+            <div className="border-t pt-3">
+              <label className={`flex items-center gap-2 text-sm font-medium mb-2 ${teamEditFor?.id === user?.id ? "opacity-60" : ""}`}>
+                <input type="checkbox" checked={teamEditForm.fullAccess} disabled={teamEditFor?.id === user?.id} data-testid="checkbox-team-edit-full-access"
+                  onChange={(e) => setTeamEditForm({ ...teamEditForm, fullAccess: e.target.checked })} />
+                Acesso completo
+              </label>
+              {teamEditFor?.id === user?.id && (
+                <p className="text-xs text-muted-foreground mb-2">Você não pode restringir a própria conta.</p>
+              )}
+              {!teamEditForm.fullAccess && (
+                <div className="space-y-1.5 pl-1">
+                  {SUPERADMIN_SCOPE_OPTIONS.map((s) => (
+                    <label key={s} className="flex items-center gap-2 text-sm">
+                      <input type="checkbox" checked={teamEditForm.scopes.includes(s)} data-testid={`checkbox-team-edit-scope-${s}`}
+                        onChange={(e) => setTeamEditForm({ ...teamEditForm, scopes: e.target.checked ? [...teamEditForm.scopes, s] : teamEditForm.scopes.filter((x) => x !== s) })} />
+                      {SUPERADMIN_SCOPE_LABELS[s]}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="border-t pt-3">
+              <Label className="text-xs">Resetar senha (opcional)</Label>
+              <Input type="password" value={teamEditForm.newPassword} onChange={(e) => setTeamEditForm({ ...teamEditForm, newPassword: e.target.value })}
+                placeholder="Deixe em branco pra manter a senha atual" data-testid="input-team-edit-password" />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setTeamEditFor(null)}>Cancelar</Button>
+            <Button onClick={saveTeamEdit} disabled={busy} data-testid="button-save-team-edit">Salvar</Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

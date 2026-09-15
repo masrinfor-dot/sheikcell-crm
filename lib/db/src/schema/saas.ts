@@ -53,6 +53,18 @@ export const saasInvoicesTable = pgTable(
     // pendente | paga | cancelada — "atrasada" é derivada (pendente + vencida)
     status: text("status").notNull().default("pendente"),
     paidAt: timestamp("paid_at", { withTimezone: true }),
+    // Preparação pra cobrança automática (Pix/boleto) — Fase 1 (gaps),
+    // ainda sem gateway real integrado. "manual" (padrão) é o fluxo de
+    // sempre: superadmin marca "paga" na mão depois de receber por fora.
+    // externalReference/pixPayload/boletoUrl ficam null até um gateway de
+    // verdade ser conectado; lastReminderAt/remindersSentCount já dão pra
+    // controlar lembretes de cobrança manuais enquanto isso.
+    paymentMethod: text("payment_method").notNull().default("manual"),
+    externalReference: text("external_reference"),
+    pixPayload: text("pix_payload"),
+    boletoUrl: text("boleto_url"),
+    lastReminderAt: timestamp("last_reminder_at", { withTimezone: true }),
+    remindersSentCount: integer("reminders_sent_count").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("saas_invoices_tenant_month_unique").on(t.tenantId, t.billingMonth)],

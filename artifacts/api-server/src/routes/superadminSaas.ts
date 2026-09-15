@@ -11,7 +11,7 @@ import {
   whatsappSessionsTable,
 } from "@workspace/db";
 import { eq, and, asc, desc, sql, lt } from "drizzle-orm";
-import { requireSuperadmin } from "../middlewares/auth";
+import { requireSuperadmin, requireSuperadminScope } from "../middlewares/auth";
 import { generateInvoicesForMonth } from "../lib/saasBilling";
 
 // Rotas do "negócio SaaS" do dono do sistema: contratos de aluguel,
@@ -246,7 +246,7 @@ router.get("/superadmin/saas/contracts", async (_req, res): Promise<void> => {
 });
 
 // Cria/atualiza o contrato da loja (1 contrato por loja)
-router.put("/superadmin/tenants/:id/contract", async (req, res): Promise<void> => {
+router.put("/superadmin/tenants/:id/contract", requireSuperadminScope("billing"), async (req, res): Promise<void> => {
   const tenantId = Number(req.params.id);
   if (!Number.isFinite(tenantId)) { res.status(400).json({ error: "Loja inválida" }); return; }
 
@@ -295,7 +295,7 @@ router.get("/superadmin/saas/contract-template", async (_req, res): Promise<void
   const [row] = await db.select().from(saasSettingsTable).where(eq(saasSettingsTable.key, TEMPLATE_KEY));
   res.json({ template: row?.value ?? "" });
 });
-router.put("/superadmin/saas/contract-template", async (req, res): Promise<void> => {
+router.put("/superadmin/saas/contract-template", requireSuperadminScope("billing"), async (req, res): Promise<void> => {
   const { template } = req.body as { template?: string };
   if (typeof template !== "string") { res.status(400).json({ error: "Modelo inválido" }); return; }
   await db
@@ -323,7 +323,7 @@ router.get("/superadmin/saas/invoices", async (_req, res): Promise<void> => {
   });
 });
 
-router.post("/superadmin/saas/invoices", async (req, res): Promise<void> => {
+router.post("/superadmin/saas/invoices", requireSuperadminScope("billing"), async (req, res): Promise<void> => {
   const { tenantId, description, amountCents, dueDate } = req.body as {
     tenantId?: number; description?: string; amountCents?: number; dueDate?: string;
   };
@@ -374,7 +374,7 @@ router.post("/superadmin/saas/invoices", async (req, res): Promise<void> => {
 
 // Gera as mensalidades do mês a partir dos contratos ativos (não duplica:
 // pula lojas que já têm mensalidade com vencimento no mês).
-router.post("/superadmin/saas/invoices/generate", async (req, res): Promise<void> => {
+router.post("/superadmin/saas/invoices/generate", requireSuperadminScope("billing"), async (req, res): Promise<void> => {
   const { month } = req.body as { month?: string }; // "YYYY-MM"
   const m = month && /^\d{4}-\d{2}$/.test(month) ? month : todayISO().slice(0, 7);
   // Lógica compartilhada com o agendador automático (lib/saasBilling).
@@ -383,7 +383,7 @@ router.post("/superadmin/saas/invoices/generate", async (req, res): Promise<void
 });
 
 // Marca paga / reabre / cancela
-router.patch("/superadmin/saas/invoices/:id", async (req, res): Promise<void> => {
+router.patch("/superadmin/saas/invoices/:id", requireSuperadminScope("billing"), async (req, res): Promise<void> => {
   const id = Number(req.params.id);
   const { status } = req.body as { status?: string };
   if (!Number.isFinite(id)) { res.status(400).json({ error: "Mensalidade inválida" }); return; }
@@ -413,7 +413,7 @@ router.patch("/superadmin/saas/invoices/:id", async (req, res): Promise<void> =>
   res.json({ invoice: result.invoice });
 });
 
-router.delete("/superadmin/saas/invoices/:id", async (req, res): Promise<void> => {
+router.delete("/superadmin/saas/invoices/:id", requireSuperadminScope("billing"), async (req, res): Promise<void> => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) { res.status(400).json({ error: "Mensalidade inválida" }); return; }
   const [invoice] = await db.delete(saasInvoicesTable).where(eq(saasInvoicesTable.id, id)).returning();
@@ -444,7 +444,7 @@ router.get("/superadmin/saas/tickets", async (req, res): Promise<void> => {
   res.json({ tickets: rows.map((r) => ({ ...r.ticket, tenantName: r.tenantName, openedByUserName: r.openedByUserName })) });
 });
 
-router.post("/superadmin/saas/tickets", async (req, res): Promise<void> => {
+router.post("/superadmin/saas/tickets", requireSuperadminScope("support"), async (req, res): Promise<void> => {
   const { tenantId, title, description } = req.body as { tenantId?: number; title?: string; description?: string };
   const tid = Number(tenantId);
   if (!Number.isFinite(tid)) { res.status(400).json({ error: "Loja inválida" }); return; }
@@ -459,7 +459,7 @@ router.post("/superadmin/saas/tickets", async (req, res): Promise<void> => {
   res.status(201).json({ ticket });
 });
 
-router.patch("/superadmin/saas/tickets/:id", async (req, res): Promise<void> => {
+router.patch("/superadmin/saas/tickets/:id", requireSuperadminScope("support"), async (req, res): Promise<void> => {
   const id = Number(req.params.id);
   const { status, priority, category, title, description, resolutionNote } = req.body as {
     status?: string; priority?: string; category?: string; title?: string; description?: string;
@@ -506,7 +506,7 @@ router.get("/superadmin/saas/tickets/:id/messages", async (req, res): Promise<vo
   res.json({ messages: rows });
 });
 
-router.post("/superadmin/saas/tickets/:id/messages", async (req, res): Promise<void> => {
+router.post("/superadmin/saas/tickets/:id/messages", requireSuperadminScope("support"), async (req, res): Promise<void> => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) { res.status(400).json({ error: "Chamado inválido" }); return; }
   const [ticket] = await db.select().from(saasTicketsTable).where(eq(saasTicketsTable.id, id)).limit(1);

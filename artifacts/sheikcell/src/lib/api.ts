@@ -144,6 +144,21 @@ export type User = {
   // admin de loja está no "modo espiar" um vendedor — role diferencia os
   // dois casos pro front mostrar o texto/botão de volta certo.
   impersonatedBy?: { name: string; role: string } | null;
+  // Sub-perfil do superadmin (Fase 1 - gaps): null = acesso completo (todo
+  // superadmin de sempre); um array restringe às abas/ações cobertas por
+  // esses escopos — ver SUPERADMIN_SCOPE_OPTIONS em SuperAdminDashboard.tsx.
+  // Só é relevante quando role="superadmin".
+  superadminScopes?: string[] | null;
+};
+
+// Um membro da equipe do superadmin (Painel do Sistema → aba Equipe).
+export type TeamMember = {
+  id: number;
+  name: string;
+  email: string;
+  isActive: boolean;
+  superadminScopes: string[] | null;
+  createdAt: string;
 };
 
 // "Modo espiar" — 1 linha do log de acesso (quem entrou, em quem, quando).
@@ -1877,6 +1892,15 @@ export const api = {
     ticketMessages: (id: number) => req<{ messages: TicketMessage[] }>(`/superadmin/saas/tickets/${id}/messages`),
     replyTicket: (id: number, content: string) =>
       req<{ message: TicketMessage }>(`/superadmin/saas/tickets/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
+    // Equipe do superadmin (Fase 1 - gaps): só quem tem acesso completo
+    // enxerga/mexe nisso (ver requireFullSuperadmin no backend).
+    team: {
+      list: () => req<{ team: TeamMember[]; scopes: string[] }>("/superadmin/team"),
+      create: (data: { name: string; email: string; password: string; superadminScopes: string[] | null }) =>
+        req<{ member: TeamMember }>("/superadmin/team", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: { name?: string; isActive?: boolean; superadminScopes?: string[] | null; newPassword?: string }) =>
+        req<{ member: TeamMember }>(`/superadmin/team/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    },
   },
   tickets: {
     list: () => req<{ tickets: SaasTicket[] }>("/tickets"),
@@ -1889,8 +1913,16 @@ export const api = {
         req<{ message: TicketMessage }>(`/tickets/${id}/messages`, { method: "POST", body: JSON.stringify({ content, attachment }) })),
   },
   auth: {
+    // Superadmin (papel mais sensível) não abre sessão só com a senha —
+    // volta { twoFactorRequired: true, challengeId, maskedEmail } e precisa
+    // confirmar o código por e-mail em loginTwoFactor abaixo. Qualquer outra
+    // role sempre volta { user } direto, igual sempre foi.
     login: (email: string, password: string) =>
-      req<{ user: User }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+      req<{ user: User } | { twoFactorRequired: true; challengeId: number; maskedEmail: string }>(
+        "/auth/login", { method: "POST", body: JSON.stringify({ email, password }) },
+      ),
+    loginTwoFactor: (challengeId: number, code: string) =>
+      req<{ user: User }>("/auth/login/2fa", { method: "POST", body: JSON.stringify({ challengeId, code }) }),
     logout: () => req<{ ok: boolean }>("/auth/logout", { method: "POST" }),
     me: () => req<{ user: User }>("/auth/me"),
     // Auto-edição de nome/e-mail do próprio usuário logado — sempre a

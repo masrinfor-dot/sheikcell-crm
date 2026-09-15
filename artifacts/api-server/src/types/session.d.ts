@@ -21,6 +21,12 @@ declare module "express-session" {
     // está atuando como um admin de loja. Presente = mostra a faixa de
     // impersonação no front e libera POST /auth/stop-impersonation.
     impersonatorId: number | undefined;
+    // Sub-perfil do superadmin (Fase 1 - gaps): null/undefined = acesso
+    // completo (superadmin "de sempre" — inclusive toda sessão criada ANTES
+    // deste deploy, que nunca ganhou este campo). Um array restringe aos
+    // escopos ali listados — ver requireSuperadminScope/requireFullSuperadmin
+    // em middlewares/auth.ts. Só é definido quando userRole="superadmin".
+    superadminScopes: string[] | null | undefined;
     // Controle de sessões (item 15 do roadmap de segurança): metadados
     // gravados uma vez no login, usados só pra exibir/auditar — nunca pra
     // autenticação. userAgent cru (o parsing pra "dispositivo/navegador"

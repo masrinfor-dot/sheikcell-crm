@@ -239,3 +239,50 @@ export function requireAdminOrSupervisor(req: Request, res: Response, next: Next
 export function isGlobalRole(role: string | undefined): boolean {
   return role === "admin" || role === "supervisor";
 }
+
+// ── Sub-perfis do superadmin (Painel do Sistema — Fase 1, gap pendente) ────
+// scopes null/undefined na sessão = acesso completo. Isso cobre tanto o
+// superadmin "de sempre" (nunca teve essa coluna preenchida) quanto QUALQUER
+// sessão já aberta antes deste deploy (o cookie existente não tem este
+// campo) — ninguém que já estava logado é travado por essa mudança.
+export function requireSuperadminScope(...allowed: string[]) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    if (!req.session?.userId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    if (req.session.userRole !== "superadmin") {
+      respondForbidden(req, res);
+      return;
+    }
+    const scopes = req.session.superadminScopes;
+    if (scopes == null) { next(); return; } // acesso completo
+    if (scopes.some((s) => allowed.includes(s))) { next(); return; }
+    respondForbidden(req, res);
+  };
+}
+
+/**
+ * Ações mais sensíveis do superadmin (entrar como um admin de loja, ver
+ * auditoria/sessões de TODO o sistema, gerenciar a própria equipe do
+ * superadmin) — nunca liberadas só por causa de um escopo aplicável, mesmo
+ * que o membro tenha esse escopo. Sem isso, um superadmin restrito a
+ * "support", por exemplo, poderia teoricamente se promover a acesso
+ * completo editando a própria equipe — essa rota (e as outras aqui) exigem
+ * scopes===null (acesso completo de verdade), não um escopo específico.
+ */
+export function requireFullSuperadmin(req: Request, res: Response, next: NextFunction): void {
+  if (!req.session?.userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  if (req.session.userRole !== "superadmin") {
+    respondForbidden(req, res);
+    return;
+  }
+  if (req.session.superadminScopes != null) {
+    respondForbidden(req, res);
+    return;
+  }
+  next();
+}

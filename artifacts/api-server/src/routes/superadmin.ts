@@ -1,13 +1,13 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { db, tenantsTable, usersTable, sectorsTable, conversationsTable, whatsappSessionsTable, saasContractsTable, saasInvoicesTable, saasTicketsTable, impersonationLogTable, superadminAuditLogTable, plansTable, OPTIONAL_MODULES, LIMIT_FIELDS, type OptionalModule, type LimitField, type PlanLimits } from "@workspace/db";
-import { eq, and, count, desc, lt, inArray, sql } from "drizzle-orm";
+import { db, tenantsTable, usersTable, sectorsTable, conversationsTable, whatsappSessionsTable, saasContractsTable, saasInvoicesTable, saasTicketsTable, impersonationLogTable, superadminAuditLogTable, plansTable, OPTIONAL_MODULES, LIMIT_FIELDS, SUPERADMIN_SCOPES, type OptionalModule, type LimitField, type PlanLimits, type SuperadminScope } from "@workspace/db";
+import { eq, and, count, desc, lt, inArray, sql, ne } from "drizzle-orm";
 import { getLimitsAndUsage } from "../lib/planLimits";
 
 // Chamados que ainda pedem atenção (mesmo grupo usado na aba Suporte do
 // painel) — usado aqui só pra contar quantos uma loja tem em aberto.
 const OPEN_TICKET_STATUSES = ["aberto", "em_analise", "em_andamento"] as const;
-import { requireSuperadmin, invalidateTenantCache } from "../middlewares/auth";
+import { requireSuperadmin, requireSuperadminScope, requireFullSuperadmin, invalidateTenantCache } from "../middlewares/auth";
 import { validateCpfCnpj } from "../lib/cpfCnpj";
 import { parseUserAgent } from "../lib/sessions";
 import { logger } from "../lib/logger";
@@ -103,7 +103,7 @@ router.get("/superadmin/tenants", async (_req, res): Promise<void> => {
 });
 
 // Cria loja (e opcionalmente já o admin dela)
-router.post("/superadmin/tenants", async (req, res): Promise<void> => {
+router.post("/superadmin/tenants", requireSuperadminScope("tenants"), async (req, res): Promise<void> => {
   const {
     name, adminName, adminEmail, adminPassword,
     contactName, contactPhone, contactEmail, cpfCnpj, enabledModules,
@@ -177,7 +177,7 @@ router.post("/superadmin/tenants", async (req, res): Promise<void> => {
 });
 
 // Renomeia / suspende / reativa loja
-router.patch("/superadmin/tenants/:id", async (req, res): Promise<void> => {
+router.patch("/superadmin/tenants/:id", requireSuperadminScope("tenants"), async (req, res): Promise<void> => {
   const id = Number(req.params.id);
   const { name, isActive, saasStatus, contactName, contactPhone, contactEmail, enabledModules } = req.body as {
     name?: string; isActive?: boolean; saasStatus?: string;
@@ -278,7 +278,7 @@ router.get("/superadmin/plans", async (_req, res): Promise<void> => {
   res.json({ plans });
 });
 
-router.post("/superadmin/plans", async (req, res): Promise<void> => {
+router.post("/superadmin/plans", requireSuperadminScope("billing"), async (req, res): Promise<void> => {
   const { name, ...rest } = req.body as { name?: string } & Partial<PlanLimits>;
   if (!name?.trim()) { res.status(400).json({ error: "Informe o nome do plano" }); return; }
   const limits = sanitizeCustomLimits(rest);
@@ -297,7 +297,7 @@ router.post("/superadmin/plans", async (req, res): Promise<void> => {
   }
 });
 
-router.patch("/superadmin/plans/:id", async (req, res): Promise<void> => {
+router.patch("/superadmin/plans/:id", requireSuperadminScope("billing"), async (req, res): Promise<void> => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) { res.status(400).json({ error: "Plano inválido" }); return; }
   const { name, isActive, ...rest } = req.body as { name?: string; isActive?: boolean } & Partial<PlanLimits>;
@@ -321,7 +321,7 @@ router.patch("/superadmin/plans/:id", async (req, res): Promise<void> => {
 // é a "negociação diferente do padrão" (item pedido explicitamente pelo
 // cliente): cada chave customizada sobrepõe o valor do plano só pra essa
 // loja; o que não foi customizado continua caindo no valor do plano.
-router.patch("/superadmin/tenants/:id/plan", async (req, res): Promise<void> => {
+router.patch("/superadmin/tenants/:id/plan", requireSuperadminScope("billing"), async (req, res): Promise<void> => {
   const tenantId = Number(req.params.id);
   if (!Number.isFinite(tenantId)) { res.status(400).json({ error: "Loja inválida" }); return; }
   const { planId, usesCustomLimits, customLimits } = req.body as {
@@ -355,7 +355,7 @@ router.patch("/superadmin/tenants/:id/plan", async (req, res): Promise<void> => 
 });
 
 // Cria (ou reseta a senha de) um admin para a loja
-router.post("/superadmin/tenants/:id/admin", async (req, res): Promise<void> => {
+router.post("/superadmin/tenants/:id/admin", requireSuperadminScope("tenants"), async (req, res): Promise<void> => {
   const tenantId = Number(req.params.id);
   const { name, email, password } = req.body as { name?: string; email?: string; password?: string };
   if (!Number.isFinite(tenantId)) { res.status(400).json({ error: "Loja inválida" }); return; }
@@ -412,7 +412,7 @@ router.post("/superadmin/tenants/:id/admin", async (req, res): Promise<void> => 
 // pra dar pra voltar (POST /auth/stop-impersonation) e registra no log —
 // desde a Fase 2 do Painel do Sistema, com motivo obrigatório (item pedido
 // explicitamente pelo cliente).
-router.post("/superadmin/tenants/:tenantId/impersonate/:userId", async (req, res): Promise<void> => {
+router.post("/superadmin/tenants/:tenantId/impersonate/:userId", requireFullSuperadmin, async (req, res): Promise<void> => {
   const tenantId = Number(req.params.tenantId);
   const userId = Number(req.params.userId);
   if (!Number.isFinite(tenantId) || !Number.isFinite(userId)) { res.status(400).json({ error: "Loja ou usuário inválido" }); return; }
@@ -448,13 +448,16 @@ router.post("/superadmin/tenants/:tenantId/impersonate/:userId", async (req, res
   req.session.userName = target.name;
   req.session.accessHours = null;
   req.session.allowedSessionKeys = null;
+  // Alvo de "entrar como" é sempre admin de loja (ver checagem acima), nunca
+  // superadmin — escopo não se aplica.
+  req.session.superadminScopes = undefined;
   res.json({ ok: true });
 });
 
 // ─── Auditoria de sessões (item 15) ────────────────────────────────────────
 // Todas as sessões ativas do sistema, de qualquer loja — só o superadmin
 // enxerga isso. Reaproveita a tabela "session" do connect-pg-simple.
-router.get("/superadmin/sessions", async (_req, res): Promise<void> => {
+router.get("/superadmin/sessions", requireFullSuperadmin, async (_req, res): Promise<void> => {
   const rows = await db.execute(sql`
     select sid, sess::jsonb as sess, expire from session
     where expire > now()
@@ -500,7 +503,7 @@ router.get("/superadmin/sessions", async (_req, res): Promise<void> => {
 // suspender/reativar, cancelar/reativar contrato, mudar módulos, criar
 // loja/admin. Mais recentes primeiro; limite alto porque ainda não temos
 // volume que justifique paginação de verdade.
-router.get("/superadmin/audit-log", async (req, res): Promise<void> => {
+router.get("/superadmin/audit-log", requireFullSuperadmin, async (req, res): Promise<void> => {
   const tenantIdFilter = req.query.tenantId ? Number(req.query.tenantId) : undefined;
   const base = db.select({
     id: superadminAuditLogTable.id,
@@ -520,6 +523,135 @@ router.get("/superadmin/audit-log", async (req, res): Promise<void> => {
     : base
   ).orderBy(desc(superadminAuditLogTable.createdAt)).limit(300);
   res.json({ entries: rows });
+});
+
+// ─── Equipe do superadmin (Fase 1 - gap pendente) ──────────────────────────
+// Gerencia os OUTROS membros com role "superadmin" (o dono do sistema pode
+// dar acesso a um sócio/técnico sem entregar acesso completo). Sempre exige
+// requireFullSuperadmin — nunca liberado só por causa de um escopo, senão
+// um membro restrito poderia se promover a acesso completo editando a
+// própria equipe.
+function sanitizeSuperadminScopes(v: unknown): SuperadminScope[] | null {
+  if (v === null) return null; // null explícito = acesso completo
+  if (!Array.isArray(v)) return null;
+  const valid = new Set<string>(SUPERADMIN_SCOPES);
+  const scopes = v.filter((s): s is SuperadminScope => typeof s === "string" && valid.has(s));
+  // Array vazio não faz sentido (membro sem nenhum escopo não conseguiria
+  // fazer nada) — trata como null (acesso completo) pra evitar uma conta
+  // "presa" sem querer.
+  return scopes.length ? scopes : null;
+}
+
+router.get("/superadmin/team", requireFullSuperadmin, async (_req, res): Promise<void> => {
+  const team = await db
+    .select({
+      id: usersTable.id,
+      name: usersTable.name,
+      email: usersTable.email,
+      isActive: usersTable.isActive,
+      superadminScopes: usersTable.superadminScopes,
+      createdAt: usersTable.createdAt,
+    })
+    .from(usersTable)
+    .where(eq(usersTable.role, "superadmin"))
+    .orderBy(usersTable.createdAt);
+  res.json({ team, scopes: SUPERADMIN_SCOPES });
+});
+
+router.post("/superadmin/team", requireFullSuperadmin, async (req, res): Promise<void> => {
+  const { name, email, password, superadminScopes } = req.body as {
+    name?: string; email?: string; password?: string; superadminScopes?: unknown;
+  };
+  if (!name?.trim()) { res.status(400).json({ error: "Informe o nome" }); return; }
+  if (!email?.trim() || !email.includes("@")) { res.status(400).json({ error: "E-mail inválido" }); return; }
+  if (!password || password.length < 6) { res.status(400).json({ error: "Senha precisa ter pelo menos 6 caracteres" }); return; }
+
+  const normalized = email.trim().toLowerCase();
+  const [dup] = await db.select({ id: usersTable.id }).from(usersTable).where(eq(usersTable.email, normalized));
+  if (dup) { res.status(400).json({ error: "Já existe um usuário com este e-mail" }); return; }
+
+  const passwordHash = await bcrypt.hash(password, 10);
+  const scopes = sanitizeSuperadminScopes(superadminScopes);
+  const [member] = await db.insert(usersTable).values({
+    tenantId: 0, // reservado pro superadmin — ver migration 0050_superadmin_no_tenant.sql
+    name: name.trim(),
+    email: normalized,
+    passwordHash,
+    role: "superadmin",
+    mustChangePassword: true,
+    isActive: true,
+    superadminScopes: scopes,
+  }).returning();
+  await logAudit({
+    superadminUserId: req.session.userId!,
+    action: "criar_membro_equipe_superadmin",
+    description: `Criou o membro da equipe "${member!.name}" (${scopes ? `escopo: ${scopes.join(", ")}` : "acesso completo"})`,
+  });
+  res.status(201).json({
+    member: { id: member!.id, name: member!.name, email: member!.email, isActive: member!.isActive, superadminScopes: member!.superadminScopes },
+  });
+});
+
+router.patch("/superadmin/team/:id", requireFullSuperadmin, async (req, res): Promise<void> => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "Membro inválido" }); return; }
+  const { name, isActive, superadminScopes, newPassword } = req.body as {
+    name?: string; isActive?: boolean; superadminScopes?: unknown; newPassword?: string;
+  };
+  const [target] = await db.select().from(usersTable).where(and(eq(usersTable.id, id), eq(usersTable.role, "superadmin")));
+  if (!target) { res.status(404).json({ error: "Membro não encontrado" }); return; }
+
+  // Nunca deixa a própria conta sem acesso (nem inativa, nem restrita) —
+  // senão o superadmin fica trancado pra fora, e restringir a própria conta
+  // não teria efeito até o próximo login mesmo (a sessão já aberta continua
+  // com o escopo antigo), o que confundiria mais do que ajudaria.
+  const isSelf = id === req.session.userId;
+  if (isSelf && isActive === false) { res.status(400).json({ error: "Você não pode inativar sua própria conta" }); return; }
+  if (isSelf && superadminScopes !== undefined && sanitizeSuperadminScopes(superadminScopes) !== null) {
+    res.status(400).json({ error: "Você não pode restringir o escopo da sua própria conta" });
+    return;
+  }
+
+  const updates: Partial<typeof usersTable.$inferInsert> = {};
+  const parts: string[] = [];
+  if (typeof name === "string" && name.trim()) { updates.name = name.trim(); parts.push("renomeou"); }
+  if (typeof isActive === "boolean") {
+    // Sempre precisa sobrar pelo menos 1 superadmin de acesso completo ativo
+    // — senão ninguém mais consegue gerenciar a equipe (nem reverter isso).
+    if (!isActive) {
+      const [[fullAccessActive]] = await Promise.all([
+        db.select({ n: count() }).from(usersTable)
+          .where(and(eq(usersTable.role, "superadmin"), eq(usersTable.isActive, true), sql`${usersTable.superadminScopes} IS NULL`, ne(usersTable.id, id))),
+      ]);
+      if (Number(fullAccessActive?.n ?? 0) === 0) {
+        res.status(400).json({ error: "Precisa sobrar pelo menos um superadmin de acesso completo ativo" });
+        return;
+      }
+    }
+    updates.isActive = isActive;
+    parts.push(isActive ? "reativou" : "inativou");
+  }
+  if (superadminScopes !== undefined) {
+    updates.superadminScopes = sanitizeSuperadminScopes(superadminScopes);
+    parts.push(updates.superadminScopes ? `restringiu ao escopo: ${updates.superadminScopes.join(", ")}` : "deu acesso completo");
+  }
+  if (typeof newPassword === "string" && newPassword) {
+    if (newPassword.length < 6) { res.status(400).json({ error: "Senha precisa ter pelo menos 6 caracteres" }); return; }
+    updates.passwordHash = await bcrypt.hash(newPassword, 10);
+    updates.mustChangePassword = true;
+    parts.push("resetou a senha");
+  }
+  if (!Object.keys(updates).length) { res.status(400).json({ error: "Nada para atualizar" }); return; }
+
+  const [member] = await db.update(usersTable).set(updates).where(eq(usersTable.id, id)).returning();
+  await logAudit({
+    superadminUserId: req.session.userId!,
+    action: "atualizar_membro_equipe_superadmin",
+    description: `No membro "${member!.name}": ${parts.join("; ")}`,
+  });
+  res.json({
+    member: { id: member!.id, name: member!.name, email: member!.email, isActive: member!.isActive, superadminScopes: member!.superadminScopes },
+  });
 });
 
 export default router;

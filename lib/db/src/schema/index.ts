@@ -37,6 +37,7 @@ export * from "./saas";
 export * from "./system_board";
 export * from "./team_favorites";
 export * from "./password_reset_tokens";
+export * from "./two_factor_codes";
 export * from "./tv_box";
 export * from "./catalog";
 export * from "./finance_payments";
