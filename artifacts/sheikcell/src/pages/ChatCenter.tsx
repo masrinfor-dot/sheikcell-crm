@@ -14,7 +14,7 @@ import {
   Pin, PinOff, Reply, StickyNote, Star, StarOff, ChevronLeft, ChevronRight,
   MapPin, ShoppingBag, CreditCard, BarChart3, Ban, UserPlus, ExternalLink,
   FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Download, Maximize2, Pencil,
-  MoreVertical, RotateCcw, Percent, FolderOpen, Flag, Lock,
+  MoreVertical, RotateCcw, Percent, FolderOpen, Flag, Lock, Forward,
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -821,9 +821,10 @@ function IconTextCard({ icon: Icon, content }: { icon: typeof CreditCard; conten
 }
 
 // ─── Message bubble ─────────────────────────────────────────────────────────
-function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConversation, onReplyPrivately, currentUserId, isModerator, onEdit, onDelete, isPinned, onPin, onUnpin }: {
+function MsgBubble({ msg, onReply, onForward, highlighted, onJumpTo, isGroup, onStartConversation, onReplyPrivately, currentUserId, isModerator, onEdit, onDelete, isPinned, onPin, onUnpin }: {
   msg: ChatMessage;
   onReply: (m: ChatMessage) => void;
+  onForward: (m: ChatMessage) => void;
   highlighted: boolean;
   onJumpTo: (id: number) => void;
   isGroup: boolean;
@@ -921,6 +922,21 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConver
     </button>
   ) : null;
 
+  // Encaminhar mensagem (estilo WhatsApp) pra outra conversa do Atendimento —
+  // só texto e mídia (foto/áudio/vídeo/documento) por enquanto, igual o
+  // backend aceita (ver FORWARDABLE_MESSAGE_TYPES em chat.ts).
+  const canForward = !msg.deletedAt && !editing && ["text", "image", "audio", "video", "doc"].includes(msg.type);
+  const forwardButton = canForward ? (
+    <button
+      onClick={() => onForward(msg)}
+      data-testid={`button-forward-msg-${msg.id}`}
+      title="Encaminhar mensagem"
+      className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-full text-gray-500 hover:text-primary hover:bg-black/5 shrink-0"
+    >
+      <Forward className="w-3.5 h-3.5" />
+    </button>
+  ) : null;
+
   // "Marcar mensagem" (igual WhatsApp): fixa/desafixa essa mensagem no topo da
   // conversa, visível pra todo mundo que atende. Só aparece com hover, junto
   // do botão de responder — exceto quando já fixada, aí fica sempre visível.
@@ -967,7 +983,7 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConver
       id={`chat-msg-${msg.id}`}
       className={`group flex items-center gap-1 mb-1 transition-colors duration-500 rounded-lg ${out ? "justify-end" : "justify-start"} ${highlighted ? "bg-amber-200/60" : ""}`}
     >
-      {out && <>{manageButtons}{pinButton}{replyButton}</>}
+      {out && <>{manageButtons}{pinButton}{forwardButton}{replyButton}</>}
       <div className={`max-w-[75%] rounded-2xl px-3 py-2 shadow-sm ${out ? "bg-[#dcf8c6] rounded-br-sm" : "bg-white rounded-bl-sm border border-border"}`}>
         {!out && msg.senderName && (
           isGroup && msg.senderPhone && onStartConversation ? (
@@ -998,6 +1014,11 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConver
             <div className="text-[11px] font-semibold text-primary">{msg.replyTo.senderName ?? "Cliente"}</div>
             <div className="text-xs text-gray-600 truncate">{msg.replyTo.content}</div>
           </button>
+        )}
+        {msg.forwarded && !msg.deletedAt && (
+          <div className="flex items-center gap-1 text-[11px] text-gray-400 italic mb-0.5">
+            <Forward className="w-3 h-3" /> Encaminhada
+          </div>
         )}
         {editing ? (
           <div className="space-y-1.5">
@@ -1091,7 +1112,7 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo, isGroup, onStartConver
           )}
         </div>
       </div>
-      {!out && <>{pinButton}{replyButton}{replyPrivatelyButton}</>}
+      {!out && <>{pinButton}{forwardButton}{replyButton}{replyPrivatelyButton}</>}
     </div>
   );
 }
@@ -1188,6 +1209,16 @@ export default function ChatCenter({
   const prevActiveIdRef = useRef<number | null>(null);
   useEffect(() => { msgTextRef.current = msgText; }, [msgText]);
   const [replyTarget, setReplyTarget] = useState<ChatMessage | null>(null);
+  // Encaminhar mensagem entre atendimentos (estilo WhatsApp, v1: 1 conversa
+  // de destino por vez). Busca própria — INDEPENDENTE do filtro/busca da
+  // barra lateral — porque o destino pode ser qualquer conversa acessível,
+  // não só as que já estão na lista filtrada aberta no momento.
+  const [forwardMsg, setForwardMsg] = useState<ChatMessage | null>(null);
+  const [forwardQuery, setForwardQuery] = useState("");
+  const [forwardResults, setForwardResults] = useState<Conversation[]>([]);
+  const [forwardLoading, setForwardLoading] = useState(false);
+  const [forwardTargetId, setForwardTargetId] = useState<number | null>(null);
+  const [forwarding, setForwarding] = useState(false);
   const [composerMode, setComposerMode] = useState<"message" | "note">("message");
   const [highlightedMsgId, setHighlightedMsgId] = useState<number | null>(null);
   // "Marcar mensagem" — mensagens fixadas na conversa aberta (compartilhado).
@@ -2154,6 +2185,40 @@ export default function ChatCenter({
     setMsgText(activeId != null ? (draftsRef.current.get(activeId) ?? "") : "");
     prevActiveIdRef.current = activeId;
   }, [activeId]);
+
+  // ── Encaminhar mensagem ──
+  const openForward = (m: ChatMessage) => {
+    setForwardMsg(m);
+    setForwardQuery("");
+    setForwardResults([]);
+    setForwardTargetId(null);
+  };
+  const closeForward = () => { if (!forwarding) setForwardMsg(null); };
+  useEffect(() => {
+    if (!forwardMsg) return;
+    let cancelled = false;
+    setForwardLoading(true);
+    const t = setTimeout(() => {
+      api.chat.conversations({ search: forwardQuery || undefined })
+        .then((list) => { if (!cancelled) setForwardResults(list.filter((c) => c.id !== forwardMsg.conversationId)); })
+        .catch(() => { if (!cancelled) setForwardResults([]); })
+        .finally(() => { if (!cancelled) setForwardLoading(false); });
+    }, 300);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [forwardMsg, forwardQuery]);
+  const submitForward = async () => {
+    if (!forwardMsg || forwardTargetId == null || forwarding) return;
+    setForwarding(true);
+    try {
+      await api.chat.forward(forwardMsg.id, forwardTargetId);
+      toast({ title: "Mensagem encaminhada! ↪️" });
+      setForwardMsg(null);
+    } catch (err) {
+      toast({ title: "Erro ao encaminhar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setForwarding(false);
+    }
+  };
 
   // ── Send message ──
   const cancelReply = () => setReplyTarget(null);
@@ -4418,6 +4483,7 @@ export default function ChatCenter({
                       <MsgBubble
                         msg={msg}
                         onReply={setReplyTarget}
+                        onForward={openForward}
                         highlighted={highlightedMsgId === msg.id}
                         onJumpTo={scrollToMessage}
                         isGroup={!!activeConv && isGroupConv(activeConv)}
@@ -5263,6 +5329,72 @@ export default function ChatCenter({
           </div>
         </div>,
         document.body
+      )}
+
+      {/* ── Encaminhar mensagem (estilo WhatsApp, v1: 1 conversa por vez) ── */}
+      {forwardMsg && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={closeForward}>
+          <div className="bg-white rounded-2xl w-full max-w-sm shadow-xl border overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <span className="font-semibold text-sm flex items-center gap-2"><Forward className="w-4 h-4 text-primary" /> Encaminhar mensagem</span>
+              <button onClick={closeForward} data-testid="button-close-forward-modal" className="p-1 rounded hover:bg-muted/60"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="px-4 pt-3">
+              <div className="text-xs bg-muted/40 border rounded-lg px-3 py-2 text-muted-foreground line-clamp-3">
+                {forwardMsg.type === "text" ? `"${forwardMsg.content}"` : forwardMsg.content.split("\n")[0]}
+              </div>
+            </div>
+            <div className="px-4 pt-3">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  autoFocus
+                  value={forwardQuery}
+                  onChange={(e) => { setForwardQuery(e.target.value); setForwardTargetId(null); }}
+                  placeholder="Buscar conversa de destino..."
+                  data-testid="input-forward-search"
+                  className="w-full pl-8 pr-3 py-2 rounded-lg border border-border text-sm outline-none focus:ring-2 focus:ring-primary/30"
+                />
+              </div>
+            </div>
+            <div className="max-h-72 overflow-y-auto mt-2">
+              {forwardLoading ? (
+                <div className="px-4 py-6 text-center text-xs text-muted-foreground">Buscando...</div>
+              ) : forwardResults.length === 0 ? (
+                <div className="px-4 py-6 text-center text-xs text-muted-foreground">
+                  {forwardQuery ? "Nenhuma conversa encontrada" : "Digite pra buscar uma conversa"}
+                </div>
+              ) : forwardResults.map((c) => {
+                const selected = forwardTargetId === c.id;
+                return (
+                  <button
+                    key={c.id}
+                    onClick={() => setForwardTargetId(c.id)}
+                    data-testid={`forward-target-${c.id}`}
+                    className={`w-full text-left px-4 py-2.5 flex items-center gap-3 border-b border-border/50 transition ${selected ? "bg-primary/10" : "hover:bg-muted/50"}`}
+                  >
+                    <div className="w-8 h-8 rounded-full bg-primary text-white flex items-center justify-center text-xs font-semibold shrink-0">
+                      {c.name?.slice(0, 2).toUpperCase() ?? "??"}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium truncate">{c.name}</div>
+                      {c.phone && <div className="text-[11px] text-muted-foreground truncate">{c.phone}</div>}
+                    </div>
+                    <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 ${selected ? "bg-primary border-primary" : "border-border"}`}>
+                      {selected && <span className="text-white text-[10px] leading-none">✓</span>}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="p-3 border-t">
+              <button onClick={submitForward} disabled={forwardTargetId == null || forwarding} data-testid="button-submit-forward"
+                className="w-full py-2.5 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition disabled:opacity-50">
+                {forwarding ? "Encaminhando..." : "Encaminhar"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ── Configuração do alerta de sem resposta ──────────────────────── */}

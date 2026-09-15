@@ -174,6 +174,11 @@ export const messagesTable = pgTable(
     // conversa. FK fora de linha porque a tabela referencia a própria id.
     replyToId: integer("reply_to_id"),
     metadata: jsonb("metadata").$type<MessageMetadata>(),
+    // Encaminhar mensagem (estilo WhatsApp): marca que esta mensagem é uma
+    // cópia encaminhada de outra conversa (mesma ideia do "forwarded" do
+    // chat interno, mas aqui também dispara envio real pro WhatsApp do
+    // destinatário — ver POST /chat/messages/:id/forward).
+    forwarded: boolean("forwarded").notNull().default(false),
   },
   // Garante no banco que a MESMA mensagem recebida (mesmo ID do WhatsApp)
   // nunca é gravada duas vezes, mesmo com webhooks simultâneos.

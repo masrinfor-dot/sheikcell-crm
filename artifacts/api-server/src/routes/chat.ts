@@ -761,6 +761,7 @@ router.get("/chat/conversations/:id/messages", requireAuth, requireChatAccess(),
       replyToSenderName: repliedMsg.senderName,
       replyToContent: repliedMsg.content,
       replyToType: repliedMsg.type,
+      forwarded: messagesTable.forwarded,
     })
     .from(messagesTable)
     .leftJoin(repliedMsg, eq(messagesTable.replyToId, repliedMsg.id))
@@ -1247,6 +1248,170 @@ router.post("/chat/conversations/:id/messages", requireAuth, requireChatAccess()
       if (failedRow) {
         const failedMsg = { ...failedRow, replyTo };
         broadcast("message_updated", { conversationId: id, message: failedMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+        res.status(201).json(failedMsg);
+        return;
+      }
+    }
+  }
+
+  res.status(201).json(msg);
+});
+
+// ─── Encaminhar mensagem entre conversas ───────────────────────────────────
+// Estilo WhatsApp: copia uma mensagem (texto ou mídia) de uma conversa pra
+// outra E entrega de verdade pro WhatsApp do novo contato — diferente do
+// "encaminhar" do Chat Interno (internalChat.ts), que é só cópia de banco +
+// broadcast porque lá nunca sai pro WhatsApp. Mídia reusa o ARQUIVO físico já
+// salvo (não pede upload de novo pro atendente), mas grava sob um nome NOVO
+// pra cada mensagem manter seu próprio dono em GET /chat/media/:filename (ver
+// comentário lá — dois registros de mensagem nunca podem apontar pro mesmo
+// mediaUrl, senão o dono resolvido fica ambíguo entre origem e destino).
+const FORWARDABLE_MESSAGE_TYPES = new Set(["text", "image", "audio", "video", "doc"]);
+
+router.post("/chat/messages/:id/forward", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const { conversationId: targetIdRaw } = req.body as { conversationId?: number };
+  const targetId = Number(targetIdRaw);
+  if (!Number.isInteger(targetId)) { res.status(400).json({ error: "Conversa de destino inválida" }); return; }
+
+  const [source] = await db.select().from(messagesTable)
+    .where(and(eq(messagesTable.id, id), eq(messagesTable.tenantId, tenantId))).limit(1);
+  if (!source) { res.status(404).json({ error: "Mensagem não encontrada" }); return; }
+  if (source.deletedAt) { res.status(400).json({ error: "Mensagem apagada não pode ser encaminhada" }); return; }
+  if (!FORWARDABLE_MESSAGE_TYPES.has(source.type)) {
+    res.status(400).json({ error: "Esse tipo de mensagem não pode ser encaminhado" });
+    return;
+  }
+  // Encaminhar mídia é, na prática, enviar mídia de novo (pro destino) —
+  // mesma permissão exigida em POST /chat/conversations/:id/media.
+  if (source.type !== "text" && !(await checkPerm(req, "enviar_midia"))) {
+    res.status(403).json({ error: "Você não tem permissão para enviar mídia. Fale com o administrador." });
+    return;
+  }
+
+  const [sourceConv] = await db.select().from(conversationsTable)
+    .where(and(eq(conversationsTable.id, source.conversationId), eq(conversationsTable.tenantId, tenantId))).limit(1);
+  if (!sourceConv) { res.status(404).json({ error: "Conversa de origem não encontrada" }); return; }
+  if (!(await canAccessConversation(sourceConv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+
+  const [targetConv] = await db.select().from(conversationsTable)
+    .where(and(eq(conversationsTable.id, targetId), eq(conversationsTable.tenantId, tenantId))).limit(1);
+  if (!targetConv) { res.status(404).json({ error: "Conversa de destino não encontrada" }); return; }
+  if (!(await canAccessConversation(targetConv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+  if (targetConv.assigneeId == null) {
+    res.status(409).json({ error: "Inicie o atendimento na conversa de destino antes de encaminhar" });
+    return;
+  }
+
+  const senderName = req.session.userName ?? "Atendente";
+  const showNameToCustomer = await isAttendantNameVisibleToCustomer(tenantId);
+  const bridgeUrl = process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
+  const bridgeSecret = createHmac("sha256", process.env["SESSION_SECRET"] ?? "sheikcell-dev-only-secret")
+    .update("whatsapp-bridge-v1").digest("hex");
+
+  let newMediaUrl: string | null = null;
+  let mediaBase64: string | null = null;
+  let mediaMimetype: string | null = null;
+  let waType: "image" | "video" | "audio" | "document" | null = null;
+
+  if (source.type !== "text") {
+    if (!source.mediaUrl) { res.status(400).json({ error: "Mídia original não encontrada" }); return; }
+    const origFilename = path.basename(source.mediaUrl);
+    const origPath = path.join(MEDIA_DIR, origFilename);
+    if (!existsSync(origPath)) { res.status(404).json({ error: "Arquivo de mídia original não existe mais" }); return; }
+    const { readFile, writeFile } = await import("fs/promises");
+    const { randomUUID } = await import("crypto");
+    const buf = await readFile(origPath);
+    const ext = origFilename.split(".").pop() ?? "bin";
+    const newFilename = `${randomUUID()}.${ext}`;
+    await writeFile(path.join(MEDIA_DIR, newFilename), buf);
+    newMediaUrl = `/api/chat/media/${newFilename}`;
+    mediaBase64 = buf.toString("base64");
+    const extToMime: Record<string, string> = {
+      jpg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp",
+      mp4: "video/mp4", "3gp": "video/3gpp", webm: "video/webm", mov: "video/quicktime",
+      ogg: "audio/ogg", mp3: "audio/mpeg", m4a: "audio/mp4", weba: "audio/webm", aac: "audio/aac", wav: "audio/wav",
+      pdf: "application/pdf", doc: "application/msword",
+      docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      xls: "application/vnd.ms-excel",
+      xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    };
+    mediaMimetype = extToMime[ext] ?? "application/octet-stream";
+    waType = source.type === "image" ? "image" : source.type === "video" ? "video" : source.type === "audio" ? "audio" : "document";
+  }
+
+  const [inserted] = await db.insert(messagesTable).values({
+    tenantId,
+    conversationId: targetId,
+    content: source.content,
+    direction: "outbound",
+    type: source.type,
+    status: "sent",
+    senderName,
+    senderId: req.session.userId!,
+    mediaUrl: newMediaUrl,
+    metadata: source.metadata ?? null,
+    forwarded: true,
+  }).returning();
+  const msg = { ...inserted!, replyTo: null };
+
+  await db.update(conversationsTable).set({
+    lastMessage: source.content,
+    lastMessageDirection: "outbound",
+    lastMessageSenderName: senderName,
+    lastMessageAt: new Date(),
+    updatedAt: new Date(),
+  }).where(eq(conversationsTable.id, targetId));
+
+  broadcast("message", { conversationId: targetId, message: msg }, { tenantId: targetConv.tenantId, sectorId: targetConv.sectorId, sessionKey: targetConv.sessionKey, isPotential: isPotentialConversation(targetConv), restrictedTo: await restrictedRecipients(targetConv) });
+
+  if (targetConv.channel === "whatsapp" && targetConv.phone) {
+    let delivered = true;
+    try {
+      const r = source.type === "text"
+        ? await fetch(`${bridgeUrl}/whatsapp/send`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Bridge-Secret": bridgeSecret },
+            body: JSON.stringify({
+              to: targetConv.phone,
+              text: showNameToCustomer ? `*${senderName}:*\n${source.content}` : source.content,
+              session: targetConv.sessionKey,
+            }),
+            signal: AbortSignal.timeout(60_000),
+          })
+        : await fetch(`${bridgeUrl}/whatsapp/send-media`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Bridge-Secret": bridgeSecret },
+            body: JSON.stringify({
+              to: targetConv.phone,
+              type: waType,
+              base64: mediaBase64,
+              mimetype: mediaMimetype,
+              filename: source.metadata?.fileName ?? path.basename(newMediaUrl!),
+              caption: waType === "audio" ? undefined
+                : !showNameToCustomer ? undefined
+                : `*${senderName}:*`,
+              ptt: false,
+              session: targetConv.sessionKey,
+            }),
+            signal: AbortSignal.timeout(60_000),
+          });
+      if (!r.ok) {
+        const body = await r.text().catch(() => "");
+        req.log.warn({ status: r.status, body }, "WhatsApp bridge delivery failed (forward) — mensagem salva mas não entregue");
+        delivered = false;
+      }
+    } catch (err) {
+      req.log.warn({ err }, "WhatsApp bridge unreachable (forward) — mensagem salva mas não entregue");
+      delivered = false;
+    }
+
+    if (!delivered) {
+      const [failedRow] = await db.update(messagesTable).set({ status: "failed" }).where(eq(messagesTable.id, msg.id)).returning();
+      if (failedRow) {
+        const failedMsg = { ...failedRow, replyTo: null };
+        broadcast("message_updated", { conversationId: targetId, message: failedMsg }, { tenantId: targetConv.tenantId, sectorId: targetConv.sectorId, sessionKey: targetConv.sessionKey, isPotential: isPotentialConversation(targetConv), restrictedTo: await restrictedRecipients(targetConv) });
         res.status(201).json(failedMsg);
         return;
       }

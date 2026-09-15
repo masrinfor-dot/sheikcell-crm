@@ -1665,6 +1665,7 @@ export type ChatMessage = {
   replyToId?: number | null;
   replyTo?: { id: number; senderName: string | null; content: string; type: string } | null;
   metadata?: MessageMetadata | null;
+  forwarded?: boolean;
 };
 
 // "Marcar mensagem" no Atendimento (igual WhatsApp): compartilhado entre
@@ -2027,6 +2028,8 @@ export const api = {
     },
     sendMessage: (id: number, content: string, replyToId?: number) =>
       req<ChatMessage>(`/chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content, replyToId }) }),
+    forward: (messageId: number, conversationId: number) =>
+      req<ChatMessage>(`/chat/messages/${messageId}/forward`, { method: "POST", body: JSON.stringify({ conversationId }) }),
     sendNote: (id: number, content: string) =>
       req<ChatMessage>(`/chat/conversations/${id}/notes`, { method: "POST", body: JSON.stringify({ content }) }),
     editMessage: (messageId: number, content: string) =>
