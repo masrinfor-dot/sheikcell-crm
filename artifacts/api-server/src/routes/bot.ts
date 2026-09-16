@@ -65,7 +65,12 @@ router.put("/bot/settings", requireModuleAccess("robo"), async (req, res): Promi
     greeting: str("greeting", existing.greeting, 1000) || existing.greeting,
     doneMessage: str("doneMessage", existing.doneMessage, 1000) || existing.doneMessage,
     handoffMessage: str("handoffMessage", existing.handoffMessage, 1000) || existing.handoffMessage,
-    knowledgeBase: String(body["knowledgeBase"] ?? existing.knowledgeBase).trim().slice(0, 15000),
+    // Limite subiu de 15000 pra 30000 (16/09): base de conhecimento real da
+    // loja (persona + regras de tom + direcionamento por setor + triagem)
+    // passou dos 15000 e estava sendo cortada no meio de frase ao salvar,
+    // sem aviso nenhum pro admin — folga generosa pra caber crescimento
+    // futuro sem precisar mexer aqui de novo.
+    knowledgeBase: String(body["knowledgeBase"] ?? existing.knowledgeBase).trim().slice(0, 30000),
     urgencyWords: str("urgencyWords", existing.urgencyWords, 500),
     questions,
     mode,
