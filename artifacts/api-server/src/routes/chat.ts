@@ -2241,6 +2241,17 @@ router.post("/chat/conversations", requireAuth, requireChatAccess(), requirePerm
   // uma ao mesmo tempo. Compara contra todas as variações plausíveis do
   // número (com/sem DDI, com/sem o 9º dígito), pois o valor salvo pode ter
   // formato diferente do digitado.
+  //
+  // BUG (16/09): "Excluir atendimento" não muda o `status` — ele só marca
+  // `isArchived=true` (arquivamento reversível, ver DELETE /chat/conversations/:id
+  // abaixo). Essa checagem de duplicata só olhava `status`, então uma conversa
+  // excluída (que some das listas, que já filtram isArchived=false) continuava
+  // contando como "em andamento" aqui e travava para sempre a criação de um
+  // novo atendimento pro mesmo número — o vendedor via "Atendimento já
+  // existente" apontando pra uma conversa que não aparece em lugar nenhum.
+  // Mesmo padrão usado no resto do arquivo (linhas 301, 370, 1949 etc.) e no
+  // fluxo de mensagem recebida do WhatsApp (whatsappInbound.ts): também exigir
+  // isArchived=false.
   const digits = phone.replace(/\D/g, "");
   const dupCandidates = phoneVariants(phone);
   if (digits && dupCandidates.length > 0) {
@@ -2254,6 +2265,7 @@ router.post("/chat/conversations", requireAuth, requireChatAccess(), requirePerm
       .where(and(
         eq(conversationsTable.tenantId, tenantId),
         notInArray(conversationsTable.status, ["resolved", "archived"]),
+        eq(conversationsTable.isArchived, false),
         inArray(conversationsTable.phone, dupCandidates),
         eq(conversationsTable.sessionKey, targetSessionKey),
       ))
