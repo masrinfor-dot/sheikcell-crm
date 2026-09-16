@@ -137,8 +137,17 @@ router.delete("/sectors/:id", requireAdmin, async (req, res): Promise<void> => {
       .where(and(eq(conversationsTable.sectorId, id), eq(conversationsTable.tenantId, tenantId)));
     await tx.update(quickRepliesTable).set({ sectorId: null })
       .where(and(eq(quickRepliesTable.sectorId, id), eq(quickRepliesTable.tenantId, tenantId)));
-    await tx.update(whatsappSessionsTable).set({ defaultSectorId: null })
-      .where(and(eq(whatsappSessionsTable.defaultSectorId, id), eq(whatsappSessionsTable.tenantId, tenantId)));
+    // defaultSectorIds é uma lista (jsonb) — desvincula só removendo este id
+    // dela, linha por linha (não dá pra fazer num único UPDATE simples).
+    const waSessionsWithSector = await tx.select({ id: whatsappSessionsTable.id, defaultSectorIds: whatsappSessionsTable.defaultSectorIds })
+      .from(whatsappSessionsTable).where(eq(whatsappSessionsTable.tenantId, tenantId));
+    for (const row of waSessionsWithSector) {
+      if (row.defaultSectorIds.includes(id)) {
+        await tx.update(whatsappSessionsTable)
+          .set({ defaultSectorIds: row.defaultSectorIds.filter((sid) => sid !== id) })
+          .where(eq(whatsappSessionsTable.id, row.id));
+      }
+    }
     // routing_rules.sectorId é obrigatório (NOT NULL) — regra sem setor não
     // faz sentido, por isso a regra em si é excluída junto.
     await tx.delete(routingRulesTable)

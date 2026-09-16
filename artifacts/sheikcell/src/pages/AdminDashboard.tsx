@@ -116,7 +116,7 @@ type WASession = {
   icon: string | null;
   queueAutoAssignEnabled: boolean;
   surveyDisabled: boolean;
-  defaultSectorId: number | null;
+  defaultSectorIds: number[];
 };
 
 type UserRow = {
@@ -1377,36 +1377,50 @@ export default function AdminDashboard() {
                   </span>
                 </label>
 
-                {/* Vincular setor a esta linha, pra direcionamento automático
+                {/* Vincular setor(es) a esta linha, pra direcionamento automático
                     (pedido 16/09: "vincular os setores aos números de
-                    atendimento cadastrados pra direcionar"). Quando escolhido,
-                    toda conversa NOVA que chegar por este número já nasce
-                    direto nesse setor — sem depender de regra de palavra-chave.
-                    "Nenhum" volta ao comportamento de sempre (palavra-chave). */}
+                    atendimento cadastrados pra direcionar"; evoluído no mesmo
+                    dia pra "permitir adicionar mais de um setor a um número").
+                    Com 1 setor marcado, toda conversa NOVA que chegar por este
+                    número já nasce direto nele — sem depender de regra de
+                    palavra-chave. Com 2+, a palavra-chave escolhe entre eles
+                    quando bate; senão cai no primeiro marcado. Nenhum marcado
+                    volta ao comportamento de sempre (palavra-chave). */}
                 <div className="mb-3 px-2 py-2 rounded-lg hover:bg-secondary/50 text-sm"
                   data-testid={`select-wa-default-sector-wrap-${s.sessionKey}`}>
-                  <label className="font-medium block mb-1">Setor padrão desta linha (direcionamento automático)</label>
-                  <select
-                    value={s.defaultSectorId ?? ""}
-                    onChange={async (e) => {
-                      const sectorId = e.target.value === "" ? null : Number(e.target.value);
-                      await fetch(`/api/whatsapp/sessions/${s.sessionKey}/default-sector`, {
-                        method: "POST", credentials: "include",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ sectorId }),
-                      });
-                      fetchWAStatus();
-                    }}
-                    data-testid={`select-wa-default-sector-${s.sessionKey}`}
-                    className="w-full px-2 py-1.5 rounded-lg border border-border text-xs bg-white"
-                  >
-                    <option value="">Nenhum (usar regras de palavra-chave)</option>
-                    {activeSectors.map((sec) => <option key={sec.id} value={sec.id}>{sec.name}</option>)}
-                  </select>
+                  <label className="font-medium block mb-1">Setores desta linha (direcionamento automático)</label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {activeSectors.map((sec) => {
+                      const checked = s.defaultSectorIds.includes(sec.id);
+                      return (
+                        <label key={sec.id}
+                          className={`flex items-center gap-1.5 px-2 py-1 rounded-lg border text-xs cursor-pointer transition ${checked ? "border-primary bg-primary/10 font-medium" : "border-border bg-white"}`}
+                          data-testid={`checkbox-wa-default-sector-${s.sessionKey}-${sec.id}`}>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={async (e) => {
+                              const sectorIds = e.target.checked
+                                ? [...s.defaultSectorIds, sec.id]
+                                : s.defaultSectorIds.filter((sid) => sid !== sec.id);
+                              await fetch(`/api/whatsapp/sessions/${s.sessionKey}/default-sector`, {
+                                method: "POST", credentials: "include",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ sectorIds }),
+                              });
+                              fetchWAStatus();
+                            }}
+                          />
+                          {sec.name}
+                        </label>
+                      );
+                    })}
+                  </div>
                   <p className="text-[11px] text-muted-foreground mt-1">
-                    Com um setor escolhido, todo cliente novo que chegar por este número já entra direto nesse setor
-                    — útil pra loja que dedica um número por departamento. Sem isso, continua usando as regras de
-                    palavra-chave (Administração → Direcionamento) e, na falta delas, o primeiro setor ativo.
+                    Nenhum marcado: continua usando as regras de palavra-chave (Administração → Direcionamento) e,
+                    na falta delas, o primeiro setor ativo. 1 marcado: todo cliente novo entra direto nele. 2 ou
+                    mais marcados: a palavra-chave escolhe entre eles quando bate uma regra; sem bater, vai pro
+                    primeiro que você marcou.
                   </p>
                 </div>
 

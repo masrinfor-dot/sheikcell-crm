@@ -1,5 +1,4 @@
-import { pgTable, serial, text, timestamp, integer, boolean } from "drizzle-orm/pg-core";
-import { sectorsTable } from "./sectors";
+import { pgTable, serial, text, timestamp, integer, boolean, jsonb } from "drizzle-orm/pg-core";
 
 export const whatsappSessionsTable = pgTable("whatsapp_sessions", {
   tenantId: integer("tenant_id").notNull().default(1),
@@ -30,15 +29,19 @@ export const whatsappSessionsTable = pgTable("whatsapp_sessions", {
   // (survey_settings continua tenant-wide, isto só é uma exceção por cima).
   // Default false: nenhuma linha muda de comportamento até o admin ligar.
   surveyDisabled: boolean("survey_disabled").notNull().default(false),
-  // Vincula este número/linha a um setor fixo (pedido 16/09: "vincular os
-  // setores aos números de atendimento pra direcionar"). Quando setado, TODA
-  // conversa NOVA que chega por esta linha vai direto pro setor escolhido,
-  // sem passar pelas regras de palavra-chave (routing_rules/autoRouter) —
-  // pensado pra loja que já dedica um número por departamento (ex.: número
-  // do Suporte sempre cai em Suporte, não importa o texto da mensagem).
-  // null (padrão) = comportamento de sempre, continua usando as regras de
-  // palavra-chave e, na falta delas, o primeiro setor ativo da loja.
-  defaultSectorId: integer("default_sector_id").references(() => sectorsTable.id),
+  // Vincula este número/linha a um ou mais setores fixos (pedido 16/09:
+  // "vincular os setores aos números de atendimento pra direcionar";
+  // evoluído no mesmo dia pra "permitir adicionar mais de um setor a um
+  // número"). Quando a lista tem exatamente 1 setor, TODA conversa NOVA que
+  // chega por esta linha vai direto pra ele, sem passar pelas regras de
+  // palavra-chave — pensado pra loja que dedica um número por departamento
+  // (ex.: número do Suporte sempre cai em Suporte). Com 2+ setores, a
+  // conversa nova tenta bater uma regra de palavra-chave (routing_rules)
+  // restrita a ESSES setores; sem bater nenhuma, cai no primeiro da lista
+  // (ordem em que foram marcados). Lista vazia (padrão) = comportamento de
+  // sempre: regras de palavra-chave sem restrição e, na falta delas, o
+  // primeiro setor ativo da loja. Ver uso em lib/whatsappInbound.ts.
+  defaultSectorIds: jsonb("default_sector_ids").$type<number[]>().notNull().default([]),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

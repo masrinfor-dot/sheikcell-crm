@@ -346,18 +346,29 @@ async function upsertConversation(
 
   if (!conv) {
     // Roteamento automático só considera regras e setores DESTA loja.
-    // Prioridade 1: número/linha vinculado a um setor fixo (pedido 16/09 —
-    // "vincular os setores aos números de atendimento pra direcionar"). Se a
-    // linha que recebeu esta mensagem tem um setor padrão configurado, usa
-    // direto — nem chama classifyText, já que o direcionamento por número é
-    // mais específico que palavra-chave. Grupo (isGroupJid) também respeita
-    // isso normalmente, já que grupo também "chega" por uma sessionKey.
+    // Prioridade 1: número/linha vinculado a um ou mais setores fixos
+    // (pedido 16/09 — "vincular os setores aos números de atendimento pra
+    // direcionar", evoluído no mesmo dia pra permitir mais de um setor por
+    // número). Com exatamente 1 setor vinculado, usa direto — nem chama
+    // classifyText, já que o direcionamento por número é mais específico
+    // que palavra-chave. Com 2+ vinculados, tenta achar uma regra de
+    // palavra-chave que aponte pra um DESSES setores; sem bater nenhuma,
+    // cai no primeiro da lista (ordem em que foram marcados). Grupo
+    // (isGroupJid) também respeita isso normalmente, já que grupo também
+    // "chega" por uma sessionKey.
     const [sessionRow] = await db
-      .select({ defaultSectorId: whatsappSessionsTable.defaultSectorId })
+      .select({ defaultSectorIds: whatsappSessionsTable.defaultSectorIds })
       .from(whatsappSessionsTable)
       .where(and(eq(whatsappSessionsTable.sessionKey, sessionKey), eq(whatsappSessionsTable.tenantId, tenantId)))
       .limit(1);
-    let targetSectorId = sessionRow?.defaultSectorId ?? null;
+    const linkedSectorIds = sessionRow?.defaultSectorIds ?? [];
+    let targetSectorId: number | null = null;
+    if (linkedSectorIds.length === 1) {
+      targetSectorId = linkedSectorIds[0];
+    } else if (linkedSectorIds.length > 1) {
+      const classified = displayContent ? await classifyText(displayContent, tenantId) : null;
+      targetSectorId = classified && linkedSectorIds.includes(classified.sectorId) ? classified.sectorId : linkedSectorIds[0];
+    }
     if (targetSectorId == null) {
       const classified = displayContent ? await classifyText(displayContent, tenantId) : null;
       const [first] = await db
