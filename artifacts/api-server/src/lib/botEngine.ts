@@ -76,11 +76,22 @@ export function botStep(settings: BotSettingsShape, state: BotStateShape, text: 
 
   const qs = settings.questions;
 
-  // Primeiro contato: saudação + primeira pergunta (ou já cai no modo dúvidas).
+  // Primeiro contato.
   if (state.stage === 0) {
     if (qs.length === 0) {
-      return { step: { kind: "reply", replies: [settings.greeting] }, state: { ...state, stage: 1 } };
+      // Modo 100% IA (pedido 16/09: "tira essa mensagem automática, deixa
+      // todo tratamento com IA"): sem perguntas de filtragem cadastradas, a
+      // primeira mensagem do cliente já vai direto pra IA responder — nada
+      // de saudação pronta. `greeting` fica só como rede de segurança pro
+      // caso raro de já ter estourado o teto de IA logo no primeiro contato
+      // (sem isso o cliente ficaria sem resposta nenhuma).
+      if (state.aiReplies >= settings.maxPerConversation) {
+        return { step: { kind: "reply", replies: [settings.greeting] }, state: { ...state, stage: 1 } };
+      }
+      return { step: { kind: "ai_question", question: text.slice(0, 1000) }, state: { ...state, stage: 1 } };
     }
+    // Com perguntas de filtragem cadastradas, mantém o fluxo de sempre:
+    // saudação + primeira pergunta.
     return {
       step: { kind: "reply", replies: [settings.greeting, formatQuestion(qs[0]!)] },
       state: { ...state, stage: 1 },
