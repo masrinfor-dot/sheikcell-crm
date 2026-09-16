@@ -7,7 +7,7 @@
 import { Router, type IRouter } from "express";
 import { createHmac } from "node:crypto";
 import { requireFeature, requireTenant } from "../middlewares/auth";
-import { db, whatsappSessionsTable, conversationsTable } from "@workspace/db";
+import { db, whatsappSessionsTable, conversationsTable, sectorsTable } from "@workspace/db";
 import { and, eq, isNotNull, notInArray, sql } from "drizzle-orm";
 import { assertWithinLimit } from "../lib/planLimits";
 import { broadcast } from "../lib/sseEmitter";
@@ -47,6 +47,7 @@ export interface AdminWAState extends BridgeWAState {
   icon: string | null;
   queueAutoAssignEnabled: boolean;
   surveyDisabled: boolean;
+  defaultSectorId: number | null;
 }
 
 async function persistSessionState(tenantId: number, key: string, state: BridgeWAState): Promise<void> {
@@ -129,6 +130,7 @@ function offlineState(
     icon: row?.icon ?? null,
     queueAutoAssignEnabled: row?.queueAutoAssignEnabled ?? false,
     surveyDisabled: row?.surveyDisabled ?? false,
+    defaultSectorId: row?.defaultSectorId ?? null,
   };
 }
 
@@ -175,6 +177,7 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         icon: row?.icon ?? null,
         queueAutoAssignEnabled: row?.queueAutoAssignEnabled ?? false,
         surveyDisabled: row?.surveyDisabled ?? false,
+        defaultSectorId: row?.defaultSectorId ?? null,
       });
     } else if (bridgeAvailable) {
       // Bridge is up but doesn't know this session yet — ask it to start it.
@@ -193,6 +196,7 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         icon: row?.icon ?? null,
         queueAutoAssignEnabled: row?.queueAutoAssignEnabled ?? false,
         surveyDisabled: row?.surveyDisabled ?? false,
+        defaultSectorId: row?.defaultSectorId ?? null,
       });
       void fetchFromBridge("/whatsapp/sessions", "POST", { session: key }).catch(() => {});
     } else {
@@ -337,6 +341,39 @@ router.post("/whatsapp/sessions/:key/survey-disabled", requireFeature("whatsapp"
   res.json({ ok: true, surveyDisabled: updated.surveyDisabled });
 });
 
+// ─── Setor padrão desta linha, pra direcionamento automático (pedido 16/09:
+// "vincular os setores aos números de atendimento cadastrados pra
+// direcionar") ────────────────────────────────────────────────────────────
+// Quando setado, toda conversa NOVA recebida por este número já nasce nesse
+// setor, sem passar pelas regras de palavra-chave — pensado pra loja que
+// dedica um número de WhatsApp por departamento. sectorId null limpa o
+// vínculo e volta ao roteamento por palavra-chave (comportamento de sempre).
+// Ver uso em lib/whatsappInbound.ts (upsertConversation).
+router.post("/whatsapp/sessions/:key/default-sector", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const raw = (req.body as { sectorId?: unknown } | undefined)?.sectorId;
+  let sectorId: number | null = null;
+  if (raw !== null && raw !== undefined && raw !== "") {
+    const n = Number(raw);
+    if (!Number.isInteger(n)) { res.status(400).json({ error: "Setor inválido" }); return; }
+    // Só aceita setor ativo e da mesma loja — nunca vincula a um setor de
+    // outra loja nem a um já desativado.
+    const [sector] = await db.select({ id: sectorsTable.id }).from(sectorsTable)
+      .where(and(eq(sectorsTable.id, n), eq(sectorsTable.tenantId, tenantId), eq(sectorsTable.isActive, true)))
+      .limit(1);
+    if (!sector) { res.status(400).json({ error: "Setor não encontrado ou inativo" }); return; }
+    sectorId = n;
+  }
+  const [updated] = await db
+    .update(whatsappSessionsTable)
+    .set({ defaultSectorId: sectorId, updatedAt: new Date() })
+    .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId)))
+    .returning();
+  if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+  res.json({ ok: true, defaultSectorId: updated.defaultSectorId });
+});
+
 // ─── Reiniciar a fila desta linha (pedido 14/09, pra testar do zero) ──────
 // Tira TODOS os atendimentos ativos desta linha de quem estiver com eles
 // agora e devolve pro pool (Pendentes) — a fila então preenche de novo os
@@ -473,6 +510,7 @@ router.get("/whatsapp/status", requireFeature("whatsapp"), async (req, res): Pro
         icon: row?.icon ?? null,
         queueAutoAssignEnabled: row?.queueAutoAssignEnabled ?? false,
         surveyDisabled: row?.surveyDisabled ?? false,
+        defaultSectorId: row?.defaultSectorId ?? null,
       };
       res.json(result);
       return;

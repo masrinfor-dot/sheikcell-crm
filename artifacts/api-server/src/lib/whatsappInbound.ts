@@ -346,13 +346,27 @@ async function upsertConversation(
 
   if (!conv) {
     // Roteamento automático só considera regras e setores DESTA loja.
-    const classified = displayContent ? await classifyText(displayContent, tenantId) : null;
-    const [first] = await db
-      .select()
-      .from(sectorsTable)
-      .where(and(eq(sectorsTable.isActive, true), eq(sectorsTable.tenantId, tenantId)))
+    // Prioridade 1: número/linha vinculado a um setor fixo (pedido 16/09 —
+    // "vincular os setores aos números de atendimento pra direcionar"). Se a
+    // linha que recebeu esta mensagem tem um setor padrão configurado, usa
+    // direto — nem chama classifyText, já que o direcionamento por número é
+    // mais específico que palavra-chave. Grupo (isGroupJid) também respeita
+    // isso normalmente, já que grupo também "chega" por uma sessionKey.
+    const [sessionRow] = await db
+      .select({ defaultSectorId: whatsappSessionsTable.defaultSectorId })
+      .from(whatsappSessionsTable)
+      .where(and(eq(whatsappSessionsTable.sessionKey, sessionKey), eq(whatsappSessionsTable.tenantId, tenantId)))
       .limit(1);
-    const targetSectorId = classified?.sectorId ?? first?.id ?? 1;
+    let targetSectorId = sessionRow?.defaultSectorId ?? null;
+    if (targetSectorId == null) {
+      const classified = displayContent ? await classifyText(displayContent, tenantId) : null;
+      const [first] = await db
+        .select()
+        .from(sectorsTable)
+        .where(and(eq(sectorsTable.isActive, true), eq(sectorsTable.tenantId, tenantId)))
+        .limit(1);
+      targetSectorId = classified?.sectorId ?? first?.id ?? 1;
+    }
     [conv] = await db
       .insert(conversationsTable)
       .values({

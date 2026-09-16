@@ -1966,6 +1966,10 @@ export const api = {
     listAll: () => req<Sector[]>("/sectors/all"),
     create: (data: Partial<Sector>) => req<Sector>("/sectors", { method: "POST", body: JSON.stringify(data) }),
     update: (id: number, data: Partial<Sector>) => req<Sector>(`/sectors/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    // Exclui de vez (diferente de update({isActive:false}), que só desativa
+    // e mantém o setor na lista). O servidor recusa se ainda houver usuário
+    // vinculado — pede pra mudar o setor deles antes.
+    remove: (id: number) => req<{ ok: boolean }>(`/sectors/${id}`, { method: "DELETE" }),
   },
   queue: {
     list: (params?: { sectorId?: number; status?: string }) => {

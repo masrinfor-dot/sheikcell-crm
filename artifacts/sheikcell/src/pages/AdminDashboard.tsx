@@ -116,6 +116,7 @@ type WASession = {
   icon: string | null;
   queueAutoAssignEnabled: boolean;
   surveyDisabled: boolean;
+  defaultSectorId: number | null;
 };
 
 type UserRow = {
@@ -560,6 +561,21 @@ export default function AdminDashboard() {
       fetchUsersAndSectors();
     } catch (err: unknown) {
       toast({ title: "Erro", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
+  };
+  // Excluir setor (pedido 16/09) — diferente de desativar (isActive=false,
+  // que só marca "Inativo" e mantém na lista): isto remove o setor de vez.
+  // O servidor recusa (400) se ainda houver usuário vinculado, com a mensagem
+  // já pronta pra mostrar no toast; conversas antigas, respostas rápidas e
+  // números de WhatsApp vinculados só perdem o vínculo (não travam a exclusão).
+  const handleDeleteSector = async (sector: Sector) => {
+    if (!window.confirm(`Excluir o setor "${sector.name}"? Essa ação não pode ser desfeita. Se houver usuário vinculado a ele, a exclusão será recusada.`)) return;
+    try {
+      await api.sectors.remove(sector.id);
+      toast({ title: "Setor excluído!" });
+      fetchUsersAndSectors();
+    } catch (err: unknown) {
+      toast({ title: "Não foi possível excluir", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     }
   };
 
@@ -1361,6 +1377,39 @@ export default function AdminDashboard() {
                   </span>
                 </label>
 
+                {/* Vincular setor a esta linha, pra direcionamento automático
+                    (pedido 16/09: "vincular os setores aos números de
+                    atendimento cadastrados pra direcionar"). Quando escolhido,
+                    toda conversa NOVA que chegar por este número já nasce
+                    direto nesse setor — sem depender de regra de palavra-chave.
+                    "Nenhum" volta ao comportamento de sempre (palavra-chave). */}
+                <div className="mb-3 px-2 py-2 rounded-lg hover:bg-secondary/50 text-sm"
+                  data-testid={`select-wa-default-sector-wrap-${s.sessionKey}`}>
+                  <label className="font-medium block mb-1">Setor padrão desta linha (direcionamento automático)</label>
+                  <select
+                    value={s.defaultSectorId ?? ""}
+                    onChange={async (e) => {
+                      const sectorId = e.target.value === "" ? null : Number(e.target.value);
+                      await fetch(`/api/whatsapp/sessions/${s.sessionKey}/default-sector`, {
+                        method: "POST", credentials: "include",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ sectorId }),
+                      });
+                      fetchWAStatus();
+                    }}
+                    data-testid={`select-wa-default-sector-${s.sessionKey}`}
+                    className="w-full px-2 py-1.5 rounded-lg border border-border text-xs bg-white"
+                  >
+                    <option value="">Nenhum (usar regras de palavra-chave)</option>
+                    {activeSectors.map((sec) => <option key={sec.id} value={sec.id}>{sec.name}</option>)}
+                  </select>
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    Com um setor escolhido, todo cliente novo que chegar por este número já entra direto nesse setor
+                    — útil pra loja que dedica um número por departamento. Sem isso, continua usando as regras de
+                    palavra-chave (Administração → Direcionamento) e, na falta delas, o primeiro setor ativo.
+                  </p>
+                </div>
+
                 {/* Reiniciar fila desta linha (pedido 14/09): tira todo mundo
                     que está com atendimento ativo por este número e devolve
                     pro Pendentes, pra fila recomeçar do zero preenchendo um
@@ -1906,6 +1955,10 @@ export default function AdminDashboard() {
                   <button onClick={() => openEditSector(sector)} data-testid={`button-edit-sector-${sector.id}`}
                     className="p-1.5 text-muted-foreground hover:text-primary hover:bg-blue-50 rounded-lg transition">
                     <Pencil className="w-3.5 h-3.5" />
+                  </button>
+                  <button onClick={() => handleDeleteSector(sector)} data-testid={`button-delete-sector-${sector.id}`}
+                    title="Excluir setor" className="p-1.5 text-muted-foreground hover:text-red-600 hover:bg-red-50 rounded-lg transition">
+                    <Trash2 className="w-3.5 h-3.5" />
                   </button>
                 </div>
               ))}
