@@ -9,6 +9,7 @@ import {
   conversationsTable,
   messagesTable,
   sectorsTable,
+  chatLabelsTable,
 } from "@workspace/db";
 import { botStep, type BotSettingsShape, type BotQuestion } from "./botEngine";
 import { sendOutboundText } from "./outbound";
@@ -16,6 +17,7 @@ import { broadcast } from "./sseEmitter";
 import { isPotentialConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES } from "./conversationScope";
 import { logger } from "./logger";
 import { runBotAgent, type BotTool } from "./botTools";
+import { resolveOrCreateLabel, attachLabelToConversation } from "./labels";
 
 const DEFAULT_QUESTIONS: BotQuestion[] = [
   { question: "Para começar, o que você procura hoje?", options: ["Comprar um celular", "Assistência técnica / conserto", "Película ou acessórios", "Outro assunto"] },
@@ -136,6 +138,39 @@ export function routeToSectorTool(sectors: { id: number; name: string }[]): BotT
   };
 }
 
+// ---------- etiquetas (ferramenta do robô) ----------
+
+// Pedido 16/09: "permite que o robô com IA direcione para setores de forma
+// automática, crie e utilize etiquetas, evita repetir etiqueta ou criar com
+// semelhança". A lista de etiquetas já existentes vai na descrição da
+// ferramenta (mesmo padrão do enum de setores), pra IA preferir reaproveitar
+// uma existente — resolveOrCreateLabel (lib/labels.ts) é a rede de segurança
+// do servidor caso o modelo peça um nome só levemente diferente.
+function applyLabelTool(tenantId: number, existingLabels: { name: string }[]): BotTool {
+  const namesList = existingLabels.map((l) => l.name).join(", ") || "(nenhuma ainda)";
+  return {
+    name: "apply_label",
+    description: `Aplica uma etiqueta de assunto nesta conversa pra ajudar a equipe a organizar e filtrar depois (ex.: "Orçamento", "Reclamação", "Pós-venda"). IMPORTANTE: antes de usar um nome novo, veja se alguma das etiquetas já existentes já cobre o mesmo assunto — reaproveite o nome EXATO de uma existente sempre que fizer sentido, em vez de criar uma parecida com nome diferente (ex.: não crie "Orçamentos" se já existe "Orçamento"). Etiquetas já cadastradas nesta loja: ${namesList}. Só chame quando o assunto da conversa já estiver razoavelmente claro — não precisa etiquetar toda conversa, e pode chamar de novo se o assunto mudar.`,
+    parameters: {
+      type: "object",
+      properties: {
+        label: { type: "string", description: "Nome curto da etiqueta (2-4 palavras), reaproveitando um nome já existente sempre que possível" },
+      },
+      required: ["label"],
+    },
+    execute: async (args, ctx) => {
+      const requested = String(args["label"] ?? "").trim();
+      if (!requested) return "Nome de etiqueta vazio — nada foi feito.";
+      const resolved = await resolveOrCreateLabel(ctx.tenantId, requested);
+      if (!resolved) return "Não consegui aplicar a etiqueta.";
+      await attachLabelToConversation(ctx.conversationId, resolved.name);
+      return resolved.created
+        ? `Etiqueta nova "${resolved.name}" criada e aplicada.`
+        : `Etiqueta existente "${resolved.name}" reaproveitada e aplicada (evitei criar uma parecida).`;
+    },
+  };
+}
+
 // ---------- IA ----------
 
 async function aiAnswer(tenantId: number, conversationId: number | null, settings: BotSettingsRow, question: string): Promise<string | null> {
@@ -144,11 +179,18 @@ async function aiAnswer(tenantId: number, conversationId: number | null, setting
       ? await db.select({ id: sectorsTable.id, name: sectorsTable.name })
           .from(sectorsTable).where(and(eq(sectorsTable.isActive, true), eq(sectorsTable.tenantId, tenantId)))
       : [];
+    const labels = conversationId != null
+      ? await db.select({ name: chatLabelsTable.name })
+          .from(chatLabelsTable).where(and(eq(chatLabelsTable.isActive, true), eq(chatLabelsTable.tenantId, tenantId)))
+      : [];
+    const tools: BotTool[] = [];
+    if (sectors.length > 0) tools.push(routeToSectorTool(sectors));
+    if (conversationId != null) tools.push(applyLabelTool(tenantId, labels));
     const { replyText } = await runBotAgent({
       maxTokens: 300,
-      systemPrompt: `Você é ${settings.botName}, assistente virtual de uma loja de celulares no WhatsApp. Responda em português, curto e simpático. Responda SOMENTE com base nas informações abaixo. Se a resposta não estiver nas informações, diga que vai verificar com a equipe e que um atendente já vai falar com o cliente. Nunca invente preços, prazos ou promoções.\n\nINFORMAÇÕES DA LOJA:\n${settings.knowledgeBase || "(nenhuma informação cadastrada)"}${sectors.length > 0 ? `\n\nSe perceber, pela pergunta do cliente, que o assunto é de outro setor (diferente do setor atual da conversa), chame a ferramenta route_to_sector pra corrigir — só quando tiver razoável confiança.` : ""}`,
+      systemPrompt: `Você é ${settings.botName}, assistente virtual de uma loja de celulares no WhatsApp. Responda em português, curto e simpático. Responda SOMENTE com base nas informações abaixo. Se a resposta não estiver nas informações, diga que vai verificar com a equipe e que um atendente já vai falar com o cliente. Nunca invente preços, prazos ou promoções.\n\nINFORMAÇÕES DA LOJA:\n${settings.knowledgeBase || "(nenhuma informação cadastrada)"}${sectors.length > 0 ? `\n\nSe perceber, pela pergunta do cliente, que o assunto é de outro setor (diferente do setor atual da conversa), chame a ferramenta route_to_sector pra corrigir — só quando tiver razoável confiança.` : ""}${conversationId != null ? `\n\nSe o assunto da conversa já estiver razoavelmente claro, use a ferramenta apply_label pra etiquetar (reaproveitando uma etiqueta existente sempre que possível).` : ""}`,
       userMessage: question,
-      tools: sectors.length > 0 ? [routeToSectorTool(sectors)] : [],
+      tools,
       ctx: { tenantId, conversationId: conversationId ?? 0 },
     });
     return replyText;
@@ -159,17 +201,22 @@ async function aiAnswer(tenantId: number, conversationId: number | null, setting
 }
 
 export async function aiClassify(tenantId: number, conversationId: number | null, settings: BotSettingsRow, answers: string[]): Promise<{ summary: string }> {
-  // Multi-loja: só considera os setores DESTA loja na triagem.
+  // Multi-loja: só considera os setores e etiquetas DESTA loja na triagem.
   const sectors = await db.select({ id: sectorsTable.id, name: sectorsTable.name })
     .from(sectorsTable).where(and(eq(sectorsTable.isActive, true), eq(sectorsTable.tenantId, tenantId)));
+  const labels = await db.select({ name: chatLabelsTable.name })
+    .from(chatLabelsTable).where(and(eq(chatLabelsTable.isActive, true), eq(chatLabelsTable.tenantId, tenantId)));
   const qs = toEngineSettings(settings).questions;
   const qa = qs.map((q, i) => `P: ${q.question}\nR: ${answers[i] ?? "(sem resposta)"}`).join("\n");
+  const tools: BotTool[] = [];
+  if (conversationId != null && sectors.length > 0) tools.push(routeToSectorTool(sectors));
+  if (conversationId != null) tools.push(applyLabelTool(tenantId, labels));
   try {
     const { replyText } = await runBotAgent({
       maxTokens: 200,
-      systemPrompt: `Você faz a triagem de clientes de uma loja de celulares. Leia as respostas do cliente e: 1) responda com um resumo de 1-2 frases (em português) do que o cliente quer, pro atendente humano ler rápido; 2) se conseguir identificar com razoável confiança qual setor deve atender, chame a ferramenta route_to_sector. Setores disponíveis: ${sectors.map((s) => s.name).join(", ") || "(nenhum)"}.`,
+      systemPrompt: `Você faz a triagem de clientes de uma loja de celulares. Leia as respostas do cliente e: 1) responda com um resumo de 1-2 frases (em português) do que o cliente quer, pro atendente humano ler rápido; 2) se conseguir identificar com razoável confiança qual setor deve atender, chame a ferramenta route_to_sector; 3) se o assunto já estiver claro, chame também apply_label pra etiquetar (reaproveitando uma etiqueta existente sempre que possível). Setores disponíveis: ${sectors.map((s) => s.name).join(", ") || "(nenhum)"}.`,
       userMessage: qa,
-      tools: conversationId != null && sectors.length > 0 ? [routeToSectorTool(sectors)] : [],
+      tools,
       ctx: { tenantId, conversationId: conversationId ?? 0 },
     });
     const summary = (replyText || answers.join(" | ")).slice(0, 500);
