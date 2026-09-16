@@ -52,6 +52,11 @@ router.put("/bot/settings", requireModuleAccess("robo"), async (req, res): Promi
   if (!Number.isFinite(maxPerConversation) || maxPerConversation < 0 || maxPerConversation > 50) { res.status(400).json({ error: "Limite por conversa deve ser de 0 a 50" }); return; }
   if (!Number.isFinite(maxPerDay) || maxPerDay < 0 || maxPerDay > 5000) { res.status(400).json({ error: "Limite por dia deve ser de 0 a 5000" }); return; }
 
+  // "Tempo de resposta digitando" (pedido 16/09) — segundos, configurável por
+  // loja, 0 a 30 (0 = sem atraso extra, só o que a ponte do WhatsApp já faz).
+  const typingDelaySeconds = parseInt(String(body["typingDelaySeconds"] ?? existing.typingDelaySeconds), 10);
+  if (!Number.isFinite(typingDelaySeconds) || typingDelaySeconds < 0 || typingDelaySeconds > 30) { res.status(400).json({ error: "Tempo de resposta deve ser de 0 a 30 segundos" }); return; }
+
   const str = (k: string, cur: string, max: number) => String(body[k] ?? cur).trim().slice(0, max);
 
   const [updated] = await db.update(botSettingsTable).set({
@@ -68,6 +73,7 @@ router.put("/bot/settings", requireModuleAccess("robo"), async (req, res): Promi
     hoursEnd,
     maxPerConversation,
     maxPerDay,
+    typingDelaySeconds,
     updatedAt: new Date(),
   }).where(and(eq(botSettingsTable.id, existing.id), eq(botSettingsTable.tenantId, tenantId))).returning();
 
@@ -91,25 +97,38 @@ router.get("/bot/stats", requireModuleAccess("robo"), async (req, res): Promise<
 // ---------- modo teste (simulação, sem WhatsApp e sem banco de conversas) ----------
 
 const testStates = new Map<number, BotStateShape>();
+// Transcrição simulada por admin testando (pedido 16/09: "o teste com IA
+// precisa melhorar" — sem isso, cada resposta de IA no teste era cega ao que
+// já tinha sido "dito" na simulação, igual ao bug que existia em produção).
+type TestHistoryMsg = { role: "user" | "assistant"; content: string };
+const testHistories = new Map<number, TestHistoryMsg[]>();
 
 router.post("/bot/test", requireModuleAccess("robo"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const uid = req.session.userId!;
   const { message, reset } = (req.body ?? {}) as { message?: string; reset?: boolean };
-  if (reset) { testStates.delete(uid); res.json({ replies: [], reset: true }); return; }
+  if (reset) { testStates.delete(uid); testHistories.delete(uid); res.json({ replies: [], reset: true }); return; }
   const text = String(message ?? "").trim();
   if (!text) { res.status(400).json({ error: "Escreva uma mensagem de teste" }); return; }
 
   const settings = await getBotSettings(tenantId);
   const state = testStates.get(uid) ?? { stage: 0, answers: [], aiReplies: 0, active: true };
+  const history = testHistories.get(uid) ?? [];
+  history.push({ role: "user", content: text.slice(0, 800) });
   const { step, state: next } = botStep(toEngineSettings(settings), state, text);
   testStates.set(uid, next);
+
+  const pushReplies = (replies: string[]) => {
+    for (const r of replies) history.push({ role: "assistant", content: r.slice(0, 800) });
+    testHistories.set(uid, history);
+  };
 
   if (step.kind === "silent") {
     res.json({ replies: ["(robô ficou em silêncio — fluxo encerrado ou limite de IA atingido)"], simulated: true });
     return;
   }
   if (step.kind === "reply" || step.kind === "handoff") {
+    pushReplies(step.replies);
     res.json({ replies: step.replies, ended: step.kind === "handoff", simulated: true });
     return;
   }
@@ -117,10 +136,13 @@ router.post("/bot/test", requireModuleAccess("robo"), async (req, res): Promise<
     // Modo teste: sem conversa real, então sem ferramenta de roteamento
     // (nada pra mudar de setor de verdade) — conversationId null desliga isso.
     const { summary } = await aiClassify(tenantId, null, settings, step.answers);
+    pushReplies(step.replies);
     res.json({ replies: [...step.replies, `— [interno] Resumo para o vendedor: ${summary}`], simulated: true });
     return;
   }
-  // ai_question no teste: responde de verdade com a base de conhecimento
+  // ai_question no teste: responde de verdade com a base de conhecimento,
+  // já com a transcrição simulada até aqui como histórico (mesma lógica de
+  // aiAnswer em lib/bot.ts, só que sem gravar nada no banco).
   const { getOpenAiClientForTenant } = await import("../lib/aiClient");
   const openai = await getOpenAiClientForTenant(tenantId);
   try {
@@ -128,12 +150,17 @@ router.post("/bot/test", requireModuleAccess("robo"), async (req, res): Promise<
       model: "gpt-4o",
       max_tokens: 300,
       messages: [
-        { role: "system", content: `Você é ${settings.botName}, assistente virtual de uma loja de celulares no WhatsApp. Responda em português, curto e simpático, SOMENTE com base nas informações abaixo. Se não souber, diga que vai verificar com a equipe.\n\nINFORMAÇÕES DA LOJA:\n${settings.knowledgeBase || "(nenhuma informação cadastrada)"}` },
+        { role: "system", content: `Você é ${settings.botName}, assistente virtual de uma loja de celulares no WhatsApp. Responda em português, curto e simpático, SOMENTE com base nas informações abaixo. Se não souber, diga que vai verificar com a equipe.\n\nINFORMAÇÕES DA LOJA:\n${settings.knowledgeBase || "(nenhuma informação cadastrada)"}${history.length > 1 ? `\n\nAs mensagens anteriores desta conversa simulada estão no histórico abaixo — nunca repita uma pergunta que o cliente já respondeu ali.` : ""}` },
+        // history já inclui a mensagem atual (foi empurrada logo no início) —
+        // manda tudo exceto o último item, que vira a mensagem "user" final.
+        ...history.slice(0, -1).map((h) => ({ role: h.role, content: h.content }) as const),
         { role: "user", content: step.question },
       ],
     });
+    const reply = completion.choices[0]?.message?.content?.trim() ?? "(sem resposta)";
     testStates.set(uid, { ...next, aiReplies: next.aiReplies + 1 });
-    res.json({ replies: [completion.choices[0]?.message?.content?.trim() ?? "(sem resposta)"], simulated: true });
+    pushReplies([reply]);
+    res.json({ replies: [reply], simulated: true });
   } catch {
     res.status(503).json({ error: "IA indisponível no momento — confira a chave da OpenAI" });
   }

@@ -36,10 +36,19 @@ export type BotAgentResult = {
  * pra obter o texto final já considerando o resultado. Sem tools, é uma
  * chamada de chat comum.
  */
+export type BotHistoryMessage = { role: "user" | "assistant"; content: string };
+
 export async function runBotAgent(opts: {
   model?: string;
   maxTokens?: number;
   systemPrompt: string;
+  // Mensagens anteriores da MESMA conversa (ordem cronológica, mais antiga
+  // primeiro), inseridas entre o system prompt e a mensagem atual — sem
+  // isso, cada chamada é cega ao que já foi dito, e o robô repete pergunta
+  // que o cliente já respondeu (pedido 16/09: "o teste com IA precisa
+  // melhorar"). Opcional: quando omitido, comportamento de sempre (só a
+  // mensagem atual).
+  history?: BotHistoryMessage[];
   userMessage: string;
   tools: BotTool[];
   ctx: BotToolContext;
@@ -50,6 +59,7 @@ export async function runBotAgent(opts: {
   const maxTokens = opts.maxTokens ?? 300;
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
     { role: "system", content: opts.systemPrompt },
+    ...(opts.history ?? []).map((h) => ({ role: h.role, content: h.content }) as OpenAI.Chat.Completions.ChatCompletionMessageParam),
     { role: "user", content: opts.userMessage },
   ];
 

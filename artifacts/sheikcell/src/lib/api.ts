@@ -736,6 +736,7 @@ export type BotSettings = {
   doneMessage: string; handoffMessage: string;
   mode: "always" | "off_hours"; hoursStart: string; hoursEnd: string;
   urgencyWords: string; maxPerConversation: number; maxPerDay: number;
+  typingDelaySeconds: number;
   usageToday: number;
 };
 

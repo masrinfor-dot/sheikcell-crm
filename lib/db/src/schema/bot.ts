@@ -20,6 +20,13 @@ export const botSettingsTable = pgTable("bot_settings", {
   urgencyWords: text("urgency_words").notNull().default("reclamação, reclamar, urgente, advogado, procon"),
   maxPerConversation: integer("max_per_conversation").notNull().default(5),
   maxPerDay: integer("max_per_day").notNull().default(200),
+  // "Tempo de resposta digitando" (pedido 16/09) — segundos que o robô
+  // espera, simulando "digitando...", antes de mandar cada resposta gerada
+  // por IA. Por cima do "humanPacing" que a ponte do WhatsApp já faz sozinha
+  // por tamanho de texto (ver whatsapp-bridge/lib/waConnection.ts) — este
+  // aqui é um atraso extra, configurável por loja, pra não parecer robótico
+  // respondendo instantâneo. 0 = sem atraso extra (só o da ponte).
+  typingDelaySeconds: integer("typing_delay_seconds").notNull().default(5),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
 

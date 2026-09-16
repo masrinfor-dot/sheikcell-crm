@@ -193,6 +193,15 @@ export default function Robo() {
                   onChange={(e) => set({ maxPerDay: parseInt(e.target.value || "0", 10) })} className={INPUT} />
               </div>
             </div>
+            <div>
+              <label className="font-semibold">Tempo de resposta digitando (segundos)</label>
+              <input type="number" min={0} max={30} value={s.typingDelaySeconds}
+                onChange={(e) => set({ typingDelaySeconds: parseInt(e.target.value || "0", 10) })} className={INPUT} />
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Espera esse tanto de segundos "digitando..." antes de mandar cada resposta gerada por IA, pra não
+                parecer uma resposta robótica instantânea. 0 = manda assim que a IA responder.
+              </p>
+            </div>
           </div>
         </div>
 

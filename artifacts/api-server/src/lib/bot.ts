@@ -1,6 +1,6 @@
 // Robô de pré-atendimento: liga a máquina de estados (botEngine) ao banco,
 // ao WhatsApp e à IA. Nunca lança — falha do robô não pode derrubar o webhook.
-import { and, eq, sql, isNull, lte, notInArray } from "drizzle-orm";
+import { and, eq, sql, isNull, lte, notInArray, desc } from "drizzle-orm";
 import {
   db,
   botSettingsTable,
@@ -16,8 +16,67 @@ import { sendOutboundText } from "./outbound";
 import { broadcast } from "./sseEmitter";
 import { isPotentialConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES } from "./conversationScope";
 import { logger } from "./logger";
-import { runBotAgent, type BotTool } from "./botTools";
+import { runBotAgent, type BotTool, type BotHistoryMessage } from "./botTools";
 import { resolveOrCreateLabel, attachLabelToConversation } from "./labels";
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const MEDIA_PLACEHOLDER: Record<string, string> = {
+  image: "[imagem enviada pelo cliente]",
+  video: "[vídeo enviado pelo cliente]",
+  doc: "[documento enviado pelo cliente]",
+  sticker: "[figurinha]",
+  contact: "[contato compartilhado]",
+  location: "[localização compartilhada]",
+  poll: "[enquete]",
+  product: "[produto compartilhado]",
+  payment: "[pagamento]",
+  group_invite: "[convite de grupo]",
+};
+
+/**
+ * Últimas mensagens REAIS da conversa (mais antiga primeiro), pra dar
+ * memória à IA entre uma chamada e outra — sem isso, cada resposta é cega ao
+ * que já foi dito e o robô fica repetindo pergunta que o cliente já
+ * respondeu (pedido 16/09: "o teste com IA precisa melhorar"). Exclui
+ * mensagens internas (type "system"/"note" — ex.: o resumo de triagem, que o
+ * cliente nunca viu) e a própria mensagem mais recente, já que ela é
+ * repassada separadamente como a pergunta atual (userMessage).
+ */
+async function buildConversationHistory(conversationId: number, limit = 14): Promise<BotHistoryMessage[]> {
+  try {
+    const rows = await db.select({
+      direction: messagesTable.direction,
+      content: messagesTable.content,
+      transcript: messagesTable.transcript,
+      type: messagesTable.type,
+      deletedAt: messagesTable.deletedAt,
+    })
+      .from(messagesTable)
+      .where(eq(messagesTable.conversationId, conversationId))
+      .orderBy(desc(messagesTable.createdAt), desc(messagesTable.id))
+      .limit(limit + 1);
+    const chronological = rows.reverse();
+    // A última (mais recente) é a mensagem atual, já enviada como
+    // userMessage — não duplica aqui.
+    const withoutCurrent = chronological.slice(0, -1);
+    const history: BotHistoryMessage[] = [];
+    for (const m of withoutCurrent) {
+      if (m.deletedAt) continue;
+      if (m.type === "system" || m.type === "note") continue;
+      const text = (m.type === "audio" ? (m.transcript || m.content) : m.content)
+        || (m.type ? MEDIA_PLACEHOLDER[m.type] : undefined);
+      if (!text || !text.trim()) continue;
+      history.push({ role: m.direction === "inbound" ? "user" : "assistant", content: text.trim().slice(0, 800) });
+    }
+    return history;
+  } catch (err) {
+    logger.warn({ err, conversationId }, "Robô: falha ao montar histórico da conversa pra IA");
+    return [];
+  }
+}
 
 const DEFAULT_QUESTIONS: BotQuestion[] = [
   { question: "Para começar, o que você procura hoje?", options: ["Comprar um celular", "Assistência técnica / conserto", "Película ou acessórios", "Outro assunto"] },
@@ -183,12 +242,14 @@ async function aiAnswer(tenantId: number, conversationId: number | null, setting
       ? await db.select({ name: chatLabelsTable.name })
           .from(chatLabelsTable).where(and(eq(chatLabelsTable.isActive, true), eq(chatLabelsTable.tenantId, tenantId)))
       : [];
+    const history = conversationId != null ? await buildConversationHistory(conversationId) : [];
     const tools: BotTool[] = [];
     if (sectors.length > 0) tools.push(routeToSectorTool(sectors));
     if (conversationId != null) tools.push(applyLabelTool(tenantId, labels));
     const { replyText } = await runBotAgent({
       maxTokens: 300,
-      systemPrompt: `Você é ${settings.botName}, assistente virtual de uma loja de celulares no WhatsApp. Responda em português, curto e simpático. Responda SOMENTE com base nas informações abaixo. Se a resposta não estiver nas informações, diga que vai verificar com a equipe e que um atendente já vai falar com o cliente. Nunca invente preços, prazos ou promoções.\n\nINFORMAÇÕES DA LOJA:\n${settings.knowledgeBase || "(nenhuma informação cadastrada)"}${sectors.length > 0 ? `\n\nSe perceber, pela pergunta do cliente, que o assunto é de outro setor (diferente do setor atual da conversa), chame a ferramenta route_to_sector pra corrigir — só quando tiver razoável confiança.` : ""}${conversationId != null ? `\n\nSe o assunto da conversa já estiver razoavelmente claro, use a ferramenta apply_label pra etiquetar (reaproveitando uma etiqueta existente sempre que possível).` : ""}`,
+      systemPrompt: `Você é ${settings.botName}, assistente virtual de uma loja de celulares no WhatsApp. Responda em português, curto e simpático. Responda SOMENTE com base nas informações abaixo. Se a resposta não estiver nas informações, diga que vai verificar com a equipe e que um atendente já vai falar com o cliente. Nunca invente preços, prazos ou promoções.\n\nINFORMAÇÕES DA LOJA:\n${settings.knowledgeBase || "(nenhuma informação cadastrada)"}${sectors.length > 0 ? `\n\nSe perceber, pela pergunta do cliente, que o assunto é de outro setor (diferente do setor atual da conversa), chame a ferramenta route_to_sector pra corrigir — só quando tiver razoável confiança.` : ""}${conversationId != null ? `\n\nSe o assunto da conversa já estiver razoavelmente claro, use a ferramenta apply_label pra etiquetar (reaproveitando uma etiqueta existente sempre que possível).` : ""}${history.length > 0 ? `\n\nAs mensagens anteriores desta MESMA conversa estão no histórico abaixo — leia com atenção antes de responder. NUNCA repita uma pergunta que o cliente já respondeu ali, e não peça de novo uma informação que ele já deu. Se já houver informação suficiente pra encaminhar, encaminhe (via route_to_sector) em vez de continuar perguntando.` : ""}`,
+      history,
       userMessage: question,
       tools,
       ctx: { tenantId, conversationId: conversationId ?? 0 },
@@ -329,12 +390,14 @@ async function handle(conv: Conv, text: string): Promise<void> {
 
   if (step.kind === "reply" || step.kind === "handoff") {
     await saveState();
+    if (settings.typingDelaySeconds > 0) await sleep(settings.typingDelaySeconds * 1000);
     for (const r of step.replies) await sendOutboundText(conv.id, r, settings.botName);
     return;
   }
 
   if (step.kind === "triage_done") {
     await saveState();
+    if (settings.typingDelaySeconds > 0) await sleep(settings.typingDelaySeconds * 1000);
     for (const r of step.replies) await sendOutboundText(conv.id, r, settings.botName);
     // Classifica com IA (respeitando o teto diário) e registra o resumo na conversa.
     // A própria classificação pode rotear o setor (ferramenta route_to_sector,
@@ -387,5 +450,12 @@ async function handle(conv: Conv, text: string): Promise<void> {
   if (!(await consumeDailyAi(tenantId, settings.maxPerDay))) { await saveState(); return; }
   const answer = await aiAnswer(tenantId, conv.id, settings, step.question);
   await saveState({ aiReplies: state.aiReplies + 1 });
-  if (answer) await sendOutboundText(conv.id, answer, settings.botName);
+  if (answer) {
+    // "Tempo de resposta digitando" (pedido 16/09), configurável por loja —
+    // some ao humanPacing que a ponte do WhatsApp já faz sozinha por
+    // tamanho de texto; este é um atraso extra antes de mandar, pra não
+    // parecer robótico respondendo instantâneo a uma pergunta livre.
+    if (settings.typingDelaySeconds > 0) await sleep(settings.typingDelaySeconds * 1000);
+    await sendOutboundText(conv.id, answer, settings.botName);
+  }
 }
