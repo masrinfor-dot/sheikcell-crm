@@ -45,7 +45,7 @@ import {
   PhoneCall, TrendingUp, Pencil, Kanban, MessageCircle, MessagesSquare, ListTodo, MoreHorizontal, ShieldCheck, Zap, Trash2, Landmark, BadgeDollarSign, GraduationCap, UserSearch, Gift, Bot, KeyRound, UserX, UserCheck,
   AlertTriangle, WifiOff,
   FolderArchive, Headphones, BarChart3, SlidersHorizontal, Palette, ChevronDown, Wrench,
-  ArrowRight, Filter, BookUser, LifeBuoy, FileBarChart2, Plug, Tv, ListChecks, PanelTop, ArrowLeftRight, Eye, History, Tags,
+  ArrowRight, Filter, BookUser, LifeBuoy, FileBarChart2, Plug, Tv, ListChecks, PanelTop, ArrowLeftRight, Eye, History, Tags, MapPin,
 } from "lucide-react";
 import Resultados from "./Resultados";
 import Relatorios from "./Relatorios";
@@ -204,6 +204,62 @@ export default function AdminDashboard() {
   const activeSectors = sectors.filter((s) => s.isActive);
   const [stores, setStores] = useState<Store[]>([]);
   const [newStoreName, setNewStoreName] = useState("");
+  // Geofence do Ponto por loja (pedido 15/09, análise Tangerino "Local de
+  // Interesse") — raio permitido pra bater ponto de entrada. Configurado
+  // aqui mesmo, ao lado do cadastro de loja.
+  const [geofenceEditingId, setGeofenceEditingId] = useState<number | null>(null);
+  const [geofenceForm, setGeofenceForm] = useState<{ lat: string; lng: string; radius: string }>({ lat: "", lng: "", radius: "150" });
+  const [geofenceSaving, setGeofenceSaving] = useState(false);
+  const openGeofence = (s: Store) => {
+    setGeofenceEditingId(s.id);
+    setGeofenceForm({
+      lat: s.geofenceLat != null ? String(s.geofenceLat) : "",
+      lng: s.geofenceLng != null ? String(s.geofenceLng) : "",
+      radius: s.geofenceRadiusMeters != null ? String(s.geofenceRadiusMeters) : "150",
+    });
+  };
+  const useMyLocationForGeofence = () => {
+    if (!navigator.geolocation) { toast({ title: "Seu navegador não suporta geolocalização", variant: "destructive" }); return; }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => setGeofenceForm((f) => ({ ...f, lat: String(pos.coords.latitude), lng: String(pos.coords.longitude) })),
+      () => toast({ title: "Não foi possível obter sua localização", variant: "destructive" }),
+    );
+  };
+  const saveGeofence = async (id: number) => {
+    const lat = Number(geofenceForm.lat);
+    const lng = Number(geofenceForm.lng);
+    const radius = Number(geofenceForm.radius);
+    // Validação no cliente pra evitar salvar geofence vazio/errado sem
+    // querer (ex.: campo em branco vira 0 e a loja passa a sinalizar TODAS
+    // as batidas reais como fora do raio, já que ninguém bate ponto em 0,0).
+    const valid = geofenceForm.lat.trim() !== "" && geofenceForm.lng.trim() !== "" && geofenceForm.radius.trim() !== ""
+      && Number.isFinite(lat) && Math.abs(lat) <= 90
+      && Number.isFinite(lng) && Math.abs(lng) <= 180
+      && Number.isFinite(radius) && radius >= 20 && radius <= 5000;
+    if (!valid) {
+      toast({ title: "Preencha latitude, longitude e raio (20 a 5000 metros) válidos", variant: "destructive" });
+      return;
+    }
+    setGeofenceSaving(true);
+    try {
+      const upd = await api.stores.update(id, { geofenceLat: lat, geofenceLng: lng, geofenceRadiusMeters: radius });
+      setStores((prev) => prev.map((x) => x.id === id ? upd : x));
+      setGeofenceEditingId(null);
+      toast({ title: "Geofence salvo — batidas de entrada fora do raio serão sinalizadas pra revisão" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar geofence", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setGeofenceSaving(false); }
+  };
+  const clearGeofence = async (id: number) => {
+    setGeofenceSaving(true);
+    try {
+      const upd = await api.stores.update(id, { geofenceLat: null, geofenceLng: null, geofenceRadiusMeters: null });
+      setStores((prev) => prev.map((x) => x.id === id ? upd : x));
+      setGeofenceEditingId(null);
+      toast({ title: "Geofence desligado" });
+    } catch { toast({ title: "Erro", variant: "destructive" }); }
+    finally { setGeofenceSaving(false); }
+  };
   const [userRows, setUserRows] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [waSessions, setWaSessions] = useState<WASession[] | null>(null);
@@ -1885,32 +1941,70 @@ export default function AdminDashboard() {
                 <p className="text-xs text-muted-foreground py-2">Nenhuma loja cadastrada ainda.</p>
               ) : (
                 <div className="grid sm:grid-cols-2 gap-2">
-                  {stores.map((s) => (
-                    <div key={s.id} className="flex items-center gap-2 rounded-xl border border-border px-3 py-2" data-testid={`store-row-${s.id}`}>
-                      <span className={`text-sm font-medium flex-1 truncate ${s.isActive ? "" : "line-through text-muted-foreground"}`}>{s.name}</span>
-                      <span className={s.isActive ? "shk-badge-done" : "shk-badge-waiting"}>{s.isActive ? "Ativa" : "Inativa"}</span>
-                      <button onClick={async () => {
-                        const novo = prompt("Novo nome da loja:", s.name);
-                        if (!novo || !novo.trim() || novo.trim() === s.name) return;
-                        try {
-                          const upd = await api.stores.update(s.id, { name: novo.trim() });
-                          setStores((prev) => prev.map((x) => x.id === s.id ? upd : x));
-                        } catch (err) { toast({ title: err instanceof Error ? err.message : "Erro", variant: "destructive" }); }
-                      }} data-testid={`button-rename-store-${s.id}`}
-                        className="p-1.5 text-muted-foreground hover:text-primary hover:bg-blue-50 rounded-lg transition">
-                        <Pencil className="w-3.5 h-3.5" />
-                      </button>
-                      <button onClick={async () => {
-                        try {
-                          const upd = await api.stores.update(s.id, { isActive: !s.isActive });
-                          setStores((prev) => prev.map((x) => x.id === s.id ? upd : x));
-                        } catch { /* silent */ }
-                      }} data-testid={`button-toggle-store-${s.id}`}
-                        className={`text-[11px] font-semibold px-2 py-1 rounded-lg transition ${s.isActive ? "text-red-600 hover:bg-red-50" : "text-green-600 hover:bg-green-50"}`}>
-                        {s.isActive ? "Desativar" : "Reativar"}
-                      </button>
+                  {stores.map((s) => {
+                    const hasGeofence = s.geofenceLat != null && s.geofenceLng != null && s.geofenceRadiusMeters != null;
+                    return (
+                    <div key={s.id} className="rounded-xl border border-border px-3 py-2 space-y-1.5" data-testid={`store-row-${s.id}`}>
+                      <div className="flex items-center gap-2">
+                        <span className={`text-sm font-medium flex-1 truncate ${s.isActive ? "" : "line-through text-muted-foreground"}`}>{s.name}</span>
+                        <span className={s.isActive ? "shk-badge-done" : "shk-badge-waiting"}>{s.isActive ? "Ativa" : "Inativa"}</span>
+                        <button onClick={async () => {
+                          const novo = prompt("Novo nome da loja:", s.name);
+                          if (!novo || !novo.trim() || novo.trim() === s.name) return;
+                          try {
+                            const upd = await api.stores.update(s.id, { name: novo.trim() });
+                            setStores((prev) => prev.map((x) => x.id === s.id ? upd : x));
+                          } catch (err) { toast({ title: err instanceof Error ? err.message : "Erro", variant: "destructive" }); }
+                        }} data-testid={`button-rename-store-${s.id}`}
+                          className="p-1.5 text-muted-foreground hover:text-primary hover:bg-blue-50 rounded-lg transition">
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                        <button onClick={async () => {
+                          try {
+                            const upd = await api.stores.update(s.id, { isActive: !s.isActive });
+                            setStores((prev) => prev.map((x) => x.id === s.id ? upd : x));
+                          } catch { /* silent */ }
+                        }} data-testid={`button-toggle-store-${s.id}`}
+                          className={`text-[11px] font-semibold px-2 py-1 rounded-lg transition ${s.isActive ? "text-red-600 hover:bg-red-50" : "text-green-600 hover:bg-green-50"}`}>
+                          {s.isActive ? "Desativar" : "Reativar"}
+                        </button>
+                      </div>
+                      {/* Geofence do Ponto (pedido 15/09, análise Tangerino "Local de
+                          Interesse") — só sinaliza (nunca bloqueia) batida de entrada
+                          feita fora do raio configurado. */}
+                      {geofenceEditingId === s.id ? (
+                        <div className="space-y-1.5 bg-secondary/30 rounded-lg p-2">
+                          <div className="grid grid-cols-3 gap-1.5">
+                            <input placeholder="Latitude" value={geofenceForm.lat} onChange={(e) => setGeofenceForm({ ...geofenceForm, lat: e.target.value })}
+                              data-testid={`input-geofence-lat-${s.id}`} className="px-2 py-1 rounded-lg border border-border text-[11px]" />
+                            <input placeholder="Longitude" value={geofenceForm.lng} onChange={(e) => setGeofenceForm({ ...geofenceForm, lng: e.target.value })}
+                              data-testid={`input-geofence-lng-${s.id}`} className="px-2 py-1 rounded-lg border border-border text-[11px]" />
+                            <input placeholder="Raio (m)" type="number" min={20} max={5000} value={geofenceForm.radius} onChange={(e) => setGeofenceForm({ ...geofenceForm, radius: e.target.value })}
+                              data-testid={`input-geofence-radius-${s.id}`} className="px-2 py-1 rounded-lg border border-border text-[11px]" />
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            <button type="button" onClick={useMyLocationForGeofence} className="text-[10px] font-semibold text-primary px-2 py-1 rounded-lg border border-primary/30">
+                              Usar minha localização
+                            </button>
+                            <button type="button" disabled={geofenceSaving} onClick={() => saveGeofence(s.id)} data-testid={`button-save-geofence-${s.id}`}
+                              className="text-[10px] font-bold text-white bg-primary px-2 py-1 rounded-lg disabled:opacity-40">Salvar</button>
+                            {hasGeofence && (
+                              <button type="button" disabled={geofenceSaving} onClick={() => clearGeofence(s.id)}
+                                className="text-[10px] font-semibold text-red-600 px-2 py-1 rounded-lg border border-red-200">Desligar</button>
+                            )}
+                            <button type="button" onClick={() => setGeofenceEditingId(null)} className="text-[10px] font-semibold text-muted-foreground px-2 py-1">Cancelar</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button type="button" onClick={() => openGeofence(s)} data-testid={`button-geofence-${s.id}`}
+                          className="text-[10px] font-semibold text-muted-foreground hover:text-primary flex items-center gap-1">
+                          <MapPin className="w-3 h-3" />
+                          {hasGeofence ? `Geofence do Ponto: raio ${s.geofenceRadiusMeters}m` : "Geofence do Ponto: não configurado"}
+                        </button>
+                      )}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

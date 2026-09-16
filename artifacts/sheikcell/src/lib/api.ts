@@ -287,6 +287,10 @@ export type Store = {
   name: string;
   isActive: boolean;
   createdAt: string;
+  // Geofence do Ponto — null (qualquer um) = geofence não configurado.
+  geofenceLat?: number | null;
+  geofenceLng?: number | null;
+  geofenceRadiusMeters?: number | null;
 };
 
 // ─── Pagamentos entre Filiais ────────────────────────────────────────────────
@@ -1325,6 +1329,14 @@ export type WorkShift = {
   breakEnd: string | null;
   weekdays: number[];
   expectedMinutesPerDay: number | null;
+  toleranceMinutes: number;
+};
+
+export type Holiday = {
+  id: number;
+  date: string; // "YYYY-MM-DD"
+  name: string;
+  excusesExpected: boolean;
 };
 
 export type TimeBankClosure = {
@@ -1361,6 +1373,8 @@ export type TimeBankDay = {
   expectedMinutes: number;
   complete: boolean;
   leaveKind: "ferias" | "atestado" | "falta_justificada" | null;
+  holidayName?: string | null;
+  inconsistencies?: ("excesso_2h_diarias" | "interjornada_curta")[];
   entries: { kind: string; at: string }[];
 };
 
@@ -2573,12 +2587,18 @@ export const api = {
       signTimesheet: (periodMonth: string) =>
         req<{ id: number }>("/rh-dp/me/timesheet-signatures", { method: "POST", body: JSON.stringify({ periodMonth }) }),
     },
-    // Painel DP — 4 indicadores agregados (colaboradores/presença hoje,
-    // atestados e afastamentos, inconsistências de ponto, horas excedentes).
+    // Painel DP — indicadores agregados (colaboradores/presença hoje,
+    // atestados e afastamentos, inconsistências de ponto, horas excedentes,
+    // e os novos alertas de conformidade CLT — análise Tangerino 15/09).
     dashboardSummary: () => req<{
       activeEmployees: number; noPresenceToday: number;
       pendingVacationRequests: number; recentLeaveRecords: number;
       flaggedPunches: number; overtimeEmployeesCount: number; overtimeMinutesTotal: number;
+      clockAlerts: {
+        overtimeAbove2hEmployees: number; restBelow11hEmployees: number;
+        suspiciousManualPatternEmployees: number;
+        timeBankExpiredEmployees: number; timeBankExpiredMinutesTotal: number;
+      };
     }>("/rh-dp/dashboard-summary"),
     employees: {
       list: () => req<Employee[]>("/rh-dp/employees"),
@@ -2655,15 +2675,30 @@ export const api = {
       get: () => req<{
         pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean;
         companyMission: string | null; companyVision: string | null; companyValues: string | null;
+        timeBankValidityMonths: number | null;
       }>("/rh-dp/settings"),
       update: (data: Partial<{
         pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean;
         companyMission: string | null; companyVision: string | null; companyValues: string | null;
+        timeBankValidityMonths: number | null;
       }>) =>
         req<{
           pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean;
           companyMission: string | null; companyVision: string | null; companyValues: string | null;
+          timeBankValidityMonths: number | null;
         }>("/rh-dp/settings", { method: "PATCH", body: JSON.stringify(data) }),
+    },
+    // Calendário de feriados (pedido 15/09, análise Tangerino) — abate o
+    // expediente esperado do banco de horas.
+    holidays: {
+      list: (year?: number) => req<Holiday[]>(`/rh-dp/holidays${year ? `?year=${year}` : ""}`),
+      create: (data: { date: string; name: string; excusesExpected?: boolean }) =>
+        req<Holiday>("/rh-dp/holidays", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<{ date: string; name: string; excusesExpected: boolean }>) =>
+        req<Holiday>(`/rh-dp/holidays/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/holidays/${id}`, { method: "DELETE" }),
+      // Carrega o calendário nacional padrão de um ano de uma vez.
+      seedDefault: (year: number) => req<{ ok: boolean; inserted: number; total: number }>("/rh-dp/holidays/seed-default", { method: "POST", body: JSON.stringify({ year }) }),
     },
     shifts: {
       list: () => req<WorkShift[]>("/rh-dp/shifts"),
@@ -2960,7 +2995,7 @@ export const api = {
   stores: {
     list: (all?: boolean) => req<Store[]>(`/stores${all ? "?all=1" : ""}`),
     create: (name: string) => req<Store>("/stores", { method: "POST", body: JSON.stringify({ name }) }),
-    update: (id: number, data: Partial<{ name: string; isActive: boolean }>) =>
+    update: (id: number, data: Partial<{ name: string; isActive: boolean; geofenceLat: number | null; geofenceLng: number | null; geofenceRadiusMeters: number | null }>) =>
       req<Store>(`/stores/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   },
   teamStatus: {

@@ -1,5 +1,13 @@
-import { db, employeesTable, workShiftsTable, timeClockEntriesTable, timeBankAdjustmentsTable, leaveRecordsTable, type TimeClockEntry } from "@workspace/db";
+import { db, employeesTable, workShiftsTable, timeClockEntriesTable, timeBankAdjustmentsTable, leaveRecordsTable, holidaysTable, type TimeClockEntry, type WorkShift } from "@workspace/db";
 import { eq, and, gte, lte, asc, sum } from "drizzle-orm";
+
+// Inconsistências sinalizadas no dia (pedido 15/09, análise Tangerino
+// "Controle de Inconsistências") — só informativo, nunca bloqueia nada:
+// "excesso_2h_diarias" = mais de 2h de hora extra no dia (CLT art. 59 — limite
+// de referência); "interjornada_curta" = menos de 11h de descanso entre o fim
+// de um turno e o início do próximo (CLT art. 66 — descanso mínimo entre
+// jornadas).
+export type TimeBankDayInconsistency = "excesso_2h_diarias" | "interjornada_curta";
 
 export type TimeBankDay = {
   date: string; // YYYY-MM-DD (America/Sao_Paulo)
@@ -7,6 +15,8 @@ export type TimeBankDay = {
   expectedMinutes: number;
   complete: boolean; // false = falta bater alguma batida do turno (ex.: esqueceu a saída) — não conta no cálculo
   leaveKind: string | null; // "ferias" | "atestado" | "falta_justificada" | "falta_injustificada" | "outro" | null
+  holidayName: string | null; // nome do feriado no dia, se houver (ver holidaysTable)
+  inconsistencies: TimeBankDayInconsistency[];
   entries: { kind: string; at: string }[];
 };
 
@@ -27,6 +37,11 @@ function dayKeySaoPaulo(d: Date): string {
 function nextDayKey(key: string): string {
   const [y, m, d] = key.split("-").map(Number);
   return new Date(Date.UTC(y!, m! - 1, d! + 1)).toISOString().slice(0, 10);
+}
+
+function previousDayKey(key: string): string {
+  const [y, m, d] = key.split("-").map(Number);
+  return new Date(Date.UTC(y!, m! - 1, d! - 1)).toISOString().slice(0, 10);
 }
 
 function weekdayOfDayKey(key: string): number {
@@ -113,6 +128,46 @@ function pairShifts(sortedEntries: TimeClockEntry[]): ShiftResult[] {
   return results;
 }
 
+// Tolerância de atraso (pedido 15/09, análise Tangerino "Regras de Ponto" —
+// campo "Tolerância de Atrasos"): atraso na entrada dentro de
+// shift.toleranceMinutes não gera déficit — credita de volta os minutos
+// tolerados no turno, sem precisar de ajuste manual do RH. Só se aplica à
+// entrada (não à saída antecipada), escala fixa, e só quando o turno foi
+// batido normalmente (complete=true). Mutação in-place de propósito (mesmo
+// padrão de pairShifts, evita duplicar a estrutura só pra isso).
+function applyLateTolerance(shiftResults: ShiftResult[], shift: WorkShift | null): void {
+  if (!shift || shift.type !== "fixed" || !shift.startTime) return;
+  const toleranceMinutes = shift.toleranceMinutes ?? 0;
+  if (toleranceMinutes <= 0) return;
+  for (const r of shiftResults) {
+    if (!r.complete || r.minutes <= 0) continue;
+    const firstEntry = r.entries[0];
+    if (!firstEntry || firstEntry.kind !== "in") continue;
+    if (!shift.weekdays.includes(weekdayOfDayKey(r.dayKey))) continue;
+    const scheduledStart = new Date(`${r.dayKey}T${shift.startTime}:00-03:00`);
+    if (Number.isNaN(scheduledStart.getTime())) continue;
+    const lateMinutes = (firstEntry.at.getTime() - scheduledStart.getTime()) / 60000;
+    if (lateMinutes > 0 && lateMinutes <= toleranceMinutes) {
+      r.minutes += Math.round(lateMinutes);
+    }
+  }
+}
+
+// Primeira batida "in" / última batida "out" do dia civil (já pareadas por
+// pairShifts) — usadas pra medir o descanso entre jornadas (interjornada),
+// que compara o fim de um turno com o início do turno seguinte, mesmo que
+// caiam em dias civis diferentes.
+function dayFirstIn(byDay: Map<string, ShiftResult[]>, key: string): Date | null {
+  const first = byDay.get(key)?.[0]?.entries[0];
+  return first && first.kind === "in" ? first.at : null;
+}
+function dayLastOut(byDay: Map<string, ShiftResult[]>, key: string): Date | null {
+  const arr = byDay.get(key);
+  const last = arr?.[arr.length - 1];
+  const lastEntry = last?.entries[last.entries.length - 1];
+  return lastEntry && lastEntry.kind === "out" ? lastEntry.at : null;
+}
+
 export async function computeTimeBank(employeeId: number, tenantId: number, from: Date, to: Date): Promise<TimeBankResult> {
   const [employee] = await db.select().from(employeesTable)
     .where(and(eq(employeesTable.id, employeeId), eq(employeesTable.tenantId, tenantId)));
@@ -134,6 +189,7 @@ export async function computeTimeBank(employeeId: number, tenantId: number, from
     .orderBy(asc(timeClockEntriesTable.at));
 
   const shiftResults = pairShifts(entries);
+  applyLateTolerance(shiftResults, shift);
   const byDay = new Map<string, ShiftResult[]>();
   for (const r of shiftResults) {
     const arr = byDay.get(r.dayKey);
@@ -144,6 +200,16 @@ export async function computeTimeBank(employeeId: number, tenantId: number, from
   // expediente esperado (ver EXCUSED_LEAVE_KINDS acima).
   const fromKey = dayKeySaoPaulo(from);
   const toKey = dayKeySaoPaulo(to);
+
+  // Feriados no período (pedido 15/09, análise Tangerino "Calendário de
+  // Feriados"): mesma lógica de isenção de expediente esperado que férias/
+  // atestado/falta justificada — ver excusesExpected em holidaysTable.
+  const holidayRows = await db.select({
+    date: holidaysTable.date, name: holidaysTable.name, excusesExpected: holidaysTable.excusesExpected,
+  }).from(holidaysTable)
+    .where(and(eq(holidaysTable.tenantId, tenantId), gte(holidaysTable.date, fromKey), lte(holidaysTable.date, toKey)));
+  const holidayByDay = new Map<string, { name: string; excusesExpected: boolean }>();
+  for (const h of holidayRows) holidayByDay.set(h.date, { name: h.name, excusesExpected: h.excusesExpected });
   const leaveRows = await db.select({
     kind: leaveRecordsTable.kind,
     startDate: leaveRecordsTable.startDate,
@@ -186,24 +252,40 @@ export async function computeTimeBank(employeeId: number, tenantId: number, from
   for (const key of dayKeys) {
     const dayResults = byDay.get(key) ?? [];
     const leaveKind = leaveKindByDay.get(key) ?? null;
+    const holiday = holidayByDay.get(key) ?? null;
     let dayExpected = 0;
     // Escala "flexible" (sem horário fixo) nunca tem expediente esperado —
     // o banco de horas dela só soma o que foi trabalhado, nunca cobra falta.
-    // Dia coberto por férias/atestado/falta justificada também não gera
-    // expediente esperado — o colaborador estava de licença, não devendo.
-    if (shift && shift.type === "fixed" && shift.weekdays.includes(weekdayOfDayKey(key)) && !leaveKind) {
+    // Dia coberto por férias/atestado/falta justificada ou feriado (que
+    // isenta, ver excusesExpected) também não gera expediente esperado — o
+    // colaborador estava de licença/folga, não devendo.
+    if (shift && shift.type === "fixed" && shift.weekdays.includes(weekdayOfDayKey(key)) && !leaveKind && !(holiday?.excusesExpected)) {
       dayExpected = shift.expectedMinutesPerDay ?? 0;
     }
     expectedMinutes += dayExpected;
     const minutes = dayResults.reduce((s, r) => s + r.minutes, 0);
     const complete = dayResults.length === 0 ? true : dayResults.every((r) => r.complete);
     workedMinutes += minutes;
+
+    // Inconsistências sinalizadas (pedido 15/09, análise Tangerino) — só
+    // informativo, nunca altera o cálculo do saldo.
+    const inconsistencies: TimeBankDayInconsistency[] = [];
+    if (dayExpected > 0 && minutes - dayExpected > 120) inconsistencies.push("excesso_2h_diarias");
+    const firstIn = dayFirstIn(byDay, key);
+    const prevOut = dayLastOut(byDay, previousDayKey(key));
+    if (firstIn && prevOut) {
+      const restMinutes = (firstIn.getTime() - prevOut.getTime()) / 60000;
+      if (restMinutes >= 0 && restMinutes < 660) inconsistencies.push("interjornada_curta");
+    }
+
     days.push({
       date: key,
       workedMinutes: minutes,
       expectedMinutes: dayExpected,
       complete,
       leaveKind,
+      holidayName: holiday?.name ?? null,
+      inconsistencies,
       entries: dayResults.flatMap((r) => r.entries).map((e) => ({ kind: e.kind, at: e.at.toISOString() })),
     });
   }
@@ -264,6 +346,47 @@ export async function employeeNeedsClockInToday(
       lte(timeClockEntriesTable.at, dayEnd),
     )).limit(1);
   return !hasIn;
+}
+
+function hhmmSaoPaulo(d: Date): string {
+  return new Intl.DateTimeFormat("en-GB", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit", hour12: false }).format(d);
+}
+
+// "Pontos britânicos" adaptado (pedido 15/09, análise Tangerino) — o
+// Tangerino sinaliza quando um relógio de ponto FÍSICO registra horários
+// exatos demais, sinal clássico de fraude (marcação pré-configurada em vez
+// da hora real). Nosso sistema não tem esse risco pra batida do próprio
+// colaborador (o horário é sempre now() do servidor, o colaborador não pode
+// editar) — o risco equivalente aqui é o RH lançar manualmente (source=
+// "admin", ver PontoAdmin/"Editar dia") sempre EXATAMENTE no horário da
+// escala em vez de conferir o horário real trabalhado, o que apaga
+// silenciosamente atrasos/saídas antecipadas reais. Sinaliza (não bloqueia)
+// quando 80%+ das batidas manuais do período batem exatamente com o horário
+// da escala, com pelo menos 5 batidas manuais no período.
+export async function hasSuspiciousManualPattern(employeeId: number, tenantId: number, from: Date, to: Date): Promise<boolean> {
+  const [employee] = await db.select().from(employeesTable)
+    .where(and(eq(employeesTable.id, employeeId), eq(employeesTable.tenantId, tenantId)));
+  const shift = employee?.shiftId
+    ? (await db.select().from(workShiftsTable).where(and(eq(workShiftsTable.id, employee.shiftId), eq(workShiftsTable.tenantId, tenantId))))[0] ?? null
+    : null;
+  if (!shift || shift.type !== "fixed" || !shift.startTime || !shift.endTime) return false;
+
+  const rows = await db.select({ kind: timeClockEntriesTable.kind, at: timeClockEntriesTable.at })
+    .from(timeClockEntriesTable)
+    .where(and(
+      eq(timeClockEntriesTable.employeeId, employeeId),
+      eq(timeClockEntriesTable.tenantId, tenantId),
+      eq(timeClockEntriesTable.source, "admin"),
+      gte(timeClockEntriesTable.at, from),
+      lte(timeClockEntriesTable.at, to),
+    ));
+  const relevant = rows.filter((r) => r.kind === "in" || r.kind === "out");
+  if (relevant.length < 5) return false;
+  const exactMatches = relevant.filter((r) => {
+    const hhmm = hhmmSaoPaulo(r.at);
+    return (r.kind === "in" && hhmm === shift.startTime) || (r.kind === "out" && hhmm === shift.endTime);
+  }).length;
+  return exactMatches / relevant.length >= 0.8;
 }
 
 export { dayKeySaoPaulo };

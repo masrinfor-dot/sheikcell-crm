@@ -50,13 +50,33 @@ export async function isValidStoreName(name: string, tenantId: number, currentVa
   return stores.some((s) => s.name === name);
 }
 
-// Editar loja (renomear / ativar / desativar)
+// Editar loja (renomear / ativar / desativar / geofence do Ponto)
 router.patch("/stores/:id", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
-  const update: Partial<{ name: string; isActive: boolean }> = {};
+  const update: Partial<{ name: string; isActive: boolean; geofenceLat: number | null; geofenceLng: number | null; geofenceRadiusMeters: number | null }> = {};
   if (typeof req.body?.name === "string" && req.body.name.trim()) update.name = req.body.name.trim().slice(0, 120);
   if (typeof req.body?.isActive === "boolean") update.isActive = req.body.isActive;
+  // Geofence do Ponto (pedido 15/09, análise Tangerino "Local de
+  // Interesse") — os 3 campos vêm sempre juntos: ou os 3 preenchidos (liga o
+  // geofence) ou os 3 null (desliga). Não dá pra configurar só um deles.
+  if ("geofenceLat" in (req.body ?? {}) || "geofenceLng" in (req.body ?? {}) || "geofenceRadiusMeters" in (req.body ?? {})) {
+    const lat = req.body.geofenceLat;
+    const lng = req.body.geofenceLng;
+    const radius = req.body.geofenceRadiusMeters;
+    const allNull = lat == null && lng == null && radius == null;
+    const allValid = typeof lat === "number" && Number.isFinite(lat) && Math.abs(lat) <= 90
+      && typeof lng === "number" && Number.isFinite(lng) && Math.abs(lng) <= 180
+      && typeof radius === "number" && Number.isFinite(radius) && radius >= 20 && radius <= 5000;
+    if (allNull) {
+      update.geofenceLat = null; update.geofenceLng = null; update.geofenceRadiusMeters = null;
+    } else if (allValid) {
+      update.geofenceLat = lat; update.geofenceLng = lng; update.geofenceRadiusMeters = Math.round(radius);
+    } else {
+      res.status(400).json({ error: "Geofence inválido — informe latitude, longitude e raio (20 a 5000 metros), ou os 3 vazios pra desligar" });
+      return;
+    }
+  }
   if (Object.keys(update).length === 0) { res.status(400).json({ error: "Nada para atualizar" }); return; }
   try {
     const [store] = await db.update(storesTable).set(update)

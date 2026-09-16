@@ -1,4 +1,4 @@
-import { pgTable, serial, text, boolean, timestamp, integer } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, boolean, timestamp, integer, doublePrecision } from "drizzle-orm/pg-core";
 
 // Lojas da rede — cadastradas pelo admin e usadas como opção de seleção
 // no cadastro de vendedores (users.storeName) e clientes (crm_contacts.serviceStore).
@@ -19,4 +19,13 @@ export const storesTable = pgTable("stores", {
   city: text("city"),
   state: text("state"), // UF, 2 letras
   zipCode: text("zip_code"),
+  // Geofence do Ponto (pedido 15/09, análise Tangerino "Local de Interesse")
+  // — raio permitido pra bater ponto de entrada nesta loja. Null (qualquer
+  // um dos 3 campos) = geofence não configurado pra esta loja: comportamento
+  // de sempre, nada é sinalizado por localização. Configurado, o backend só
+  // SINALIZA (flagged) a batida feita fora do raio — nunca bloqueia (mesmo
+  // espírito de reconhecimento facial/foto: sinaliza, RH revisa depois).
+  geofenceLat: doublePrecision("geofence_lat"),
+  geofenceLng: doublePrecision("geofence_lng"),
+  geofenceRadiusMeters: integer("geofence_radius_meters"),
 });

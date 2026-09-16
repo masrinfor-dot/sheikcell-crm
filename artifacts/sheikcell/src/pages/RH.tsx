@@ -4,7 +4,7 @@ import {
   api, API_BASE, canEditModule,
   type RhStage, type RhQuestion, type RhCandidate, type RhPosition, type RhProfileType,
   type Employee, type WorkShift, type TimeClockEntry, type TimeBankResult, type TimeBankSummaryRow, type LeaveRecord, type TimeBankClosure,
-  type Store, type User, type EmployeeDocument, type EmployeeContractTemplate, type VacationRequest,
+  type Store, type User, type EmployeeDocument, type EmployeeContractTemplate, type VacationRequest, type Holiday,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
@@ -204,7 +204,7 @@ export default function RH() {
   const { user } = useAuth();
   const canEdit = canEditModule(user, "rh");
   const [group, setGroup] = useState<"recrutamento" | "dp">("recrutamento");
-  const [dpView, setDpView] = useState<"painel" | "colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos" | "ferias" | "fechamentos">("painel");
+  const [dpView, setDpView] = useState<"painel" | "colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos" | "ferias" | "feriados" | "fechamentos">("painel");
 
   return (
     <div className="space-y-4">
@@ -235,6 +235,7 @@ export default function RH() {
               { key: "banco-horas", label: "Banco de horas", icon: Wallet },
               { key: "afastamentos", label: "Afastamentos", icon: CalendarClock },
               { key: "ferias", label: "Férias", icon: Palmtree },
+              { key: "feriados", label: "Feriados", icon: CalendarClock },
               { key: "fechamentos", label: "Fechamentos", icon: Archive },
             ] as const).map(({ key, label, icon: Icon }) => (
               <button key={key} onClick={() => setDpView(key)} data-testid={`button-dp-${key}`}
@@ -250,6 +251,7 @@ export default function RH() {
           {dpView === "banco-horas" && <BancoHoras canEdit={canEdit} />}
           {dpView === "afastamentos" && <Afastamentos canEdit={canEdit} />}
           {dpView === "ferias" && <Ferias canEdit={canEdit} />}
+          {dpView === "feriados" && <Feriados canEdit={canEdit} />}
           {dpView === "fechamentos" && <Fechamentos canEdit={canEdit} />}
         </div>
       )}
@@ -2750,7 +2752,7 @@ function Escalas({ canEdit }: { canEdit: boolean }) {
                   <p className="text-[11px] text-muted-foreground">Sem horário fixo — sem cobrança de expediente esperado, sem ponto obrigatório.</p>
                 ) : (
                   <p className="text-[11px] text-muted-foreground">
-                    {s.startTime}–{s.endTime}{s.breakStart && s.breakEnd ? ` (intervalo ${s.breakStart}–${s.breakEnd})` : ""} · {formatMinutes(s.expectedMinutesPerDay ?? 0)}/dia · {s.weekdays.map((d) => WEEKDAY_LABELS[d]).join(", ")}
+                    {s.startTime}–{s.endTime}{s.breakStart && s.breakEnd ? ` (intervalo ${s.breakStart}–${s.breakEnd})` : ""} · {formatMinutes(s.expectedMinutesPerDay ?? 0)}/dia · {s.weekdays.map((d) => WEEKDAY_LABELS[d]).join(", ")} · tolerância {s.toleranceMinutes ?? 10}min
                   </p>
                 )}
               </div>
@@ -2829,6 +2831,14 @@ function Escalas({ canEdit }: { canEdit: boolean }) {
                     ))}
                   </div>
                 </div>
+                <label className="text-xs block">
+                  Tolerância de atraso (minutos)
+                  <input type="number" min={0} max={120} value={editing.toleranceMinutes ?? 10}
+                    onChange={(ev) => setEditing({ ...editing, toleranceMinutes: Number(ev.target.value) })}
+                    data-testid="input-shift-tolerance"
+                    className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+                  <span className="text-[10px] text-muted-foreground">Atraso na entrada dentro desse limite não gera déficit no banco de horas.</span>
+                </label>
               </>
             )}
             <button onClick={save} disabled={saving} data-testid="button-save-shift"
@@ -2864,11 +2874,30 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
   const [waSessions, setWaSessions] = useState<{ sessionKey: string; displayName: string | null; phoneNumber: string | null }[]>([]);
   const [checkInSessionKey, setCheckInSessionKey] = useState<string>("");
   const [facialRecognitionEnabled, setFacialRecognitionEnabled] = useState(false);
+  // Vencimento do banco de horas (pedido 15/09, análise Tangerino) — texto
+  // livre pra deixar apagar o campo (vira null = sem vencimento).
+  const [timeBankValidityMonths, setTimeBankValidityMonths] = useState<string>("");
   const [savingSettings, setSavingSettings] = useState(false);
   useEffect(() => {
     api.chat.waSessions().then(setWaSessions).catch(() => {});
-    api.rhDp.settings.get().then((s) => { setCheckInSessionKey(s.pontoCheckInSessionKey ?? ""); setFacialRecognitionEnabled(s.facialRecognitionEnabled); }).catch(() => {});
+    api.rhDp.settings.get().then((s) => {
+      setCheckInSessionKey(s.pontoCheckInSessionKey ?? "");
+      setFacialRecognitionEnabled(s.facialRecognitionEnabled);
+      setTimeBankValidityMonths(s.timeBankValidityMonths != null ? String(s.timeBankValidityMonths) : "");
+    }).catch(() => {});
   }, []);
+  const saveTimeBankValidity = async () => {
+    setSavingSettings(true);
+    try {
+      const n = timeBankValidityMonths.trim() ? Number(timeBankValidityMonths) : null;
+      await api.rhDp.settings.update({ timeBankValidityMonths: n });
+      toast({ title: n ? `Vencimento do banco de horas: ${n} meses` : "Vencimento do banco de horas desligado" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSavingSettings(false);
+    }
+  };
   const saveCheckInSession = async (value: string) => {
     setSavingSettings(true);
     try {
@@ -3023,6 +3052,30 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
           </label>
         ) : (
           <p className="text-xs font-semibold mt-1">{facialRecognitionEnabled ? "Ligado" : "Desligado"} <span className="text-[11px] font-normal text-muted-foreground">· só admin altera</span></p>
+        )}
+      </div>
+
+      <div className="shk-card p-4 space-y-1.5">
+        <p className="text-xs font-semibold flex items-center gap-1.5"><Wallet className="w-3.5 h-3.5 text-primary" /> Vencimento do banco de horas</p>
+        <p className="text-[11px] text-muted-foreground">
+          Passado esse prazo, um mês fechado com saldo positivo aparece como "vencido" no Painel DP pra você decidir
+          (compensar ou pagar) — não zera nem desconta nada sozinho. Deixe em branco pra nunca vencer.
+        </p>
+        {isAdmin ? (
+          <div className="flex items-center gap-1.5 mt-1">
+            <input type="number" min={1} max={60} placeholder="sem vencimento" value={timeBankValidityMonths}
+              onChange={(e) => setTimeBankValidityMonths(e.target.value)} disabled={savingSettings}
+              data-testid="input-time-bank-validity"
+              className="w-28 px-3 py-1.5 rounded-xl border border-border text-xs bg-white disabled:opacity-50" />
+            <span className="text-[11px] text-muted-foreground">meses</span>
+            <button onClick={saveTimeBankValidity} disabled={savingSettings} data-testid="button-save-time-bank-validity"
+              className="px-2.5 py-1.5 rounded-xl bg-primary text-white text-[11px] font-bold disabled:opacity-40">Salvar</button>
+          </div>
+        ) : (
+          <p className="text-xs font-semibold mt-1">
+            {timeBankValidityMonths ? `${timeBankValidityMonths} meses` : "Sem vencimento"}
+            <span className="text-[11px] font-normal text-muted-foreground"> · só admin altera</span>
+          </p>
         )}
       </div>
 
@@ -3220,12 +3273,17 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
 // Sem métrica inventada: "Dispositivos"/"relógios de ponto" e "Alertas" do
 // Tangerino ficaram de fora por enquanto (não se aplicam ou não têm dado
 // real aqui ainda) — ver claude/backlog-pendencias.md.
-type DpView = "painel" | "colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos" | "ferias" | "fechamentos";
+type DpView = "painel" | "colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos" | "ferias" | "feriados" | "fechamentos";
 function PainelDP({ onNavigate }: { onNavigate: (view: DpView) => void }) {
   const [summary, setSummary] = useState<{
     activeEmployees: number; noPresenceToday: number;
     pendingVacationRequests: number; recentLeaveRecords: number;
     flaggedPunches: number; overtimeEmployeesCount: number; overtimeMinutesTotal: number;
+    clockAlerts: {
+      overtimeAbove2hEmployees: number; restBelow11hEmployees: number;
+      suspiciousManualPatternEmployees: number;
+      timeBankExpiredEmployees: number; timeBankExpiredMinutesTotal: number;
+    };
   } | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -3291,6 +3349,54 @@ function PainelDP({ onNavigate }: { onNavigate: (view: DpView) => void }) {
             Tem {summary.flaggedPunches} ponto{summary.flaggedPunches === 1 ? "" : "s"} sinalizado{summary.flaggedPunches === 1 ? "" : "s"} pra revisão — confira em "Registros de Ponto".
           </p>
         </button>
+      )}
+
+      {/* Alertas de conformidade CLT (pedido 15/09, análise Tangerino
+          "Controle de Inconsistências") — só aparecem quando há algo a
+          revisar; nunca bloqueiam nada, é só informativo pro RH decidir. */}
+      {!loading && summary && (
+        summary.clockAlerts.overtimeAbove2hEmployees > 0 || summary.clockAlerts.restBelow11hEmployees > 0
+        || summary.clockAlerts.suspiciousManualPatternEmployees > 0 || summary.clockAlerts.timeBankExpiredEmployees > 0
+      ) && (
+        <div className="space-y-1.5">
+          <p className="text-[10px] font-bold text-muted-foreground uppercase">Alertas de conformidade (mês corrente)</p>
+          {summary.clockAlerts.overtimeAbove2hEmployees > 0 && (
+            <button onClick={() => onNavigate("banco-horas")} data-testid="alert-painel-excesso-2h"
+              className="w-full shk-card p-3 flex items-center gap-2 border-amber-200 bg-amber-50 text-left hover:bg-amber-100/60 transition">
+              <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
+              <p className="text-xs text-amber-700">
+                {summary.clockAlerts.overtimeAbove2hEmployees} colaborador(es) com dia(s) de mais de 2h de hora extra — confira em "Banco de horas".
+              </p>
+            </button>
+          )}
+          {summary.clockAlerts.restBelow11hEmployees > 0 && (
+            <button onClick={() => onNavigate("banco-horas")} data-testid="alert-painel-interjornada"
+              className="w-full shk-card p-3 flex items-center gap-2 border-amber-200 bg-amber-50 text-left hover:bg-amber-100/60 transition">
+              <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
+              <p className="text-xs text-amber-700">
+                {summary.clockAlerts.restBelow11hEmployees} colaborador(es) com menos de 11h de descanso entre turnos — confira em "Banco de horas".
+              </p>
+            </button>
+          )}
+          {summary.clockAlerts.suspiciousManualPatternEmployees > 0 && (
+            <button onClick={() => onNavigate("ponto")} data-testid="alert-painel-padrao-suspeito"
+              className="w-full shk-card p-3 flex items-center gap-2 border-red-200 bg-red-50 text-left hover:bg-red-100/60 transition">
+              <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" />
+              <p className="text-xs text-red-700">
+                {summary.clockAlerts.suspiciousManualPatternEmployees} colaborador(es) com lançamentos manuais sempre no horário exato da escala — vale conferir se o horário real está sendo registrado.
+              </p>
+            </button>
+          )}
+          {summary.clockAlerts.timeBankExpiredEmployees > 0 && (
+            <button onClick={() => onNavigate("fechamentos")} data-testid="alert-painel-banco-vencido"
+              className="w-full shk-card p-3 flex items-center gap-2 border-red-200 bg-red-50 text-left hover:bg-red-100/60 transition">
+              <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" />
+              <p className="text-xs text-red-700">
+                Banco de horas vencido: {summary.clockAlerts.timeBankExpiredEmployees} colaborador(es), {formatMinutes(summary.clockAlerts.timeBankExpiredMinutesTotal)} — decida compensar ou pagar em "Fechamentos".
+              </p>
+            </button>
+          )}
+        </div>
       )}
     </div>
   );
@@ -3409,12 +3515,26 @@ function BancoHoras({ canEdit }: { canEdit: boolean }) {
               )
             )}
             <div className="max-h-[40vh] overflow-y-auto space-y-1">
-              {detail.result.days.filter((d) => d.entries.length > 0 || d.expectedMinutes > 0 || d.leaveKind).map((d) => (
-                <div key={d.date} className="flex items-center justify-between text-[11px] bg-secondary/30 rounded-lg px-3 py-1.5">
-                  <span>{new Date(`${d.date}T12:00:00`).toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit", month: "2-digit" })}</span>
-                  <span className={!d.complete ? "text-amber-600 font-semibold" : d.leaveKind ? "text-blue-600 font-semibold" : ""}>
-                    {!d.complete ? "incompleto (falta batida)" : d.leaveKind ? LEAVE_LABELS[d.leaveKind] : `${formatMinutes(d.workedMinutes)} / ${formatMinutes(d.expectedMinutes)}`}
-                  </span>
+              {detail.result.days.filter((d) => d.entries.length > 0 || d.expectedMinutes > 0 || d.leaveKind || d.holidayName).map((d) => (
+                <div key={d.date} className="flex items-center justify-between gap-2 text-[11px] bg-secondary/30 rounded-lg px-3 py-1.5">
+                  <span className="shrink-0">{new Date(`${d.date}T12:00:00`).toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit", month: "2-digit" })}</span>
+                  <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                    {(d.inconsistencies ?? []).includes("excesso_2h_diarias") && (
+                      <span className="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-semibold" title="Mais de 2h de hora extra no dia">+2h extra</span>
+                    )}
+                    {(d.inconsistencies ?? []).includes("interjornada_curta") && (
+                      <span className="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-semibold" title="Menos de 11h de descanso entre turnos">descanso curto</span>
+                    )}
+                    <span className={!d.complete ? "text-amber-600 font-semibold" : d.leaveKind ? "text-blue-600 font-semibold" : d.holidayName ? "text-purple-600 font-semibold" : ""}>
+                      {!d.complete
+                        ? "incompleto (falta batida)"
+                        : d.leaveKind
+                          ? LEAVE_LABELS[d.leaveKind]
+                          : d.holidayName && d.expectedMinutes === 0
+                            ? `Feriado: ${d.holidayName}`
+                            : `${formatMinutes(d.workedMinutes)} / ${formatMinutes(d.expectedMinutes)}`}
+                    </span>
+                  </div>
                 </div>
               ))}
             </div>
@@ -3678,6 +3798,143 @@ function previousMonthStr(): string {
 function monthLabel(m: string): string {
   const [y, mo] = m.split("-").map(Number);
   return new Date(y!, mo! - 1, 1).toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+}
+
+// ── Feriados ─────────────────────────────────────────────────────────────
+// Calendário de feriados (pedido 15/09, análise Tangerino "Calendário de
+// Feriados") — abate o expediente esperado do banco de horas, igual férias/
+// atestado/falta justificada. "Carregar padrão" preenche de uma vez o
+// calendário nacional do ano (feriados fixos + móveis calculados a partir da
+// Páscoa), sem duplicar o que já foi cadastrado/editado manualmente.
+function Feriados({ canEdit }: { canEdit: boolean }) {
+  const { toast } = useToast();
+  const [year, setYear] = useState(new Date().getFullYear());
+  const [holidays, setHolidays] = useState<Holiday[]>([]);
+  const [editing, setEditing] = useState<Partial<Holiday> | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [seeding, setSeeding] = useState(false);
+
+  const load = () => api.rhDp.holidays.list(year).then(setHolidays).catch(() => {});
+  useEffect(() => { load(); }, [year]);
+
+  const seedDefault = async () => {
+    setSeeding(true);
+    try {
+      const r = await api.rhDp.holidays.seedDefault(year);
+      toast({ title: r.inserted > 0 ? `${r.inserted} feriado(s) carregado(s)` : "Calendário já estava completo" });
+      load();
+    } catch (err) {
+      toast({ title: "Erro ao carregar calendário padrão", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setSeeding(false); }
+  };
+
+  const save = async () => {
+    if (!editing || saving) return;
+    if (!editing.date || !editing.name?.trim()) { toast({ title: "Preencha data e nome do feriado", variant: "destructive" }); return; }
+    setSaving(true);
+    try {
+      if (editing.id) await api.rhDp.holidays.update(editing.id, editing);
+      else await api.rhDp.holidays.create({ date: editing.date, name: editing.name.trim(), excusesExpected: editing.excusesExpected });
+      setEditing(null);
+      load();
+      toast({ title: "Feriado salvo!" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setSaving(false); }
+  };
+
+  const remove = async (h: Holiday) => {
+    if (!window.confirm(`Excluir o feriado "${h.name}"?`)) return;
+    try { await api.rhDp.holidays.remove(h.id); load(); } catch { toast({ title: "Erro", variant: "destructive" }); }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="shk-card p-4 flex flex-wrap gap-2 items-end">
+        <label className="text-xs">
+          Ano
+          <input type="number" value={year} onChange={(e) => setYear(Number(e.target.value))}
+            className="block mt-0.5 w-28 px-3 py-1.5 rounded-xl border border-border text-xs" />
+        </label>
+        {canEdit && (
+          <>
+            <button onClick={seedDefault} disabled={seeding} data-testid="button-seed-holidays"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-primary/30 text-primary text-xs font-bold disabled:opacity-40">
+              <RefreshCw className={`w-3.5 h-3.5 ${seeding ? "animate-spin" : ""}`} /> Carregar calendário nacional de {year}
+            </button>
+            <button onClick={() => setEditing({ date: `${year}-01-01`, excusesExpected: true })} data-testid="button-new-holiday"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold">
+              <Plus className="w-3.5 h-3.5" /> Novo feriado
+            </button>
+          </>
+        )}
+      </div>
+      <p className="text-[11px] text-muted-foreground px-1">
+        Feriado com "isenta expediente" ligado abate o esperado do banco de horas nesse dia, igual férias/atestado.
+        Carnaval e Corpus Christi entram desligados (ponto facultativo) — ligue manualmente se sua loja fecha nesses dias.
+      </p>
+
+      {holidays.length === 0 ? (
+        <div className="shk-card p-8 text-center text-muted-foreground">
+          <CalendarClock className="w-8 h-8 mx-auto mb-2 opacity-30" />
+          <p className="text-sm font-semibold">Nenhum feriado cadastrado em {year}</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {holidays.map((h) => (
+            <div key={h.id} className="shk-card p-4 flex items-center gap-3" data-testid={`holiday-${h.id}`}>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <p className="font-bold text-sm">{h.name}</p>
+                  {!h.excusesExpected && <span className="text-[10px] font-bold border px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 border-blue-100">Facultativo</span>}
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  {new Date(`${h.date}T12:00:00`).toLocaleDateString("pt-BR", { weekday: "long", day: "2-digit", month: "2-digit", year: "numeric" })}
+                  {" · "}{h.excusesExpected ? "isenta expediente" : "não isenta expediente"}
+                </p>
+              </div>
+              {canEdit && (
+                <div className="flex gap-1">
+                  <button onClick={() => setEditing(h)} className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground"><Pencil className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => remove(h)} className="p-1.5 rounded-lg hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {editing && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="shk-card w-full max-w-md p-6 my-8 bg-white space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold">{editing.id ? "Editar feriado" : "Novo feriado"}</h3>
+              <button onClick={() => setEditing(null)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <label className="text-xs block">
+              Data
+              <input type="date" value={editing.date ?? ""} onChange={(ev) => setEditing({ ...editing, date: ev.target.value })}
+                className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+            </label>
+            <label className="text-xs block">
+              Nome
+              <input value={editing.name ?? ""} onChange={(ev) => setEditing({ ...editing, name: ev.target.value })}
+                placeholder="Aniversário da cidade" className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+            </label>
+            <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+              <input type="checkbox" checked={editing.excusesExpected !== false}
+                onChange={(ev) => setEditing({ ...editing, excusesExpected: ev.target.checked })} />
+              Isenta expediente esperado do banco de horas
+            </label>
+            <button onClick={save} disabled={saving} data-testid="button-save-holiday"
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
+              <Save className="w-3.5 h-3.5" /> {saving ? "Salvando..." : "Salvar"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function Fechamentos({ canEdit }: { canEdit: boolean }) {

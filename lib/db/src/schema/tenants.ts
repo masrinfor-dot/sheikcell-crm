@@ -58,6 +58,14 @@ export const tenantsTable = pgTable("tenants", {
   // biométrico é sensível (LGPD): default false, e só roda se o colaborador
   // já tiver uma foto de referência cadastrada.
   facialRecognitionEnabled: boolean("facial_recognition_enabled").notNull().default(false),
+  // Vencimento do banco de horas em meses (pedido 15/09, análise Tangerino
+  // "Tempo de Validade do Banco de Horas") — null = sem vencimento
+  // (comportamento de sempre, banco de horas nunca expira). Configurado,
+  // NÃO zera/desconta nada automaticamente (não temos rotina de pagamento de
+  // horas extras pra fazer esse acerto com segurança) — só alerta o RH no
+  // Painel DP e no fechamento quando um mês fechado com saldo positivo passa
+  // da validade, pra decidir manualmente (compensar ou pagar).
+  timeBankValidityMonths: integer("time_bank_validity_months"),
   // Endereço público da Vitrine de Aparelhos (/vitrine/:slug) — null = a loja
   // ainda não escolheu um endereço (link desligado). Único entre lojas.
   catalogSlug: text("catalog_slug"),

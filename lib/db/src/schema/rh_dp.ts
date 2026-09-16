@@ -84,8 +84,33 @@ export const workShiftsTable = pgTable("work_shifts", {
   // menos intervalo) e cacheado aqui pra não recalcular a cada consulta.
   // Nulo quando type="flexible" (não há expediente esperado a cobrar).
   expectedMinutesPerDay: integer("expected_minutes_per_day"),
+  // Tolerância de atraso em minutos (pedido 15/09, análise Tangerino "Regras
+  // de Ponto") — antes só existia um GRACE_MINUTES=15 fixo no código, usado
+  // SÓ pra decidir quando mandar o lembrete de WhatsApp; agora também entra
+  // no cálculo do banco de horas (ver applyLateTolerance em lib/timeBank.ts):
+  // atraso na entrada dentro da tolerância não gera déficit. Padrão 10 min
+  // (mesmo padrão do Tangerino).
+  toleranceMinutes: integer("tolerance_minutes").notNull().default(10),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// Calendário de feriados (pedido 15/09, análise Tangerino "Calendário de
+// Feriados") — abate o expediente esperado do banco de horas no dia, igual
+// férias/atestado/falta justificada (ver EXCUSED_LEAVE_KINDS em timeBank.ts).
+// excusesExpected=false serve pro feriado facultativo (ex.: Carnaval,
+// Corpus Christi) — entra no calendário/visualização mas NÃO isenta
+// expediente por padrão, porque juridicamente não é feriado obrigatório; o
+// admin pode marcar manualmente como isento se a loja fechar mesmo assim.
+export const holidaysTable = pgTable("holidays", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  date: date("date").notNull(), // "YYYY-MM-DD"
+  name: text("name").notNull(),
+  excusesExpected: boolean("excuses_expected").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("holidays_tenant_date_unique").on(t.tenantId, t.date),
+]);
 
 // Fato histórico: sem FK em employeeId — sobrevive à exclusão do
 // colaborador, mesmo padrão de attendance_logs.sectorId/attendantId.
@@ -288,3 +313,4 @@ export type TimeBankClosure = typeof timeBankClosuresTable.$inferSelect;
 export type TimesheetSignature = typeof timesheetSignaturesTable.$inferSelect;
 export type EmployeeDocument = typeof employeeDocumentsTable.$inferSelect;
 export type EmployeeContractTemplate = typeof employeeContractTemplatesTable.$inferSelect;
+export type Holiday = typeof holidaysTable.$inferSelect;

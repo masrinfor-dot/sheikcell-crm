@@ -2,11 +2,12 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import {
   db, employeesTable, workShiftsTable, timeClockEntriesTable, timeBankAdjustmentsTable, leaveRecordsTable,
   timeBankClosuresTable, usersTable, storesTable, tenantsTable, vacationRequestsTable, timesheetSignaturesTable,
+  holidaysTable,
 } from "@workspace/db";
 import { eq, and, desc, asc, gte, lte, inArray, sql } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireTenant, tenantIdOf } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
-import { computeTimeBank, nextPunchKind, dayKeySaoPaulo, employeeNeedsClockInToday } from "../lib/timeBank";
+import { computeTimeBank, nextPunchKind, dayKeySaoPaulo, employeeNeedsClockInToday, hasSuspiciousManualPattern } from "../lib/timeBank";
 import { computeVacationDeadline } from "../lib/vacationDeadline";
 import { checkFaceMatch } from "../lib/facialRecognition";
 import { normalizePhone } from "../lib/phone";
@@ -79,6 +80,18 @@ const PUNCH_PHOTO_MIMES: Record<string, string> = {
 };
 const MAX_PUNCH_PHOTO_BYTES = 10 * 1024 * 1024; // 10 MB
 
+// Distância em metros entre 2 coordenadas (fórmula de Haversine) — usada só
+// pra sinalizar (nunca bloquear) a batida de entrada longe demais do
+// geofence da loja (pedido 15/09, análise Tangerino "Local de Interesse").
+function distanceMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371000;
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 async function savePunchPhoto(base64: string, rawMimetype: string): Promise<string> {
   const mimetype = rawMimetype.split(";")[0]!.trim().toLowerCase();
   const ext = PUNCH_PHOTO_MIMES[mimetype];
@@ -97,15 +110,15 @@ async function savePunchPhoto(base64: string, rawMimetype: string): Promise<stri
 // rotas sempre liberadas, 423 pro resto. Só se aplica a quem tem employee
 // vinculado com escala "fixed" prevendo expediente hoje — ver
 // employeeNeedsClockInToday em lib/timeBank.ts.
-// DESLIGADO TEMPORARIAMENTE (09/09, a pedido do lojista): enquanto o módulo
-// de RH/Ponto está em reparo (bugs sendo corrigidos), o bloqueio obrigatório
-// estava travando o acesso de vendedores ao sistema inteiro. Com isto em
-// `false`, ninguém é bloqueado por falta de ponto — nem o backend (423) nem
-// a tela cheia (PontoGate.tsx, via /rh-dp/me/clock-status abaixo). O registro
-// de ponto em si continua funcionando normalmente pra quem quiser bater;
-// só a EXIGÊNCIA que está suspensa. Voltar para `true` depois que o RH
-// estiver confirmado corrigido e o lojista quiser reativar a obrigatoriedade.
-export const CLOCK_IN_GATE_ENABLED = false;
+// REATIVADO (16/09, junto com a rodada de conformidade CLT — calendário de
+// feriados, tolerância de atraso, vencimento do banco de horas, alertas de
+// hora extra >2h/dia, interjornada <11h, padrão suspeito de lançamento
+// manual, e geofence por loja). Esteve `false` desde 09/09 enquanto os bugs
+// do módulo de RH/Ponto eram corrigidos (ver histórico abaixo) — com o
+// módulo revisado, testado e ampliado nesta rodada, a exigência de bater
+// ponto volta a valer. Se precisar desligar de novo por algum bug, é só
+// voltar pra `false`: nada mais nesta rodada depende deste flag.
+export const CLOCK_IN_GATE_ENABLED = true;
 
 const CLOCK_IN_BLOCK_CACHE_MS = 60000;
 const clockInBlockCache = new Map<string, { until: number; blocked: boolean }>();
@@ -262,6 +275,26 @@ router.post("/rh-dp/me/punch", requireAuth, async (req, res): Promise<void> => {
     lat = rawLat;
     lng = rawLng;
     accuracyMeters = typeof rawAccuracy === "number" && Number.isFinite(rawAccuracy) ? rawAccuracy : null;
+
+    // Geofence da loja (pedido 15/09, análise Tangerino "Local de
+    // Interesse") — SINALIZA (nunca bloqueia) quando a loja do colaborador
+    // tem geofence configurado e a batida veio de fora do raio permitido.
+    // Loja sem geofence configurado (qualquer um dos 3 campos nulo) não
+    // sinaliza nada — comportamento de sempre.
+    if (employee.storeId) {
+      const [store] = await db.select({
+        name: storesTable.name, geofenceLat: storesTable.geofenceLat,
+        geofenceLng: storesTable.geofenceLng, geofenceRadiusMeters: storesTable.geofenceRadiusMeters,
+      }).from(storesTable).where(and(eq(storesTable.id, employee.storeId), eq(storesTable.tenantId, tenantId)));
+      if (store?.geofenceLat != null && store.geofenceLng != null && store.geofenceRadiusMeters != null) {
+        const dist = distanceMeters(rawLat, rawLng, store.geofenceLat, store.geofenceLng);
+        if (dist > store.geofenceRadiusMeters) {
+          flagged = true;
+          const geofenceReason = `Localização fora do raio permitido da loja "${store.name}" (${Math.round(dist)}m, limite ${store.geofenceRadiusMeters}m).`;
+          flagReason = flagReason ? `${flagReason} ${geofenceReason}` : geofenceReason;
+        }
+      }
+    }
   }
 
   const [created] = await db.insert(timeClockEntriesTable).values({
@@ -592,6 +625,7 @@ router.get("/rh-dp/settings", requireModuleAccess("rh"), async (req, res): Promi
     companyMission: tenantsTable.companyMission,
     companyVision: tenantsTable.companyVision,
     companyValues: tenantsTable.companyValues,
+    timeBankValidityMonths: tenantsTable.timeBankValidityMonths,
   }).from(tenantsTable).where(eq(tenantsTable.id, tenantId));
   res.json({
     pontoCheckInSessionKey: row?.pontoCheckInSessionKey ?? null,
@@ -599,6 +633,7 @@ router.get("/rh-dp/settings", requireModuleAccess("rh"), async (req, res): Promi
     companyMission: row?.companyMission ?? null,
     companyVision: row?.companyVision ?? null,
     companyValues: row?.companyValues ?? null,
+    timeBankValidityMonths: row?.timeBankValidityMonths ?? null,
   });
 });
 
@@ -607,6 +642,7 @@ router.patch("/rh-dp/settings", requireAdmin, async (req, res): Promise<void> =>
   const b = (req.body ?? {}) as {
     pontoCheckInSessionKey?: string | null; facialRecognitionEnabled?: boolean;
     companyMission?: string | null; companyVision?: string | null; companyValues?: string | null;
+    timeBankValidityMonths?: number | null;
   };
   const update: Record<string, unknown> = {};
   if ("pontoCheckInSessionKey" in b) {
@@ -617,11 +653,17 @@ router.patch("/rh-dp/settings", requireAdmin, async (req, res): Promise<void> =>
   if ("companyMission" in b) update.companyMission = typeof b.companyMission === "string" ? b.companyMission.trim().slice(0, 4000) || null : null;
   if ("companyVision" in b) update.companyVision = typeof b.companyVision === "string" ? b.companyVision.trim().slice(0, 4000) || null : null;
   if ("companyValues" in b) update.companyValues = typeof b.companyValues === "string" ? b.companyValues.trim().slice(0, 4000) || null : null;
+  // Vencimento do banco de horas (meses) — null/0 = sem vencimento.
+  if ("timeBankValidityMonths" in b) {
+    const v = b.timeBankValidityMonths;
+    update.timeBankValidityMonths = typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.round(Math.min(60, v)) : null;
+  }
   const [updated] = await db.update(tenantsTable).set(update)
     .where(eq(tenantsTable.id, tenantId))
     .returning({
       pontoCheckInSessionKey: tenantsTable.pontoCheckInSessionKey, facialRecognitionEnabled: tenantsTable.facialRecognitionEnabled,
       companyMission: tenantsTable.companyMission, companyVision: tenantsTable.companyVision, companyValues: tenantsTable.companyValues,
+      timeBankValidityMonths: tenantsTable.timeBankValidityMonths,
     });
   res.json(updated);
 });
@@ -653,6 +695,13 @@ function computeExpectedMinutes(startTime: number, endTime: number, breakStart: 
   return total;
 }
 
+// Tolerância de atraso (minutos) — clamp 0-120 (sem limite não faz sentido,
+// 120min de tolerância já é generoso demais pra ser um valor real).
+function parseTolerance(v: unknown, fallback: number): number {
+  if (typeof v !== "number" || !Number.isFinite(v)) return fallback;
+  return Math.max(0, Math.min(120, Math.round(v)));
+}
+
 router.post("/rh-dp/shifts", requireModuleAccess("rh"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const b = (req.body ?? {}) as Record<string, unknown>;
@@ -660,12 +709,13 @@ router.post("/rh-dp/shifts", requireModuleAccess("rh"), async (req, res): Promis
   if (!name) { res.status(400).json({ error: "Informe o nome da escala" }); return; }
   const type = b.type === "flexible" ? "flexible" : "fixed";
   const weekdays = Array.isArray(b.weekdays) ? b.weekdays.filter((n): n is number => typeof n === "number" && n >= 0 && n <= 6) : [1, 2, 3, 4, 5];
+  const toleranceMinutes = parseTolerance(b.toleranceMinutes, 10);
 
   // Escala livre: sem horário, sem expediente esperado — não exige ponto e
   // não entra no cálculo de "esperado" do banco de horas.
   if (type === "flexible") {
     const [created] = await db.insert(workShiftsTable).values({
-      tenantId, name, type, weekdays,
+      tenantId, name, type, weekdays, toleranceMinutes,
       startTime: null, endTime: null, breakStart: null, breakEnd: null, expectedMinutesPerDay: null,
     }).returning();
     res.status(201).json(created);
@@ -687,7 +737,7 @@ router.post("/rh-dp/shifts", requireModuleAccess("rh"), async (req, res): Promis
     startTime: b.startTime as string, endTime: b.endTime as string,
     breakStart: hasBreak ? (b.breakStart as string) : null,
     breakEnd: hasBreak ? (b.breakEnd as string) : null,
-    weekdays, expectedMinutesPerDay,
+    weekdays, expectedMinutesPerDay, toleranceMinutes,
   }).returning();
   res.status(201).json(created);
 });
@@ -703,11 +753,12 @@ router.patch("/rh-dp/shifts/:id", requireModuleAccess("rh"), async (req, res): P
   const name = typeof b.name === "string" ? b.name.trim().slice(0, 80) : existing.name;
   const type = "type" in b ? (b.type === "flexible" ? "flexible" : "fixed") : existing.type;
   const weekdays = Array.isArray(b.weekdays) ? b.weekdays.filter((n): n is number => typeof n === "number" && n >= 0 && n <= 6) : (existing.weekdays as number[]);
+  const toleranceMinutes = "toleranceMinutes" in b ? parseTolerance(b.toleranceMinutes, existing.toleranceMinutes) : existing.toleranceMinutes;
   if (!name) { res.status(400).json({ error: "Dados da escala inválidos" }); return; }
 
   if (type === "flexible") {
     const [updated] = await db.update(workShiftsTable).set({
-      name, type, weekdays,
+      name, type, weekdays, toleranceMinutes,
       startTime: null, endTime: null, breakStart: null, breakEnd: null, expectedMinutesPerDay: null,
     }).where(and(eq(workShiftsTable.id, id), eq(workShiftsTable.tenantId, tenantId))).returning();
     res.json(updated);
@@ -731,7 +782,7 @@ router.patch("/rh-dp/shifts/:id", requireModuleAccess("rh"), async (req, res): P
   const [updated] = await db.update(workShiftsTable).set({
     name, type, startTime: startTimeStr, endTime: endTimeStr,
     breakStart: hasBreak ? breakStartStr : null, breakEnd: hasBreak ? breakEndStr : null,
-    weekdays, expectedMinutesPerDay,
+    weekdays, expectedMinutesPerDay, toleranceMinutes,
   }).where(and(eq(workShiftsTable.id, id), eq(workShiftsTable.tenantId, tenantId))).returning();
   res.json(updated);
 });
@@ -743,6 +794,123 @@ router.delete("/rh-dp/shifts/:id", requireModuleAccess("rh"), async (req, res): 
   await db.update(employeesTable).set({ shiftId: null }).where(and(eq(employeesTable.shiftId, id), eq(employeesTable.tenantId, tenantId)));
   await db.delete(workShiftsTable).where(and(eq(workShiftsTable.id, id), eq(workShiftsTable.tenantId, tenantId)));
   res.json({ ok: true });
+});
+
+// ── Calendário de feriados (pedido 15/09, análise Tangerino) ───────────────
+
+router.get("/rh-dp/holidays", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const yearRaw = req.query.year;
+  const conditions = [eq(holidaysTable.tenantId, tenantId)];
+  if (typeof yearRaw === "string" && /^\d{4}$/.test(yearRaw)) {
+    conditions.push(gte(holidaysTable.date, `${yearRaw}-01-01`), lte(holidaysTable.date, `${yearRaw}-12-31`));
+  }
+  const rows = await db.select().from(holidaysTable).where(and(...conditions)).orderBy(asc(holidaysTable.date));
+  res.json(rows);
+});
+
+router.post("/rh-dp/holidays", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const b = (req.body ?? {}) as { date?: unknown; name?: unknown; excusesExpected?: unknown };
+  const date = typeof b.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(b.date) ? b.date : null;
+  const name = typeof b.name === "string" ? b.name.trim().slice(0, 120) : "";
+  if (!date || !name) { res.status(400).json({ error: "Informe data e nome do feriado" }); return; }
+  const excusesExpected = b.excusesExpected !== false;
+  try {
+    const [created] = await db.insert(holidaysTable).values({ tenantId, date, name, excusesExpected }).returning();
+    res.status(201).json(created);
+  } catch (err) {
+    if ((err as { code?: string })?.code === "23505") { res.status(409).json({ error: "Já existe um feriado cadastrado nessa data" }); return; }
+    throw err;
+  }
+});
+
+router.patch("/rh-dp/holidays/:id", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const b = (req.body ?? {}) as { date?: unknown; name?: unknown; excusesExpected?: unknown };
+  const update: Record<string, unknown> = {};
+  if (typeof b.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(b.date)) update.date = b.date;
+  if (typeof b.name === "string" && b.name.trim()) update.name = b.name.trim().slice(0, 120);
+  if (typeof b.excusesExpected === "boolean") update.excusesExpected = b.excusesExpected;
+  if (Object.keys(update).length === 0) { res.status(400).json({ error: "Nada para atualizar" }); return; }
+  try {
+    const [updated] = await db.update(holidaysTable).set(update)
+      .where(and(eq(holidaysTable.id, id), eq(holidaysTable.tenantId, tenantId))).returning();
+    if (!updated) { res.status(404).json({ error: "Feriado não encontrado" }); return; }
+    res.json(updated);
+  } catch (err) {
+    if ((err as { code?: string })?.code === "23505") { res.status(409).json({ error: "Já existe um feriado cadastrado nessa data" }); return; }
+    throw err;
+  }
+});
+
+router.delete("/rh-dp/holidays/:id", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  await db.delete(holidaysTable).where(and(eq(holidaysTable.id, id), eq(holidaysTable.tenantId, tenantId)));
+  res.json({ ok: true });
+});
+
+// Domingo de Páscoa do ano (algoritmo de Gauss/anônimo gregoriano) — base
+// pra derivar os feriados móveis (Carnaval, Sexta-feira Santa, Corpus Christi).
+function easterDate(year: number): Date {
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31);
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(Date.UTC(year, month - 1, day));
+}
+
+// Carrega o calendário nacional padrão de um ano de uma vez (pedido 15/09,
+// análise Tangerino "Calendário de Feriados" — lá já vem pré-cadastrado por
+// ano). Feriados fixos nacionais (Lei 662/1949, Lei 6.802/1980, Lei
+// 14.759/2023) entram como excusesExpected=true; Carnaval e Corpus Christi
+// são "ponto facultativo" (não são feriado nacional decretado, variam por
+// convenção/decreto local) e entram como excusesExpected=false — o admin
+// pode marcar como isento manualmente se a loja realmente fechar nesses dias.
+// Idempotente (onConflictDoNothing): rodar de novo não duplica nem sobrescreve
+// datas que o admin já editou manualmente.
+router.post("/rh-dp/holidays/seed-default", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const yearRaw = (req.body ?? {}).year;
+  const year = typeof yearRaw === "number" && Number.isInteger(yearRaw) ? yearRaw : new Date().getFullYear();
+  if (year < 2000 || year > 2100) { res.status(400).json({ error: "Ano inválido" }); return; }
+  const easter = easterDate(year);
+  const addDays = (n: number) => new Date(easter.getTime() + n * 86_400_000).toISOString().slice(0, 10);
+  const items: { date: string; name: string; excusesExpected: boolean }[] = [
+    { date: `${year}-01-01`, name: "Confraternização Universal", excusesExpected: true },
+    { date: addDays(-48), name: "Carnaval (segunda-feira)", excusesExpected: false },
+    { date: addDays(-47), name: "Carnaval (terça-feira)", excusesExpected: false },
+    { date: addDays(-2), name: "Sexta-feira Santa", excusesExpected: true },
+    { date: `${year}-04-21`, name: "Tiradentes", excusesExpected: true },
+    { date: `${year}-05-01`, name: "Dia do Trabalho", excusesExpected: true },
+    { date: addDays(60), name: "Corpus Christi", excusesExpected: false },
+    { date: `${year}-09-07`, name: "Independência do Brasil", excusesExpected: true },
+    { date: `${year}-10-12`, name: "Nossa Senhora Aparecida", excusesExpected: true },
+    { date: `${year}-11-02`, name: "Finados", excusesExpected: true },
+    { date: `${year}-11-15`, name: "Proclamação da República", excusesExpected: true },
+    { date: `${year}-11-20`, name: "Consciência Negra", excusesExpected: true },
+    { date: `${year}-12-25`, name: "Natal", excusesExpected: true },
+  ];
+  let inserted = 0;
+  for (const item of items) {
+    const result = await db.insert(holidaysTable).values({ tenantId, ...item }).onConflictDoNothing().returning({ id: holidaysTable.id });
+    if (result.length > 0) inserted++;
+  }
+  res.json({ ok: true, inserted, total: items.length });
 });
 
 // ── Ponto (gestão) ────────────────────────────────────────────────────────
@@ -1130,11 +1298,49 @@ router.get("/rh-dp/dashboard-summary", requireModuleAccess("rh"), async (req, re
   // só soma o trabalhado, nunca desconta esperado) com saldo positivo no mês
   // corrente — mesmo cálculo de /rh-dp/reports/time-bank-summary, só que
   // filtrado a quem realmente pode ter "excedente" nesse sentido.
-  const flexibleEmployees = employees.filter((e) => e.shiftType === "flexible");
   const monthStart = new Date(`${todaySP.slice(0, 7)}-01T00:00:00-03:00`);
-  const overtimeResults = await Promise.all(flexibleEmployees.map((e) => computeTimeBank(e.id, tenantId, monthStart, endOfDay)));
-  const overtimeEmployeesCount = overtimeResults.filter((r) => r.balanceMinutes > 0).length;
-  const overtimeMinutesTotal = overtimeResults.reduce((sum, r) => sum + Math.max(0, r.balanceMinutes), 0);
+  // Calcula o banco de horas do mês corrente de TODO mundo de uma vez (antes
+  // só calculava pra escala flexible) — reaproveitado tanto pra "horas
+  // excedentes" quanto pros novos alertas de conformidade abaixo.
+  const allResults = await Promise.all(employees.map(async (e) => ({
+    id: e.id, shiftType: e.shiftType, result: await computeTimeBank(e.id, tenantId, monthStart, endOfDay),
+  })));
+  const flexibleResults = allResults.filter((r) => r.shiftType === "flexible");
+  const overtimeEmployeesCount = flexibleResults.filter((r) => r.result.balanceMinutes > 0).length;
+  const overtimeMinutesTotal = flexibleResults.reduce((sum, r) => sum + Math.max(0, r.result.balanceMinutes), 0);
+
+  // Alertas de conformidade CLT (pedido 15/09, análise Tangerino "Controle de
+  // Inconsistências") — quantos colaboradores tiveram pelo menos 1 dia
+  // sinalizado no mês corrente, em cada tipo. Só informativo (ver
+  // computeTimeBank em lib/timeBank.ts — nunca altera o saldo calculado).
+  let overtimeAbove2hEmployees = 0;
+  let restBelow11hEmployees = 0;
+  for (const r of allResults) {
+    if (r.result.days.some((d) => d.inconsistencies.includes("excesso_2h_diarias"))) overtimeAbove2hEmployees++;
+    if (r.result.days.some((d) => d.inconsistencies.includes("interjornada_curta"))) restBelow11hEmployees++;
+  }
+  const suspiciousFlags = await Promise.all(employees.map((e) => hasSuspiciousManualPattern(e.id, tenantId, monthStart, endOfDay)));
+  const suspiciousManualPatternEmployees = suspiciousFlags.filter(Boolean).length;
+
+  // Banco de horas vencido (pedido 15/09) — meses já fechados com saldo
+  // positivo mais velhos que o vencimento configurado da loja
+  // (tenants.timeBankValidityMonths). Só ALERTA — não zera/desconta nada
+  // automaticamente (não temos rotina de pagamento de horas extras pra fazer
+  // esse acerto com segurança); o RH decide manualmente (compensar ou pagar).
+  let timeBankExpiredEmployees = 0;
+  let timeBankExpiredMinutesTotal = 0;
+  const [tenantRow] = await db.select({ timeBankValidityMonths: tenantsTable.timeBankValidityMonths }).from(tenantsTable).where(eq(tenantsTable.id, tenantId));
+  if (tenantRow?.timeBankValidityMonths) {
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - tenantRow.timeBankValidityMonths);
+    const expiredClosures = await db.select({ employeeId: timeBankClosuresTable.employeeId, balanceMinutes: timeBankClosuresTable.balanceMinutes })
+      .from(timeBankClosuresTable)
+      .where(and(eq(timeBankClosuresTable.tenantId, tenantId), sql`${timeBankClosuresTable.balanceMinutes} > 0`, lte(timeBankClosuresTable.closedAt, cutoff)));
+    const byEmployee = new Map<number, number>();
+    for (const c of expiredClosures) byEmployee.set(c.employeeId, (byEmployee.get(c.employeeId) ?? 0) + c.balanceMinutes);
+    timeBankExpiredEmployees = byEmployee.size;
+    timeBankExpiredMinutesTotal = [...byEmployee.values()].reduce((s, v) => s + v, 0);
+  }
 
   res.json({
     activeEmployees: activeEmployeeIds.length,
@@ -1144,6 +1350,13 @@ router.get("/rh-dp/dashboard-summary", requireModuleAccess("rh"), async (req, re
     flaggedPunches: Number(flaggedRow?.count ?? 0),
     overtimeEmployeesCount,
     overtimeMinutesTotal,
+    clockAlerts: {
+      overtimeAbove2hEmployees,
+      restBelow11hEmployees,
+      suspiciousManualPatternEmployees,
+      timeBankExpiredEmployees,
+      timeBankExpiredMinutesTotal,
+    },
   });
 });
 
