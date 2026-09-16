@@ -1,9 +1,10 @@
 import { Router, type IRouter } from "express";
-import { db, botSettingsTable, botStatesTable, conversationsTable } from "@workspace/db";
-import { and, eq, sql } from "drizzle-orm";
+import { db, botSettingsTable, botStatesTable, conversationsTable, kbSuggestionsTable } from "@workspace/db";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { requireTenant } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import { getBotSettings, toEngineSettings, todayUsage, aiClassify } from "../lib/bot";
+import { mergeIntoKnowledgeBase } from "../lib/knowledgeLearning";
 import { botStep, type BotStateShape, type BotQuestion } from "../lib/botEngine";
 
 const router: IRouter = Router();
@@ -79,10 +80,85 @@ router.put("/bot/settings", requireModuleAccess("robo"), async (req, res): Promi
     maxPerConversation,
     maxPerDay,
     typingDelaySeconds,
+    // "Aprender com atendimentos" (pedido 16/09) — liga/desliga a geração
+    // automática de sugestões de conhecimento a partir de atendimentos
+    // humanos finalizados. Ver lib/knowledgeLearning.ts.
+    learningEnabled: body["learningEnabled"] !== undefined ? body["learningEnabled"] === true : existing.learningEnabled,
     updatedAt: new Date(),
   }).where(and(eq(botSettingsTable.id, existing.id), eq(botSettingsTable.tenantId, tenantId))).returning();
 
   res.json({ ...updated, usageToday: await todayUsage(tenantId) });
+});
+
+// ---------- caixa de IA da base de conhecimento (pedido 16/09) ----------
+// Admin cola informação nova/solta (ou corrige algo) numa caixa acima da
+// base; a IA reorganiza e junta com a base já existente, sem duplicar — o
+// próprio botão já "envia pra base" (salva direto), o admin só revisa o
+// resultado na base logo abaixo antes de continuar editando.
+router.post("/bot/knowledge/merge", requireModuleAccess("robo"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const text = String((req.body as { text?: unknown } | undefined)?.text ?? "").trim();
+  if (!text) { res.status(400).json({ error: "Escreva a informação que quer adicionar" }); return; }
+  if (text.length > 6000) { res.status(400).json({ error: "Texto muito longo — envie em partes menores (até 6000 caracteres)" }); return; }
+
+  const existing = await getBotSettings(tenantId);
+  const merged = await mergeIntoKnowledgeBase(tenantId, existing.knowledgeBase, text);
+  const [updated] = await db.update(botSettingsTable).set({ knowledgeBase: merged, updatedAt: new Date() })
+    .where(and(eq(botSettingsTable.id, existing.id), eq(botSettingsTable.tenantId, tenantId))).returning();
+
+  res.json({ ...updated, usageToday: await todayUsage(tenantId) });
+});
+
+// ---------- sugestões de conhecimento (aprendizado com atendimentos) ----------
+
+router.get("/bot/knowledge/suggestions", requireModuleAccess("robo"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const statusParam = String(req.query.status ?? "pending");
+  const status = ["pending", "approved", "rejected"].includes(statusParam) ? statusParam : "pending";
+  const rows = await db.select().from(kbSuggestionsTable)
+    .where(and(eq(kbSuggestionsTable.tenantId, tenantId), eq(kbSuggestionsTable.status, status)))
+    .orderBy(desc(kbSuggestionsTable.createdAt))
+    .limit(100);
+  res.json(rows);
+});
+
+// Aprovar: mescla a sugestão na base (mesma fusão via IA da caixa manual) e
+// marca aprovada. Rejeitar: só marca, nunca mexe na base.
+router.post("/bot/knowledge/suggestions/:id/approve", requireModuleAccess("robo"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const uid = req.session.userId!;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+
+  const [suggestion] = await db.select().from(kbSuggestionsTable)
+    .where(and(eq(kbSuggestionsTable.id, id), eq(kbSuggestionsTable.tenantId, tenantId))).limit(1);
+  if (!suggestion) { res.status(404).json({ error: "Sugestão não encontrada" }); return; }
+  if (suggestion.status !== "pending") { res.status(400).json({ error: "Essa sugestão já foi revisada" }); return; }
+
+  const existing = await getBotSettings(tenantId);
+  const merged = await mergeIntoKnowledgeBase(tenantId, existing.knowledgeBase, suggestion.suggestion);
+  await db.update(botSettingsTable).set({ knowledgeBase: merged, updatedAt: new Date() })
+    .where(and(eq(botSettingsTable.id, existing.id), eq(botSettingsTable.tenantId, tenantId)));
+  const [updatedSuggestion] = await db.update(kbSuggestionsTable)
+    .set({ status: "approved", reviewedBy: uid, reviewedAt: new Date() })
+    .where(and(eq(kbSuggestionsTable.id, id), eq(kbSuggestionsTable.tenantId, tenantId)))
+    .returning();
+
+  res.json({ suggestion: updatedSuggestion, knowledgeBase: merged });
+});
+
+router.post("/bot/knowledge/suggestions/:id/reject", requireModuleAccess("robo"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const uid = req.session.userId!;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+
+  const [updatedSuggestion] = await db.update(kbSuggestionsTable)
+    .set({ status: "rejected", reviewedBy: uid, reviewedAt: new Date() })
+    .where(and(eq(kbSuggestionsTable.id, id), eq(kbSuggestionsTable.tenantId, tenantId), eq(kbSuggestionsTable.status, "pending")))
+    .returning();
+  if (!updatedSuggestion) { res.status(404).json({ error: "Sugestão não encontrada ou já revisada" }); return; }
+  res.json({ suggestion: updatedSuggestion });
 });
 
 // Estatísticas simples: conversas triadas pelo robô (só da loja do usuário).

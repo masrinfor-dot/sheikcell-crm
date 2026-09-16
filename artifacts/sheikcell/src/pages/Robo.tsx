@@ -1,8 +1,8 @@
-import { useState, useEffect, useRef } from "react";
-import { api, canEditModule, type BotSettings, type BotQuestion } from "@/lib/api";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { api, canEditModule, type BotSettings, type BotQuestion, type KbSuggestion } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
-import { Bot, Plus, X, Trash2, Send, RotateCcw, MessageSquareText } from "lucide-react";
+import { Bot, Plus, X, Trash2, Send, RotateCcw, MessageSquareText, Sparkles, Check, GraduationCap } from "lucide-react";
 
 const INPUT = "w-full px-3 py-2 rounded-xl border border-border text-sm mt-1";
 
@@ -13,6 +13,15 @@ export default function Robo() {
   const canEdit = canEditModule(user, "robo");
   const [s, setS] = useState<BotSettings | null>(null);
   const [saving, setSaving] = useState(false);
+
+  // caixa de IA da base de conhecimento (pedido 16/09)
+  const [kbInput, setKbInput] = useState("");
+  const [merging, setMerging] = useState(false);
+
+  // sugestões de conhecimento (aprendizado com atendimentos)
+  const [suggestions, setSuggestions] = useState<KbSuggestion[]>([]);
+  const [loadingSuggestions, setLoadingSuggestions] = useState(false);
+  const [reviewingId, setReviewingId] = useState<number | null>(null);
 
   // modo teste
   const [chat, setChat] = useState<{ from: "you" | "bot"; text: string }[]>([]);
@@ -25,6 +34,16 @@ export default function Robo() {
       toast({ title: "Erro ao carregar o robô", variant: "destructive" });
     });
   }, [toast]);
+
+  const refreshSuggestions = useCallback(() => {
+    setLoadingSuggestions(true);
+    api.bot.suggestions("pending")
+      .then(setSuggestions)
+      .catch(() => toast({ title: "Erro ao carregar sugestões de conhecimento", variant: "destructive" }))
+      .finally(() => setLoadingSuggestions(false));
+  }, [toast]);
+
+  useEffect(() => { refreshSuggestions(); }, [refreshSuggestions]);
 
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: "smooth" }); }, [chat]);
 
@@ -75,6 +94,52 @@ export default function Robo() {
     setChat([]);
   };
 
+  // Caixa de IA: manda o texto solto, a IA reorganiza e já junta com a base
+  // atual (salva direto) — o admin revisa o resultado no textarea logo abaixo.
+  const handleKbMerge = async () => {
+    const text = kbInput.trim();
+    if (!text || merging) return;
+    setMerging(true);
+    try {
+      const upd = await api.bot.knowledgeMerge(text);
+      setS((prev) => (prev ? { ...prev, ...upd } : upd));
+      setKbInput("");
+      toast({ title: "Base de conhecimento atualizada pela IA 🤖", description: "Confira o resultado abaixo antes de continuar editando." });
+    } catch (err) {
+      toast({ title: "Erro ao enviar para a base", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setMerging(false);
+    }
+  };
+
+  const handleApproveSuggestion = async (id: number) => {
+    if (reviewingId) return;
+    setReviewingId(id);
+    try {
+      const { knowledgeBase } = await api.bot.approveSuggestion(id);
+      setS((prev) => (prev ? { ...prev, knowledgeBase } : prev));
+      setSuggestions((prev) => prev.filter((sug) => sug.id !== id));
+      toast({ title: "Sugestão aprovada e adicionada à base 🤖" });
+    } catch (err) {
+      toast({ title: "Erro ao aprovar sugestão", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setReviewingId(null);
+    }
+  };
+
+  const handleRejectSuggestion = async (id: number) => {
+    if (reviewingId) return;
+    setReviewingId(id);
+    try {
+      await api.bot.rejectSuggestion(id);
+      setSuggestions((prev) => prev.filter((sug) => sug.id !== id));
+    } catch (err) {
+      toast({ title: "Erro ao rejeitar sugestão", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setReviewingId(null);
+    }
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -105,6 +170,13 @@ export default function Robo() {
               <input type="checkbox" checked={s.enabled} onChange={(e) => set({ enabled: e.target.checked })} data-testid="toggle-bot-enabled" />
               Robô ligado
             </label>
+            <label className="flex items-center gap-2 font-semibold text-[11px]">
+              <input type="checkbox" checked={s.learningEnabled} onChange={(e) => set({ learningEnabled: e.target.checked })} data-testid="toggle-bot-learning" />
+              <GraduationCap className="w-3.5 h-3.5 text-primary" /> Aprender com atendimentos
+            </label>
+            <p className="text-[10px] text-muted-foreground -mt-2">
+              Quando ligado, a IA analisa cada atendimento finalizado por um vendedor e, se achar algo que falta na base, gera uma sugestão pra você aprovar (veja abaixo). Desligue manualmente quando achar a base madura o suficiente.
+            </p>
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="font-semibold">Nome do robô</label>
@@ -163,6 +235,21 @@ export default function Robo() {
           </div>
 
           <div className="shk-card p-4 space-y-3 text-xs">
+            <div className="border border-primary/30 bg-primary/5 rounded-xl p-3 space-y-2">
+              <label className="font-bold text-sm flex items-center gap-1.5">
+                <Sparkles className="w-4 h-4 text-primary" /> Adicionar com IA
+              </label>
+              <p className="text-[10px] text-muted-foreground">
+                Cole aqui uma informação nova ou uma correção (solta, sem se preocupar com formatação) — a IA organiza e já junta com a base abaixo, sem duplicar nada. Confira o resultado antes de sair da tela.
+              </p>
+              <textarea value={kbInput} onChange={(e) => setKbInput(e.target.value)} rows={3}
+                placeholder="Ex.: a partir de agora também parcelamos conserto em até 3x sem juros no cartão"
+                data-testid="input-kb-ai-box" className={INPUT} />
+              <button onClick={handleKbMerge} disabled={merging || !kbInput.trim()} data-testid="button-kb-ai-send"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-primary text-white text-[11px] font-semibold disabled:opacity-40 transition">
+                <Sparkles className="w-3.5 h-3.5" /> {merging ? "A IA está organizando..." : "Enviar para Base de Conhecimento com IA"}
+              </button>
+            </div>
             <div>
               <label className="font-bold text-sm">Base de conhecimento</label>
               <p className="text-[10px] text-muted-foreground">Cole aqui horários, endereço, formas de pagamento, garantia... A IA responde SÓ com base nisso.</p>
@@ -202,6 +289,45 @@ export default function Robo() {
                 parecer uma resposta robótica instantânea. 0 = manda assim que a IA responder.
               </p>
             </div>
+          </div>
+
+          {/* ─── Sugestões de Conhecimento (aprendizado com atendimentos) ─── */}
+          <div className="shk-card p-4 space-y-3 text-xs">
+            <div className="flex items-center justify-between">
+              <p className="font-bold text-sm flex items-center gap-1.5">
+                <GraduationCap className="w-4 h-4 text-primary" /> Sugestões de Conhecimento
+              </p>
+              {suggestions.length > 0 && (
+                <span className="text-[10px] font-semibold bg-primary/10 text-primary rounded-full px-2 py-0.5">{suggestions.length} pendente{suggestions.length > 1 ? "s" : ""}</span>
+              )}
+            </div>
+            <p className="text-[10px] text-muted-foreground">
+              Depois de cada atendimento finalizado por um vendedor, a IA analisa a conversa e sugere aqui o que faltou na base. Aprove só o que fizer sentido.
+            </p>
+            {loadingSuggestions && <p className="text-[11px] text-muted-foreground">Carregando...</p>}
+            {!loadingSuggestions && suggestions.length === 0 && (
+              <p className="text-[11px] text-muted-foreground italic">Nenhuma sugestão pendente no momento.</p>
+            )}
+            {suggestions.map((sug) => (
+              <div key={sug.id} data-testid={`suggestion-${sug.id}`} className="border border-border rounded-xl p-3 space-y-1.5">
+                <p className="text-[12px]">{sug.suggestion}</p>
+                {sug.reasoning && <p className="text-[10px] text-muted-foreground italic">Motivo: {sug.reasoning}</p>}
+                {canEdit && (
+                  <div className="flex gap-2 pt-1">
+                    <button onClick={() => handleApproveSuggestion(sug.id)} disabled={reviewingId === sug.id}
+                      data-testid={`button-approve-suggestion-${sug.id}`}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-primary text-white text-[11px] font-semibold disabled:opacity-40">
+                      <Check className="w-3 h-3" /> Aprovar
+                    </button>
+                    <button onClick={() => handleRejectSuggestion(sug.id)} disabled={reviewingId === sug.id}
+                      data-testid={`button-reject-suggestion-${sug.id}`}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-border text-[11px] font-semibold disabled:opacity-40">
+                      <X className="w-3 h-3" /> Rejeitar
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
         </div>
 

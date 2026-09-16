@@ -737,7 +737,21 @@ export type BotSettings = {
   mode: "always" | "off_hours"; hoursStart: string; hoursEnd: string;
   urgencyWords: string; maxPerConversation: number; maxPerDay: number;
   typingDelaySeconds: number;
+  // "Aprender com atendimentos" (pedido 16/09): liga/desliga a geração
+  // automática de sugestões de conhecimento a partir de atendimentos humanos
+  // finalizados.
+  learningEnabled: boolean;
   usageToday: number;
+};
+
+// Sugestão de melhoria da base de conhecimento (aprendizado da IA ou caixa
+// manual) — o admin aprova (mescla na base) ou rejeita.
+export type KbSuggestion = {
+  id: number; conversationId: number | null;
+  suggestion: string; reasoning: string | null;
+  status: "pending" | "approved" | "rejected";
+  reviewedBy: number | null; reviewedAt: string | null;
+  createdAt: string;
 };
 
 export type Raffle = {
@@ -2515,6 +2529,13 @@ export const api = {
     stats: () => req<{ conversations: number; activeFlows: number; usageToday: number }>("/bot/stats"),
     test: (message: string, reset?: boolean) =>
       req<{ replies: string[]; ended?: boolean; reset?: boolean }>("/bot/test", { method: "POST", body: JSON.stringify({ message, reset }) }),
+    knowledgeMerge: (text: string) => req<BotSettings>("/bot/knowledge/merge", { method: "POST", body: JSON.stringify({ text }) }),
+    suggestions: (status: "pending" | "approved" | "rejected" = "pending") =>
+      req<KbSuggestion[]>(`/bot/knowledge/suggestions?status=${status}`),
+    approveSuggestion: (id: number) =>
+      req<{ suggestion: KbSuggestion; knowledgeBase: string }>(`/bot/knowledge/suggestions/${id}/approve`, { method: "POST" }),
+    rejectSuggestion: (id: number) =>
+      req<{ suggestion: KbSuggestion }>(`/bot/knowledge/suggestions/${id}/reject`, { method: "POST" }),
   },
   surveySettings: {
     get: () => req<SurveySettings>("/settings/survey"),

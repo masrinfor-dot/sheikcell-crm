@@ -27,7 +27,31 @@ export const botSettingsTable = pgTable("bot_settings", {
   // aqui é um atraso extra, configurável por loja, pra não parecer robótico
   // respondendo instantâneo. 0 = sem atraso extra (só o da ponte).
   typingDelaySeconds: integer("typing_delay_seconds").notNull().default(5),
+  // "Aprender com atendimentos" (pedido 16/09): liga/desliga a geração
+  // automática de sugestões de melhoria pra base de conhecimento, analisadas
+  // pela IA a cada atendimento finalizado que passou por um humano. Começa
+  // ligado — o admin desliga manualmente quando achar a base madura o
+  // suficiente. Ver kbSuggestionsTable.
+  learningEnabled: boolean("learning_enabled").notNull().default(true),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+// Sugestões de melhoria da base de conhecimento, geradas pela IA a partir de
+// atendimentos humanos finalizados (aprendizado) ou digitadas manualmente
+// pelo admin na caixa acima da base — nunca entram na base sozinhas: o admin
+// aprova (mescla via IA) ou rejeita cada uma.
+export const kbSuggestionsTable = pgTable("kb_suggestions", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  // Sem FK: sugestão é um fato histórico que deve sobreviver à exclusão da
+  // conversa de origem (mesmo padrão de attendance_logs.conversationId).
+  conversationId: integer("conversation_id"),
+  suggestion: text("suggestion").notNull(),
+  reasoning: text("reasoning"),
+  status: text("status").notNull().default("pending"), // pending | approved | rejected
+  reviewedBy: integer("reviewed_by"),
+  reviewedAt: timestamp("reviewed_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
 // Estado do robô por conversa.

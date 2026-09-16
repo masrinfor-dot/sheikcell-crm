@@ -23,6 +23,7 @@ import { ensureCrmContactForConversation, syncCrmAttendant } from "../lib/crmSyn
 import { sendOutboundText } from "../lib/outbound";
 import { normalizePhone, phoneVariants } from "../lib/phone";
 import { getSurveySettings, buildSurveyMessage } from "../lib/surveySettings";
+import { maybeGenerateKbSuggestion } from "../lib/knowledgeLearning";
 import { fetchLinkPreview, firstUrlIn } from "../lib/linkPreview";
 
 // Sinaliza que a pesquisa está desligada nas configurações (não é erro).
@@ -1897,6 +1898,15 @@ router.patch("/chat/conversations/:id", requireAuth, requireChatAccess(), async 
   ) ? conv.assigneeId : null;
   if (freedVendorId != null) {
     void autoAssignOnVendorFreed(tenantId, freedVendorId);
+  }
+  // Aprendizado do robô (pedido 16/09): atendimento acabou de ser finalizado
+  // AGORA (resolvedLogId só é setado nessa transição) e tinha um responsável
+  // humano — analisa a conversa em segundo plano e, se achar algo que falta
+  // na base de conhecimento, grava uma sugestão pendente pro admin revisar.
+  // Nunca atrasa esta resposta nem pode derrubá-la (maybeGenerateKbSuggestion
+  // nunca lança).
+  if (resolvedLogId != null && updated.assigneeId != null) {
+    void maybeGenerateKbSuggestion(tenantId, updated.id);
   }
 });
 
