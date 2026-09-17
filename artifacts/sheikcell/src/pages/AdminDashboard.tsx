@@ -119,6 +119,7 @@ type WASession = {
   queueAutoAssignEnabled: boolean;
   surveyDisabled: boolean;
   defaultSectorIds: number[];
+  botEnabled: boolean;
 };
 
 type UserRow = {
@@ -1331,6 +1332,38 @@ export default function AdminDashboard() {
                   )}
                   {s.errorMessage && <p className="text-xs text-red-600">{s.errorMessage}</p>}
                 </div>
+
+                {/* Robô ligado/desligado POR LINHA (pedido 17/09: "decidir em
+                    quais números o robô vai agir") — desligado aqui, o robô
+                    nunca responde sozinho nas conversas que chegam por este
+                    número, mesmo ligado pra loja toda em Robô → Configurações.
+                    Default ligado — nenhuma linha muda de comportamento até o
+                    admin desligar explicitamente. */}
+                <label className="flex items-start gap-2.5 mb-3 px-2 py-2 rounded-lg hover:bg-secondary/50 cursor-pointer text-sm"
+                  data-testid={`checkbox-wa-bot-enabled-${s.sessionKey}`}>
+                  <input
+                    type="checkbox"
+                    checked={s.botEnabled}
+                    onChange={async (e) => {
+                      const enabled = e.target.checked;
+                      await fetch(`/api/whatsapp/sessions/${s.sessionKey}/bot-enabled`, {
+                        method: "POST", credentials: "include",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ enabled }),
+                      });
+                      fetchWAStatus();
+                    }}
+                    className="w-4 h-4 mt-0.5 accent-[var(--primary)] shrink-0"
+                  />
+                  <span>
+                    <span className="font-medium">Robô atende nesta linha</span>
+                    <p className="text-[11px] text-muted-foreground -mt-0.5">
+                      Desligando, o robô nunca responde sozinho às conversas que chegarem por este número — mesmo com
+                      o robô ligado geral (Robô → Configurações). Útil pra número atendido só por gente, sem triagem
+                      automática.
+                    </p>
+                  </span>
+                </label>
 
                 {/* Fila com auto-atribuição, opt-in por linha (pedido 14/09):
                     liga se conversas novas/liberadas que chegam POR ESTE

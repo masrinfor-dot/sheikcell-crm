@@ -11,6 +11,7 @@ import {
   sectorsTable,
   chatLabelsTable,
   tradeInEvaluationsTable,
+  whatsappSessionsTable,
 } from "@workspace/db";
 import { botStep, type BotSettingsShape, type BotQuestion } from "./botEngine";
 import { sendOutboundText } from "./outbound";
@@ -427,6 +428,17 @@ type Conv = typeof conversationsTable.$inferSelect;
  * antes de gastar com transcrição de áudio: se o robô não fosse responder,
  * não pagamos o Whisper à toa.
  */
+// Robô ligado/desligado POR LINHA de WhatsApp (pedido 17/09: "decidir em
+// quais números o robô vai agir") — ver bot_enabled em whatsapp_sessions.ts.
+// Linha sem registro ainda em whatsapp_sessions (nunca conectou) conta como
+// ligada (comportamento de sempre), já que o default da coluna é true.
+async function sessionAllowsBot(tenantId: number, sessionKey: string): Promise<boolean> {
+  const [session] = await db.select({ botEnabled: whatsappSessionsTable.botEnabled })
+    .from(whatsappSessionsTable)
+    .where(and(eq(whatsappSessionsTable.sessionKey, sessionKey), eq(whatsappSessionsTable.tenantId, tenantId)));
+  return session ? session.botEnabled : true;
+}
+
 export async function botWouldHandle(conv: Conv): Promise<boolean> {
   if (conv.channel !== "whatsapp") return false;
   if (conv.assigneeId != null) return false;
@@ -434,6 +446,7 @@ export async function botWouldHandle(conv: Conv): Promise<boolean> {
   const settings = await getBotSettings(conv.tenantId);
   if (!settings.enabled) return false;
   if (settings.mode === "off_hours" && withinBusinessHours(settings)) return false;
+  if (!(await sessionAllowsBot(conv.tenantId, conv.sessionKey))) return false;
   const [state] = await db.select({ active: botStatesTable.active })
     .from(botStatesTable).where(eq(botStatesTable.conversationId, conv.id));
   return state ? state.active : true; // sem estado ainda = conversa nova, robô atende
@@ -483,6 +496,7 @@ async function handle(conv: Conv, text: string): Promise<void> {
   const settings = await getBotSettings(tenantId);
   if (!settings.enabled) return;
   if (settings.mode === "off_hours" && withinBusinessHours(settings)) return;
+  if (!(await sessionAllowsBot(tenantId, conv.sessionKey))) return;
 
   // estado da conversa
   let [state] = await db.select().from(botStatesTable).where(eq(botStatesTable.conversationId, conv.id));

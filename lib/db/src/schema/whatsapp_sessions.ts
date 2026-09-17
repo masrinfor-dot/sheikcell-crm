@@ -42,6 +42,13 @@ export const whatsappSessionsTable = pgTable("whatsapp_sessions", {
   // sempre: regras de palavra-chave sem restrição e, na falta delas, o
   // primeiro setor ativo da loja. Ver uso em lib/whatsappInbound.ts.
   defaultSectorIds: jsonb("default_sector_ids").$type<number[]>().notNull().default([]),
+  // Robô ligado/desligado POR LINHA (pedido 17/09: "decidir em quais
+  // números o robô vai agir") — quando false, o robô nunca responde
+  // sozinho nas conversas novas/em triagem que chegam por esta linha,
+  // mesmo com o robô ligado tenant-wide (bot_settings). Default true:
+  // nenhuma linha muda de comportamento até o admin desligar explicitamente
+  // em Administração → WhatsApp. Ver uso em lib/bot.ts (botWouldHandle/handle).
+  botEnabled: boolean("bot_enabled").notNull().default(true),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

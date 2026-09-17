@@ -48,6 +48,7 @@ export interface AdminWAState extends BridgeWAState {
   queueAutoAssignEnabled: boolean;
   surveyDisabled: boolean;
   defaultSectorIds: number[];
+  botEnabled: boolean;
 }
 
 async function persistSessionState(tenantId: number, key: string, state: BridgeWAState): Promise<void> {
@@ -131,6 +132,7 @@ function offlineState(
     queueAutoAssignEnabled: row?.queueAutoAssignEnabled ?? false,
     surveyDisabled: row?.surveyDisabled ?? false,
     defaultSectorIds: row?.defaultSectorIds ?? [],
+    botEnabled: row?.botEnabled ?? true,
   };
 }
 
@@ -178,6 +180,7 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         queueAutoAssignEnabled: row?.queueAutoAssignEnabled ?? false,
         surveyDisabled: row?.surveyDisabled ?? false,
         defaultSectorIds: row?.defaultSectorIds ?? [],
+        botEnabled: row?.botEnabled ?? true,
       });
     } else if (bridgeAvailable) {
       // Bridge is up but doesn't know this session yet — ask it to start it.
@@ -197,6 +200,7 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         queueAutoAssignEnabled: row?.queueAutoAssignEnabled ?? false,
         surveyDisabled: row?.surveyDisabled ?? false,
         defaultSectorIds: row?.defaultSectorIds ?? [],
+        botEnabled: row?.botEnabled ?? true,
       });
       void fetchFromBridge("/whatsapp/sessions", "POST", { session: key }).catch(() => {});
     } else {
@@ -339,6 +343,24 @@ router.post("/whatsapp/sessions/:key/survey-disabled", requireFeature("whatsapp"
     .returning();
   if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
   res.json({ ok: true, surveyDisabled: updated.surveyDisabled });
+});
+
+// Robô ligado/desligado POR LINHA (pedido 17/09: "decidir em quais números o
+// robô vai agir") — desligado nesta linha, o robô nunca responde sozinho nas
+// conversas que chegam por ela, mesmo com o robô ligado pra loja toda
+// (Robô → Configurações). Default ligado — ver bot_enabled em
+// whatsapp_sessions.ts e sessionAllowsBot em lib/bot.ts.
+router.post("/whatsapp/sessions/:key/bot-enabled", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const enabled = !!(req.body as { enabled?: boolean } | undefined)?.enabled;
+  const [updated] = await db
+    .update(whatsappSessionsTable)
+    .set({ botEnabled: enabled, updatedAt: new Date() })
+    .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId)))
+    .returning();
+  if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+  res.json({ ok: true, botEnabled: updated.botEnabled });
 });
 
 // ─── Setores desta linha, pra direcionamento automático (pedido 16/09:
@@ -512,6 +534,7 @@ router.get("/whatsapp/status", requireFeature("whatsapp"), async (req, res): Pro
         queueAutoAssignEnabled: row?.queueAutoAssignEnabled ?? false,
         surveyDisabled: row?.surveyDisabled ?? false,
         defaultSectorIds: row?.defaultSectorIds ?? [],
+        botEnabled: row?.botEnabled ?? true,
       };
       res.json(result);
       return;
