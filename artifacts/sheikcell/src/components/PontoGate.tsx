@@ -11,16 +11,19 @@ import { Clock, CheckCircle2, Loader2, Camera, MapPin, AlertTriangle } from "luc
 //
 // PontoGate só é exibido pra faltar a batida de ENTRADA do dia (é a única
 // que bloqueia o sistema — ver employeeNeedsClockInToday em lib/timeBank.ts
-// e enforceMandatoryClockIn em rhDp.ts), então sempre exige foto (selfie) +
-// geolocalização antes de liberar — o backend rejeita (400) uma batida de
-// entrada sem os dois. Intervalo/saída (batidos pela MeuPonto.tsx, fora
-// deste gate) continuam sem essa exigência.
+// e enforceMandatoryClockIn em rhDp.ts), então sempre TENTA foto (selfie) +
+// geolocalização antes de liberar — mas as duas têm via de escape quando o
+// navegador genuinamente não consegue obter uma delas (sem webcam/GPS,
+// permissão negada etc.): a batida é aceita mesmo assim, só sinalizada
+// (`flagged`) pra revisão do admin em RH → Ponto (ver POST /rh-dp/me/punch).
+// Intervalo/saída (batidos pela MeuPonto.tsx, fora deste gate) continuam
+// sem essa exigência.
 export default function PontoGate() {
   const { toast } = useToast();
   const [needsClockIn, setNeedsClockIn] = useState(false);
   const [punching, setPunching] = useState(false);
   const [now, setNow] = useState(() => new Date());
-  const { cam, geo, videoRef, ready, startCamera, startGeo, capture, captureWithoutPhoto, stop } = usePunchCapture(needsClockIn);
+  const { cam, geo, videoRef, ready, startCamera, startGeo, capture, captureWithoutPhoto, captureWithoutLocation, captureWithoutBoth, stop } = usePunchCapture(needsClockIn);
 
   // Relógio ao vivo, só pra dar confiança de que o horário que vai ser
   // gravado é o de agora (mesma ideia do relógio que aparece na tela de
@@ -64,18 +67,43 @@ export default function PontoGate() {
 
   // Via de escape: quando a câmera dá erro (sem webcam, permissão negada,
   // travada em outro app, timeout etc.), não faz sentido deixar o
-  // colaborador travado pra sempre — bate a entrada só com localização, e o
-  // backend marca `flagged` pra revisão do admin (painel RH → Ponto).
-  // Localização continua sempre obrigatória.
+  // colaborador travado pra sempre — bate a entrada só com localização (se
+  // ela estiver disponível), e o backend marca `flagged` pra revisão do
+  // admin (painel RH → Ponto).
   const punchWithoutPhoto = async () => {
-    if (punching || geo.status !== "ok") return;
-    const payload = captureWithoutPhoto(cam.error ?? "Câmera indisponível");
+    if (punching) return;
+    const payload = geo.status === "ok"
+      ? captureWithoutPhoto(cam.error ?? "Câmera indisponível")
+      : captureWithoutBoth(cam.error ?? "Câmera indisponível", geo.error ?? "Localização indisponível");
     if (!payload) return;
     setPunching(true);
     try {
       await api.rhDp.me.punch(payload);
       stop();
       toast({ title: "Ponto registrado sem foto", description: "Sua entrada foi sinalizada para revisão do RH, já que a câmera não funcionou." });
+      setNeedsClockIn(false);
+    } catch (err) {
+      toast({ title: "Erro ao bater ponto", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+      refresh();
+    } finally {
+      setPunching(false);
+    }
+  };
+
+  // Mesma via de escape, agora pro lado da localização (pedido 17/09: "a
+  // opção de localização está dificultando alguns usuários de bater ponto"
+  // — comum em PC sem GPS/localização, ou permissão bloqueada sem solução).
+  const punchWithoutLocation = async () => {
+    if (punching) return;
+    const payload = cam.status === "ok"
+      ? captureWithoutLocation(geo.error ?? "Localização indisponível")
+      : captureWithoutBoth(cam.error ?? "Câmera indisponível", geo.error ?? "Localização indisponível");
+    if (!payload) return;
+    setPunching(true);
+    try {
+      await api.rhDp.me.punch(payload);
+      stop();
+      toast({ title: "Ponto registrado sem localização", description: "Sua entrada foi sinalizada para revisão do RH, já que não foi possível obter a localização." });
       setNeedsClockIn(false);
     } catch (err) {
       toast({ title: "Erro ao bater ponto", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
@@ -139,13 +167,6 @@ export default function PontoGate() {
           </button>
         )}
 
-        {geoError && !camError && (
-          <div className="flex items-start gap-2 text-left bg-amber-50 border border-amber-200 rounded-lg p-2 text-[11px] text-amber-800">
-            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-            <span>Localização é obrigatória para bater o ponto de entrada. Sem ela o sistema fica bloqueado.</span>
-          </div>
-        )}
-
         <button onClick={punch} disabled={punching || !ready} data-testid="button-ponto-gate-punch"
           className="w-full py-3 rounded-xl bg-primary text-white font-bold text-sm disabled:opacity-40 flex items-center justify-center gap-2">
           {punching ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
@@ -156,12 +177,26 @@ export default function PontoGate() {
           <>
             <div className="flex items-start gap-2 text-left bg-amber-50 border border-amber-200 rounded-lg p-2 text-[11px] text-amber-800">
               <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-              <span>Se a câmera continuar sem funcionar, você pode bater o ponto só com a localização — isso vai ficar sinalizado para o RH revisar.</span>
+              <span>Se a câmera continuar sem funcionar, você pode bater o ponto sem foto — isso vai ficar sinalizado para o RH revisar.</span>
             </div>
-            <button onClick={punchWithoutPhoto} disabled={punching || geo.status !== "ok"} data-testid="button-ponto-gate-punch-no-photo"
+            <button onClick={punchWithoutPhoto} disabled={punching} data-testid="button-ponto-gate-punch-no-photo"
               className="w-full py-3 rounded-xl bg-white border-2 border-primary text-primary font-bold text-sm disabled:opacity-40 flex items-center justify-center gap-2">
               {punching ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
               Continuar sem foto (câmera indisponível)
+            </button>
+          </>
+        )}
+
+        {geoError && (
+          <>
+            <div className="flex items-start gap-2 text-left bg-amber-50 border border-amber-200 rounded-lg p-2 text-[11px] text-amber-800">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span>Se a localização continuar sem funcionar, você pode bater o ponto sem ela — isso vai ficar sinalizado para o RH revisar.</span>
+            </div>
+            <button onClick={punchWithoutLocation} disabled={punching} data-testid="button-ponto-gate-punch-no-location"
+              className="w-full py-3 rounded-xl bg-white border-2 border-primary text-primary font-bold text-sm disabled:opacity-40 flex items-center justify-center gap-2">
+              {punching ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+              Continuar sem localização (indisponível)
             </button>
           </>
         )}

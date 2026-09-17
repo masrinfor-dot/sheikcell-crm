@@ -197,17 +197,21 @@ router.post("/rh-dp/me/punch", requireAuth, async (req, res): Promise<void> => {
   if (!kind) { res.status(409).json({ error: "Você já bateu todos os pontos de hoje." }); return; }
 
   // Batida de ENTRADA feita pelo próprio colaborador (é a que o PontoGate.tsx
-  // exige logo ao abrir o sistema) precisa de geolocalização sempre, e de
-  // foto — MAS a foto pode ser dispensada se o navegador genuinamente não
-  // conseguir acessar a câmera (sem webcam no aparelho, permissão negada,
-  // câmera em uso por outro programa etc. — ver use-punch-capture.ts): nesse
-  // caso o cliente manda `noPhotoReason` em vez de `photoBase64`, a batida é
-  // aceita sem foto mas marcada `flagged` pra revisão do admin (painel RH →
-  // Ponto). Antes, sem essa via de escape, um colaborador cujo computador não
-  // tinha câmera ficava PERMANENTEMENTE travado na tela de ponto obrigatório,
-  // sem conseguir usar o sistema de jeito nenhum — pior que aceitar uma
-  // batida sem foto e sinalizar pra revisão. Geolocalização continua sempre
-  // obrigatória (não tem via de escape pra ela).
+  // exige logo ao abrir o sistema) precisa de geolocalização e de foto — MAS
+  // as duas podem ser dispensadas se o navegador genuinamente não conseguir
+  // obter (sem webcam/GPS no aparelho, permissão negada, câmera em uso por
+  // outro programa etc. — ver use-punch-capture.ts): nesse caso o cliente
+  // manda `noPhotoReason`/`noLocationReason` em vez do dado em si, a batida é
+  // aceita mesmo assim mas marcada `flagged` pra revisão do admin (painel
+  // RH → Ponto). Antes, sem essa via de escape, um colaborador nessas
+  // condições ficava PERMANENTEMENTE travado na tela de ponto obrigatório,
+  // sem conseguir usar o sistema de jeito nenhum — pior que aceitar a batida
+  // faltando um dos dois e sinalizar pra revisão. Geolocalização ganhou essa
+  // mesma via de escape em 17/09 (antes era sem exceção nenhuma — "a opção
+  // de localização está dificultando alguns usuários de bater ponto",
+  // provavelmente PC sem GPS/localização ou permissão bloqueada sem
+  // solução): continua sempre TENTADA primeiro, só dispensada quando o
+  // navegador realmente não consegue.
   let proofUrl: string | null = null;
   let lat: number | null = null;
   let lng: number | null = null;
@@ -215,14 +219,16 @@ router.post("/rh-dp/me/punch", requireAuth, async (req, res): Promise<void> => {
   let flagged = false;
   let flagReason: string | null = null;
   if (kind === "in") {
-    const { photoBase64, mimetype, noPhotoReason } = req.body ?? {};
+    const { photoBase64, mimetype, noPhotoReason, noLocationReason } = req.body ?? {};
     const rawLat = req.body?.lat;
     const rawLng = req.body?.lng;
     const rawAccuracy = req.body?.accuracyMeters;
     const validLat = typeof rawLat === "number" && Number.isFinite(rawLat);
     const validLng = typeof rawLng === "number" && Number.isFinite(rawLng);
-    if (!validLat || !validLng) {
-      res.status(400).json({ error: "Localização é obrigatória para bater o ponto de entrada." });
+    const hasLocation = validLat && validLng;
+    const locationSkipReason = typeof noLocationReason === "string" ? noLocationReason.trim().slice(0, 300) : "";
+    if (!hasLocation && !locationSkipReason) {
+      res.status(400).json({ error: "Localização (ou o motivo de não conseguir obter) é obrigatória para bater o ponto de entrada." });
       return;
     }
     const hasPhoto = typeof photoBase64 === "string" && !!photoBase64 && typeof mimetype === "string" && !!mimetype;
@@ -252,28 +258,37 @@ router.post("/rh-dp/me/punch", requireAuth, async (req, res): Promise<void> => {
       flagged = true;
       flagReason = `Sem foto (câmera indisponível no aparelho do colaborador): ${skipReason}`;
     }
-    lat = rawLat;
-    lng = rawLng;
-    accuracyMeters = typeof rawAccuracy === "number" && Number.isFinite(rawAccuracy) ? rawAccuracy : null;
 
-    // Geofence da loja (pedido 15/09, análise Tangerino "Local de
-    // Interesse") — SINALIZA (nunca bloqueia) quando a loja do colaborador
-    // tem geofence configurado e a batida veio de fora do raio permitido.
-    // Loja sem geofence configurado (qualquer um dos 3 campos nulo) não
-    // sinaliza nada — comportamento de sempre.
-    if (employee.storeId) {
-      const [store] = await db.select({
-        name: storesTable.name, geofenceLat: storesTable.geofenceLat,
-        geofenceLng: storesTable.geofenceLng, geofenceRadiusMeters: storesTable.geofenceRadiusMeters,
-      }).from(storesTable).where(and(eq(storesTable.id, employee.storeId), eq(storesTable.tenantId, tenantId)));
-      if (store?.geofenceLat != null && store.geofenceLng != null && store.geofenceRadiusMeters != null) {
-        const dist = distanceMeters(rawLat, rawLng, store.geofenceLat, store.geofenceLng);
-        if (dist > store.geofenceRadiusMeters) {
-          flagged = true;
-          const geofenceReason = `Localização fora do raio permitido da loja "${store.name}" (${Math.round(dist)}m, limite ${store.geofenceRadiusMeters}m).`;
-          flagReason = flagReason ? `${flagReason} ${geofenceReason}` : geofenceReason;
+    const addFlag = (reason: string) => {
+      flagged = true;
+      flagReason = flagReason ? `${flagReason} ${reason}` : reason;
+    };
+
+    if (hasLocation) {
+      lat = rawLat;
+      lng = rawLng;
+      accuracyMeters = typeof rawAccuracy === "number" && Number.isFinite(rawAccuracy) ? rawAccuracy : null;
+
+      // Geofence da loja (pedido 15/09, análise Tangerino "Local de
+      // Interesse") — SINALIZA (nunca bloqueia) quando a loja do colaborador
+      // tem geofence configurado e a batida veio de fora do raio permitido.
+      // Loja sem geofence configurado (qualquer um dos 3 campos nulo) não
+      // sinaliza nada — comportamento de sempre. Só roda com localização de
+      // verdade em mãos — sem ela não tem distância pra medir.
+      if (employee.storeId) {
+        const [store] = await db.select({
+          name: storesTable.name, geofenceLat: storesTable.geofenceLat,
+          geofenceLng: storesTable.geofenceLng, geofenceRadiusMeters: storesTable.geofenceRadiusMeters,
+        }).from(storesTable).where(and(eq(storesTable.id, employee.storeId), eq(storesTable.tenantId, tenantId)));
+        if (store?.geofenceLat != null && store.geofenceLng != null && store.geofenceRadiusMeters != null) {
+          const dist = distanceMeters(rawLat, rawLng, store.geofenceLat, store.geofenceLng);
+          if (dist > store.geofenceRadiusMeters) {
+            addFlag(`Localização fora do raio permitido da loja "${store.name}" (${Math.round(dist)}m, limite ${store.geofenceRadiusMeters}m).`);
+          }
         }
       }
+    } else {
+      addFlag(`Sem localização (GPS/localização indisponível no aparelho do colaborador): ${locationSkipReason}`);
     }
   }
 

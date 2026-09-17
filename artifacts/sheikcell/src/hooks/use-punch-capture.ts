@@ -116,10 +116,6 @@ export function usePunchCapture(active: boolean) {
   }
 
   const startGeo = useCallback(() => {
-    // Localização é sempre obrigatória pra bater ponto (sem via de escape,
-    // ao contrário da câmera — decisão intencional contra fraude) — então
-    // aqui o que dá pra melhorar é só a confiabilidade/clareza do próprio
-    // pedido de localização, nunca dispensá-lo.
     if (typeof window !== "undefined" && window.isSecureContext === false) {
       setGeo({ status: "error", error: "A página precisa ser aberta em HTTPS para obter sua localização. Confira o endereço no navegador." });
       return;
@@ -188,16 +184,44 @@ export function usePunchCapture(active: boolean) {
 
   // Via de escape pra quando a câmera genuinamente não funciona nesse
   // aparelho/navegador (sem webcam, permissão negada, travada em outro app,
-  // timeout etc. — ver cam.status === "error" acima). Localização continua
-  // obrigatória (sem via de escape pra ela) — só dispensa a foto, e o
-  // backend marca a batida como `flagged` pra revisão do admin. Sem isso, um
-  // colaborador nessas condições ficava permanentemente travado no gate,
-  // sem conseguir usar o sistema de jeito nenhum.
+  // timeout etc. — ver cam.status === "error" acima). Só dispensa a foto (a
+  // localização, se disponível, continua indo junto), e o backend marca a
+  // batida como `flagged` pra revisão do admin. Sem isso, um colaborador
+  // nessas condições ficava permanentemente travado no gate, sem conseguir
+  // usar o sistema de jeito nenhum.
   const captureWithoutPhoto = useCallback((reason: string): { lat: number; lng: number; accuracyMeters: number | null; noPhotoReason: string } | null => {
     if (geo.status !== "ok" || geo.lat == null || geo.lng == null) return null;
     const trimmed = reason.trim().slice(0, 300) || "Câmera indisponível";
     return { lat: geo.lat, lng: geo.lng, accuracyMeters: geo.accuracyMeters ?? null, noPhotoReason: trimmed };
   }, [geo]);
 
-  return { cam, geo, videoRef, ready, startCamera, startGeo, capture, captureWithoutPhoto, stop };
+  // Mesma via de escape, agora pro lado da localização (pedido 17/09: "a
+  // opção de localização está dificultando alguns usuários de bater ponto"
+  // — provavelmente PC sem GPS/localização ou permissão bloqueada sem
+  // solução). Só dispensa a localização (a foto, se disponível, continua
+  // indo junto), sempre marcada `flagged` pra revisão do admin.
+  const captureWithoutLocation = useCallback((reason: string): { photoBase64: string; mimetype: string; noLocationReason: string } | null => {
+    if (cam.status !== "ok" || !videoRef.current) return null;
+    const video = videoRef.current;
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth || 480;
+    canvas.height = video.videoHeight || 360;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
+    const photoBase64 = dataUrl.split(",")[1] ?? "";
+    if (!photoBase64) return null;
+    const trimmed = reason.trim().slice(0, 300) || "Localização indisponível";
+    return { photoBase64, mimetype: "image/jpeg", noLocationReason: trimmed };
+  }, [cam]);
+
+  // Quando os DOIS falham genuinamente (aparelho sem câmera E sem
+  // GPS/localização) — bate a entrada só com os motivos, sempre flagged.
+  const captureWithoutBoth = useCallback((photoReason: string, locationReason: string): { noPhotoReason: string; noLocationReason: string } => ({
+    noPhotoReason: photoReason.trim().slice(0, 300) || "Câmera indisponível",
+    noLocationReason: locationReason.trim().slice(0, 300) || "Localização indisponível",
+  }), []);
+
+  return { cam, geo, videoRef, ready, startCamera, startGeo, capture, captureWithoutPhoto, captureWithoutLocation, captureWithoutBoth, stop };
 }

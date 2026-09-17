@@ -2629,10 +2629,15 @@ export const api = {
       get: () => req<Employee>("/rh-dp/me"),
       punch: (data?:
         | { photoBase64: string; mimetype: string; lat: number; lng: number; accuracyMeters?: number | null }
-        // Entrada sem foto (câmera indisponível) — geo continua obrigatória;
-        // backend marca a batida como `flagged` pra revisão do RH. Ver
-        // captureWithoutPhoto em use-punch-capture.ts.
+        // Entrada sem foto (câmera indisponível) — backend marca a batida
+        // como `flagged` pra revisão do RH. Ver captureWithoutPhoto em
+        // use-punch-capture.ts.
         | { lat: number; lng: number; accuracyMeters?: number | null; noPhotoReason: string }
+        // Entrada sem localização (GPS/localização indisponível, pedido
+        // 17/09) — mesma ideia, ver captureWithoutLocation.
+        | { photoBase64: string; mimetype: string; noLocationReason: string }
+        // Entrada sem foto E sem localização — ver captureWithoutBoth.
+        | { noPhotoReason: string; noLocationReason: string }
       ) =>
         req<TimeClockEntry>("/rh-dp/me/punch", { method: "POST", body: data ? JSON.stringify(data) : undefined }),
       timeBank: (from?: string, to?: string) =>
