@@ -4,18 +4,10 @@ import ChangePasswordModal from "@/components/ChangePasswordModal";
 import { ActivityGuardProvider } from "./activityGuard";
 import { toast } from "@/hooks/use-toast";
 
-// Resultado de login(): "ok" abriu a sessão direto (qualquer role exceto
-// superadmin); "2fa" é o superadmin que ainda precisa confirmar o código
-// mandado por e-mail (ver verifyTwoFactor abaixo) — a sessão só abre depois.
-type LoginResult =
-  | { twoFactorRequired: false }
-  | { twoFactorRequired: true; challengeId: number; maskedEmail: string };
-
 type AuthCtx = {
   user: User | null;
   loading: boolean;
-  login: (email: string, password: string) => Promise<LoginResult>;
-  verifyTwoFactor: (challengeId: number, code: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   // Atualiza o usuário em cache (ex.: depois de editar o próprio perfil via
   // PATCH /auth/me) sem precisar recarregar a página inteira.
@@ -25,8 +17,7 @@ type AuthCtx = {
 const AuthContext = createContext<AuthCtx>({
   user: null,
   loading: true,
-  login: async () => ({ twoFactorRequired: false }),
-  verifyTwoFactor: async () => {},
+  login: async () => {},
   logout: async () => {},
   setUser: () => {},
 });
@@ -66,17 +57,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("sheikcell:unauthorized", handleUnauthorized);
   }, []);
 
-  const login = async (email: string, password: string): Promise<LoginResult> => {
+  const login = async (email: string, password: string): Promise<void> => {
     const r = await api.auth.login(email, password);
-    if ("user" in r) {
-      setUser(r.user);
-      return { twoFactorRequired: false };
-    }
-    return { twoFactorRequired: true, challengeId: r.challengeId, maskedEmail: r.maskedEmail };
-  };
-
-  const verifyTwoFactor = async (challengeId: number, code: string) => {
-    const r = await api.auth.loginTwoFactor(challengeId, code);
     setUser(r.user);
   };
 
@@ -86,7 +68,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, verifyTwoFactor, logout, setUser }}>
+    <AuthContext.Provider value={{ user, loading, login, logout, setUser }}>
       <ActivityGuardProvider>
         {children}
       </ActivityGuardProvider>

@@ -1,7 +1,7 @@
 import { Router, type IRouter, type Request } from "express";
 import bcrypt from "bcryptjs";
-import { randomBytes, randomInt, createHash } from "node:crypto";
-import { db, usersTable, sectorsTable, accessLogsTable, tenantsTable, impersonationLogTable, passwordResetTokensTable, twoFactorCodesTable, type User } from "@workspace/db";
+import { randomBytes, createHash } from "node:crypto";
+import { db, usersTable, sectorsTable, accessLogsTable, tenantsTable, impersonationLogTable, passwordResetTokensTable, type User } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 import { requireAuth, isWithinAccessHours } from "../middlewares/auth";
 import { sendEmail } from "@workspace/integrations-email";
@@ -12,24 +12,6 @@ const RESET_TOKEN_MIN_INTERVAL_MS = 60 * 1000; // evita reenviar em cada clique 
 
 function hashResetToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
-}
-
-// ── 2FA por e-mail (só pro login de superadmin — Fase 1, gap pendente) ─────
-const TWO_FACTOR_TTL_MS = 10 * 60 * 1000; // 10 minutos
-// Reenvio: evita mandar e-mail de novo em cada clique duplo — ver
-// "interval '60 seconds'" na checagem de código recente logo abaixo.
-const TWO_FACTOR_MAX_ATTEMPTS = 5;
-
-function hashTwoFactorCode(code: string): string {
-  return createHash("sha256").update(code).digest("hex");
-}
-
-// "s***@dominio.com" — só pra confirmar visualmente pro superadmin pra onde
-// foi o código, sem expor o e-mail inteiro na resposta do login.
-function maskEmail(email: string): string {
-  const [user, domain] = email.split("@");
-  if (!user || !domain) return email;
-  return `${user[0]}${"*".repeat(Math.max(user.length - 1, 1))}@${domain}`;
 }
 
 const router: IRouter = Router();
@@ -52,11 +34,8 @@ async function impersonatedByFor(req: Request): Promise<{ name: string; role: st
   return su ? { name: su.name, role: su.role } : null;
 }
 
-// Termina de verdade o login (sessão + log de acesso + resposta do usuário)
-// — compartilhado entre o login direto (qualquer role exceto superadmin) e
-// a confirmação do código de 2FA (só superadmin, depois de validar o
-// código). Nunca chamado antes de senha (e, pro superadmin, o 2FA) já
-// terem sido confirmados.
+// Termina de verdade o login (sessão + log de acesso + resposta do usuário).
+// Nunca chamado antes da senha já ter sido confirmada.
 async function establishSession(req: Request, user: User): ReturnType<typeof buildLoginResponse> {
   let sector = null;
   if (user.sectorId) {
@@ -169,77 +148,11 @@ router.post("/auth/login", async (req, res): Promise<void> => {
     }
   }
 
-  // Superadmin (papel mais sensível — acesso a todas as lojas): senha
-  // sozinha não abre a sessão, precisa confirmar um código de 6 dígitos
-  // mandado por e-mail (POST /auth/login/2fa). Reaproveita um código ainda
-  // válido se pediram login de novo rapidinho (evita reenviar e-mail a
-  // cada clique duplo), igual ao forgot-password.
-  if (user.role === "superadmin") {
-    const [recent] = await db.select().from(twoFactorCodesTable)
-      .where(sql`${twoFactorCodesTable.userId} = ${user.id} AND ${twoFactorCodesTable.usedAt} IS NULL AND ${twoFactorCodesTable.createdAt} > now() - interval '60 seconds'`);
-    if (recent) {
-      res.json({ twoFactorRequired: true, challengeId: recent.id, maskedEmail: maskEmail(user.email) });
-      return;
-    }
-    const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
-    const expiresAt = new Date(Date.now() + TWO_FACTOR_TTL_MS);
-    const [row] = await db.insert(twoFactorCodesTable).values({
-      userId: user.id, codeHash: hashTwoFactorCode(code), expiresAt,
-    }).returning();
-    try {
-      await sendEmail({
-        to: user.email,
-        subject: "Código de acesso — Painel do Sistema Sheikcell",
-        html: `<p>Olá, ${user.name}.</p><p>Seu código de acesso ao Painel do Sistema (válido por 10 minutos):</p><p style="font-size:28px;font-weight:bold;letter-spacing:4px;">${code}</p><p>Se você não tentou entrar agora, ignore este e-mail e considere trocar sua senha.</p>`,
-      });
-    } catch (err) {
-      req.log.error({ err }, "Falha ao enviar e-mail de 2FA do superadmin");
-      res.status(500).json({ error: "Não foi possível enviar o código por e-mail. Tente novamente em instantes." });
-      return;
-    }
-    res.json({ twoFactorRequired: true, challengeId: row!.id, maskedEmail: maskEmail(user.email) });
-    return;
-  }
-
-  res.json(await establishSession(req, user));
-});
-
-// Confirma o código de 2FA enviado por e-mail e SÓ AÍ abre a sessão do
-// superadmin (ver POST /auth/login acima). Uso único, no máximo 5
-// tentativas erradas, expira em 10 minutos.
-router.post("/auth/login/2fa", async (req, res): Promise<void> => {
-  const { challengeId, code } = req.body as { challengeId?: number; code?: string };
-  const id = Number(challengeId);
-  if (!Number.isFinite(id) || !code?.trim()) {
-    res.status(400).json({ error: "Informe o código" });
-    return;
-  }
-
-  const [row] = await db.select().from(twoFactorCodesTable).where(eq(twoFactorCodesTable.id, id));
-  if (!row || row.usedAt || row.expiresAt.getTime() < Date.now()) {
-    res.status(400).json({ error: "Código inválido ou expirado. Faça login novamente." });
-    return;
-  }
-  if (row.attempts >= TWO_FACTOR_MAX_ATTEMPTS) {
-    res.status(429).json({ error: "Muitas tentativas erradas. Faça login novamente." });
-    return;
-  }
-
-  const valid = hashTwoFactorCode(code.trim()) === row.codeHash;
-  if (!valid) {
-    await db.update(twoFactorCodesTable).set({ attempts: row.attempts + 1 }).where(eq(twoFactorCodesTable.id, id));
-    const attemptsLeft = TWO_FACTOR_MAX_ATTEMPTS - (row.attempts + 1);
-    res.status(401).json({ error: attemptsLeft > 0 ? `Código incorreto (${attemptsLeft} tentativa(s) restante(s))` : "Código incorreto. Faça login novamente." });
-    return;
-  }
-
-  const [user] = await db.select().from(usersTable).where(eq(usersTable.id, row.userId));
-  if (!user || !user.isActive || user.role !== "superadmin") {
-    res.status(401).json({ error: "Credenciais inválidas" });
-    return;
-  }
-  await db.update(twoFactorCodesTable).set({ usedAt: new Date() }).where(eq(twoFactorCodesTable.id, id));
-
+  // Código de acesso por e-mail pro superadmin foi removido (pedido 17/09:
+  // conta sem e-mail de verdade vinculado/monitorado ficava travada sem
+  // conseguir receber o código — "esse negócio de código não existe pois
+  // não tem email vinculado"). Superadmin loga só com senha, como qualquer
+  // outra role, a partir de agora.
   res.json(await establishSession(req, user));
 });
 

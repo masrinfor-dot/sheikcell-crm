@@ -1977,16 +1977,8 @@ export const api = {
         req<{ message: TicketMessage }>(`/tickets/${id}/messages`, { method: "POST", body: JSON.stringify({ content, attachment }) })),
   },
   auth: {
-    // Superadmin (papel mais sensível) não abre sessão só com a senha —
-    // volta { twoFactorRequired: true, challengeId, maskedEmail } e precisa
-    // confirmar o código por e-mail em loginTwoFactor abaixo. Qualquer outra
-    // role sempre volta { user } direto, igual sempre foi.
     login: (email: string, password: string) =>
-      req<{ user: User } | { twoFactorRequired: true; challengeId: number; maskedEmail: string }>(
-        "/auth/login", { method: "POST", body: JSON.stringify({ email, password }) },
-      ),
-    loginTwoFactor: (challengeId: number, code: string) =>
-      req<{ user: User }>("/auth/login/2fa", { method: "POST", body: JSON.stringify({ challengeId, code }) }),
+      req<{ user: User }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
     logout: () => req<{ ok: boolean }>("/auth/logout", { method: "POST" }),
     me: () => req<{ user: User }>("/auth/me"),
     // Auto-edição de nome/e-mail do próprio usuário logado — sempre a
@@ -2742,16 +2734,25 @@ export const api = {
         pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean;
         companyMission: string | null; companyVision: string | null; companyValues: string | null;
         timeBankValidityMonths: number | null;
+        // Lembretes automáticos de ponto (pedido 17/09) — toggle à parte da
+        // linha de check-in, tolerância em minutos (null = padrão de 15) e
+        // mensagens customizadas (null = texto padrão).
+        pontoRemindersEnabled: boolean; pontoReminderGraceMinutes: number | null;
+        pontoReminderMessageEntrada: string | null; pontoReminderMessageSaida: string | null;
       }>("/rh-dp/settings"),
       update: (data: Partial<{
         pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean;
         companyMission: string | null; companyVision: string | null; companyValues: string | null;
         timeBankValidityMonths: number | null;
+        pontoRemindersEnabled: boolean; pontoReminderGraceMinutes: number | null;
+        pontoReminderMessageEntrada: string | null; pontoReminderMessageSaida: string | null;
       }>) =>
         req<{
           pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean;
           companyMission: string | null; companyVision: string | null; companyValues: string | null;
           timeBankValidityMonths: number | null;
+          pontoRemindersEnabled: boolean; pontoReminderGraceMinutes: number | null;
+          pontoReminderMessageEntrada: string | null; pontoReminderMessageSaida: string | null;
         }>("/rh-dp/settings", { method: "PATCH", body: JSON.stringify(data) }),
     },
     // Calendário de feriados (pedido 15/09, análise Tangerino) — abate o

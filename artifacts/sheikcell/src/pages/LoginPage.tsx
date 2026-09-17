@@ -1,49 +1,28 @@
 import { useState } from "react";
 import { Link } from "wouter";
 import { useAuth } from "@/lib/auth";
-import { Smartphone, Lock, Mail, AlertCircle, ShieldCheck } from "lucide-react";
+import { Smartphone, Lock, Mail, AlertCircle, Eye, EyeOff } from "lucide-react";
 
 export default function LoginPage() {
-  const { login, verifyTwoFactor } = useAuth();
+  const { login } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-
-  // Superadmin (Fase 1 - gaps): depois da senha, ainda precisa confirmar um
-  // código de 6 dígitos mandado por e-mail — challenge fica em memória só,
-  // nunca em localStorage (expira em 10min de qualquer jeito).
-  const [challenge, setChallenge] = useState<{ id: number; maskedEmail: string } | null>(null);
-  const [code, setCode] = useState("");
-  const [verifying, setVerifying] = useState(false);
+  // Botão de mostrar/esconder senha (pedido 17/09) — só um toggle visual, a
+  // senha continua indo pro backend do mesmo jeito.
+  const [showPassword, setShowPassword] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
     setLoading(true);
     try {
-      const r = await login(email, password);
-      if (r.twoFactorRequired) {
-        setChallenge({ id: r.challengeId, maskedEmail: r.maskedEmail });
-      }
+      await login(email, password);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Erro ao fazer login");
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleVerify = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!challenge || !code.trim()) return;
-    setError("");
-    setVerifying(true);
-    try {
-      await verifyTwoFactor(challenge.id, code.trim());
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Código inválido");
-    } finally {
-      setVerifying(false);
     }
   };
 
@@ -67,115 +46,72 @@ export default function LoginPage() {
 
         {/* Login card */}
         <div className="shk-card p-6">
-          {challenge ? (
-            <>
-              <h2 className="text-lg font-bold mb-1 text-foreground flex items-center gap-2">
-                <ShieldCheck className="w-5 h-5 text-primary" /> Código de acesso
-              </h2>
-              <p className="text-sm text-muted-foreground mb-5">
-                Mandamos um código de 6 dígitos para <strong>{challenge.maskedEmail}</strong>. Ele vale por 10 minutos.
-              </p>
-              <form onSubmit={handleVerify} className="space-y-4">
-                <div>
-                  <label className="text-sm font-medium text-foreground mb-1.5 block">Código</label>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    autoFocus
-                    value={code}
-                    onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                    placeholder="000000"
-                    required
-                    data-testid="input-2fa-code"
-                    className="w-full px-4 py-2.5 rounded-xl border border-border bg-background text-center text-lg tracking-[0.3em] font-semibold focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition"
-                  />
-                </div>
+          <h2 className="text-lg font-bold mb-5 text-foreground">Entrar</h2>
 
-                {error && (
-                  <div className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 rounded-xl p-3">
-                    <AlertCircle className="w-4 h-4 shrink-0" />
-                    <span>{error}</span>
-                  </div>
-                )}
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div>
+              <label className="text-sm font-medium text-foreground mb-1.5 block">Email</label>
+              <div className="relative">
+                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="seu@sheikcell.com"
+                  required
+                  data-testid="input-email"
+                  className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition"
+                />
+              </div>
+            </div>
 
-                <button
-                  type="submit"
-                  disabled={verifying || code.length < 6}
-                  data-testid="button-verify-2fa"
-                  className="w-full py-2.5 rounded-xl bg-primary text-white font-semibold text-sm hover:bg-primary/90 transition disabled:opacity-60"
-                >
-                  {verifying ? "Confirmando..." : "Confirmar"}
-                </button>
+            <div>
+              <label className="text-sm font-medium text-foreground mb-1.5 block">Senha</label>
+              <div className="relative">
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                <input
+                  type={showPassword ? "text" : "password"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  required
+                  data-testid="input-password"
+                  className="w-full pl-10 pr-10 py-2.5 rounded-xl border border-border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition"
+                />
                 <button
                   type="button"
-                  onClick={() => { setChallenge(null); setCode(""); setError(""); }}
-                  data-testid="button-cancel-2fa"
-                  className="w-full text-center text-xs text-muted-foreground hover:underline"
+                  onClick={() => setShowPassword((v) => !v)}
+                  tabIndex={-1}
+                  aria-label={showPassword ? "Esconder senha" : "Mostrar senha"}
+                  data-testid="button-toggle-password"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition"
                 >
-                  Voltar
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
-              </form>
-            </>
-          ) : (
-            <>
-              <h2 className="text-lg font-bold mb-5 text-foreground">Entrar</h2>
+              </div>
+            </div>
 
-              <form onSubmit={handleSubmit} className="space-y-4">
-                <div>
-                  <label className="text-sm font-medium text-foreground mb-1.5 block">Email</label>
-                  <div className="relative">
-                    <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                    <input
-                      type="email"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      placeholder="seu@sheikcell.com"
-                      required
-                      data-testid="input-email"
-                      className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition"
-                    />
-                  </div>
-                </div>
+            {error && (
+              <div className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 rounded-xl p-3">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{error}</span>
+              </div>
+            )}
 
-                <div>
-                  <label className="text-sm font-medium text-foreground mb-1.5 block">Senha</label>
-                  <div className="relative">
-                    <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                    <input
-                      type="password"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      placeholder="••••••••"
-                      required
-                      data-testid="input-password"
-                      className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition"
-                    />
-                  </div>
-                </div>
-
-                {error && (
-                  <div className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 rounded-xl p-3">
-                    <AlertCircle className="w-4 h-4 shrink-0" />
-                    <span>{error}</span>
-                  </div>
-                )}
-
-                <button
-                  type="submit"
-                  disabled={loading}
-                  data-testid="button-login"
-                  className="w-full py-2.5 rounded-xl bg-primary text-white font-semibold text-sm hover:bg-primary/90 transition disabled:opacity-60"
-                >
-                  {loading ? "Entrando..." : "Entrar"}
-                </button>
-              </form>
-              <p className="mt-3 text-center text-[11px] text-muted-foreground">
-                <Link href="/forgot-password" data-testid="link-forgot-password" className="text-primary font-semibold hover:underline">
-                  Esqueceu a senha?
-                </Link>
-              </p>
-            </>
-          )}
+            <button
+              type="submit"
+              disabled={loading}
+              data-testid="button-login"
+              className="w-full py-2.5 rounded-xl bg-primary text-white font-semibold text-sm hover:bg-primary/90 transition disabled:opacity-60"
+            >
+              {loading ? "Entrando..." : "Entrar"}
+            </button>
+          </form>
+          <p className="mt-3 text-center text-[11px] text-muted-foreground">
+            <Link href="/forgot-password" data-testid="link-forgot-password" className="text-primary font-semibold hover:underline">
+              Esqueceu a senha?
+            </Link>
+          </p>
         </div>
 
         {/* Dev-only credential hints */}
