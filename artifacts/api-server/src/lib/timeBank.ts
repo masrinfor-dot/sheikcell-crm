@@ -325,27 +325,73 @@ export function nextPunchKind(effectiveEntries: TimeClockEntry[], hasBreak: bool
   return "in";
 }
 
+// Resolve a batida esperada pro colaborador AGORA — usado por POST
+// /rh-dp/me/punch, pelo check-in por foto no WhatsApp e por GET
+// /rh-dp/me/clock-status (que decide se mostra o PontoGate). Centralizado
+// aqui pra essas três pontas nunca discordarem sobre o estado do dia.
+//
+// Bug real (17/09): quando a loja fecha tarde e um colaborador bate a
+// SAÍDA já depois da meia-noite, essa batida fica datada de "hoje" mesmo
+// sendo o fim do turno de ONTEM. Sem esse ajuste, o dia civil de hoje
+// aparecia com uma "saída" órfã (sem nenhuma "entrada" própria de hoje
+// antes dela): o clock-status via "sem entrada hoje" e mandava mostrar o
+// PontoGate pedindo entrada, mas o punch via a última batida = "saída" e
+// recusava com "Você já bateu todos os pontos de hoje.", travando o
+// colaborador num loop sem saída. Aqui essa saída órfã é ignorada pro
+// cálculo — sem uma "entrada" que também seja de hoje, o dia é tratado
+// como ainda não iniciado.
+export async function resolveTodaysPunchKind(
+  employeeId: number, tenantId: number, hasBreak: boolean,
+): Promise<{ kind: "in" | "break_start" | "break_end" | "out" | null; todayEntries: TimeClockEntry[]; effectiveEntries: TimeClockEntry[] }> {
+  const todayKey = dayKeySaoPaulo(new Date());
+  const dayStart = new Date(`${todayKey}T00:00:00-03:00`);
+  const dayEnd = new Date(`${todayKey}T23:59:59-03:00`);
+  // Turno noturno cruzando a meia-noite: uma entrada batida ontem à noite
+  // sem saída ainda não fechou o turno, mesmo que o "hoje" civil já tenha
+  // virado — olha até 20h pra trás pra achar esse turno em aberto.
+  const lookbackStart = new Date(dayStart.getTime() - 20 * 3600_000);
+  const recentEntries = await db.select().from(timeClockEntriesTable)
+    .where(and(
+      eq(timeClockEntriesTable.employeeId, employeeId),
+      eq(timeClockEntriesTable.tenantId, tenantId),
+      gte(timeClockEntriesTable.at, lookbackStart),
+      lte(timeClockEntriesTable.at, dayEnd),
+    ))
+    .orderBy(asc(timeClockEntriesTable.at));
+  const todayEntries = recentEntries.filter((e) => dayKeySaoPaulo(e.at) === todayKey);
+  const lastEntry = recentEntries[recentEntries.length - 1];
+
+  let effectiveEntries: TimeClockEntry[];
+  if (lastEntry && lastEntry.kind !== "out" && dayKeySaoPaulo(lastEntry.at) !== todayKey) {
+    // Última batida (de ontem) não foi "saída": o turno está aberto
+    // cruzando a virada do dia — continua a partir dele.
+    effectiveEntries = recentEntries;
+  } else {
+    const hasInToday = todayEntries.some((e) => e.kind === "in");
+    // Sem "entrada" própria de hoje: ignora qualquer batida órfã de hoje
+    // (ex.: a saída de um turno de ontem que só fechou depois da meia-noite)
+    // — pro sistema, o dia ainda não começou.
+    effectiveEntries = hasInToday ? todayEntries : [];
+  }
+
+  return { kind: nextPunchKind(effectiveEntries, hasBreak), todayEntries, effectiveEntries };
+}
+
 // Ponto obrigatório só se aplica a escala "fixed" e só nos dias que a escala
 // prevê expediente — escala livre ou dia fora de weekdays nunca exige bater
 // ponto pra liberar o login. Não decide isenção por cargo (ex.: admin) —
 // isso é responsabilidade de quem chama, que tem acesso à sessão.
 export async function employeeNeedsClockInToday(
-  employeeId: number, tenantId: number, shift: { type: string; weekdays: number[] } | null,
+  employeeId: number, tenantId: number, shift: (WorkShift | { type: string; weekdays: number[]; breakStart?: string | null; breakEnd?: string | null }) | null,
 ): Promise<boolean> {
   if (!shift || shift.type !== "fixed") return false;
   const todayKey = dayKeySaoPaulo(new Date());
   if (!shift.weekdays.includes(weekdayOfDayKey(todayKey))) return false;
-  const dayStart = new Date(`${todayKey}T00:00:00-03:00`);
-  const dayEnd = new Date(`${todayKey}T23:59:59-03:00`);
-  const [hasIn] = await db.select({ id: timeClockEntriesTable.id }).from(timeClockEntriesTable)
-    .where(and(
-      eq(timeClockEntriesTable.employeeId, employeeId),
-      eq(timeClockEntriesTable.tenantId, tenantId),
-      eq(timeClockEntriesTable.kind, "in"),
-      gte(timeClockEntriesTable.at, dayStart),
-      lte(timeClockEntriesTable.at, dayEnd),
-    )).limit(1);
-  return !hasIn;
+  // Mesma resolução usada por POST /rh-dp/me/punch — nunca discordar sobre
+  // se o dia já tem uma "entrada" pendente (ver resolveTodaysPunchKind).
+  const hasBreak = !!(shift.breakStart && shift.breakEnd);
+  const { kind } = await resolveTodaysPunchKind(employeeId, tenantId, hasBreak);
+  return kind === "in";
 }
 
 function hhmmSaoPaulo(d: Date): string {

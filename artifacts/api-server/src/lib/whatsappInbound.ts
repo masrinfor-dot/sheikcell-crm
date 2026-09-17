@@ -2,8 +2,8 @@ import {
   db, conversationsTable, messagesTable, sectorsTable, attendanceLogsTable, whatsappSessionsTable,
   tenantsTable, employeesTable, workShiftsTable, timeClockEntriesTable, crmContactsTable,
 } from "@workspace/db";
-import { eq, and, desc, asc, gte, lte, sql, inArray } from "drizzle-orm";
-import { nextPunchKind, dayKeySaoPaulo } from "./timeBank";
+import { eq, and, desc, sql, inArray } from "drizzle-orm";
+import { resolveTodaysPunchKind } from "./timeBank";
 import { normalizePhone, phoneVariants } from "./phone";
 import { broadcast } from "./sseEmitter";
 import { isPotentialConversation, restrictedRecipients } from "./conversationScope";
@@ -469,8 +469,8 @@ const PONTO_KIND_LABEL: Record<string, string> = {
  * tem foto — texto/áudio/vídeo/documento nunca contam como tentativa de
  * check-in (decisão de produto), caem no fluxo normal de conversa como
  * qualquer outra mensagem. Casa o remetente com um colaborador pelo telefone
- * normalizado, decide a próxima batida esperada do dia (nextPunchKind, mesma
- * função que POST /rh-dp/me/punch usa) e registra com a foto como
+ * normalizado, decide a próxima batida esperada do dia (resolveTodaysPunchKind,
+ * mesma função que POST /rh-dp/me/punch usa) e registra com a foto como
  * comprovante. Retorna true quando a mensagem foi consumida (não deve virar
  * conversa/ticket).
  */
@@ -505,20 +505,8 @@ async function tryConsumePontoCheckIn(input: {
     : null;
   const hasBreak = !!(shift?.breakStart && shift?.breakEnd);
 
-  const todayKey = dayKeySaoPaulo(new Date());
-  const dayStart = new Date(`${todayKey}T00:00:00-03:00`);
-  const dayEnd = new Date(`${todayKey}T23:59:59-03:00`);
-  const todayEntries = await db.select().from(timeClockEntriesTable)
-    .where(and(
-      eq(timeClockEntriesTable.employeeId, employee.id),
-      eq(timeClockEntriesTable.tenantId, tenantId),
-      gte(timeClockEntriesTable.at, dayStart),
-      lte(timeClockEntriesTable.at, dayEnd),
-    ))
-    .orderBy(asc(timeClockEntriesTable.at));
-
   const { sendRawWhatsAppText } = await import("./outbound");
-  const kind = nextPunchKind(todayEntries, hasBreak);
+  const { kind, todayEntries } = await resolveTodaysPunchKind(employee.id, tenantId, hasBreak);
   if (!kind) {
     void sendRawWhatsAppText(phone, sessionKey, "Seu ponto de hoje já está completo. ✅").catch(() => {});
     return true;

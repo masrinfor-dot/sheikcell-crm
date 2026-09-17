@@ -7,7 +7,7 @@ import {
 import { eq, and, desc, asc, gte, lte, inArray, sql } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireTenant, tenantIdOf } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
-import { computeTimeBank, nextPunchKind, dayKeySaoPaulo, employeeNeedsClockInToday, hasSuspiciousManualPattern } from "../lib/timeBank";
+import { computeTimeBank, resolveTodaysPunchKind, dayKeySaoPaulo, employeeNeedsClockInToday, hasSuspiciousManualPattern } from "../lib/timeBank";
 import { computeVacationDeadline } from "../lib/vacationDeadline";
 import { checkFaceMatch } from "../lib/facialRecognition";
 import { normalizePhone } from "../lib/phone";
@@ -190,33 +190,10 @@ router.post("/rh-dp/me/punch", requireAuth, async (req, res): Promise<void> => {
     : null;
   const hasBreak = !!(shift?.breakStart && shift?.breakEnd);
 
-  const todayKey = dayKeySaoPaulo(new Date());
-  const dayStart = new Date(`${todayKey}T00:00:00-03:00`);
-  const dayEnd = new Date(`${todayKey}T23:59:59-03:00`);
-  // Turno noturno cruzando a meia-noite: uma entrada batida ontem à noite
-  // sem saída ainda não fechou o turno, mesmo que o "hoje" civil já tenha
-  // virado — olha até 20h pra trás pra achar esse turno em aberto. Sem isso,
-  // a consulta só de "hoje" não via a entrada de ontem e deixava o
-  // colaborador bater "entrada" de novo em vez de intervalo/saída.
-  const lookbackStart = new Date(dayStart.getTime() - 20 * 3600_000);
-  const recentEntries = await db.select().from(timeClockEntriesTable)
-    .where(and(
-      eq(timeClockEntriesTable.employeeId, employee.id),
-      eq(timeClockEntriesTable.tenantId, tenantId),
-      gte(timeClockEntriesTable.at, lookbackStart),
-      lte(timeClockEntriesTable.at, dayEnd),
-    ))
-    .orderBy(asc(timeClockEntriesTable.at));
-  const todayEntries = recentEntries.filter((e) => dayKeySaoPaulo(e.at) === todayKey);
-  const lastEntry = recentEntries[recentEntries.length - 1];
-  // Se a última batida (mesmo de ontem) não foi "saída", o turno está aberto
-  // cruzando a virada do dia — continua a partir dela. Senão (turno já
-  // fechado ou sem nenhuma batida recente), considera só as batidas de hoje.
-  const effectiveEntries = lastEntry && lastEntry.kind !== "out" && dayKeySaoPaulo(lastEntry.at) !== todayKey
-    ? recentEntries
-    : todayEntries;
-
-  const kind = nextPunchKind(effectiveEntries, hasBreak);
+  // Mesma resolução usada por GET /rh-dp/me/clock-status (o que decide se o
+  // PontoGate aparece) — centralizada em resolveTodaysPunchKind pra nunca
+  // discordar dela (ver comentário na função em lib/timeBank.ts).
+  const { kind } = await resolveTodaysPunchKind(employee.id, tenantId, hasBreak);
   if (!kind) { res.status(409).json({ error: "Você já bateu todos os pontos de hoje." }); return; }
 
   // Batida de ENTRADA feita pelo próprio colaborador (é a que o PontoGate.tsx
