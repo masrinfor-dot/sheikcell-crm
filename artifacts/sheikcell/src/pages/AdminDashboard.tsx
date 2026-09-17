@@ -80,7 +80,7 @@ type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabI
 // nenhum tabIds: ele é sempre renderizado à parte, fixo no fim de toda
 // lista de navegação (ver `suporteTab` mais abaixo).
 const TAB_GROUPS: TabGroup[] = [
-  { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["dashboard", "chat", "equipe", "crm", "avaliacao", "vitrine", "financeiras", "sorteios"] },
+  { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["chat", "equipe", "crm", "avaliacao", "vitrine", "financeiras", "sorteios"] },
   { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["relatorios", "tarefas", "documentos", "meuponto", "rh"] },
   { key: "administracao", label: "Administração", icon: Settings, tabIds: ["users", "sectors", "financeiro", "pagamentos", "quickreplies", "whatsapp", "robo", "tvbox"] },
   { key: "configuracoes", label: "Configurações", icon: SlidersHorizontal, tabIds: ["aparencia", "integracoes", "precos"] },
@@ -88,12 +88,14 @@ const TAB_GROUPS: TabGroup[] = [
 ];
 
 // Fusão de abas do menu Gestão (31/08, a pedido do cliente — reduzir o
-// dropdown): "Relatórios" agora é um único item de menu que agrupa
-// Resultados/Relatórios/Histórico (sub-abas dentro da própria tela); "RH"
-// agrupa RH/Rotinas e Produtividade/Diretório/Treinamentos. Nada foi
+// dropdown; unificação ampliada em 17/09 a pedido do lojista: "junta
+// Dashboard, Resultados, Relatórios e Histórico numa coisa só"): "Relatórios"
+// agora é um único item de menu que agrupa Dashboard/Resultados/Relatórios/
+// Histórico (sub-abas dentro da própria tela, Dashboard é a primeira/padrão);
+// "RH" agrupa RH/Rotinas e Produtividade/Diretório/Treinamentos. Nada foi
 // removido — cada tela continua exatamente como era, só o menu encolheu.
 // "Sorteios" saiu de Gestão e foi para o grupo Atendimento (mesmo pedido).
-const RELATORIOS_GROUP_IDS: Tab[] = ["resultados", "relatorios", "history"];
+const RELATORIOS_GROUP_IDS: Tab[] = ["dashboard", "resultados", "relatorios", "history"];
 const RH_GROUP_IDS: Tab[] = ["rh", "rotinas", "diretorio", "treinamentos"];
 function tabMatchesNav(navId: Tab, currentTab: Tab): boolean {
   if (navId === "relatorios") return RELATORIOS_GROUP_IDS.includes(currentTab);
@@ -664,6 +666,9 @@ export default function AdminDashboard() {
   // sub-abas aparecem pra cada pessoa (a mesma regra de sempre: adminOnly +
   // módulo contratado pela loja + módulo liberado pro usuário).
   const relSubDefs = [
+    // Dashboard sempre visível (sem módulo opcional pra travar) — mesmo
+    // comportamento de sempre, só que agora como 1ª sub-aba do item fundido.
+    { id: "dashboard" as Tab, label: "Dashboard", icon: LayoutDashboard, adminOnly: false },
     { id: "resultados" as Tab, label: "Resultados", icon: TrendingUp, adminOnly: false, module: "resultados" as OptionalModule },
     { id: "relatorios" as Tab, label: "Relatórios", icon: FileBarChart2, adminOnly: true, module: "relatorios" as OptionalModule },
     { id: "history" as Tab, label: "Histórico", icon: ClipboardList, adminOnly: false, module: "history" as OptionalModule },
@@ -676,12 +681,14 @@ export default function AdminDashboard() {
   ];
 
   const allTabs = [
-    { id: "dashboard" as Tab, label: "Dashboard", icon: LayoutDashboard, adminOnly: false },
-    // "Relatórios" agora é o item único de menu que abre direto na sub-aba
-    // Relatórios (Resultados e Histórico ficam a um clique, dentro da tela —
-    // ver RELATORIOS_GROUP_IDS/tabMatchesNav acima). Visibilidade real do
-    // item é decidida abaixo por relVisibleSubs, não pelos campos aqui.
-    { id: "relatorios" as Tab, label: "Relatórios", icon: FileBarChart2, adminOnly: false },
+    // "Painel" agora é o item único de menu (id continua "relatorios" pra não
+    // quebrar sessionStorage/permissões salvas) que abre direto na sub-aba
+    // Dashboard (Resultados, Relatórios e Histórico ficam a um clique, dentro
+    // da tela — ver RELATORIOS_GROUP_IDS/tabMatchesNav acima). Visibilidade
+    // real do item é decidida abaixo por relVisibleSubs, não pelos campos
+    // aqui. "dashboard" não tem entrada própria aqui (igual resultados/
+    // relatorios/history) — vive só em relSubDefs.
+    { id: "relatorios" as Tab, label: "Painel", icon: LayoutDashboard, adminOnly: false },
     { id: "chat" as Tab, label: "Atendimento", icon: MessageCircle, adminOnly: false, module: "chat" as OptionalModule },
     { id: "equipe" as Tab, label: "Chat Interno", icon: MessagesSquare, adminOnly: false, module: "equipe" as OptionalModule },
     { id: "tarefas" as Tab, label: "Tarefas", icon: ListTodo, adminOnly: false, module: "tarefas" as OptionalModule },
