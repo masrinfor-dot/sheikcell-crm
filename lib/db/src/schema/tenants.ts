@@ -90,6 +90,25 @@ export const tenantsTable = pgTable("tenants", {
   companyMission: text("company_mission"),
   companyVision: text("company_vision"),
   companyValues: text("company_values"),
+  // Lembretes automáticos de ponto por WhatsApp (pedido 17/09: "configurar os
+  // lembretes automáticos") — antes rodavam sozinhos, sem opção de desligar,
+  // sempre que pontoCheckInSessionKey estava configurado (as duas coisas
+  // ficavam coladas: só dava pra desligar o lembrete removendo a linha
+  // inteira de check-in). Agora é um toggle à parte em RH → Ponto: default
+  // true (mantém o comportamento de sempre pra quem já usa). Só tem efeito
+  // quando pontoCheckInSessionKey também está configurado (sem linha de
+  // WhatsApp não tem pra onde mandar) — ver sendPontoReminders em
+  // lib/pontoReminders.ts.
+  pontoRemindersEnabled: boolean("ponto_reminders_enabled").notNull().default(true),
+  // Minutos de tolerância depois do horário previsto (entrada/saída) antes de
+  // mandar o lembrete — antes fixo em 15 (GRACE_MINUTES), agora editável por
+  // loja. Null = usa o padrão de 15.
+  pontoReminderGraceMinutes: integer("ponto_reminder_grace_minutes"),
+  // Texto customizado dos lembretes — null = usa a mensagem padrão em
+  // lib/pontoReminders.ts. "{nome}" é substituído pelo primeiro nome do
+  // colaborador.
+  pontoReminderMessageEntrada: text("ponto_reminder_message_entrada"),
+  pontoReminderMessageSaida: text("ponto_reminder_message_saida"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

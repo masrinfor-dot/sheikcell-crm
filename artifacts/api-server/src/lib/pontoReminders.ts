@@ -15,7 +15,18 @@ import { logger } from "./logger";
 // nada (não é obrigatório pra usar o resto do RH).
 // Idempotente via ponto_reminders (um por colaborador/dia/tipo) — seguro
 // rodar de novo a cada tick.
-const GRACE_MINUTES = 15;
+//
+// Configurável por loja desde 17/09 (pedido: "configurar os lembretes
+// automáticos") — antes era tudo fixo/implícito (ligava sozinho junto com a
+// linha de check-in, sempre 15min de tolerância, texto fixo). Agora:
+// tenants.pontoRemindersEnabled (default true, mantém o comportamento de
+// sempre) liga/desliga só o lembrete sem mexer no check-in em si;
+// pontoReminderGraceMinutes substitui esse default quando configurado;
+// pontoReminderMessageEntrada/Saida substituem o texto padrão quando
+// configurados ("{nome}" vira o primeiro nome do colaborador).
+const DEFAULT_GRACE_MINUTES = 15;
+const DEFAULT_MSG_ENTRADA = "Oi, {nome}! 👋 Notei que você ainda não bateu o ponto de entrada hoje. Não esqueça de registrar, combinado?";
+const DEFAULT_MSG_SAIDA = "Oi, {nome}! 👋 Vi que seu ponto de hoje ainda está aberto — não esqueça de bater a saída antes de ir, combinado?";
 
 function parseHHMMToMinutes(v: string | null): number | null {
   if (!v || !/^\d{2}:\d{2}$/.test(v)) return null;
@@ -41,11 +52,21 @@ export async function sendPontoReminders(): Promise<void> {
   if (running) return;
   running = true;
   try {
-    const tenants = await db.select({ id: tenantsTable.id, pontoCheckInSessionKey: tenantsTable.pontoCheckInSessionKey }).from(tenantsTable);
+    const tenants = await db.select({
+      id: tenantsTable.id, pontoCheckInSessionKey: tenantsTable.pontoCheckInSessionKey,
+      pontoRemindersEnabled: tenantsTable.pontoRemindersEnabled,
+      pontoReminderGraceMinutes: tenantsTable.pontoReminderGraceMinutes,
+      pontoReminderMessageEntrada: tenantsTable.pontoReminderMessageEntrada,
+      pontoReminderMessageSaida: tenantsTable.pontoReminderMessageSaida,
+    }).from(tenantsTable);
     const info = todayInfo();
     for (const tenant of tenants) {
       const sessionKey = tenant.pontoCheckInSessionKey;
       if (!sessionKey) continue;
+      // Toggle à parte da linha de check-in (pedido 17/09) — desligado, não
+      // manda nenhum lembrete pra esse tenant, mesmo com WhatsApp configurado.
+      if (!tenant.pontoRemindersEnabled) continue;
+      const graceMinutes = tenant.pontoReminderGraceMinutes ?? DEFAULT_GRACE_MINUTES;
       const employees = await db.select().from(employeesTable)
         .where(and(eq(employeesTable.tenantId, tenant.id), eq(employeesTable.isActive, true)));
       for (const emp of employees) {
@@ -60,16 +81,16 @@ export async function sendPontoReminders(): Promise<void> {
           const firstName = emp.name.split(" ")[0] ?? emp.name;
 
           const startMin = parseHHMMToMinutes(shift.startTime);
-          if (startMin != null && info.nowMinutes >= startMin + GRACE_MINUTES) {
+          if (startMin != null && info.nowMinutes >= startMin + graceMinutes) {
             const needsIn = await employeeNeedsClockInToday(emp.id, tenant.id, shift);
             if (needsIn) {
-              await sendReminder(tenant.id, emp.id, info.dateKey, "entrada", phone, sessionKey,
-                `Oi, ${firstName}! 👋 Notei que você ainda não bateu o ponto de entrada hoje. Não esqueça de registrar, combinado?`);
+              const text = (tenant.pontoReminderMessageEntrada ?? DEFAULT_MSG_ENTRADA).replace(/\{nome\}/g, firstName);
+              await sendReminder(tenant.id, emp.id, info.dateKey, "entrada", phone, sessionKey, text);
             }
           }
 
           const endMin = parseHHMMToMinutes(shift.endTime);
-          if (endMin != null && info.nowMinutes >= endMin + GRACE_MINUTES) {
+          if (endMin != null && info.nowMinutes >= endMin + graceMinutes) {
             const dayStart = new Date(`${info.dateKey}T00:00:00-03:00`);
             const dayEnd = new Date(`${info.dateKey}T23:59:59-03:00`);
             const entriesToday = await db.select().from(timeClockEntriesTable)
@@ -80,8 +101,8 @@ export async function sendPontoReminders(): Promise<void> {
             const hasIn = entriesToday.some((e) => e.kind === "in");
             const hasOut = entriesToday.some((e) => e.kind === "out");
             if (hasIn && !hasOut) {
-              await sendReminder(tenant.id, emp.id, info.dateKey, "saida", phone, sessionKey,
-                `Oi, ${firstName}! 👋 Vi que seu ponto de hoje ainda está aberto — não esqueça de bater a saída antes de ir, combinado?`);
+              const text = (tenant.pontoReminderMessageSaida ?? DEFAULT_MSG_SAIDA).replace(/\{nome\}/g, firstName);
+              await sendReminder(tenant.id, emp.id, info.dateKey, "saida", phone, sessionKey, text);
             }
           }
         } catch (err) {

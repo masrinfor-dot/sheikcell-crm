@@ -606,6 +606,10 @@ router.get("/rh-dp/settings", requireModuleAccess("rh"), async (req, res): Promi
     companyVision: tenantsTable.companyVision,
     companyValues: tenantsTable.companyValues,
     timeBankValidityMonths: tenantsTable.timeBankValidityMonths,
+    pontoRemindersEnabled: tenantsTable.pontoRemindersEnabled,
+    pontoReminderGraceMinutes: tenantsTable.pontoReminderGraceMinutes,
+    pontoReminderMessageEntrada: tenantsTable.pontoReminderMessageEntrada,
+    pontoReminderMessageSaida: tenantsTable.pontoReminderMessageSaida,
   }).from(tenantsTable).where(eq(tenantsTable.id, tenantId));
   res.json({
     pontoCheckInSessionKey: row?.pontoCheckInSessionKey ?? null,
@@ -614,6 +618,10 @@ router.get("/rh-dp/settings", requireModuleAccess("rh"), async (req, res): Promi
     companyVision: row?.companyVision ?? null,
     companyValues: row?.companyValues ?? null,
     timeBankValidityMonths: row?.timeBankValidityMonths ?? null,
+    pontoRemindersEnabled: row?.pontoRemindersEnabled ?? true,
+    pontoReminderGraceMinutes: row?.pontoReminderGraceMinutes ?? null,
+    pontoReminderMessageEntrada: row?.pontoReminderMessageEntrada ?? null,
+    pontoReminderMessageSaida: row?.pontoReminderMessageSaida ?? null,
   });
 });
 
@@ -623,6 +631,8 @@ router.patch("/rh-dp/settings", requireAdmin, async (req, res): Promise<void> =>
     pontoCheckInSessionKey?: string | null; facialRecognitionEnabled?: boolean;
     companyMission?: string | null; companyVision?: string | null; companyValues?: string | null;
     timeBankValidityMonths?: number | null;
+    pontoRemindersEnabled?: boolean; pontoReminderGraceMinutes?: number | null;
+    pontoReminderMessageEntrada?: string | null; pontoReminderMessageSaida?: string | null;
   };
   const update: Record<string, unknown> = {};
   if ("pontoCheckInSessionKey" in b) {
@@ -638,12 +648,27 @@ router.patch("/rh-dp/settings", requireAdmin, async (req, res): Promise<void> =>
     const v = b.timeBankValidityMonths;
     update.timeBankValidityMonths = typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.round(Math.min(60, v)) : null;
   }
+  // Lembretes automáticos de ponto (pedido 17/09) — toggle, tolerância em
+  // minutos e mensagens, à parte de configurar a linha de WhatsApp em si.
+  if ("pontoRemindersEnabled" in b) update.pontoRemindersEnabled = b.pontoRemindersEnabled !== false;
+  if ("pontoReminderGraceMinutes" in b) {
+    const v = b.pontoReminderGraceMinutes;
+    update.pontoReminderGraceMinutes = typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.round(Math.min(180, v)) : null;
+  }
+  if ("pontoReminderMessageEntrada" in b) {
+    update.pontoReminderMessageEntrada = typeof b.pontoReminderMessageEntrada === "string" ? b.pontoReminderMessageEntrada.trim().slice(0, 500) || null : null;
+  }
+  if ("pontoReminderMessageSaida" in b) {
+    update.pontoReminderMessageSaida = typeof b.pontoReminderMessageSaida === "string" ? b.pontoReminderMessageSaida.trim().slice(0, 500) || null : null;
+  }
   const [updated] = await db.update(tenantsTable).set(update)
     .where(eq(tenantsTable.id, tenantId))
     .returning({
       pontoCheckInSessionKey: tenantsTable.pontoCheckInSessionKey, facialRecognitionEnabled: tenantsTable.facialRecognitionEnabled,
       companyMission: tenantsTable.companyMission, companyVision: tenantsTable.companyVision, companyValues: tenantsTable.companyValues,
       timeBankValidityMonths: tenantsTable.timeBankValidityMonths,
+      pontoRemindersEnabled: tenantsTable.pontoRemindersEnabled, pontoReminderGraceMinutes: tenantsTable.pontoReminderGraceMinutes,
+      pontoReminderMessageEntrada: tenantsTable.pontoReminderMessageEntrada, pontoReminderMessageSaida: tenantsTable.pontoReminderMessageSaida,
     });
   res.json(updated);
 });

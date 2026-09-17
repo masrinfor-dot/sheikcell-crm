@@ -13,7 +13,7 @@ import {
   Video, ChevronDown, ChevronUp, Save, Link2, UserSquare2, CalendarClock, Clock, Wallet, Pencil, Archive, PlayCircle,
   AlertTriangle, Image as ImageIcon, Smartphone, Printer, Star, Briefcase, Sparkles, MapPin,
   Upload, Download, FileText, FolderArchive, UserPlus, FileSignature, Eye, IdCard, RotateCcw, Palmtree,
-  ListChecks, Building2, LayoutDashboard, UserMinus,
+  ListChecks, Building2, LayoutDashboard, UserMinus, Bell,
 } from "lucide-react";
 
 // Perfil comportamental (estilo DISC simplificado, 4 tipos definidos pelo
@@ -2879,6 +2879,13 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
   // Vencimento do banco de horas (pedido 15/09, análise Tangerino) — texto
   // livre pra deixar apagar o campo (vira null = sem vencimento).
   const [timeBankValidityMonths, setTimeBankValidityMonths] = useState<string>("");
+  // Lembretes automáticos de ponto por WhatsApp (pedido 17/09) — toggle à
+  // parte da linha de check-in, tolerância em minutos e mensagens
+  // customizadas. "" nos textos = usa o padrão do backend.
+  const [remindersEnabled, setRemindersEnabled] = useState(true);
+  const [reminderGraceMinutes, setReminderGraceMinutes] = useState<string>("");
+  const [reminderMsgEntrada, setReminderMsgEntrada] = useState<string>("");
+  const [reminderMsgSaida, setReminderMsgSaida] = useState<string>("");
   const [savingSettings, setSavingSettings] = useState(false);
   useEffect(() => {
     api.chat.waSessions().then(setWaSessions).catch(() => {});
@@ -2886,6 +2893,10 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
       setCheckInSessionKey(s.pontoCheckInSessionKey ?? "");
       setFacialRecognitionEnabled(s.facialRecognitionEnabled);
       setTimeBankValidityMonths(s.timeBankValidityMonths != null ? String(s.timeBankValidityMonths) : "");
+      setRemindersEnabled(s.pontoRemindersEnabled);
+      setReminderGraceMinutes(s.pontoReminderGraceMinutes != null ? String(s.pontoReminderGraceMinutes) : "");
+      setReminderMsgEntrada(s.pontoReminderMessageEntrada ?? "");
+      setReminderMsgSaida(s.pontoReminderMessageSaida ?? "");
     }).catch(() => {});
   }, []);
   const saveTimeBankValidity = async () => {
@@ -2918,6 +2929,33 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
       await api.rhDp.settings.update({ facialRecognitionEnabled: value });
       setFacialRecognitionEnabled(value);
       toast({ title: value ? "Reconhecimento facial ligado" : "Reconhecimento facial desligado" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+  const saveRemindersEnabled = async (value: boolean) => {
+    setSavingSettings(true);
+    try {
+      await api.rhDp.settings.update({ pontoRemindersEnabled: value });
+      setRemindersEnabled(value);
+      toast({ title: value ? "Lembretes automáticos ligados" : "Lembretes automáticos desligados" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+  const saveReminderConfig = async () => {
+    setSavingSettings(true);
+    try {
+      await api.rhDp.settings.update({
+        pontoReminderGraceMinutes: reminderGraceMinutes.trim() ? Number(reminderGraceMinutes) : null,
+        pontoReminderMessageEntrada: reminderMsgEntrada.trim() || null,
+        pontoReminderMessageSaida: reminderMsgSaida.trim() || null,
+      });
+      toast({ title: "Configuração de lembretes salva" });
     } catch (err) {
       toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     } finally {
@@ -3038,6 +3076,55 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
           </p>
         )}
       </div>
+
+      {checkInSessionKey && (
+        <div className="shk-card p-4 space-y-2">
+          <p className="text-xs font-semibold flex items-center gap-1.5"><Bell className="w-3.5 h-3.5 text-primary" /> Lembretes automáticos de ponto</p>
+          <p className="text-[11px] text-muted-foreground">
+            Manda uma mensagem pela linha de check-in acima pra quem esqueceu de bater entrada ou saída, passados os
+            minutos de tolerância do horário previsto (só pra escala fixa). À parte de configurar a linha em si —
+            desligar aqui não desliga o check-in por foto.
+          </p>
+          {isAdmin ? (
+            <>
+              <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+                <input type="checkbox" checked={remindersEnabled} disabled={savingSettings}
+                  onChange={(e) => saveRemindersEnabled(e.target.checked)} data-testid="checkbox-ponto-reminders-enabled" />
+                {remindersEnabled ? "Ligado" : "Desligado"}
+              </label>
+              {remindersEnabled && (
+                <div className="space-y-2 pt-1">
+                  <div className="flex items-center gap-1.5">
+                    <input type="number" min={0} max={180} placeholder="15" value={reminderGraceMinutes}
+                      onChange={(e) => setReminderGraceMinutes(e.target.value)} disabled={savingSettings}
+                      data-testid="input-reminder-grace-minutes"
+                      className="w-20 px-3 py-1.5 rounded-xl border border-border text-xs bg-white disabled:opacity-50" />
+                    <span className="text-[11px] text-muted-foreground">minutos de tolerância (padrão 15)</span>
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-muted-foreground block mb-1">Mensagem de entrada (deixe em branco pro texto padrão) — use {"{nome}"} pro primeiro nome</label>
+                    <textarea value={reminderMsgEntrada} onChange={(e) => setReminderMsgEntrada(e.target.value)}
+                      disabled={savingSettings} maxLength={500} rows={2} data-testid="textarea-reminder-msg-entrada"
+                      placeholder="Oi, {nome}! 👋 Notei que você ainda não bateu o ponto de entrada hoje..."
+                      className="w-full px-3 py-1.5 rounded-xl border border-border text-xs bg-white disabled:opacity-50" />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-muted-foreground block mb-1">Mensagem de saída (deixe em branco pro texto padrão)</label>
+                    <textarea value={reminderMsgSaida} onChange={(e) => setReminderMsgSaida(e.target.value)}
+                      disabled={savingSettings} maxLength={500} rows={2} data-testid="textarea-reminder-msg-saida"
+                      placeholder="Oi, {nome}! 👋 Vi que seu ponto de hoje ainda está aberto..."
+                      className="w-full px-3 py-1.5 rounded-xl border border-border text-xs bg-white disabled:opacity-50" />
+                  </div>
+                  <button onClick={saveReminderConfig} disabled={savingSettings} data-testid="button-save-reminder-config"
+                    className="px-2.5 py-1.5 rounded-xl bg-primary text-white text-[11px] font-bold disabled:opacity-40">Salvar</button>
+                </div>
+              )}
+            </>
+          ) : (
+            <p className="text-xs font-semibold">{remindersEnabled ? "Ligado" : "Desligado"} <span className="text-[11px] font-normal text-muted-foreground">· só admin altera</span></p>
+          )}
+        </div>
+      )}
 
       <div className="shk-card p-4 space-y-1.5">
         <p className="text-xs font-semibold flex items-center gap-1.5"><IdCard className="w-3.5 h-3.5 text-primary" /> Reconhecimento facial na batida</p>
