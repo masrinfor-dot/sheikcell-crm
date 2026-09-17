@@ -302,6 +302,49 @@ export const employeeContractTemplatesTable = pgTable("employee_contract_templat
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });
 
+// Processo de desligamento/demissão (pedido 17/09): acompanha o processo do
+// início à conclusão — tipo de desligamento, aviso prévio, exame
+// demissional, homologação e um checklist de pendências. Só ACOMPANHA o
+// processo, nunca calcula nem paga verba nenhuma (mesmo espírito do
+// vencimento do banco de horas, que só sinaliza pra decisão humana): valor
+// de rescisão continua sendo calculado fora daqui (contabilidade/folha).
+// Ao concluir, o colaborador é marcado inativo (employees.isActive=false,
+// hiringStatus="demitido") — mesma simetria do finalizeHiring/reopenHiring.
+export const terminationProcessesTable = pgTable("termination_processes", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  employeeId: integer("employee_id").notNull().references(() => employeesTable.id, { onDelete: "cascade" }),
+  // "sem_justa_causa" | "com_justa_causa" | "pedido_demissao" | "acordo_mutuo" | "termino_experiencia" | "aposentadoria" | "outro"
+  dismissalType: text("dismissal_type").notNull(),
+  reason: text("reason"), // motivo/observação livre
+  // "trabalhado" | "indenizado" | "dispensado" — null enquanto não definido.
+  noticeType: text("notice_type"),
+  noticeStartDate: date("notice_start_date"),
+  noticeEndDate: date("notice_end_date"),
+  lastWorkDate: date("last_work_date"), // último dia efetivamente trabalhado
+  terminationDate: date("termination_date"), // data de saída/desligamento
+  examDate: date("exam_date"), // exame demissional
+  examResult: text("exam_result"), // "apto" | "inapto" | texto livre
+  homologationDate: date("homologation_date"), // se aplicável (opcional desde a reforma trabalhista)
+  // Checklist de pendências — só marca feito/não feito, nunca calcula valor.
+  fgtsMultaPaid: boolean("fgts_multa_paid").notNull().default(false),
+  trctSigned: boolean("trct_signed").notNull().default(false),
+  seguroDesempregoGuided: boolean("seguro_desemprego_guided").notNull().default(false),
+  // "iniciado" | "aviso_previo" | "exame_demissional" | "documentacao" | "concluido" | "cancelado"
+  status: text("status").notNull().default("iniciado"),
+  notes: text("notes"),
+  createdByUserId: integer("created_by_user_id").notNull(),
+  concludedAt: timestamp("concluded_at", { withTimezone: true }),
+  cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+}, (t) => [
+  // No máximo um processo ATIVO (não concluído/cancelado) por colaborador —
+  // evita abrir dois desligamentos em paralelo pro mesmo colaborador.
+  uniqueIndex("termination_processes_employee_active_unique").on(t.employeeId)
+    .where(sql`${t.status} not in ('concluido','cancelado')`),
+]);
+
 export type Employee = typeof employeesTable.$inferSelect;
 export type WorkShift = typeof workShiftsTable.$inferSelect;
 export type TimeClockEntry = typeof timeClockEntriesTable.$inferSelect;
@@ -314,3 +357,4 @@ export type TimesheetSignature = typeof timesheetSignaturesTable.$inferSelect;
 export type EmployeeDocument = typeof employeeDocumentsTable.$inferSelect;
 export type EmployeeContractTemplate = typeof employeeContractTemplatesTable.$inferSelect;
 export type Holiday = typeof holidaysTable.$inferSelect;
+export type TerminationProcess = typeof terminationProcessesTable.$inferSelect;

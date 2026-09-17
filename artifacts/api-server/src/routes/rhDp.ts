@@ -2,7 +2,7 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import {
   db, employeesTable, workShiftsTable, timeClockEntriesTable, timeBankAdjustmentsTable, leaveRecordsTable,
   timeBankClosuresTable, usersTable, storesTable, tenantsTable, vacationRequestsTable, timesheetSignaturesTable,
-  holidaysTable,
+  holidaysTable, terminationProcessesTable,
 } from "@workspace/db";
 import { eq, and, desc, asc, gte, lte, inArray, sql } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireTenant, tenantIdOf } from "../middlewares/auth";
@@ -23,6 +23,9 @@ const PUNCH_KINDS = ["in", "break_start", "break_end", "out"] as const;
 type PunchKind = (typeof PUNCH_KINDS)[number];
 export const CONTRACT_TYPES = ["clt", "pj", "estagio"] as const;
 const LEAVE_KINDS = ["ferias", "atestado", "falta_justificada", "falta_injustificada", "outro"] as const;
+const DISMISSAL_TYPES = ["sem_justa_causa", "com_justa_causa", "pedido_demissao", "acordo_mutuo", "termino_experiencia", "aposentadoria", "outro"] as const;
+const NOTICE_TYPES = ["trabalhado", "indenizado", "dispensado"] as const;
+const TERMINATION_STATUSES = ["iniciado", "aviso_previo", "exame_demissional", "documentacao", "concluido", "cancelado"] as const;
 
 // Aceita: "YYYY-MM-DD" (usa início/fim do dia), "YYYY-MM-DDTHH:MM:SS" sem
 // offset (interpreta no fuso America/Sao_Paulo, igual ao resto do sistema —
@@ -1204,6 +1207,192 @@ router.patch("/rh-dp/vacation-requests/:id", requireModuleAccess("rh"), async (r
   } else {
     res.status(400).json({ error: "Ação inválida (use aprovar ou rejeitar)" });
   }
+});
+
+// ── Processo de desligamento/demissão (pedido 17/09) ────────────────────────
+// Acompanha o processo do início à conclusão (tipo de desligamento, aviso
+// prévio, exame demissional, homologação, checklist de pendências). Nunca
+// calcula nem paga verba nenhuma — só sinaliza status pra decisão humana,
+// mesmo espírito do vencimento do banco de horas. Documentos do processo
+// (aviso prévio, exame, TRCT, termo de quitação) usam o banco de arquivos do
+// colaborador que já existe (POST/GET /rh-dp/employees/:id/documents).
+
+function sanitizeTerminationDate(v: unknown): string | null {
+  return typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+}
+
+router.get("/rh-dp/termination-processes", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rows = await db.select({
+    id: terminationProcessesTable.id,
+    employeeId: terminationProcessesTable.employeeId,
+    employeeName: employeesTable.name,
+    dismissalType: terminationProcessesTable.dismissalType,
+    reason: terminationProcessesTable.reason,
+    noticeType: terminationProcessesTable.noticeType,
+    noticeStartDate: terminationProcessesTable.noticeStartDate,
+    noticeEndDate: terminationProcessesTable.noticeEndDate,
+    lastWorkDate: terminationProcessesTable.lastWorkDate,
+    terminationDate: terminationProcessesTable.terminationDate,
+    examDate: terminationProcessesTable.examDate,
+    examResult: terminationProcessesTable.examResult,
+    homologationDate: terminationProcessesTable.homologationDate,
+    fgtsMultaPaid: terminationProcessesTable.fgtsMultaPaid,
+    trctSigned: terminationProcessesTable.trctSigned,
+    seguroDesempregoGuided: terminationProcessesTable.seguroDesempregoGuided,
+    status: terminationProcessesTable.status,
+    notes: terminationProcessesTable.notes,
+    concludedAt: terminationProcessesTable.concludedAt,
+    cancelledAt: terminationProcessesTable.cancelledAt,
+    createdAt: terminationProcessesTable.createdAt,
+  }).from(terminationProcessesTable)
+    .leftJoin(employeesTable, eq(terminationProcessesTable.employeeId, employeesTable.id))
+    .where(eq(terminationProcessesTable.tenantId, tenantId))
+    .orderBy(desc(terminationProcessesTable.createdAt)).limit(300);
+  res.json(rows);
+});
+
+router.post("/rh-dp/termination-processes", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const employeeId = parseInt(String(b.employeeId), 10);
+  if (isNaN(employeeId)) { res.status(400).json({ error: "Selecione o colaborador" }); return; }
+  const employee = await getEmployee(employeeId, tenantId);
+  if (!employee) { res.status(404).json({ error: "Colaborador não encontrado" }); return; }
+  const dismissalType = typeof b.dismissalType === "string" && DISMISSAL_TYPES.includes(b.dismissalType as typeof DISMISSAL_TYPES[number]) ? b.dismissalType : null;
+  if (!dismissalType) { res.status(400).json({ error: "Tipo de desligamento inválido" }); return; }
+  const noticeType = typeof b.noticeType === "string" && NOTICE_TYPES.includes(b.noticeType as typeof NOTICE_TYPES[number]) ? b.noticeType : null;
+  try {
+    const [created] = await db.insert(terminationProcessesTable).values({
+      tenantId, employeeId, dismissalType,
+      reason: typeof b.reason === "string" ? b.reason.trim().slice(0, 1000) || null : null,
+      noticeType,
+      lastWorkDate: sanitizeTerminationDate(b.lastWorkDate),
+      createdByUserId: req.session.userId!,
+    }).returning();
+    res.status(201).json(created);
+  } catch (err) {
+    if (err && typeof err === "object" && "code" in err && (err as { code?: string }).code === "23505") {
+      res.status(409).json({ error: "Este colaborador já tem um processo de desligamento em andamento" });
+      return;
+    }
+    throw err;
+  }
+});
+
+async function getTerminationProcess(id: number, tenantId: number) {
+  const [row] = await db.select().from(terminationProcessesTable)
+    .where(and(eq(terminationProcessesTable.id, id), eq(terminationProcessesTable.tenantId, tenantId)));
+  return row ?? null;
+}
+
+router.patch("/rh-dp/termination-processes/:id", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const existing = await getTerminationProcess(id, tenantId);
+  if (!existing) { res.status(404).json({ error: "Processo não encontrado" }); return; }
+  if (existing.status === "concluido" || existing.status === "cancelado") {
+    res.status(409).json({ error: "Processo já encerrado — reabra antes de editar" }); return;
+  }
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const patch: Partial<typeof terminationProcessesTable.$inferInsert> = {};
+  if (b.dismissalType !== undefined) {
+    if (typeof b.dismissalType !== "string" || !DISMISSAL_TYPES.includes(b.dismissalType as typeof DISMISSAL_TYPES[number])) { res.status(400).json({ error: "Tipo de desligamento inválido" }); return; }
+    patch.dismissalType = b.dismissalType;
+  }
+  if (b.status !== undefined) {
+    if (typeof b.status !== "string" || !TERMINATION_STATUSES.includes(b.status as typeof TERMINATION_STATUSES[number]) || b.status === "concluido" || b.status === "cancelado") {
+      res.status(400).json({ error: "Use os botões Concluir/Cancelar pra encerrar o processo" }); return;
+    }
+    patch.status = b.status;
+  }
+  if (b.reason !== undefined) patch.reason = typeof b.reason === "string" ? b.reason.trim().slice(0, 1000) || null : null;
+  if (b.noticeType !== undefined) {
+    patch.noticeType = typeof b.noticeType === "string" && NOTICE_TYPES.includes(b.noticeType as typeof NOTICE_TYPES[number]) ? b.noticeType : null;
+  }
+  if (b.noticeStartDate !== undefined) patch.noticeStartDate = sanitizeTerminationDate(b.noticeStartDate);
+  if (b.noticeEndDate !== undefined) patch.noticeEndDate = sanitizeTerminationDate(b.noticeEndDate);
+  if (b.lastWorkDate !== undefined) patch.lastWorkDate = sanitizeTerminationDate(b.lastWorkDate);
+  if (b.terminationDate !== undefined) patch.terminationDate = sanitizeTerminationDate(b.terminationDate);
+  if (b.examDate !== undefined) patch.examDate = sanitizeTerminationDate(b.examDate);
+  if (b.examResult !== undefined) patch.examResult = typeof b.examResult === "string" ? b.examResult.trim().slice(0, 200) || null : null;
+  if (b.homologationDate !== undefined) patch.homologationDate = sanitizeTerminationDate(b.homologationDate);
+  if (b.fgtsMultaPaid !== undefined) patch.fgtsMultaPaid = b.fgtsMultaPaid === true;
+  if (b.trctSigned !== undefined) patch.trctSigned = b.trctSigned === true;
+  if (b.seguroDesempregoGuided !== undefined) patch.seguroDesempregoGuided = b.seguroDesempregoGuided === true;
+  if (b.notes !== undefined) patch.notes = typeof b.notes === "string" ? b.notes.trim().slice(0, 2000) || null : null;
+
+  const [updated] = await db.update(terminationProcessesTable).set(patch)
+    .where(and(eq(terminationProcessesTable.id, id), eq(terminationProcessesTable.tenantId, tenantId))).returning();
+  res.json(updated);
+});
+
+// Conclui o processo — marca o colaborador inativo (isActive=false,
+// hiringStatus="demitido"). Exige termination_date (usa a de hoje se nenhuma
+// tiver sido informada ainda, nem no corpo nem já salva no processo).
+router.post("/rh-dp/termination-processes/:id/conclude", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const existing = await getTerminationProcess(id, tenantId);
+  if (!existing) { res.status(404).json({ error: "Processo não encontrado" }); return; }
+  if (existing.status === "concluido" || existing.status === "cancelado") { res.status(409).json({ error: "Processo já encerrado" }); return; }
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const terminationDate = sanitizeTerminationDate(b.terminationDate) ?? existing.terminationDate ?? dayKeySaoPaulo(new Date());
+  const [updated] = await db.update(terminationProcessesTable).set({
+    status: "concluido", terminationDate, concludedAt: new Date(),
+  }).where(and(eq(terminationProcessesTable.id, id), eq(terminationProcessesTable.tenantId, tenantId))).returning();
+  await db.update(employeesTable).set({ isActive: false, hiringStatus: "demitido" })
+    .where(and(eq(employeesTable.id, existing.employeeId), eq(employeesTable.tenantId, tenantId)));
+  res.json(updated);
+});
+
+router.post("/rh-dp/termination-processes/:id/cancel", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const existing = await getTerminationProcess(id, tenantId);
+  if (!existing) { res.status(404).json({ error: "Processo não encontrado" }); return; }
+  if (existing.status === "concluido" || existing.status === "cancelado") { res.status(409).json({ error: "Processo já encerrado" }); return; }
+  const [updated] = await db.update(terminationProcessesTable).set({ status: "cancelado", cancelledAt: new Date() })
+    .where(and(eq(terminationProcessesTable.id, id), eq(terminationProcessesTable.tenantId, tenantId))).returning();
+  res.json(updated);
+});
+
+// Reabre um processo concluído/cancelado por engano — simétrico ao
+// reopen-hiring. Se a conclusão tinha marcado o colaborador como demitido,
+// desfaz (isActive=true, hiringStatus="ativo"); se o colaborador já foi
+// reativado/alterado manualmente por outro motivo nesse meio-tempo, não mexe.
+router.post("/rh-dp/termination-processes/:id/reopen", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const existing = await getTerminationProcess(id, tenantId);
+  if (!existing) { res.status(404).json({ error: "Processo não encontrado" }); return; }
+  if (existing.status !== "concluido" && existing.status !== "cancelado") { res.status(409).json({ error: "Este processo não está encerrado" }); return; }
+  const wasConcluded = existing.status === "concluido";
+  const [updated] = await db.update(terminationProcessesTable).set({
+    status: "iniciado", concludedAt: null, cancelledAt: null,
+  }).where(and(eq(terminationProcessesTable.id, id), eq(terminationProcessesTable.tenantId, tenantId))).returning();
+  if (wasConcluded) {
+    await db.update(employeesTable).set({ isActive: true, hiringStatus: "ativo" })
+      .where(and(eq(employeesTable.id, existing.employeeId), eq(employeesTable.tenantId, tenantId)));
+  }
+  res.json(updated);
+});
+
+// Só deleta processo que ainda não avançou nada (status "iniciado") — pra
+// desfazer um lançamento por engano. Processo com progresso real usa Cancelar.
+router.delete("/rh-dp/termination-processes/:id", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const existing = await getTerminationProcess(id, tenantId);
+  if (!existing) { res.status(404).json({ error: "Processo não encontrado" }); return; }
+  if (existing.status !== "iniciado") { res.status(409).json({ error: "Processo já em andamento — use Cancelar em vez de excluir" }); return; }
+  await db.delete(terminationProcessesTable).where(and(eq(terminationProcessesTable.id, id), eq(terminationProcessesTable.tenantId, tenantId)));
+  res.json({ ok: true });
 });
 
 // ── Relatórios ────────────────────────────────────────────────────────────

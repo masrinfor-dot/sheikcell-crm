@@ -4,7 +4,7 @@ import {
   api, API_BASE, canEditModule,
   type RhStage, type RhQuestion, type RhCandidate, type RhPosition, type RhProfileType,
   type Employee, type WorkShift, type TimeClockEntry, type TimeBankResult, type TimeBankSummaryRow, type LeaveRecord, type TimeBankClosure,
-  type Store, type User, type EmployeeDocument, type EmployeeContractTemplate, type VacationRequest, type Holiday,
+  type Store, type User, type EmployeeDocument, type EmployeeContractTemplate, type VacationRequest, type Holiday, type TerminationProcess,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
@@ -13,7 +13,7 @@ import {
   Video, ChevronDown, ChevronUp, Save, Link2, UserSquare2, CalendarClock, Clock, Wallet, Pencil, Archive, PlayCircle,
   AlertTriangle, Image as ImageIcon, Smartphone, Printer, Star, Briefcase, Sparkles, MapPin,
   Upload, Download, FileText, FolderArchive, UserPlus, FileSignature, Eye, IdCard, RotateCcw, Palmtree,
-  ListChecks, Building2, LayoutDashboard,
+  ListChecks, Building2, LayoutDashboard, UserMinus,
 } from "lucide-react";
 
 // Perfil comportamental (estilo DISC simplificado, 4 tipos definidos pelo
@@ -204,7 +204,7 @@ export default function RH() {
   const { user } = useAuth();
   const canEdit = canEditModule(user, "rh");
   const [group, setGroup] = useState<"recrutamento" | "dp">("recrutamento");
-  const [dpView, setDpView] = useState<"painel" | "colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos" | "ferias" | "feriados" | "fechamentos">("painel");
+  const [dpView, setDpView] = useState<"painel" | "colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos" | "ferias" | "feriados" | "fechamentos" | "demissoes">("painel");
 
   return (
     <div className="space-y-4">
@@ -237,6 +237,7 @@ export default function RH() {
               { key: "ferias", label: "Férias", icon: Palmtree },
               { key: "feriados", label: "Feriados", icon: CalendarClock },
               { key: "fechamentos", label: "Fechamentos", icon: Archive },
+              { key: "demissoes", label: "Desligamentos", icon: UserMinus },
             ] as const).map(({ key, label, icon: Icon }) => (
               <button key={key} onClick={() => setDpView(key)} data-testid={`button-dp-${key}`}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border ${dpView === key ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
@@ -253,6 +254,7 @@ export default function RH() {
           {dpView === "ferias" && <Ferias canEdit={canEdit} />}
           {dpView === "feriados" && <Feriados canEdit={canEdit} />}
           {dpView === "fechamentos" && <Fechamentos canEdit={canEdit} />}
+          {dpView === "demissoes" && <Desligamentos canEdit={canEdit} />}
         </div>
       )}
     </div>
@@ -3781,6 +3783,479 @@ function Ferias({ canEdit }: { canEdit: boolean }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Desligamentos (pedido 17/09) ────────────────────────────────────────
+// Acompanha o processo de desligamento/demissão do início à conclusão. Só
+// ACOMPANHA — nunca calcula nem paga verba rescisória nenhuma (isso segue
+// sendo feito fora, na contabilidade/folha); aqui é status, datas e um
+// checklist de pendências, mesmo espírito do vencimento do banco de horas
+// (sinaliza pra decisão humana, nunca resolve dinheiro sozinho).
+const DISMISSAL_LABELS: Record<TerminationProcess["dismissalType"], string> = {
+  sem_justa_causa: "Sem justa causa",
+  com_justa_causa: "Com justa causa",
+  pedido_demissao: "Pedido de demissão",
+  acordo_mutuo: "Acordo mútuo (distrato)",
+  termino_experiencia: "Fim de contrato de experiência",
+  aposentadoria: "Aposentadoria",
+  outro: "Outro",
+};
+const NOTICE_LABELS: Record<NonNullable<TerminationProcess["noticeType"]>, string> = {
+  trabalhado: "Trabalhado",
+  indenizado: "Indenizado",
+  dispensado: "Dispensado",
+};
+const TERMINATION_STATUS_LABELS: Record<TerminationProcess["status"], string> = {
+  iniciado: "Iniciado",
+  aviso_previo: "Aviso prévio",
+  exame_demissional: "Exame demissional",
+  documentacao: "Documentação",
+  concluido: "Concluído",
+  cancelado: "Cancelado",
+};
+const TERMINATION_STATUS_CLASSES: Record<TerminationProcess["status"], string> = {
+  iniciado: "bg-amber-50 text-amber-700 border-amber-100",
+  aviso_previo: "bg-blue-50 text-blue-700 border-blue-100",
+  exame_demissional: "bg-blue-50 text-blue-700 border-blue-100",
+  documentacao: "bg-blue-50 text-blue-700 border-blue-100",
+  concluido: "bg-green-50 text-green-700 border-green-100",
+  cancelado: "bg-red-50 text-red-600 border-red-100",
+};
+const OPEN_TERMINATION_STATUSES: TerminationProcess["status"][] = ["iniciado", "aviso_previo", "exame_demissional", "documentacao"];
+const TERMINATION_DOC_TYPES: { key: string; label: string }[] = [
+  { key: "aviso_previo", label: "Aviso prévio" },
+  { key: "exame_demissional", label: "Exame demissional (ASO)" },
+  { key: "carta_pedido_demissao", label: "Carta de pedido de demissão" },
+  { key: "trct", label: "TRCT (termo de rescisão)" },
+  { key: "termo_quitacao", label: "Termo de quitação" },
+  { key: "homologacao", label: "Homologação" },
+  { key: "outro", label: "Outro" },
+];
+
+function Desligamentos({ canEdit }: { canEdit: boolean }) {
+  const { toast } = useToast();
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [processes, setProcesses] = useState<TerminationProcess[]>([]);
+  const [creating, setCreating] = useState<{ employeeId: number; dismissalType: TerminationProcess["dismissalType"]; reason: string; lastWorkDate: string } | null>(null);
+  const [detailId, setDetailId] = useState<number | null>(null);
+
+  const load = () => api.rhDp.terminations.list().then(setProcesses).catch(() => {});
+  useEffect(() => {
+    load();
+    api.rhDp.employees.list().then(setEmployees).catch(() => {});
+  }, []);
+
+  const activeProcessEmployeeIds = new Set(processes.filter((p) => OPEN_TERMINATION_STATUSES.includes(p.status)).map((p) => p.employeeId));
+  const eligibleEmployees = employees.filter((e) => e.isActive && !activeProcessEmployeeIds.has(e.id));
+  const ongoing = processes.filter((p) => OPEN_TERMINATION_STATUSES.includes(p.status));
+  const closed = processes.filter((p) => !OPEN_TERMINATION_STATUSES.includes(p.status));
+  const detail = processes.find((p) => p.id === detailId) ?? null;
+
+  const save = async () => {
+    if (!creating) return;
+    if (!creating.employeeId) { toast({ title: "Selecione o colaborador", variant: "destructive" }); return; }
+    try {
+      const created = await api.rhDp.terminations.create({
+        employeeId: creating.employeeId, dismissalType: creating.dismissalType,
+        reason: creating.reason.trim() || undefined, lastWorkDate: creating.lastWorkDate || undefined,
+      });
+      setCreating(null);
+      setProcesses((prev) => [created, ...prev]);
+      setDetailId(created.id);
+      toast({ title: "Processo de desligamento iniciado" });
+    } catch (err) {
+      toast({ title: "Erro ao iniciar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      {canEdit && (
+        <button onClick={() => setCreating({ employeeId: 0, dismissalType: "sem_justa_causa", reason: "", lastWorkDate: "" })} data-testid="button-new-termination"
+          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold">
+          <UserMinus className="w-3.5 h-3.5" /> Iniciar desligamento
+        </button>
+      )}
+
+      <div>
+        <h3 className="font-bold text-sm mb-2 flex items-center gap-1.5"><UserMinus className="w-4 h-4 text-primary" /> Em andamento</h3>
+        {ongoing.length === 0 ? (
+          <div className="shk-card p-6 text-center text-muted-foreground text-xs">Nenhum processo de desligamento em andamento.</div>
+        ) : (
+          <div className="space-y-2">
+            {ongoing.map((p) => (
+              <button key={p.id} onClick={() => setDetailId(p.id)} data-testid={`termination-${p.id}`}
+                className="w-full text-left shk-card p-4 flex items-center gap-3 hover:border-primary/40">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="font-bold text-sm">{p.employeeName ?? "—"}</p>
+                    <span className={`text-[10px] font-bold border px-2 py-0.5 rounded-full ${TERMINATION_STATUS_CLASSES[p.status]}`}>{TERMINATION_STATUS_LABELS[p.status]}</span>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    {DISMISSAL_LABELS[p.dismissalType]}
+                    {p.lastWorkDate ? ` · último dia ${new Date(`${p.lastWorkDate}T12:00:00`).toLocaleDateString("pt-BR")}` : ""}
+                  </p>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {closed.length > 0 && (
+        <div>
+          <h3 className="font-bold text-sm mb-2">Encerrados</h3>
+          <div className="space-y-1.5">
+            {closed.map((p) => (
+              <button key={p.id} onClick={() => setDetailId(p.id)} data-testid={`termination-closed-${p.id}`}
+                className="w-full text-left shk-card p-3 flex items-center justify-between gap-2 text-xs hover:border-primary/40">
+                <span><span className="font-semibold">{p.employeeName ?? "—"}</span> · {DISMISSAL_LABELS[p.dismissalType]}{p.terminationDate ? ` · ${new Date(`${p.terminationDate}T12:00:00`).toLocaleDateString("pt-BR")}` : ""}</span>
+                <span className={`text-[10px] font-bold border px-2 py-0.5 rounded-full ${TERMINATION_STATUS_CLASSES[p.status]}`}>{TERMINATION_STATUS_LABELS[p.status]}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {creating && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="shk-card w-full max-w-sm p-6 bg-white space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold">Iniciar desligamento</h3>
+              <button onClick={() => setCreating(null)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <label className="text-xs block">
+              Colaborador
+              <select value={creating.employeeId} onChange={(e) => setCreating({ ...creating, employeeId: Number(e.target.value) })}
+                className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white">
+                <option value={0}>Selecione</option>
+                {eligibleEmployees.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+              </select>
+            </label>
+            <label className="text-xs block">
+              Tipo de desligamento
+              <select value={creating.dismissalType} onChange={(e) => setCreating({ ...creating, dismissalType: e.target.value as TerminationProcess["dismissalType"] })}
+                className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white">
+                {Object.entries(DISMISSAL_LABELS).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+              </select>
+            </label>
+            <label className="text-xs block">
+              Último dia de trabalho (opcional)
+              <input type="date" value={creating.lastWorkDate} onChange={(e) => setCreating({ ...creating, lastWorkDate: e.target.value })}
+                className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+            </label>
+            <label className="text-xs block">
+              Motivo/observação (opcional)
+              <textarea value={creating.reason} onChange={(e) => setCreating({ ...creating, reason: e.target.value })} rows={2}
+                className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm resize-none" />
+            </label>
+            <button onClick={save} data-testid="button-confirm-termination"
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold">
+              <Save className="w-3.5 h-3.5" /> Iniciar processo
+            </button>
+          </div>
+        </div>
+      )}
+
+      {detail && (
+        <TerminationDetail
+          process={detail} canEdit={canEdit}
+          onClose={() => setDetailId(null)}
+          onChanged={(updated) => setProcesses((prev) => prev.map((p) => (p.id === updated.id ? updated : p)))}
+          onRemoved={() => { setDetailId(null); load(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function TerminationDetail({ process, canEdit, onClose, onChanged, onRemoved }: {
+  process: TerminationProcess; canEdit: boolean;
+  onClose: () => void; onChanged: (p: TerminationProcess) => void; onRemoved: () => void;
+}) {
+  const { toast } = useToast();
+  const [form, setForm] = useState(process);
+  const [saving, setSaving] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [documents, setDocuments] = useState<EmployeeDocument[]>([]);
+  const [uploadingType, setUploadingType] = useState<string | null>(null);
+  const isOpen = OPEN_TERMINATION_STATUSES.includes(process.status);
+
+  useEffect(() => { setForm(process); }, [process]);
+  useEffect(() => {
+    api.rhDp.employeeDocuments.list(process.employeeId).then(setDocuments).catch(() => {});
+  }, [process.employeeId]);
+
+  const saveFields = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      const updated = await api.rhDp.terminations.update(process.id, {
+        dismissalType: form.dismissalType, status: form.status, reason: form.reason ?? "",
+        noticeType: form.noticeType, noticeStartDate: form.noticeStartDate ?? "", noticeEndDate: form.noticeEndDate ?? "",
+        lastWorkDate: form.lastWorkDate ?? "", terminationDate: form.terminationDate ?? "",
+        examDate: form.examDate ?? "", examResult: form.examResult ?? "", homologationDate: form.homologationDate ?? "",
+        notes: form.notes ?? "",
+      });
+      onChanged(updated);
+      toast({ title: "Alterações salvas" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setSaving(false); }
+  };
+
+  const toggleChecklist = async (field: "fgtsMultaPaid" | "trctSigned" | "seguroDesempregoGuided", value: boolean) => {
+    setForm((f) => ({ ...f, [field]: value }));
+    try {
+      const updated = await api.rhDp.terminations.update(process.id, { [field]: value });
+      onChanged(updated);
+    } catch {
+      toast({ title: "Erro ao salvar", variant: "destructive" });
+    }
+  };
+
+  const conclude = async () => {
+    if (!window.confirm(`Concluir o desligamento de ${process.employeeName ?? "colaborador"}? O colaborador será marcado como inativo.`)) return;
+    setBusy(true);
+    try {
+      const updated = await api.rhDp.terminations.conclude(process.id, form.terminationDate ?? undefined);
+      onChanged(updated);
+      toast({ title: "Desligamento concluído" });
+    } catch (err) {
+      toast({ title: "Erro ao concluir", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setBusy(false); }
+  };
+
+  const cancel = async () => {
+    if (!window.confirm("Cancelar este processo de desligamento?")) return;
+    setBusy(true);
+    try {
+      const updated = await api.rhDp.terminations.cancel(process.id);
+      onChanged(updated);
+      toast({ title: "Processo cancelado" });
+    } catch (err) {
+      toast({ title: "Erro ao cancelar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setBusy(false); }
+  };
+
+  const reopen = async () => {
+    setBusy(true);
+    try {
+      const updated = await api.rhDp.terminations.reopen(process.id);
+      onChanged(updated);
+      toast({ title: "Processo reaberto" });
+    } catch (err) {
+      toast({ title: "Erro ao reabrir", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setBusy(false); }
+  };
+
+  const remove = async () => {
+    if (!window.confirm("Excluir este processo de desligamento?")) return;
+    setBusy(true);
+    try {
+      await api.rhDp.terminations.remove(process.id);
+      toast({ title: "Processo excluído" });
+      onRemoved();
+    } catch (err) {
+      toast({ title: "Erro ao excluir", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+      setBusy(false);
+    }
+  };
+
+  const uploadDoc = async (docType: string, file: File) => {
+    setUploadingType(docType);
+    try {
+      const base64 = await readFileAsBase64Generic(file);
+      const created = await api.rhDp.employeeDocuments.uploadFile(process.employeeId, {
+        docType, fileName: file.name, mimeType: file.type || "application/octet-stream", data: base64,
+      });
+      setDocuments((prev) => [created, ...prev]);
+    } catch (err) {
+      toast({ title: "Erro ao enviar arquivo", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally { setUploadingType(null); }
+  };
+
+  const removeDoc = async (d: EmployeeDocument) => {
+    if (!window.confirm(`Excluir "${d.label || d.fileName || d.docType}"?`)) return;
+    try {
+      await api.rhDp.employeeDocuments.remove(process.employeeId, d.id);
+      setDocuments((prev) => prev.filter((x) => x.id !== d.id));
+    } catch { toast({ title: "Erro ao excluir", variant: "destructive" }); }
+  };
+
+  const disabled = !canEdit || !isOpen || busy;
+
+  return (
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4 overflow-y-auto">
+      <div className="shk-card w-full max-w-lg p-6 bg-white space-y-4 my-8">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="font-bold flex items-center gap-2"><UserMinus className="w-4 h-4 text-primary" /> {process.employeeName ?? "Colaborador"}</h3>
+            <span className={`text-[10px] font-bold border px-2 py-0.5 rounded-full ${TERMINATION_STATUS_CLASSES[process.status]}`}>{TERMINATION_STATUS_LABELS[process.status]}</span>
+          </div>
+          <button onClick={onClose}><X className="w-5 h-5 text-muted-foreground" /></button>
+        </div>
+
+        {!isOpen && (
+          <div className="text-xs px-3 py-2 rounded-xl bg-secondary text-muted-foreground">
+            Processo {process.status === "concluido" ? "concluído" : "cancelado"}{process.status === "concluido" && process.terminationDate ? ` em ${new Date(`${process.terminationDate}T12:00:00`).toLocaleDateString("pt-BR")}` : ""} — os campos ficam bloqueados. {canEdit && "Use \"Reabrir\" se precisar corrigir algo."}
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 gap-2">
+          <label className="text-xs">
+            Tipo de desligamento
+            <select value={form.dismissalType} disabled={disabled} onChange={(e) => setForm({ ...form, dismissalType: e.target.value as TerminationProcess["dismissalType"] })}
+              className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white disabled:opacity-60">
+              {Object.entries(DISMISSAL_LABELS).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </select>
+          </label>
+          <label className="text-xs">
+            Etapa do processo
+            <select value={form.status} disabled={disabled} onChange={(e) => setForm({ ...form, status: e.target.value as TerminationProcess["status"] })}
+              className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white disabled:opacity-60">
+              {OPEN_TERMINATION_STATUSES.map((s) => <option key={s} value={s}>{TERMINATION_STATUS_LABELS[s]}</option>)}
+            </select>
+          </label>
+          <label className="text-xs">
+            Aviso prévio
+            <select value={form.noticeType ?? ""} disabled={disabled} onChange={(e) => setForm({ ...form, noticeType: (e.target.value || null) as TerminationProcess["noticeType"] })}
+              className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm bg-white disabled:opacity-60">
+              <option value="">Não definido</option>
+              {Object.entries(NOTICE_LABELS).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </select>
+          </label>
+          <label className="text-xs">
+            Último dia trabalhado
+            <input type="date" value={form.lastWorkDate ?? ""} disabled={disabled} onChange={(e) => setForm({ ...form, lastWorkDate: e.target.value || null })}
+              className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+          </label>
+          <label className="text-xs">
+            Início aviso prévio
+            <input type="date" value={form.noticeStartDate ?? ""} disabled={disabled} onChange={(e) => setForm({ ...form, noticeStartDate: e.target.value || null })}
+              className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+          </label>
+          <label className="text-xs">
+            Fim aviso prévio
+            <input type="date" value={form.noticeEndDate ?? ""} disabled={disabled} onChange={(e) => setForm({ ...form, noticeEndDate: e.target.value || null })}
+              className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+          </label>
+          <label className="text-xs">
+            Data do exame demissional
+            <input type="date" value={form.examDate ?? ""} disabled={disabled} onChange={(e) => setForm({ ...form, examDate: e.target.value || null })}
+              className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+          </label>
+          <label className="text-xs">
+            Resultado do exame
+            <input type="text" value={form.examResult ?? ""} disabled={disabled} placeholder="Apto, inapto..." onChange={(e) => setForm({ ...form, examResult: e.target.value || null })}
+              className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+          </label>
+          <label className="text-xs">
+            Data de desligamento
+            <input type="date" value={form.terminationDate ?? ""} disabled={disabled} onChange={(e) => setForm({ ...form, terminationDate: e.target.value || null })}
+              className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+          </label>
+          <label className="text-xs">
+            Data de homologação
+            <input type="date" value={form.homologationDate ?? ""} disabled={disabled} onChange={(e) => setForm({ ...form, homologationDate: e.target.value || null })}
+              className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm disabled:opacity-60" />
+          </label>
+        </div>
+
+        <label className="text-xs block">
+          Motivo/observação
+          <textarea value={form.reason ?? ""} disabled={disabled} onChange={(e) => setForm({ ...form, reason: e.target.value || null })} rows={2}
+            className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm resize-none disabled:opacity-60" />
+        </label>
+        <label className="text-xs block">
+          Notas internas
+          <textarea value={form.notes ?? ""} disabled={disabled} onChange={(e) => setForm({ ...form, notes: e.target.value || null })} rows={2}
+            className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm resize-none disabled:opacity-60" />
+        </label>
+
+        {canEdit && isOpen && (
+          <button onClick={saveFields} disabled={saving} data-testid="button-save-termination"
+            className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-60">
+            <Save className="w-3.5 h-3.5" /> {saving ? "Salvando..." : "Salvar alterações"}
+          </button>
+        )}
+
+        <div>
+          <h4 className="text-xs font-bold mb-1.5 text-muted-foreground uppercase">Checklist de pendências</h4>
+          <div className="space-y-1.5">
+            {([
+              ["fgtsMultaPaid", "Multa de 40% do FGTS paga"],
+              ["trctSigned", "TRCT assinado"],
+              ["seguroDesempregoGuided", "Colaborador orientado sobre seguro-desemprego"],
+            ] as const).map(([field, label]) => (
+              <label key={field} className="flex items-center gap-2 text-xs shk-card p-2.5">
+                <input type="checkbox" checked={form[field]} disabled={!canEdit || !isOpen}
+                  onChange={(e) => toggleChecklist(field, e.target.checked)} className="w-3.5 h-3.5" />
+                {label}
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <h4 className="text-xs font-bold mb-1.5 text-muted-foreground uppercase">Documentos</h4>
+          {documents.length > 0 && (
+            <div className="space-y-1 mb-2">
+              {documents.map((d) => (
+                <div key={d.id} className="flex items-center gap-2 text-xs shk-card p-2">
+                  <FileText className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                  <span className="flex-1 min-w-0 truncate">{d.label || d.fileName || d.docType}</span>
+                  {d.fileName && (
+                    <a href={api.rhDp.employeeDocuments.fileUrl(process.employeeId, d.id)} target="_blank" rel="noreferrer" className="p-1 rounded hover:bg-secondary"><Eye className="w-3.5 h-3.5" /></a>
+                  )}
+                  {canEdit && isOpen && (
+                    <button onClick={() => removeDoc(d)} className="p-1 rounded hover:bg-red-50 text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {canEdit && isOpen && (
+            <div className="flex flex-wrap gap-1.5">
+              {TERMINATION_DOC_TYPES.map((dt) => (
+                <label key={dt.key} className="text-[11px] font-semibold px-2.5 py-1.5 rounded-full border border-border bg-white cursor-pointer hover:bg-secondary">
+                  {uploadingType === dt.key ? "Enviando..." : dt.label}
+                  <input type="file" accept="application/pdf,image/jpeg,image/png,image/webp" className="hidden" disabled={uploadingType != null}
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadDoc(dt.key, f); e.target.value = ""; }} />
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {canEdit && (
+          <div className="flex flex-wrap gap-2 pt-2 border-t border-border">
+            {isOpen ? (
+              <>
+                <button onClick={conclude} disabled={busy} data-testid="button-conclude-termination"
+                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-green-600 text-white text-xs font-bold disabled:opacity-60">
+                  <CheckCircle className="w-3.5 h-3.5" /> Concluir
+                </button>
+                <button onClick={cancel} disabled={busy} data-testid="button-cancel-termination"
+                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl border border-red-200 text-red-600 text-xs font-bold disabled:opacity-60">
+                  <XCircle className="w-3.5 h-3.5" /> Cancelar processo
+                </button>
+                {process.status === "iniciado" && (
+                  <button onClick={remove} disabled={busy} data-testid="button-delete-termination"
+                    className="px-3 py-2 rounded-xl text-red-400 text-xs font-bold disabled:opacity-60"><Trash2 className="w-3.5 h-3.5" /></button>
+                )}
+              </>
+            ) : (
+              <button onClick={reopen} disabled={busy} data-testid="button-reopen-termination"
+                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl border border-border text-xs font-bold disabled:opacity-60">
+                <RotateCcw className="w-3.5 h-3.5" /> Reabrir processo
+              </button>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

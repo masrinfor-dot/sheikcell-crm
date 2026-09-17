@@ -1443,6 +1443,32 @@ export type VacationRequest = {
   createdAt: string;
 };
 
+// Processo de desligamento/demissão — acompanha o processo (nunca calcula
+// nem paga verba, só sinaliza status/checklist pra decisão humana).
+export type TerminationProcess = {
+  id: number;
+  employeeId: number;
+  employeeName?: string | null;
+  dismissalType: "sem_justa_causa" | "com_justa_causa" | "pedido_demissao" | "acordo_mutuo" | "termino_experiencia" | "aposentadoria" | "outro";
+  reason: string | null;
+  noticeType: "trabalhado" | "indenizado" | "dispensado" | null;
+  noticeStartDate: string | null;
+  noticeEndDate: string | null;
+  lastWorkDate: string | null;
+  terminationDate: string | null;
+  examDate: string | null;
+  examResult: string | null;
+  homologationDate: string | null;
+  fgtsMultaPaid: boolean;
+  trctSigned: boolean;
+  seguroDesempregoGuided: boolean;
+  status: "iniciado" | "aviso_previo" | "exame_demissional" | "documentacao" | "concluido" | "cancelado";
+  notes: string | null;
+  concludedAt: string | null;
+  cancelledAt: string | null;
+  createdAt: string;
+};
+
 export type TimesheetMonth = {
   closureId: number;
   periodMonth: string;
@@ -2753,6 +2779,22 @@ export const api = {
         review: (id: number, action: "aprovar" | "rejeitar", reviewNote?: string) =>
           req<VacationRequest>(`/rh-dp/vacation-requests/${id}`, { method: "PATCH", body: JSON.stringify({ action, reviewNote }) }),
       },
+    },
+    // Processo de desligamento/demissão — acompanhamento do início à
+    // conclusão, nunca calcula/paga verba (ver comentário no schema).
+    terminations: {
+      list: () => req<TerminationProcess[]>("/rh-dp/termination-processes"),
+      create: (data: { employeeId: number; dismissalType: TerminationProcess["dismissalType"]; reason?: string; noticeType?: TerminationProcess["noticeType"]; lastWorkDate?: string }) =>
+        req<TerminationProcess>("/rh-dp/termination-processes", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<Pick<TerminationProcess,
+        "dismissalType" | "status" | "reason" | "noticeType" | "noticeStartDate" | "noticeEndDate" | "lastWorkDate" |
+        "terminationDate" | "examDate" | "examResult" | "homologationDate" | "fgtsMultaPaid" | "trctSigned" | "seguroDesempregoGuided" | "notes"
+      >>) => req<TerminationProcess>(`/rh-dp/termination-processes/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+      conclude: (id: number, terminationDate?: string) =>
+        req<TerminationProcess>(`/rh-dp/termination-processes/${id}/conclude`, { method: "POST", body: JSON.stringify({ terminationDate }) }),
+      cancel: (id: number) => req<TerminationProcess>(`/rh-dp/termination-processes/${id}/cancel`, { method: "POST" }),
+      reopen: (id: number) => req<TerminationProcess>(`/rh-dp/termination-processes/${id}/reopen`, { method: "POST" }),
+      remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/termination-processes/${id}`, { method: "DELETE" }),
     },
     reports: {
       timesheet: (from?: string, to?: string, employeeId?: number) =>
