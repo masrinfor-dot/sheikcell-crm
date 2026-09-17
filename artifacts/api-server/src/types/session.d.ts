@@ -8,6 +8,14 @@ declare module "express-session" {
     // Loja (tenant) do usuário. Superadmin não tem loja (undefined).
     tenantId: number | undefined;
     userSectorId: number | undefined;
+    // Vendedor em mais de um setor (pedido 17/09): lista completa dos
+    // setores do usuário — userSectorId acima continua existindo como o
+    // setor primário (sectorIds[0], usado pra roteamento/exibição de setor
+    // único), mas toda checagem de VISIBILIDADE (fila, CRM, respostas
+    // rápidas) deve usar esta lista ("está em algum destes setores"), não
+    // mais igualdade contra userSectorId. Sempre um array (nunca undefined)
+    // — [] = sem setor algum, equivalente ao userSectorId null de antes.
+    userSectorIds: number[];
     // Loja (stores.id — loja física dentro do tenant, multi-loja). Usado
     // pra escopar supervisor por loja (Fase 6 de Rotinas e Produtividade).
     userStoreId: number | undefined;

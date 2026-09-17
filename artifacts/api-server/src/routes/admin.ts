@@ -60,6 +60,15 @@ router.get("/admin/summary", requireAdminOrSupervisor, async (req, res): Promise
   const sectors = await db.select().from(sectorsTable)
     .where(and(eq(sectorsTable.tenantId, tenantId), eq(sectorsTable.isActive, true)));
 
+  // Vendedor em mais de um setor (pedido 17/09): uma consulta só, contada em
+  // JS por setor abaixo — sectorIds é jsonb, não dá pra filtrar por setor
+  // direto no WHERE sem um operador jsonb à parte (mesmo padrão já usado em
+  // whatsappInbound.ts pra whatsapp_sessions.default_sector_ids).
+  const activeUsersSectors = await db
+    .select({ sectorIds: usersTable.sectorIds })
+    .from(usersTable)
+    .where(and(eq(usersTable.tenantId, tenantId), eq(usersTable.isActive, true)));
+
   // Meia-noite de HOJE no horário do Brasil, não no fuso do processo Node
   // (em produção o container pode rodar em UTC e desalinhar "hoje" perto da
   // virada do dia).
@@ -94,11 +103,9 @@ router.get("/admin/summary", requireAdminOrSupervisor, async (req, res): Promise
         .from(attendanceLogsTable)
         .where(and(eq(attendanceLogsTable.tenantId, tenantId), eq(attendanceLogsTable.sectorId, sector.id), gte(attendanceLogsTable.createdAt, startOfDay)));
 
-      // Attendants assigned to this sector (active users da loja)
-      const [activeAttendants] = await db
-        .select({ count: sql<number>`count(*)` })
-        .from(usersTable)
-        .where(and(eq(usersTable.tenantId, tenantId), eq(usersTable.sectorId, sector.id), eq(usersTable.isActive, true)));
+      // Attendants assigned to this sector (active users da loja) — pedido
+      // 17/09: conta quem tem este setor entre os seus (não só o primário).
+      const activeAttendantsCount = activeUsersSectors.filter((u) => u.sectorIds.includes(sector.id)).length;
 
       // Vendedores atualmente atendendo (responsáveis por conversa em andamento)
       const busyAttendants = await db
@@ -111,7 +118,7 @@ router.get("/admin/summary", requireAdminOrSupervisor, async (req, res): Promise
         waiting: Number(waiting?.count ?? 0),
         inProgress: Number(inProgress?.count ?? 0),
         completedToday: Number(completedToday?.count ?? 0),
-        totalAttendants: Number(activeAttendants?.count ?? 0),
+        totalAttendants: activeAttendantsCount,
         busyAttendants: busyAttendants.filter((a) => a.attendantId !== null).length,
       };
     })
@@ -308,6 +315,7 @@ router.get("/admin/users", requireAdmin, async (req, res): Promise<void> => {
       email: usersTable.email,
       role: usersTable.role,
       sectorId: usersTable.sectorId,
+      sectorIds: usersTable.sectorIds,
       storeName: usersTable.storeName,
       extension: usersTable.extension,
       adminAccess: usersTable.adminAccess,
@@ -335,6 +343,10 @@ router.get("/admin/users", requireAdmin, async (req, res): Promise<void> => {
   const usersWithSector = users.map((u) => ({
     ...u,
     sector: u.sectorId ? (sectorMap[u.sectorId] ?? null) : null,
+    // Vendedor em mais de um setor (pedido 17/09): objetos completos de
+    // TODOS os setores do usuário, pra tela mostrar cada um (chips), não só
+    // o primário acima.
+    sectors: (u.sectorIds ?? []).map((id) => sectorMap[id]).filter((s): s is typeof sectors[number] => !!s),
   }));
 
   res.json(usersWithSector);
@@ -426,14 +438,32 @@ router.get("/admin/plan-usage", requireAdmin, async (req, res): Promise<void> =>
   res.json(usage);
 });
 
+// Vendedor em mais de um setor (pedido 17/09): valida a lista completa de
+// setores contra a loja (nunca aceita id de outra loja), deduplicada e sem
+// null/NaN. Retorna null se algum id não existir na loja (o chamador decide
+// a mensagem de erro) — [] é uma resposta válida (nenhum setor).
+async function sanitizeSectorIds(raw: unknown, tenantId: number): Promise<number[] | null> {
+  if (!Array.isArray(raw)) return null;
+  const ids = Array.from(new Set(raw.map((v) => Number(v)).filter((n) => Number.isInteger(n) && n > 0)));
+  if (ids.length === 0) return [];
+  const rows = await db.select({ id: sectorsTable.id }).from(sectorsTable)
+    .where(and(inArray(sectorsTable.id, ids), eq(sectorsTable.tenantId, tenantId)));
+  const validIds = new Set(rows.map((r) => r.id));
+  return ids.every((sid) => validIds.has(sid)) ? ids : null;
+}
+
 router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { name, email, password, role, sectorId, storeName, extension, adminAccess, accessHours, allowedSessionKeys, moduleAccess } = req.body as {
+  const { name, email, password, role, sectorId, sectorIds, storeName, extension, adminAccess, accessHours, allowedSessionKeys, moduleAccess } = req.body as {
     name?: string;
     email?: string;
     password?: string;
     role?: string;
     sectorId?: number;
+    // Vendedor em mais de um setor (pedido 17/09): lista completa, prevalece
+    // sobre sectorId quando enviada (compatibilidade com telas antigas que
+    // só mandam sectorId).
+    sectorIds?: unknown;
     storeName?: string;
     extension?: string;
     adminAccess?: unknown;
@@ -470,15 +500,17 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
   const totalLimitCheck = await assertWithinLimit(tenantId, "maxUsersTotal");
   if (!totalLimitCheck.ok) { res.status(400).json({ error: totalLimitCheck.error }); return; }
 
+  // Vendedor em mais de um setor (pedido 17/09): sectorIds (array) prevalece
+  // quando enviado; sectorId isolado (telas antigas) vira lista de 1 item.
+  const resolvedSectorIds = sectorIds !== undefined
+    ? await sanitizeSectorIds(sectorIds, tenantId)
+    : (sectorId != null ? [sectorId] : []);
+  if (resolvedSectorIds === null) { res.status(400).json({ error: "Setor inválido" }); return; }
+
   // Vendedores must be assigned to a real sector (da própria loja)
-  if (resolvedRole === "vendedor" && !sectorId) {
-    res.status(400).json({ error: "Vendedor precisa de um setor atribuído" });
+  if (resolvedRole === "vendedor" && resolvedSectorIds.length === 0) {
+    res.status(400).json({ error: "Vendedor precisa de pelo menos um setor atribuído" });
     return;
-  }
-  if (sectorId != null) {
-    const [sec] = await db.select({ id: sectorsTable.id }).from(sectorsTable)
-      .where(and(eq(sectorsTable.id, sectorId), eq(sectorsTable.tenantId, tenantId))).limit(1);
-    if (!sec) { res.status(400).json({ error: "Setor inválido" }); return; }
   }
 
   const cleanStore = typeof storeName === "string" && storeName.trim() ? storeName.trim().slice(0, 120) : null;
@@ -496,7 +528,8 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
     .values({
       tenantId,
       name, email: email.toLowerCase(), passwordHash, role: resolvedRole,
-      sectorId: sectorId ?? undefined,
+      sectorId: resolvedSectorIds[0] ?? undefined,
+      sectorIds: resolvedSectorIds,
       storeName: cleanStore,
       storeId: cleanStoreId,
       extension: cleanExtension,
@@ -530,7 +563,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   // que ela carregue este tenant_id (coluna NOT NULL sem valor "sem loja").
   if (existingUser.role === "superadmin") { res.status(403).json({ error: "Operação não permitida" }); return; }
 
-  const { name, email, password, role, sectorId, isActive, permissions, storeName, extension, adminAccess, accessHours, allowedSessionKeys, moduleAccess, internalChatSingleTask, queueRestrictToAssigned, chatQueueSingleTask } = req.body as {
+  const { name, email, password, role, sectorId, sectorIds, isActive, permissions, storeName, extension, adminAccess, accessHours, allowedSessionKeys, moduleAccess, internalChatSingleTask, queueRestrictToAssigned, chatQueueSingleTask } = req.body as {
     adminAccess?: unknown;
     accessHours?: unknown;
     allowedSessionKeys?: unknown;
@@ -540,6 +573,9 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
     password?: string;
     role?: string;
     sectorId?: number;
+    // Vendedor em mais de um setor (pedido 17/09): quando enviado, prevalece
+    // sobre sectorId (compatibilidade com telas antigas).
+    sectorIds?: unknown;
     isActive?: boolean;
     permissions?: unknown;
     storeName?: string | null;
@@ -558,13 +594,22 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
     if (!ALLOWED_ROLES.includes(role)) { res.status(400).json({ error: "Função inválida" }); return; }
     updateData.role = role;
   }
-  if (sectorId !== undefined) {
+  // Vendedor em mais de um setor (pedido 17/09): sectorIds (array) prevalece
+  // quando enviado; sectorId isolado (telas antigas) continua funcionando e
+  // mantém sectorIds em sincronia (lista de 1 item, ou vazia se null).
+  if (sectorIds !== undefined) {
+    const resolvedSectorIds = await sanitizeSectorIds(sectorIds, tenantId);
+    if (resolvedSectorIds === null) { res.status(400).json({ error: "Setor inválido" }); return; }
+    updateData.sectorIds = resolvedSectorIds;
+    updateData.sectorId = resolvedSectorIds[0] ?? null;
+  } else if (sectorId !== undefined) {
     if (sectorId != null) {
       const [sec] = await db.select({ id: sectorsTable.id }).from(sectorsTable)
         .where(and(eq(sectorsTable.id, sectorId), eq(sectorsTable.tenantId, tenantId))).limit(1);
       if (!sec) { res.status(400).json({ error: "Setor inválido" }); return; }
     }
     updateData.sectorId = sectorId;
+    updateData.sectorIds = sectorId != null ? [sectorId] : [];
   }
   if (adminAccess !== undefined) updateData.adminAccess = sanitizeAdminAccess(adminAccess);
   if (moduleAccess !== undefined) {
@@ -832,6 +877,7 @@ router.post("/admin/vendedores/:id/espiar", requireAdmin, async (req, res): Prom
   req.session.userRole = target.role;
   req.session.tenantId = target.tenantId;
   req.session.userSectorId = target.sectorId ?? undefined;
+  req.session.userSectorIds = target.sectorIds?.length ? target.sectorIds : (target.sectorId ? [target.sectorId] : []);
   req.session.userStoreId = target.storeId ?? undefined;
   req.session.userName = target.name;
   req.session.accessHours = null;

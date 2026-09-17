@@ -123,7 +123,12 @@ type WASession = {
 
 type UserRow = {
   id: number; name: string; email: string; role: string;
-  isActive: boolean; sector: Sector | null; sectorId: number | null; storeName?: string | null; extension?: string | null; adminAccess?: string[] | null; moduleAccess?: UserModuleAccess | null; accessHours?: { start: string; end: string; days: number[] } | null; allowedSessionKeys?: string[] | null; createdAt: string;
+  isActive: boolean; sector: Sector | null; sectorId: number | null;
+  // Vendedor em mais de um setor (pedido 17/09): lista completa (objetos, pra
+  // mostrar nome/cor de cada um) — sector/sectorId acima continuam existindo
+  // como o setor primário (compatibilidade).
+  sectors?: Sector[];
+  storeName?: string | null; extension?: string | null; adminAccess?: string[] | null; moduleAccess?: UserModuleAccess | null; accessHours?: { start: string; end: string; days: number[] } | null; allowedSessionKeys?: string[] | null; createdAt: string;
   permissions?: Record<string, boolean> | null;
   internalChatSingleTask?: boolean;
   queueRestrictToAssigned?: boolean;
@@ -329,7 +334,9 @@ export default function AdminDashboard() {
     finally { setLoadingEspiarLog(false); }
   };
 
-  const [userForm, setUserForm] = useState<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; extension: string; adminAccess: string[]; moduleAccess: UserModuleAccess; ahEnabled: boolean; ahStart: string; ahEnd: string; ahDays: number[]; waEnabled: boolean; waKeys: string[] }>({ name: "", email: "", password: "", role: "vendedor", sectorId: 1, storeName: "", extension: "", adminAccess: [], moduleAccess: {}, ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [] });
+  // Vendedor em mais de um setor (pedido 17/09): sectorIds substitui o antigo
+  // sectorId único — array com 0 ou mais setores marcados.
+  const [userForm, setUserForm] = useState<{ name: string; email: string; password: string; role: string; sectorIds: number[]; storeName: string; extension: string; adminAccess: string[]; moduleAccess: UserModuleAccess; ahEnabled: boolean; ahStart: string; ahEnd: string; ahDays: number[]; waEnabled: boolean; waKeys: string[] }>({ name: "", email: "", password: "", role: "vendedor", sectorIds: [1], storeName: "", extension: "", adminAccess: [], moduleAccess: {}, ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [] });
   const [sectorForm, setSectorForm] = useState<{ name: string; description: string; icon: string; color: string; isActive: boolean; enabledModules: OptionalModule[] | null; vendorsSeeResolved: boolean }>({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true, enabledModules: null, vendorsSeeResolved: false });
 
   const fetchAll = useCallback(async () => {
@@ -490,13 +497,15 @@ export default function AdminDashboard() {
   // ---- User handlers ----
   const openAddUser = () => {
     setEditUser(null);
-    setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorId: activeSectors[0]?.id ?? sectors[0]?.id ?? 1, storeName: "", extension: "", adminAccess: [], moduleAccess: {}, ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [] });
+    const firstSectorId = activeSectors[0]?.id ?? sectors[0]?.id ?? 1;
+    setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorIds: [firstSectorId], storeName: "", extension: "", adminAccess: [], moduleAccess: {}, ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [] });
     setOpenUserSections(new Set(["basico"]));
     setShowAddUser(true);
   };
   const openEditUser = (u: UserRow) => {
     setEditUser(u);
-    setUserForm({ name: u.name, email: u.email, password: "", role: u.role, sectorId: u.sectorId ?? 1, storeName: u.storeName ?? "", extension: u.extension ?? "", adminAccess: u.adminAccess ?? [], moduleAccess: u.moduleAccess ?? {}, ahEnabled: !!u.accessHours, ahStart: u.accessHours?.start ?? "08:00", ahEnd: u.accessHours?.end ?? "18:00", ahDays: u.accessHours?.days?.length ? u.accessHours.days : [1, 2, 3, 4, 5, 6], waEnabled: !!u.allowedSessionKeys, waKeys: u.allowedSessionKeys ?? [] });
+    const sectorIds = u.sectors?.length ? u.sectors.map((s) => s.id) : (u.sectorId != null ? [u.sectorId] : []);
+    setUserForm({ name: u.name, email: u.email, password: "", role: u.role, sectorIds, storeName: u.storeName ?? "", extension: u.extension ?? "", adminAccess: u.adminAccess ?? [], moduleAccess: u.moduleAccess ?? {}, ahEnabled: !!u.accessHours, ahStart: u.accessHours?.start ?? "08:00", ahEnd: u.accessHours?.end ?? "18:00", ahDays: u.accessHours?.days?.length ? u.accessHours.days : [1, 2, 3, 4, 5, 6], waEnabled: !!u.allowedSessionKeys, waKeys: u.allowedSessionKeys ?? [] });
     setOpenUserSections(new Set(["basico"]));
     setShowAddUser(true);
   };
@@ -505,7 +514,7 @@ export default function AdminDashboard() {
     try {
       if (editUser) {
         const payload: Parameters<typeof api.admin.users.update>[1] = {
-          name: userForm.name, email: userForm.email, role: userForm.role, sectorId: userForm.sectorId,
+          name: userForm.name, email: userForm.email, role: userForm.role, sectorIds: userForm.sectorIds,
           storeName: userForm.storeName,
           extension: userForm.extension,
           adminAccess: userForm.role === "admin" ? null : userForm.adminAccess,
@@ -520,7 +529,7 @@ export default function AdminDashboard() {
         toast({ title: "Atendente atualizado!" });
       } else {
         await api.admin.users.create({
-          name: userForm.name, email: userForm.email, password: userForm.password, role: userForm.role, sectorId: userForm.sectorId,
+          name: userForm.name, email: userForm.email, password: userForm.password, role: userForm.role, sectorIds: userForm.sectorIds,
           storeName: userForm.storeName, extension: userForm.extension,
           adminAccess: userForm.role === "admin" ? null : userForm.adminAccess,
           moduleAccess: userForm.role === "admin" ? null : userForm.moduleAccess,
@@ -1736,7 +1745,9 @@ export default function AdminDashboard() {
                       <tr key={u.id} className={i % 2 === 0 ? "bg-white" : "bg-secondary/20"} data-testid={`row-user-${u.id}`}>
                         <td className="px-4 py-3 font-medium">{u.name}</td>
                         <td className="px-4 py-3 text-muted-foreground">{u.email}</td>
-                        <td className="px-4 py-3 text-muted-foreground">{u.sector?.name ?? "—"}</td>
+                        <td className="px-4 py-3 text-muted-foreground">
+                          {u.sectors?.length ? u.sectors.map((s) => s.name).join(", ") : (u.sector?.name ?? "—")}
+                        </td>
                         <td className="px-4 py-3 text-muted-foreground" data-testid={`user-store-${u.id}`}>{u.storeName || "—"}</td>
                         <td className="px-4 py-3">
                           <span className={
@@ -2386,20 +2397,41 @@ export default function AdminDashboard() {
                         </select>
                       </div>
                       <div>
-                        <label className="text-xs font-medium mb-1 block">Setor</label>
-                        <select value={userForm.sectorId} onChange={(e) => setUserForm({ ...userForm, sectorId: Number(e.target.value) })}
-                          className="w-full px-3 py-2 rounded-xl border border-border text-sm">
-                          {/* Setor desativado não é oferecido pra escolher — exceto o que
-                              esse vendedor já está, senão editar o cadastro dele trocaria
-                              o setor sem querer (mostrado marcado "(inativo)" pra ficar claro). */}
-                          {activeSectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                          {(() => {
-                            const current = sectors.find((s) => s.id === userForm.sectorId);
-                            return current && !current.isActive
-                              ? <option key={current.id} value={current.id}>{current.name} (inativo)</option>
-                              : null;
-                          })()}
-                        </select>
+                        {/* Vendedor em mais de um setor (pedido 17/09): chips de
+                            múltipla escolha, mesmo padrão já usado nos setores de
+                            uma linha de WhatsApp. Setor desativado não é oferecido
+                            pra marcar — exceto o(s) que esse usuário já está,
+                            senão editar o cadastro trocaria o setor sem querer
+                            (mostrado com "(inativo)" pra ficar claro). O primeiro
+                            marcado vira o setor primário (roteamento/exibição). */}
+                        <label className="text-xs font-medium mb-1 block">Setor(es)</label>
+                        <div className="flex flex-wrap gap-1.5">
+                          {activeSectors.map((s) => {
+                            const checked = userForm.sectorIds.includes(s.id);
+                            return (
+                              <label key={s.id}
+                                className={`flex items-center gap-1.5 px-2 py-1 rounded-lg border text-xs cursor-pointer transition ${checked ? "border-primary bg-primary/10 font-medium" : "border-border bg-white"}`}
+                                data-testid={`checkbox-user-sector-${s.id}`}>
+                                <input type="checkbox" checked={checked}
+                                  onChange={(e) => setUserForm({
+                                    ...userForm,
+                                    sectorIds: e.target.checked
+                                      ? [...userForm.sectorIds, s.id]
+                                      : userForm.sectorIds.filter((sid) => sid !== s.id),
+                                  })} />
+                                {s.name}
+                              </label>
+                            );
+                          })}
+                          {sectors.filter((s) => !s.isActive && userForm.sectorIds.includes(s.id)).map((s) => (
+                            <label key={s.id}
+                              className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-primary bg-primary/10 font-medium text-xs cursor-pointer">
+                              <input type="checkbox" checked
+                                onChange={() => setUserForm({ ...userForm, sectorIds: userForm.sectorIds.filter((sid) => sid !== s.id) })} />
+                              {s.name} (inativo)
+                            </label>
+                          ))}
+                        </div>
                       </div>
                     </div>
                   </div>

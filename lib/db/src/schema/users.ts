@@ -26,7 +26,21 @@ export const usersTable = pgTable("users", {
   email: text("email").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
   role: text("role").notNull().default("vendedor"), // "vendedor" | "vendedor_chefe" | "supervisor" | "admin" | "superadmin"
+  // Setor PRIMÁRIO (compatibilidade com todo código antigo que só entende um
+  // setor por vendedor — roteamento de conversa nova, quick replies, etc.).
+  // Sempre mantido em sincronia com sectorIds[0] pela rota de usuários (ver
+  // artifacts/api-server/src/routes/admin.ts) — nunca editado direto sem
+  // também atualizar sectorIds.
   sectorId: integer("sector_id").references(() => sectorsTable.id),
+  // Vendedor em mais de um setor (pedido 17/09: "colocar vendedores com mais
+  // de um setor") — lista completa dos setores deste vendedor, mesmo padrão
+  // já usado em whatsapp_sessions.defaultSectorIds. Vazio = nenhum setor
+  // (equivalente a sectorId null). Filtros de visibilidade (fila de
+  // atendimento, CRM, respostas rápidas) passam a considerar "está em
+  // ALGUM destes setores" em vez de comparar contra um único sectorId — ver
+  // req.session.userSectorIds. sectorId acima continua existindo só como o
+  // "setor de exibição/roteamento padrão" (o primeiro da lista).
+  sectorIds: jsonb("sector_ids").$type<number[]>().notNull().default([]),
   // Loja da rede a que o vendedor pertence (texto livre; ex.: "Loja Centro")
   storeName: text("store_name"),
   // Mesma loja acima, mas como FK de verdade — mantido lado a lado com

@@ -62,6 +62,10 @@ async function establishSession(req: Request, user: User): ReturnType<typeof bui
   req.session.userRole = user.role;
   req.session.tenantId = user.role === "superadmin" ? undefined : user.tenantId;
   req.session.userSectorId = user.sectorId ?? undefined;
+  // Vendedor em mais de um setor (pedido 17/09): fallback pro sectorId único
+  // cobre linhas que por algum motivo ainda não passaram pela migration de
+  // backfill (nunca deveria acontecer depois dela rodar, mas não custa).
+  req.session.userSectorIds = user.sectorIds?.length ? user.sectorIds : (user.sectorId ? [user.sectorId] : []);
   req.session.userStoreId = user.storeId ?? undefined;
   req.session.userName = user.name;
   req.session.allowedSessionKeys = user.role === "vendedor" ? (user.allowedSessionKeys ?? null) : null;
@@ -420,6 +424,7 @@ router.post("/auth/stop-impersonation", requireAuth, async (req, res): Promise<v
   // do modo espiar sem acesso a nada até logar de novo.
   req.session.tenantId = original.role === "superadmin" ? undefined : original.tenantId;
   req.session.userSectorId = original.sectorId ?? undefined;
+  req.session.userSectorIds = original.sectorIds?.length ? original.sectorIds : (original.sectorId ? [original.sectorId] : []);
   req.session.userStoreId = original.role === "superadmin" ? undefined : (original.storeId ?? undefined);
   req.session.userName = original.name;
   req.session.accessHours = null;

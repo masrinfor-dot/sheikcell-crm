@@ -111,6 +111,10 @@ export type User = {
   email: string;
   role: string;
   sectorId: number | null;
+  // Vendedor em mais de um setor (pedido 17/09): lista completa (objetos
+  // resumidos, pra exibir nome/cor de cada um) — sectorId acima continua
+  // existindo como o setor primário (compatibilidade).
+  sectors?: Sector[];
   storeName?: string | null;
   extension?: string | null;
   mustChangePassword?: boolean;
@@ -3132,9 +3136,9 @@ export const api = {
     },
     users: {
       list: () => req<(User & { isActive: boolean; createdAt: string })[]>("/admin/users"),
-      create: (data: { name: string; email: string; password: string; role: string; sectorId: number; storeName?: string; extension?: string; adminAccess?: string[] | null; moduleAccess?: UserModuleAccess | null; accessHours?: { start: string; end: string; days: number[] } | null; allowedSessionKeys?: string[] | null }) =>
+      create: (data: { name: string; email: string; password: string; role: string; sectorIds: number[]; storeName?: string; extension?: string; adminAccess?: string[] | null; moduleAccess?: UserModuleAccess | null; accessHours?: { start: string; end: string; days: number[] } | null; allowedSessionKeys?: string[] | null }) =>
         req<User>("/admin/users", { method: "POST", body: JSON.stringify(data) }),
-      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; extension: string; isActive: boolean; permissions: Record<string, boolean>; adminAccess: string[] | null; moduleAccess: UserModuleAccess | null; accessHours: { start: string; end: string; days: number[] } | null; allowedSessionKeys: string[] | null; internalChatSingleTask: boolean; queueRestrictToAssigned: boolean; chatQueueSingleTask: boolean }>) =>
+      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorIds: number[]; storeName: string; extension: string; isActive: boolean; permissions: Record<string, boolean>; adminAccess: string[] | null; moduleAccess: UserModuleAccess | null; accessHours: { start: string; end: string; days: number[] } | null; allowedSessionKeys: string[] | null; internalChatSingleTask: boolean; queueRestrictToAssigned: boolean; chatQueueSingleTask: boolean }>) =>
         req<User>(`/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number, transferToId: number | null) =>
         req<{ ok: boolean; transferredConversations: number }>(`/admin/users/${id}`, { method: "DELETE", body: JSON.stringify({ transferToId }) }),

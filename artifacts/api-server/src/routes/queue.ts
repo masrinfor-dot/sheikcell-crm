@@ -1,14 +1,16 @@
 import { Router, type IRouter } from "express";
 import { db, queueEntriesTable, usersTable, sectorsTable, attendanceLogsTable } from "@workspace/db";
-import { eq, and, asc, sql, desc } from "drizzle-orm";
+import { eq, and, asc, sql, desc, inArray } from "drizzle-orm";
 import { requireAuth, requireTenant } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
-/** Returns true if the user has global role (admin/supervisor) OR the entry belongs to their sector */
-function canActOnEntry(userRole: string, userSectorId: number | null, entrySectorId: number): boolean {
+/** Returns true if the user has global role (admin/supervisor) OR the entry
+ * belongs to ANY of the user's sectors (pedido 17/09: vendedor em mais de um
+ * setor). */
+function canActOnEntry(userRole: string, userSectorIds: number[], entrySectorId: number): boolean {
   if (userRole === "admin" || userRole === "supervisor") return true;
-  return userSectorId === entrySectorId;
+  return userSectorIds.includes(entrySectorId);
 }
 
 /** Quem pode direcionar uma entrada da fila pra um vendedor específico
@@ -23,7 +25,10 @@ router.get("/queue", requireAuth, async (req, res): Promise<void> => {
   const statusParam = req.query.status as string | undefined;
 
   const userRole = req.session.userRole!;
-  const userSectorId = req.session.userSectorId ?? null;
+  // Vendedor em mais de um setor (pedido 17/09): a lista completa — sem
+  // filtro explícito de sectorId na tela, o pool geral passa a somar TODOS
+  // os setores do vendedor, não só um.
+  const userSectorIds = req.session.userSectorIds ?? [];
 
   // Vendedor com fila restrita (pedido 10/09): só vê o que foi direcionado
   // especificamente pra ele — nunca o pool geral do setor. Ver coluna
@@ -36,39 +41,41 @@ router.get("/queue", requireAuth, async (req, res): Promise<void> => {
     .from(usersTable).where(eq(usersTable.id, req.session.userId!)).limit(1);
   const isRestricted = userRole === "vendedor" && !!me?.queueRestrictToAssigned;
 
-  // Attendants can only query their own sector; admins can query any sector
-  let effectiveSectorId: number | null = null;
+  // Attendants can only query their own sector(s); admins can query any sector
+  let effectiveSectorIds: number[] | null = null;
   if (sectorIdParam) {
     const parsed = parseInt(String(sectorIdParam), 10);
     if (isNaN(parsed)) {
       res.status(400).json({ error: "sectorId inválido" });
       return;
     }
-    if (userRole !== "admin" && userRole !== "supervisor" && parsed !== userSectorId && !isRestricted) {
+    if (userRole !== "admin" && userRole !== "supervisor" && !userSectorIds.includes(parsed) && !isRestricted) {
       res.status(403).json({ error: "Acesso negado a este setor" });
       return;
     }
-    effectiveSectorId = isRestricted ? null : parsed;
+    effectiveSectorIds = isRestricted ? null : [parsed];
   } else if (userRole === "admin" || userRole === "supervisor") {
     // Admins and supervisors can see all sectors when no sectorId param given
-    effectiveSectorId = null;
+    effectiveSectorIds = null;
   } else if (isRestricted) {
     // Fila restrita: ignora setor, o filtro real é por targetUserId abaixo.
-    effectiveSectorId = null;
+    effectiveSectorIds = null;
   } else {
     // Non-admin/supervisor users must have a valid sector assignment
-    if (!userSectorId) {
+    if (userSectorIds.length === 0) {
       res.status(403).json({ error: "Conta sem setor atribuído válido" });
       return;
     }
-    effectiveSectorId = userSectorId;
+    effectiveSectorIds = userSectorIds;
   }
 
   // Fila sempre restrita à loja (tenant) do usuário.
   const conditions = [eq(queueEntriesTable.tenantId, tenantId)];
 
-  if (effectiveSectorId !== null) {
-    conditions.push(eq(queueEntriesTable.sectorId, effectiveSectorId));
+  if (effectiveSectorIds !== null) {
+    conditions.push(effectiveSectorIds.length === 1
+      ? eq(queueEntriesTable.sectorId, effectiveSectorIds[0]!)
+      : inArray(queueEntriesTable.sectorId, effectiveSectorIds));
   }
 
   if (isRestricted) {
@@ -123,7 +130,7 @@ router.post("/queue", requireAuth, async (req, res): Promise<void> => {
   }
 
   // Attendants can only add to their own sector
-  if (!canActOnEntry(req.session.userRole!, req.session.userSectorId ?? null, sectorId)) {
+  if (!canActOnEntry(req.session.userRole!, req.session.userSectorIds ?? [], sectorId)) {
     res.status(403).json({ error: "Acesso negado a este setor" });
     return;
   }
@@ -205,7 +212,7 @@ router.patch("/queue/:id/call", requireAuth, async (req, res): Promise<void> => 
   const userId = req.session.userId!;
   const userRole = req.session.userRole!;
   const wasRoutedToMe = existing.targetUserId === userId;
-  if (!wasRoutedToMe && !canActOnEntry(userRole, req.session.userSectorId ?? null, existing.sectorId)) {
+  if (!wasRoutedToMe && !canActOnEntry(userRole, req.session.userSectorIds ?? [], existing.sectorId)) {
     res.status(403).json({ error: "Acesso negado a este setor" }); return;
   }
 
@@ -248,7 +255,7 @@ router.patch("/queue/:id/start", requireAuth, async (req, res): Promise<void> =>
   if (!existing) { res.status(404).json({ error: "Entrada não encontrada" }); return; }
 
   const canBypassSector = existing.attendantId === req.session.userId || existing.targetUserId === req.session.userId;
-  if (!canBypassSector && !canActOnEntry(req.session.userRole!, req.session.userSectorId ?? null, existing.sectorId)) {
+  if (!canBypassSector && !canActOnEntry(req.session.userRole!, req.session.userSectorIds ?? [], existing.sectorId)) {
     res.status(403).json({ error: "Acesso negado a este setor" }); return;
   }
 
@@ -273,7 +280,7 @@ router.patch("/queue/:id/complete", requireAuth, async (req, res): Promise<void>
   if (!existing) { res.status(404).json({ error: "Entrada não encontrada" }); return; }
 
   const canBypassSectorComplete = existing.attendantId === req.session.userId || existing.targetUserId === req.session.userId;
-  if (!canBypassSectorComplete && !canActOnEntry(req.session.userRole!, req.session.userSectorId ?? null, existing.sectorId)) {
+  if (!canBypassSectorComplete && !canActOnEntry(req.session.userRole!, req.session.userSectorIds ?? [], existing.sectorId)) {
     res.status(403).json({ error: "Acesso negado a este setor" }); return;
   }
 
@@ -332,7 +339,7 @@ router.patch("/queue/:id/transfer", requireAuth, async (req, res): Promise<void>
     .where(and(eq(queueEntriesTable.id, id), eq(queueEntriesTable.tenantId, tenantId)));
   if (!existingEntry) { res.status(404).json({ error: "Entrada não encontrada" }); return; }
 
-  if (!canActOnEntry(req.session.userRole!, req.session.userSectorId ?? null, existingEntry.sectorId)) {
+  if (!canActOnEntry(req.session.userRole!, req.session.userSectorIds ?? [], existingEntry.sectorId)) {
     res.status(403).json({ error: "Acesso negado a este setor" }); return;
   }
 
@@ -389,7 +396,7 @@ router.delete("/queue/:id", requireAuth, async (req, res): Promise<void> => {
     .where(and(eq(queueEntriesTable.id, id), eq(queueEntriesTable.tenantId, tenantId)));
   if (!existing) { res.status(404).json({ error: "Entrada não encontrada" }); return; }
 
-  if (!canActOnEntry(req.session.userRole!, req.session.userSectorId ?? null, existing.sectorId)) {
+  if (!canActOnEntry(req.session.userRole!, req.session.userSectorIds ?? [], existing.sectorId)) {
     res.status(403).json({ error: "Acesso negado a este setor" }); return;
   }
 

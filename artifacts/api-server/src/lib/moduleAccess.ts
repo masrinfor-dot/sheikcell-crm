@@ -70,13 +70,18 @@ async function getSectorEnabledModules(sectorId: number): Promise<Set<string> | 
   return modules;
 }
 
-/** true = o setor do usuário da sessão bloqueia esse módulo (só vale pra vendedor). */
+/** true = TODOS os setores do usuário da sessão bloqueiam esse módulo (só
+ * vale pra vendedor). Vendedor em mais de um setor (pedido 17/09): union —
+ * se QUALQUER um dos setores dele libera o módulo, ele tem acesso (não
+ * bloqueia só porque um dos outros setores restringe). */
 async function sectorBlocks(req: Request, moduleKey: string): Promise<boolean> {
   if (req.session.userRole !== "vendedor") return false;
-  const sectorId = req.session.userSectorId;
-  if (sectorId == null) return false;
-  const allowed = await getSectorEnabledModules(sectorId);
-  return allowed != null && !allowed.has(moduleKey);
+  const sectorIds = req.session.userSectorIds ?? [];
+  if (sectorIds.length === 0) return false;
+  const results = await Promise.all(sectorIds.map((sid) => getSectorEnabledModules(sid)));
+  // Cada setor: null = sem restrição (libera); array = precisa conter o módulo.
+  const anyAllows = results.some((allowed) => allowed == null || allowed.has(moduleKey));
+  return !anyAllows;
 }
 
 /** Nível de acesso do usuário da sessão a um módulo — admin sempre "edit". Ausência = sem acesso (fail closed). */

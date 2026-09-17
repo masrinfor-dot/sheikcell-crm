@@ -444,6 +444,7 @@ router.post("/superadmin/tenants/:tenantId/impersonate/:userId", requireFullSupe
   req.session.userRole = target.role;
   req.session.tenantId = target.tenantId;
   req.session.userSectorId = target.sectorId ?? undefined;
+  req.session.userSectorIds = target.sectorIds?.length ? target.sectorIds : (target.sectorId ? [target.sectorId] : []);
   req.session.userStoreId = target.storeId ?? undefined;
   req.session.userName = target.name;
   req.session.accessHours = null;

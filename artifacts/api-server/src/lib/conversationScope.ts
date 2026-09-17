@@ -1,5 +1,5 @@
 import { db, conversationParticipantsTable, conversationsTable, sectorsTable } from "@workspace/db";
-import { and, eq, notInArray, sql } from "drizzle-orm";
+import { and, eq, inArray, notInArray, sql } from "drizzle-orm";
 
 // Shared "potencial" (new, unclaimed lead) scoping helpers.
 //
@@ -71,6 +71,17 @@ export async function sectorAllowsResolvedAccess(sectorId: number | null | undef
   const [row] = await db.select({ v: sectorsTable.vendorsSeeResolved }).from(sectorsTable)
     .where(eq(sectorsTable.id, sectorId)).limit(1);
   return !!row?.v;
+}
+
+// Vendedor em mais de um setor (pedido 17/09): mesma checagem acima, mas pra
+// VÁRIOS setores de uma vez (um vendedor pode estar num setor que libera
+// "todo vendedor vê Resolvidos" e noutro que não) — devolve só o subconjunto
+// que libera, pra montar um filtro "resolvida/arquivada DESTES setores".
+export async function sectorsAllowingResolvedAccess(sectorIds: number[]): Promise<number[]> {
+  if (sectorIds.length === 0) return [];
+  const rows = await db.select({ id: sectorsTable.id }).from(sectorsTable)
+    .where(and(inArray(sectorsTable.id, sectorIds), eq(sectorsTable.vendorsSeeResolved, true)));
+  return rows.map((r) => r.id);
 }
 
 // Pedido 14/09: número sequencial exibido como "Fila #N" pra todo atendimento

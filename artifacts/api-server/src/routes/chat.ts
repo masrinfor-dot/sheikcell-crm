@@ -17,7 +17,7 @@ import {
   presenceDisconnect,
   type BufferedEvent,
 } from "../lib/sseEmitter";
-import { isPotentialConversation, isRestrictedConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES, countActiveConversations, sectorAllowsResolvedAccess, nextQueueNumber } from "../lib/conversationScope";
+import { isPotentialConversation, isRestrictedConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES, countActiveConversations, sectorAllowsResolvedAccess, sectorsAllowingResolvedAccess, nextQueueNumber } from "../lib/conversationScope";
 import { autoAssignOnNewPoolConversation, autoAssignOnVendorFreed } from "../lib/queueAutoAssign";
 import { ensureCrmContactForConversation, syncCrmAttendant } from "../lib/crmSync";
 import { sendOutboundText } from "../lib/outbound";
@@ -47,7 +47,7 @@ router.get("/chat/events", requireAuth, requireChatAccess(), async (req: Request
   res.flushHeaders();
 
   const userRole = req.session.userRole!;
-  const userSectorId = req.session.userSectorId;
+  const userSectorIds = req.session.userSectorIds ?? [];
   const userId = req.session.userId!;
   // Multi-loja: a loja da sessão. Eventos NUNCA cruzam a fronteira de loja —
   // superadmin (sem loja) e sessões antigas não recebem nada (fail closed).
@@ -96,7 +96,7 @@ router.get("/chat/events", requireAuth, requireChatAccess(), async (req: Request
     // fora das linhas liberadas nunca chega.
     if (allowedSessionKeys != null && ev.sessionKey != null && !allowedSessionKeys.includes(ev.sessionKey)) return false;
     if (ev.isPotential && canSeePotenciais) return true;
-    return ev.sectorId != null && ev.sectorId === userSectorId;
+    return ev.sectorId != null && userSectorIds.includes(ev.sectorId);
   };
 
   const writeEvent = (ev: { id?: number; event: string; data: unknown }) => {
@@ -199,7 +199,7 @@ async function canAccessConversation(
   const userRole = req.session.userRole!;
   if (userRole === "admin") return true;
   const userId = req.session.userId!;
-  const userSectorId = req.session.userSectorId;
+  const userSectorIds = req.session.userSectorIds ?? [];
   // Supervisor e vendedor_chefe (pedido 10/09, direciona atendimentos):
   // acesso irrestrito a qualquer conversa, em qualquer setor (inclusive já
   // assumidas/finalizadas por outro vendedor). A privacidade entre
@@ -227,7 +227,7 @@ async function canAccessConversation(
     // mesmo não sendo o responsável original nem participante. NÃO libera
     // conversa ativa (só tem dono) de outro vendedor — só resolvida/arquivada.
     if ((conv.status === "resolved" || conv.status === "archived" || conv.isArchived === true)
-      && conv.sectorId != null && conv.sectorId === userSectorId
+      && conv.sectorId != null && userSectorIds.includes(conv.sectorId)
       && (await sectorAllowsResolvedAccess(conv.sectorId))) {
       return true;
     }
@@ -242,7 +242,7 @@ async function canAccessConversation(
   // das linhas liberadas, nem potencial nem conversa do próprio setor conta.
   const allowedSessionKeys = await getCurrentAllowedSessionKeys(req);
   if (allowedSessionKeys != null && !allowedSessionKeys.includes(conv.sessionKey)) return false;
-  if (conv.sectorId != null && conv.sectorId === userSectorId) return true;
+  if (conv.sectorId != null && userSectorIds.includes(conv.sectorId)) return true;
   return isPotentialConversation(conv) && (await checkPerm(req, "ver_potenciais"));
 }
 
@@ -255,7 +255,7 @@ async function canAccessConversation(
  * aberto) quanto pra validar, no /claim, que quem está pegando um novo
  * está pegando mesmo essa — não uma escolhida a dedo direto pela API,
  * ainda que a lista já esconda as outras. */
-async function vendorClaimablePoolCondition(req: Request, userSectorId: number | null) {
+async function vendorClaimablePoolCondition(req: Request, userSectorIds: number[]) {
   const userAllowedSessionKeys = await getCurrentAllowedSessionKeys(req);
   const sessionScope = userAllowedSessionKeys != null
     ? (userAllowedSessionKeys.length ? inArray(conversationsTable.sessionKey, userAllowedSessionKeys) : sql`FALSE`)
@@ -270,8 +270,10 @@ async function vendorClaimablePoolCondition(req: Request, userSectorId: number |
     sql`${conversationsTable.assigneeId} IS NOT NULL`,
     inArray(conversationsTable.status, ["resolved", "archived"]),
   )!;
-  let sectorUnrestricted = userSectorId
-    ? and(eq(conversationsTable.sectorId, userSectorId), sql`NOT (${restricted})`)!
+  // Vendedor em mais de um setor (pedido 17/09): pool combinado de TODOS os
+  // setores do vendedor, não só um.
+  let sectorUnrestricted = userSectorIds.length
+    ? and(inArray(conversationsTable.sectorId, userSectorIds), sql`NOT (${restricted})`)!
     : sql`FALSE`;
   if (sessionScope) {
     potencial = and(potencial, sessionScope)!;
@@ -296,7 +298,7 @@ async function buildConversationVisibilityConditions(
   opts: { sectorId?: number; assigneeId?: number },
 ) {
   const userRole = req.session.userRole!;
-  const userSectorId = req.session.userSectorId;
+  const userSectorIds = req.session.userSectorIds ?? [];
 
   // Multi-loja: base de tudo é a loja do usuário.
   const conditions = [eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.isArchived, false)];
@@ -320,14 +322,16 @@ async function buildConversationVisibilityConditions(
     const userId = req.session.userId!;
 
     // Setor com "todo vendedor vê Resolvidos" ligado (pedido 14/09, Atacado):
-    // condição extra que libera QUALQUER resolvida/arquivada do próprio
-    // setor, não só a que esse vendedor finalizou — pra reiniciar contato e
-    // prospectar cliente antigo. null quando o setor não liga essa opção
+    // condição extra que libera QUALQUER resolvida/arquivada de um dos
+    // setores do vendedor (pedido 17/09: agora pode ser mais de um), não só a
+    // que esse vendedor finalizou — pra reiniciar contato e prospectar
+    // cliente antigo. null quando NENHUM dos setores dele liga essa opção
     // (comportamento de sempre).
-    const sectorResolved = (userSectorId != null && await sectorAllowsResolvedAccess(userSectorId))
+    const resolvedAllowedSectorIds = await sectorsAllowingResolvedAccess(userSectorIds);
+    const sectorResolved = resolvedAllowedSectorIds.length
       ? and(
           inArray(conversationsTable.status, ["resolved", "archived"]),
-          eq(conversationsTable.sectorId, userSectorId),
+          inArray(conversationsTable.sectorId, resolvedAllowedSectorIds),
         )
       : null;
 
@@ -366,7 +370,7 @@ async function buildConversationVisibilityConditions(
       if (activeCount > 0) {
         conditions.push(sectorResolved ? or(mine, sectorResolved)! : mine);
       } else {
-        const pool = await vendorClaimablePoolCondition(req, userSectorId ?? null);
+        const pool = await vendorClaimablePoolCondition(req, userSectorIds);
         const [next] = await db.select({ id: conversationsTable.id }).from(conversationsTable)
           .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.isArchived, false), pool))
           .orderBy(asc(conversationsTable.createdAt)).limit(1);
@@ -379,7 +383,7 @@ async function buildConversationVisibilityConditions(
       return conditions;
     }
 
-    const pool = await vendorClaimablePoolCondition(req, userSectorId ?? null);
+    const pool = await vendorClaimablePoolCondition(req, userSectorIds);
     conditions.push(sectorResolved ? or(pool, mine, sectorResolved)! : or(pool, mine)!);
     // Resolvidas só aparecem para admin/supervisor (ou pro setor que ligou
     // "todo vendedor vê Resolvidos" acima): vendedor comum não vê conversas
@@ -1630,7 +1634,7 @@ router.patch("/chat/conversations/:id", requireAuth, requireChatAccess(), async 
       // sempre (precisa de "transferir").
       const selfClaimResolvedInSector = assigneeId === req.session.userId!
         && (conv.status === "resolved" || conv.status === "archived" || conv.isArchived === true)
-        && conv.sectorId != null && conv.sectorId === req.session.userSectorId
+        && conv.sectorId != null && (req.session.userSectorIds ?? []).includes(conv.sectorId)
         && (await sectorAllowsResolvedAccess(conv.sectorId));
       if (!selfClaimResolvedInSector) {
         res.status(403).json({ error: "Você não tem permissão para transferir conversas. Fale com o administrador." });
@@ -1937,7 +1941,12 @@ router.post("/chat/conversations/:id/claim", requireAuth, requireChatAccess(), a
   // When a vendedor claims a potencial from another sector, move it into their
   // own sector so it stays properly scoped to them afterwards.
   const userRole = req.session.userRole!;
+  // Setor primário (fallback de roteamento quando precisa de UM só, ex.:
+  // reatribuir o setor da conversa abaixo) e a lista completa (pedido 17/09:
+  // vendedor em mais de um setor) usada pras checagens de "já está no meu
+  // pool" abaixo.
   const userSectorId = req.session.userSectorId;
+  const userSectorIds = req.session.userSectorIds ?? [];
   const isGenuineStart = conv.assigneeId == null;
 
   // Fila do Central de Atendimento por ordem (pedido 14/09, ver
@@ -1954,7 +1963,7 @@ router.post("/chat/conversations/:id/claim", requireAuth, requireChatAccess(), a
         res.status(409).json({ error: "Conclua um atendimento em aberto antes de assumir um novo.", code: "QUEUE_SINGLE_TASK_BLOCKED" });
         return;
       }
-      const pool = await vendorClaimablePoolCondition(req, userSectorId ?? null);
+      const pool = await vendorClaimablePoolCondition(req, userSectorIds);
       const [next] = await db.select({ id: conversationsTable.id }).from(conversationsTable)
         .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.isArchived, false), pool))
         .orderBy(asc(conversationsTable.createdAt)).limit(1);
@@ -1980,7 +1989,12 @@ router.post("/chat/conversations/:id/claim", requireAuth, requireChatAccess(), a
     // Início do atendimento: só marca na primeira vez (re-claim é idempotente).
     ...(isGenuineStart ? { attendanceStartedAt: new Date(), origin: "fila", queueNumber: claimQueueNumber } : {}),
   };
-  if (userRole !== "admin" && userRole !== "supervisor" && userSectorId && conv.sectorId !== userSectorId) {
+  // Já está em algum dos setores do vendedor (pedido 17/09): deixa como está.
+  // Só reatribui (pro setor primário) quando o setor da conversa não é
+  // nenhum dos dele — mesmo comportamento de sempre, só que checando a
+  // lista inteira em vez de um único setor.
+  if (userRole !== "admin" && userRole !== "supervisor" && userSectorId
+    && (conv.sectorId == null || !userSectorIds.includes(conv.sectorId))) {
     claimSet.sectorId = userSectorId;
   }
 
@@ -2573,13 +2587,15 @@ router.get("/chat/quick-replies", requireAuth, async (req, res): Promise<void> =
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const role = req.session.userRole!;
   const userId = req.session.userId!;
-  const sectorId = req.session.userSectorId ?? null;
+  // Vendedor em mais de um setor (pedido 17/09): resposta rápida escopada a
+  // um setor aparece se for QUALQUER um dos setores do vendedor.
+  const sectorIds = req.session.userSectorIds ?? [];
   const storeId = req.session.userStoreId ?? null;
   const rows = await db.select().from(quickRepliesTable).where(eq(quickRepliesTable.tenantId, tenantId)).orderBy(asc(quickRepliesTable.title));
   const visible = (role === "admin" || role === "supervisor")
     ? rows
     : rows.filter((r) => {
-        if (r.sectorId != null && r.sectorId !== sectorId) return false;
+        if (r.sectorId != null && !sectorIds.includes(r.sectorId)) return false;
         if (Array.isArray(r.storeIds) && r.storeIds.length > 0 && (storeId == null || !r.storeIds.includes(storeId))) return false;
         if (Array.isArray(r.userIds) && r.userIds.length > 0 && !r.userIds.includes(userId)) return false;
         return true;

@@ -87,12 +87,14 @@ function isGlobalRole(role: string | undefined): boolean {
 
 function callerCanAccessSector(session: Request["session"], contactSectorId: number | null): boolean {
   if (isGlobalRole(session.userRole)) return true;
-  // Fail closed: a sector-scoped user without a sector matches nothing, and
+  // Fail closed: a sector-scoped user without any sector matches nothing, and
   // null-sector contacts are never accessible to non-global users. This keeps
-  // CRM isolation consistent with the hardened chat/queue scoping.
-  const sid = session.userSectorId ?? null;
-  if (sid === null) return false;
-  return contactSectorId === sid;
+  // CRM isolation consistent with the hardened chat/queue scoping. Vendedor
+  // em mais de um setor (pedido 17/09): acessa se o contato for de QUALQUER
+  // um dos setores dele.
+  const sectorIds = session.userSectorIds ?? [];
+  if (sectorIds.length === 0 || contactSectorId === null) return false;
+  return sectorIds.includes(contactSectorId);
 }
 
 /**
@@ -155,6 +157,11 @@ router.post("/crm/auto-register", requireAuth, async (req, res): Promise<void> =
 
   const userRole = req.session.userRole!;
   const userSectorId = req.session.userSectorId ?? null;
+  // Vendedor em mais de um setor (pedido 17/09): lista completa pra achar um
+  // contato já existente em QUALQUER setor dele; effectiveSectorId continua
+  // um único valor (o primário) só pra quando precisa CRIAR um contato novo
+  // — um contato tem um setor só, igual sempre foi.
+  const userSectorIds = req.session.userSectorIds ?? [];
   // Sector-scoped roles are pinned to their own sector; they cannot specify a different one.
   const effectiveSectorId = isGlobalRole(userRole) ? (sectorId ?? null) : userSectorId;
 
@@ -162,12 +169,13 @@ router.post("/crm/auto-register", requireAuth, async (req, res): Promise<void> =
   const variants = phoneVariants(phone ?? contact);
   let existing: typeof crmContactsTable.$inferSelect | undefined;
   if (variants.length > 0) {
-    // Scope the lookup to the caller's sector for sector-scoped roles so they
-    // cannot probe for contacts in other sectors via phone number. Compara
-    // por todas as variações plausíveis (com/sem DDI, com/sem o 9º dígito).
+    // Scope the lookup to the caller's sector(s) for sector-scoped roles so
+    // they cannot probe for contacts in other sectors via phone number.
+    // Compara por todas as variações plausíveis (com/sem DDI, com/sem o 9º
+    // dígito).
     const phoneConditions = isGlobalRole(userRole)
       ? and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.isArchived, false), inArray(crmContactsTable.phone, variants))
-      : and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.isArchived, false), inArray(crmContactsTable.phone, variants), eq(crmContactsTable.sectorId, effectiveSectorId!));
+      : and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.isArchived, false), inArray(crmContactsTable.phone, variants), inArray(crmContactsTable.sectorId, userSectorIds));
     const rows = await db.select().from(crmContactsTable).where(phoneConditions);
     existing = rows[0];
   }
@@ -304,7 +312,9 @@ router.delete("/crm/custom-fields/:fieldId", requireAdminOrSupervisor, async (re
 router.get("/crm", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const userRole = req.session.userRole!;
-  const userSectorId = req.session.userSectorId ?? null;
+  // Vendedor em mais de um setor (pedido 17/09): vê contatos de QUALQUER um
+  // dos setores dele, não só um.
+  const userSectorIds = req.session.userSectorIds ?? [];
   const { profile, status, search } = req.query as Record<string, string | undefined>;
 
   const allContacts = await db
@@ -315,9 +325,9 @@ router.get("/crm", requireAuth, async (req, res): Promise<void> => {
 
   let contacts = isGlobalRole(userRole)
     ? allContacts
-    : userSectorId === null
+    : userSectorIds.length === 0
       ? [] // fail closed: sector-scoped user without a sector sees nothing
-      : allContacts.filter((c) => c.sectorId === userSectorId);
+      : allContacts.filter((c) => c.sectorId != null && userSectorIds.includes(c.sectorId));
 
   if (profile) contacts = contacts.filter((c) => c.profile === profile);
   if (status) contacts = contacts.filter((c) => c.status === status);
@@ -557,16 +567,19 @@ router.get("/crm/:id/service-history", requireAuth, async (req, res): Promise<vo
   if (!contact) return;
   const phone = contact.phone ?? contact.contact ?? "";
   const userRole = req.session.userRole!;
-  const userSectorId = req.session.userSectorId ?? null;
+  // Vendedor em mais de um setor (pedido 17/09): restrito a qualquer um dos
+  // setores dele, não só um.
+  const userSectorIds = req.session.userSectorIds ?? [];
 
   // Build identity match: logs that belong to this customer by phone or name.
   const identityMatch = phone
     ? or(ilike(attendanceLogsTable.clientContact, `%${phone.slice(-8)}%`), ilike(attendanceLogsTable.clientName, `%${contact.name}%`))
     : ilike(attendanceLogsTable.clientName, `%${contact.name}%`);
 
-  // Tenant scope sempre; não-admins também restritos ao próprio setor.
-  const whereClause = (userRole !== "admin" && userSectorId !== null)
-    ? and(eq(attendanceLogsTable.tenantId, tenantId), identityMatch, eq(attendanceLogsTable.sectorId, userSectorId))
+  // Tenant scope sempre; não-admins com setor também restritos aos próprios
+  // setores (supervisor sem setor nenhum = global, igual sempre foi).
+  const whereClause = (userRole !== "admin" && userSectorIds.length > 0)
+    ? and(eq(attendanceLogsTable.tenantId, tenantId), identityMatch, inArray(attendanceLogsTable.sectorId, userSectorIds))
     : and(eq(attendanceLogsTable.tenantId, tenantId), identityMatch);
 
   const logs = await db.select().from(attendanceLogsTable)
