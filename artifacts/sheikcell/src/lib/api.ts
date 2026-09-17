@@ -741,6 +741,10 @@ export type BotSettings = {
   // automática de sugestões de conhecimento a partir de atendimentos humanos
   // finalizados.
   learningEnabled: boolean;
+  // "Avaliação de usados por conversa" (pedido 17/09): liga/desliga a
+  // ferramenta que deixa o robô do WhatsApp conduzir a avaliação de troca
+  // (marca/modelo/questionário) e dar uma estimativa, direto na conversa.
+  tradeInEnabled: boolean;
   usageToday: number;
 };
 
@@ -1174,9 +1178,11 @@ export type RoutineEvidenceUpload = { fileName: string; mimeType: string; data: 
 
 export type TradeInEvaluation = {
   id: number; userId: number | null; userName?: string | null;
-  // "staff" (padrão, feito por atendente) ou "public_lead" (cliente avaliou
-  // sozinho na vitrine pública e deixou contato) — ver tradeInPublicRouter.
-  source?: "staff" | "public_lead";
+  // "staff" (padrão, feito por atendente), "public_lead" (cliente avaliou
+  // sozinho na vitrine pública e deixou contato — ver tradeInPublicRouter) ou
+  // "whatsapp_bot" (assistente de IA conduziu a avaliação na conversa do
+  // WhatsApp — ver evaluateUsedDeviceTool em lib/bot.ts).
+  source?: "staff" | "public_lead" | "whatsapp_bot";
   // Nome do cliente informado já na simulação (etapas 1-3), opcional — não
   // confundir com sellerCustomerName, preenchido só ao fechar o negócio.
   customerName?: string | null;

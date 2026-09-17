@@ -878,10 +878,16 @@ ${photosHtml}
                           🌐 Vindo do site
                         </span>
                       )}
+                      {h.source === "whatsapp_bot" && (
+                        <span title="Avaliação conduzida pelo assistente de IA direto na conversa do WhatsApp — confirme o valor com o cliente antes de fechar."
+                          className="text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 px-1.5 py-0.5 rounded-full">
+                          💬 Vindo do WhatsApp
+                        </span>
+                      )}
                     </p>
                     <p className="text-[10px] text-muted-foreground">
                       {h.customerName ? `Cliente: ${h.customerName}` : "Cliente não informado"}
-                      {h.source === "public_lead" && h.sellerPhone ? ` · ${h.sellerPhone}` : ""}
+                      {(h.source === "public_lead" || h.source === "whatsapp_bot") && h.sellerPhone ? ` · ${h.sellerPhone}` : ""}
                     </p>
                     <p className="text-[10px] text-muted-foreground">
                       Avaliado por {h.userName ?? "—"} · {new Date(h.createdAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}

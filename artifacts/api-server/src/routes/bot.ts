@@ -84,6 +84,9 @@ router.put("/bot/settings", requireModuleAccess("robo"), async (req, res): Promi
     // automática de sugestões de conhecimento a partir de atendimentos
     // humanos finalizados. Ver lib/knowledgeLearning.ts.
     learningEnabled: body["learningEnabled"] !== undefined ? body["learningEnabled"] === true : existing.learningEnabled,
+    // "Avaliação de usados por conversa" (pedido 17/09) — liga/desliga a
+    // ferramenta evaluate_used_device do robô. Ver lib/bot.ts.
+    tradeInEnabled: body["tradeInEnabled"] !== undefined ? body["tradeInEnabled"] === true : existing.tradeInEnabled,
     updatedAt: new Date(),
   }).where(and(eq(botSettingsTable.id, existing.id), eq(botSettingsTable.tenantId, tenantId))).returning();
 

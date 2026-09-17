@@ -5,11 +5,13 @@ import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
 import { requirePerm } from "../lib/permissions";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import {
-  QUESTIONS_KEY, DEFAULT_QUESTIONS, sanitizeQuestions, validateTradeInAnswers, totalDeductionPercent, type QuestionsConfig,
+  QUESTIONS_KEY, DEFAULT_QUESTIONS, sanitizeQuestions, validateTradeInAnswers, type QuestionsConfig,
 } from "../lib/tradeInQuestions";
 import {
   PAYMENT_METHODS_KEY, DEFAULT_PAYMENT_METHODS, sanitizePaymentMethods,
 } from "../lib/tradeInPaymentMethods";
+import { getMargins, getQuestionsConfig, MARGINS_KEY, type Margins } from "../lib/tradeInConfig";
+import { computeTradeInEstimate, askTradeInPriceAI, extractTradeInJson, formatBRL } from "../lib/tradeInEstimate";
 import { findBaseValueMatch, type BaseValueRow } from "../lib/tradeInBaseValues";
 import { MEDIA_DIR } from "../lib/whatsappInbound";
 import { writeFile, mkdir } from "fs/promises";
@@ -86,26 +88,8 @@ type Answers = Record<string, string>;
 // ─── Tabelas de margem ──────────────────────────────────────────────────────
 // 1 = margem maior, 2 = média, 3 = menor. A % é a margem da loja: a sugestão
 // de compra fica em torno de (100 − margem)% do valor de revenda.
-type Margins = { t1: number; t2: number; t3: number };
-const MARGIN_DEFAULTS: Margins = { t1: 40, t2: 30, t3: 20 };
-const MARGINS_KEY = "trade_in_margins";
-
-// Multi-loja: margens POR LOJA (app_settings tem PK composta tenant_id+key).
-async function getMargins(tenantId: number): Promise<Margins> {
-  const [row] = await db.select().from(appSettingsTable)
-    .where(and(eq(appSettingsTable.tenantId, tenantId), eq(appSettingsTable.key, MARGINS_KEY))).limit(1);
-  if (!row) return { ...MARGIN_DEFAULTS };
-  try {
-    const p = JSON.parse(row.value) as Partial<Margins>;
-    const norm = (v: unknown, d: number) => {
-      const n = Math.round(Number(v));
-      return Number.isFinite(n) && n >= 1 && n <= 90 ? n : d;
-    };
-    return { t1: norm(p.t1, MARGIN_DEFAULTS.t1), t2: norm(p.t2, MARGIN_DEFAULTS.t2), t3: norm(p.t3, MARGIN_DEFAULTS.t3) };
-  } catch {
-    return { ...MARGIN_DEFAULTS };
-  }
-}
+// getMargins mora em lib/tradeInConfig.ts (compartilhado com a avaliação por
+// conversa no WhatsApp, ver lib/bot.ts).
 
 router.get("/trade-in/margins", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
@@ -140,19 +124,9 @@ router.patch("/trade-in/margins", requireAdmin, async (req, res): Promise<void> 
 // O admin edita perguntas/opções nas configurações; cada opção pode ser marcada
 // como "bloqueia avaliação" (parte sem funcionar). Perguntas variam por marca
 // (Apple x Android). Guardado por loja em app_settings (tenant_id + key).
-// Lógica pura (defaults, sanitização e validação) em lib/tradeInQuestions.
-
-async function getQuestionsConfig(tenantId: number): Promise<QuestionsConfig> {
-  const [row] = await db.select().from(appSettingsTable)
-    .where(and(eq(appSettingsTable.tenantId, tenantId), eq(appSettingsTable.key, QUESTIONS_KEY))).limit(1);
-  if (!row) return DEFAULT_QUESTIONS;
-  try {
-    const { config } = sanitizeQuestions(JSON.parse(row.value));
-    return config ?? DEFAULT_QUESTIONS;
-  } catch {
-    return DEFAULT_QUESTIONS;
-  }
-}
+// Lógica pura (defaults, sanitização e validação) em lib/tradeInQuestions;
+// leitura do banco em lib/tradeInConfig.ts (compartilhado com a avaliação
+// por conversa no WhatsApp, ver lib/bot.ts).
 
 router.get("/trade-in/questions", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
@@ -317,35 +291,12 @@ const clean = (v: unknown, max: number) => (typeof v === "string"
 const isManager = (req: Request): boolean =>
   req.session.userRole === "admin" || req.session.userRole === "supervisor";
 
-// Chama a IA de preços (com busca na web; cai para estimativa sem web).
-async function askPriceAI(prompt: string, tenantId: number): Promise<string> {
-  const { getOpenAiClientForTenant } = await import("../lib/aiClient");
-  const openai = await getOpenAiClientForTenant(tenantId);
-  try {
-    const r = await openai.responses.create({
-      model: "gpt-4o",
-      tools: [{ type: "web_search_preview" }],
-      input: prompt,
-      max_output_tokens: 1024,
-    });
-    return (r.output_text ?? "").trim();
-  } catch {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o",
-      max_tokens: 1024,
-      messages: [{ role: "user", content: `${prompt}\n\n(Obs.: você está sem acesso à web; estime pelos preços que conhece do mercado brasileiro e diga na justificativa que é uma estimativa.)` }],
-    });
-    return completion.choices[0]?.message?.content?.trim() ?? "";
-  }
-}
-
-function extractJson<T>(raw: string): T | null {
-  const jsonText = raw.replace(/^```(?:json)?/m, "").replace(/```$/m, "").trim();
-  const start = jsonText.indexOf("{");
-  const end = jsonText.lastIndexOf("}");
-  if (start === -1 || end === -1) return null;
-  try { return JSON.parse(jsonText.slice(start, end + 1)) as T; } catch { return null; }
-}
+// askPriceAI/extractJson viraram askTradeInPriceAI/extractTradeInJson em
+// lib/tradeInEstimate.ts (compartilhado com a avaliação por conversa no
+// WhatsApp, ver lib/bot.ts) — mantidos com esses nomes locais só pra não
+// precisar renomear toda chamada abaixo.
+const askPriceAI = askTradeInPriceAI;
+const extractJson = extractTradeInJson;
 
 // Preço base (estilo Trocafone): logo após informar marca/modelo/memória/cor,
 // estima o valor MÁXIMO de compra para aparelho em perfeito estado.
@@ -767,8 +718,6 @@ function publicAiRateLimited(ip: string): boolean {
   return false;
 }
 
-const formatBRL = (v: number) => `R$ ${v.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-
 async function tenantByPublicSlug(slug: string) {
   const [tenant] = await db.select().from(tenantsTable).where(eq(tenantsTable.catalogSlug, slug.toLowerCase())).limit(1);
   if (!tenant || !tenant.isActive || !tenant.enabledModules.includes("avaliacao")) return null;
@@ -833,53 +782,29 @@ tradeInPublicRouter.post("/trade-in-public/:slug/estimate", async (req: Request,
   }
 
   const dev = [fBrand, fModel, fMemory, fColor].filter(Boolean).join(" ");
-  const margins = await getMargins(tenantId);
-  const marginPct = margins.t2; // vitrine pública sempre usa a tabela "2 - média", nunca deixa escolher
-  const payPct = 100 - marginPct;
 
-  // 1ª tentativa: tabela de valores base (lista fixa) — sem custo, na hora.
+  // Tabela de valores base primeiro (sem custo, na hora); só bate na IA (com
+  // limite por IP — pesquisa/estimativa custa, não pode ser ilimitado pra
+  // visitante anônimo) se o modelo não estiver cadastrado. Cálculo em si
+  // (tabela e IA) compartilhado com a avaliação por conversa no WhatsApp —
+  // ver lib/tradeInEstimate.ts.
   const baseRows = await db.select().from(tradeInBaseValuesTable).where(eq(tradeInBaseValuesTable.tenantId, tenantId));
   const rows: BaseValueRow[] = baseRows.map((r) => ({ brand: r.brand, model: r.model, storage: r.storage, baseValue: Number(r.baseValue) }));
-  const match = findBaseValueMatch(rows, fBrand, fModel, fMemory);
-  if (match) {
-    const deductionPct = totalDeductionPercent(questionList, cleanAnswers);
-    const estimated = Math.max(0, match.baseValue * (payPct / 100) * (1 - deductionPct / 100));
-    res.json({ method: "table", device: dev, estimatedPrice: formatBRL(estimated) });
-    return;
+  const willUseTable = findBaseValueMatch(rows, fBrand, fModel, fMemory) != null;
+  if (!willUseTable) {
+    const ip = req.ip ?? "unknown";
+    if (publicAiRateLimited(ip)) {
+      res.status(429).json({ error: "Limite de avaliações automáticas atingido por hoje. Deixe seu contato abaixo que a loja avalia manualmente e retorna com um valor." });
+      return;
+    }
   }
-
-  // 2ª tentativa: IA (mesma do CRM), com limite por IP — pesquisa/estimativa
-  // custa, então não pode ser ilimitado pra visitante anônimo.
-  const ip = req.ip ?? "unknown";
-  if (publicAiRateLimited(ip)) {
-    res.status(429).json({ error: "Limite de avaliações automáticas atingido por hoje. Deixe seu contato abaixo que a loja avalia manualmente e retorna com um valor." });
-    return;
-  }
-
-  const condLines = Object.entries(cleanAnswers).map(([k, v]) => `- ${k}: ${v}`).join("\n");
-  const prompt = [
-    `Você é o avaliador de compra de celulares usados da Sheikcell (loja no Brasil).`,
-    `Pesquise na web os preços ATUAIS de venda do aparelho usado abaixo no mercado brasileiro (OLX, Mercado Livre, Trocafone).`,
-    ``,
-    `Aparelho: ${dev.slice(0, 120)}`,
-    `Estado informado pelo cliente:`,
-    condLines || "- (sem detalhes)",
-    ``,
-    `Regras da sugestão:`,
-    `1. Estime a faixa de preço que esse aparelho usado é VENDIDO hoje no Brasil, já descontando o estado informado.`,
-    `2. A loja trabalha com margem de ${marginPct}% nesta avaliação: sugira um valor de COMPRA em torno de ${payPct}% do valor de revenda estimado.`,
-    ``,
-    `Responda SOMENTE com um JSON válido, sem markdown, neste formato:`,
-    `{"suggestedPrice":"R$ Z"}`,
-  ].join("\n");
 
   try {
-    const parsed = extractJson<{ suggestedPrice?: string }>(await askPriceAI(prompt, tenantId));
-    const suggestedPrice = (parsed?.suggestedPrice ?? "").toString().slice(0, 100);
-    if (!suggestedPrice) { res.status(502).json({ error: "Não conseguimos calcular uma estimativa agora. Deixe seu contato que a loja avalia manualmente." }); return; }
-    res.json({ method: "ai", device: dev, estimatedPrice: suggestedPrice });
+    const estimate = await computeTradeInEstimate({ tenantId, brand: fBrand, model: fModel, memory: fMemory, questionList, answers: cleanAnswers });
+    if (!estimate) { res.status(502).json({ error: "Não conseguimos calcular uma estimativa agora. Deixe seu contato que a loja avalia manualmente." }); return; }
+    res.json({ method: estimate.method, device: dev, estimatedPrice: estimate.estimatedPrice });
   } catch (err) {
-    req.log.error({ err }, "Public trade-in AI estimate failed");
+    req.log.error({ err }, "Public trade-in estimate failed");
     res.status(503).json({ error: "Não conseguimos calcular uma estimativa agora. Deixe seu contato que a loja avalia manualmente." });
   }
 });

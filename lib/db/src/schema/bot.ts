@@ -33,6 +33,14 @@ export const botSettingsTable = pgTable("bot_settings", {
   // ligado — o admin desliga manualmente quando achar a base madura o
   // suficiente. Ver kbSuggestionsTable.
   learningEnabled: boolean("learning_enabled").notNull().default(true),
+  // "Avaliação de usados por conversa" (pedido 17/09: "avaliação de usados
+  // com IA, pra ser feita por conversas também") — liga/desliga a ferramenta
+  // que deixa o robô do WhatsApp conduzir a avaliação de troca (marca,
+  // modelo, questionário de estado) e dar uma estimativa, igual à avaliação
+  // pública da vitrine (só estimativa — nunca pede CPF/IMEI/foto pelo chat,
+  // nem fecha negócio sozinho). Começa DESLIGADO — o admin liga quando
+  // quiser (ver evaluateUsedDeviceTool em lib/bot.ts).
+  tradeInEnabled: boolean("trade_in_enabled").notNull().default(false),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
 

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { api, canEditModule, type BotSettings, type KbSuggestion } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
-import { Bot, X, Send, RotateCcw, MessageSquareText, Sparkles, Check, GraduationCap } from "lucide-react";
+import { Bot, X, Send, RotateCcw, MessageSquareText, Sparkles, Check, GraduationCap, Repeat } from "lucide-react";
 
 const INPUT = "w-full px-3 py-2 rounded-xl border border-border text-sm mt-1";
 
@@ -210,6 +210,13 @@ export default function Robo() {
             </label>
             <p className="text-[10px] text-muted-foreground -mt-2">
               Quando ligado, a IA analisa cada atendimento finalizado por um vendedor e, se achar algo que falta na base, gera uma sugestão pra você aprovar (veja abaixo). Desligue manualmente quando achar a base madura o suficiente.
+            </p>
+            <label className="flex items-center gap-2 font-semibold text-[11px]">
+              <input type="checkbox" checked={s.tradeInEnabled} onChange={(e) => set({ tradeInEnabled: e.target.checked })} data-testid="toggle-bot-trade-in" />
+              <Repeat className="w-3.5 h-3.5 text-primary" /> Avaliação de usados por conversa
+            </label>
+            <p className="text-[10px] text-muted-foreground -mt-2">
+              Quando ligado, o robô pode conduzir a avaliação de um aparelho usado direto na conversa (marca, modelo, questionário de estado) e dar uma estimativa — igual à avaliação pública do site, só que pelo WhatsApp. Nunca pede CPF/IMEI/foto pelo chat nem fecha negócio sozinho: vira um lead em Avaliação de Usados pra um vendedor confirmar.
             </p>
             <div className="grid grid-cols-2 gap-3">
               <div>

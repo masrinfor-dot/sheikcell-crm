@@ -10,6 +10,7 @@ import {
   messagesTable,
   sectorsTable,
   chatLabelsTable,
+  tradeInEvaluationsTable,
 } from "@workspace/db";
 import { botStep, type BotSettingsShape, type BotQuestion } from "./botEngine";
 import { sendOutboundText } from "./outbound";
@@ -18,6 +19,9 @@ import { isPotentialConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATU
 import { logger } from "./logger";
 import { runBotAgent, type BotTool, type BotHistoryMessage } from "./botTools";
 import { resolveOrCreateLabel, attachLabelToConversation } from "./labels";
+import { validateTradeInAnswers, type QuestionsConfig as TradeInQuestionsConfig } from "./tradeInQuestions";
+import { getQuestionsConfig as getTradeInQuestionsConfig } from "./tradeInConfig";
+import { computeTradeInEstimate, type TradeInEstimate } from "./tradeInEstimate";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -230,6 +234,113 @@ function applyLabelTool(tenantId: number, existingLabels: { name: string }[]): B
   };
 }
 
+// ---------- avaliação de usados por conversa (ferramenta do robô) ----------
+
+// Pedido 17/09: "avaliação de usados com ia, para ser feita por conversas
+// também" — já existia avaliação feita pela equipe (Avaliação de Usados no
+// CRM) e avaliação pública (cliente preenche formulário sozinho no site,
+// sem login). Esta é a terceira porta de entrada: o próprio robô do
+// WhatsApp conduz a conversa (marca/modelo/questionário de estado, uma
+// pergunta por vez — segue as mesmas regras de tom da base de
+// conhecimento) e, quando tiver tudo, chama esta ferramenta pra calcular
+// a estimativa. Sempre se comporta como a avaliação pública: só estimativa,
+// nunca pede CPF/IMEI/foto pelo chat, nunca fecha negócio sozinho — vira um
+// lead (source="whatsapp_bot") na mesma tela "Avaliações de usado" pra um
+// vendedor confirmar e fechar. Cálculo (tabela de valores base → IA como
+// fallback) compartilhado com a avaliação pública em lib/tradeInEstimate.ts.
+function evaluateUsedDeviceTool(questionsConfig: TradeInQuestionsConfig): BotTool {
+  const describe = (list: TradeInQuestionsConfig["apple"]) =>
+    list.map((q) => `- "${q.key}": ${q.label} — opções válidas (use o texto EXATO de uma delas): ${q.options.map((o) => `"${o.label}"`).join(", ")}`).join("\n");
+  return {
+    name: "evaluate_used_device",
+    description: `Avalia um aparelho USADO que o cliente quer vender ou trocar por outro, dando uma estimativa de valor de compra — a mesma avaliação que já existe no site da loja, só que por conversa. Use quando o cliente quiser avaliar/trocar/vender o aparelho usado dele e você já tiver marca, modelo e as respostas de TODAS as perguntas do questionário de estado (pergunte uma de cada vez, do jeito natural que já é seu costume — não precisa despejar o questionário inteiro de uma vez). Preencha "answers" com a lista de perguntas certa pra marca (Apple ou Android), usando a CHAVE e o TEXTO EXATO de uma das opções de cada pergunta — se errar o texto, a ferramenta devolve um erro dizendo o que corrigir, e você tenta de novo.\n\nPerguntas pra aparelhos Apple/iPhone:\n${describe(questionsConfig.apple)}\n\nPerguntas pra aparelhos Android (Samsung, Motorola, Xiaomi etc.):\n${describe(questionsConfig.android)}`,
+    parameters: {
+      type: "object",
+      properties: {
+        brand: { type: "string", description: "Marca do aparelho (ex.: Apple, Samsung, Motorola, Xiaomi)" },
+        model: { type: "string", description: "Modelo (ex.: iPhone 13, Galaxy S22)" },
+        memory: { type: "string", description: "Armazenamento, se o cliente informou (ex.: 128GB) — opcional" },
+        color: { type: "string", description: "Cor, se o cliente informou — opcional, só de referência" },
+        answers: {
+          type: "object",
+          description: "Respostas do questionário de estado: uma propriedade por pergunta (chave = a chave exata listada acima, valor = o texto exato de uma das opções daquela pergunta). Responda TODAS as perguntas da marca certa.",
+          additionalProperties: { type: "string" },
+        },
+      },
+      required: ["brand", "model", "answers"],
+    },
+    execute: async (args, ctx) => {
+      const brand = String(args["brand"] ?? "").trim().slice(0, 40);
+      const model = String(args["model"] ?? "").trim().slice(0, 60);
+      const memory = args["memory"] ? String(args["memory"]).trim().slice(0, 20) : null;
+      const color = args["color"] ? String(args["color"]).trim().slice(0, 30) : null;
+      if (!brand || !model) return "Faltam marca e modelo do aparelho — pergunte ao cliente antes de chamar de novo.";
+      const rawAnswers = args["answers"];
+      if (!rawAnswers || typeof rawAnswers !== "object" || Array.isArray(rawAnswers)) return "Faltam as respostas do questionário de estado — responda todas as perguntas da marca certa antes de chamar de novo.";
+
+      const answers: Record<string, string> = {};
+      for (const [k, v] of Object.entries(rawAnswers as Record<string, unknown>).slice(0, 30)) {
+        if (typeof v === "string" && v.trim()) answers[k.trim().slice(0, 60)] = v.trim().slice(0, 200);
+      }
+
+      const isApple = /apple|iphone/i.test(brand);
+      const questionList = isApple ? questionsConfig.apple : questionsConfig.android;
+      const validation = validateTradeInAnswers(questionList, answers);
+      if (!validation.ok) {
+        if (validation.status === 422) {
+          return `${validation.error} Não dá pra prosseguir com avaliação automática nesse caso — explique isso ao cliente com naturalidade e ofereça encaminhar pro setor Vendas de Celulares pra uma avaliação manual.`;
+        }
+        return `${validation.error} Corrija e chame a ferramenta de novo usando exatamente o texto de uma das opções válidas listadas.`;
+      }
+
+      let estimate: TradeInEstimate | null;
+      try {
+        estimate = await computeTradeInEstimate({ tenantId: ctx.tenantId, brand, model, memory, questionList, answers });
+      } catch (err) {
+        logger.warn({ err }, "Robô: falha ao calcular estimativa de avaliação de usado");
+        estimate = null;
+      }
+      if (!estimate) return "Não consegui calcular uma estimativa agora. Avise o cliente que a equipe vai avaliar manualmente e encaminhe pro setor Vendas de Celulares.";
+
+      const dev = [brand, model, memory, color].filter(Boolean).join(" ").slice(0, 160) || "(aparelho não informado)";
+      try {
+        const [conv] = await db.select({ phone: conversationsTable.phone, name: conversationsTable.name })
+          .from(conversationsTable).where(eq(conversationsTable.id, ctx.conversationId)).limit(1);
+        const phone = conv?.phone ?? "";
+        const values = {
+          customerName: conv?.name || null,
+          device: dev,
+          brand, model, memory, color,
+          answers,
+          suggestedPrice: estimate.estimatedPrice,
+          aiSummary: "Avaliação feita pelo assistente de IA durante a conversa no WhatsApp — confirme o valor com o cliente antes de fechar.",
+        };
+        // Mesmo padrão da avaliação pública: só 1 avaliação PENDENTE por
+        // telefone — se o robô reavaliar (cliente corrigiu algo) antes de
+        // um vendedor fechar/descartar, atualiza a mesma linha em vez de
+        // duplicar o lead.
+        const [existingPending] = phone
+          ? await db.select().from(tradeInEvaluationsTable)
+              .where(and(eq(tradeInEvaluationsTable.tenantId, ctx.tenantId), eq(tradeInEvaluationsTable.source, "whatsapp_bot"), eq(tradeInEvaluationsTable.sellerPhone, phone), isNull(tradeInEvaluationsTable.closedAt)))
+              .orderBy(desc(tradeInEvaluationsTable.createdAt)).limit(1)
+          : [];
+        if (existingPending) {
+          await db.update(tradeInEvaluationsTable).set({ ...values, createdAt: new Date() }).where(eq(tradeInEvaluationsTable.id, existingPending.id));
+        } else {
+          await db.insert(tradeInEvaluationsTable).values({ tenantId: ctx.tenantId, source: "whatsapp_bot", sellerPhone: phone, ...values });
+        }
+      } catch (err) {
+        // Falha ao salvar o lead não pode impedir o cliente de receber a
+        // estimativa — só loga; pior caso, a equipe não vê na lista de
+        // avaliações, mas a conversa em si já registra o valor dado.
+        logger.warn({ err }, "Robô: falha ao salvar lead de avaliação de usado");
+      }
+
+      return `Estimativa calculada: ${estimate.estimatedPrice} pra esse ${dev} (${estimate.method === "table" ? "tabela de valores da loja" : "pesquisa de mercado feita agora pela IA"}). É uma estimativa — o valor final é sempre confirmado por um vendedor. Informe o valor ao cliente e, se ele quiser seguir com a troca/venda, encaminhe a conversa pro setor Vendas de Celulares.`;
+    },
+  };
+}
+
 // ---------- IA ----------
 
 async function aiAnswer(tenantId: number, conversationId: number | null, settings: BotSettingsRow, question: string): Promise<string | null> {
@@ -246,9 +357,22 @@ async function aiAnswer(tenantId: number, conversationId: number | null, setting
     const tools: BotTool[] = [];
     if (sectors.length > 0) tools.push(routeToSectorTool(sectors));
     if (conversationId != null) tools.push(applyLabelTool(tenantId, labels));
+    // Avaliação de usados por conversa (pedido 17/09) — só entra na lista de
+    // ferramentas quando o admin ligou o interruptor (settings.tradeInEnabled)
+    // e existe uma conversa de verdade pra registrar o lead.
+    let tradeInAvailable = false;
+    if (conversationId != null && settings.tradeInEnabled) {
+      try {
+        const questionsConfig = await getTradeInQuestionsConfig(tenantId);
+        tools.push(evaluateUsedDeviceTool(questionsConfig));
+        tradeInAvailable = true;
+      } catch (err) {
+        logger.warn({ err }, "Robô: falha ao carregar config de avaliação de usados");
+      }
+    }
     const { replyText } = await runBotAgent({
       maxTokens: 300,
-      systemPrompt: `Você é ${settings.botName}, assistente virtual de uma loja de celulares no WhatsApp. Responda em português, curto e simpático. Responda SOMENTE com base nas informações abaixo. Se a resposta não estiver nas informações, diga que vai verificar com a equipe e que um atendente já vai falar com o cliente. Nunca invente preços, prazos ou promoções.\n\nINFORMAÇÕES DA LOJA:\n${settings.knowledgeBase || "(nenhuma informação cadastrada)"}${sectors.length > 0 ? `\n\nSe perceber, pela pergunta do cliente, que o assunto é de outro setor (diferente do setor atual da conversa), chame a ferramenta route_to_sector pra corrigir — só quando tiver razoável confiança.` : ""}${conversationId != null ? `\n\nSe o assunto da conversa já estiver razoavelmente claro, use a ferramenta apply_label pra etiquetar (reaproveitando uma etiqueta existente sempre que possível).` : ""}${history.length > 0 ? `\n\nAs mensagens anteriores desta MESMA conversa estão no histórico abaixo — leia com atenção antes de responder. NUNCA repita uma pergunta que o cliente já respondeu ali, e não peça de novo uma informação que ele já deu. Se já houver informação suficiente pra encaminhar, encaminhe (via route_to_sector) em vez de continuar perguntando.` : ""}`,
+      systemPrompt: `Você é ${settings.botName}, assistente virtual de uma loja de celulares no WhatsApp. Responda em português, curto e simpático. Responda SOMENTE com base nas informações abaixo. Se a resposta não estiver nas informações, diga que vai verificar com a equipe e que um atendente já vai falar com o cliente. Nunca invente preços, prazos ou promoções.\n\nINFORMAÇÕES DA LOJA:\n${settings.knowledgeBase || "(nenhuma informação cadastrada)"}${sectors.length > 0 ? `\n\nSe perceber, pela pergunta do cliente, que o assunto é de outro setor (diferente do setor atual da conversa), chame a ferramenta route_to_sector pra corrigir — só quando tiver razoável confiança.` : ""}${conversationId != null ? `\n\nSe o assunto da conversa já estiver razoavelmente claro, use a ferramenta apply_label pra etiquetar (reaproveitando uma etiqueta existente sempre que possível).` : ""}${tradeInAvailable ? `\n\nSe o cliente quiser avaliar, trocar ou vender um aparelho usado, você pode conduzir a avaliação direto na conversa (pergunte marca, modelo e o estado do aparelho, uma pergunta por vez, do seu jeito natural de sempre) e chamar a ferramenta evaluate_used_device quando tiver tudo, pra dar uma estimativa de valor.` : ""}${history.length > 0 ? `\n\nAs mensagens anteriores desta MESMA conversa estão no histórico abaixo — leia com atenção antes de responder. NUNCA repita uma pergunta que o cliente já respondeu ali, e não peça de novo uma informação que ele já deu. Se já houver informação suficiente pra encaminhar, encaminhe (via route_to_sector) em vez de continuar perguntando.` : ""}`,
       history,
       userMessage: question,
       tools,
