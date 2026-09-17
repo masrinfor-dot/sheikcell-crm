@@ -147,6 +147,29 @@ export const CLOCK_IN_GATE_ALLOWLIST = [
   /^\/rh-dp\/me\/clock-status$/, /^\/rh-dp\/me\/punch$/,
 ];
 
+// Ponto obrigatório por loja (pedido 17/09: "criar botão de obrigatoriedade
+// no ponto") — além do kill-switch global fixo em código (CLOCK_IN_GATE_
+// ENABLED, pra emergência em TODAS as lojas), agora cada loja tem seu
+// próprio liga/desliga (tenants.pontoObrigatorioEnabled, editável em RH →
+// Ponto). TTL de 5 minutos: é uma configuração de admin, mudada raramente —
+// não precisa da invalidação fina do clockInBlockCache acima, só evita
+// consultar o banco a cada requisição (este middleware roda em quase toda
+// rota da API). PATCH /rh-dp/settings invalida na hora ao salvar, então o
+// atraso real de propagação é bem menor que os 5 minutos do TTL na prática.
+const TENANT_GATE_CACHE_MS = 5 * 60_000;
+const tenantGateEnabledCache = new Map<number, { enabled: boolean; until: number }>();
+async function isPontoObrigatorioEnabledForTenant(tenantId: number): Promise<boolean> {
+  const cached = tenantGateEnabledCache.get(tenantId);
+  if (cached && cached.until > Date.now()) return cached.enabled;
+  const [row] = await db.select({ v: tenantsTable.pontoObrigatorioEnabled }).from(tenantsTable).where(eq(tenantsTable.id, tenantId));
+  const enabled = row?.v ?? true;
+  tenantGateEnabledCache.set(tenantId, { enabled, until: Date.now() + TENANT_GATE_CACHE_MS });
+  return enabled;
+}
+export function invalidateTenantGateCache(tenantId: number): void {
+  tenantGateEnabledCache.delete(tenantId);
+}
+
 export async function enforceMandatoryClockIn(req: Request, res: Response, next: import("express").NextFunction): Promise<void> {
   if (!CLOCK_IN_GATE_ENABLED) { next(); return; }
   const uid = req.session?.userId;
@@ -157,6 +180,7 @@ export async function enforceMandatoryClockIn(req: Request, res: Response, next:
   const tenantId = tenantIdOf(req);
   if (tenantId == null) { next(); return; } // superadmin/sessão sem loja: sem RH a exigir
   try {
+    if (!(await isPontoObrigatorioEnabledForTenant(tenantId))) { next(); return; }
     const cacheKey = `${tenantId}:${uid}`;
     const cached = clockInBlockCache.get(cacheKey);
     let blocked: boolean;
@@ -332,12 +356,18 @@ router.get("/rh-dp/me/clock-status", requireAuth, async (req, res): Promise<void
   // Localização obrigatória (pedido 17/09) — devolvido sempre, independente
   // do resto, pra PontoGate.tsx/MeuPonto.tsx saberem se devem exigir/
   // bloquear por falta dela antes mesmo de saber se o gate vai aparecer.
-  const [tenantRow] = await db.select({ pontoLocationRequired: tenantsTable.pontoLocationRequired })
-    .from(tenantsTable).where(eq(tenantsTable.id, tenantId));
+  const [tenantRow] = await db.select({
+    pontoLocationRequired: tenantsTable.pontoLocationRequired,
+    pontoObrigatorioEnabled: tenantsTable.pontoObrigatorioEnabled,
+  }).from(tenantsTable).where(eq(tenantsTable.id, tenantId));
   const locationRequired = tenantRow?.pontoLocationRequired ?? true;
   // Gate desligado temporariamente (ver CLOCK_IN_GATE_ENABLED acima) — não
-  // mostra a tela cheia de bater ponto pra ninguém enquanto o RH está em reparo.
-  if (!CLOCK_IN_GATE_ENABLED) { res.json({ needsClockIn: false, locationRequired }); return; }
+  // mostra a tela cheia de bater ponto pra ninguém enquanto o RH está em
+  // reparo — OU desligado pra esta loja especificamente (pedido 17/09:
+  // "criar botão de obrigatoriedade no ponto", ver pontoObrigatorioEnabled).
+  if (!CLOCK_IN_GATE_ENABLED || !(tenantRow?.pontoObrigatorioEnabled ?? true)) {
+    res.json({ needsClockIn: false, locationRequired }); return;
+  }
   // Admin nunca é obrigado a bater ponto, mesmo com cadastro de RH vinculado.
   if (req.session.userRole === "admin") { res.json({ needsClockIn: false, locationRequired }); return; }
   const employee = await getEmployeeForUser(req.session.userId!, tenantId);
@@ -659,6 +689,7 @@ router.get("/rh-dp/settings", requireModuleAccess("rh"), async (req, res): Promi
     pontoReminderMessageEntrada: tenantsTable.pontoReminderMessageEntrada,
     pontoReminderMessageSaida: tenantsTable.pontoReminderMessageSaida,
     pontoLocationRequired: tenantsTable.pontoLocationRequired,
+    pontoObrigatorioEnabled: tenantsTable.pontoObrigatorioEnabled,
   }).from(tenantsTable).where(eq(tenantsTable.id, tenantId));
   res.json({
     pontoCheckInSessionKey: row?.pontoCheckInSessionKey ?? null,
@@ -672,6 +703,7 @@ router.get("/rh-dp/settings", requireModuleAccess("rh"), async (req, res): Promi
     pontoReminderMessageEntrada: row?.pontoReminderMessageEntrada ?? null,
     pontoReminderMessageSaida: row?.pontoReminderMessageSaida ?? null,
     pontoLocationRequired: row?.pontoLocationRequired ?? true,
+    pontoObrigatorioEnabled: row?.pontoObrigatorioEnabled ?? true,
   });
 });
 
@@ -684,6 +716,7 @@ router.patch("/rh-dp/settings", requireAdmin, async (req, res): Promise<void> =>
     pontoRemindersEnabled?: boolean; pontoReminderGraceMinutes?: number | null;
     pontoReminderMessageEntrada?: string | null; pontoReminderMessageSaida?: string | null;
     pontoLocationRequired?: boolean;
+    pontoObrigatorioEnabled?: boolean;
   };
   const update: Record<string, unknown> = {};
   if ("pontoCheckInSessionKey" in b) {
@@ -715,6 +748,11 @@ router.patch("/rh-dp/settings", requireAdmin, async (req, res): Promise<void> =>
   // Localização obrigatória na batida de entrada (pedido 17/09: "criar botão
   // para desativar" a exigência) — ver comentário no schema (tenants.ts).
   if ("pontoLocationRequired" in b) update.pontoLocationRequired = b.pontoLocationRequired !== false;
+  // Ponto obrigatório inteiro (pedido 17/09: "criar botão de obrigatoriedade
+  // no ponto") — liga/desliga a trava de tela até bater a entrada, só pra
+  // esta loja. Ver comentário no schema (tenants.ts) e em
+  // enforceMandatoryClockIn (acima nesse arquivo).
+  if ("pontoObrigatorioEnabled" in b) update.pontoObrigatorioEnabled = b.pontoObrigatorioEnabled !== false;
   const [updated] = await db.update(tenantsTable).set(update)
     .where(eq(tenantsTable.id, tenantId))
     .returning({
@@ -724,7 +762,12 @@ router.patch("/rh-dp/settings", requireAdmin, async (req, res): Promise<void> =>
       pontoRemindersEnabled: tenantsTable.pontoRemindersEnabled, pontoReminderGraceMinutes: tenantsTable.pontoReminderGraceMinutes,
       pontoReminderMessageEntrada: tenantsTable.pontoReminderMessageEntrada, pontoReminderMessageSaida: tenantsTable.pontoReminderMessageSaida,
       pontoLocationRequired: tenantsTable.pontoLocationRequired,
+      pontoObrigatorioEnabled: tenantsTable.pontoObrigatorioEnabled,
     });
+  // Invalida na hora o cache de "gate ligado pra esta loja" (TTL normal de
+  // 5min, ver isPontoObrigatorioEnabledForTenant) — sem isso, desligar aqui
+  // podia continuar travando gente por até 5 minutos.
+  if ("pontoObrigatorioEnabled" in b) invalidateTenantGateCache(tenantId);
   res.json(updated);
 });
 

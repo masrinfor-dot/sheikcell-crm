@@ -2880,6 +2880,10 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
   // localização está dificultando alguns usuários" → "criar botão para
   // desativar"). Default true (comportamento de sempre).
   const [locationRequired, setLocationRequired] = useState(true);
+  // Ponto obrigatório inteiro (pedido 17/09: "criar botão de obrigatoriedade
+  // no ponto") — liga/desliga a trava de tela até bater a entrada, só pra
+  // esta loja. Default true (comportamento de sempre).
+  const [pontoObrigatorio, setPontoObrigatorio] = useState(true);
   // Vencimento do banco de horas (pedido 15/09, análise Tangerino) — texto
   // livre pra deixar apagar o campo (vira null = sem vencimento).
   const [timeBankValidityMonths, setTimeBankValidityMonths] = useState<string>("");
@@ -2902,6 +2906,7 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
       setReminderMsgEntrada(s.pontoReminderMessageEntrada ?? "");
       setReminderMsgSaida(s.pontoReminderMessageSaida ?? "");
       setLocationRequired(s.pontoLocationRequired);
+      setPontoObrigatorio(s.pontoObrigatorioEnabled);
     }).catch(() => {});
   }, []);
   const saveTimeBankValidity = async () => {
@@ -2946,6 +2951,18 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
       await api.rhDp.settings.update({ pontoLocationRequired: value });
       setLocationRequired(value);
       toast({ title: value ? "Localização obrigatória ligada" : "Localização obrigatória desligada" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+  const savePontoObrigatorio = async (value: boolean) => {
+    setSavingSettings(true);
+    try {
+      await api.rhDp.settings.update({ pontoObrigatorioEnabled: value });
+      setPontoObrigatorio(value);
+      toast({ title: value ? "Ponto obrigatório ligado" : "Ponto obrigatório desligado", description: value ? "A tela de bater ponto volta a travar o sistema até a entrada ser registrada." : "Ninguém desta loja é mais bloqueado por não ter batido o ponto." });
     } catch (err) {
       toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     } finally {
@@ -3067,6 +3084,25 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
 
   return (
     <div className="space-y-3">
+      <div className="shk-card p-4 space-y-1.5">
+        <p className="text-xs font-semibold flex items-center gap-1.5"><Clock className="w-3.5 h-3.5 text-primary" /> Ponto obrigatório</p>
+        <p className="text-[11px] text-muted-foreground">
+          Ligado (padrão): o sistema fica travado numa tela cheia até o colaborador de escala fixa bater a entrada do
+          dia — mesma trava de sempre (foto + localização, com vias de escape quando genuinamente não dá). Desligado:
+          ninguém desta loja é mais bloqueado por não ter batido — o resto do módulo de Ponto continua funcionando
+          normalmente (registro manual, banco de horas, lembretes por WhatsApp), só a trava de tela some.
+        </p>
+        {isAdmin ? (
+          <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+            <input type="checkbox" checked={pontoObrigatorio} disabled={savingSettings}
+              onChange={(e) => savePontoObrigatorio(e.target.checked)} data-testid="checkbox-ponto-obrigatorio" />
+            {pontoObrigatorio ? "Ligado" : "Desligado"}
+          </label>
+        ) : (
+          <p className="text-xs font-semibold">{pontoObrigatorio ? "Ligado" : "Desligado"} <span className="text-[11px] font-normal text-muted-foreground">· só admin altera</span></p>
+        )}
+      </div>
+
       <div className="shk-card p-4 space-y-1.5">
         <p className="text-xs font-semibold flex items-center gap-1.5"><MapPin className="w-3.5 h-3.5 text-primary" /> Localização obrigatória na batida</p>
         <p className="text-[11px] text-muted-foreground">

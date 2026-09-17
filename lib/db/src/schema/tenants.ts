@@ -119,6 +119,19 @@ export const tenantsTable = pgTable("tenants", {
   // (sinaliza `flagged` quando o navegador genuinamente não consegue obter —
   // ver resolveTodaysPunchKind/POST /rh-dp/me/punch em rhDp.ts).
   pontoLocationRequired: boolean("ponto_location_required").notNull().default(true),
+  // Ponto obrigatório (pedido 17/09: "criar botão de obrigatoriedade no
+  // ponto") — liga/desliga POR LOJA a trava de tela inteira até bater a
+  // entrada (enforceMandatoryClockIn em rhDp.ts). Antes só existia um
+  // interruptor fixo no código (CLOCK_IN_GATE_ENABLED), que valia pra TODAS
+  // as lojas ao mesmo tempo e só um dev conseguia mudar. Default true
+  // (mantém o comportamento de sempre). Desligado: ninguém dessa loja é
+  // bloqueado por não ter batido o ponto — o resto do módulo de Ponto
+  // (registro manual, banco de horas, RH → Ponto) continua funcionando
+  // normalmente, só a exigência de bater pra liberar o sistema é que some.
+  // CLOCK_IN_GATE_ENABLED continua existindo como um kill-switch global
+  // acima deste (pra emergência em TODAS as lojas de uma vez) — as duas
+  // chaves precisam estar "ligadas" pra trava valer.
+  pontoObrigatorioEnabled: boolean("ponto_obrigatorio_enabled").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

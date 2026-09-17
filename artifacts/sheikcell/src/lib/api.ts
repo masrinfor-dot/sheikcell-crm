@@ -2753,6 +2753,10 @@ export const api = {
         pontoReminderMessageEntrada: string | null; pontoReminderMessageSaida: string | null;
         // Localização obrigatória na batida de entrada (pedido 17/09).
         pontoLocationRequired: boolean;
+        // Ponto obrigatório inteiro (pedido 17/09: "criar botão de
+        // obrigatoriedade no ponto") — liga/desliga a trava de tela até
+        // bater a entrada, só pra esta loja.
+        pontoObrigatorioEnabled: boolean;
       }>("/rh-dp/settings"),
       update: (data: Partial<{
         pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean;
@@ -2761,6 +2765,7 @@ export const api = {
         pontoRemindersEnabled: boolean; pontoReminderGraceMinutes: number | null;
         pontoReminderMessageEntrada: string | null; pontoReminderMessageSaida: string | null;
         pontoLocationRequired: boolean;
+        pontoObrigatorioEnabled: boolean;
       }>) =>
         req<{
           pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean;
@@ -2769,6 +2774,7 @@ export const api = {
           pontoRemindersEnabled: boolean; pontoReminderGraceMinutes: number | null;
           pontoReminderMessageEntrada: string | null; pontoReminderMessageSaida: string | null;
           pontoLocationRequired: boolean;
+          pontoObrigatorioEnabled: boolean;
         }>("/rh-dp/settings", { method: "PATCH", body: JSON.stringify(data) }),
     },
     // Calendário de feriados (pedido 15/09, análise Tangerino) — abate o
