@@ -572,6 +572,45 @@ router.get("/chat/conversations/counts", requireAuth, requireChatAccess(), async
   });
 });
 
+// ─── Contagem de atendimentos abertos por NÚMERO de WhatsApp ──────────────
+// Pedido 17/09: painel rápido perto de "Conversas" mostrando quanto
+// atendimento em aberto tem em cada linha conectada (útil pra loja com mais
+// de um número — ver quando uma linha específica está sobrecarregada). Só
+// conta o que ainda está em aberto (potencial/pendente/ativo — nunca
+// resolvida/arquivada, mesmo pra admin/supervisor que enxergam resolvidas
+// na listagem normal): a ideia aqui é "carga de trabalho atual", não
+// histórico. Mesma visibilidade de sempre (buildConversationVisibilityConditions)
+// — vendedor restrito a setor/linha só vê a contagem do que ele mesmo veria
+// na lista.
+router.get("/chat/conversations/counts-by-session", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { sectorId, assigneeId } = req.query as Record<string, string | undefined>;
+
+  const conditions = await buildConversationVisibilityConditions(req, tenantId, {
+    sectorId: sectorId ? Number(sectorId) : undefined,
+    assigneeId: assigneeId ? Number(assigneeId) : undefined,
+  });
+  conditions.push(notInArray(conversationsTable.status, ["resolved", "archived"]));
+
+  const rows = await db
+    .select({
+      sessionKey: conversationsTable.sessionKey,
+      total: sql<string>`count(*)`,
+      ativos: sql<string>`count(*) filter (where ${conversationsTable.assigneeId} is not null)`,
+      naFila: sql<string>`count(*) filter (where ${conversationsTable.assigneeId} is null)`,
+    })
+    .from(conversationsTable)
+    .where(and(...conditions))
+    .groupBy(conversationsTable.sessionKey);
+
+  res.json(rows.map((r) => ({
+    sessionKey: r.sessionKey,
+    total: Number(r.total),
+    ativos: Number(r.ativos),
+    naFila: Number(r.naFila),
+  })));
+});
+
 // ─── Get single conversation ───────────────────────────────────────────────
 router.get("/chat/conversations/:id", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;

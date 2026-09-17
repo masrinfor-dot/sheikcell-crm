@@ -2058,6 +2058,18 @@ export const api = {
         `/chat/conversations/counts?${qs.toString()}`,
       );
     },
+    // Quantidade de atendimento em ABERTO por número de WhatsApp conectado
+    // (pedido 17/09: painel perto de "Conversas" pra ver a carga de cada
+    // linha). Mesma visibilidade de conversationCounts acima, só agrupada
+    // por sessionKey em vez de categoria.
+    conversationCountsBySession: (params?: { sectorId?: number; assigneeId?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      if (params?.assigneeId) qs.set("assigneeId", String(params.assigneeId));
+      return req<{ sessionKey: string; total: number; ativos: number; naFila: number }[]>(
+        `/chat/conversations/counts-by-session?${qs.toString()}`,
+      );
+    },
     pinConversation: (id: number) => req<{ ok: boolean }>(`/chat/conversations/${id}/pin`, { method: "POST" }),
     unpinConversation: (id: number) => req<{ ok: boolean }>(`/chat/conversations/${id}/pin`, { method: "DELETE" }),
     // "Marcar mensagem" (fixar uma mensagem já enviada, estilo WhatsApp) —

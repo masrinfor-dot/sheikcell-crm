@@ -1223,6 +1223,11 @@ export default function ChatCenter({
   // de "Ativos" bem menor que o real numa loja com mais de 100 atendimentos
   // em aberto (foi assim que o Quadro do CRM ficou divergente do Atendimento).
   const [serverCounts, setServerCounts] = useState<{ ativos: number; pendentes: number; potenciais: number; resolvidas: number; favoritos: number } | null>(null);
+  // Quantidade de atendimento em aberto por NÚMERO de WhatsApp (pedido
+  // 17/09: painel perto de "Conversas" pra ver a carga de cada linha
+  // conectada) — atualiza junto com fetchConvs, sempre em sincronia com a
+  // lista/abinhas de cima.
+  const [sessionCounts, setSessionCounts] = useState<{ sessionKey: string; total: number; ativos: number; naFila: number }[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
   const [search, setSearch] = useState("");
@@ -1470,6 +1475,26 @@ export default function ChatCenter({
     return () => window.removeEventListener("resize", place);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showNotifications]);
+
+  // Painel "atendimento por número" (pedido 17/09) — mesmo padrão de posição
+  // do painel de notificações acima (portal ancorado no botão, só desktop).
+  const [showNumberPanel, setShowNumberPanel] = useState(false);
+  const numberBtnRef = useRef<HTMLButtonElement | null>(null);
+  const [numberPanelPos, setNumberPanelPos] = useState<{ left: number; top: number } | null>(null);
+  useEffect(() => {
+    if (!showNumberPanel) { setNumberPanelPos(null); return; }
+    const place = () => {
+      if (window.innerWidth < 768 || !numberBtnRef.current) { setNumberPanelPos(null); return; }
+      const r = numberBtnRef.current.getBoundingClientRect();
+      const width = 300;
+      const left = Math.max(8, Math.min(r.left, window.innerWidth - width - 8));
+      setNumberPanelPos({ left, top: r.bottom + 8 });
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showNumberPanel]);
 
   // Alert preferences: play a sound and/or show a native browser notification for
   // inbound messages even when the attendant is on another tab. Persisted locally.
@@ -1720,14 +1745,19 @@ export default function ChatCenter({
       // ativas ficava com a contagem menor do que a real (ex.: 47 vs 14).
       if (filterVendedor) params.assigneeId = Number(filterVendedor);
       if (filterSetor) params.sectorId = Number(filterSetor);
-      const [data, counts] = await Promise.all([
+      const sessionParams: Parameters<typeof api.chat.conversationCountsBySession>[0] = {};
+      if (filterVendedor) sessionParams.assigneeId = Number(filterVendedor);
+      if (filterSetor) sessionParams.sectorId = Number(filterSetor);
+      const [data, counts, bySession] = await Promise.all([
         api.chat.conversations(params),
         // Best-effort: se a contagem real falhar por qualquer motivo, cai
         // pro cálculo local (sobre a lista já carregada) — nunca trava a tela.
         api.chat.conversationCounts(params).catch(() => null),
+        api.chat.conversationCountsBySession(sessionParams).catch(() => null),
       ]);
       setConvs(data);
       if (counts) setServerCounts(counts);
+      if (bySession) setSessionCounts(bySession);
     } catch { /* silent */ } finally { setLoadingConvs(false); }
   }, [search, labelFilter, filterVendedor, filterSetor]);
 
@@ -3528,6 +3558,57 @@ export default function ChatCenter({
                 document.body
               )}
             </div>
+            {waSessions.length > 1 && (
+              <div className="relative">
+                <button
+                  ref={numberBtnRef}
+                  onClick={() => setShowNumberPanel((v) => !v)}
+                  data-testid="button-numbers-panel"
+                  title="Atendimento por número"
+                  className={`relative p-2 md:p-1.5 rounded-lg hover:bg-secondary transition ${showNumberPanel ? "bg-secondary" : ""}`}
+                >
+                  <BarChart3 className="w-5 h-5 md:w-4 md:h-4 text-muted-foreground" />
+                </button>
+                {/* Portal (body): mesmo motivo do painel de notificações —
+                    o container da lista tem overflow-hidden e cortaria o painel. */}
+                {showNumberPanel && createPortal(
+                  <div
+                    data-testid="panel-numbers"
+                    className="fixed inset-x-2 top-14 md:inset-x-auto md:w-[300px] z-[70] bg-white border border-border rounded-xl shadow-xl overflow-hidden"
+                    style={numberPanelPos ?? undefined}
+                  >
+                    <div className="border-b border-border bg-[#ededed] px-3 py-2">
+                      <span className="text-sm font-bold text-foreground">Atendimento por número</span>
+                    </div>
+                    <div className="max-h-[60vh] md:max-h-96 overflow-y-auto overscroll-contain divide-y divide-border/50">
+                      {sessionCounts.length === 0 ? (
+                        <div className="flex flex-col items-center gap-2 py-8">
+                          <BarChart3 className="w-8 h-8 text-muted-foreground/40" />
+                          <p className="text-xs text-muted-foreground">Nenhum atendimento em aberto</p>
+                        </div>
+                      ) : (
+                        [...sessionCounts].sort((a, b) => b.total - a.total).map((s) => (
+                          <div key={s.sessionKey} className="flex items-center gap-2.5 px-3 py-2.5">
+                            <span
+                              className="w-7 h-7 rounded-full shrink-0 flex items-center justify-center text-xs font-bold"
+                              style={{ backgroundColor: `${waSessionColor(s.sessionKey, waSessions)}26`, color: waSessionColor(s.sessionKey, waSessions) }}
+                            >
+                              {waSessionIcon(s.sessionKey, waSessions) ?? <Smartphone className="w-3.5 h-3.5" />}
+                            </span>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-semibold text-foreground truncate">{waSessionLabel(s.sessionKey, waSessions)}</p>
+                              <p className="text-[11px] text-muted-foreground">{s.ativos} em atendimento · {s.naFila} na fila</p>
+                            </div>
+                            <span className="text-base font-bold text-foreground shrink-0">{s.total}</span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>,
+                  document.body,
+                )}
+              </div>
+            )}
             <button onClick={() => setShowFilter(!showFilter)} className={`p-1.5 rounded-lg hover:bg-secondary transition ${showFilter ? "bg-secondary" : ""}`}>
               <Filter className="w-4 h-4 text-muted-foreground" />
             </button>
