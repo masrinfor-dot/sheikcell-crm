@@ -2743,7 +2743,11 @@ export default function ChatCenter({
 
   const handleFinalize = (id: number) => {
     setFinalizeTarget(id);
-    setFinalizeReason(finalizeReasonOptions[0] ?? FINALIZE_REASONS[0]);
+    // Pedido 17/09: motivo passou a exigir escolha ativa (antes pré-marcava
+    // o primeiro da lista e dava pra finalizar sem nem olhar pro campo) —
+    // começa vazio, com placeholder no <select>, e submitFinalize bloqueia
+    // enquanto continuar vazio.
+    setFinalizeReason("");
     setFinalizeDetail("");
     setFinalizeHadSale(null);
     setFinalizeSaleAmount("");
@@ -2780,6 +2784,13 @@ export default function ChatCenter({
   const submitFinalize = async () => {
     if (finalizeTarget == null) return;
     const id = finalizeTarget;
+    // Pedido 17/09: escolher um motivo passou a ser obrigatório (antes vinha
+    // pré-marcado no primeiro da lista, então dava pra finalizar sem escolher
+    // nada de verdade) — handleFinalize já não pré-seleciona mais nada.
+    if (!finalizeReason) {
+      toast({ title: "Selecione o motivo da finalização", variant: "destructive" });
+      return;
+    }
     // Motivo enviado ao servidor: para "Outro" usa o texto livre, senão o rótulo.
     const isOutro = finalizeReason === "Outro";
     const resolutionReason = (isOutro ? finalizeDetail.trim() : finalizeReason) || null;
@@ -2787,9 +2798,13 @@ export default function ChatCenter({
       toast({ title: "Descreva o motivo da finalização", variant: "destructive" });
       return;
     }
-    // Pedido 14/09: "Teve venda?" deixou de ser obrigatório pra finalizar —
-    // continua aparecendo na tela (finalizeHadSale pode ficar null se o
-    // vendedor não responder), só não bloqueia mais o botão Finalizar.
+    // Pedido 17/09: "Teve venda?" voltou a ser obrigatório pra finalizar
+    // (revertendo a decisão de 14/09) — precisa responder Sim ou Não antes
+    // de liberar o botão Finalizar.
+    if (finalizeHadSale == null) {
+      toast({ title: "Informe se teve venda neste atendimento", variant: "destructive" });
+      return;
+    }
     const saleAmount = parseFloat(finalizeSaleAmount.replace(",", "."));
     if (finalizeHadSale && (!Number.isFinite(saleAmount) || saleAmount <= 0)) {
       toast({ title: "Informe o valor da venda", variant: "destructive" });
@@ -2799,7 +2814,7 @@ export default function ChatCenter({
     try {
       const updated = await api.chat.updateConversation(id, {
         status: "resolved", resolutionReason,
-        ...(finalizeHadSale != null ? { hadSale: finalizeHadSale } : {}),
+        hadSale: finalizeHadSale,
         ...(finalizeHadSale ? { saleAmount, saleDescription: finalizeSaleDesc.trim() } : {}),
       });
       setConvs((prev) => prev.map((c) => c.id === id ? { ...c, ...updated, status: "resolved" } : c));
@@ -5689,6 +5704,7 @@ export default function ChatCenter({
               <select value={finalizeReason} onChange={(e) => setFinalizeReason(e.target.value)}
                 data-testid="select-finalize-reason"
                 className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                <option value="" disabled>Selecione um motivo…</option>
                 {finalizeReasonOptions.map((r) => <option key={r} value={r}>{r}</option>)}
               </select>
             </div>
