@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { api, canEditModule, type BotSettings, type BotQuestion, type KbSuggestion } from "@/lib/api";
+import { api, canEditModule, type BotSettings, type KbSuggestion } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
-import { Bot, Plus, X, Trash2, Send, RotateCcw, MessageSquareText, Sparkles, Check, GraduationCap } from "lucide-react";
+import { Bot, X, Send, RotateCcw, MessageSquareText, Sparkles, Check, GraduationCap } from "lucide-react";
 
 const INPUT = "w-full px-3 py-2 rounded-xl border border-border text-sm mt-1";
 
@@ -51,19 +51,11 @@ export default function Robo() {
 
   const set = (patch: Partial<BotSettings>) => setS({ ...s, ...patch });
 
-  const setQuestion = (i: number, patch: Partial<BotQuestion>) => {
-    const qs = s.questions.map((q, j) => (j === i ? { ...q, ...patch } : q));
-    set({ questions: qs });
-  };
-
   const handleSave = async () => {
     if (saving) return;
     setSaving(true);
     try {
-      const cleaned = s.questions
-        .map((q) => ({ ...q, question: q.question.trim(), options: q.options?.map((o) => o.trim()).filter(Boolean) }))
-        .filter((q) => q.question);
-      const upd = await api.bot.save({ ...s, questions: cleaned });
+      const upd = await api.bot.save(s);
       setS(upd);
       toast({ title: upd.enabled ? "Robô salvo e LIGADO 🤖" : "Robô salvo (desligado)" });
     } catch (err) {
@@ -202,36 +194,6 @@ export default function Robo() {
                 </div>
               </div>
             )}
-            <div>
-              <label className="font-semibold">Saudação (primeira mensagem)</label>
-              <textarea value={s.greeting} onChange={(e) => set({ greeting: e.target.value })} rows={2} className={INPUT} />
-            </div>
-          </div>
-
-          <div className="shk-card p-4 space-y-3 text-xs">
-            <p className="font-bold text-sm">Perguntas de filtragem</p>
-            {s.questions.map((q, i) => (
-              <div key={i} className="border border-border rounded-xl p-3 space-y-2">
-                <div className="flex items-start gap-2">
-                  <span className="text-[10px] font-bold text-muted-foreground mt-2.5">{i + 1}.</span>
-                  <input value={q.question} onChange={(e) => setQuestion(i, { question: e.target.value })}
-                    placeholder="Pergunta" className="w-full px-3 py-2 rounded-xl border border-border text-sm" />
-                  <button onClick={() => set({ questions: s.questions.filter((_, j) => j !== i) })} className="p-2">
-                    <Trash2 className="w-4 h-4 text-destructive" />
-                  </button>
-                </div>
-                <input value={(q.options ?? []).join(", ")}
-                  onChange={(e) => setQuestion(i, { options: e.target.value ? e.target.value.split(",").map((x) => x.trimStart()) : undefined })}
-                  placeholder="Opções separadas por vírgula (opcional) — vira menu 1, 2, 3..."
-                  className="w-full px-3 py-2 rounded-xl border border-border text-[11px]" />
-              </div>
-            ))}
-            {s.questions.length < 10 && (
-              <button onClick={() => set({ questions: [...s.questions, { question: "" }] })}
-                className="flex items-center gap-1 text-primary font-semibold text-[11px]">
-                <Plus className="w-3.5 h-3.5" /> Adicionar pergunta
-              </button>
-            )}
           </div>
 
           <div className="shk-card p-4 space-y-3 text-xs">
@@ -255,18 +217,6 @@ export default function Robo() {
               <p className="text-[10px] text-muted-foreground">Cole aqui horários, endereço, formas de pagamento, garantia... A IA responde SÓ com base nisso.</p>
               <textarea value={s.knowledgeBase} onChange={(e) => set({ knowledgeBase: e.target.value })} rows={6}
                 placeholder={"Ex.:\nHorário: seg a sáb, 9h às 18h\nEndereço: Rua X, 123 — Centro\nAceitamos cartão, Pix e dinheiro\nGarantia de 90 dias nos consertos"} className={INPUT} />
-            </div>
-            <div>
-              <label className="font-semibold">Mensagem ao terminar as perguntas</label>
-              <textarea value={s.doneMessage} onChange={(e) => set({ doneMessage: e.target.value })} rows={2} className={INPUT} />
-            </div>
-            <div>
-              <label className="font-semibold">Mensagem quando o cliente pede um atendente</label>
-              <textarea value={s.handoffMessage} onChange={(e) => set({ handoffMessage: e.target.value })} rows={2} className={INPUT} />
-            </div>
-            <div>
-              <label className="font-semibold">Palavras de urgência (pulam o robô)</label>
-              <input value={s.urgencyWords} onChange={(e) => set({ urgencyWords: e.target.value })} className={INPUT} />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
