@@ -232,7 +232,18 @@ async function getMyDrafts(userId: number): Promise<Map<number, Record<string, n
 
 const blockCache = new Map<number, { until: number; blocked: boolean }>();
 const BLOCK_CACHE_MS = 60000;
-function invalidateTrainingBlock(uid: number): void { blockCache.delete(uid); }
+// Geração por usuário (mesmo bug/correção do clockInEpochByUid em rhDp.ts,
+// pedido 17/09): sem isso, uma requisição concorrente que já estava
+// consultando o banco de dados ANTES de completar o treinamento podia
+// terminar DEPOIS da invalidação e regravar o cache com `blocked: true`
+// desatualizado, reabrindo o bloqueio por até mais 60s mesmo já tendo
+// concluído. Guardando a geração antes de consultar e só gravando se ela
+// não mudou nesse meio-tempo, essa escrita atrasada é descartada.
+const blockEpochByUid = new Map<number, number>();
+function invalidateTrainingBlock(uid: number): void {
+  blockCache.delete(uid);
+  blockEpochByUid.set(uid, (blockEpochByUid.get(uid) ?? 0) + 1);
+}
 
 // Rotas que continuam acessíveis enquanto o usuário está travado por
 // treinamento (ou checklist, que agora é só um tipo de treinamento) pendente.
@@ -261,9 +272,12 @@ export async function enforceMandatoryTrainings(
     if (cached && cached.until > Date.now()) {
       blocked = cached.blocked;
     } else {
+      const epochAtStart = blockEpochByUid.get(uid) ?? 0;
       const pending = await getPendingTrainings(uid, req.session.userRole ?? "", tenantId);
       blocked = pending.some((p) => p.mandatory);
-      blockCache.set(uid, { until: Date.now() + BLOCK_CACHE_MS, blocked });
+      if ((blockEpochByUid.get(uid) ?? 0) === epochAtStart) {
+        blockCache.set(uid, { until: Date.now() + BLOCK_CACHE_MS, blocked });
+      }
     }
     if (blocked) {
       res.status(423).json({ error: "Conclua o treinamento obrigatório para liberar o sistema", code: "TRAINING_REQUIRED" });

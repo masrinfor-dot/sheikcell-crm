@@ -711,8 +711,18 @@ const BLOCK_ALLOWLIST = [
 ];
 const BLOCK_CACHE_MS = 60_000;
 const blockCache = new Map<string, { until: number; blocked: boolean }>();
+// Geração por chave (mesmo bug/correção do clockInEpochByUid em rhDp.ts,
+// pedido 17/09): sem isso, uma requisição concorrente que já estava
+// consultando o banco ANTES de responder o checklist podia terminar DEPOIS
+// da invalidação e regravar o cache com `blocked: true` desatualizado,
+// reabrindo o bloqueio por até mais 60s mesmo já tendo respondido.
+// Guardando a geração antes de consultar e só gravando se ela não mudou
+// nesse meio-tempo, essa escrita atrasada é descartada.
+const blockEpochByKey = new Map<string, number>();
 export function invalidateRoutineBlock(tenantId: number, userId: number): void {
-  blockCache.delete(`${tenantId}:${userId}`);
+  const cacheKey = `${tenantId}:${userId}`;
+  blockCache.delete(cacheKey);
+  blockEpochByKey.set(cacheKey, (blockEpochByKey.get(cacheKey) ?? 0) + 1);
 }
 
 export async function enforceMandatoryRoutines(
@@ -733,9 +743,12 @@ export async function enforceMandatoryRoutines(
     if (cached && cached.until > Date.now()) {
       blocked = cached.blocked;
     } else {
+      const epochAtStart = blockEpochByKey.get(cacheKey) ?? 0;
       const pending = await getPendingRoutines(tenantId, uid);
       blocked = pending.some((p) => p.mandatory);
-      blockCache.set(cacheKey, { until: Date.now() + BLOCK_CACHE_MS, blocked });
+      if ((blockEpochByKey.get(cacheKey) ?? 0) === epochAtStart) {
+        blockCache.set(cacheKey, { until: Date.now() + BLOCK_CACHE_MS, blocked });
+      }
     }
     if (blocked) {
       res.status(423).json({ error: "Responda o checklist obrigatório para liberar o sistema", code: "ROUTINE_REQUIRED" });

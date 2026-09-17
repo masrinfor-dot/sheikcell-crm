@@ -125,8 +125,21 @@ export const CLOCK_IN_GATE_ENABLED = true;
 
 const CLOCK_IN_BLOCK_CACHE_MS = 60000;
 const clockInBlockCache = new Map<string, { until: number; blocked: boolean }>();
+// Geração por usuário, incrementada a cada invalidação (pedido 17/09: "os
+// pontos ainda estão travando a tela mesmo após bater"). Bug real: bater o
+// ponto invalida o cache, mas uma OUTRA requisição concorrente (chat, SSE,
+// dashboard etc.) que já estava consultando o banco ANTES da batida podia
+// terminar DEPOIS da invalidação e regravar o cache com `blocked: true`
+// desatualizado (calculado antes da entrada ser registrada) — sem essa
+// checagem de geração, essa escrita atrasada reabria o bloqueio (423) por
+// até mais 60s pro sistema inteiro, mesmo já tendo batido corretamente.
+// Guardando a geração vigente antes de consultar e só gravando no cache se
+// ela não mudou nesse meio-tempo, uma invalidação concorrente descarta a
+// escrita atrasada em vez de deixá-la sobrescrever o estado fresco.
+const clockInEpochByUid = new Map<number, number>();
 export function invalidateClockInBlock(uid: number): void {
   for (const k of clockInBlockCache.keys()) if (k.endsWith(`:${uid}`)) clockInBlockCache.delete(k);
+  clockInEpochByUid.set(uid, (clockInEpochByUid.get(uid) ?? 0) + 1);
 }
 
 export const CLOCK_IN_GATE_ALLOWLIST = [
@@ -150,6 +163,7 @@ export async function enforceMandatoryClockIn(req: Request, res: Response, next:
     if (cached && cached.until > Date.now()) {
       blocked = cached.blocked;
     } else {
+      const epochAtStart = clockInEpochByUid.get(uid) ?? 0;
       const employee = await getEmployeeForUser(uid, tenantId);
       if (!employee) {
         blocked = false;
@@ -159,7 +173,11 @@ export async function enforceMandatoryClockIn(req: Request, res: Response, next:
           : null;
         blocked = await employeeNeedsClockInToday(employee.id, tenantId, shift);
       }
-      clockInBlockCache.set(cacheKey, { until: Date.now() + CLOCK_IN_BLOCK_CACHE_MS, blocked });
+      // Só grava no cache se ninguém bateu o ponto (invalidou) enquanto essa
+      // consulta rodava — ver comentário na declaração de clockInEpochByUid.
+      if ((clockInEpochByUid.get(uid) ?? 0) === epochAtStart) {
+        clockInBlockCache.set(cacheKey, { until: Date.now() + CLOCK_IN_BLOCK_CACHE_MS, blocked });
+      }
     }
     if (blocked) {
       res.status(423).json({ error: "Bata o ponto de entrada para liberar o sistema", code: "CLOCK_IN_REQUIRED" });
