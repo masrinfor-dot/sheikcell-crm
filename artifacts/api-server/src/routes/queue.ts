@@ -27,10 +27,14 @@ router.get("/queue", requireAuth, async (req, res): Promise<void> => {
 
   // Vendedor com fila restrita (pedido 10/09): só vê o que foi direcionado
   // especificamente pra ele — nunca o pool geral do setor. Ver coluna
-  // queueRestrictToAssigned em users.
+  // queueRestrictToAssigned em users. Só vale pra role "vendedor" (pedido
+  // 17/09: promover alguém a supervisor/vendedor_chefe pra ele poder
+  // direcionar atendimentos não pode deixar uma marcação antiga de "fila
+  // restrita" — de quando ainda era vendedor — travando essa mesma pessoa
+  // no pool geral que ela agora precisa enxergar/distribuir).
   const [me] = await db.select({ queueRestrictToAssigned: usersTable.queueRestrictToAssigned })
     .from(usersTable).where(eq(usersTable.id, req.session.userId!)).limit(1);
-  const isRestricted = !!me?.queueRestrictToAssigned;
+  const isRestricted = userRole === "vendedor" && !!me?.queueRestrictToAssigned;
 
   // Attendants can only query their own sector; admins can query any sector
   let effectiveSectorId: number | null = null;
@@ -199,17 +203,19 @@ router.patch("/queue/:id/call", requireAuth, async (req, res): Promise<void> => 
   if (!existing) { res.status(404).json({ error: "Entrada não encontrada" }); return; }
 
   const userId = req.session.userId!;
+  const userRole = req.session.userRole!;
   const wasRoutedToMe = existing.targetUserId === userId;
-  if (!wasRoutedToMe && !canActOnEntry(req.session.userRole!, req.session.userSectorId ?? null, existing.sectorId)) {
+  if (!wasRoutedToMe && !canActOnEntry(userRole, req.session.userSectorId ?? null, existing.sectorId)) {
     res.status(403).json({ error: "Acesso negado a este setor" }); return;
   }
 
   // Fila restrita (pedido 10/09): só chama o que foi direcionado pra ele, e
   // nunca dois atendimentos ao mesmo tempo — precisa concluir o atual antes
-  // de chamar o próximo.
+  // de chamar o próximo. Só vale pra role "vendedor" (pedido 17/09 — ver
+  // comentário equivalente em GET /queue acima).
   const [me] = await db.select({ queueRestrictToAssigned: usersTable.queueRestrictToAssigned })
     .from(usersTable).where(eq(usersTable.id, userId)).limit(1);
-  if (me?.queueRestrictToAssigned) {
+  if (userRole === "vendedor" && me?.queueRestrictToAssigned) {
     if (existing.targetUserId !== userId) {
       res.status(403).json({ error: "Este atendimento não foi direcionado a você." }); return;
     }
