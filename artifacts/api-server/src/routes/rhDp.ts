@@ -1909,6 +1909,135 @@ router.get("/rh-dp/reports/facial-recognition-failures", requireModuleAccess("rh
   res.json(rows);
 });
 
+// Farol de potencial de riscos (NR-1) — pedido 17/09, análise Tangerino
+// ("Farol de Potencial de Riscos" Beta, em Saúde ocupacional). A NR-1 exige,
+// desde maio/2025, que a empresa avalie riscos psicossociais no trabalho
+// (sobrecarga, jornada excessiva etc.) dentro do PGR. Em vez de inventar um
+// dado novo, compomos um placar de 0 a 100 por colaborador (e agregamos por
+// loja) a partir de sinais que o sistema já calcula: excesso de hora extra
+// diária, descanso entre turnos curto, padrão suspeito de lançamento manual,
+// banco de horas vencido, atrasos e faltas injustificadas/não registradas no
+// período. Fórmula simples e documentada aqui (não é a fórmula do Tangenrino,
+// que é fechada/beta) — pontos por ocorrência, somados e limitados a 100:
+//   excesso de hora extra (>2h/dia): 8 pontos por dia
+//   descanso entre turnos curto (<11h): 10 pontos por dia
+//   padrão suspeito de lançamento manual: 20 pontos (fixo, se detectado)
+//   banco de horas vencido: 15 pontos (fixo, se houver saldo vencido)
+//   atraso: 3 pontos por dia
+//   falta injustificada / ausência não registrada: 5 pontos por dia
+// Status: score > 20 = "alerta", score <= 20 = "controlado" (limiar fixo,
+// ajustável aqui se o RH achar duro/frouxo demais).
+const NR1_ALERT_THRESHOLD = 20;
+router.get("/rh-dp/reports/nr1-risk", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const range = parseDateRange(req, res); if (!range) return;
+
+  const employees = await db.select({
+    id: employeesTable.id, name: employeesTable.name, storeId: employeesTable.storeId, storeName: storesTable.name,
+  }).from(employeesTable)
+    .leftJoin(storesTable, eq(employeesTable.storeId, storesTable.id))
+    .where(and(eq(employeesTable.tenantId, tenantId), eq(employeesTable.isActive, true)))
+    .orderBy(asc(employeesTable.name));
+
+  const shifts = await db.select().from(workShiftsTable).where(eq(workShiftsTable.tenantId, tenantId));
+  const shiftById = new Map(shifts.map((s) => [s.id, s]));
+  const employeeShift = await db.select({ id: employeesTable.id, shiftId: employeesTable.shiftId })
+    .from(employeesTable).where(eq(employeesTable.tenantId, tenantId));
+  const shiftIdByEmployee = new Map(employeeShift.map((e) => [e.id, e.shiftId]));
+
+  const [tenantRow] = await db.select({ timeBankValidityMonths: tenantsTable.timeBankValidityMonths }).from(tenantsTable).where(eq(tenantsTable.id, tenantId));
+  let expiredCutoff: Date | null = null;
+  if (tenantRow?.timeBankValidityMonths) {
+    expiredCutoff = new Date();
+    expiredCutoff.setMonth(expiredCutoff.getMonth() - tenantRow.timeBankValidityMonths);
+  }
+  const expiredClosures = expiredCutoff
+    ? await db.select({ employeeId: timeBankClosuresTable.employeeId, balanceMinutes: timeBankClosuresTable.balanceMinutes })
+        .from(timeBankClosuresTable)
+        .where(and(eq(timeBankClosuresTable.tenantId, tenantId), sql`${timeBankClosuresTable.balanceMinutes} > 0`, lte(timeBankClosuresTable.closedAt, expiredCutoff)))
+    : [];
+  const expiredMinutesByEmployee = new Map<number, number>();
+  for (const c of expiredClosures) expiredMinutesByEmployee.set(c.employeeId, (expiredMinutesByEmployee.get(c.employeeId) ?? 0) + c.balanceMinutes);
+
+  const employeeRows = await Promise.all(employees.map(async (e) => {
+    const result = await computeTimeBank(e.id, tenantId, range.from, range.to);
+    const shift = shiftIdByEmployee.get(e.id) ? shiftById.get(shiftIdByEmployee.get(e.id)!) : null;
+    const toleranceMinutes = shift?.toleranceMinutes ?? 0;
+
+    let diasExcesso2h = 0, diasInterjornadaCurta = 0, diasAtraso = 0, diasFaltaInjustificada = 0;
+    for (const d of result.days) {
+      if (d.inconsistencies.includes("excesso_2h_diarias")) diasExcesso2h++;
+      if (d.inconsistencies.includes("interjornada_curta")) diasInterjornadaCurta++;
+      if (d.leaveKind === "falta_injustificada") { diasFaltaInjustificada++; continue; }
+      if (d.leaveKind || d.holidayName) continue;
+      const firstIn = d.entries.find((en) => en.kind === "in");
+      if (firstIn && shift?.type === "fixed" && shift.startTime) {
+        const [sh, sm] = shift.startTime.split(":").map(Number);
+        const inDate = new Date(firstIn.at);
+        const lateMinutes = (inDate.getHours() * 60 + inDate.getMinutes()) - (sh! * 60 + sm!);
+        if (lateMinutes > toleranceMinutes) diasAtraso++;
+      } else if (!firstIn && shift?.type === "fixed" && d.expectedMinutes > 0) {
+        diasFaltaInjustificada++;
+      }
+    }
+    const suspiciousPattern = await hasSuspiciousManualPattern(e.id, tenantId, range.from, range.to);
+    const bancoHorasVencidoMinutes = expiredMinutesByEmployee.get(e.id) ?? 0;
+
+    const score = Math.min(100,
+      diasExcesso2h * 8 +
+      diasInterjornadaCurta * 10 +
+      (suspiciousPattern ? 20 : 0) +
+      (bancoHorasVencidoMinutes > 0 ? 15 : 0) +
+      diasAtraso * 3 +
+      diasFaltaInjustificada * 5,
+    );
+    const status: "alerta" | "controlado" = score > NR1_ALERT_THRESHOLD ? "alerta" : "controlado";
+    return {
+      employeeId: e.id, employeeName: e.name, storeId: e.storeId, storeName: e.storeName ?? "Sem loja",
+      score, status,
+      factors: { diasExcesso2h, diasInterjornadaCurta, suspiciousPattern, bancoHorasVencidoMinutes, diasAtraso, diasFaltaInjustificada },
+    };
+  }));
+
+  const byStoreMap = new Map<string, { storeId: number | null; storeName: string; scores: number[]; employeesInAlert: number }>();
+  for (const r of employeeRows) {
+    const key = String(r.storeId ?? "sem_loja");
+    const bucket = byStoreMap.get(key) ?? { storeId: r.storeId, storeName: r.storeName, scores: [], employeesInAlert: 0 };
+    bucket.scores.push(r.score);
+    if (r.status === "alerta") bucket.employeesInAlert++;
+    byStoreMap.set(key, bucket);
+  }
+  const byStore = [...byStoreMap.values()].map((b) => {
+    const avgScore = b.scores.length ? Math.round(b.scores.reduce((s, v) => s + v, 0) / b.scores.length) : 0;
+    return {
+      storeId: b.storeId, storeName: b.storeName, score: avgScore,
+      status: (avgScore > NR1_ALERT_THRESHOLD ? "alerta" : "controlado") as "alerta" | "controlado",
+      employeesEvaluated: b.scores.length, employeesInAlert: b.employeesInAlert,
+    };
+  }).sort((a, b) => b.score - a.score);
+
+  const overallScore = employeeRows.length ? Math.round(employeeRows.reduce((s, r) => s + r.score, 0) / employeeRows.length) : 0;
+  const employeesInAlert = employeeRows.filter((r) => r.status === "alerta").length;
+
+  // Ações rápidas: sugestões simples, só aparecem quando o fator relevante
+  // afeta pelo menos 1 colaborador no período — equivalente à aba "Ações
+  // rápidas" do Tangerino.
+  const quickActions: string[] = [];
+  if (employeeRows.some((r) => r.factors.diasExcesso2h > 0)) quickActions.push("Revisar escalas com hora extra acima de 2h/dia recorrente — risco de sobrecarga.");
+  if (employeeRows.some((r) => r.factors.diasInterjornadaCurta > 0)) quickActions.push("Ajustar horários com menos de 11h de descanso entre turnos — obrigatório por lei.");
+  if (employeeRows.some((r) => r.factors.suspiciousPattern)) quickActions.push("Conferir lançamentos manuais de ponto com padrão suspeito.");
+  if (employeeRows.some((r) => r.factors.bancoHorasVencidoMinutes > 0)) quickActions.push("Compensar ou pagar banco de horas vencido antes que acumule mais.");
+  if (employeeRows.some((r) => r.factors.diasAtraso >= 3)) quickActions.push("Conversar com colaboradores com atrasos frequentes no período.");
+  if (employeeRows.some((r) => r.factors.diasFaltaInjustificada > 0)) quickActions.push("Investigar faltas injustificadas/ausências não registradas.");
+
+  res.json({
+    periodFrom: range.from.toISOString(), periodTo: range.to.toISOString(),
+    overall: { score: overallScore, status: (overallScore > NR1_ALERT_THRESHOLD ? "alerta" : "controlado") as "alerta" | "controlado", employeesEvaluated: employeeRows.length, employeesInAlert },
+    byStore, employees: employeeRows.sort((a, b) => b.score - a.score),
+    quickActions,
+  });
+});
+
 // ── Fechamento mensal do banco de horas ─────────────────────────────────────
 
 router.get("/rh-dp/closures", requireModuleAccess("rh"), async (req, res): Promise<void> => {

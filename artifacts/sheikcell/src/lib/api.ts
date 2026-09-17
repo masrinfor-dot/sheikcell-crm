@@ -2871,6 +2871,19 @@ export const api = {
           id: number; employeeId: number; employeeName: string | null; kind: string; at: string;
           flagReason: string | null; proofUrl: string | null;
         }>>(`/rh-dp/reports/facial-recognition-failures?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+      // Farol de risco NR-1 (pedido 17/09, análise Tangerino).
+      nr1Risk: (from?: string, to?: string) =>
+        req<{
+          periodFrom: string; periodTo: string;
+          overall: { score: number; status: "alerta" | "controlado"; employeesEvaluated: number; employeesInAlert: number };
+          byStore: Array<{ storeId: number | null; storeName: string; score: number; status: "alerta" | "controlado"; employeesEvaluated: number; employeesInAlert: number }>;
+          employees: Array<{
+            employeeId: number; employeeName: string; storeId: number | null; storeName: string;
+            score: number; status: "alerta" | "controlado";
+            factors: { diasExcesso2h: number; diasInterjornadaCurta: number; suspiciousPattern: boolean; bancoHorasVencidoMinutes: number; diasAtraso: number; diasFaltaInjustificada: number };
+          }>;
+          quickActions: string[];
+        }>(`/rh-dp/reports/nr1-risk?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
     },
     closures: {
       list: (month?: string) => req<TimeBankClosure[]>(`/rh-dp/closures?${new URLSearchParams({ ...(month ? { month } : {}) })}`),

@@ -13,7 +13,7 @@ import {
   Video, ChevronDown, ChevronUp, Save, Link2, UserSquare2, CalendarClock, Clock, Wallet, Pencil, Archive, PlayCircle,
   AlertTriangle, Image as ImageIcon, Smartphone, Printer, Star, Briefcase, Sparkles, MapPin,
   Upload, Download, FileText, FolderArchive, UserPlus, FileSignature, Eye, IdCard, RotateCcw, Palmtree,
-  ListChecks, Building2, LayoutDashboard, UserMinus, Bell, FileBarChart,
+  ListChecks, Building2, LayoutDashboard, UserMinus, Bell, FileBarChart, ShieldAlert,
 } from "lucide-react";
 
 // Perfil comportamental (estilo DISC simplificado, 4 tipos definidos pelo
@@ -204,7 +204,7 @@ export default function RH() {
   const { user } = useAuth();
   const canEdit = canEditModule(user, "rh");
   const [group, setGroup] = useState<"recrutamento" | "dp">("recrutamento");
-  const [dpView, setDpView] = useState<"painel" | "colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos" | "ferias" | "feriados" | "fechamentos" | "demissoes" | "relatorios">("painel");
+  const [dpView, setDpView] = useState<"painel" | "colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos" | "ferias" | "feriados" | "fechamentos" | "demissoes" | "relatorios" | "farol-risco">("painel");
 
   return (
     <div className="space-y-4">
@@ -239,6 +239,7 @@ export default function RH() {
               { key: "fechamentos", label: "Fechamentos", icon: Archive },
               { key: "demissoes", label: "Desligamentos", icon: UserMinus },
               { key: "relatorios", label: "Relatórios", icon: FileBarChart },
+              { key: "farol-risco", label: "Farol de risco NR-1", icon: ShieldAlert },
             ] as const).map(({ key, label, icon: Icon }) => (
               <button key={key} onClick={() => setDpView(key)} data-testid={`button-dp-${key}`}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border ${dpView === key ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
@@ -257,6 +258,7 @@ export default function RH() {
           {dpView === "fechamentos" && <Fechamentos canEdit={canEdit} />}
           {dpView === "demissoes" && <Desligamentos canEdit={canEdit} />}
           {dpView === "relatorios" && <RelatoriosDP />}
+          {dpView === "farol-risco" && <FarolRiscoNR1 />}
         </div>
       )}
     </div>
@@ -3993,6 +3995,147 @@ function RelatorioAuditoria({ from, to }: { from: string; to: string }) {
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// ── Farol de risco NR-1 ──────────────────────────────────────────────────
+// Composição dos sinais de conformidade que já existíamos calculando
+// (Painel DP) num placar mensal por colaborador/loja — ver comentário da
+// fórmula em rhDp.ts (rota /rh-dp/reports/nr1-risk). Pedido 17/09, análise
+// Tangerino ("Farol de Potencial de Riscos" Beta, Saúde ocupacional).
+function FarolRiscoNR1() {
+  const [from, setFrom] = useState(firstOfMonthStr());
+  const [to, setTo] = useState(todayStr());
+  const [tab, setTab] = useState<"acoes" | "fatores">("acoes");
+  const [data, setData] = useState<Awaited<ReturnType<typeof api.rhDp.reports.nr1Risk>> | null>(null);
+
+  useEffect(() => { api.rhDp.reports.nr1Risk(`${from}T00:00:00`, `${to}T23:59:59`).then(setData).catch(() => {}); }, [from, to]);
+
+  return (
+    <div className="space-y-3">
+      <div className="shk-card p-4 flex flex-wrap gap-2 items-end">
+        <label className="text-xs">
+          De
+          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="block mt-0.5 px-3 py-1.5 rounded-xl border border-border text-xs" />
+        </label>
+        <label className="text-xs">
+          Até
+          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="block mt-0.5 px-3 py-1.5 rounded-xl border border-border text-xs" />
+        </label>
+      </div>
+
+      {!data ? null : (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className={`shk-card p-4 text-center ${data.overall.status === "alerta" ? "bg-red-50" : "bg-green-50"}`}>
+              <p className={`text-2xl font-bold ${data.overall.status === "alerta" ? "text-red-600" : "text-green-700"}`}>{data.overall.score}%</p>
+              <p className="text-xs font-semibold flex items-center justify-center gap-1 mt-0.5">
+                <ShieldAlert className="w-3.5 h-3.5" /> {data.overall.status === "alerta" ? "Alerta" : "Controlado"}
+              </p>
+            </div>
+            <div className="shk-card p-4 text-center">
+              <p className="text-2xl font-bold">{data.overall.employeesEvaluated}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">Colaboradores avaliados</p>
+            </div>
+            <div className="shk-card p-4 text-center">
+              <p className={`text-2xl font-bold ${data.overall.employeesInAlert > 0 ? "text-red-600" : ""}`}>{data.overall.employeesInAlert}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">Em alerta</p>
+            </div>
+            <div className="shk-card p-4 text-center">
+              <p className="text-2xl font-bold">{data.byStore.length}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">Lojas avaliadas</p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-1.5">
+            <button onClick={() => setTab("acoes")} className={`px-3 py-1.5 rounded-xl text-xs font-semibold border ${tab === "acoes" ? "bg-primary text-white border-primary" : "border-border text-muted-foreground"}`}>Ações rápidas</button>
+            <button onClick={() => setTab("fatores")} className={`px-3 py-1.5 rounded-xl text-xs font-semibold border ${tab === "fatores" ? "bg-primary text-white border-primary" : "border-border text-muted-foreground"}`}>Fatores de risco</button>
+          </div>
+
+          {tab === "acoes" ? (
+            <div className="space-y-3">
+              <div className="shk-card overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-muted-foreground border-b border-border">
+                      <th className="text-left py-2 px-3 font-semibold">Loja</th>
+                      <th className="text-right py-2 px-3 font-semibold">Placar</th>
+                      <th className="text-left py-2 px-3 font-semibold">Status</th>
+                      <th className="text-right py-2 px-3 font-semibold">Colaboradores</th>
+                      <th className="text-right py-2 px-3 font-semibold">Em alerta</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.byStore.map((s) => (
+                      <tr key={s.storeId ?? "sem-loja"} className="border-b border-border/50 last:border-0">
+                        <td className="py-2 px-3 font-semibold">{s.storeName}</td>
+                        <td className="py-2 px-3 text-right">{s.score}%</td>
+                        <td className="py-2 px-3">
+                          <span className={`px-1.5 py-0.5 rounded-full font-semibold ${s.status === "alerta" ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700"}`}>
+                            {s.status === "alerta" ? "Alerta" : "Controlado"}
+                          </span>
+                        </td>
+                        <td className="py-2 px-3 text-right">{s.employeesEvaluated}</td>
+                        <td className="py-2 px-3 text-right">{s.employeesInAlert || "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {data.quickActions.length === 0 ? (
+                <div className="shk-card p-4 text-center text-xs text-muted-foreground">Nenhum fator de risco relevante no período. 👍</div>
+              ) : (
+                <div className="shk-card p-4 space-y-2">
+                  <p className="text-xs font-bold text-muted-foreground">Sugestões</p>
+                  {data.quickActions.map((a, i) => (
+                    <p key={i} className="text-xs flex items-start gap-1.5"><AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" /> {a}</p>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="shk-card overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-muted-foreground border-b border-border">
+                    <th className="text-left py-2 px-3 font-semibold">Colaborador</th>
+                    <th className="text-left py-2 px-3 font-semibold">Loja</th>
+                    <th className="text-right py-2 px-3 font-semibold">Placar</th>
+                    <th className="text-left py-2 px-3 font-semibold">Status</th>
+                    <th className="text-right py-2 px-3 font-semibold" title="Dias com mais de 2h de hora extra">+2h extra</th>
+                    <th className="text-right py-2 px-3 font-semibold" title="Dias com menos de 11h de descanso entre turnos">Descanso curto</th>
+                    <th className="text-right py-2 px-3 font-semibold" title="Padrão suspeito de lançamento manual">Padrão suspeito</th>
+                    <th className="text-right py-2 px-3 font-semibold" title="Minutos de banco de horas vencido">Banco vencido</th>
+                    <th className="text-right py-2 px-3 font-semibold">Atrasos</th>
+                    <th className="text-right py-2 px-3 font-semibold">Faltas</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.employees.map((e) => (
+                    <tr key={e.employeeId} className="border-b border-border/50 last:border-0">
+                      <td className="py-2 px-3 font-semibold">{e.employeeName}</td>
+                      <td className="py-2 px-3">{e.storeName}</td>
+                      <td className="py-2 px-3 text-right">{e.score}%</td>
+                      <td className="py-2 px-3">
+                        <span className={`px-1.5 py-0.5 rounded-full font-semibold ${e.status === "alerta" ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700"}`}>
+                          {e.status === "alerta" ? "Alerta" : "Controlado"}
+                        </span>
+                      </td>
+                      <td className="py-2 px-3 text-right">{e.factors.diasExcesso2h || "-"}</td>
+                      <td className="py-2 px-3 text-right">{e.factors.diasInterjornadaCurta || "-"}</td>
+                      <td className="py-2 px-3 text-right">{e.factors.suspiciousPattern ? "Sim" : "-"}</td>
+                      <td className="py-2 px-3 text-right">{e.factors.bancoHorasVencidoMinutes ? formatMinutes(e.factors.bancoHorasVencidoMinutes) : "-"}</td>
+                      <td className="py-2 px-3 text-right">{e.factors.diasAtraso || "-"}</td>
+                      <td className="py-2 px-3 text-right">{e.factors.diasFaltaInjustificada || "-"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
