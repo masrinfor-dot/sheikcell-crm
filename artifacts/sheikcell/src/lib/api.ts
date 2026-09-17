@@ -2529,11 +2529,19 @@ export const api = {
     stats: () => req<{ conversations: number; activeFlows: number; usageToday: number }>("/bot/stats"),
     test: (message: string, reset?: boolean) =>
       req<{ replies: string[]; ended?: boolean; reset?: boolean }>("/bot/test", { method: "POST", body: JSON.stringify({ message, reset }) }),
-    knowledgeMerge: (text: string) => req<BotSettings>("/bot/knowledge/merge", { method: "POST", body: JSON.stringify({ text }) }),
+    // Só GERA A PRÉVIA de como a base vai ficar — nunca salva sozinho (pedido
+    // 17/09). Salvar de fato é bot.save() normal, chamado depois que o admin
+    // aprova (e pode corrigir) o texto devolvido aqui.
+    knowledgeMerge: (text: string) => req<{ knowledgeBase: string }>("/bot/knowledge/merge", { method: "POST", body: JSON.stringify({ text }) }),
     suggestions: (status: "pending" | "approved" | "rejected" = "pending") =>
       req<KbSuggestion[]>(`/bot/knowledge/suggestions?status=${status}`),
-    approveSuggestion: (id: number) =>
-      req<{ suggestion: KbSuggestion; knowledgeBase: string }>(`/bot/knowledge/suggestions/${id}/approve`, { method: "POST" }),
+    previewSuggestion: (id: number) =>
+      req<{ knowledgeBase: string }>(`/bot/knowledge/suggestions/${id}/preview`, { method: "POST" }),
+    // knowledgeBase opcional: manda o texto da prévia (possivelmente
+    // corrigido pelo admin) pra salvar exatamente o que foi revisado — sem
+    // isso, o backend recalcula a fusão na hora (aprovar direto, sem prévia).
+    approveSuggestion: (id: number, knowledgeBase?: string) =>
+      req<{ suggestion: KbSuggestion; knowledgeBase: string }>(`/bot/knowledge/suggestions/${id}/approve`, { method: "POST", body: JSON.stringify({ knowledgeBase }) }),
     rejectSuggestion: (id: number) =>
       req<{ suggestion: KbSuggestion }>(`/bot/knowledge/suggestions/${id}/reject`, { method: "POST" }),
   },

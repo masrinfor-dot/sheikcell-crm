@@ -16,7 +16,7 @@ import { eq, and, asc } from "drizzle-orm";
 import { getOpenAiClientForTenant } from "./aiClient";
 import { logger } from "./logger";
 
-const MAX_KB_CHARS = 30000; // mesmo teto de PUT /bot/settings — nunca deixa a IA estourar o limite salvo.
+export const MAX_KB_CHARS = 30000; // mesmo teto de PUT /bot/settings — nunca deixa a IA estourar o limite salvo.
 
 /**
  * Reorganiza a base de conhecimento juntando o texto novo (caixa de IA do

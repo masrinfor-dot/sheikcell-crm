@@ -4,7 +4,7 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import { requireTenant } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import { getBotSettings, toEngineSettings, todayUsage, aiClassify } from "../lib/bot";
-import { mergeIntoKnowledgeBase } from "../lib/knowledgeLearning";
+import { mergeIntoKnowledgeBase, MAX_KB_CHARS } from "../lib/knowledgeLearning";
 import { botStep, type BotStateShape, type BotQuestion } from "../lib/botEngine";
 
 const router: IRouter = Router();
@@ -90,11 +90,13 @@ router.put("/bot/settings", requireModuleAccess("robo"), async (req, res): Promi
   res.json({ ...updated, usageToday: await todayUsage(tenantId) });
 });
 
-// ---------- caixa de IA da base de conhecimento (pedido 16/09) ----------
+// ---------- caixa de IA da base de conhecimento (pedido 16/09, prévia pedido 17/09) ----------
 // Admin cola informação nova/solta (ou corrige algo) numa caixa acima da
-// base; a IA reorganiza e junta com a base já existente, sem duplicar — o
-// próprio botão já "envia pra base" (salva direto), o admin só revisa o
-// resultado na base logo abaixo antes de continuar editando.
+// base; a IA reorganiza e junta com a base já existente, sem duplicar. Este
+// endpoint SÓ GERA A PRÉVIA — nunca salva sozinho ("ante de enviar pra base
+// de conhecimento mostra como vai ficar... pra aprovar ou não ou corrigir").
+// O admin revisa (e pode corrigir) o texto devolvido aqui; salvar de fato é
+// um PUT /bot/settings normal, feito pelo front só depois que o admin aprova.
 router.post("/bot/knowledge/merge", requireModuleAccess("robo"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const text = String((req.body as { text?: unknown } | undefined)?.text ?? "").trim();
@@ -103,10 +105,7 @@ router.post("/bot/knowledge/merge", requireModuleAccess("robo"), async (req, res
 
   const existing = await getBotSettings(tenantId);
   const merged = await mergeIntoKnowledgeBase(tenantId, existing.knowledgeBase, text);
-  const [updated] = await db.update(botSettingsTable).set({ knowledgeBase: merged, updatedAt: new Date() })
-    .where(and(eq(botSettingsTable.id, existing.id), eq(botSettingsTable.tenantId, tenantId))).returning();
-
-  res.json({ ...updated, usageToday: await todayUsage(tenantId) });
+  res.json({ knowledgeBase: merged });
 });
 
 // ---------- sugestões de conhecimento (aprendizado com atendimentos) ----------
@@ -122,8 +121,27 @@ router.get("/bot/knowledge/suggestions", requireModuleAccess("robo"), async (req
   res.json(rows);
 });
 
-// Aprovar: mescla a sugestão na base (mesma fusão via IA da caixa manual) e
-// marca aprovada. Rejeitar: só marca, nunca mexe na base.
+// Prévia da fusão da sugestão na base — não salva, não marca aprovada. Mesmo
+// motivo da prévia manual acima: o admin revisa (e pode corrigir) antes de
+// confirmar.
+router.post("/bot/knowledge/suggestions/:id/preview", requireModuleAccess("robo"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+
+  const [suggestion] = await db.select().from(kbSuggestionsTable)
+    .where(and(eq(kbSuggestionsTable.id, id), eq(kbSuggestionsTable.tenantId, tenantId))).limit(1);
+  if (!suggestion) { res.status(404).json({ error: "Sugestão não encontrada" }); return; }
+
+  const existing = await getBotSettings(tenantId);
+  const merged = await mergeIntoKnowledgeBase(tenantId, existing.knowledgeBase, suggestion.suggestion);
+  res.json({ knowledgeBase: merged });
+});
+
+// Aprovar: SALVA na base + marca aprovada. Recebe no corpo o texto já
+// revisado (prévia acima, possivelmente corrigida pelo admin) — sem
+// "knowledgeBase" no corpo, recalcula a fusão na hora (aprovar direto, sem
+// passar pela prévia). Rejeitar: só marca, nunca mexe na base.
 router.post("/bot/knowledge/suggestions/:id/approve", requireModuleAccess("robo"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const uid = req.session.userId!;
@@ -136,7 +154,10 @@ router.post("/bot/knowledge/suggestions/:id/approve", requireModuleAccess("robo"
   if (suggestion.status !== "pending") { res.status(400).json({ error: "Essa sugestão já foi revisada" }); return; }
 
   const existing = await getBotSettings(tenantId);
-  const merged = await mergeIntoKnowledgeBase(tenantId, existing.knowledgeBase, suggestion.suggestion);
+  const reviewedText = (req.body as { knowledgeBase?: unknown } | undefined)?.knowledgeBase;
+  const merged = typeof reviewedText === "string" && reviewedText.trim()
+    ? reviewedText.trim().slice(0, MAX_KB_CHARS)
+    : await mergeIntoKnowledgeBase(tenantId, existing.knowledgeBase, suggestion.suggestion);
   await db.update(botSettingsTable).set({ knowledgeBase: merged, updatedAt: new Date() })
     .where(and(eq(botSettingsTable.id, existing.id), eq(botSettingsTable.tenantId, tenantId)));
   const [updatedSuggestion] = await db.update(kbSuggestionsTable)

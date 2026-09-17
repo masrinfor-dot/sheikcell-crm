@@ -14,14 +14,21 @@ export default function Robo() {
   const [s, setS] = useState<BotSettings | null>(null);
   const [saving, setSaving] = useState(false);
 
-  // caixa de IA da base de conhecimento (pedido 16/09)
+  // caixa de IA da base de conhecimento (pedido 16/09) — com prévia antes de
+  // salvar (pedido 17/09): mergePreview !== null enquanto o admin revisa.
   const [kbInput, setKbInput] = useState("");
   const [merging, setMerging] = useState(false);
+  const [mergePreview, setMergePreview] = useState<string | null>(null);
+  const [approvingPreview, setApprovingPreview] = useState(false);
 
-  // sugestões de conhecimento (aprendizado com atendimentos)
+  // sugestões de conhecimento (aprendizado com atendimentos) — mesma lógica
+  // de prévia: previewingSuggestionId enquanto gera, suggestionPreview com o
+  // resultado (editável) antes de aprovar de verdade.
   const [suggestions, setSuggestions] = useState<KbSuggestion[]>([]);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [reviewingId, setReviewingId] = useState<number | null>(null);
+  const [previewingSuggestionId, setPreviewingSuggestionId] = useState<number | null>(null);
+  const [suggestionPreview, setSuggestionPreview] = useState<{ id: number; text: string } | null>(null);
 
   // modo teste
   const [chat, setChat] = useState<{ from: "you" | "bot"; text: string }[]>([]);
@@ -86,31 +93,65 @@ export default function Robo() {
     setChat([]);
   };
 
-  // Caixa de IA: manda o texto solto, a IA reorganiza e já junta com a base
-  // atual (salva direto) — o admin revisa o resultado no textarea logo abaixo.
-  const handleKbMerge = async () => {
+  // Caixa de IA: manda o texto solto, a IA reorganiza e devolve uma PRÉVIA —
+  // nunca salva sozinho (pedido 17/09: "mostras como vai fica o novo
+  // conhecimento para aprovar ou não ou corrigir"). O admin revisa (e pode
+  // editar) o texto da prévia antes de aprovar.
+  const handleKbGeneratePreview = async () => {
     const text = kbInput.trim();
     if (!text || merging) return;
     setMerging(true);
     try {
-      const upd = await api.bot.knowledgeMerge(text);
-      setS((prev) => (prev ? { ...prev, ...upd } : upd));
-      setKbInput("");
-      toast({ title: "Base de conhecimento atualizada pela IA 🤖", description: "Confira o resultado abaixo antes de continuar editando." });
+      const { knowledgeBase } = await api.bot.knowledgeMerge(text);
+      setMergePreview(knowledgeBase);
     } catch (err) {
-      toast({ title: "Erro ao enviar para a base", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+      toast({ title: "Erro ao gerar prévia", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     } finally {
       setMerging(false);
     }
   };
 
-  const handleApproveSuggestion = async (id: number) => {
+  const handleApproveKbPreview = async () => {
+    if (mergePreview == null || approvingPreview) return;
+    setApprovingPreview(true);
+    try {
+      const upd = await api.bot.save({ ...s, knowledgeBase: mergePreview });
+      setS(upd);
+      setMergePreview(null);
+      setKbInput("");
+      toast({ title: "Base de conhecimento atualizada 🤖" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setApprovingPreview(false);
+    }
+  };
+
+  const handleCancelKbPreview = () => setMergePreview(null);
+
+  // Sugestão: "Ver prévia" gera o texto mesclado sem salvar; só ao aprovar
+  // (com o texto já revisado) é que a base muda de verdade.
+  const handlePreviewSuggestion = async (id: number) => {
+    if (previewingSuggestionId) return;
+    setPreviewingSuggestionId(id);
+    try {
+      const { knowledgeBase } = await api.bot.previewSuggestion(id);
+      setSuggestionPreview({ id, text: knowledgeBase });
+    } catch (err) {
+      toast({ title: "Erro ao gerar prévia", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setPreviewingSuggestionId(null);
+    }
+  };
+
+  const handleApproveSuggestion = async (id: number, reviewedText?: string) => {
     if (reviewingId) return;
     setReviewingId(id);
     try {
-      const { knowledgeBase } = await api.bot.approveSuggestion(id);
+      const { knowledgeBase } = await api.bot.approveSuggestion(id, reviewedText);
       setS((prev) => (prev ? { ...prev, knowledgeBase } : prev));
       setSuggestions((prev) => prev.filter((sug) => sug.id !== id));
+      setSuggestionPreview((prev) => (prev?.id === id ? null : prev));
       toast({ title: "Sugestão aprovada e adicionada à base 🤖" });
     } catch (err) {
       toast({ title: "Erro ao aprovar sugestão", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
@@ -125,6 +166,7 @@ export default function Robo() {
     try {
       await api.bot.rejectSuggestion(id);
       setSuggestions((prev) => prev.filter((sug) => sug.id !== id));
+      setSuggestionPreview((prev) => (prev?.id === id ? null : prev));
     } catch (err) {
       toast({ title: "Erro ao rejeitar sugestão", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     } finally {
@@ -202,15 +244,35 @@ export default function Robo() {
                 <Sparkles className="w-4 h-4 text-primary" /> Adicionar com IA
               </label>
               <p className="text-[10px] text-muted-foreground">
-                Cole aqui uma informação nova ou uma correção (solta, sem se preocupar com formatação) — a IA organiza e já junta com a base abaixo, sem duplicar nada. Confira o resultado antes de sair da tela.
+                Cole aqui uma informação nova ou uma correção (solta, sem se preocupar com formatação) — a IA organiza e junta com a base abaixo. Antes de salvar, você confere (e pode corrigir) exatamente como vai ficar.
               </p>
-              <textarea value={kbInput} onChange={(e) => setKbInput(e.target.value)} rows={3}
-                placeholder="Ex.: a partir de agora também parcelamos conserto em até 3x sem juros no cartão"
-                data-testid="input-kb-ai-box" className={INPUT} />
-              <button onClick={handleKbMerge} disabled={merging || !kbInput.trim()} data-testid="button-kb-ai-send"
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-primary text-white text-[11px] font-semibold disabled:opacity-40 transition">
-                <Sparkles className="w-3.5 h-3.5" /> {merging ? "A IA está organizando..." : "Enviar para Base de Conhecimento com IA"}
-              </button>
+              {mergePreview == null ? (
+                <>
+                  <textarea value={kbInput} onChange={(e) => setKbInput(e.target.value)} rows={3}
+                    placeholder="Ex.: a partir de agora também parcelamos conserto em até 3x sem juros no cartão"
+                    data-testid="input-kb-ai-box" className={INPUT} />
+                  <button onClick={handleKbGeneratePreview} disabled={merging || !kbInput.trim()} data-testid="button-kb-ai-send"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-primary text-white text-[11px] font-semibold disabled:opacity-40 transition">
+                    <Sparkles className="w-3.5 h-3.5" /> {merging ? "A IA está organizando..." : "Gerar prévia com IA"}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <p className="text-[10px] font-semibold text-foreground">Prévia de como a base vai ficar — pode corrigir antes de aprovar:</p>
+                  <textarea value={mergePreview} onChange={(e) => setMergePreview(e.target.value)} rows={8}
+                    data-testid="textarea-kb-preview" className={INPUT} />
+                  <div className="flex gap-2">
+                    <button onClick={handleApproveKbPreview} disabled={approvingPreview} data-testid="button-kb-preview-approve"
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-primary text-white text-[11px] font-semibold disabled:opacity-40 transition">
+                      <Check className="w-3.5 h-3.5" /> {approvingPreview ? "Salvando..." : "Aprovar e salvar na base"}
+                    </button>
+                    <button onClick={handleCancelKbPreview} disabled={approvingPreview} data-testid="button-kb-preview-cancel"
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-border text-[11px] font-semibold disabled:opacity-40 transition">
+                      <X className="w-3.5 h-3.5" /> Cancelar
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
             <div>
               <label className="font-bold text-sm">Base de conhecimento</label>
@@ -262,18 +324,36 @@ export default function Robo() {
               <div key={sug.id} data-testid={`suggestion-${sug.id}`} className="border border-border rounded-xl p-3 space-y-1.5">
                 <p className="text-[12px]">{sug.suggestion}</p>
                 {sug.reasoning && <p className="text-[10px] text-muted-foreground italic">Motivo: {sug.reasoning}</p>}
-                {canEdit && (
+                {canEdit && suggestionPreview?.id !== sug.id && (
                   <div className="flex gap-2 pt-1">
-                    <button onClick={() => handleApproveSuggestion(sug.id)} disabled={reviewingId === sug.id}
-                      data-testid={`button-approve-suggestion-${sug.id}`}
+                    <button onClick={() => handlePreviewSuggestion(sug.id)} disabled={previewingSuggestionId === sug.id}
+                      data-testid={`button-preview-suggestion-${sug.id}`}
                       className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-primary text-white text-[11px] font-semibold disabled:opacity-40">
-                      <Check className="w-3 h-3" /> Aprovar
+                      <Sparkles className="w-3 h-3" /> {previewingSuggestionId === sug.id ? "Gerando prévia..." : "Ver prévia e aprovar"}
                     </button>
                     <button onClick={() => handleRejectSuggestion(sug.id)} disabled={reviewingId === sug.id}
                       data-testid={`button-reject-suggestion-${sug.id}`}
                       className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-border text-[11px] font-semibold disabled:opacity-40">
                       <X className="w-3 h-3" /> Rejeitar
                     </button>
+                  </div>
+                )}
+                {canEdit && suggestionPreview?.id === sug.id && (
+                  <div className="space-y-2 pt-1">
+                    <p className="text-[10px] font-semibold text-foreground">Prévia de como a base vai ficar — pode corrigir antes de aprovar:</p>
+                    <textarea value={suggestionPreview.text} onChange={(e) => setSuggestionPreview({ id: sug.id, text: e.target.value })}
+                      rows={8} data-testid={`textarea-suggestion-preview-${sug.id}`} className={INPUT} />
+                    <div className="flex gap-2">
+                      <button onClick={() => handleApproveSuggestion(sug.id, suggestionPreview.text)} disabled={reviewingId === sug.id}
+                        data-testid={`button-approve-suggestion-${sug.id}`}
+                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-primary text-white text-[11px] font-semibold disabled:opacity-40">
+                        <Check className="w-3 h-3" /> {reviewingId === sug.id ? "Salvando..." : "Aprovar e salvar"}
+                      </button>
+                      <button onClick={() => setSuggestionPreview(null)} disabled={reviewingId === sug.id}
+                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-border text-[11px] font-semibold disabled:opacity-40">
+                        <X className="w-3 h-3" /> Cancelar
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
