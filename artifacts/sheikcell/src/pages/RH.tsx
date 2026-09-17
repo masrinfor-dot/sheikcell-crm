@@ -13,7 +13,7 @@ import {
   Video, ChevronDown, ChevronUp, Save, Link2, UserSquare2, CalendarClock, Clock, Wallet, Pencil, Archive, PlayCircle,
   AlertTriangle, Image as ImageIcon, Smartphone, Printer, Star, Briefcase, Sparkles, MapPin,
   Upload, Download, FileText, FolderArchive, UserPlus, FileSignature, Eye, IdCard, RotateCcw, Palmtree,
-  ListChecks, Building2, LayoutDashboard, UserMinus, Bell, FileBarChart, ShieldAlert,
+  ListChecks, Building2, LayoutDashboard, UserMinus, Bell, FileBarChart, ShieldAlert, Layers,
 } from "lucide-react";
 
 // Perfil comportamental (estilo DISC simplificado, 4 tipos definidos pelo
@@ -204,7 +204,7 @@ export default function RH() {
   const { user } = useAuth();
   const canEdit = canEditModule(user, "rh");
   const [group, setGroup] = useState<"recrutamento" | "dp">("recrutamento");
-  const [dpView, setDpView] = useState<"painel" | "colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos" | "ferias" | "feriados" | "fechamentos" | "demissoes" | "relatorios" | "farol-risco">("painel");
+  const [dpView, setDpView] = useState<"painel" | "colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos" | "ferias" | "feriados" | "fechamentos" | "demissoes" | "relatorios" | "farol-risco" | "acoes-lote">("painel");
 
   return (
     <div className="space-y-4">
@@ -240,6 +240,7 @@ export default function RH() {
               { key: "demissoes", label: "Desligamentos", icon: UserMinus },
               { key: "relatorios", label: "Relatórios", icon: FileBarChart },
               { key: "farol-risco", label: "Farol de risco NR-1", icon: ShieldAlert },
+              { key: "acoes-lote", label: "Ações em lote", icon: Layers },
             ] as const).map(({ key, label, icon: Icon }) => (
               <button key={key} onClick={() => setDpView(key)} data-testid={`button-dp-${key}`}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border ${dpView === key ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
@@ -259,6 +260,7 @@ export default function RH() {
           {dpView === "demissoes" && <Desligamentos canEdit={canEdit} />}
           {dpView === "relatorios" && <RelatoriosDP />}
           {dpView === "farol-risco" && <FarolRiscoNR1 />}
+          {dpView === "acoes-lote" && <AcoesEmLote canEdit={canEdit} />}
         </div>
       )}
     </div>
@@ -4135,6 +4137,169 @@ function FarolRiscoNR1() {
             </div>
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+// ── Ações em lote ────────────────────────────────────────────────────────
+// Pedido 17/09, análise Tangerino ("Cadastros gerais → Ações em lote"):
+// filtra um grupo de colaboradores, baixa planilha, edita em massa no
+// Excel e reenvia — fluxo em 2 passos (conferir antes de aplicar).
+function AcoesEmLote({ canEdit }: { canEdit: boolean }) {
+  const { toast } = useToast();
+  const [stores, setStores] = useState<Store[]>([]);
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [filterRole, setFilterRole] = useState("");
+  const [filterStoreId, setFilterStoreId] = useState<number | "">("");
+  const [filterShiftId, setFilterShiftId] = useState<number | "">("");
+  const [shifts, setShifts] = useState<WorkShift[]>([]);
+  const [fileBase64, setFileBase64] = useState<string | null>(null);
+  const [fileName, setFileName] = useState("");
+  const [preview, setPreview] = useState<Awaited<ReturnType<typeof api.rhDp.bulk.preview>> | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [applyResult, setApplyResult] = useState<{ applied: number; skipped: number; totalRows: number } | null>(null);
+
+  useEffect(() => {
+    api.stores.list(true).then(setStores).catch(() => {});
+    api.rhDp.shifts.list().then(setShifts).catch(() => {});
+    api.rhDp.employees.list().then(setEmployees).catch(() => {});
+  }, []);
+
+  const roles = [...new Set(employees.map((e) => e.role).filter((r): r is string => !!r))].sort();
+
+  const exportUrl = api.rhDp.bulk.exportUrl({
+    role: filterRole || null, storeId: filterStoreId || null, shiftId: filterShiftId || null,
+  });
+
+  const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    setPreview(null);
+    setApplyResult(null);
+    if (!file) { setFileBase64(null); setFileName(""); return; }
+    setFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = () => setFileBase64(String(reader.result ?? ""));
+    reader.readAsDataURL(file);
+  };
+
+  const runPreview = async () => {
+    if (!fileBase64) { toast({ title: "Escolha o arquivo preenchido", variant: "destructive" }); return; }
+    setLoading(true);
+    setApplyResult(null);
+    try {
+      const result = await api.rhDp.bulk.preview(fileBase64);
+      setPreview(result);
+    } catch (err) {
+      toast({ title: "Erro ao ler a planilha", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const runApply = async () => {
+    if (!fileBase64) return;
+    if (!window.confirm("Aplicar as alterações desta planilha agora? Não tem como desfazer em lote.")) return;
+    setLoading(true);
+    try {
+      const result = await api.rhDp.bulk.apply(fileBase64);
+      setApplyResult(result);
+      setPreview(null);
+      setFileBase64(null);
+      setFileName("");
+      api.rhDp.employees.list().then(setEmployees).catch(() => {});
+      toast({ title: `Aplicado: ${result.applied} colaborador(es)` });
+    } catch (err) {
+      toast({ title: "Erro ao aplicar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="shk-card p-4 space-y-3">
+        <p className="text-xs font-semibold flex items-center gap-1.5"><Layers className="w-3.5 h-3.5 text-primary" /> 1. Filtre e baixe a planilha</p>
+        <p className="text-[11px] text-muted-foreground">
+          Edite cargo, função, loja e/ou escala em massa no Excel (não mude a coluna ID nem o nome) e volte aqui pra reenviar.
+        </p>
+        <div className="flex flex-wrap gap-2 items-end">
+          <label className="text-xs">
+            Cargo
+            <select value={filterRole} onChange={(e) => setFilterRole(e.target.value)} className="block mt-0.5 px-3 py-1.5 rounded-xl border border-border text-xs bg-white">
+              <option value="">Todos</option>
+              {roles.map((r) => <option key={r} value={r}>{r}</option>)}
+            </select>
+          </label>
+          <label className="text-xs">
+            Loja
+            <select value={filterStoreId} onChange={(e) => setFilterStoreId(e.target.value ? Number(e.target.value) : "")} className="block mt-0.5 px-3 py-1.5 rounded-xl border border-border text-xs bg-white">
+              <option value="">Todas</option>
+              {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </label>
+          <label className="text-xs">
+            Escala
+            <select value={filterShiftId} onChange={(e) => setFilterShiftId(e.target.value ? Number(e.target.value) : "")} className="block mt-0.5 px-3 py-1.5 rounded-xl border border-border text-xs bg-white">
+              <option value="">Todas</option>
+              {shifts.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </label>
+          <a href={exportUrl} download="colaboradores-acoes-em-lote.xlsx" data-testid="button-bulk-export"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-primary text-white text-xs font-bold">
+            <Download className="w-3.5 h-3.5" /> Baixar planilha
+          </a>
+        </div>
+      </div>
+
+      {canEdit && (
+        <div className="shk-card p-4 space-y-3">
+          <p className="text-xs font-semibold flex items-center gap-1.5"><Upload className="w-3.5 h-3.5 text-primary" /> 2. Reenvie a planilha editada</p>
+          <div className="flex flex-wrap gap-2 items-center">
+            <input type="file" accept=".xlsx" onChange={onFileChange} data-testid="input-bulk-file" className="text-xs" />
+            <button onClick={runPreview} disabled={!fileBase64 || loading} data-testid="button-bulk-preview"
+              className="px-3 py-1.5 rounded-xl border border-border text-xs font-semibold disabled:opacity-40">
+              {loading && !preview ? "Lendo..." : "Conferir alterações"}
+            </button>
+          </div>
+          {fileName && <p className="text-[11px] text-muted-foreground">Arquivo: {fileName}</p>}
+        </div>
+      )}
+
+      {preview && (
+        <div className="shk-card p-4 space-y-3">
+          <div className="flex flex-wrap gap-3 text-xs">
+            <span><strong>{preview.totalRows}</strong> linhas</span>
+            <span className="text-green-700"><strong>{preview.withChanges}</strong> com alteração</span>
+            {preview.withErrors > 0 && <span className="text-red-600"><strong>{preview.withErrors}</strong> com erro (não serão aplicadas)</span>}
+          </div>
+          <div className="max-h-[50vh] overflow-y-auto space-y-1.5">
+            {preview.rows.filter((r) => r.changes.length > 0 || r.errors.length > 0).map((r) => (
+              <div key={r.row} className={`rounded-lg px-3 py-2 text-[11px] ${r.errors.length > 0 ? "bg-red-50" : "bg-secondary/30"}`}>
+                <p className="font-semibold">Linha {r.row}{r.employeeName ? ` — ${r.employeeName}` : ""}</p>
+                {r.changes.map((c, i) => (
+                  <p key={i} className="text-muted-foreground">{c.field}: <span className="line-through">{c.from}</span> → <span className="font-semibold text-foreground">{c.to}</span></p>
+                ))}
+                {r.errors.map((e, i) => <p key={i} className="text-red-600">⚠ {e}</p>)}
+              </div>
+            ))}
+            {preview.rows.every((r) => r.changes.length === 0 && r.errors.length === 0) && (
+              <p className="text-xs text-muted-foreground text-center py-4">Nenhuma alteração detectada na planilha.</p>
+            )}
+          </div>
+          {canEdit && preview.withChanges > 0 && (
+            <button onClick={runApply} disabled={loading} data-testid="button-bulk-apply"
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
+              <Save className="w-3.5 h-3.5" /> {loading ? "Aplicando..." : `Aplicar ${preview.withChanges} alteração(ões)`}
+            </button>
+          )}
+        </div>
+      )}
+
+      {applyResult && (
+        <div className="shk-card p-4 bg-green-50 text-xs">
+          <p className="font-semibold text-green-700">Aplicado: {applyResult.applied} colaborador(es) atualizado(s){applyResult.skipped > 0 ? `, ${applyResult.skipped} linha(s) ignorada(s) por erro` : ""}.</p>
+        </div>
       )}
     </div>
   );

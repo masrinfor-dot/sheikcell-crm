@@ -16,6 +16,7 @@ import { MEDIA_DIR } from "../lib/whatsappInbound";
 import { writeFile, mkdir } from "fs/promises";
 import { randomUUID } from "crypto";
 import path from "path";
+import * as XLSX from "xlsx";
 
 const router: IRouter = Router();
 
@@ -668,6 +669,166 @@ router.delete("/rh-dp/employees/:id", requireModuleAccess("rh"), async (req, res
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   await db.delete(employeesTable).where(and(eq(employeesTable.id, id), eq(employeesTable.tenantId, tenantId)));
   res.json({ ok: true });
+});
+
+// ── Ações em lote (cadastro de colaboradores) ───────────────────────────────
+// Pedido 17/09, análise Tangerino ("Cadastros gerais → Ações em lote"): em
+// vez de editar colaborador por colaborador em Administração → Usuários,
+// filtra um grupo (cargo/loja/escala/status), baixa uma planilha
+// pré-preenchida, edita em massa no Excel e reenvia. Campos editáveis:
+// cargo, função, loja e escala (os mesmos que o Tangerino oferece em
+// "Cadastro de colaboradores" — lá é cargo/escala/setor, aqui usamos loja no
+// lugar de setor, que é nosso conceito equivalente de local físico).
+// Sem tabela/rota nova de importação genérica: reaproveita a lib "xlsx" já
+// usada em finance/payments/export. Segue o mesmo padrão do resto do
+// sistema pra receber arquivo (sem multer — o front manda como data URL
+// base64 no corpo, igual mídia do chat interno) e o fluxo em 2 passos
+// (preview → apply) pra você conferir antes de aplicar de vez.
+const BULK_EMPLOYEE_HEADERS = ["ID", "Nome (não editar)", "Cargo", "Função", "Loja", "Escala"] as const;
+
+router.get("/rh-dp/bulk/employees/export", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const role = typeof req.query.role === "string" && req.query.role ? req.query.role : null;
+  const storeId = typeof req.query.storeId === "string" && req.query.storeId ? parseInt(req.query.storeId, 10) : null;
+  const shiftId = typeof req.query.shiftId === "string" && req.query.shiftId ? parseInt(req.query.shiftId, 10) : null;
+  const isActive = req.query.isActive === "false" ? false : true; // padrão: só ativos
+
+  const conditions = [eq(employeesTable.tenantId, tenantId), eq(employeesTable.isActive, isActive)];
+  if (role) conditions.push(eq(employeesTable.role, role));
+  if (storeId && !isNaN(storeId)) conditions.push(eq(employeesTable.storeId, storeId));
+  if (shiftId && !isNaN(shiftId)) conditions.push(eq(employeesTable.shiftId, shiftId));
+
+  const rows = await db.select({
+    id: employeesTable.id, name: employeesTable.name, role: employeesTable.role, jobFunction: employeesTable.jobFunction,
+    storeName: storesTable.name, shiftName: workShiftsTable.name,
+  }).from(employeesTable)
+    .leftJoin(storesTable, eq(employeesTable.storeId, storesTable.id))
+    .leftJoin(workShiftsTable, eq(employeesTable.shiftId, workShiftsTable.id))
+    .where(and(...conditions))
+    .orderBy(asc(employeesTable.name));
+
+  const sheetRows = rows.map((r) => ({
+    [BULK_EMPLOYEE_HEADERS[0]]: r.id,
+    [BULK_EMPLOYEE_HEADERS[1]]: r.name,
+    [BULK_EMPLOYEE_HEADERS[2]]: r.role ?? "",
+    [BULK_EMPLOYEE_HEADERS[3]]: r.jobFunction ?? "",
+    [BULK_EMPLOYEE_HEADERS[4]]: r.storeName ?? "",
+    [BULK_EMPLOYEE_HEADERS[5]]: r.shiftName ?? "",
+  }));
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.json_to_sheet(sheetRows);
+  ws["!cols"] = [{ wch: 6 }, { wch: 28 }, { wch: 20 }, { wch: 20 }, { wch: 20 }, { wch: 20 }];
+  XLSX.utils.book_append_sheet(wb, ws, "Colaboradores");
+  const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
+
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="colaboradores-acoes-em-lote.xlsx"`);
+  res.send(buffer);
+});
+
+type BulkEmployeeApply = { role: string | null; jobFunction: string | null; storeId: number | null; shiftId: number | null };
+type BulkEmployeeRowResult = {
+  row: number; id: number | null; employeeName: string;
+  changes: Array<{ field: string; from: string; to: string }>;
+  errors: string[];
+  apply: BulkEmployeeApply | null; // null quando a linha tem erro ou id vazio — nada a aplicar
+};
+
+async function parseBulkEmployeeFile(fileBase64: string, tenantId: number): Promise<BulkEmployeeRowResult[]> {
+  const base64 = fileBase64.includes(",") ? fileBase64.slice(fileBase64.indexOf(",") + 1) : fileBase64;
+  const buffer = Buffer.from(base64, "base64");
+  const wb = XLSX.read(buffer, { type: "buffer" });
+  const ws = wb.Sheets[wb.SheetNames[0]!];
+  const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws!, { defval: "" });
+
+  const employees = await db.select().from(employeesTable).where(eq(employeesTable.tenantId, tenantId));
+  const employeeById = new Map(employees.map((e) => [e.id, e]));
+  const stores = await db.select().from(storesTable).where(eq(storesTable.tenantId, tenantId));
+  const storeByNameLower = new Map(stores.map((s) => [s.name.trim().toLowerCase(), s]));
+  const shifts = await db.select().from(workShiftsTable).where(eq(workShiftsTable.tenantId, tenantId));
+  const shiftByNameLower = new Map(shifts.map((s) => [s.name.trim().toLowerCase(), s]));
+
+  return raw.map((r, i) => {
+    const rowNum = i + 2; // linha 1 é cabeçalho
+    const idRaw = r[BULK_EMPLOYEE_HEADERS[0]];
+    const id = typeof idRaw === "number" ? idRaw : parseInt(String(idRaw ?? "").trim(), 10);
+    const errors: string[] = [];
+    if (!id || isNaN(id)) { errors.push("ID vazio ou inválido"); return { row: rowNum, id: null, employeeName: "", changes: [], errors, apply: null }; }
+    const emp = employeeById.get(id);
+    if (!emp) { errors.push(`Colaborador #${id} não encontrado`); return { row: rowNum, id, employeeName: "", changes: [], errors, apply: null }; }
+
+    const changes: Array<{ field: string; from: string; to: string }> = [];
+    const newRole = String(r[BULK_EMPLOYEE_HEADERS[2]] ?? "").trim().slice(0, 80);
+    if (newRole !== (emp.role ?? "")) changes.push({ field: "Cargo", from: emp.role ?? "(vazio)", to: newRole || "(vazio)" });
+    const newFunction = String(r[BULK_EMPLOYEE_HEADERS[3]] ?? "").trim().slice(0, 80);
+    if (newFunction !== (emp.jobFunction ?? "")) changes.push({ field: "Função", from: emp.jobFunction ?? "(vazio)", to: newFunction || "(vazio)" });
+
+    const storeNameRaw = String(r[BULK_EMPLOYEE_HEADERS[4]] ?? "").trim();
+    let newStoreId = emp.storeId;
+    if (storeNameRaw) {
+      const store = storeByNameLower.get(storeNameRaw.toLowerCase());
+      if (!store) { errors.push(`Loja "${storeNameRaw}" não encontrada`); }
+      else if (store.id !== emp.storeId) { newStoreId = store.id; changes.push({ field: "Loja", from: stores.find((s) => s.id === emp.storeId)?.name ?? "(vazio)", to: store.name }); }
+    } else if (emp.storeId != null) {
+      newStoreId = null;
+      changes.push({ field: "Loja", from: stores.find((s) => s.id === emp.storeId)?.name ?? "(vazio)", to: "(vazio)" });
+    }
+
+    const shiftNameRaw = String(r[BULK_EMPLOYEE_HEADERS[5]] ?? "").trim();
+    let newShiftId = emp.shiftId;
+    if (shiftNameRaw) {
+      const shift = shiftByNameLower.get(shiftNameRaw.toLowerCase());
+      if (!shift) { errors.push(`Escala "${shiftNameRaw}" não encontrada`); }
+      else if (shift.id !== emp.shiftId) { newShiftId = shift.id; changes.push({ field: "Escala", from: shifts.find((s) => s.id === emp.shiftId)?.name ?? "(vazio)", to: shift.name }); }
+    } else if (emp.shiftId != null) {
+      newShiftId = null;
+      changes.push({ field: "Escala", from: shifts.find((s) => s.id === emp.shiftId)?.name ?? "(vazio)", to: "(vazio)" });
+    }
+
+    return {
+      row: rowNum, id, employeeName: emp.name, changes, errors,
+      apply: errors.length === 0 ? { role: newRole || null, jobFunction: newFunction || null, storeId: newStoreId, shiftId: newShiftId } : null,
+    };
+  });
+}
+
+router.post("/rh-dp/bulk/employees/preview", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const fileBase64 = typeof req.body?.fileBase64 === "string" ? req.body.fileBase64 : "";
+  if (!fileBase64) { res.status(400).json({ error: "Envie o arquivo (fileBase64)" }); return; }
+  try {
+    const rows = await parseBulkEmployeeFile(fileBase64, tenantId);
+    const withErrors = rows.filter((r) => r.errors.length > 0).length;
+    const withChanges = rows.filter((r) => r.errors.length === 0 && r.changes.length > 0).length;
+    res.json({
+      rows: rows.map((r) => ({ row: r.row, id: r.id, employeeName: r.employeeName, changes: r.changes, errors: r.errors })),
+      totalRows: rows.length, withChanges, withErrors,
+    });
+  } catch {
+    res.status(400).json({ error: "Não consegui ler a planilha — confira se é o mesmo arquivo baixado (.xlsx)" });
+  }
+});
+
+router.post("/rh-dp/bulk/employees/apply", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const fileBase64 = typeof req.body?.fileBase64 === "string" ? req.body.fileBase64 : "";
+  if (!fileBase64) { res.status(400).json({ error: "Envie o arquivo (fileBase64)" }); return; }
+  let rows: BulkEmployeeRowResult[];
+  try {
+    rows = await parseBulkEmployeeFile(fileBase64, tenantId);
+  } catch {
+    res.status(400).json({ error: "Não consegui ler a planilha — confira se é o mesmo arquivo baixado (.xlsx)" });
+    return;
+  }
+  let applied = 0, skipped = 0;
+  for (const r of rows) {
+    if (r.errors.length > 0 || r.changes.length === 0 || r.id == null || !r.apply) { if (r.changes.length > 0) skipped++; continue; }
+    await db.update(employeesTable).set({
+      role: r.apply.role, jobFunction: r.apply.jobFunction, storeId: r.apply.storeId, shiftId: r.apply.shiftId,
+    }).where(and(eq(employeesTable.id, r.id), eq(employeesTable.tenantId, tenantId)));
+    applied++;
+  }
+  res.json({ applied, skipped, totalRows: rows.length });
 });
 
 // ── Configuração: linha oficial de check-in de ponto por WhatsApp ──────────

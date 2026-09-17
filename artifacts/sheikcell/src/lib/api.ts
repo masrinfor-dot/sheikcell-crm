@@ -2674,6 +2674,26 @@ export const api = {
         timeBankExpiredEmployees: number; timeBankExpiredMinutesTotal: number;
       };
     }>("/rh-dp/dashboard-summary"),
+    // Ações em lote (pedido 17/09, análise Tangerino): exporta planilha
+    // filtrada, importa de volta em 2 passos (preview → apply).
+    bulk: {
+      exportUrl: (params?: { role?: string | null; storeId?: number | null; shiftId?: number | null; isActive?: boolean }) => {
+        const qs = new URLSearchParams();
+        if (params?.role) qs.set("role", params.role);
+        if (params?.storeId) qs.set("storeId", String(params.storeId));
+        if (params?.shiftId) qs.set("shiftId", String(params.shiftId));
+        if (params?.isActive === false) qs.set("isActive", "false");
+        const qsStr = qs.toString();
+        return `${API_BASE}/rh-dp/bulk/employees/export${qsStr ? `?${qsStr}` : ""}`;
+      },
+      preview: (fileBase64: string) => req<{
+        rows: Array<{ row: number; id: number | null; employeeName: string; changes: Array<{ field: string; from: string; to: string }>; errors: string[] }>;
+        totalRows: number; withChanges: number; withErrors: number;
+      }>("/rh-dp/bulk/employees/preview", { method: "POST", body: JSON.stringify({ fileBase64 }) }),
+      apply: (fileBase64: string) => req<{ applied: number; skipped: number; totalRows: number }>(
+        "/rh-dp/bulk/employees/apply", { method: "POST", body: JSON.stringify({ fileBase64 }) },
+      ),
+    },
     employees: {
       list: () => req<Employee[]>("/rh-dp/employees"),
       create: (data: Partial<Employee>) => req<Employee>("/rh-dp/employees", { method: "POST", body: JSON.stringify(data) }),
