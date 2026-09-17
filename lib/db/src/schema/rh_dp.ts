@@ -140,6 +140,31 @@ export const timeClockEntriesTable = pgTable("time_clock_entries", {
   flagReason: text("flag_reason"),
 });
 
+// Auditoria de ajustes de ponto (pedido 17/09, análise Tangerino "Motivos de
+// ajustes nos pontos" + "Coleta de pontos originais"): antes, editar ou
+// apagar uma batida em PUT /rh-dp/employees/:id/day ou DELETE
+// /rh-dp/time-clock-entries/:id sobrescrevia/apagava direto, sem pedir
+// motivo e sem guardar o valor original — só ficava "source: admin" na
+// própria batida, sem rastro de quem/quando/por quê nem do horário de
+// antes. Cada edição ou exclusão de uma batida JÁ EXISTENTE agora grava uma
+// linha aqui antes de mudar o dado (ver rhDp.ts) — criar uma batida que
+// ainda não existia continua sem exigir motivo (não é "ajuste", é só
+// completar um lançamento que faltava). entryId fica null quando a ação foi
+// "delete" (a batida em si não existe mais pra referenciar).
+export const timeClockEntryEditsTable = pgTable("time_clock_entry_edits", {
+  tenantId: integer("tenant_id").notNull().default(1),
+  id: serial("id").primaryKey(),
+  employeeId: integer("employee_id").notNull(),
+  entryId: integer("entry_id"),
+  kind: text("kind").notNull(), // "in" | "break_start" | "break_end" | "out"
+  action: text("action").notNull(), // "edit" | "delete"
+  previousAt: timestamp("previous_at", { withTimezone: true }).notNull(),
+  newAt: timestamp("new_at", { withTimezone: true }), // null quando action="delete"
+  reason: text("reason").notNull(),
+  editedByUserId: integer("edited_by_user_id").notNull(),
+  editedAt: timestamp("edited_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const timeBankAdjustmentsTable = pgTable("time_bank_adjustments", {
   tenantId: integer("tenant_id").notNull().default(1),
   id: serial("id").primaryKey(),
@@ -348,6 +373,7 @@ export const terminationProcessesTable = pgTable("termination_processes", {
 export type Employee = typeof employeesTable.$inferSelect;
 export type WorkShift = typeof workShiftsTable.$inferSelect;
 export type TimeClockEntry = typeof timeClockEntriesTable.$inferSelect;
+export type TimeClockEntryEdit = typeof timeClockEntryEditsTable.$inferSelect;
 export type TimeBankAdjustment = typeof timeBankAdjustmentsTable.$inferSelect;
 export type LeaveRecord = typeof leaveRecordsTable.$inferSelect;
 export type VacationRequest = typeof vacationRequestsTable.$inferSelect;

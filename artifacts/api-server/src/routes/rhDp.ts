@@ -2,7 +2,7 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import {
   db, employeesTable, workShiftsTable, timeClockEntriesTable, timeBankAdjustmentsTable, leaveRecordsTable,
   timeBankClosuresTable, usersTable, storesTable, tenantsTable, vacationRequestsTable, timesheetSignaturesTable,
-  holidaysTable, terminationProcessesTable,
+  holidaysTable, terminationProcessesTable, timeClockEntryEditsTable, employeeDocumentsTable,
 } from "@workspace/db";
 import { eq, and, desc, asc, gte, lte, inArray, sql } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireTenant, tenantIdOf } from "../middlewares/auth";
@@ -1053,11 +1053,12 @@ router.put("/rh-dp/employees/:id/day", requireModuleAccess("rh"), async (req, re
   const employee = await getEmployee(employeeId, tenantId);
   if (!employee) { res.status(404).json({ error: "Colaborador não encontrado" }); return; }
 
-  const b = (req.body ?? {}) as { date?: string } & Partial<Record<PunchKind, string | null>>;
+  const b = (req.body ?? {}) as { date?: string; reason?: string } & Partial<Record<PunchKind, string | null>>;
   if (typeof b.date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(b.date)) {
     res.status(400).json({ error: "Data inválida (use YYYY-MM-DD)" }); return;
   }
   const date = b.date;
+  const reason = typeof b.reason === "string" ? b.reason.trim().slice(0, 500) : "";
 
   // Valida formato de cada horário informado.
   for (const k of PUNCH_KINDS) {
@@ -1090,6 +1091,24 @@ router.put("/rh-dp/employees/:id/day", requireModuleAccess("rh"), async (req, re
       lte(timeClockEntriesTable.at, dayEnd),
     ));
 
+  // Auditoria de ajustes (pedido 17/09, análise Tangerino): editar ou apagar
+  // uma batida JÁ EXISTENTE exige motivo e grava o valor original em
+  // time_clock_entry_edits ANTES de mudar o dado — ver comentário no schema.
+  // Criar uma batida que ainda não existia (existingForKind vazio) continua
+  // sem exigir motivo, não é um "ajuste".
+  const willTouchExisting = PUNCH_KINDS.some((k) => {
+    const v = b[k];
+    const existingForKind = existing.filter((e) => e.kind === k);
+    if (existingForKind.length === 0) return false;
+    if (v == null || v === "") return true; // vai apagar uma batida existente
+    const newAt = new Date(`${date}T${v}:00-03:00`).getTime();
+    return existingForKind.some((e) => e.at.getTime() !== newAt) || existingForKind.length > 1;
+  });
+  if (willTouchExisting && !reason) {
+    res.status(400).json({ error: "Informe o motivo do ajuste (batida já existente sendo alterada ou removida)" });
+    return;
+  }
+
   const result: Partial<Record<PunchKind, string>> = {};
   for (const k of PUNCH_KINDS) {
     const v = b[k];
@@ -1098,6 +1117,10 @@ router.put("/rh-dp/employees/:id/day", requireModuleAccess("rh"), async (req, re
     if (v == null || v === "") {
       // Seção não informada/limpa: remove qualquer batida existente desse tipo no dia.
       if (existingForKind.length > 0) {
+        await db.insert(timeClockEntryEditsTable).values(existingForKind.map((e) => ({
+          tenantId, employeeId, entryId: null, kind: k, action: "delete" as const,
+          previousAt: e.at, newAt: null, reason, editedByUserId: req.session.userId!,
+        })));
         await db.delete(timeClockEntriesTable).where(and(
           eq(timeClockEntriesTable.tenantId, tenantId),
           inArray(timeClockEntriesTable.id, existingForKind.map((e) => e.id)),
@@ -1111,10 +1134,20 @@ router.put("/rh-dp/employees/:id/day", requireModuleAccess("rh"), async (req, re
       // Atualiza a primeira batida desse tipo no dia; qualquer duplicata
       // extra (não deveria existir, mas por segurança) é removida.
       const [first, ...rest] = existingForKind;
+      if (first!.at.getTime() !== at.getTime()) {
+        await db.insert(timeClockEntryEditsTable).values({
+          tenantId, employeeId, entryId: first!.id, kind: k, action: "edit",
+          previousAt: first!.at, newAt: at, reason, editedByUserId: req.session.userId!,
+        });
+      }
       await db.update(timeClockEntriesTable)
         .set({ at, source: "admin", createdByUserId: req.session.userId })
         .where(and(eq(timeClockEntriesTable.id, first!.id), eq(timeClockEntriesTable.tenantId, tenantId)));
       if (rest.length > 0) {
+        await db.insert(timeClockEntryEditsTable).values(rest.map((e) => ({
+          tenantId, employeeId, entryId: null, kind: k, action: "delete" as const,
+          previousAt: e.at, newAt: null, reason, editedByUserId: req.session.userId!,
+        })));
         await db.delete(timeClockEntriesTable).where(and(
           eq(timeClockEntriesTable.tenantId, tenantId),
           inArray(timeClockEntriesTable.id, rest.map((e) => e.id)),
@@ -1139,6 +1172,18 @@ router.delete("/rh-dp/time-clock-entries/:id", requireModuleAccess("rh"), async 
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  // Auditoria de ajustes (pedido 17/09): motivo obrigatório + guarda o valor
+  // original antes de apagar (mesmo mecanismo de PUT .../day, ver lá).
+  const reasonRaw = typeof req.query.reason === "string" ? req.query.reason : (req.body as { reason?: string } | undefined)?.reason;
+  const reason = typeof reasonRaw === "string" ? reasonRaw.trim().slice(0, 500) : "";
+  if (!reason) { res.status(400).json({ error: "Informe o motivo do ajuste" }); return; }
+  const [entry] = await db.select().from(timeClockEntriesTable)
+    .where(and(eq(timeClockEntriesTable.id, id), eq(timeClockEntriesTable.tenantId, tenantId)));
+  if (!entry) { res.status(404).json({ error: "Batida não encontrada" }); return; }
+  await db.insert(timeClockEntryEditsTable).values({
+    tenantId, employeeId: entry.employeeId, entryId: null, kind: entry.kind, action: "delete",
+    previousAt: entry.at, newAt: null, reason, editedByUserId: req.session.userId!,
+  });
   await db.delete(timeClockEntriesTable).where(and(eq(timeClockEntriesTable.id, id), eq(timeClockEntriesTable.tenantId, tenantId)));
   res.json({ ok: true });
 });
@@ -1684,6 +1729,183 @@ router.get("/rh-dp/reports/leaves", requireModuleAccess("rh"), async (req, res):
       gte(leaveRecordsTable.endDate, fromStr),
     ))
     .orderBy(desc(leaveRecordsTable.startDate));
+  res.json(rows);
+});
+
+// ── Relatórios novos (pedido 17/09, análise Tangerino — "nossa base de
+// relatórios está muito simples ainda") ────────────────────────────────────
+
+// Motivos de ajuste: histórico de toda edição/exclusão de batida já
+// existente (ver time_clock_entry_edits, gravado em PUT .../day e DELETE
+// .../time-clock-entries/:id). Equivalente ao "Motivos de ajustes nos
+// pontos" + "Coleta de pontos originais" do Tangerino — aqui já sai junto
+// (o valor original fica em previousAt, o novo em newAt).
+router.get("/rh-dp/reports/entry-edits", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const range = parseDateRange(req, res); if (!range) return;
+  const rows = await db.select({
+    id: timeClockEntryEditsTable.id,
+    employeeId: timeClockEntryEditsTable.employeeId,
+    employeeName: employeesTable.name,
+    kind: timeClockEntryEditsTable.kind,
+    action: timeClockEntryEditsTable.action,
+    previousAt: timeClockEntryEditsTable.previousAt,
+    newAt: timeClockEntryEditsTable.newAt,
+    reason: timeClockEntryEditsTable.reason,
+    editedByUserId: timeClockEntryEditsTable.editedByUserId,
+    editedByName: usersTable.name,
+    editedAt: timeClockEntryEditsTable.editedAt,
+  }).from(timeClockEntryEditsTable)
+    .leftJoin(employeesTable, eq(timeClockEntryEditsTable.employeeId, employeesTable.id))
+    .leftJoin(usersTable, eq(timeClockEntryEditsTable.editedByUserId, usersTable.id))
+    .where(and(
+      eq(timeClockEntryEditsTable.tenantId, tenantId),
+      gte(timeClockEntryEditsTable.editedAt, range.from),
+      lte(timeClockEntryEditsTable.editedAt, range.to),
+    ))
+    .orderBy(desc(timeClockEntryEditsTable.editedAt)).limit(2000);
+  res.json(rows);
+});
+
+// Sintético: um colaborador por linha, com os totais do período — resume o
+// que hoje só dá pra ver abrindo o banco de horas colaborador por
+// colaborador (equivalente ao relatório "Sintético" do Tangerino).
+router.get("/rh-dp/reports/synthetic", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const range = parseDateRange(req, res); if (!range) return;
+  const employees = await db.select().from(employeesTable)
+    .where(and(eq(employeesTable.tenantId, tenantId), eq(employeesTable.isActive, true)))
+    .orderBy(asc(employeesTable.name));
+  const rows = await Promise.all(employees.map(async (e) => {
+    const result = await computeTimeBank(e.id, tenantId, range.from, range.to);
+    const diasFalta = result.days.filter((d) => d.leaveKind === "falta_justificada" || d.leaveKind === "falta_injustificada").length;
+    const diasAtestado = result.days.filter((d) => d.leaveKind === "atestado").length;
+    const diasFerias = result.days.filter((d) => d.leaveKind === "ferias").length;
+    const diasIncompletos = result.days.filter((d) => !d.complete && !d.leaveKind && !d.holidayName).length;
+    return {
+      employeeId: e.id, employeeName: e.name,
+      workedMinutes: result.workedMinutes, expectedMinutes: result.expectedMinutes,
+      balanceMinutes: result.balanceMinutes, diasFalta, diasAtestado, diasFerias, diasIncompletos,
+    };
+  }));
+  res.json(rows);
+});
+
+// Faltas/Atrasos/Absenteísmo: uma linha por ocorrência no período — falta
+// (justificada/injustificada), atestado, atraso (batida de entrada além da
+// tolerância da escala) e dia incompleto sem afastamento registrado
+// ("ausência não registrada" — nem bateu ponto, nem tem afastamento lançado).
+router.get("/rh-dp/reports/attendance-issues", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const range = parseDateRange(req, res); if (!range) return;
+  const employees = await db.select().from(employeesTable)
+    .where(and(eq(employeesTable.tenantId, tenantId), eq(employeesTable.isActive, true)))
+    .orderBy(asc(employeesTable.name));
+  const shifts = await db.select().from(workShiftsTable).where(eq(workShiftsTable.tenantId, tenantId));
+  const shiftById = new Map(shifts.map((s) => [s.id, s]));
+  const rows: Array<{
+    employeeId: number; employeeName: string; date: string;
+    kind: "falta_justificada" | "falta_injustificada" | "atestado" | "atraso" | "ausencia_nao_registrada";
+    lateMinutes?: number;
+  }> = [];
+  for (const e of employees) {
+    const result = await computeTimeBank(e.id, tenantId, range.from, range.to);
+    const shift = e.shiftId ? shiftById.get(e.shiftId) : null;
+    const toleranceMinutes = shift?.toleranceMinutes ?? 0;
+    for (const d of result.days) {
+      if (d.leaveKind === "falta_justificada" || d.leaveKind === "falta_injustificada") {
+        rows.push({ employeeId: e.id, employeeName: e.name, date: d.date, kind: d.leaveKind });
+        continue;
+      }
+      if (d.leaveKind === "atestado") {
+        rows.push({ employeeId: e.id, employeeName: e.name, date: d.date, kind: "atestado" });
+        continue;
+      }
+      if (d.leaveKind || d.holidayName) continue; // férias/feriado: não é ocorrência
+      const firstIn = d.entries.find((en) => en.kind === "in");
+      if (firstIn && shift?.type === "fixed" && shift.startTime) {
+        const [sh, sm] = shift.startTime.split(":").map(Number);
+        const inDate = new Date(firstIn.at);
+        const inMinutes = inDate.getHours() * 60 + inDate.getMinutes();
+        const startMinutes = sh! * 60 + sm!;
+        const lateMinutes = inMinutes - startMinutes;
+        if (lateMinutes > toleranceMinutes) {
+          rows.push({ employeeId: e.id, employeeName: e.name, date: d.date, kind: "atraso", lateMinutes });
+        }
+      } else if (!firstIn && shift?.type === "fixed" && d.expectedMinutes > 0) {
+        rows.push({ employeeId: e.id, employeeName: e.name, date: d.date, kind: "ausencia_nao_registrada" });
+      }
+    }
+  }
+  rows.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  res.json(rows);
+});
+
+// Horas por loja: agregado do banco de horas do período, por loja — útil
+// pra comparar filiais (equivalente ao "Horas por local de trabalho" do
+// Tangerino, que lá é por setor; aqui usamos loja, que é o nosso conceito
+// equivalente de local físico de trabalho).
+router.get("/rh-dp/reports/hours-by-store", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const range = parseDateRange(req, res); if (!range) return;
+  const employees = await db.select({
+    id: employeesTable.id, storeId: employeesTable.storeId, storeName: storesTable.name,
+  }).from(employeesTable)
+    .leftJoin(storesTable, eq(employeesTable.storeId, storesTable.id))
+    .where(and(eq(employeesTable.tenantId, tenantId), eq(employeesTable.isActive, true)));
+  const byStore = new Map<string, { storeId: number | null; storeName: string; workedMinutes: number; expectedMinutes: number; employeeCount: number }>();
+  for (const e of employees) {
+    const result = await computeTimeBank(e.id, tenantId, range.from, range.to);
+    const key = String(e.storeId ?? "sem_loja");
+    const bucket = byStore.get(key) ?? { storeId: e.storeId, storeName: e.storeName ?? "Sem loja", workedMinutes: 0, expectedMinutes: 0, employeeCount: 0 };
+    bucket.workedMinutes += result.workedMinutes;
+    bucket.expectedMinutes += result.expectedMinutes;
+    bucket.employeeCount += 1;
+    byStore.set(key, bucket);
+  }
+  res.json([...byStore.values()].sort((a, b) => b.workedMinutes - a.workedMinutes));
+});
+
+// Colaboradores com foto: quem já tem a foto 3x4 cadastrada no banco de
+// arquivos (usada como referência pro reconhecimento facial) e quem ainda
+// não tem — facilita achar quem falta completar o cadastro.
+router.get("/rh-dp/reports/employees-with-photo", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const employees = await db.select({ id: employeesTable.id, name: employeesTable.name, storeId: employeesTable.storeId })
+    .from(employeesTable)
+    .where(and(eq(employeesTable.tenantId, tenantId), eq(employeesTable.isActive, true)))
+    .orderBy(asc(employeesTable.name));
+  const photoDocs = await db.select({ employeeId: employeeDocumentsTable.employeeId })
+    .from(employeeDocumentsTable)
+    .where(and(eq(employeeDocumentsTable.tenantId, tenantId), eq(employeeDocumentsTable.docType, "foto_3x4")));
+  const withPhoto = new Set(photoDocs.map((d) => d.employeeId));
+  res.json(employees.map((e) => ({ employeeId: e.id, employeeName: e.name, storeId: e.storeId, hasPhoto: withPhoto.has(e.id) })));
+});
+
+// Falhas de reconhecimento facial: batidas sinalizadas especificamente por
+// não bater com a foto de referência (ver checkFaceMatch em
+// lib/facialRecognition.ts) — subconjunto das batidas "flagged" em geral.
+router.get("/rh-dp/reports/facial-recognition-failures", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const range = parseDateRange(req, res); if (!range) return;
+  const rows = await db.select({
+    id: timeClockEntriesTable.id,
+    employeeId: timeClockEntriesTable.employeeId,
+    employeeName: employeesTable.name,
+    kind: timeClockEntriesTable.kind,
+    at: timeClockEntriesTable.at,
+    flagReason: timeClockEntriesTable.flagReason,
+    proofUrl: timeClockEntriesTable.proofUrl,
+  }).from(timeClockEntriesTable)
+    .leftJoin(employeesTable, eq(timeClockEntriesTable.employeeId, employeesTable.id))
+    .where(and(
+      eq(timeClockEntriesTable.tenantId, tenantId),
+      eq(timeClockEntriesTable.flagged, true),
+      sql`${timeClockEntriesTable.flagReason} LIKE 'Reconhecimento facial:%'`,
+      gte(timeClockEntriesTable.at, range.from),
+      lte(timeClockEntriesTable.at, range.to),
+    ))
+    .orderBy(desc(timeClockEntriesTable.at)).limit(1000);
   res.json(rows);
 });
 

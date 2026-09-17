@@ -2683,7 +2683,10 @@ export const api = {
         req<TimeClockEntry>(`/rh-dp/employees/${id}/punch`, { method: "POST", body: JSON.stringify(data) }),
       // Lança/edita/limpa o dia inteiro (até 4 seções) numa chamada só —
       // cada seção omitida/vazia remove a batida existente daquele tipo.
-      setDay: (id: number, data: { date: string; in?: string | null; break_start?: string | null; break_end?: string | null; out?: string | null }) =>
+      // reason (pedido 17/09, auditoria de ajustes): obrigatório só quando a
+      // chamada vai editar ou apagar uma batida JÁ EXISTENTE — o servidor
+      // recusa com 400 se faltar nesse caso; ignorado ao só criar batida nova.
+      setDay: (id: number, data: { date: string; in?: string | null; break_start?: string | null; break_end?: string | null; out?: string | null; reason?: string }) =>
         req<{ ok: boolean; date: string } & Partial<Record<"in" | "break_start" | "break_end" | "out", string>>>(
           `/rh-dp/employees/${id}/day`, { method: "PUT", body: JSON.stringify(data) },
         ),
@@ -2739,7 +2742,10 @@ export const api = {
       remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/contract-templates/${id}`, { method: "DELETE" }),
     },
     timeClockEntries: {
-      remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/time-clock-entries/${id}`, { method: "DELETE" }),
+      // reason obrigatório (pedido 17/09, auditoria de ajustes) — vai na
+      // query string porque DELETE não costuma levar corpo.
+      remove: (id: number, reason: string) =>
+        req<{ ok: boolean }>(`/rh-dp/time-clock-entries/${id}?${new URLSearchParams({ reason })}`, { method: "DELETE" }),
       // Admin conferiu uma batida sinalizada (duas fotos em pouco tempo via
       // WhatsApp) e decidiu manter como está — some da lista de pendências.
       review: (id: number) => req<TimeClockEntry>(`/rh-dp/time-clock-entries/${id}/review`, { method: "POST" }),
@@ -2836,6 +2842,35 @@ export const api = {
         req<TimeBankSummaryRow[]>(`/rh-dp/reports/time-bank-summary?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
       leaves: (from?: string, to?: string) =>
         req<LeaveRecord[]>(`/rh-dp/reports/leaves?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+      // 5 relatórios novos (pedido 17/09, análise Tangerino).
+      entryEdits: (from?: string, to?: string) =>
+        req<Array<{
+          id: number; employeeId: number; employeeName: string | null; kind: string; action: "edit" | "delete";
+          previousAt: string; newAt: string | null; reason: string;
+          editedByUserId: number; editedByName: string | null; editedAt: string;
+        }>>(`/rh-dp/reports/entry-edits?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+      synthetic: (from?: string, to?: string) =>
+        req<Array<{
+          employeeId: number; employeeName: string; workedMinutes: number; expectedMinutes: number;
+          balanceMinutes: number; diasFalta: number; diasAtestado: number; diasFerias: number; diasIncompletos: number;
+        }>>(`/rh-dp/reports/synthetic?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+      attendanceIssues: (from?: string, to?: string) =>
+        req<Array<{
+          employeeId: number; employeeName: string; date: string;
+          kind: "falta_justificada" | "falta_injustificada" | "atestado" | "atraso" | "ausencia_nao_registrada";
+          lateMinutes?: number;
+        }>>(`/rh-dp/reports/attendance-issues?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+      hoursByStore: (from?: string, to?: string) =>
+        req<Array<{ storeId: number | null; storeName: string; workedMinutes: number; expectedMinutes: number; employeeCount: number }>>(
+          `/rh-dp/reports/hours-by-store?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`,
+        ),
+      employeesWithPhoto: () =>
+        req<Array<{ employeeId: number; employeeName: string; storeId: number | null; hasPhoto: boolean }>>("/rh-dp/reports/employees-with-photo"),
+      facialRecognitionFailures: (from?: string, to?: string) =>
+        req<Array<{
+          id: number; employeeId: number; employeeName: string | null; kind: string; at: string;
+          flagReason: string | null; proofUrl: string | null;
+        }>>(`/rh-dp/reports/facial-recognition-failures?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
     },
     closures: {
       list: (month?: string) => req<TimeBankClosure[]>(`/rh-dp/closures?${new URLSearchParams({ ...(month ? { month } : {}) })}`),

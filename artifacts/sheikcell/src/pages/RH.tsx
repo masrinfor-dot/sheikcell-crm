@@ -13,7 +13,7 @@ import {
   Video, ChevronDown, ChevronUp, Save, Link2, UserSquare2, CalendarClock, Clock, Wallet, Pencil, Archive, PlayCircle,
   AlertTriangle, Image as ImageIcon, Smartphone, Printer, Star, Briefcase, Sparkles, MapPin,
   Upload, Download, FileText, FolderArchive, UserPlus, FileSignature, Eye, IdCard, RotateCcw, Palmtree,
-  ListChecks, Building2, LayoutDashboard, UserMinus, Bell,
+  ListChecks, Building2, LayoutDashboard, UserMinus, Bell, FileBarChart,
 } from "lucide-react";
 
 // Perfil comportamental (estilo DISC simplificado, 4 tipos definidos pelo
@@ -204,7 +204,7 @@ export default function RH() {
   const { user } = useAuth();
   const canEdit = canEditModule(user, "rh");
   const [group, setGroup] = useState<"recrutamento" | "dp">("recrutamento");
-  const [dpView, setDpView] = useState<"painel" | "colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos" | "ferias" | "feriados" | "fechamentos" | "demissoes">("painel");
+  const [dpView, setDpView] = useState<"painel" | "colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos" | "ferias" | "feriados" | "fechamentos" | "demissoes" | "relatorios">("painel");
 
   return (
     <div className="space-y-4">
@@ -238,6 +238,7 @@ export default function RH() {
               { key: "feriados", label: "Feriados", icon: CalendarClock },
               { key: "fechamentos", label: "Fechamentos", icon: Archive },
               { key: "demissoes", label: "Desligamentos", icon: UserMinus },
+              { key: "relatorios", label: "Relatórios", icon: FileBarChart },
             ] as const).map(({ key, label, icon: Icon }) => (
               <button key={key} onClick={() => setDpView(key)} data-testid={`button-dp-${key}`}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border ${dpView === key ? "bg-primary text-white border-primary" : "bg-white text-muted-foreground border-border"}`}>
@@ -255,6 +256,7 @@ export default function RH() {
           {dpView === "feriados" && <Feriados canEdit={canEdit} />}
           {dpView === "fechamentos" && <Fechamentos canEdit={canEdit} />}
           {dpView === "demissoes" && <Desligamentos canEdit={canEdit} />}
+          {dpView === "relatorios" && <RelatoriosDP />}
         </div>
       )}
     </div>
@@ -3001,6 +3003,7 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
   const [dayEditor, setDayEditor] = useState<{
     employeeId: number; date: string;
     in: string; break_start: string; break_end: string; out: string;
+    reason: string;
     saving: boolean;
   } | null>(null);
 
@@ -3013,7 +3016,9 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
 
   const removeEntry = async (id: number) => {
     if (!window.confirm("Excluir esta batida?")) return;
-    try { await api.rhDp.timeClockEntries.remove(id); load(); } catch { toast({ title: "Erro", variant: "destructive" }); }
+    const reason = window.prompt("Motivo da exclusão (obrigatório, fica registrado na auditoria):", "");
+    if (!reason || !reason.trim()) { toast({ title: "Informe o motivo da exclusão", variant: "destructive" }); return; }
+    try { await api.rhDp.timeClockEntries.remove(id, reason.trim()); load(); } catch { toast({ title: "Erro", variant: "destructive" }); }
   };
 
   // Admin conferiu uma batida sinalizada (duas fotos em pouco tempo via
@@ -3040,6 +3045,7 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
       employeeId: employeeId || employees[0]?.id || 0,
       date: todayStr(),
       in: "", break_start: "", break_end: "", out: "",
+      reason: "",
       saving: false,
     });
   };
@@ -3072,6 +3078,7 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
         break_start: dayEditor.break_start || null,
         break_end: dayEditor.break_end || null,
         out: dayEditor.out || null,
+        reason: dayEditor.reason.trim() || undefined,
       });
       setDayEditor(null);
       load();
@@ -3416,6 +3423,16 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
                   className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
               </label>
             </div>
+            <label className="text-xs block">
+              Motivo do ajuste
+              <input value={dayEditor.reason} onChange={(e) => setDayEditor({ ...dayEditor, reason: e.target.value })}
+                placeholder="Obrigatório se alterar/remover batida já lançada"
+                data-testid="input-day-editor-reason"
+                className="w-full mt-0.5 px-3 py-2 rounded-xl border border-border text-sm" />
+              <span className="text-[10px] text-muted-foreground">
+                Só é exigido quando o dia já tem alguma batida lançada sendo alterada ou removida — para uma batida nova (dia ainda em branco) pode deixar vazio.
+              </span>
+            </label>
             <button onClick={saveDayEditor} disabled={dayEditor.saving} data-testid="button-save-day"
               className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-primary text-white text-xs font-bold disabled:opacity-40">
               <Save className="w-3.5 h-3.5" /> {dayEditor.saving ? "Salvando..." : "Salvar dia"}
@@ -3702,6 +3719,289 @@ function BancoHoras({ canEdit }: { canEdit: boolean }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Relatórios (DP) ──────────────────────────────────────────────────────
+// 5 relatórios novos pedidos em 17/09 (análise Tangerino + auditoria de
+// pontos): Sintético, Faltas/Atrasos, Horas por setor/loja, Colaboradores
+// com foto + Falhas de reconhecimento facial, e o log de Auditoria de
+// ajustes (edição/exclusão de batidas) que passou a ser gravado agora.
+const ATTENDANCE_ISSUE_LABELS: Record<string, string> = {
+  falta_justificada: "Falta justificada",
+  falta_injustificada: "Falta injustificada",
+  atestado: "Atestado",
+  atraso: "Atraso",
+  ausencia_nao_registrada: "Ausência não registrada",
+};
+const ENTRY_KIND_LABELS: Record<string, string> = {
+  in: "Entrada",
+  break_start: "Início intervalo",
+  break_end: "Fim intervalo",
+  out: "Saída",
+};
+
+function RelatoriosDP() {
+  const [tab, setTab] = useState<"sintetico" | "faltas" | "setores" | "fotos" | "auditoria">("sintetico");
+  const [from, setFrom] = useState(firstOfMonthStr());
+  const [to, setTo] = useState(todayStr());
+
+  const TABS: { key: typeof tab; label: string }[] = [
+    { key: "sintetico", label: "Sintético" },
+    { key: "faltas", label: "Faltas/Atrasos" },
+    { key: "setores", label: "Horas por setor/loja" },
+    { key: "fotos", label: "Fotos e reconhecimento facial" },
+    { key: "auditoria", label: "Auditoria de ajustes" },
+  ];
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap gap-1.5">
+        {TABS.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setTab(t.key)}
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold border ${tab === t.key ? "bg-primary text-white border-primary" : "border-border text-muted-foreground"}`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <div className="shk-card p-4 flex flex-wrap gap-2 items-end">
+        <label className="text-xs">
+          De
+          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="block mt-0.5 px-3 py-1.5 rounded-xl border border-border text-xs" />
+        </label>
+        <label className="text-xs">
+          Até
+          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="block mt-0.5 px-3 py-1.5 rounded-xl border border-border text-xs" />
+        </label>
+      </div>
+
+      {tab === "sintetico" && <RelatorioSintetico from={from} to={to} />}
+      {tab === "faltas" && <RelatorioFaltas from={from} to={to} />}
+      {tab === "setores" && <RelatorioSetores from={from} to={to} />}
+      {tab === "fotos" && <RelatorioFotos from={from} to={to} />}
+      {tab === "auditoria" && <RelatorioAuditoria from={from} to={to} />}
+    </div>
+  );
+}
+
+function RelatorioSintetico({ from, to }: { from: string; to: string }) {
+  const [rows, setRows] = useState<Awaited<ReturnType<typeof api.rhDp.reports.synthetic>>>([]);
+  useEffect(() => { api.rhDp.reports.synthetic(`${from}T00:00:00`, `${to}T23:59:59`).then(setRows).catch(() => {}); }, [from, to]);
+
+  if (rows.length === 0) return <EmptyReportState />;
+  return (
+    <div className="shk-card overflow-x-auto">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-muted-foreground border-b border-border">
+            <th className="text-left py-2 px-3 font-semibold">Colaborador</th>
+            <th className="text-right py-2 px-3 font-semibold">Trabalhado</th>
+            <th className="text-right py-2 px-3 font-semibold">Esperado</th>
+            <th className="text-right py-2 px-3 font-semibold">Saldo</th>
+            <th className="text-right py-2 px-3 font-semibold">Faltas</th>
+            <th className="text-right py-2 px-3 font-semibold">Atestados</th>
+            <th className="text-right py-2 px-3 font-semibold">Férias</th>
+            <th className="text-right py-2 px-3 font-semibold">Incompletos</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.employeeId} className="border-b border-border/50 last:border-0">
+              <td className="py-2 px-3 font-semibold">{r.employeeName}</td>
+              <td className="py-2 px-3 text-right">{formatMinutes(r.workedMinutes)}</td>
+              <td className="py-2 px-3 text-right">{formatMinutes(r.expectedMinutes)}</td>
+              <td className={`py-2 px-3 text-right font-bold ${r.balanceMinutes < 0 ? "text-red-600" : "text-green-700"}`}>{formatMinutes(r.balanceMinutes)}</td>
+              <td className="py-2 px-3 text-right">{r.diasFalta || "-"}</td>
+              <td className="py-2 px-3 text-right">{r.diasAtestado || "-"}</td>
+              <td className="py-2 px-3 text-right">{r.diasFerias || "-"}</td>
+              <td className="py-2 px-3 text-right">{r.diasIncompletos || "-"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function RelatorioFaltas({ from, to }: { from: string; to: string }) {
+  const [rows, setRows] = useState<Awaited<ReturnType<typeof api.rhDp.reports.attendanceIssues>>>([]);
+  useEffect(() => { api.rhDp.reports.attendanceIssues(`${from}T00:00:00`, `${to}T23:59:59`).then(setRows).catch(() => {}); }, [from, to]);
+
+  if (rows.length === 0) return <EmptyReportState />;
+  return (
+    <div className="shk-card overflow-x-auto">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-muted-foreground border-b border-border">
+            <th className="text-left py-2 px-3 font-semibold">Data</th>
+            <th className="text-left py-2 px-3 font-semibold">Colaborador</th>
+            <th className="text-left py-2 px-3 font-semibold">Ocorrência</th>
+            <th className="text-right py-2 px-3 font-semibold">Atraso</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={`${r.employeeId}-${r.date}-${i}`} className="border-b border-border/50 last:border-0">
+              <td className="py-2 px-3">{new Date(`${r.date}T12:00:00`).toLocaleDateString("pt-BR")}</td>
+              <td className="py-2 px-3 font-semibold">{r.employeeName}</td>
+              <td className="py-2 px-3">
+                <span className={`px-1.5 py-0.5 rounded-full font-semibold ${r.kind === "falta_injustificada" || r.kind === "ausencia_nao_registrada" ? "bg-red-100 text-red-700" : r.kind === "atraso" ? "bg-amber-100 text-amber-700" : "bg-blue-100 text-blue-700"}`}>
+                  {ATTENDANCE_ISSUE_LABELS[r.kind] ?? r.kind}
+                </span>
+              </td>
+              <td className="py-2 px-3 text-right">{r.lateMinutes ? formatMinutes(r.lateMinutes) : "-"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function RelatorioSetores({ from, to }: { from: string; to: string }) {
+  const [rows, setRows] = useState<Awaited<ReturnType<typeof api.rhDp.reports.hoursByStore>>>([]);
+  useEffect(() => { api.rhDp.reports.hoursByStore(`${from}T00:00:00`, `${to}T23:59:59`).then(setRows).catch(() => {}); }, [from, to]);
+
+  if (rows.length === 0) return <EmptyReportState />;
+  return (
+    <div className="shk-card overflow-x-auto">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-muted-foreground border-b border-border">
+            <th className="text-left py-2 px-3 font-semibold">Loja/setor</th>
+            <th className="text-right py-2 px-3 font-semibold">Colaboradores</th>
+            <th className="text-right py-2 px-3 font-semibold">Trabalhado</th>
+            <th className="text-right py-2 px-3 font-semibold">Esperado</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.storeId ?? "sem-loja"} className="border-b border-border/50 last:border-0">
+              <td className="py-2 px-3 font-semibold">{r.storeName}</td>
+              <td className="py-2 px-3 text-right">{r.employeeCount}</td>
+              <td className="py-2 px-3 text-right">{formatMinutes(r.workedMinutes)}</td>
+              <td className="py-2 px-3 text-right">{formatMinutes(r.expectedMinutes)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function RelatorioFotos({ from, to }: { from: string; to: string }) {
+  const [photoRows, setPhotoRows] = useState<Awaited<ReturnType<typeof api.rhDp.reports.employeesWithPhoto>>>([]);
+  const [failRows, setFailRows] = useState<Awaited<ReturnType<typeof api.rhDp.reports.facialRecognitionFailures>>>([]);
+  useEffect(() => { api.rhDp.reports.employeesWithPhoto().then(setPhotoRows).catch(() => {}); }, []);
+  useEffect(() => { api.rhDp.reports.facialRecognitionFailures(`${from}T00:00:00`, `${to}T23:59:59`).then(setFailRows).catch(() => {}); }, [from, to]);
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h4 className="text-xs font-bold text-muted-foreground mb-1.5 px-1">Colaboradores sem foto 3x4 cadastrada</h4>
+        {photoRows.filter((r) => !r.hasPhoto).length === 0 ? (
+          <div className="shk-card p-4 text-center text-xs text-muted-foreground">Todos os colaboradores ativos têm foto cadastrada.</div>
+        ) : (
+          <div className="shk-card overflow-x-auto">
+            <table className="w-full text-xs">
+              <tbody>
+                {photoRows.filter((r) => !r.hasPhoto).map((r) => (
+                  <tr key={r.employeeId} className="border-b border-border/50 last:border-0">
+                    <td className="py-2 px-3 font-semibold">{r.employeeName}</td>
+                    <td className="py-2 px-3 text-right text-red-600 font-semibold">Sem foto</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+      <div>
+        <h4 className="text-xs font-bold text-muted-foreground mb-1.5 px-1">Falhas de reconhecimento facial no período</h4>
+        {failRows.length === 0 ? (
+          <EmptyReportState />
+        ) : (
+          <div className="shk-card overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-muted-foreground border-b border-border">
+                  <th className="text-left py-2 px-3 font-semibold">Data/hora</th>
+                  <th className="text-left py-2 px-3 font-semibold">Colaborador</th>
+                  <th className="text-left py-2 px-3 font-semibold">Tipo</th>
+                  <th className="text-left py-2 px-3 font-semibold">Detalhe</th>
+                </tr>
+              </thead>
+              <tbody>
+                {failRows.map((r) => (
+                  <tr key={r.id} className="border-b border-border/50 last:border-0">
+                    <td className="py-2 px-3">{new Date(r.at).toLocaleString("pt-BR")}</td>
+                    <td className="py-2 px-3 font-semibold">{r.employeeName ?? "-"}</td>
+                    <td className="py-2 px-3">{ENTRY_KIND_LABELS[r.kind] ?? r.kind}</td>
+                    <td className="py-2 px-3 text-muted-foreground">{r.flagReason ?? "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RelatorioAuditoria({ from, to }: { from: string; to: string }) {
+  const [rows, setRows] = useState<Awaited<ReturnType<typeof api.rhDp.reports.entryEdits>>>([]);
+  useEffect(() => { api.rhDp.reports.entryEdits(`${from}T00:00:00`, `${to}T23:59:59`).then(setRows).catch(() => {}); }, [from, to]);
+
+  if (rows.length === 0) return <EmptyReportState />;
+  return (
+    <div className="shk-card overflow-x-auto">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-muted-foreground border-b border-border">
+            <th className="text-left py-2 px-3 font-semibold">Quando</th>
+            <th className="text-left py-2 px-3 font-semibold">Colaborador</th>
+            <th className="text-left py-2 px-3 font-semibold">Batida</th>
+            <th className="text-left py-2 px-3 font-semibold">Ação</th>
+            <th className="text-left py-2 px-3 font-semibold">De → Para</th>
+            <th className="text-left py-2 px-3 font-semibold">Motivo</th>
+            <th className="text-left py-2 px-3 font-semibold">Feito por</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.id} className="border-b border-border/50 last:border-0">
+              <td className="py-2 px-3">{new Date(r.editedAt).toLocaleString("pt-BR")}</td>
+              <td className="py-2 px-3 font-semibold">{r.employeeName ?? "-"}</td>
+              <td className="py-2 px-3">{ENTRY_KIND_LABELS[r.kind] ?? r.kind}</td>
+              <td className="py-2 px-3">
+                <span className={`px-1.5 py-0.5 rounded-full font-semibold ${r.action === "delete" ? "bg-red-100 text-red-700" : "bg-amber-100 text-amber-700"}`}>
+                  {r.action === "delete" ? "Exclusão" : "Edição"}
+                </span>
+              </td>
+              <td className="py-2 px-3 text-muted-foreground">
+                {new Date(r.previousAt).toLocaleString("pt-BR")}
+                {r.newAt ? ` → ${new Date(r.newAt).toLocaleString("pt-BR")}` : ""}
+              </td>
+              <td className="py-2 px-3">{r.reason}</td>
+              <td className="py-2 px-3">{r.editedByName ?? "-"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function EmptyReportState() {
+  return (
+    <div className="shk-card p-8 text-center text-muted-foreground">
+      <FileBarChart className="w-8 h-8 mx-auto mb-2 opacity-30" />
+      <p className="text-sm font-semibold">Nenhum registro no período</p>
     </div>
   );
 }
