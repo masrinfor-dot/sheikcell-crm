@@ -2845,19 +2845,35 @@ export default function ChatCenter({
     if (!activeConv) return;
     const targetSector = sectors.find((s) => s.id === targetSectorId);
     try {
+      // Transferir pra outro SETOR sempre limpa o responsável no backend (vira
+      // handoff: a conversa cai em Pendentes do setor novo pra alguém de lá
+      // assumir — ver comentário "isSectorTransfer" em PATCH /chat/conversations
+      // no backend). Ou seja, DEPOIS desta chamada a conversa NUNCA tem
+      // responsável — nem quando já tinha um antes. O endpoint de mensagem
+      // exige responsável ("Inicie o atendimento antes de enviar mensagens"),
+      // então o "insere mensagem de sistema" abaixo SEMPRE ia dar 409 aqui —
+      // e, sem try/catch próprio, isso derrubava a função inteira, mostrando
+      // "Erro ao transferir" mesmo quando a transferência de setor (a parte
+      // que importa) já tinha funcionado 100%. Mesma causa raiz já corrigida
+      // em handleTransferToUser (ver comentário lá em cima) — best-effort
+      // aqui também: registra a mensagem quando dá, mas nunca bloqueia nem
+      // finge que a transferência falhou.
       const updated = await api.chat.updateConversation(activeConv.id, { sectorId: targetSectorId });
       setConvs((prev) => prev.map((c) => c.id === activeConv.id ? { ...c, ...updated } : c));
-      // Insert system message locally to show the transfer in chat history
-      await api.chat.sendMessage(activeConv.id, `🔀 Conversa transferida para ${targetSector?.name ?? "outro setor"}`);
-      setMessages((prev: ChatMessage[]) => [...prev, {
-        id: Date.now(), conversationId: activeConv.id,
-        content: `🔀 Conversa transferida para ${targetSector?.name ?? "outro setor"}`,
-        direction: "outbound" as const, type: "system", status: "sent",
-        senderName: "Sistema", mediaUrl: null, transcript: null, externalId: null,
-        createdAt: new Date().toISOString(),
-      }]);
+      try {
+        await api.chat.sendMessage(activeConv.id, `🔀 Conversa transferida para ${targetSector?.name ?? "outro setor"}`);
+        setMessages((prev: ChatMessage[]) => [...prev, {
+          id: Date.now(), conversationId: activeConv.id,
+          content: `🔀 Conversa transferida para ${targetSector?.name ?? "outro setor"}`,
+          direction: "outbound" as const, type: "system", status: "sent",
+          senderName: "Sistema", mediaUrl: null, transcript: null, externalId: null,
+          createdAt: new Date().toISOString(),
+        }]);
+      } catch { /* best-effort — a transferência acima já valeu */ }
       toast({ title: `Transferido para ${targetSector?.name ?? "setor"}`, description: "Conversa enviada para Pendentes para aprovar o atendimento." });
-    } catch { toast({ title: "Erro ao transferir", variant: "destructive" }); }
+    } catch (err) {
+      toast({ title: "Erro ao transferir", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
     setShowTransferPicker(false);
   };
 
