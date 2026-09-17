@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo, Fragment } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, Fragment, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { api, can, ApiError, type Conversation, type ChatMessage, type PinnedMessage, type Sector, type ChatLabel, type ChatSavedFilter, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata, type CatalogCoupon } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -820,6 +820,34 @@ function IconTextCard({ icon: Icon, content }: { icon: typeof CreditCard; conten
   );
 }
 
+// ─── Linkify: deixa URLs dentro do texto da mensagem clicáveis (pedido 17/09:
+// "abrir link direto nos atendimentos") ─────────────────────────────────────
+// Cobre http(s):// e também "www.algo.com" sem protocolo (comum em mensagem
+// de cliente). Não altera o texto em si, só troca o trecho da URL por <a>;
+// o resto do texto continua igual (mesma quebra de linha, mesmo estilo).
+const URL_REGEX = /(https?:\/\/[^\s<]+[^\s<.,;:!?)"'\]]|www\.[^\s<]+[^\s<.,;:!?)"'\]])/gi;
+function linkifyText(text: string): ReactNode[] {
+  // Regex com grupo de captura: String.split devolve o texto alternado com
+  // os trechos capturados (índice ímpar = URL casada), sem precisar re-testar.
+  const parts = text.split(URL_REGEX);
+  if (parts.length <= 1) return [text];
+  return parts.map((part, i) => {
+    if (i % 2 === 0) return part ? <Fragment key={i}>{part}</Fragment> : null;
+    const href = part.startsWith("http") ? part : `https://${part}`;
+    return (
+      <a
+        key={i}
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="underline text-primary break-all hover:opacity-80"
+      >
+        {part}
+      </a>
+    );
+  });
+}
+
 // ─── Message bubble ─────────────────────────────────────────────────────────
 function MsgBubble({ msg, onReply, onForward, highlighted, onJumpTo, isGroup, onStartConversation, onReplyPrivately, currentUserId, isModerator, onEdit, onDelete, isPinned, onPin, onUnpin }: {
   msg: ChatMessage;
@@ -886,7 +914,7 @@ function MsgBubble({ msg, onReply, onForward, highlighted, onJumpTo, isGroup, on
             <span className="text-xs font-semibold text-amber-800">{msg.senderName ?? "Equipe"}</span>
             <span className="text-[10px] text-amber-700/70">· nota interna</span>
           </div>
-          <p className="text-sm text-amber-900 whitespace-pre-wrap break-words">{msg.content}</p>
+          <p className="text-sm text-amber-900 whitespace-pre-wrap break-words">{linkifyText(msg.content)}</p>
           <div className="text-right mt-1">
             <span className="text-[11px] text-amber-700/70">{msgTime(msg.createdAt)}</span>
           </div>
@@ -1070,7 +1098,7 @@ function MsgBubble({ msg, onReply, onForward, highlighted, onJumpTo, isGroup, on
           <>
             <MediaContent msg={msg} />
             {showCaption && (
-              <p className="text-sm text-gray-800 whitespace-pre-wrap break-words mt-1">{mediaCaption}</p>
+              <p className="text-sm text-gray-800 whitespace-pre-wrap break-words mt-1">{linkifyText(mediaCaption)}</p>
             )}
           </>
         ) : isMedia && !msg.mediaUrl ? (
@@ -1084,7 +1112,7 @@ function MsgBubble({ msg, onReply, onForward, highlighted, onJumpTo, isGroup, on
           </div>
         ) : (
           <>
-            <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">{msg.content}</p>
+            <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">{linkifyText(msg.content)}</p>
             {msg.metadata?.linkPreview && <LinkPreviewCard preview={msg.metadata.linkPreview} />}
           </>
         )}
