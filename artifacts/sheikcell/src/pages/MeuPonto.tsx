@@ -43,6 +43,15 @@ export default function MeuPonto() {
   const [sendingVacation, setSendingVacation] = useState(false);
   const [timesheetMonths, setTimesheetMonths] = useState<TimesheetMonth[]>([]);
   const [signingMonth, setSigningMonth] = useState<string | null>(null);
+  // Localização obrigatória (pedido 17/09) — tenant-wide, mesmo flag que o
+  // PontoGate.tsx lê de /rh-dp/me/clock-status. true até a resposta chegar
+  // (mais seguro: se a rede demorar, o comportamento de sempre continua
+  // valendo por padrão).
+  const [locationRequired, setLocationRequired] = useState(true);
+
+  useEffect(() => {
+    api.rhDp.me.clockStatus().then((s) => setLocationRequired(s.locationRequired)).catch(() => {});
+  }, []);
 
   const loadVacation = useCallback(() => {
     api.rhDp.me.vacation().then((r) => { setVacationDeadline(r.deadline); setVacationRequests(r.requests); }).catch(() => {});
@@ -122,7 +131,7 @@ export default function MeuPonto() {
   // (isento do gate) ou colaborador de escala flexível (gate nunca aparece).
   const nextIsIn = todayEntries.length === 0;
   const needsCapture = nextIsIn && !doneForToday && !loading && !notLinked && !!employee;
-  const { cam, geo, videoRef, ready, startCamera, startGeo, capture, captureWithoutPhoto, captureWithoutLocation, captureWithoutBoth, stop } = usePunchCapture(needsCapture);
+  const { cam, geo, videoRef, ready, startCamera, startGeo, capture, captureWithoutPhoto, captureWithoutLocation, captureWithoutBoth, stop } = usePunchCapture(needsCapture, locationRequired);
 
   const punch = async () => {
     if (punching) return;
@@ -202,7 +211,7 @@ export default function MeuPonto() {
 
         {needsCapture && (
           <div className="space-y-2">
-            <p className="text-[11px] text-muted-foreground">A entrada precisa de foto e localização</p>
+            <p className="text-[11px] text-muted-foreground">{locationRequired ? "A entrada precisa de foto e localização" : "A entrada precisa de foto"}</p>
             <div className="relative w-full aspect-[4/3] rounded-xl overflow-hidden bg-muted flex items-center justify-center">
               {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
               <video ref={videoRef} playsInline className={`w-full h-full object-cover ${cam.status === "ok" ? "" : "hidden"}`} />
@@ -217,16 +226,20 @@ export default function MeuPonto() {
                 </div>
               )}
             </div>
-            <div className="flex items-center justify-center gap-2 text-xs">
-              <MapPin className={`w-4 h-4 ${geo.status === "ok" ? "text-emerald-600" : geo.status === "error" ? "text-destructive" : "text-muted-foreground"}`} />
-              {geo.status === "loading" && <span className="text-muted-foreground">Obtendo localização...</span>}
-              {geo.status === "ok" && <span className="text-emerald-600 font-medium">Localização confirmada</span>}
-              {geo.status === "error" && (
-                <span className="text-destructive">
-                  {geo.error} <button onClick={startGeo} className="font-semibold underline" data-testid="button-meuponto-retry-geo">Tentar de novo</button>
-                </span>
-              )}
-            </div>
+            {/* Sem exigência de localização pro tenant, um erro de geo aqui
+                não deve alarmar — o botão "Bater ponto" já funciona sem ela. */}
+            {(locationRequired || geo.status !== "error") && (
+              <div className="flex items-center justify-center gap-2 text-xs">
+                <MapPin className={`w-4 h-4 ${geo.status === "ok" ? "text-emerald-600" : geo.status === "error" && locationRequired ? "text-destructive" : "text-muted-foreground"}`} />
+                {geo.status === "loading" && <span className="text-muted-foreground">Obtendo localização...</span>}
+                {geo.status === "ok" && <span className="text-emerald-600 font-medium">Localização confirmada</span>}
+                {geo.status === "error" && locationRequired && (
+                  <span className="text-destructive">
+                    {geo.error} <button onClick={startGeo} className="font-semibold underline" data-testid="button-meuponto-retry-geo">Tentar de novo</button>
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -244,7 +257,7 @@ export default function MeuPonto() {
           </button>
         )}
 
-        {needsCapture && geo.status === "error" && (
+        {needsCapture && geo.status === "error" && locationRequired && (
           <button onClick={punchWithoutLocation} disabled={punching} data-testid="button-meuponto-punch-no-location"
             className="w-full py-3 rounded-2xl bg-white border-2 border-primary text-primary font-bold text-sm disabled:opacity-40 flex items-center justify-center gap-2">
             {punching ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}

@@ -196,6 +196,10 @@ router.post("/rh-dp/me/punch", requireAuth, async (req, res): Promise<void> => {
   const { kind } = await resolveTodaysPunchKind(employee.id, tenantId, hasBreak);
   if (!kind) { res.status(409).json({ error: "Você já bateu todos os pontos de hoje." }); return; }
 
+  const [tenantRow] = await db.select({ pontoLocationRequired: tenantsTable.pontoLocationRequired })
+    .from(tenantsTable).where(eq(tenantsTable.id, tenantId));
+  const locationRequired = tenantRow?.pontoLocationRequired ?? true;
+
   // Batida de ENTRADA feita pelo próprio colaborador (é a que o PontoGate.tsx
   // exige logo ao abrir o sistema) precisa de geolocalização e de foto — MAS
   // as duas podem ser dispensadas se o navegador genuinamente não conseguir
@@ -227,7 +231,9 @@ router.post("/rh-dp/me/punch", requireAuth, async (req, res): Promise<void> => {
     const validLng = typeof rawLng === "number" && Number.isFinite(rawLng);
     const hasLocation = validLat && validLng;
     const locationSkipReason = typeof noLocationReason === "string" ? noLocationReason.trim().slice(0, 300) : "";
-    if (!hasLocation && !locationSkipReason) {
+    // Localização vira opcional quando a loja desliga a exigência (pedido
+    // 17/09) — nesse caso, sem ela e sem motivo nenhum, segue sem erro.
+    if (!hasLocation && !locationSkipReason && locationRequired) {
       res.status(400).json({ error: "Localização (ou o motivo de não conseguir obter) é obrigatória para bater o ponto de entrada." });
       return;
     }
@@ -287,7 +293,10 @@ router.post("/rh-dp/me/punch", requireAuth, async (req, res): Promise<void> => {
           }
         }
       }
-    } else {
+    } else if (locationRequired) {
+      // Via de escape (localização exigida, mas genuinamente indisponível):
+      // sinaliza pra revisão. Loja com a exigência desligada não sinaliza —
+      // ausência de localização já é esperada/aceita nesse caso.
       addFlag(`Sem localização (GPS/localização indisponível no aparelho do colaborador): ${locationSkipReason}`);
     }
   }
@@ -302,18 +311,24 @@ router.post("/rh-dp/me/punch", requireAuth, async (req, res): Promise<void> => {
 
 router.get("/rh-dp/me/clock-status", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  // Localização obrigatória (pedido 17/09) — devolvido sempre, independente
+  // do resto, pra PontoGate.tsx/MeuPonto.tsx saberem se devem exigir/
+  // bloquear por falta dela antes mesmo de saber se o gate vai aparecer.
+  const [tenantRow] = await db.select({ pontoLocationRequired: tenantsTable.pontoLocationRequired })
+    .from(tenantsTable).where(eq(tenantsTable.id, tenantId));
+  const locationRequired = tenantRow?.pontoLocationRequired ?? true;
   // Gate desligado temporariamente (ver CLOCK_IN_GATE_ENABLED acima) — não
   // mostra a tela cheia de bater ponto pra ninguém enquanto o RH está em reparo.
-  if (!CLOCK_IN_GATE_ENABLED) { res.json({ needsClockIn: false }); return; }
+  if (!CLOCK_IN_GATE_ENABLED) { res.json({ needsClockIn: false, locationRequired }); return; }
   // Admin nunca é obrigado a bater ponto, mesmo com cadastro de RH vinculado.
-  if (req.session.userRole === "admin") { res.json({ needsClockIn: false }); return; }
+  if (req.session.userRole === "admin") { res.json({ needsClockIn: false, locationRequired }); return; }
   const employee = await getEmployeeForUser(req.session.userId!, tenantId);
-  if (!employee) { res.json({ needsClockIn: false }); return; }
+  if (!employee) { res.json({ needsClockIn: false, locationRequired }); return; }
   const shift = employee.shiftId
     ? (await db.select().from(workShiftsTable).where(and(eq(workShiftsTable.id, employee.shiftId), eq(workShiftsTable.tenantId, tenantId))))[0] ?? null
     : null;
   const needsClockIn = await employeeNeedsClockInToday(employee.id, tenantId, shift);
-  res.json({ needsClockIn });
+  res.json({ needsClockIn, locationRequired });
 });
 
 router.get("/rh-dp/me/time-bank", requireAuth, async (req, res): Promise<void> => {
@@ -625,6 +640,7 @@ router.get("/rh-dp/settings", requireModuleAccess("rh"), async (req, res): Promi
     pontoReminderGraceMinutes: tenantsTable.pontoReminderGraceMinutes,
     pontoReminderMessageEntrada: tenantsTable.pontoReminderMessageEntrada,
     pontoReminderMessageSaida: tenantsTable.pontoReminderMessageSaida,
+    pontoLocationRequired: tenantsTable.pontoLocationRequired,
   }).from(tenantsTable).where(eq(tenantsTable.id, tenantId));
   res.json({
     pontoCheckInSessionKey: row?.pontoCheckInSessionKey ?? null,
@@ -637,6 +653,7 @@ router.get("/rh-dp/settings", requireModuleAccess("rh"), async (req, res): Promi
     pontoReminderGraceMinutes: row?.pontoReminderGraceMinutes ?? null,
     pontoReminderMessageEntrada: row?.pontoReminderMessageEntrada ?? null,
     pontoReminderMessageSaida: row?.pontoReminderMessageSaida ?? null,
+    pontoLocationRequired: row?.pontoLocationRequired ?? true,
   });
 });
 
@@ -648,6 +665,7 @@ router.patch("/rh-dp/settings", requireAdmin, async (req, res): Promise<void> =>
     timeBankValidityMonths?: number | null;
     pontoRemindersEnabled?: boolean; pontoReminderGraceMinutes?: number | null;
     pontoReminderMessageEntrada?: string | null; pontoReminderMessageSaida?: string | null;
+    pontoLocationRequired?: boolean;
   };
   const update: Record<string, unknown> = {};
   if ("pontoCheckInSessionKey" in b) {
@@ -676,6 +694,9 @@ router.patch("/rh-dp/settings", requireAdmin, async (req, res): Promise<void> =>
   if ("pontoReminderMessageSaida" in b) {
     update.pontoReminderMessageSaida = typeof b.pontoReminderMessageSaida === "string" ? b.pontoReminderMessageSaida.trim().slice(0, 500) || null : null;
   }
+  // Localização obrigatória na batida de entrada (pedido 17/09: "criar botão
+  // para desativar" a exigência) — ver comentário no schema (tenants.ts).
+  if ("pontoLocationRequired" in b) update.pontoLocationRequired = b.pontoLocationRequired !== false;
   const [updated] = await db.update(tenantsTable).set(update)
     .where(eq(tenantsTable.id, tenantId))
     .returning({
@@ -684,6 +705,7 @@ router.patch("/rh-dp/settings", requireAdmin, async (req, res): Promise<void> =>
       timeBankValidityMonths: tenantsTable.timeBankValidityMonths,
       pontoRemindersEnabled: tenantsTable.pontoRemindersEnabled, pontoReminderGraceMinutes: tenantsTable.pontoReminderGraceMinutes,
       pontoReminderMessageEntrada: tenantsTable.pontoReminderMessageEntrada, pontoReminderMessageSaida: tenantsTable.pontoReminderMessageSaida,
+      pontoLocationRequired: tenantsTable.pontoLocationRequired,
     });
   res.json(updated);
 });

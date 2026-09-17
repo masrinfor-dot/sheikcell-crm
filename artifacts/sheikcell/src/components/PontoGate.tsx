@@ -21,9 +21,13 @@ import { Clock, CheckCircle2, Loader2, Camera, MapPin, AlertTriangle } from "luc
 export default function PontoGate() {
   const { toast } = useToast();
   const [needsClockIn, setNeedsClockIn] = useState(false);
+  // Localização obrigatória (pedido 17/09) — tenant-wide, vem junto do
+  // clock-status. true até a resposta chegar (mais seguro: se a rede
+  // demorar, o comportamento de sempre continua valendo por padrão).
+  const [locationRequired, setLocationRequired] = useState(true);
   const [punching, setPunching] = useState(false);
   const [now, setNow] = useState(() => new Date());
-  const { cam, geo, videoRef, ready, startCamera, startGeo, capture, captureWithoutPhoto, captureWithoutLocation, captureWithoutBoth, stop } = usePunchCapture(needsClockIn);
+  const { cam, geo, videoRef, ready, startCamera, startGeo, capture, captureWithoutPhoto, captureWithoutLocation, captureWithoutBoth, stop } = usePunchCapture(needsClockIn, locationRequired);
 
   // Relógio ao vivo, só pra dar confiança de que o horário que vai ser
   // gravado é o de agora (mesma ideia do relógio que aparece na tela de
@@ -36,7 +40,7 @@ export default function PontoGate() {
   }, [needsClockIn]);
 
   const refresh = useCallback(() => {
-    api.rhDp.me.clockStatus().then((s) => setNeedsClockIn(s.needsClockIn)).catch(() => {});
+    api.rhDp.me.clockStatus().then((s) => { setNeedsClockIn(s.needsClockIn); setLocationRequired(s.locationRequired); }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -123,7 +127,9 @@ export default function PontoGate() {
         <div>
           <h3 className="font-bold">Bata o ponto para começar</h3>
           <p className="text-xs text-muted-foreground mt-1">
-            Tire uma foto e confirme sua localização para registrar a entrada de hoje.
+            {locationRequired
+              ? "Tire uma foto e confirme sua localização para registrar a entrada de hoje."
+              : "Tire uma foto para registrar a entrada de hoje."}
           </p>
           <p className="text-2xl font-bold tabular-nums mt-2" data-testid="text-ponto-gate-clock">
             {now.toLocaleTimeString("pt-BR")}
@@ -155,13 +161,19 @@ export default function PontoGate() {
           </button>
         )}
 
-        <div className="flex items-center justify-center gap-2 text-xs">
-          <MapPin className={`w-4 h-4 ${geo.status === "ok" ? "text-emerald-600" : geoError ? "text-destructive" : "text-muted-foreground"}`} />
-          {geo.status === "loading" && <span className="text-muted-foreground">Obtendo localização...</span>}
-          {geo.status === "ok" && <span className="text-emerald-600 font-medium">Localização confirmada</span>}
-          {geoError && <span className="text-destructive">{geo.error}</span>}
-        </div>
-        {geoError && (
+        {/* Se a localização não é obrigatória pro tenant, só mostra o status
+            quando ela deu certo (bônus informativo) ou ainda está
+            carregando — um erro aqui não deve alarmar ninguém, já que o
+            botão "Bater entrada" já funciona sem ela nesse caso. */}
+        {(locationRequired || geo.status !== "error") && (
+          <div className="flex items-center justify-center gap-2 text-xs">
+            <MapPin className={`w-4 h-4 ${geo.status === "ok" ? "text-emerald-600" : geoError && locationRequired ? "text-destructive" : "text-muted-foreground"}`} />
+            {geo.status === "loading" && <span className="text-muted-foreground">Obtendo localização...</span>}
+            {geo.status === "ok" && <span className="text-emerald-600 font-medium">Localização confirmada</span>}
+            {geoError && locationRequired && <span className="text-destructive">{geo.error}</span>}
+          </div>
+        )}
+        {geoError && locationRequired && (
           <button onClick={startGeo} className="text-xs font-semibold text-primary underline -mt-2" data-testid="button-ponto-gate-retry-geo">
             Tentar de novo
           </button>
@@ -187,7 +199,7 @@ export default function PontoGate() {
           </>
         )}
 
-        {geoError && (
+        {geoError && locationRequired && (
           <>
             <div className="flex items-start gap-2 text-left bg-amber-50 border border-amber-200 rounded-lg p-2 text-[11px] text-amber-800">
               <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />

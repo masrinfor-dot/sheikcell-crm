@@ -2628,13 +2628,17 @@ export const api = {
     me: {
       get: () => req<Employee>("/rh-dp/me"),
       punch: (data?:
-        | { photoBase64: string; mimetype: string; lat: number; lng: number; accuracyMeters?: number | null }
+        // lat/lng ausentes (sem noLocationReason) só é aceito pelo backend
+        // quando a loja desligou "localização obrigatória" (pedido 17/09,
+        // ver pontoLocationRequired) — com a exigência ligada (padrão), ou
+        // manda os dois ou usa noLocationReason abaixo.
+        | { photoBase64: string; mimetype: string; lat?: number; lng?: number; accuracyMeters?: number | null }
         // Entrada sem foto (câmera indisponível) — backend marca a batida
         // como `flagged` pra revisão do RH. Ver captureWithoutPhoto em
         // use-punch-capture.ts.
-        | { lat: number; lng: number; accuracyMeters?: number | null; noPhotoReason: string }
-        // Entrada sem localização (GPS/localização indisponível, pedido
-        // 17/09) — mesma ideia, ver captureWithoutLocation.
+        | { lat?: number; lng?: number; accuracyMeters?: number | null; noPhotoReason: string }
+        // Entrada sem localização (GPS/localização indisponível, exigência
+        // ligada) — mesma ideia, ver captureWithoutLocation.
         | { photoBase64: string; mimetype: string; noLocationReason: string }
         // Entrada sem foto E sem localização — ver captureWithoutBoth.
         | { noPhotoReason: string; noLocationReason: string }
@@ -2642,7 +2646,10 @@ export const api = {
         req<TimeClockEntry>("/rh-dp/me/punch", { method: "POST", body: data ? JSON.stringify(data) : undefined }),
       timeBank: (from?: string, to?: string) =>
         req<TimeBankResult>(`/rh-dp/me/time-bank?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
-      clockStatus: () => req<{ needsClockIn: boolean }>("/rh-dp/me/clock-status"),
+      // locationRequired (pedido 17/09): tenant-wide, sempre devolvido —
+      // PontoGate.tsx/MeuPonto.tsx usam pra saber se devem exigir/bloquear
+      // por falta de localização antes mesmo de bater o ponto.
+      clockStatus: () => req<{ needsClockIn: boolean; locationRequired: boolean }>("/rh-dp/me/clock-status"),
       vacation: () => req<{ deadline: VacationDeadline | null; requests: VacationRequest[] }>("/rh-dp/me/vacation"),
       requestVacation: (data: { startDate: string; endDate: string }) =>
         req<VacationRequest>("/rh-dp/me/vacation-requests", { method: "POST", body: JSON.stringify(data) }),
@@ -2744,6 +2751,8 @@ export const api = {
         // mensagens customizadas (null = texto padrão).
         pontoRemindersEnabled: boolean; pontoReminderGraceMinutes: number | null;
         pontoReminderMessageEntrada: string | null; pontoReminderMessageSaida: string | null;
+        // Localização obrigatória na batida de entrada (pedido 17/09).
+        pontoLocationRequired: boolean;
       }>("/rh-dp/settings"),
       update: (data: Partial<{
         pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean;
@@ -2751,6 +2760,7 @@ export const api = {
         timeBankValidityMonths: number | null;
         pontoRemindersEnabled: boolean; pontoReminderGraceMinutes: number | null;
         pontoReminderMessageEntrada: string | null; pontoReminderMessageSaida: string | null;
+        pontoLocationRequired: boolean;
       }>) =>
         req<{
           pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean;
@@ -2758,6 +2768,7 @@ export const api = {
           timeBankValidityMonths: number | null;
           pontoRemindersEnabled: boolean; pontoReminderGraceMinutes: number | null;
           pontoReminderMessageEntrada: string | null; pontoReminderMessageSaida: string | null;
+          pontoLocationRequired: boolean;
         }>("/rh-dp/settings", { method: "PATCH", body: JSON.stringify(data) }),
     },
     // Calendário de feriados (pedido 15/09, análise Tangerino) — abate o

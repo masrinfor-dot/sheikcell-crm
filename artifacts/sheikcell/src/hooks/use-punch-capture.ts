@@ -3,13 +3,16 @@ import { useState, useEffect, useCallback, useRef } from "react";
 export type CamState = { status: "idle" | "loading" | "ok" | "error"; error?: string };
 export type GeoState = { status: "idle" | "loading" | "ok" | "error"; lat?: number; lng?: number; accuracyMeters?: number; error?: string };
 
-// Câmera (selfie) + geolocalização exigidas na batida de ENTRADA (source
-// "self") — ver requirePhotoAndGeo / POST /rh-dp/me/punch em rhDp.ts.
-// Compartilhado entre PontoGate.tsx (gate obrigatório ao abrir o sistema) e
-// MeuPonto.tsx (quando a própria entrada é batida por ali, ex.: colaborador
-// de escala flexível ou admin, que não passam pelo gate mas ainda mandam
-// kind="in" — o backend exige os dois do mesmo jeito).
-export function usePunchCapture(active: boolean) {
+// Câmera (selfie) sempre exigida na batida de ENTRADA (source "self") — ver
+// POST /rh-dp/me/punch em rhDp.ts. Geolocalização é exigida por padrão, mas
+// pode ser desligada por loja (tenants.pontoLocationRequired, pedido
+// 17/09) — nesse caso `requireGeo=false` faz `ready`/`capture()` não
+// esperarem por ela (ainda é tentada e vai junto quando disponível, só não
+// bloqueia nem precisa de motivo quando falta). Compartilhado entre
+// PontoGate.tsx (gate obrigatório ao abrir o sistema) e MeuPonto.tsx (quando
+// a própria entrada é batida por ali, ex.: colaborador de escala flexível ou
+// admin, que não passam pelo gate mas ainda mandam kind="in").
+export function usePunchCapture(active: boolean, requireGeo: boolean = true) {
   const [cam, setCam] = useState<CamState>({ status: "idle" });
   const [geo, setGeo] = useState<GeoState>({ status: "idle" });
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -162,13 +165,20 @@ export function usePunchCapture(active: boolean) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
-  const ready = cam.status === "ok" && geo.status === "ok";
+  // Sem requireGeo, não espera a localização pra liberar o botão — ela ainda
+  // é tentada em paralelo (ver useEffect acima) e vai junto se resolver a
+  // tempo, só não é mais um requisito.
+  const ready = cam.status === "ok" && (!requireGeo || geo.status === "ok");
 
-  // Tira a foto do frame atual do <video> e monta o payload pro POST /rh-dp/me/punch.
-  // Retorna null se algo não estiver pronto (chamador não deveria chegar aqui
-  // com o botão de bater ponto desabilitado, mas confere de novo por segurança).
-  const capture = useCallback((): { photoBase64: string; mimetype: string; lat: number; lng: number; accuracyMeters: number | null } | null => {
-    if (!ready || !videoRef.current || geo.lat == null || geo.lng == null) return null;
+  // Tira a foto do frame atual do <video> e monta o payload pro POST
+  // /rh-dp/me/punch. Location só entra no payload se já tiver resolvido
+  // (geo.status === "ok") — com requireGeo=false isso é opcional, então o
+  // payload pode sair sem lat/lng nenhum (backend aceita quando a loja
+  // desligou a exigência). Retorna null se algo não estiver pronto (chamador
+  // não deveria chegar aqui com o botão desabilitado, mas confere de novo
+  // por segurança).
+  const capture = useCallback((): { photoBase64: string; mimetype: string; lat?: number; lng?: number; accuracyMeters?: number | null } | null => {
+    if (!ready || !videoRef.current) return null;
     const video = videoRef.current;
     const canvas = document.createElement("canvas");
     canvas.width = video.videoWidth || 480;
@@ -179,7 +189,11 @@ export function usePunchCapture(active: boolean) {
     const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
     const photoBase64 = dataUrl.split(",")[1] ?? "";
     if (!photoBase64) return null;
-    return { photoBase64, mimetype: "image/jpeg", lat: geo.lat, lng: geo.lng, accuracyMeters: geo.accuracyMeters ?? null };
+    const base = { photoBase64, mimetype: "image/jpeg" };
+    if (geo.status === "ok" && geo.lat != null && geo.lng != null) {
+      return { ...base, lat: geo.lat, lng: geo.lng, accuracyMeters: geo.accuracyMeters ?? null };
+    }
+    return base;
   }, [ready, geo]);
 
   // Via de escape pra quando a câmera genuinamente não funciona nesse

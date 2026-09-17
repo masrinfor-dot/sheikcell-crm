@@ -2876,6 +2876,10 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
   const [waSessions, setWaSessions] = useState<{ sessionKey: string; displayName: string | null; phoneNumber: string | null }[]>([]);
   const [checkInSessionKey, setCheckInSessionKey] = useState<string>("");
   const [facialRecognitionEnabled, setFacialRecognitionEnabled] = useState(false);
+  // Localização obrigatória na batida de entrada (pedido 17/09: "a opção de
+  // localização está dificultando alguns usuários" → "criar botão para
+  // desativar"). Default true (comportamento de sempre).
+  const [locationRequired, setLocationRequired] = useState(true);
   // Vencimento do banco de horas (pedido 15/09, análise Tangerino) — texto
   // livre pra deixar apagar o campo (vira null = sem vencimento).
   const [timeBankValidityMonths, setTimeBankValidityMonths] = useState<string>("");
@@ -2897,6 +2901,7 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
       setReminderGraceMinutes(s.pontoReminderGraceMinutes != null ? String(s.pontoReminderGraceMinutes) : "");
       setReminderMsgEntrada(s.pontoReminderMessageEntrada ?? "");
       setReminderMsgSaida(s.pontoReminderMessageSaida ?? "");
+      setLocationRequired(s.pontoLocationRequired);
     }).catch(() => {});
   }, []);
   const saveTimeBankValidity = async () => {
@@ -2929,6 +2934,18 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
       await api.rhDp.settings.update({ facialRecognitionEnabled: value });
       setFacialRecognitionEnabled(value);
       toast({ title: value ? "Reconhecimento facial ligado" : "Reconhecimento facial desligado" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+  const saveLocationRequired = async (value: boolean) => {
+    setSavingSettings(true);
+    try {
+      await api.rhDp.settings.update({ pontoLocationRequired: value });
+      setLocationRequired(value);
+      toast({ title: value ? "Localização obrigatória ligada" : "Localização obrigatória desligada" });
     } catch (err) {
       toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     } finally {
@@ -3050,6 +3067,25 @@ function PontoAdmin({ canEdit, isAdmin }: { canEdit: boolean; isAdmin: boolean }
 
   return (
     <div className="space-y-3">
+      <div className="shk-card p-4 space-y-1.5">
+        <p className="text-xs font-semibold flex items-center gap-1.5"><MapPin className="w-3.5 h-3.5 text-primary" /> Localização obrigatória na batida</p>
+        <p className="text-[11px] text-muted-foreground">
+          Ligado (padrão): a entrada exige localização — se o navegador genuinamente não conseguir obter (sem GPS,
+          permissão negada), o colaborador ainda consegue bater o ponto, mas fica sinalizado pra você revisar aqui
+          embaixo. Desligado: a localização deixa de ser exigida — o app ainda tenta capturar quando possível (útil
+          pro geofence da loja), mas nunca bloqueia nem sinaliza por faltar.
+        </p>
+        {isAdmin ? (
+          <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+            <input type="checkbox" checked={locationRequired} disabled={savingSettings}
+              onChange={(e) => saveLocationRequired(e.target.checked)} data-testid="checkbox-ponto-location-required" />
+            {locationRequired ? "Ligado" : "Desligado"}
+          </label>
+        ) : (
+          <p className="text-xs font-semibold">{locationRequired ? "Ligado" : "Desligado"} <span className="text-[11px] font-normal text-muted-foreground">· só admin altera</span></p>
+        )}
+      </div>
+
       <div className="shk-card p-4 space-y-1.5">
         <p className="text-xs font-semibold flex items-center gap-1.5"><Smartphone className="w-3.5 h-3.5 text-primary" /> Check-in de ponto por WhatsApp</p>
         <p className="text-[11px] text-muted-foreground">

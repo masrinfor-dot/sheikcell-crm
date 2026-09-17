@@ -109,6 +109,16 @@ export const tenantsTable = pgTable("tenants", {
   // colaborador.
   pontoReminderMessageEntrada: text("ponto_reminder_message_entrada"),
   pontoReminderMessageSaida: text("ponto_reminder_message_saida"),
+  // Localização obrigatória na batida de ENTRADA (pedido 17/09: "a opção de
+  // localização está dificultando alguns usuários de bater ponto" → "criar
+  // botão para desativar" a exigência). Default true (mantém o
+  // comportamento de sempre). Desligado: o app ainda tenta obter a
+  // localização (é útil pro geofence quando disponível), mas não bloqueia
+  // nem sinaliza a batida por faltar — vira dado opcional, igual sempre foi
+  // com a foto. Ligado: continua exigindo, com a via de escape existente
+  // (sinaliza `flagged` quando o navegador genuinamente não consegue obter —
+  // ver resolveTodaysPunchKind/POST /rh-dp/me/punch em rhDp.ts).
+  pontoLocationRequired: boolean("ponto_location_required").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
