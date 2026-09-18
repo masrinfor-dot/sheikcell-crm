@@ -1459,6 +1459,7 @@ export default function ChatCenter({
   useEffect(() => { notificationsRef.current = notifications; }, [notifications]);
   // Posição do painel de notificações (portal): ancora no sino no desktop.
   const bellBtnRef = useRef<HTMLButtonElement | null>(null);
+  const notifPanelRef = useRef<HTMLDivElement | null>(null);
   const [notifPanelPos, setNotifPanelPos] = useState<{ left: number; top: number } | null>(null);
   useEffect(() => {
     if (!showNotifications) { setNotifPanelPos(null); return; }
@@ -1475,11 +1476,32 @@ export default function ChatCenter({
     return () => window.removeEventListener("resize", place);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showNotifications]);
+  // Bug reportado (18/09): o painel não fechava sozinho — como ele é
+  // renderizado num portal (document.body), fica fora da árvore DOM do
+  // botão/container, então um <div className="relative"> com onBlur ou um
+  // useClickOutside de ref único não pega clique fora. Fecha explicitamente
+  // ao clicar/tocar fora do botão E fora do painel (os dois refs juntos).
+  useEffect(() => {
+    if (!showNotifications) return;
+    const handler = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as Node;
+      if (bellBtnRef.current?.contains(target)) return;
+      if (notifPanelRef.current?.contains(target)) return;
+      setShowNotifications(false);
+    };
+    document.addEventListener("mousedown", handler);
+    document.addEventListener("touchstart", handler);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("touchstart", handler);
+    };
+  }, [showNotifications]);
 
   // Painel "atendimento por número" (pedido 17/09) — mesmo padrão de posição
   // do painel de notificações acima (portal ancorado no botão, só desktop).
   const [showNumberPanel, setShowNumberPanel] = useState(false);
   const numberBtnRef = useRef<HTMLButtonElement | null>(null);
+  const numberPanelRef = useRef<HTMLDivElement | null>(null);
   const [numberPanelPos, setNumberPanelPos] = useState<{ left: number; top: number } | null>(null);
   useEffect(() => {
     if (!showNumberPanel) { setNumberPanelPos(null); return; }
@@ -1494,6 +1516,23 @@ export default function ChatCenter({
     window.addEventListener("resize", place);
     return () => window.removeEventListener("resize", place);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showNumberPanel]);
+  // Mesmo bug do painel de notificações acima (portal fora da árvore do
+  // botão) — fecha ao clicar/tocar fora do botão e fora do painel.
+  useEffect(() => {
+    if (!showNumberPanel) return;
+    const handler = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as Node;
+      if (numberBtnRef.current?.contains(target)) return;
+      if (numberPanelRef.current?.contains(target)) return;
+      setShowNumberPanel(false);
+    };
+    document.addEventListener("mousedown", handler);
+    document.addEventListener("touchstart", handler);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("touchstart", handler);
+    };
   }, [showNumberPanel]);
 
   // Alert preferences: play a sound and/or show a native browser notification for
@@ -3474,6 +3513,7 @@ export default function ChatCenter({
                   overflow-hidden do container do chat e não dava para ver. */}
               {showNotifications && createPortal(
                 <div
+                  ref={notifPanelRef}
                   data-testid="panel-notifications"
                   className="fixed inset-x-2 top-14 md:inset-x-auto md:w-96 z-[70] bg-white border border-border rounded-xl shadow-xl overflow-hidden"
                   style={notifPanelPos ?? undefined}
@@ -3573,6 +3613,7 @@ export default function ChatCenter({
                     o container da lista tem overflow-hidden e cortaria o painel. */}
                 {showNumberPanel && createPortal(
                   <div
+                    ref={numberPanelRef}
                     data-testid="panel-numbers"
                     className="fixed inset-x-2 top-14 md:inset-x-auto md:w-[300px] z-[70] bg-white border border-border rounded-xl shadow-xl overflow-hidden"
                     style={numberPanelPos ?? undefined}
