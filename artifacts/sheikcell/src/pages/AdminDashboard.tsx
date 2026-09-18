@@ -1769,7 +1769,7 @@ export default function AdminDashboard() {
                   <thead className="bg-secondary/50">
                     <tr>
                       {["Nome", "Email", "Setor", "Loja", "Perfil", "Status", ""].map((h, i) => (
-                        <th key={i} className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground">{h}</th>
+                        <th key={i} className={`text-left px-4 py-3 text-xs font-semibold text-muted-foreground ${i === 6 ? "sticky right-0 bg-secondary/50" : ""}`}>{h}</th>
                       ))}
                     </tr>
                   </thead>
@@ -1778,8 +1778,10 @@ export default function AdminDashboard() {
                       <tr key={u.id} className={i % 2 === 0 ? "bg-white" : "bg-secondary/20"} data-testid={`row-user-${u.id}`}>
                         <td className="px-4 py-3 font-medium">{u.name}</td>
                         <td className="px-4 py-3 text-muted-foreground">{u.email}</td>
-                        <td className="px-4 py-3 text-muted-foreground">
-                          {u.sectors?.length ? u.sectors.map((s) => s.name).join(", ") : (u.sector?.name ?? "—")}
+                        <td className="px-4 py-3 text-muted-foreground max-w-[220px]">
+                          <span className="block whitespace-normal break-words">
+                            {u.sectors?.length ? u.sectors.map((s) => s.name).join(", ") : (u.sector?.name ?? "—")}
+                          </span>
                         </td>
                         <td className="px-4 py-3 text-muted-foreground" data-testid={`user-store-${u.id}`}>{u.storeName || "—"}</td>
                         <td className="px-4 py-3">
@@ -1800,7 +1802,7 @@ export default function AdminDashboard() {
                             {u.isActive ? "Ativo" : "Inativo"}
                           </span>
                         </td>
-                        <td className="px-4 py-3">
+                        <td className={`px-4 py-3 sticky right-0 shadow-[-6px_0_6px_-4px_rgba(0,0,0,0.08)] ${i % 2 === 0 ? "bg-white" : "bg-secondary/20"}`}>
                           <div className="flex items-center gap-1">
                             <button onClick={() => openEditUser(u)} data-testid={`button-edit-user-${u.id}`}
                               className="p-1.5 text-muted-foreground hover:text-primary hover:bg-blue-50 rounded-lg transition">
