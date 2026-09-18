@@ -2415,6 +2415,13 @@ export const api = {
     importBaseValues: (rawText: string) =>
       req<{ imported: number; skipped: string[]; rows: TradeInBaseValue[] }>(
         "/trade-in/base-values/import", { method: "POST", body: JSON.stringify({ rawText }) }),
+    // Avaliação na vitrine pública: liga/desliga + limite de avaliações por
+    // IA (pedido 18/09) — só afeta a porta de entrada pública, a Avaliação
+    // de Usados dentro do CRM não depende disso.
+    publicSettings: () => req<{ publicTradeInEnabled: boolean; publicTradeInAiLimit: number | null }>("/trade-in/settings"),
+    savePublicSettings: (data: { publicTradeInEnabled?: boolean; publicTradeInAiLimit?: number | null }) =>
+      req<{ publicTradeInEnabled: boolean; publicTradeInAiLimit: number | null }>(
+        "/trade-in/settings", { method: "PATCH", body: JSON.stringify(data) }),
   },
   // Avaliação de usados PÚBLICA (vitrine, sem login) — ver tradeInPublicRouter.
   tradeInPublic: {
@@ -3114,6 +3121,7 @@ export const api = {
       req<{
         storeName: string; logoDataUrl: string | null; bannerImage: string | null;
         whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
+        tradeInEnabled: boolean;
         categories: CatalogCategory[]; products: CatalogPublicProduct[]; trustBadges: CatalogTrustBadge[]; paymentMethods: CatalogPaymentMethod[];
       }>(`/catalog-public/${slug}${code ? `?code=${encodeURIComponent(code)}` : ""}`),
     // Gera a lista de "Principais características" com IA — não salva nada

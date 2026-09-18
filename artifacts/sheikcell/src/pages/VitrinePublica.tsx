@@ -17,6 +17,9 @@ import { Carousel, CarouselContent, CarouselItem, CarouselPrevious, CarouselNext
 type PublicData = {
   storeName: string; logoDataUrl: string | null; bannerImage: string | null;
   whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
+  // Avaliação de usados desligada na vitrine pública (pedido 18/09) — esconde
+  // "Avalie seu usado" e "Trocar por este aparelho" quando false.
+  tradeInEnabled: boolean;
   categories: CatalogCategory[]; products: CatalogPublicProduct[]; trustBadges: CatalogTrustBadge[]; paymentMethods: CatalogPaymentMethod[];
 };
 
@@ -444,9 +447,12 @@ function ProductCard({
 // variando (primeiro escolhe a cor, depois só os armazenamentos daquela
 // cor aparecem pra escolher).
 function ProductDetailModal({
-  p, wholesaleUnlocked, slug, trustBadges, paymentMethods, onAddToCart, onClose,
+  p, wholesaleUnlocked, slug, trustBadges, paymentMethods, tradeInEnabled, onAddToCart, onClose,
 }: {
   p: CatalogPublicProduct; wholesaleUnlocked: boolean; slug: string; trustBadges: CatalogTrustBadge[]; paymentMethods: CatalogPaymentMethod[];
+  // Avaliação de usados desligada na vitrine pública (pedido 18/09) — esconde
+  // "Trocar por este aparelho (dar seu usado)" quando false.
+  tradeInEnabled: boolean;
   onAddToCart: (item: { productId: number; variantId: number; model: string; storage: string | null; unitPrice: number | null; wholesale: boolean }, qty: number) => void;
   onClose: () => void;
 }) {
@@ -803,7 +809,7 @@ function ProductDetailModal({
                   className="mt-2 inline-flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-neutral-900 text-white text-sm sm:text-base font-bold hover:bg-neutral-800 active:scale-[0.99] transition disabled:opacity-40">
                   <ShoppingCart className="w-4 h-4 sm:w-5 sm:h-5" /> Adicionar ao pedido
                 </button>
-                {!wholesaleUnlocked && (
+                {!wholesaleUnlocked && tradeInEnabled && (
                   <button type="button" disabled={!selected}
                     onClick={() => {
                       if (!selected) return;
@@ -1168,7 +1174,7 @@ export default function VitrinePublica() {
                 {data.wholesaleUnlocked ? "Atacado desbloqueado" : "Sou técnico/lojista"}
               </button>
             )}
-            {slug && (
+            {slug && data.tradeInEnabled && (
               <Link href={`/avaliar/${slug}`}
                 className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-neutral-900 text-white text-xs font-semibold hover:bg-neutral-800 transition shrink-0">
                 <Wallet className="w-4 h-4" /> Avalie seu usado
@@ -1430,6 +1436,7 @@ export default function VitrinePublica() {
           slug={slug}
           trustBadges={data.trustBadges}
           paymentMethods={data.paymentMethods}
+          tradeInEnabled={data.tradeInEnabled}
           onAddToCart={(item, qty) => { addToCart(item, qty); setDetailProduct(null); }}
           onClose={() => setDetailProduct(null)}
         />

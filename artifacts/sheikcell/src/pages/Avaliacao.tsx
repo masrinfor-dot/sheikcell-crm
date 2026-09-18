@@ -188,6 +188,18 @@ export default function Avaliacao() {
   // tenha sido desativada, uma avaliação antiga fechada com ela continua
   // mostrando o nome certo no histórico.
   const [stores, setStores] = useState<Store[]>([]);
+
+  // Avaliação na vitrine pública: liga/desliga + limite de avaliações por IA
+  // (pedido 18/09: "criar um botão para desativa as avaliações de celulares
+  // na vitrine, dentro do crm permanece, e um limite personalizável"). Só
+  // afeta a porta de entrada pública — a Avaliação de Usados aqui dentro do
+  // CRM nunca depende disso.
+  const [publicSettings, setPublicSettings] = useState<{ publicTradeInEnabled: boolean; publicTradeInAiLimit: number | null } | null>(null);
+  const [showPublicCfg, setShowPublicCfg] = useState(false);
+  const [cfgPublicEnabled, setCfgPublicEnabled] = useState(true);
+  const [cfgPublicAiLimit, setCfgPublicAiLimit] = useState("5");
+  const [savingPublicCfg, setSavingPublicCfg] = useState(false);
+
   const fetchBaseValues = () => { api.tradeIn.baseValues().then(setBaseValues).catch(() => {}); };
   const fetchHistory = () => { api.tradeIn.list().then(setHistory).catch(() => {}); };
   useEffect(() => {
@@ -196,6 +208,7 @@ export default function Avaliacao() {
     api.tradeIn.questions().then(setQConfig).catch(() => {});
     api.tradeIn.paymentMethods().then(setPaymentMethods).catch(() => {});
     api.stores.list(true).then(setStores).catch(() => {});
+    api.tradeIn.publicSettings().then(setPublicSettings).catch(() => {});
     fetchBaseValues();
   }, []);
   // Loja sugerida quando ninguém escolheu nada ainda: a própria loja do
@@ -1120,6 +1133,15 @@ ${photosHtml}
                     className="flex items-center gap-1 text-[11px] font-semibold text-primary">
                     <BadgeDollarSign className="w-3 h-3" /> Tabela de valores base (avaliação pública)
                   </button>
+                  <button onClick={() => {
+                      setCfgPublicEnabled(publicSettings?.publicTradeInEnabled ?? true);
+                      setCfgPublicAiLimit(String(publicSettings?.publicTradeInAiLimit ?? 5));
+                      setShowPublicCfg(true);
+                    }}
+                    data-testid="button-public-tradein-settings"
+                    className={`flex items-center gap-1 text-[11px] font-semibold ${publicSettings?.publicTradeInEnabled === false ? "text-red-600" : "text-primary"}`}>
+                    <Wallet className="w-3 h-3" /> Avaliação na vitrine{publicSettings?.publicTradeInEnabled === false ? " (desligada)" : ""}
+                  </button>
                 </div>
               )}
             </div>
@@ -1866,6 +1888,65 @@ ${photosHtml}
               data-testid="button-save-margins"
               className="w-full py-2.5 rounded-xl bg-primary text-white font-semibold text-sm disabled:opacity-50">
               {savingMargins ? "Salvando..." : "Salvar"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showPublicCfg && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowPublicCfg(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-sm p-6 shadow-xl space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold">Avaliação na vitrine pública</h3>
+              <button onClick={() => setShowPublicCfg(false)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Controla só a avaliação que o cliente final faz sozinho na vitrine pública (sem login). A Avaliação de Usados usada pela equipe aqui dentro do CRM não é afetada — continua funcionando normal mesmo desligada abaixo.
+            </p>
+            <label className="flex items-center gap-2.5 rounded-xl border border-border p-3 cursor-pointer hover:bg-secondary/50 transition">
+              <input type="checkbox" checked={cfgPublicEnabled} onChange={(e) => setCfgPublicEnabled(e.target.checked)}
+                data-testid="checkbox-public-tradein-enabled" className="w-4 h-4" />
+              <div>
+                <p className="text-sm font-semibold">Avaliação ativa na vitrine</p>
+                <p className="text-[11px] text-muted-foreground">Desligado: some o botão "Avalie seu usado" e "Trocar por este aparelho" pro cliente final.</p>
+              </div>
+            </label>
+            <div>
+              <p className="text-xs font-bold mb-1">Limite de avaliações por IA</p>
+              <p className="text-[11px] text-muted-foreground mb-1.5">
+                Quantas avaliações automáticas (aparelho fora da tabela de valores base) a mesma pessoa pode fazer por dia. Ao atingir, a vitrine pede pra ela deixar contato em vez de travar.
+              </p>
+              <div className="flex items-center gap-1.5">
+                <input type="number" min={1} max={200} value={cfgPublicAiLimit}
+                  onChange={(e) => setCfgPublicAiLimit(e.target.value)}
+                  data-testid="input-public-tradein-ai-limit"
+                  className="w-24 px-3 py-2 rounded-xl border border-border text-sm text-right" />
+                <span className="text-sm text-muted-foreground">por pessoa, a cada 24h</span>
+              </div>
+            </div>
+            <button
+              onClick={async () => {
+                const limit = Math.round(Number(cfgPublicAiLimit));
+                if (!Number.isFinite(limit) || limit < 1 || limit > 200) {
+                  toast({ title: "Limite inválido", description: "Use um número entre 1 e 200.", variant: "destructive" });
+                  return;
+                }
+                setSavingPublicCfg(true);
+                try {
+                  const saved = await api.tradeIn.savePublicSettings({ publicTradeInEnabled: cfgPublicEnabled, publicTradeInAiLimit: limit });
+                  setPublicSettings(saved);
+                  setShowPublicCfg(false);
+                  toast({ title: "Configuração salva! ✅" });
+                } catch (err) {
+                  toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+                } finally {
+                  setSavingPublicCfg(false);
+                }
+              }}
+              disabled={savingPublicCfg}
+              data-testid="button-save-public-tradein-settings"
+              className="w-full py-2.5 rounded-xl bg-primary text-white font-semibold text-sm disabled:opacity-50">
+              {savingPublicCfg ? "Salvando..." : "Salvar"}
             </button>
           </div>
         </div>

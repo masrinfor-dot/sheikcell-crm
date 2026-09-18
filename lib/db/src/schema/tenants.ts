@@ -132,6 +132,21 @@ export const tenantsTable = pgTable("tenants", {
   // acima deste (pra emergência em TODAS as lojas de uma vez) — as duas
   // chaves precisam estar "ligadas" pra trava valer.
   pontoObrigatorioEnabled: boolean("ponto_obrigatorio_enabled").notNull().default(true),
+  // Avaliação de usados na VITRINE PÚBLICA (pedido 18/09: "criar um botão
+  // para desativar as avaliações de celulares na vitrine, dentro do CRM
+  // permanece") — quando false, a vitrine pública (/vitrine/:slug e
+  // /avaliar/:slug) esconde o fluxo de avaliação pro cliente final e as
+  // rotas públicas (tradeInPublicRouter) passam a responder como se a
+  // avaliação não existisse. A Avaliação de Usados usada pelos vendedores
+  // DENTRO do CRM (módulo "avaliacao", rotas normais em routes/tradeIn.ts)
+  // não é afetada — continua funcionando normal, é só a porta de entrada
+  // pública que fecha. Default true (mantém o comportamento de sempre).
+  publicTradeInEnabled: boolean("public_trade_in_enabled").notNull().default(true),
+  // Limite de avaliações que caem na IA (sem match na tabela de valores
+  // base), por IP, a cada 24h, na vitrine pública — antes fixo em 5
+  // (PUBLIC_AI_LIMIT, ver routes/tradeIn.ts), agora editável por loja pelo
+  // mesmo pedido de 18/09. Null = usa o padrão de 5.
+  publicTradeInAiLimit: integer("public_trade_in_ai_limit"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

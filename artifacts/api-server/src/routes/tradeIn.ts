@@ -198,6 +198,42 @@ router.delete("/trade-in/payment-methods", requireAdmin, async (req, res): Promi
   res.json(DEFAULT_PAYMENT_METHODS);
 });
 
+// ─── Avaliação na vitrine pública: liga/desliga + limite de IA (18/09) ──────
+// Só afeta a porta de entrada PÚBLICA (vitrine/:slug, avaliar/:slug) — a
+// Avaliação de Usados usada pelos vendedores dentro do CRM (rotas acima,
+// todas atrás de requireAuth) nunca é afetada por isso. Ver comentário
+// completo em tenants.ts (publicTradeInEnabled/publicTradeInAiLimit).
+router.get("/trade-in/settings", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const [row] = await db.select({
+    publicTradeInEnabled: tenantsTable.publicTradeInEnabled,
+    publicTradeInAiLimit: tenantsTable.publicTradeInAiLimit,
+  }).from(tenantsTable).where(eq(tenantsTable.id, tenantId));
+  res.json({
+    publicTradeInEnabled: row?.publicTradeInEnabled ?? true,
+    publicTradeInAiLimit: row?.publicTradeInAiLimit ?? null,
+  });
+});
+
+router.patch("/trade-in/settings", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const b = (req.body ?? {}) as { publicTradeInEnabled?: boolean; publicTradeInAiLimit?: number | null };
+  const update: Record<string, unknown> = {};
+  if ("publicTradeInEnabled" in b) update.publicTradeInEnabled = b.publicTradeInEnabled !== false;
+  if ("publicTradeInAiLimit" in b) {
+    const v = b.publicTradeInAiLimit;
+    update.publicTradeInAiLimit = typeof v === "number" && Number.isFinite(v) && v >= 1
+      ? Math.round(Math.min(200, v)) : null;
+  }
+  const [updated] = await db.update(tenantsTable).set(update)
+    .where(eq(tenantsTable.id, tenantId))
+    .returning({
+      publicTradeInEnabled: tenantsTable.publicTradeInEnabled,
+      publicTradeInAiLimit: tenantsTable.publicTradeInAiLimit,
+    });
+  res.json(updated);
+});
+
 // ─── Tabela de valores base (lista fixa, pedido 06/09) ──────────────────────
 // Alimenta o cálculo determinístico da avaliação PÚBLICA (ver
 // tradeInPublicRouter mais abaixo): pra marca/modelo/armazenamento cadastrado
@@ -705,22 +741,26 @@ router.delete("/trade-in/:id", requireAuth, async (req, res): Promise<void> => {
 //    limite por IP (nunca por login, aqui não tem) — ver PUBLIC_AI_LIMIT.
 export const tradeInPublicRouter: IRouter = Router();
 
-const PUBLIC_AI_LIMIT = 5; // avaliações por IA, por IP, por 24h — best-effort (reseta a cada deploy)
+const DEFAULT_PUBLIC_AI_LIMIT = 5; // avaliações por IA, por IP, por 24h, quando a loja não personalizou (ver tenant.publicTradeInAiLimit) — best-effort (reseta a cada deploy)
 const PUBLIC_AI_WINDOW_MS = 24 * 60 * 60 * 1000;
 const publicAiCallsByIp = new Map<string, number[]>();
 
-function publicAiRateLimited(ip: string): boolean {
+function publicAiRateLimited(ip: string, limit: number): boolean {
   const now = Date.now();
   const calls = (publicAiCallsByIp.get(ip) ?? []).filter((t) => now - t < PUBLIC_AI_WINDOW_MS);
-  if (calls.length >= PUBLIC_AI_LIMIT) { publicAiCallsByIp.set(ip, calls); return true; }
+  if (calls.length >= limit) { publicAiCallsByIp.set(ip, calls); return true; }
   calls.push(now);
   publicAiCallsByIp.set(ip, calls);
   return false;
 }
 
+// Avaliação desligada pra vitrine pública (pedido 18/09, ver
+// tenant.publicTradeInEnabled) se comporta igual a módulo não contratado:
+// as rotas públicas somem, mas a Avaliação de Usados usada pelos vendedores
+// dentro do CRM (requireModuleAccess("avaliacao") lá em cima) não é tocada.
 async function tenantByPublicSlug(slug: string) {
   const [tenant] = await db.select().from(tenantsTable).where(eq(tenantsTable.catalogSlug, slug.toLowerCase())).limit(1);
-  if (!tenant || !tenant.isActive || !tenant.enabledModules.includes("avaliacao")) return null;
+  if (!tenant || !tenant.isActive || !tenant.enabledModules.includes("avaliacao") || !tenant.publicTradeInEnabled) return null;
   return tenant;
 }
 
@@ -793,7 +833,8 @@ tradeInPublicRouter.post("/trade-in-public/:slug/estimate", async (req: Request,
   const willUseTable = findBaseValueMatch(rows, fBrand, fModel, fMemory) != null;
   if (!willUseTable) {
     const ip = req.ip ?? "unknown";
-    if (publicAiRateLimited(ip)) {
+    const aiLimit = tenant.publicTradeInAiLimit ?? DEFAULT_PUBLIC_AI_LIMIT;
+    if (publicAiRateLimited(ip, aiLimit)) {
       res.status(429).json({ error: "Limite de avaliações automáticas atingido por hoje. Deixe seu contato abaixo que a loja avalia manualmente e retorna com um valor." });
       return;
     }

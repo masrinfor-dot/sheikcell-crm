@@ -2270,6 +2270,11 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
     whatsappWholesale: wholesaleUnlocked ? (tenant.catalogWhatsappWholesale ?? retailWa) : null,
     hasWholesale: !!tenant.catalogWholesaleCode,
     wholesaleUnlocked,
+    // Avaliação de usados desligada na vitrine pública (pedido 18/09, ver
+    // tenant.publicTradeInEnabled) — front esconde "Avalie seu usado" e
+    // "Trocar por este aparelho" quando false. A Avaliação de Usados usada
+    // pelos vendedores dentro do CRM não depende disso.
+    tradeInEnabled: tenant.enabledModules.includes("avaliacao") && tenant.publicTradeInEnabled,
     categories: categories.map((c) => ({ id: c.id, name: c.name, parentId: c.parentId, sortOrder: c.sortOrder })),
     // Selos de confiança/garantia customizados pela loja — mostrados uma vez
     // por página (ver getTrustBadges/DEFAULT_TRUST_BADGES acima).
