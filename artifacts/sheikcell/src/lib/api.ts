@@ -295,6 +295,25 @@ export type Store = {
   geofenceLat?: number | null;
   geofenceLng?: number | null;
   geofenceRadiusMeters?: number | null;
+  // "Pular fila" por palavra-chave (pedido 18/09) — se esta loja participa
+  // como candidata a receber conversa auto-atribuída por uma regra com
+  // skipQueue=true (ex.: xerox). Ver routingRules abaixo e skipQueueAssign.ts.
+  skipQueueEnabled?: boolean;
+};
+
+// Regras de roteamento automático por palavra-chave (pedido 18/09) — CRUD em
+// routes/routingRules.ts, motor de classificação em autoRouter.ts (backend).
+export type RoutingRule = {
+  id: number;
+  sectorId: number;
+  name: string;
+  keywords: string;
+  priority: number;
+  isActive: boolean;
+  // "Pular a fila" — quando true e a palavra-chave bate, tenta atribuir na
+  // hora a um vendedor ocioso do setor (das lojas com skipQueueEnabled),
+  // sem esperar assumir manualmente.
+  skipQueue: boolean;
 };
 
 // ─── Pagamentos entre Filiais ────────────────────────────────────────────────
@@ -3192,8 +3211,16 @@ export const api = {
   stores: {
     list: (all?: boolean) => req<Store[]>(`/stores${all ? "?all=1" : ""}`),
     create: (name: string) => req<Store>("/stores", { method: "POST", body: JSON.stringify({ name }) }),
-    update: (id: number, data: Partial<{ name: string; isActive: boolean; geofenceLat: number | null; geofenceLng: number | null; geofenceRadiusMeters: number | null }>) =>
+    update: (id: number, data: Partial<{ name: string; isActive: boolean; geofenceLat: number | null; geofenceLng: number | null; geofenceRadiusMeters: number | null; skipQueueEnabled: boolean }>) =>
       req<Store>(`/stores/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  },
+  routingRules: {
+    list: () => req<RoutingRule[]>("/routing-rules"),
+    create: (data: { sectorId: number; name: string; keywords: string; priority?: number; isActive?: boolean; skipQueue?: boolean }) =>
+      req<RoutingRule>("/routing-rules", { method: "POST", body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<{ sectorId: number; name: string; keywords: string; priority: number; isActive: boolean; skipQueue: boolean }>) =>
+      req<RoutingRule>(`/routing-rules/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/routing-rules/${id}`, { method: "DELETE" }),
   },
   teamStatus: {
     list: () => req<TeamStatusRow[]>("/admin/team-status"),

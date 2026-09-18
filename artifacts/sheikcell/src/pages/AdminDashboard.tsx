@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, PERMISSION_KEYS, PERMISSION_LABELS, MODULE_LABELS, USER_GRANTABLE_MODULES, OPTIONAL_MODULES, type SectorSummary, type AttendanceLog, type Sector, type QuickReply, type Store, type DashboardAttention, type InternalConversation, type OptionalModule, type UserGrantableModule, type UserModuleAccess, type ChatLabel, type EspiarLogEntry } from "@/lib/api";
+import { api, PERMISSION_KEYS, PERMISSION_LABELS, MODULE_LABELS, USER_GRANTABLE_MODULES, OPTIONAL_MODULES, type SectorSummary, type AttendanceLog, type Sector, type QuickReply, type Store, type RoutingRule, type DashboardAttention, type InternalConversation, type OptionalModule, type UserGrantableModule, type UserModuleAccess, type ChatLabel, type EspiarLogEntry } from "@/lib/api";
 import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
@@ -269,6 +269,72 @@ export default function AdminDashboard() {
     } catch { toast({ title: "Erro", variant: "destructive" }); }
     finally { setGeofenceSaving(false); }
   };
+  // "Pular fila" por palavra-chave (pedido 18/09, ex.: xerox) — loja
+  // participa como candidata a receber conversa auto-atribuída. Ver
+  // routing_rules abaixo e skipQueueAssign.ts (backend).
+  const toggleSkipQueueStore = async (s: Store) => {
+    try {
+      const upd = await api.stores.update(s.id, { skipQueueEnabled: !s.skipQueueEnabled });
+      setStores((prev) => prev.map((x) => x.id === s.id ? upd : x));
+    } catch (err) { toast({ title: err instanceof Error ? err.message : "Erro", variant: "destructive" }); }
+  };
+  const [routingRules, setRoutingRules] = useState<RoutingRule[]>([]);
+  const [newRule, setNewRule] = useState<{ name: string; keywords: string; sectorId: string; skipQueue: boolean }>({ name: "", keywords: "", sectorId: "", skipQueue: false });
+  const [editingRuleId, setEditingRuleId] = useState<number | null>(null);
+  const [editRuleForm, setEditRuleForm] = useState<{ name: string; keywords: string; sectorId: string; skipQueue: boolean }>({ name: "", keywords: "", sectorId: "", skipQueue: false });
+  const [savingRule, setSavingRule] = useState(false);
+  const createRule = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = newRule.name.trim();
+    const keywords = newRule.keywords.trim();
+    const sectorId = Number(newRule.sectorId);
+    if (!name || !keywords || !sectorId) {
+      toast({ title: "Preencha nome, palavras-chave e setor", variant: "destructive" });
+      return;
+    }
+    setSavingRule(true);
+    try {
+      const created = await api.routingRules.create({ sectorId, name, keywords, skipQueue: newRule.skipQueue });
+      setRoutingRules((prev) => [created, ...prev]);
+      setNewRule({ name: "", keywords: "", sectorId: "", skipQueue: false });
+    } catch (err) {
+      toast({ title: err instanceof Error ? err.message : "Erro ao criar regra", variant: "destructive" });
+    } finally { setSavingRule(false); }
+  };
+  const openEditRule = (r: RoutingRule) => {
+    setEditingRuleId(r.id);
+    setEditRuleForm({ name: r.name, keywords: r.keywords, sectorId: String(r.sectorId), skipQueue: r.skipQueue });
+  };
+  const saveEditRule = async (id: number) => {
+    const name = editRuleForm.name.trim();
+    const keywords = editRuleForm.keywords.trim();
+    const sectorId = Number(editRuleForm.sectorId);
+    if (!name || !keywords || !sectorId) {
+      toast({ title: "Preencha nome, palavras-chave e setor", variant: "destructive" });
+      return;
+    }
+    setSavingRule(true);
+    try {
+      const upd = await api.routingRules.update(id, { name, keywords, sectorId, skipQueue: editRuleForm.skipQueue });
+      setRoutingRules((prev) => prev.map((x) => x.id === id ? upd : x));
+      setEditingRuleId(null);
+    } catch (err) {
+      toast({ title: err instanceof Error ? err.message : "Erro ao salvar regra", variant: "destructive" });
+    } finally { setSavingRule(false); }
+  };
+  const toggleRuleActive = async (r: RoutingRule) => {
+    try {
+      const upd = await api.routingRules.update(r.id, { isActive: !r.isActive });
+      setRoutingRules((prev) => prev.map((x) => x.id === r.id ? upd : x));
+    } catch (err) { toast({ title: err instanceof Error ? err.message : "Erro", variant: "destructive" }); }
+  };
+  const deleteRule = async (r: RoutingRule) => {
+    if (!confirm(`Excluir a regra "${r.name}"?`)) return;
+    try {
+      await api.routingRules.remove(r.id);
+      setRoutingRules((prev) => prev.filter((x) => x.id !== r.id));
+    } catch (err) { toast({ title: err instanceof Error ? err.message : "Erro ao excluir regra", variant: "destructive" }); }
+  };
   const [userRows, setUserRows] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [waSessions, setWaSessions] = useState<WASession[] | null>(null);
@@ -414,10 +480,11 @@ export default function AdminDashboard() {
 
   const fetchUsersAndSectors = useCallback(async () => {
     try {
-      const [u, sec, st] = await Promise.all([api.admin.users.list(), api.sectors.listAll(), api.stores.list(true)]);
+      const [u, sec, st, rr] = await Promise.all([api.admin.users.list(), api.sectors.listAll(), api.stores.list(true), api.routingRules.list()]);
       setUserRows(u as UserRow[]);
       setSectors(sec);
       setStores(st);
+      setRoutingRules(rr);
     } catch { /* silent */ }
   }, []);
 
@@ -2122,9 +2189,116 @@ export default function AdminDashboard() {
                           {hasGeofence ? `Geofence do Ponto: raio ${s.geofenceRadiusMeters}m` : "Geofence do Ponto: não configurado"}
                         </button>
                       )}
+                      {/* "Pular fila" por palavra-chave (pedido 18/09, ex.:
+                          xerox) — vendedores desta loja entram na lista de
+                          candidatos a receber conversa auto-atribuída direto,
+                          sem esperar assumir manualmente. Ver regras abaixo. */}
+                      <button type="button" onClick={() => toggleSkipQueueStore(s)} data-testid={`button-skip-queue-${s.id}`}
+                        className={`text-[10px] font-semibold flex items-center gap-1 ${s.skipQueueEnabled ? "text-amber-600 hover:text-amber-700" : "text-muted-foreground hover:text-primary"}`}>
+                        <Zap className="w-3 h-3" />
+                        {s.skipQueueEnabled ? "Pular fila (xerox): ativado" : "Pular fila (xerox): desativado"}
+                      </button>
                     </div>
                     );
                   })}
+                </div>
+              )}
+            </div>
+
+            {/* ===== Regras de Roteamento por Palavra-chave ===== */}
+            <div className="flex items-center justify-between pt-4">
+              <h2 className="font-bold">Regras de Roteamento (palavra-chave)</h2>
+            </div>
+            <div className="shk-card p-4 space-y-3">
+              <p className="text-xs text-muted-foreground">
+                Quando uma mensagem nova bate com uma palavra-chave, a conversa vai direto pro setor escolhido.
+                Marcando <span className="font-semibold">Pular fila</span>, além de rotear ela já tenta atribuir na hora a um
+                vendedor livre desse setor (só considera vendedores de lojas com &quot;Pular fila (xerox)&quot; ativado, acima) —
+                sem sucesso, a conversa fica normal no setor pra qualquer um assumir.
+              </p>
+              <form className="grid sm:grid-cols-2 gap-2" onSubmit={createRule}>
+                <input value={newRule.name} onChange={(e) => setNewRule({ ...newRule, name: e.target.value })}
+                  placeholder="Nome da regra (ex.: Xerox)" data-testid="input-new-rule-name"
+                  className="px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                <select value={newRule.sectorId} onChange={(e) => setNewRule({ ...newRule, sectorId: e.target.value })}
+                  data-testid="select-new-rule-sector"
+                  className="px-3 py-2 rounded-xl border border-border text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary/30">
+                  <option value="">Setor de destino...</option>
+                  {activeSectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+                <input value={newRule.keywords} onChange={(e) => setNewRule({ ...newRule, keywords: e.target.value })}
+                  placeholder="Palavras-chave, separadas por vírgula (ex.: xerox, impressão)" data-testid="input-new-rule-keywords"
+                  className="sm:col-span-2 px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                <label className="flex items-center gap-2 text-xs font-medium">
+                  <input type="checkbox" checked={newRule.skipQueue} onChange={(e) => setNewRule({ ...newRule, skipQueue: e.target.checked })}
+                    data-testid="checkbox-new-rule-skip-queue" className="w-4 h-4 accent-[var(--primary)]" />
+                  Pular fila (auto-atribuir direto)
+                </label>
+                <button type="submit" disabled={savingRule} data-testid="button-add-rule"
+                  className="flex items-center justify-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition disabled:opacity-50">
+                  <Plus className="w-3.5 h-3.5" /> Cadastrar regra
+                </button>
+              </form>
+              {routingRules.length === 0 ? (
+                <p className="text-xs text-muted-foreground py-2">Nenhuma regra cadastrada ainda.</p>
+              ) : (
+                <div className="space-y-2">
+                  {routingRules.map((r) => (
+                    <div key={r.id} className="rounded-xl border border-border px-3 py-2 space-y-1.5" data-testid={`rule-row-${r.id}`}>
+                      {editingRuleId === r.id ? (
+                        <div className="space-y-1.5">
+                          <div className="grid sm:grid-cols-2 gap-1.5">
+                            <input value={editRuleForm.name} onChange={(e) => setEditRuleForm({ ...editRuleForm, name: e.target.value })}
+                              data-testid={`input-edit-rule-name-${r.id}`} className="px-2 py-1 rounded-lg border border-border text-xs" />
+                            <select value={editRuleForm.sectorId} onChange={(e) => setEditRuleForm({ ...editRuleForm, sectorId: e.target.value })}
+                              data-testid={`select-edit-rule-sector-${r.id}`} className="px-2 py-1 rounded-lg border border-border text-xs bg-white">
+                              {activeSectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                            </select>
+                          </div>
+                          <input value={editRuleForm.keywords} onChange={(e) => setEditRuleForm({ ...editRuleForm, keywords: e.target.value })}
+                            data-testid={`input-edit-rule-keywords-${r.id}`} className="w-full px-2 py-1 rounded-lg border border-border text-xs" />
+                          <label className="flex items-center gap-2 text-[11px] font-medium">
+                            <input type="checkbox" checked={editRuleForm.skipQueue} onChange={(e) => setEditRuleForm({ ...editRuleForm, skipQueue: e.target.checked })}
+                              data-testid={`checkbox-edit-rule-skip-queue-${r.id}`} className="w-3.5 h-3.5 accent-[var(--primary)]" />
+                            Pular fila (auto-atribuir direto)
+                          </label>
+                          <div className="flex flex-wrap gap-1.5">
+                            <button type="button" disabled={savingRule} onClick={() => saveEditRule(r.id)} data-testid={`button-save-rule-${r.id}`}
+                              className="text-[10px] font-bold text-white bg-primary px-2 py-1 rounded-lg disabled:opacity-40">Salvar</button>
+                            <button type="button" onClick={() => setEditingRuleId(null)} className="text-[10px] font-semibold text-muted-foreground px-2 py-1">Cancelar</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-sm font-medium">{r.name}</span>
+                              <span className="text-[10px] text-muted-foreground">→ {sectors.find((s) => s.id === r.sectorId)?.name ?? "Setor"}</span>
+                              {r.skipQueue && (
+                                <span className="shk-badge-progress flex items-center gap-1" title="Tenta auto-atribuir direto, pulando a fila">
+                                  <Zap className="w-3 h-3" /> Pula fila
+                                </span>
+                              )}
+                              <span className={r.isActive ? "shk-badge-done" : "shk-badge-waiting"}>{r.isActive ? "Ativa" : "Inativa"}</span>
+                            </div>
+                            <p className="text-[11px] text-muted-foreground truncate">{r.keywords}</p>
+                          </div>
+                          <button onClick={() => openEditRule(r)} data-testid={`button-edit-rule-${r.id}`}
+                            className="p-1.5 text-muted-foreground hover:text-primary hover:bg-blue-50 rounded-lg transition">
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                          <button onClick={() => toggleRuleActive(r)} data-testid={`button-toggle-rule-${r.id}`}
+                            className={`text-[11px] font-semibold px-2 py-1 rounded-lg transition ${r.isActive ? "text-red-600 hover:bg-red-50" : "text-green-600 hover:bg-green-50"}`}>
+                            {r.isActive ? "Desativar" : "Reativar"}
+                          </button>
+                          <button onClick={() => deleteRule(r)} data-testid={`button-delete-rule-${r.id}`}
+                            title="Excluir regra" className="p-1.5 text-muted-foreground hover:text-red-600 hover:bg-red-50 rounded-lg transition">
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
               )}
             </div>

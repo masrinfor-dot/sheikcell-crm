@@ -54,9 +54,13 @@ export async function isValidStoreName(name: string, tenantId: number, currentVa
 router.patch("/stores/:id", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
-  const update: Partial<{ name: string; isActive: boolean; geofenceLat: number | null; geofenceLng: number | null; geofenceRadiusMeters: number | null }> = {};
+  const update: Partial<{ name: string; isActive: boolean; geofenceLat: number | null; geofenceLng: number | null; geofenceRadiusMeters: number | null; skipQueueEnabled: boolean }> = {};
   if (typeof req.body?.name === "string" && req.body.name.trim()) update.name = req.body.name.trim().slice(0, 120);
   if (typeof req.body?.isActive === "boolean") update.isActive = req.body.isActive;
+  // "Pular fila" por palavra-chave (pedido 18/09) — participação desta loja
+  // como candidata a receber conversa auto-atribuída por uma regra com
+  // skipQueue=true. Ver comentário em stores.ts (schema) e skipQueueAssign.ts.
+  if (typeof req.body?.skipQueueEnabled === "boolean") update.skipQueueEnabled = req.body.skipQueueEnabled;
   // Geofence do Ponto (pedido 15/09, análise Tangerino "Local de
   // Interesse") — os 3 campos vêm sempre juntos: ou os 3 preenchidos (liga o
   // geofence) ou os 3 null (desliga). Não dá pra configurar só um deles.

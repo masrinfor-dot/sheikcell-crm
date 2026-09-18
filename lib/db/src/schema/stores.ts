@@ -28,4 +28,14 @@ export const storesTable = pgTable("stores", {
   geofenceLat: doublePrecision("geofence_lat"),
   geofenceLng: doublePrecision("geofence_lng"),
   geofenceRadiusMeters: integer("geofence_radius_meters"),
+  // Participa do "pular fila" por palavra-chave (pedido 18/09, ver
+  // routing_rules.skipQueue e lib/skipQueueAssign.ts) — quando true, os
+  // vendedores DESTA loja entram como candidatos a receber, na hora, uma
+  // conversa nova que bateu numa regra de pular fila (ex.: "xerox"). Uma
+  // conversa em si não tem loja definida antes de ser atribuída (a vitrine
+  // recebe mensagens por número/setor, não por loja) — este interruptor
+  // controla quais VENDEDORES participam, não qual conversa é roteada.
+  // Default false: nenhuma loja participa até o admin ligar explicitamente
+  // aqui (Setores → Lojas da Rede).
+  skipQueueEnabled: boolean("skip_queue_enabled").notNull().default(false),
 });

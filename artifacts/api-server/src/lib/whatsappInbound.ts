@@ -8,6 +8,7 @@ import { normalizePhone, phoneVariants } from "./phone";
 import { broadcast } from "./sseEmitter";
 import { isPotentialConversation, restrictedRecipients } from "./conversationScope";
 import { autoAssignOnNewPoolConversation } from "./queueAutoAssign";
+import { tryAssignSkipQueue } from "./skipQueueAssign";
 import { classifyText } from "./autoRouter";
 import { ensureCrmContactForConversation, syncCrmAttendant } from "./crmSync";
 import { getSurveySettings, SURVEY_DEFAULTS, surveyScaleMin, buildThankYouMessage } from "./surveySettings";
@@ -362,15 +363,19 @@ async function upsertConversation(
       .where(and(eq(whatsappSessionsTable.sessionKey, sessionKey), eq(whatsappSessionsTable.tenantId, tenantId)))
       .limit(1);
     const linkedSectorIds = sessionRow?.defaultSectorIds ?? [];
+    // Só chama a IA/regras de palavra-chave uma vez, mesmo que o resultado
+    // sirva tanto pra decidir o setor (quando o número não está fixo em um
+    // só) quanto pra decidir se PULA A FILA (pedido 18/09) — que vale pelo
+    // match da palavra-chave em si, independente de qual caminho acabou
+    // decidindo o setor final.
+    const classified = displayContent ? await classifyText(displayContent, tenantId) : null;
     let targetSectorId: number | null = null;
     if (linkedSectorIds.length === 1) {
       targetSectorId = linkedSectorIds[0];
     } else if (linkedSectorIds.length > 1) {
-      const classified = displayContent ? await classifyText(displayContent, tenantId) : null;
       targetSectorId = classified && linkedSectorIds.includes(classified.sectorId) ? classified.sectorId : linkedSectorIds[0];
     }
     if (targetSectorId == null) {
-      const classified = displayContent ? await classifyText(displayContent, tenantId) : null;
       const [first] = await db
         .select()
         .from(sectorsTable)
@@ -400,6 +405,15 @@ async function upsertConversation(
     // Keep the CRM in sync with atendimentos: register the customer as soon as
     // the conversation starts, not only when it is resolved.
     await ensureCrmContactForConversation(conv);
+    // "Pular fila" por palavra-chave (pedido 18/09, ex.: xerox) — tenta
+    // atribuir na hora a um vendedor ocioso do setor, em segundo plano;
+    // nunca roda pra grupo/comunidade (mesmo espírito da fila normal). Sem
+    // sucesso (ninguém elegível), a conversa segue no pool do setor,
+    // disponível pra assumir manualmente como qualquer outra — e o
+    // auto-atribuir normal logo abaixo ainda pode pegá-la depois.
+    if (classified?.skipQueue && !isCommunity && !isGroupJid) {
+      void tryAssignSkipQueue({ id: conv.id, tenantId, sectorId: targetSectorId });
+    }
     // Fila do Central de Atendimento com auto-atribuição (pedido 14/09, opt-in
     // por linha de WhatsApp): tenta atribuir esta conversa nova a um vendedor
     // ocioso da fila, em segundo plano — nunca lança nem atrasa o webhook.

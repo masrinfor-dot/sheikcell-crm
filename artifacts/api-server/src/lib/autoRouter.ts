@@ -5,11 +5,14 @@ export interface ClassifyResult {
   sectorId: number;
   ruleName: string;
   matchedKeyword: string;
+  // Pedido 18/09 ("pular a fila" por palavra-chave, ex.: xerox) — ver
+  // lib/skipQueueAssign.ts, chamado pelo whatsappInbound.ts quando true.
+  skipQueue: boolean;
 }
 
 // Multi-loja: o cache de regras é por tenant — cada loja tem suas próprias
 // regras de roteamento e nunca deve enxergar as de outra loja.
-type Rule = { id: number; sectorId: number; name: string; keywords: string; priority: number };
+type Rule = { id: number; sectorId: number; name: string; keywords: string; priority: number; skipQueue: boolean };
 const cacheByTenant = new Map<number, { rules: Rule[]; ts: number }>();
 const CACHE_TTL = 60_000;
 
@@ -17,7 +20,10 @@ async function getRules(tenantId: number): Promise<Rule[]> {
   const cached = cacheByTenant.get(tenantId);
   if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.rules;
   const rules = await db
-    .select({ id: routingRulesTable.id, sectorId: routingRulesTable.sectorId, name: routingRulesTable.name, keywords: routingRulesTable.keywords, priority: routingRulesTable.priority })
+    .select({
+      id: routingRulesTable.id, sectorId: routingRulesTable.sectorId, name: routingRulesTable.name,
+      keywords: routingRulesTable.keywords, priority: routingRulesTable.priority, skipQueue: routingRulesTable.skipQueue,
+    })
     .from(routingRulesTable)
     .where(and(eq(routingRulesTable.isActive, true), eq(routingRulesTable.tenantId, tenantId)))
     .orderBy(routingRulesTable.priority);
@@ -38,7 +44,7 @@ export async function classifyText(text: string, tenantId: number): Promise<Clas
     const kws = rule.keywords.split(",").map((k) => k.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")).filter(Boolean);
     for (const kw of kws) {
       if (normalized.includes(kw)) {
-        return { sectorId: rule.sectorId, ruleName: rule.name, matchedKeyword: kw };
+        return { sectorId: rule.sectorId, ruleName: rule.name, matchedKeyword: kw, skipQueue: rule.skipQueue };
       }
     }
   }
