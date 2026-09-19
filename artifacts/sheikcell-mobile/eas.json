@@ -1,0 +1,38 @@
+{
+  "cli": {
+    "version": ">= 16.0.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "channel": "preview",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_DOMAIN": "crm.sheikcell.com.br"
+      }
+    },
+    "production": {
+      "channel": "production",
+      "autoIncrement": true,
+      "android": {
+        "buildType": "app-bundle"
+      },
+      "env": {
+        "EXPO_PUBLIC_DOMAIN": "crm.sheikcell.com.br"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

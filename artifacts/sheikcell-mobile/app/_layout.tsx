@@ -18,7 +18,12 @@ import { ScheduleAlerts } from "@/components/ScheduleAlerts";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { setBaseUrl } from "@/lib/api";
 
-setBaseUrl(`https://${process.env.EXPO_PUBLIC_DOMAIN}`);
+// Em dev dentro do Replit, EXPO_PUBLIC_DOMAIN aponta pro domínio de preview.
+// Num build real (APK gerado pelo EAS, distribuído pra equipe), essa env var
+// não existe — por isso o fallback pro domínio de produção, senão o app
+// abre e não consegue falar com a API nenhuma.
+const apiDomain = process.env.EXPO_PUBLIC_DOMAIN || "crm.sheikcell.com.br";
+setBaseUrl(`https://${apiDomain}`);
 
 SplashScreen.preventAutoHideAsync();
 
