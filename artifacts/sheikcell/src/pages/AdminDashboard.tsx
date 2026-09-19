@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, PERMISSION_KEYS, PERMISSION_LABELS, MODULE_LABELS, USER_GRANTABLE_MODULES, OPTIONAL_MODULES, type SectorSummary, type AttendanceLog, type Sector, type QuickReply, type Store, type RoutingRule, type DashboardAttention, type InternalConversation, type OptionalModule, type UserGrantableModule, type UserModuleAccess, type ChatLabel, type EspiarLogEntry } from "@/lib/api";
+import { api, PERMISSION_KEYS, PERMISSION_LABELS, MODULE_LABELS, USER_GRANTABLE_MODULES, OPTIONAL_MODULES, type SectorSummary, type AttendanceLog, type Sector, type QuickReply, type Store, type RoutingRule, type DashboardAttention, type InternalConversation, type OptionalModule, type UserGrantableModule, type UserModuleAccess, type ChatLabel, type EspiarLogEntry, type SensitiveActionLogEntry } from "@/lib/api";
 import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
@@ -148,6 +148,15 @@ function formatDate(iso: string): string {
 }
 
 const ICONS = ["smartphone", "headphones", "wrench", "dollar-sign", "users", "shopping-bag"];
+
+// Rótulos em pt-BR pro badge de cada ação no log de auditoria (item 21).
+const AUDIT_ACTION_LABELS: Record<string, string> = {
+  transferir_atendimento: "Transferência",
+  transferir_setor: "Transferência de setor",
+  editar_mensagem: "Edição de mensagem",
+  excluir_mensagem: "Exclusão de mensagem",
+  excluir_atendimento: "Exclusão de atendimento",
+};
 
 export default function AdminDashboard() {
   const { user, logout } = useAuth();
@@ -399,6 +408,21 @@ export default function AdminDashboard() {
     try { setEspiarLog(await api.admin.espiarLog()); }
     catch { toast({ title: "Erro ao carregar log", variant: "destructive" }); }
     finally { setLoadingEspiarLog(false); }
+  };
+
+  // Auditoria de ações sensíveis (item 21 do roadmap "Central de
+  // Atendimento"): transferência de atendimento/setor, edição/exclusão de
+  // mensagem, exclusão de atendimento. Mesmo padrão do log do modo espiar
+  // acima — "entrar como" continua no log próprio, não duplicado aqui.
+  const [showAuditLog, setShowAuditLog] = useState(false);
+  const [auditLog, setAuditLog] = useState<SensitiveActionLogEntry[]>([]);
+  const [loadingAuditLog, setLoadingAuditLog] = useState(false);
+  const openAuditLog = async () => {
+    setShowAuditLog(true);
+    setLoadingAuditLog(true);
+    try { setAuditLog(await api.chat.sensitiveActionsLog()); }
+    catch { toast({ title: "Erro ao carregar auditoria", variant: "destructive" }); }
+    finally { setLoadingAuditLog(false); }
   };
 
   // Vendedor em mais de um setor (pedido 17/09): sectorIds substitui o antigo
@@ -1824,6 +1848,11 @@ export default function AdminDashboard() {
                   className="flex items-center gap-1.5 px-3 py-2 bg-white border border-border rounded-xl text-xs font-semibold hover:bg-secondary transition">
                   <History className="w-3.5 h-3.5" /> Log do modo espiar
                 </button>
+                <button onClick={openAuditLog} data-testid="button-audit-log"
+                  title="Auditoria: transferência de atendimento/setor, edição/exclusão de mensagem, exclusão de atendimento"
+                  className="flex items-center gap-1.5 px-3 py-2 bg-white border border-border rounded-xl text-xs font-semibold hover:bg-secondary transition">
+                  <ShieldCheck className="w-3.5 h-3.5" /> Auditoria
+                </button>
                 <button onClick={openAddUser} data-testid="button-add-user"
                   className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-xl text-xs font-semibold hover:bg-primary/90 transition">
                   <Plus className="w-3.5 h-3.5" /> Novo Usuário
@@ -2546,6 +2575,43 @@ export default function AdminDashboard() {
                       </div>
                       <span className={e.endedAt ? "shk-badge-done shrink-0" : "shk-badge-progress shrink-0"}>
                         {e.endedAt ? "Encerrado" : "Em andamento"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===== AUDITORIA DE AÇÕES SENSÍVEIS (item 21) ===== */}
+      {showAuditLog && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="shk-card w-full max-w-lg p-6 max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="font-bold flex items-center gap-2"><ShieldCheck className="w-4 h-4 text-primary" />Auditoria de ações sensíveis</h3>
+              <button onClick={() => setShowAuditLog(false)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <p className="text-xs text-muted-foreground mb-3">
+              Transferência de atendimento/setor, edição e exclusão de mensagem, exclusão de atendimento. "Entrar como" fica no{" "}
+              <button onClick={() => { setShowAuditLog(false); openEspiarLog(); }} className="underline hover:text-foreground">log do modo espiar</button>.
+            </p>
+            <div className="flex-1 overflow-y-auto -mx-1 px-1">
+              {loadingAuditLog ? (
+                <div className="flex justify-center py-8"><RefreshCw className="w-5 h-5 animate-spin text-muted-foreground" /></div>
+              ) : auditLog.length === 0 ? (
+                <p className="text-xs text-muted-foreground text-center py-8">Nenhuma ação registrada ainda.</p>
+              ) : (
+                <div className="space-y-1.5">
+                  {auditLog.map((e) => (
+                    <div key={e.id} className="flex items-start justify-between gap-2 px-3 py-2 rounded-lg bg-secondary/40 text-xs" data-testid={`audit-log-row-${e.id}`}>
+                      <div className="min-w-0">
+                        <span className="font-semibold">{e.userName}</span> — {e.description}
+                        <div className="text-[11px] text-muted-foreground">{formatDate(e.createdAt)}</div>
+                      </div>
+                      <span className="shk-badge-progress shrink-0 whitespace-nowrap">
+                        {AUDIT_ACTION_LABELS[e.action] ?? e.action}
                       </span>
                     </div>
                   ))}

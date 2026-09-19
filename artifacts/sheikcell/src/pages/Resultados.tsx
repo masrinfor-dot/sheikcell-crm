@@ -5,7 +5,7 @@ import type { SurveySettings } from "@/lib/api";
 import {
   Trophy, Clock, Timer, Users, UserPlus, Repeat, ShoppingBag,
   TrendingUp, RefreshCw, BadgeDollarSign, Star, Settings, X, Eye,
-  PlayCircle, CheckCircle2, AlertTriangle, Gauge,
+  PlayCircle, CheckCircle2, AlertTriangle, Gauge, UserX,
 } from "lucide-react";
 
 // Períodos pré-definidos do filtro
@@ -166,6 +166,11 @@ export default function Resultados() {
     { label: "Tempo médio de atendimento", value: t ? fmtDuration(t.avgServiceSeconds) : "—", icon: Timer, color: "text-indigo-600", bg: "bg-indigo-50" },
     { label: "Tempo médio de 1ª resposta", value: t ? fmtDuration(t.avgFirstResponseSeconds) : "—", icon: Gauge, color: "text-sky-600", bg: "bg-sky-50" },
     { label: "Tempo médio de espera", value: t ? fmtDuration(t.avgWaitSeconds) : "—", icon: Clock, color: "text-amber-600", bg: "bg-amber-50" },
+    {
+      label: "Abandono (sem resposta)",
+      value: t ? `${t.abandonmentRate}% · ${t.abandonedCount}` : "—",
+      icon: UserX, color: "text-red-600", bg: "bg-red-50",
+    },
     { label: "Vendas", value: t ? `${t.vendas} · ${fmtMoney(t.totalVendido)}` : "—", icon: BadgeDollarSign, color: "text-green-600", bg: "bg-green-50" },
     { label: "Novos leads", value: t ? String(t.newLeads) : "—", icon: UserPlus, color: "text-cyan-600", bg: "bg-cyan-50" },
     { label: "Leads recorrentes (voltaram)", value: t ? String(t.recurringLeads) : "—", icon: Repeat, color: "text-purple-600", bg: "bg-purple-50" },

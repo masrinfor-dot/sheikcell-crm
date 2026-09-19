@@ -176,6 +176,19 @@ export type EspiarLogEntry = {
   vendedorName: string;
 };
 
+// Auditoria de ações sensíveis (item 21 do roadmap "Central de Atendimento")
+// — 1 linha do log: transferência de atendimento/setor, edição/exclusão de
+// mensagem, exclusão de atendimento. "Entrar como"/modo espiar continua no
+// log próprio (EspiarLogEntry acima).
+export type SensitiveActionLogEntry = {
+  id: number;
+  action: string;
+  description: string;
+  userName: string;
+  conversationId: number | null;
+  createdAt: string;
+};
+
 // Módulos opcionais que uma loja pode ou não ter contratado — mesma lista
 // de OPTIONAL_MODULES em lib/db/src/schema/tenants.ts (mantenha em sincronia).
 export const OPTIONAL_MODULES = [
@@ -2103,6 +2116,16 @@ export const api = {
       req<{ id: number; content: string; type: string; senderName: string | null; direction: string; createdAt: string }[]>(
         `/chat/conversations/${id}/messages/search?q=${encodeURIComponent(q)}`,
       ),
+    // Busca global (item 11 do roadmap "Central de Atendimento") — cruza
+    // TODAS as conversas visíveis (nome, telefone, etiqueta, atendente,
+    // protocolo/nº da fila, texto de mensagem, CPF/CNPJ via CRM), diferente
+    // da busca acima (só dentro de uma conversa já aberta).
+    searchGlobal: (q: string) =>
+      req<(Conversation & { matchedBy: "protocolo" | "mensagem" | "cpf_cnpj" | "atendente" | null })[]>(
+        `/chat/search-global?q=${encodeURIComponent(q)}`,
+      ),
+    // Auditoria de ações sensíveis (item 21 do roadmap) — admin/supervisor.
+    sensitiveActionsLog: () => req<SensitiveActionLogEntry[]>("/chat/sensitive-actions-log"),
     // Paginação por cursor: devolve o bloco de mensagens + flag de "tem mais
     // antigas" (cabeçalho X-Has-More). Sem `before`, é o bloco mais recente.
     messagesPage: async (id: number, before?: number): Promise<{ messages: ChatMessage[]; hasMore: boolean }> => {
@@ -3267,6 +3290,8 @@ export type ResultsSummary = {
   from: string; to: string; sectorId: number | null; attendantId: number | null;
   totals: {
     atendimentos: number; avgServiceSeconds: number; avgWaitSeconds: number; avgFirstResponseSeconds: number;
+    // Abandono (item 3 do roadmap): atendimento finalizado sem nenhuma resposta do atendente.
+    abandonedCount: number; abandonmentRate: number;
     vendas: number; totalVendido: number;
     newLeads: number; recurringLeads: number; repurchaseClients: number;
     avgRating: number; ratings: number;

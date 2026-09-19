@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
-import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, messagePinsTable, attendanceLogsTable, attendanceStartEventsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, chatSavedFiltersTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, taskAssigneesTable, crmPurchasesTable, appSettingsTable, tradeInEvaluationsTable, timeClockEntriesTable } from "@workspace/db";
+import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, messagePinsTable, attendanceLogsTable, attendanceStartEventsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, chatSavedFiltersTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, taskAssigneesTable, crmPurchasesTable, appSettingsTable, tradeInEvaluationsTable, timeClockEntriesTable, sensitiveActionLogTable } from "@workspace/db";
 import { eq, desc, and, or, lt, gte, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { requireAuth, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
@@ -37,6 +37,36 @@ import {
 } from "../lib/whatsappInbound";
 
 const router: IRouter = Router();
+
+// ─── Auditoria de ações sensíveis (item 21 do roadmap "Central de
+// Atendimento") ────────────────────────────────────────────────────────────
+// Registra transferência de atendimento/setor e edição/exclusão de mensagem
+// — nunca atrasa nem pode derrubar a requisição que a originou (mesmo
+// padrão "fire and forget" de autoAssignOnNewPoolConversation/
+// autoAssignOnVendorFreed, chamado com "void" e nunca lança). "Entrar como"
+// (modo espiar) já tem log dedicado — ver impersonationLogTable em admin.ts,
+// não duplicado aqui.
+async function logSensitiveAction(
+  req: Request,
+  tenantId: number,
+  action: string,
+  description: string,
+  opts: { conversationId?: number; metadata?: Record<string, unknown> } = {},
+): Promise<void> {
+  try {
+    await db.insert(sensitiveActionLogTable).values({
+      tenantId,
+      userId: req.session.userId ?? null,
+      userName: req.session.userName ?? "Desconhecido",
+      action,
+      description,
+      conversationId: opts.conversationId ?? null,
+      metadata: opts.metadata ?? null,
+    });
+  } catch (err) {
+    console.error("[auditoria] falha ao registrar ação sensível:", err);
+  }
+}
 
 // ─── SSE real-time stream ──────────────────────────────────────────────────
 router.get("/chat/events", requireAuth, requireChatAccess(), async (req: Request, res: Response): Promise<void> => {
@@ -520,6 +550,104 @@ router.get("/chat/conversations", requireAuth, requireChatAccess(), async (req, 
   res.json(enriched);
 });
 
+// ─── Busca global (item 11 do roadmap "Central de Atendimento") ───────────
+// Diferente da busca de /chat/conversations acima (só nome/telefone, usada
+// pelo campo de busca da lista) e de /messages/search acima (só dentro de
+// UMA conversa já aberta): esta cruza TODAS as conversas visíveis pro
+// usuário logado (mesma regra de visibilidade de sempre, via
+// buildConversationVisibilityConditions) e casa por nome, telefone,
+// etiqueta, atendente, protocolo/nº da fila, texto de alguma mensagem, e
+// CPF/CNPJ (ou qualquer outro campo personalizado do CRM), pelo telefone do
+// contato do CRM — a conversa em si não guarda esse dado.
+router.get("/chat/search-global", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const qRaw = Array.isArray(req.query.q) ? String(req.query.q[0]) : String(req.query.q ?? "");
+  const q = qRaw.trim();
+  if (q.length < 2) { res.json([]); return; }
+  const pattern = `%${q.replace(/[%_]/g, "\\$&")}%`; // escapa curinga do LIKE
+  const asNumber = /^\d+$/.test(q) ? Number(q) : null;
+
+  const conditions = await buildConversationVisibilityConditions(req, tenantId, {});
+
+  const users = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable).where(eq(usersTable.tenantId, tenantId));
+  const matchingAssigneeIds = users.filter((u) => u.name.toLowerCase().includes(q.toLowerCase())).map((u) => u.id);
+
+  // Texto de alguma mensagem da conversa (não só a que está aberta na tela).
+  const msgMatches = await db.select({ conversationId: messagesTable.conversationId })
+    .from(messagesTable)
+    .where(and(eq(messagesTable.tenantId, tenantId), isNull(messagesTable.deletedAt), ilike(messagesTable.content, pattern)))
+    .limit(300);
+  const msgMatchIds = [...new Set(msgMatches.map((m) => m.conversationId))];
+
+  // CPF/CNPJ e demais campos personalizados do CRM — casados pelo telefone
+  // do contato (a conversa não guarda CPF/CNPJ diretamente).
+  const crmMatches = await db.select({ phone: crmContactsTable.phone })
+    .from(crmContactsTable)
+    .where(and(eq(crmContactsTable.tenantId, tenantId), sql`${crmContactsTable.customFields}::text ILIKE ${pattern}`))
+    .limit(100);
+  const crmPhoneVariants = [...new Set(crmMatches.flatMap((c) => (c.phone ? phoneVariants(normalizePhone(c.phone)) : [])))];
+
+  const orParts = [
+    ilike(conversationsTable.name, pattern),
+    ilike(conversationsTable.phone, pattern),
+    sql`${conversationsTable.labels} ILIKE ${pattern}`,
+  ];
+  if (asNumber != null) {
+    orParts.push(eq(conversationsTable.id, asNumber));
+    orParts.push(eq(conversationsTable.queueNumber, asNumber));
+  }
+  if (matchingAssigneeIds.length > 0) orParts.push(inArray(conversationsTable.assigneeId, matchingAssigneeIds));
+  if (msgMatchIds.length > 0) orParts.push(inArray(conversationsTable.id, msgMatchIds));
+  if (crmPhoneVariants.length > 0) orParts.push(inArray(conversationsTable.phone, crmPhoneVariants));
+
+  const rows = await db.select().from(conversationsTable)
+    .where(and(...conditions, or(...orParts)))
+    .orderBy(desc(conversationsTable.lastMessageAt))
+    .limit(30);
+
+  const sectors = await db.select().from(sectorsTable).where(eq(sectorsTable.tenantId, tenantId));
+  const sectorMap = Object.fromEntries(sectors.map((s) => [s.id, s]));
+  const userMap = Object.fromEntries(users.map((u) => [u.id, u]));
+
+  const enriched = rows.map((c) => ({
+    ...c,
+    sector: c.sectorId ? (sectorMap[c.sectorId] ?? null) : null,
+    assignee: c.assigneeId ? (userMap[c.assigneeId] ?? null) : null,
+    // Mesmo formato do card em /chat/conversations (participants/pinned):
+    // clicar num resultado injeta este objeto direto em convs (ver
+    // openSearchResult no ChatCenter), então precisa ter o shape completo do
+    // tipo Conversation do frontend — mesmo que participantes reais só sejam
+    // carregados de fato na próxima vez que a lista normal recarregar.
+    participants: [] as { id: number; name: string }[],
+    pinned: false,
+    // Pista pro frontend destacar POR QUE essa conversa apareceu no resultado.
+    matchedBy: asNumber != null && (c.id === asNumber || c.queueNumber === asNumber)
+      ? "protocolo"
+      : msgMatchIds.includes(c.id) && !c.name.toLowerCase().includes(q.toLowerCase()) && !c.phone.includes(q)
+        ? "mensagem"
+        : crmPhoneVariants.includes(c.phone)
+          ? "cpf_cnpj"
+          : matchingAssigneeIds.includes(c.assigneeId ?? -1) && !c.name.toLowerCase().includes(q.toLowerCase())
+            ? "atendente"
+            : null,
+  }));
+
+  res.json(enriched);
+});
+
+// ─── Auditoria de ações sensíveis (item 21) — leitura ─────────────────────
+// Lista as últimas ações registradas por logSensitiveAction acima (só desta
+// loja). Restrito a admin/supervisor — mesmo nível de acesso já usado por
+// DELETE /chat/conversations/:id (a mais sensível das ações aqui logadas).
+router.get("/chat/sensitive-actions-log", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rows = await db.select().from(sensitiveActionLogTable)
+    .where(eq(sensitiveActionLogTable.tenantId, tenantId))
+    .orderBy(desc(sensitiveActionLogTable.createdAt))
+    .limit(200);
+  res.json(rows);
+});
+
 // ─── Contagem real por categoria (Potenciais/Pendentes/Ativos/Resolvidas) ──
 // Usada pelos números das abinhas na Central de Atendimento. Roda sobre a
 // base INTEIRA (mesma visibilidade da listagem acima, sem o limit(100)) —
@@ -915,6 +1043,13 @@ router.patch("/chat/messages/:id", requireAuth, requireChatAccess(), async (req,
   const outMsg = { ...updated!, replyTo };
   broadcast("message_updated", { conversationId: msg.conversationId, message: outMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
   res.json(outMsg);
+
+  // Auditoria (item 21): edição de mensagem já enviada. Não grava o texto
+  // antigo/novo no log (conteúdo da conversa do cliente) — só o fato e o id,
+  // suficiente pra investigar um caso pontual olhando a conversa em si.
+  void logSensitiveAction(req, tenantId, "editar_mensagem",
+    `Mensagem editada no atendimento de "${conv.name}".`,
+    { conversationId: conv.id, metadata: { messageId: id } });
 });
 
 router.delete("/chat/messages/:id", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
@@ -938,6 +1073,11 @@ router.delete("/chat/messages/:id", requireAuth, requireChatAccess(), async (req
   const outMsg = { ...updated!, replyTo };
   broadcast("message_updated", { conversationId: msg.conversationId, message: outMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
   res.json(outMsg);
+
+  // Auditoria (item 21): exclusão de mensagem já enviada.
+  void logSensitiveAction(req, tenantId, "excluir_mensagem",
+    `Mensagem excluída no atendimento de "${conv.name}".`,
+    { conversationId: conv.id, metadata: { messageId: id } });
 });
 
 // ─── Send media ────────────────────────────────────────────────────────────
@@ -1922,6 +2062,39 @@ router.patch("/chat/conversations/:id", requireAuth, requireChatAccess(), async 
   }
   res.json(updated);
 
+  // Auditoria (item 21 do roadmap): registra transferência de responsável
+  // e/ou de setor — só quando o valor realmente mudou, pra não logar toda
+  // PATCH trivial (ex.: só marcar etiqueta ou prioridade). "Assumir da fila"
+  // (conv.assigneeId era null) ainda conta como transferência aqui — é uma
+  // mudança de responsabilidade como outra qualquer.
+  if (updated.assigneeId !== conv.assigneeId && updated.assigneeId != null) {
+    void (async () => {
+      try {
+        const [newAssignee] = await db.select({ name: usersTable.name }).from(usersTable)
+          .where(eq(usersTable.id, updated.assigneeId!)).limit(1);
+        await logSensitiveAction(req, tenantId, "transferir_atendimento",
+          `Atendimento de "${updated.name}" transferido para ${newAssignee?.name ?? `vendedor #${updated.assigneeId}`}${conv.assigneeId == null ? " (assumido da fila)" : ""}.`,
+          { conversationId: updated.id, metadata: { fromAssigneeId: conv.assigneeId, toAssigneeId: updated.assigneeId } });
+      } catch (err) {
+        console.error("[auditoria] falha ao registrar transferência de atendimento:", err);
+      }
+    })();
+  }
+  if (updated.sectorId !== conv.sectorId) {
+    void (async () => {
+      try {
+        const [newSector] = updated.sectorId != null
+          ? await db.select({ name: sectorsTable.name }).from(sectorsTable).where(eq(sectorsTable.id, updated.sectorId!)).limit(1)
+          : [];
+        await logSensitiveAction(req, tenantId, "transferir_setor",
+          `Atendimento de "${updated.name}" transferido para o setor ${newSector?.name ?? "—"}.`,
+          { conversationId: updated.id, metadata: { fromSectorId: conv.sectorId, toSectorId: updated.sectorId } });
+      } catch (err) {
+        console.error("[auditoria] falha ao registrar transferência de setor:", err);
+      }
+    })();
+  }
+
   // Fila do Central de Atendimento com auto-atribuição por linha de WhatsApp
   // (pedido 14/09): dispara em segundo plano, depois de responder — nunca
   // atrasa nem pode derrubar esta requisição (as duas funções nunca lançam).
@@ -2162,6 +2335,12 @@ router.delete("/chat/conversations/:id", requireAdminOrSupervisor, async (req, r
   // são restritas a quem podia vê-las antes (setor/participantes/responsável).
   broadcast("conversation_deleted", { id }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: wasPotential, restrictedTo: wasPotential ? null : recipients });
   res.json({ ok: true });
+
+  // Auditoria (item 21): excluir atendimento é a ação mais sensível deste
+  // arquivo (some da tela de todo mundo, mesmo mantendo o histórico no banco).
+  void logSensitiveAction(req, tenantId, "excluir_atendimento",
+    `Atendimento de "${conv.name}" excluído.`,
+    { conversationId: conv.id, metadata: { phone: conv.phone, sectorId: conv.sectorId, assigneeId: conv.assigneeId } });
 });
 
 // ─── Disparo em massa pra Resolvidos (pedido 14/09, Atacado) ─────────────

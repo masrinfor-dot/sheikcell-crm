@@ -125,6 +125,12 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
     avgServiceSeconds: sql<number>`coalesce(round(avg(${attendanceLogsTable.serviceTimeSeconds}) filter (where ${attendanceLogsTable.serviceTimeSeconds} is not null)), 0)::int`,
     avgWaitSeconds: sql<number>`coalesce(round(avg(${attendanceLogsTable.waitTimeSeconds}) filter (where ${attendanceLogsTable.waitTimeSeconds} is not null)), 0)::int`,
     avgFirstResponseSeconds: sql<number>`coalesce(round(avg(${attendanceLogsTable.firstResponseSeconds}) filter (where ${attendanceLogsTable.firstResponseSeconds} is not null)), 0)::int`,
+    // Abandono (item 3 do roadmap "Central de Atendimento"): atendimento
+    // finalizado sem o atendente ter respondido nenhuma vez (mesmo sinal já
+    // usado pelo comentário de firstResponseSeconds — "nulo se não houve
+    // nenhuma resposta registrada"). Não depende de nenhuma coluna nova:
+    // reaproveita um dado que já era gravado, só nunca tinha virado métrica.
+    abandonedCount: sql<number>`count(*) filter (where ${attendanceLogsTable.firstResponseSeconds} is null)::int`,
     vendas: sql<number>`count(*) filter (where ${attendanceLogsTable.hadSale})::int`,
     totalVendido: sql<string>`coalesce(sum(${attendanceLogsTable.saleAmount}) filter (where ${attendanceLogsTable.hadSale}), 0)::text`,
     avgRating: sql<string>`coalesce(round(avg(${attendanceLogsTable.satisfactionRating}) filter (where ${attendanceLogsTable.satisfactionRating} is not null), 1), 0)::text`,
@@ -258,6 +264,8 @@ router.get("/results/summary", requireAuth, async (req, res): Promise<void> => {
       avgServiceSeconds: Number(totals?.avgServiceSeconds ?? 0),
       avgWaitSeconds: Number(totals?.avgWaitSeconds ?? 0),
       avgFirstResponseSeconds: Number(totals?.avgFirstResponseSeconds ?? 0),
+      abandonedCount: Number(totals?.abandonedCount ?? 0),
+      abandonmentRate: totals?.atendimentos ? Math.round((Number(totals.abandonedCount ?? 0) / Number(totals.atendimentos)) * 100) : 0,
       vendas: Number(totals?.vendas ?? 0),
       totalVendido: Number(totals?.totalVendido ?? 0),
       newLeads,

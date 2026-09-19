@@ -1535,6 +1535,77 @@ export default function ChatCenter({
     };
   }, [showNumberPanel]);
 
+  // Busca global (item 11 do roadmap) — mesmo padrão de portal/posição/
+  // clique-fora dos painéis acima (número, notificações), mas cruzando TODAS
+  // as conversas visíveis (nome, telefone, etiqueta, atendente, protocolo/nº
+  // da fila, texto de mensagem, CPF/CNPJ), não só a lista já carregada.
+  const [showSearchPanel, setShowSearchPanel] = useState(false);
+  const searchBtnRef = useRef<HTMLButtonElement | null>(null);
+  const searchPanelRef = useRef<HTMLDivElement | null>(null);
+  const [searchPanelPos, setSearchPanelPos] = useState<{ left: number; top: number } | null>(null);
+  const [globalSearchQuery, setGlobalSearchQuery] = useState("");
+  const [globalSearchResults, setGlobalSearchResults] = useState<
+    (Conversation & { matchedBy: "protocolo" | "mensagem" | "cpf_cnpj" | "atendente" | null })[]
+  >([]);
+  const [globalSearchLoading, setGlobalSearchLoading] = useState(false);
+  useEffect(() => {
+    if (!showSearchPanel) { setSearchPanelPos(null); return; }
+    const place = () => {
+      if (window.innerWidth < 768 || !searchBtnRef.current) { setSearchPanelPos(null); return; }
+      const r = searchBtnRef.current.getBoundingClientRect();
+      const width = 380;
+      const left = Math.max(8, Math.min(r.left, window.innerWidth - width - 8));
+      setSearchPanelPos({ left, top: r.bottom + 8 });
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showSearchPanel]);
+  // Mesmo bug dos painéis acima (portal fora da árvore do botão) — fecha ao
+  // clicar/tocar fora do botão e fora do painel.
+  useEffect(() => {
+    if (!showSearchPanel) return;
+    const handler = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as Node;
+      if (searchBtnRef.current?.contains(target)) return;
+      if (searchPanelRef.current?.contains(target)) return;
+      setShowSearchPanel(false);
+    };
+    document.addEventListener("mousedown", handler);
+    document.addEventListener("touchstart", handler);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("touchstart", handler);
+    };
+  }, [showSearchPanel]);
+  // Limpa a busca ao fechar o painel, pra não reabrir mostrando resultado antigo.
+  useEffect(() => {
+    if (!showSearchPanel) { setGlobalSearchQuery(""); setGlobalSearchResults([]); }
+  }, [showSearchPanel]);
+  // Debounce (mesmo padrão de msgSearchQuery acima): evita 1 request por tecla.
+  useEffect(() => {
+    const q = globalSearchQuery.trim();
+    if (!showSearchPanel || q.length < 2) { setGlobalSearchResults([]); setGlobalSearchLoading(false); return; }
+    setGlobalSearchLoading(true);
+    const t = setTimeout(() => {
+      api.chat.searchGlobal(q)
+        .then((rows) => setGlobalSearchResults(rows))
+        .catch(() => setGlobalSearchResults([]))
+        .finally(() => setGlobalSearchLoading(false));
+    }, 350);
+    return () => clearTimeout(t);
+  }, [globalSearchQuery, showSearchPanel]);
+  // Abre um resultado: injeta o objeto (já vem completo do endpoint) em convs
+  // caso ainda não esteja na lista carregada — mesmo padrão usado ao criar/
+  // reatribuir conversa (ver setConvs mais abaixo) — pra não depender do
+  // filtro/paginação atual da lista pra conseguir abrir o resultado.
+  const openSearchResult = (c: Conversation) => {
+    setConvs((prev) => (prev.some((x) => x.id === c.id) ? prev : [c, ...prev]));
+    setActiveId(c.id);
+    setShowSearchPanel(false);
+  };
+
   // Alert preferences: play a sound and/or show a native browser notification for
   // inbound messages even when the attendant is on another tab. Persisted locally.
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
@@ -3650,6 +3721,90 @@ export default function ChatCenter({
                 )}
               </div>
             )}
+            <div className="relative">
+              <button
+                ref={searchBtnRef}
+                onClick={() => setShowSearchPanel((v) => !v)}
+                data-testid="button-search-global"
+                title="Busca global (protocolo, nº da fila, atendente, mensagem, CPF/CNPJ...)"
+                className={`relative p-2 md:p-1.5 rounded-lg hover:bg-secondary transition ${showSearchPanel ? "bg-secondary" : ""}`}
+              >
+                <Search className="w-5 h-5 md:w-4 md:h-4 text-muted-foreground" />
+              </button>
+              {/* Portal (body): mesmo motivo dos painéis acima — o container
+                  da lista tem overflow-hidden e cortaria o painel. */}
+              {showSearchPanel && createPortal(
+                <div
+                  ref={searchPanelRef}
+                  data-testid="panel-search-global"
+                  className="fixed inset-x-2 top-14 md:inset-x-auto md:w-[380px] z-[70] bg-white border border-border rounded-xl shadow-xl overflow-hidden"
+                  style={searchPanelPos ?? undefined}
+                >
+                  <div className="border-b border-border bg-[#ededed] px-3 py-2">
+                    <span className="text-sm font-bold text-foreground">Busca global</span>
+                    <p className="text-[11px] text-muted-foreground">Nome, telefone, protocolo, nº da fila, atendente, mensagem, CPF/CNPJ...</p>
+                  </div>
+                  <div className="p-2 border-b border-border">
+                    <input
+                      autoFocus
+                      value={globalSearchQuery}
+                      onChange={(e) => setGlobalSearchQuery(e.target.value)}
+                      placeholder="Buscar em todos os atendimentos..."
+                      data-testid="input-search-global"
+                      className="w-full px-3 py-2 text-sm rounded-lg border border-border bg-secondary/40 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                  </div>
+                  <div className="max-h-[60vh] md:max-h-96 overflow-y-auto overscroll-contain divide-y divide-border/50">
+                    {globalSearchQuery.trim().length < 2 ? (
+                      <div className="flex flex-col items-center gap-2 py-8">
+                        <Search className="w-8 h-8 text-muted-foreground/40" />
+                        <p className="text-xs text-muted-foreground">Digite pelo menos 2 caracteres</p>
+                      </div>
+                    ) : globalSearchLoading ? (
+                      <div className="flex flex-col items-center gap-2 py-8">
+                        <p className="text-xs text-muted-foreground">Buscando...</p>
+                      </div>
+                    ) : globalSearchResults.length === 0 ? (
+                      <div className="flex flex-col items-center gap-2 py-8">
+                        <Search className="w-8 h-8 text-muted-foreground/40" />
+                        <p className="text-xs text-muted-foreground">Nada encontrado</p>
+                      </div>
+                    ) : (
+                      globalSearchResults.map((c) => (
+                        <button
+                          key={c.id}
+                          onClick={() => openSearchResult(c)}
+                          data-testid={`search-result-${c.id}`}
+                          className="w-full flex gap-2.5 items-start px-3 py-2.5 text-left hover:bg-secondary/60 active:bg-secondary transition"
+                        >
+                          <span className="mt-1 w-7 h-7 rounded-full shrink-0 flex items-center justify-center bg-secondary text-muted-foreground">
+                            <UserCircle2 className="w-4.5 h-4.5" />
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-sm font-semibold text-foreground truncate">{c.name || c.phone}</span>
+                              {c.lastMessageAt && <span className="text-[11px] text-muted-foreground shrink-0">{msgTime(c.lastMessageAt)}</span>}
+                            </div>
+                            <p className="text-xs text-muted-foreground truncate">
+                              {c.sector?.name ?? "Sem setor"}{c.assignee ? ` · ${c.assignee.name}` : ""}
+                              {c.origin === "fila" && c.queueNumber ? ` · Fila #${c.queueNumber}` : ` · Protocolo #${c.id}`}
+                            </p>
+                            {c.matchedBy && (
+                              <span className="inline-block mt-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-primary/10 text-primary">
+                                {c.matchedBy === "protocolo" ? "Protocolo/fila" :
+                                  c.matchedBy === "mensagem" ? "Achado numa mensagem" :
+                                  c.matchedBy === "cpf_cnpj" ? "CPF/CNPJ" : "Atendente"}
+                              </span>
+                            )}
+                          </div>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>,
+                document.body,
+              )}
+            </div>
             <button onClick={() => setShowFilter(!showFilter)} className={`p-1.5 rounded-lg hover:bg-secondary transition ${showFilter ? "bg-secondary" : ""}`}>
               <Filter className="w-4 h-4 text-muted-foreground" />
             </button>

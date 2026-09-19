@@ -41,3 +41,4 @@ export * from "./two_factor_codes";
 export * from "./tv_box";
 export * from "./catalog";
 export * from "./finance_payments";
+export * from "./sensitive_action_log";
