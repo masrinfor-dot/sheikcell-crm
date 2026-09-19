@@ -2486,12 +2486,20 @@ export const api = {
       req<{ imported: number; skipped: string[]; rows: TradeInBaseValue[] }>(
         "/trade-in/base-values/import", { method: "POST", body: JSON.stringify({ rawText }) }),
     // Avaliação na vitrine pública: liga/desliga + limite de avaliações por
-    // IA (pedido 18/09) — só afeta a porta de entrada pública, a Avaliação
-    // de Usados dentro do CRM não depende disso.
-    publicSettings: () => req<{ publicTradeInEnabled: boolean; publicTradeInAiLimit: number | null }>("/trade-in/settings"),
-    savePublicSettings: (data: { publicTradeInEnabled?: boolean; publicTradeInAiLimit?: number | null }) =>
-      req<{ publicTradeInEnabled: boolean; publicTradeInAiLimit: number | null }>(
-        "/trade-in/settings", { method: "PATCH", body: JSON.stringify(data) }),
+    // IA (pedido 18/09) + margem própria (pedido 19/09, separada da Tabela 2
+    // do CRM interno) — só afeta a porta de entrada pública, a Avaliação de
+    // Usados dentro do CRM não depende disso. publicTradeInMarginPct vem null
+    // até a loja configurar um valor próprio; effectiveMarginPct nunca é
+    // null (cai pra Tabela 2 nesse caso) — use pra pré-preencher o campo.
+    publicSettings: () => req<{
+      publicTradeInEnabled: boolean; publicTradeInAiLimit: number | null;
+      publicTradeInMarginPct: number | null; effectiveMarginPct: number;
+    }>("/trade-in/settings"),
+    savePublicSettings: (data: { publicTradeInEnabled?: boolean; publicTradeInAiLimit?: number | null; publicTradeInMarginPct?: number | null }) =>
+      req<{
+        publicTradeInEnabled: boolean; publicTradeInAiLimit: number | null;
+        publicTradeInMarginPct: number | null; effectiveMarginPct: number;
+      }>("/trade-in/settings", { method: "PATCH", body: JSON.stringify(data) }),
   },
   // Avaliação de usados PÚBLICA (vitrine, sem login) — ver tradeInPublicRouter.
   tradeInPublic: {

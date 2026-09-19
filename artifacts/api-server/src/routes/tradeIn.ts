@@ -208,16 +208,23 @@ router.get("/trade-in/settings", requireAuth, async (req, res): Promise<void> =>
   const [row] = await db.select({
     publicTradeInEnabled: tenantsTable.publicTradeInEnabled,
     publicTradeInAiLimit: tenantsTable.publicTradeInAiLimit,
+    publicTradeInMarginPct: tenantsTable.publicTradeInMarginPct,
   }).from(tenantsTable).where(eq(tenantsTable.id, tenantId));
   res.json({
     publicTradeInEnabled: row?.publicTradeInEnabled ?? true,
     publicTradeInAiLimit: row?.publicTradeInAiLimit ?? null,
+    publicTradeInMarginPct: row?.publicTradeInMarginPct ?? null,
+    // Valor efetivo (nunca null) pra pré-preencher o campo na tela mesmo
+    // antes da loja configurar uma margem própria pra Vitrine — hoje isso
+    // cai pra Tabela 2 (média), mas o valor salvo (acima) continua null até
+    // a loja realmente mexer nisso (ver comentário em publicTradeInMarginPct).
+    effectiveMarginPct: row?.publicTradeInMarginPct ?? (await getMargins(tenantId)).t2,
   });
 });
 
 router.patch("/trade-in/settings", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const b = (req.body ?? {}) as { publicTradeInEnabled?: boolean; publicTradeInAiLimit?: number | null };
+  const b = (req.body ?? {}) as { publicTradeInEnabled?: boolean; publicTradeInAiLimit?: number | null; publicTradeInMarginPct?: number | null };
   const update: Record<string, unknown> = {};
   if ("publicTradeInEnabled" in b) update.publicTradeInEnabled = b.publicTradeInEnabled !== false;
   if ("publicTradeInAiLimit" in b) {
@@ -225,13 +232,24 @@ router.patch("/trade-in/settings", requireAdmin, async (req, res): Promise<void>
     update.publicTradeInAiLimit = typeof v === "number" && Number.isFinite(v) && v >= 1
       ? Math.round(Math.min(200, v)) : null;
   }
+  if ("publicTradeInMarginPct" in b) {
+    const v = b.publicTradeInMarginPct;
+    if (v != null) {
+      const n = Math.round(Number(v));
+      if (!Number.isFinite(n) || n < 1 || n > 90) { res.status(400).json({ error: "Margem deve ser entre 1% e 90%" }); return; }
+      update.publicTradeInMarginPct = n;
+    } else {
+      update.publicTradeInMarginPct = null;
+    }
+  }
   const [updated] = await db.update(tenantsTable).set(update)
     .where(eq(tenantsTable.id, tenantId))
     .returning({
       publicTradeInEnabled: tenantsTable.publicTradeInEnabled,
       publicTradeInAiLimit: tenantsTable.publicTradeInAiLimit,
+      publicTradeInMarginPct: tenantsTable.publicTradeInMarginPct,
     });
-  res.json(updated);
+  res.json({ ...updated, effectiveMarginPct: updated?.publicTradeInMarginPct ?? (await getMargins(tenantId)).t2 });
 });
 
 // ─── Tabela de valores base (lista fixa, pedido 06/09) ──────────────────────
@@ -841,7 +859,13 @@ tradeInPublicRouter.post("/trade-in-public/:slug/estimate", async (req: Request,
   }
 
   try {
-    const estimate = await computeTradeInEstimate({ tenantId, brand: fBrand, model: fModel, memory: fMemory, questionList, answers: cleanAnswers });
+    const estimate = await computeTradeInEstimate({
+      tenantId, brand: fBrand, model: fModel, memory: fMemory, questionList, answers: cleanAnswers,
+      // Pedido 19/09: Vitrine usa a margem PRÓPRIA da loja (independente da
+      // Tabela 2 do CRM interno) quando configurada — ver comentário em
+      // tenants.ts/publicTradeInMarginPct.
+      marginPctOverride: tenant.publicTradeInMarginPct,
+    });
     if (!estimate) { res.status(502).json({ error: "Não conseguimos calcular uma estimativa agora. Deixe seu contato que a loja avalia manualmente." }); return; }
     res.json({ method: estimate.method, device: dev, estimatedPrice: estimate.estimatedPrice });
   } catch (err) {

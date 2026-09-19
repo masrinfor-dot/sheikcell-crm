@@ -381,11 +381,16 @@ export default function VitrineAparelhos() {
   const [savingSettings, setSavingSettings] = useState(false);
 
   // Margem de avaliação de usados usada na Vitrine pública (cliente avaliando
-  // o próprio aparelho sozinho, sem vendedor) — mesma "Tabela 2 (média)" da
-  // tela de Avaliação de Usados (ver /trade-in/margins), só mostrada aqui
-  // junto da margem de venda pra ficar tudo num único lugar, como pedido pelo
-  // lojista (07/09). null = módulo de Avaliação de Usados não habilitado
-  // nesta loja, ou ainda não carregou — nesse caso a seção some sozinha.
+  // o próprio aparelho sozinho, sem vendedor) — mostrada aqui junto da margem
+  // de venda pra ficar tudo num único lugar, como pedido pelo lojista (07/09).
+  // Pedido 19/09: até aqui isso reaproveitava literalmente a "Tabela 2
+  // (média)" do CRM interno — editar aqui mudava, sem querer, a margem que o
+  // vendedor usa na avaliação manual. Agora é um valor PRÓPRIO
+  // (tenant.publicTradeInMarginPct, via /trade-in/settings), independente
+  // das 3 tabelas internas. null = módulo de Avaliação de Usados não
+  // habilitado nesta loja, ou ainda não carregou — nesse caso a seção some
+  // sozinha (o valor exibido já vem resolvido do backend — effectiveMarginPct
+  // — então mostra a Tabela 2 até a loja configurar algo próprio).
   const [tradeInMarginPct, setTradeInMarginPct] = useState<number | null>(null);
   const [savingTradeInMargin, setSavingTradeInMargin] = useState(false);
   const handleSaveTradeInMargin = async () => {
@@ -397,9 +402,9 @@ export default function VitrineAparelhos() {
     }
     setSavingTradeInMargin(true);
     try {
-      const saved = await api.tradeIn.saveMargins({ t2: v });
-      setTradeInMarginPct(saved.t2);
-      toast({ title: "Margem de avaliação de usados atualizada!" });
+      const saved = await api.tradeIn.savePublicSettings({ publicTradeInMarginPct: v });
+      setTradeInMarginPct(saved.effectiveMarginPct);
+      toast({ title: "Margem de avaliação de usados (Vitrine) atualizada!" });
     } catch (err) {
       toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     } finally {
@@ -648,7 +653,7 @@ export default function VitrineAparelhos() {
       api.catalog.getBannerImage(),
       // Best-effort, igual à lista de leads acima: só existe se a loja tiver
       // o módulo "Avaliação de Usados" habilitado.
-      api.tradeIn.margins().catch(() => null),
+      api.tradeIn.publicSettings().catch(() => null),
     ])
       .then(([l, s, w, ww, cats, wc, tb, sn, pm, rv, cp, ti, bn, tim]) => {
         if (l.status === "fulfilled") { setProducts(l.value.products); setSettings(l.value.settings); }
@@ -664,7 +669,7 @@ export default function VitrineAparelhos() {
         if (cp.status === "fulfilled") setCoupons(cp.value.coupons);
         if (ti.status === "fulfilled") setTradeInLeads(ti.value);
         if (bn.status === "fulfilled") setBannerImage(bn.value.bannerImage);
-        if (tim.status === "fulfilled" && tim.value) setTradeInMarginPct(tim.value.t2);
+        if (tim.status === "fulfilled" && tim.value) setTradeInMarginPct(tim.value.effectiveMarginPct);
         const failed = [l, s, w, ww, cats, wc, tb, sn, pm, rv, cp].filter((r) => r.status === "rejected");
         if (failed.length > 0) {
           // eslint-disable-next-line no-console
@@ -2368,8 +2373,9 @@ export default function VitrineAparelhos() {
                     <Wallet className="w-3 h-3" /> Margem de avaliação de usados (Vitrine pública)
                   </label>
                   <p className="text-[10px] text-muted-foreground mt-0.5 mb-1.5">
-                    Margem usada quando o próprio cliente avalia o usado dele sozinho na Vitrine, sem vendedor
-                    (mesma "Tabela 2 — média" da tela de Avaliação de Usados; editar aqui já atualiza lá também).
+                    Margem usada quando o próprio cliente avalia o usado dele sozinho na Vitrine, sem vendedor.
+                    É uma margem própria, independente das 3 tabelas da tela de Avaliação de Usados — mudar aqui
+                    não afeta o que o vendedor usa na avaliação manual dentro do CRM.
                   </p>
                   <div className="flex items-center gap-2">
                     <input type="number" min={1} max={90} value={tradeInMarginPct}

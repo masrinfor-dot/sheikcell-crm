@@ -54,10 +54,16 @@ export async function computeTradeInEstimate(opts: {
   memory?: string | null;
   questionList: QuestionCfg[];
   answers: Record<string, string>;
+  // Pedido 19/09: a Vitrine pública passa a ter margem PRÓPRIA
+  // (tenant.publicTradeInMarginPct), separada da "Tabela 2 (média)" usada
+  // pelo vendedor na avaliação manual do CRM — antes as duas eram o MESMO
+  // valor (editar a margem na Vitrine mexia sem querer na Tabela 2). Quem
+  // chama sem informar (ex.: bot do WhatsApp, ou loja que nunca configurou
+  // uma margem própria pra Vitrine) cai pra margins.t2 como sempre foi.
+  marginPctOverride?: number | null;
 }): Promise<TradeInEstimate | null> {
-  const { tenantId, brand, model, memory, questionList, answers } = opts;
-  const margins = await getMargins(tenantId);
-  const marginPct = margins.t2; // nunca deixa escolher — sempre a margem "média"
+  const { tenantId, brand, model, memory, questionList, answers, marginPctOverride } = opts;
+  const marginPct = marginPctOverride ?? (await getMargins(tenantId)).t2; // nunca deixa escolher — sempre a margem "média" (ou a própria da Vitrine)
   const payPct = 100 - marginPct;
 
   // 1ª tentativa: tabela de valores base (lista fixa) — sem custo, na hora.

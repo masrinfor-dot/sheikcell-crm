@@ -147,6 +147,16 @@ export const tenantsTable = pgTable("tenants", {
   // (PUBLIC_AI_LIMIT, ver routes/tradeIn.ts), agora editável por loja pelo
   // mesmo pedido de 18/09. Null = usa o padrão de 5.
   publicTradeInAiLimit: integer("public_trade_in_ai_limit"),
+  // Margem usada no cálculo da avaliação PÚBLICA (vitrine + antes disso, o
+  // fluxo por conversa do WhatsApp continua com regra própria — ver
+  // computeTradeInEstimate). Pedido 19/09: até aqui a Vitrine reaproveitava
+  // literalmente a "Tabela 2 (margem média)" do CRM interno (margins.t2) —
+  // editar a margem na Vitrine mudava, sem querer, a Tabela 2 que o
+  // vendedor usa na avaliação manual dentro do CRM. Agora são valores
+  // independentes: null (padrão, nada muda pra quem nunca mexeu nisso) usa
+  // margins.t2 como sempre foi; um número aqui passa a valer só pra Vitrine
+  // pública, sem tocar nas 3 tabelas internas.
+  publicTradeInMarginPct: integer("public_trade_in_margin_pct"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
