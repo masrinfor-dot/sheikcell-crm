@@ -165,3 +165,7 @@ allowBuilds:
   '@whiskeysockets/baileys': true
   esbuild: true
   protobufjs: true
+  # sharp é dependência opcional de uma ferramenta de build (não usamos
+  # diretamente); build nativo bloqueado por padrão, mesma postura de
+  # segurança das outras entradas desta lista.
+  sharp: false

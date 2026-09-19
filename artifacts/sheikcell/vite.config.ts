@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
+import { VitePWA } from "vite-plugin-pwa";
 
 const rawPort = process.env.PORT;
 
@@ -31,6 +32,45 @@ export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
+    // PWA: permite "Instalar app" no Android/desktop (ícone próprio, tela
+    // cheia, abre como app) sem precisar de loja nem de um APK separado.
+    // Só faz cache dos arquivos estáticos do build (JS/CSS/ícones) — nunca
+    // intercepta /api/* nem mídia (áudio/imagem do chat), pra não arriscar
+    // servir dado desatualizado ou mexer no problema de áudio no celular.
+    VitePWA({
+      registerType: "autoUpdate",
+      manifest: {
+        name: "Sheikcell - Sistema de Atendimento",
+        short_name: "Sheikcell",
+        description: "Central de Atendimento Sheikcell — CRM e chat integrado",
+        theme_color: "#FF3C00",
+        // Mesma cor de fundo do splash do app mobile (Expo), pra manter a
+        // identidade visual igual entre o PWA e o APK.
+        background_color: "#1a2e6e",
+        display: "standalone",
+        orientation: "portrait",
+        start_url: ".",
+        scope: ".",
+        icons: [
+          { src: "icons/icon-192.png", sizes: "192x192", type: "image/png" },
+          { src: "icons/icon-512.png", sizes: "512x512", type: "image/png" },
+          {
+            src: "icons/icon-maskable-512.png",
+            sizes: "512x512",
+            type: "image/png",
+            purpose: "maskable",
+          },
+        ],
+      },
+      workbox: {
+        // Nunca cacheia /api/* — o chat precisa sempre de dados frescos.
+        navigateFallbackDenylist: [/^\/api\//],
+        globPatterns: ["**/*.{js,css,html,ico,svg,png,woff2}"],
+        // O bundle principal passa de 2 MB (app grande, com pdf.js etc.);
+        // sem isso o build falha recusando pré-cachear esse arquivo.
+        maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
+      },
+    }),
     runtimeErrorOverlay(),
     ...(process.env.NODE_ENV !== "production" &&
     process.env.REPL_ID !== undefined
