@@ -844,12 +844,36 @@ export async function sendMedia(
       let audioMime = mimetype;
       const alreadyOgg = /audio\/ogg/i.test(mimetype);
       if (!alreadyOgg) {
-        try {
-          audio = await toOggOpus(buffer);
-          audioMime = "audio/ogg; codecs=opus";
-        } catch (err) {
-          logger.warn({ err }, "ffmpeg falhou ao converter áudio — enviando original");
+        // Reportado 17/09: cliente recebendo "Este áudio não está mais
+        // disponível. Peça a [número] para reenviá-lo". Causa encontrada
+        // agora: quando o ffmpeg falhava (transitório — timeout, pipe
+        // fechado cedo, etc.), o código só logava o erro e mandava o
+        // buffer ORIGINAL webm/mp4 mesmo assim, com mimetype/ptt de nota de
+        // voz — o WhatsApp do cliente recebe um arquivo que não bate com o
+        // que foi anunciado e mostra indisponível, sem ninguém da loja saber
+        // que aquele envio específico falhou (a mensagem ficava com status
+        // "sent" no CRM normalmente). Duas mudanças: tenta 2x (cobre falha
+        // transitória) e, se mesmo assim falhar, propaga o erro em vez de
+        // mandar o arquivo quebrado — isso já flui pro tratamento que existe
+        // no api-server (marca a mensagem como "failed" e mostra pro
+        // atendente), só não estava sendo acionado.
+        let converted: Buffer | null = null;
+        let lastErr: unknown;
+        for (let attempt = 1; attempt <= 2 && !converted; attempt++) {
+          try {
+            converted = await toOggOpus(buffer);
+          } catch (err) {
+            lastErr = err;
+            logger.warn({ err, attempt }, "ffmpeg falhou ao converter áudio");
+          }
         }
+        if (!converted) {
+          throw new Error(
+            `Falha ao converter áudio para ogg/opus (2 tentativas): ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
+          );
+        }
+        audio = converted;
+        audioMime = "audio/ogg; codecs=opus";
       } else {
         audioMime = "audio/ogg; codecs=opus";
       }
