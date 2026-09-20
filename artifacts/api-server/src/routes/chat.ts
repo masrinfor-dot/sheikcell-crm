@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
-import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, messagePinsTable, attendanceLogsTable, attendanceStartEventsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, chatSavedFiltersTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, taskAssigneesTable, crmPurchasesTable, appSettingsTable, tradeInEvaluationsTable, timeClockEntriesTable, sensitiveActionLogTable } from "@workspace/db";
+import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, messagePinsTable, attendanceLogsTable, attendanceStartEventsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, chatSavedFiltersTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, taskAssigneesTable, crmPurchasesTable, appSettingsTable, tradeInEvaluationsTable, timeClockEntriesTable, sensitiveActionLogTable, broadcastDispatchLogTable } from "@workspace/db";
 import { eq, desc, and, or, lt, gte, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { requireAuth, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
@@ -2354,6 +2354,75 @@ router.delete("/chat/conversations/:id", requireAdminOrSupervisor, async (req, r
 // por chamada (MAX_BATCH) evita uma única requisição virar um disparo
 // gigante de uma vez só — quem precisa de mais repete em outra leva.
 const BROADCAST_MAX_BATCH = 60;
+
+// Roda a leva em segundo plano (não trava a requisição): com o intervalo real
+// entre mensagens (pedido 19/09, ver broadcast_interval_ms em /settings), uma
+// leva de 60 facilmente passa de 1-2 minutos. Atualiza o log a cada envio (dá
+// pra acompanhar o progresso via polling em GET /chat/broadcast-logs/:id) e
+// avisa por SSE só quem disparou.
+async function runBroadcastJob(
+  logId: number, tenantId: number, ids: number[], text: string, senderName: string,
+  userRole: string, userId: number, intervalMs: number, req: Request,
+): Promise<void> {
+  const results: { id: number; ok: boolean; reason?: string }[] = [];
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i]!;
+    try {
+      const [conv] = await db.select().from(conversationsTable)
+        .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
+      if (!conv) {
+        results.push({ id, ok: false, reason: "Não encontrado" });
+      } else if (conv.phone.includes("@g.us")) {
+        results.push({ id, ok: false, reason: "É um grupo — grupo não entra em disparo" });
+      } else if (conv.status !== "resolved" && conv.status !== "archived" && !conv.isArchived) {
+        results.push({ id, ok: false, reason: "Não está Resolvido" });
+      } else if (!(await canAccessConversation(conv, req))) {
+        results.push({ id, ok: false, reason: "Sem acesso" });
+      } else {
+        // Vendedor sempre assume pra si (é ele quem vai prospectar); admin/
+        // supervisor mantém o responsável original quando houver.
+        const targetAssigneeId = userRole === "vendedor" ? userId : (conv.assigneeId ?? userId);
+        const [updated] = await db.update(conversationsTable)
+          .set({
+            assigneeId: targetAssigneeId, status: "open", isArchived: false,
+            attendanceStartedAt: new Date(), updatedAt: new Date(),
+          })
+          .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)))
+          .returning();
+        if (!updated) {
+          results.push({ id, ok: false, reason: "Falha ao reabrir" });
+        } else {
+          const recipients = await restrictedRecipients(updated);
+          broadcast("conversation_updated", updated, {
+            tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey, isPotential: false, restrictedTo: recipients,
+          });
+          const delivered = await sendOutboundText(id, text, senderName);
+          results.push({ id, ok: delivered, reason: delivered ? undefined : "Falha no envio (WhatsApp)" });
+        }
+      }
+    } catch (err) {
+      req.log.error({ err, id }, "disparo em massa: erro inesperado numa conversa");
+      results.push({ id, ok: false, reason: "Erro inesperado" });
+    }
+
+    const sentCount = results.filter((r) => r.ok).length;
+    const failedCount = results.length - sentCount;
+    await db.update(broadcastDispatchLogTable)
+      .set({ sentCount, failedCount, results })
+      .where(eq(broadcastDispatchLogTable.id, logId));
+    broadcast("broadcast_progress", { logId, sentCount, failedCount, total: ids.length, done: false }, { tenantId, restrictedTo: [userId] });
+
+    if (i < ids.length - 1) await new Promise((r) => setTimeout(r, intervalMs));
+  }
+
+  const sentCount = results.filter((r) => r.ok).length;
+  const failedCount = results.length - sentCount;
+  await db.update(broadcastDispatchLogTable)
+    .set({ status: "done", finishedAt: new Date() })
+    .where(eq(broadcastDispatchLogTable.id, logId));
+  broadcast("broadcast_progress", { logId, sentCount, failedCount, total: ids.length, done: true }, { tenantId, restrictedTo: [userId] });
+}
+
 router.post("/chat/conversations/broadcast", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { conversationIds, message } = req.body as { conversationIds?: unknown; message?: string };
@@ -2372,41 +2441,78 @@ router.post("/chat/conversations/broadcast", requireAuth, requireChatAccess(), a
   const userId = req.session.userId!;
   const senderName = req.session.userName ?? "Atendente";
 
-  const results: { id: number; ok: boolean; reason?: string }[] = [];
-  for (const id of ids) {
-    const [conv] = await db.select().from(conversationsTable)
-      .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
-    if (!conv) { results.push({ id, ok: false, reason: "Não encontrado" }); continue; }
-    if (conv.phone.includes("@g.us")) { results.push({ id, ok: false, reason: "É um grupo — grupo não entra em disparo" }); continue; }
-    if (conv.status !== "resolved" && conv.status !== "archived" && !conv.isArchived) {
-      results.push({ id, ok: false, reason: "Não está Resolvido" });
-      continue;
-    }
-    if (!(await canAccessConversation(conv, req))) { results.push({ id, ok: false, reason: "Sem acesso" }); continue; }
+  const [intervalRow] = await db.select({ value: appSettingsTable.value }).from(appSettingsTable)
+    .where(and(eq(appSettingsTable.tenantId, tenantId), eq(appSettingsTable.key, "broadcast_interval_ms")));
+  const intervalMs = Math.max(1000, Math.min(30000, parseInt(intervalRow?.value ?? "", 10) || 3000));
 
-    // Vendedor sempre assume pra si (é ele quem vai prospectar); admin/
-    // supervisor mantém o responsável original quando houver.
-    const targetAssigneeId = userRole === "vendedor" ? userId : (conv.assigneeId ?? userId);
-    const [updated] = await db.update(conversationsTable)
-      .set({
-        assigneeId: targetAssigneeId, status: "open", isArchived: false,
-        attendanceStartedAt: new Date(), updatedAt: new Date(),
-      })
-      .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)))
-      .returning();
-    if (!updated) { results.push({ id, ok: false, reason: "Falha ao reabrir" }); continue; }
+  const [log] = await db.insert(broadcastDispatchLogTable).values({
+    tenantId, userId, userName: senderName, message: text,
+    totalSelected: ids.length, intervalMs, status: "running",
+  }).returning();
 
-    const recipients = await restrictedRecipients(updated);
-    broadcast("conversation_updated", updated, {
-      tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey, isPotential: false, restrictedTo: recipients,
-    });
+  void runBroadcastJob(log!.id, tenantId, ids, text, senderName, userRole, userId, intervalMs, req).catch((err) => {
+    req.log.error({ err, logId: log!.id }, "disparo em massa: job falhou");
+  });
 
-    const delivered = await sendOutboundText(id, text, senderName);
-    results.push({ id, ok: delivered, reason: delivered ? undefined : "Falha no envio (WhatsApp)" });
+  res.json({ ok: true, logId: log!.id, total: ids.length, intervalMs });
+});
+
+// ─── Métricas de disparo (pedido 19/09: "criar métrica para disparo:
+// quantidade, tempo de envio, tempo de intervalo etc") ────────────────────
+// Progresso de UMA leva em andamento — o próprio atendente que disparou pode
+// consultar (faz polling enquanto broadcastSending), além de admin/supervisor.
+router.get("/chat/broadcast-logs/summary", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const since30 = new Date(Date.now() - 30 * 24 * 60 * 60_000);
+  const since14 = new Date(Date.now() - 14 * 24 * 60 * 60_000);
+  const [totals] = await db.select({
+    dispatches: sql<number>`count(*)`,
+    sent: sql<number>`coalesce(sum(${broadcastDispatchLogTable.sentCount}), 0)`,
+    failed: sql<number>`coalesce(sum(${broadcastDispatchLogTable.failedCount}), 0)`,
+  }).from(broadcastDispatchLogTable)
+    .where(and(eq(broadcastDispatchLogTable.tenantId, tenantId), gte(broadcastDispatchLogTable.startedAt, since30)));
+  const daily = await db.select({
+    day: sql<string>`to_char(${broadcastDispatchLogTable.startedAt}, 'YYYY-MM-DD')`,
+    dispatches: sql<number>`count(*)`,
+    sent: sql<number>`coalesce(sum(${broadcastDispatchLogTable.sentCount}), 0)`,
+  }).from(broadcastDispatchLogTable)
+    .where(and(eq(broadcastDispatchLogTable.tenantId, tenantId), gte(broadcastDispatchLogTable.startedAt, since14)))
+    .groupBy(sql`to_char(${broadcastDispatchLogTable.startedAt}, 'YYYY-MM-DD')`)
+    .orderBy(sql`to_char(${broadcastDispatchLogTable.startedAt}, 'YYYY-MM-DD')`);
+  res.json({
+    last30Days: {
+      dispatches: Number(totals?.dispatches ?? 0),
+      sent: Number(totals?.sent ?? 0),
+      failed: Number(totals?.failed ?? 0),
+    },
+    daily: daily.map((d) => ({ day: d.day, dispatches: Number(d.dispatches), sent: Number(d.sent) })),
+  });
+});
+
+router.get("/chat/broadcast-logs", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const limit = Math.min(200, Math.max(1, parseInt(String(req.query["limit"] ?? "50"), 10) || 50));
+  const rows = await db.select().from(broadcastDispatchLogTable)
+    .where(eq(broadcastDispatchLogTable.tenantId, tenantId))
+    .orderBy(desc(broadcastDispatchLogTable.startedAt))
+    .limit(limit);
+  res.json(rows);
+});
+
+router.get("/chat/broadcast-logs/:id", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(req.params.id as string, 10);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "id inválido" }); return; }
+  const [log] = await db.select().from(broadcastDispatchLogTable)
+    .where(and(eq(broadcastDispatchLogTable.id, id), eq(broadcastDispatchLogTable.tenantId, tenantId))).limit(1);
+  if (!log) { res.status(404).json({ error: "Não encontrado" }); return; }
+  const userRole = req.session.userRole!;
+  const userId = req.session.userId!;
+  if (log.userId !== userId && userRole !== "admin" && userRole !== "supervisor") {
+    res.status(403).json({ error: "Acesso negado" });
+    return;
   }
-
-  const sent = results.filter((r) => r.ok).length;
-  res.json({ ok: true, sent, total: ids.length, results });
+  res.json(log);
 });
 
 // ─── Uso atual da trava anti-disparo em massa (Atendimento ativo) ─────────

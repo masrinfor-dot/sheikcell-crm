@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo, Fragment, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { api, can, ApiError, type Conversation, type ChatMessage, type PinnedMessage, type Sector, type ChatLabel, type ChatSavedFilter, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata, type CatalogCoupon } from "@/lib/api";
+import { api, can, ApiError, type Conversation, type ChatMessage, type PinnedMessage, type Sector, type ChatLabel, type ChatSavedFilter, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata, type CatalogCoupon, type BroadcastDispatchLog, type BroadcastDispatchSummary } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useActivityGuard } from "@/lib/activityGuard";
 import { useToast } from "@/hooks/use-toast";
@@ -194,6 +194,18 @@ function msgDayLabel(iso: string): string {
   if (key === todayKey) return "Hoje";
   if (key === yesterdayKey) return "Ontem";
   return new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", timeZone: TENANT_TIMEZONE });
+}
+
+// Quanto tempo a leva de disparo levou do começo ao fim ("tempo de envio" —
+// pedido 19/09). Leva em andamento (sem finishedAt) mostra travessão.
+function broadcastDuration(startIso: string, endIso: string | null): string {
+  if (!endIso) return "—";
+  const ms = new Date(endIso).getTime() - new Date(startIso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const totalSec = Math.round(ms / 1000);
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return min > 0 ? `${min}min ${sec}s` : `${sec}s`;
 }
 
 // ─── Avatar ────────────────────────────────────────────────────────────────
@@ -1354,6 +1366,9 @@ export default function ChatCenter({
   // Trava anti-disparo em massa do Atendimento ativo (mesmo modal de config).
   const [cfgOutboundHourly, setCfgOutboundHourly] = useState(10);
   const [cfgOutboundDaily, setCfgOutboundDaily] = useState(40);
+  // Intervalo entre mensagens do disparo em massa (segundos na UI, ms na API
+  // — pedido 19/09, mesmo modal de config).
+  const [cfgBroadcastInterval, setCfgBroadcastInterval] = useState(3);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const alertedRef = useRef<Set<number>>(new Set());
   // Finalizar atendimento: modal para capturar o motivo da finalização.
@@ -1374,6 +1389,9 @@ export default function ChatCenter({
   // (pedido 14/09, Atacado — reiniciar contato/prospectar cliente antigo).
   const canSeeResolved = user?.role === "admin" || user?.role === "supervisor"
     || user?.sector?.vendorsSeeResolved === true;
+  // Métricas de disparo (pedido 19/09): mesma trava do backend
+  // (GET /chat/broadcast-logs é admin/supervisor).
+  const canSeeBroadcastMetrics = user?.role === "admin" || user?.role === "supervisor";
   // Disparo em massa pra Resolvidos (pedido 14/09, Atacado): "lista de
   // transmissão" — seleciona vários atendimentos finalizados e manda a
   // mesma mensagem pra todos de uma vez (reabre + envia, ver
@@ -1382,6 +1400,15 @@ export default function ChatCenter({
   const [broadcastSelected, setBroadcastSelected] = useState<Set<number>>(new Set());
   const [broadcastMessage, setBroadcastMessage] = useState("");
   const [broadcastSending, setBroadcastSending] = useState(false);
+  // Progresso ao vivo da leva em andamento (polling em GET /chat/broadcast-logs/:id
+  // — o job roda em segundo plano no servidor, com intervalo real entre envios).
+  const [broadcastProgress, setBroadcastProgress] = useState<{ sentCount: number; failedCount: number; total: number } | null>(null);
+  // Métricas de disparo (pedido 19/09: "quantidade, tempo de envio, tempo de
+  // intervalo etc") — histórico + resumo, admin/supervisor (mesma trava do backend).
+  const [showBroadcastMetrics, setShowBroadcastMetrics] = useState(false);
+  const [broadcastLogs, setBroadcastLogs] = useState<BroadcastDispatchLog[]>([]);
+  const [broadcastSummary, setBroadcastSummary] = useState<BroadcastDispatchSummary | null>(null);
+  const [loadingBroadcastMetrics, setLoadingBroadcastMetrics] = useState(false);
   const [chatUsers, setChatUsers] = useState<{ id: number; name: string; role: string; sectorId?: number | null }[]>([]);
   const [quickReplies, setQuickReplies] = useState<QuickReply[]>([]);
   const [showQuickReplies, setShowQuickReplies] = useState(false);
@@ -2254,6 +2281,7 @@ export default function ChatCenter({
     api.settings.get().then((s) => {
       setAlertEnabled(s.alertUnansweredEnabled); setAlertMinutes(s.alertUnansweredMinutes);
       setCfgOutboundHourly(s.outboundHourlyLimit); setCfgOutboundDaily(s.outboundDailyLimit);
+      setCfgBroadcastInterval(Math.round(s.broadcastIntervalMs / 1000));
       // "Outro" nunca vem do backend — é sempre a última opção fixa aqui,
       // porque a UI depende dela pra abrir o campo de descrição livre.
       setFinalizeReasonOptions([...s.finalizeReasons, "Outro"]);
@@ -3896,14 +3924,38 @@ export default function ChatCenter({
         {category === "resolvidas" && canSeeResolved && (
           <div className="px-3 py-2 bg-[#ededed] border-b border-border">
             {!broadcastMode ? (
-              <button
-                onClick={() => { setBroadcastMode(true); setBroadcastSelected(new Set()); }}
-                data-testid="button-broadcast-mode-start"
-                className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-primary/30 bg-white text-primary text-xs font-semibold hover:bg-primary/5 transition"
-              >
-                <Send className="w-3.5 h-3.5" />
-                Disparar mensagem para vários (lista de transmissão)
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => { setBroadcastMode(true); setBroadcastSelected(new Set()); }}
+                  data-testid="button-broadcast-mode-start"
+                  className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-primary/30 bg-white text-primary text-xs font-semibold hover:bg-primary/5 transition"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  Disparar mensagem para vários (lista de transmissão)
+                </button>
+                {canSeeBroadcastMetrics && (
+                  <button
+                    onClick={async () => {
+                      setShowBroadcastMetrics(true);
+                      setLoadingBroadcastMetrics(true);
+                      try {
+                        const [logs, summary] = await Promise.all([api.chat.broadcastLogs(30), api.chat.broadcastLogsSummary()]);
+                        setBroadcastLogs(logs);
+                        setBroadcastSummary(summary);
+                      } catch (e) {
+                        toast({ title: e instanceof Error ? e.message : "Erro ao carregar métricas", variant: "destructive" });
+                      } finally {
+                        setLoadingBroadcastMetrics(false);
+                      }
+                    }}
+                    title="Métricas de disparo"
+                    data-testid="button-broadcast-metrics"
+                    className="shrink-0 flex items-center justify-center p-1.5 rounded-lg border border-border bg-white text-muted-foreground hover:bg-secondary/50 transition"
+                  >
+                    <BarChart3 className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
             ) : (
               <div className="space-y-2">
                 <div className="flex items-center justify-between text-xs">
@@ -3943,12 +3995,26 @@ export default function ChatCenter({
                     if (!text) { toast({ title: "Escreva a mensagem", variant: "destructive" }); return; }
                     if (!window.confirm(`Mandar essa mensagem para ${ids.length} atendimento(s) resolvido(s)?`)) return;
                     setBroadcastSending(true);
+                    setBroadcastProgress({ sentCount: 0, failedCount: 0, total: ids.length });
                     try {
-                      const res = await api.chat.broadcast(ids, text);
-                      toast({
-                        title: `${res.sent}/${res.total} enviado(s)`,
-                        description: res.sent < res.total ? "Alguns não foram enviados — confira o motivo na lista." : undefined,
-                      });
+                      const started = await api.chat.broadcast(ids, text);
+                      // O disparo roda em segundo plano no servidor, com um
+                      // intervalo real entre cada mensagem (pedido 19/09) —
+                      // uma leva grande pode levar alguns minutos. Acompanha
+                      // por polling em vez de segurar a resposta original.
+                      let done = false;
+                      while (!done) {
+                        await new Promise((r) => setTimeout(r, 1500));
+                        const log = await api.chat.broadcastLog(started.logId);
+                        setBroadcastProgress({ sentCount: log.sentCount, failedCount: log.failedCount, total: log.totalSelected });
+                        done = log.status === "done";
+                        if (done) {
+                          toast({
+                            title: `${log.sentCount}/${log.totalSelected} enviado(s)`,
+                            description: log.failedCount > 0 ? "Alguns não foram enviados — confira o motivo em Métricas de disparo." : undefined,
+                          });
+                        }
+                      }
                       setBroadcastMode(false);
                       setBroadcastSelected(new Set());
                       setBroadcastMessage("");
@@ -3957,6 +4023,7 @@ export default function ChatCenter({
                       toast({ title: e instanceof Error ? e.message : "Erro ao disparar", variant: "destructive" });
                     } finally {
                       setBroadcastSending(false);
+                      setBroadcastProgress(null);
                     }
                   }}
                   disabled={broadcastSending || broadcastSelected.size === 0 || !broadcastMessage.trim()}
@@ -3964,7 +4031,9 @@ export default function ChatCenter({
                   className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary/90 transition disabled:opacity-50"
                 >
                   <Send className="w-3.5 h-3.5" />
-                  {broadcastSending ? "Enviando..." : `Enviar para ${broadcastSelected.size}`}
+                  {broadcastSending
+                    ? (broadcastProgress ? `Enviando ${broadcastProgress.sentCount}/${broadcastProgress.total}...` : "Enviando...")
+                    : `Enviar para ${broadcastSelected.size}`}
                 </button>
               </div>
             )}
@@ -5778,6 +5847,22 @@ export default function ChatCenter({
                 </div>
               </div>
             </div>
+            <div className="pt-2 border-t border-border">
+              <label className="text-sm font-semibold flex items-center gap-1.5">
+                <Send className="w-3.5 h-3.5 text-primary" />
+                Intervalo do disparo em massa
+              </label>
+              <p className="text-xs text-muted-foreground mt-0.5 mb-2">
+                Pausa entre uma mensagem e a próxima dentro da mesma leva (Resolvidas → "Disparar mensagem para vários") — reduz o risco de o WhatsApp banir o número.
+              </p>
+              <div>
+                <label className="text-xs text-muted-foreground">Segundos entre mensagens</label>
+                <input type="number" min={1} max={30} value={cfgBroadcastInterval}
+                  onChange={(e) => setCfgBroadcastInterval(Number(e.target.value))}
+                  data-testid="input-broadcast-interval"
+                  className="w-full px-3 py-2 rounded-xl border border-border text-sm mt-1" />
+              </div>
+            </div>
             <button
               onClick={async () => {
                 const mins = Math.round(cfgMinutes);
@@ -5795,16 +5880,23 @@ export default function ChatCenter({
                   toast({ title: "Limite por dia inválido", description: "Use entre 1 e 1000.", variant: "destructive" });
                   return;
                 }
+                const intervalSec = Math.round(cfgBroadcastInterval);
+                if (!Number.isFinite(intervalSec) || intervalSec < 1 || intervalSec > 30) {
+                  toast({ title: "Intervalo inválido", description: "Use entre 1 e 30 segundos.", variant: "destructive" });
+                  return;
+                }
                 setSavingAlertCfg(true);
                 try {
                   const s = await api.settings.update({
                     alertUnansweredEnabled: cfgEnabled, alertUnansweredMinutes: mins,
                     outboundHourlyLimit: hourly, outboundDailyLimit: daily,
+                    broadcastIntervalMs: intervalSec * 1000,
                   });
                   setAlertEnabled(s.alertUnansweredEnabled);
                   setAlertMinutes(s.alertUnansweredMinutes);
                   setCfgOutboundHourly(s.outboundHourlyLimit);
                   setCfgOutboundDaily(s.outboundDailyLimit);
+                  setCfgBroadcastInterval(Math.round(s.broadcastIntervalMs / 1000));
                   setShowAlertCfg(false);
                   toast({ title: "Configurações salvas! ✅", description: s.alertUnansweredEnabled ? `Avisa após ${s.alertUnansweredMinutes} min sem resposta.` : "Alerta desligado para toda a equipe." });
                 } catch (err) {
@@ -5818,6 +5910,129 @@ export default function ChatCenter({
               className="w-full py-2.5 rounded-xl bg-primary text-white font-semibold text-sm disabled:opacity-50">
               {savingAlertCfg ? "Salvando..." : "Salvar"}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Métricas de disparo (pedido 19/09) ──────────────────────────── */}
+      {showBroadcastMetrics && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowBroadcastMetrics(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 pt-5 pb-3 shrink-0">
+              <h3 className="font-bold flex items-center gap-2">
+                <BarChart3 className="w-4 h-4 text-primary" />
+                Métricas de disparo
+              </h3>
+              <button onClick={() => setShowBroadcastMetrics(false)} data-testid="button-close-broadcast-metrics">
+                <X className="w-5 h-5 text-muted-foreground" />
+              </button>
+            </div>
+
+            {loadingBroadcastMetrics ? (
+              <div className="px-5 pb-8 pt-4 text-center text-sm text-muted-foreground">Carregando...</div>
+            ) : (
+              <div className="flex-1 overflow-y-auto px-5 pb-5 space-y-5">
+                {/* Números do período — hero numbers, sem gráfico (são totais,
+                    não série temporal). */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {[
+                    { label: "Disparos", value: broadcastSummary?.last30Days.dispatches ?? 0, hint: "levas em 30 dias" },
+                    { label: "Enviadas", value: broadcastSummary?.last30Days.sent ?? 0, hint: "mensagens entregues" },
+                    { label: "Falhas", value: broadcastSummary?.last30Days.failed ?? 0, hint: "não entregues" },
+                    {
+                      label: "Taxa de sucesso",
+                      value: (() => {
+                        const s = broadcastSummary?.last30Days.sent ?? 0;
+                        const f = broadcastSummary?.last30Days.failed ?? 0;
+                        return s + f === 0 ? "—" : `${Math.round((s / (s + f)) * 100)}%`;
+                      })(),
+                      hint: "entregues / total",
+                    },
+                  ].map((tile) => (
+                    <div key={tile.label} className="rounded-xl border border-border bg-secondary/30 px-3 py-2.5">
+                      <div className="text-[11px] text-muted-foreground">{tile.label}</div>
+                      <div className="text-xl font-bold text-foreground leading-tight">{tile.value}</div>
+                      <div className="text-[10px] text-muted-foreground">{tile.hint}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Volume diário (14 dias) — uma série só, então o título já
+                    identifica: sem legenda. Rótulo direto só no maior dia. */}
+                <div>
+                  <div className="text-xs font-semibold mb-2">Mensagens enviadas por dia (14 dias)</div>
+                  {(() => {
+                    const daily = broadcastSummary?.daily ?? [];
+                    if (daily.length === 0) {
+                      return <div className="text-xs text-muted-foreground py-4">Nenhum disparo nos últimos 14 dias.</div>;
+                    }
+                    const max = Math.max(...daily.map((d) => d.sent), 1);
+                    return (
+                      <div className="flex items-end gap-[2px] h-28 border-b border-border/70 pb-0">
+                        {daily.map((d) => {
+                          const pct = Math.max(4, Math.round((d.sent / max) * 100));
+                          const isMax = d.sent === max;
+                          const [, mm, dd] = d.day.split("-");
+                          return (
+                            <div key={d.day} className="group relative flex-1 flex flex-col items-center justify-end h-full min-w-0">
+                              {isMax && (
+                                <span className="text-[10px] font-semibold text-foreground mb-0.5">{d.sent}</span>
+                              )}
+                              <div
+                                className="w-full bg-primary rounded-t transition group-hover:brightness-110"
+                                style={{ height: `${pct}%` }}
+                              />
+                              <span className="text-[9px] text-muted-foreground mt-1 truncate w-full text-center">{dd}/{mm}</span>
+                              {/* Tooltip por marca */}
+                              <div className="pointer-events-none absolute bottom-full mb-1 left-1/2 -translate-x-1/2 z-10 hidden group-hover:block whitespace-nowrap rounded-lg bg-foreground text-white text-[10px] px-2 py-1 shadow-lg">
+                                {dd}/{mm} · {d.sent} enviada(s) · {d.dispatches} leva(s)
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Histórico leva a leva — é também a "table view" dos números
+                    acima (quantidade, tempo de envio, intervalo usado). */}
+                <div>
+                  <div className="text-xs font-semibold mb-2">Últimos disparos</div>
+                  {broadcastLogs.length === 0 ? (
+                    <div className="text-xs text-muted-foreground py-4">Nenhum disparo registrado ainda.</div>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {broadcastLogs.map((log) => (
+                        <div key={log.id} className="rounded-xl border border-border px-3 py-2">
+                          <div className="flex items-center justify-between gap-2 text-xs">
+                            <span className="font-semibold truncate">
+                              {new Date(log.startedAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                              <span className="text-muted-foreground font-normal"> · {log.userName}</span>
+                            </span>
+                            {log.status === "running" ? (
+                              <span className="shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">em andamento</span>
+                            ) : (
+                              <span className="shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-secondary text-muted-foreground">
+                                {log.sentCount}/{log.totalSelected}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-muted-foreground mt-1 line-clamp-2">{log.message}</p>
+                          <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-muted-foreground mt-1.5">
+                            <span>Quantidade: <strong className="text-foreground">{log.totalSelected}</strong></span>
+                            <span>Enviadas: <strong className="text-foreground">{log.sentCount}</strong></span>
+                            {log.failedCount > 0 && <span>Falhas: <strong className="text-foreground">{log.failedCount}</strong></span>}
+                            <span>Intervalo: <strong className="text-foreground">{Math.round(log.intervalMs / 1000)}s</strong></span>
+                            <span>Tempo de envio: <strong className="text-foreground">{broadcastDuration(log.startedAt, log.finishedAt)}</strong></span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

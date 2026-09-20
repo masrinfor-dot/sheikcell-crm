@@ -19,6 +19,11 @@ const DEFAULTS: Record<string, string> = {
   // sem API oficial da Meta, número real sob risco de ban por uso indevido).
   outbound_hourly_limit: "10",
   outbound_daily_limit: "40",
+  // Intervalo (ms) entre um envio e o próximo no "Disparar mensagem para
+  // vários" (lista de transmissão) — pedido do usuário (19/09): hoje as
+  // mensagens saem uma atrás da outra sem pausa nenhuma, que é justamente o
+  // que o aviso na tela ("pode fazer o WhatsApp banir o número") alerta.
+  broadcast_interval_ms: "3000",
   // Identificação do vendedor pro cliente (item 5 do roadmap): hoje sempre
   // veio ligado ("*Nome:*" antes da mensagem no WhatsApp) — default "true"
   // preserva esse comportamento pra quem nunca configurou nada.
@@ -61,6 +66,7 @@ router.get("/settings", requireAuth, async (req, res): Promise<void> => {
     alertUnansweredMinutes: Math.max(1, parseInt(map.alert_unanswered_minutes, 10) || 5),
     outboundHourlyLimit: Math.max(1, parseInt(map.outbound_hourly_limit, 10) || 10),
     outboundDailyLimit: Math.max(1, parseInt(map.outbound_daily_limit, 10) || 40),
+    broadcastIntervalMs: Math.max(500, parseInt(map.broadcast_interval_ms, 10) || 3000),
     attendantNameVisibleToCustomer: map.attendant_name_visible_to_customer !== "false",
     finalizeReasons: parseFinalizeReasons(map.finalize_reasons),
     branding: brandingOf(map),
@@ -70,11 +76,12 @@ router.get("/settings", requireAuth, async (req, res): Promise<void> => {
 // Só admin/supervisor alteram.
 router.patch("/settings", requireAdminOrSupervisor, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { alertUnansweredEnabled, alertUnansweredMinutes, outboundHourlyLimit, outboundDailyLimit, attendantNameVisibleToCustomer } = req.body as {
+  const { alertUnansweredEnabled, alertUnansweredMinutes, outboundHourlyLimit, outboundDailyLimit, broadcastIntervalMs, attendantNameVisibleToCustomer } = req.body as {
     alertUnansweredEnabled?: boolean;
     alertUnansweredMinutes?: number;
     outboundHourlyLimit?: number;
     outboundDailyLimit?: number;
+    broadcastIntervalMs?: number;
     attendantNameVisibleToCustomer?: boolean;
   };
   const updates: [string, string][] = [];
@@ -109,6 +116,16 @@ router.patch("/settings", requireAdminOrSupervisor, async (req, res): Promise<vo
     }
     updates.push(["outbound_daily_limit", String(d)]);
   }
+  // Entre 1s e 30s: abaixo disso não muda nada na prática pro risco de ban;
+  // acima disso uma leva de 60 já passaria de 15 minutos.
+  if (broadcastIntervalMs !== undefined) {
+    const ms = Math.round(Number(broadcastIntervalMs));
+    if (!Number.isFinite(ms) || ms < 1000 || ms > 30000) {
+      res.status(400).json({ error: "Intervalo deve ser entre 1000 e 30000 ms (1 a 30 segundos)" });
+      return;
+    }
+    updates.push(["broadcast_interval_ms", String(ms)]);
+  }
   if (attendantNameVisibleToCustomer !== undefined) {
     updates.push(["attendant_name_visible_to_customer", attendantNameVisibleToCustomer ? "true" : "false"]);
   }
@@ -127,6 +144,7 @@ router.patch("/settings", requireAdminOrSupervisor, async (req, res): Promise<vo
     alertUnansweredMinutes: Math.max(1, parseInt(map.alert_unanswered_minutes, 10) || 5),
     outboundHourlyLimit: Math.max(1, parseInt(map.outbound_hourly_limit, 10) || 10),
     outboundDailyLimit: Math.max(1, parseInt(map.outbound_daily_limit, 10) || 40),
+    broadcastIntervalMs: Math.max(500, parseInt(map.broadcast_interval_ms, 10) || 3000),
     attendantNameVisibleToCustomer: map.attendant_name_visible_to_customer !== "false",
     finalizeReasons: parseFinalizeReasons(map.finalize_reasons),
     branding: brandingOf(map),

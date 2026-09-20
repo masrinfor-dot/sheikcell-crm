@@ -1623,9 +1623,31 @@ export type AppSettings = {
   alertUnansweredMinutes: number;
   outboundHourlyLimit: number;
   outboundDailyLimit: number;
+  broadcastIntervalMs: number;
   attendantNameVisibleToCustomer: boolean;
   finalizeReasons: string[];
   branding: Branding;
+};
+
+// Métricas do "Disparar mensagem para vários" (pedido 19/09).
+export type BroadcastDispatchLog = {
+  id: number;
+  userId: number | null;
+  userName: string;
+  message: string;
+  totalSelected: number;
+  sentCount: number;
+  failedCount: number;
+  intervalMs: number;
+  status: "running" | "done";
+  results: { id: number; ok: boolean; reason?: string }[] | null;
+  startedAt: string;
+  finishedAt: string | null;
+};
+
+export type BroadcastDispatchSummary = {
+  last30Days: { dispatches: number; sent: number; failed: number };
+  daily: { day: string; dispatches: number; sent: number }[];
 };
 
 export type OutboundUsage = {
@@ -2177,12 +2199,18 @@ export const api = {
     deleteConversation: (id: number) =>
       req<{ ok: boolean }>(`/chat/conversations/${id}`, { method: "DELETE" }),
     // Disparo em massa pra Resolvidos (pedido 14/09, Atacado): reabre +
-    // manda a mesma mensagem pra vários atendimentos de uma vez.
+    // manda a mesma mensagem pra vários atendimentos de uma vez. Roda em
+    // segundo plano no servidor (pedido 19/09: intervalo real entre envios) —
+    // esta chamada só inicia a leva; acompanhe com broadcastLog(logId).
     broadcast: (conversationIds: number[], message: string) =>
-      req<{ ok: boolean; sent: number; total: number; results: { id: number; ok: boolean; reason?: string }[] }>(
+      req<{ ok: boolean; logId: number; total: number; intervalMs: number }>(
         "/chat/conversations/broadcast",
         { method: "POST", body: JSON.stringify({ conversationIds, message }) },
       ),
+    broadcastLog: (logId: number) => req<BroadcastDispatchLog>(`/chat/broadcast-logs/${logId}`),
+    broadcastLogs: (limit?: number) =>
+      req<BroadcastDispatchLog[]>(`/chat/broadcast-logs${limit ? `?limit=${limit}` : ""}`),
+    broadcastLogsSummary: () => req<BroadcastDispatchSummary>("/chat/broadcast-logs/summary"),
     outboundUsage: (assigneeId?: number) =>
       req<OutboundUsage>(`/chat/outbound-usage${assigneeId ? `?assigneeId=${assigneeId}` : ""}`),
     createConversation: (data: { phone: string; name: string; channel?: string; sectorId?: number; assigneeId?: number; sessionKey?: string }) =>

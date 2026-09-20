@@ -42,3 +42,4 @@ export * from "./tv_box";
 export * from "./catalog";
 export * from "./finance_payments";
 export * from "./sensitive_action_log";
+export * from "./broadcast_dispatch_log";
