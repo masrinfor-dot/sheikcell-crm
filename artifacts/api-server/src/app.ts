@@ -3,6 +3,7 @@ import cors from "cors";
 import pinoHttp from "pino-http";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
+import cookieParser from "cookie-parser";
 import { pool } from "@workspace/db";
 import router from "./routes";
 import { logger } from "./lib/logger";
@@ -49,6 +50,12 @@ app.use(
   }),
 );
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
+
+// Cookies simples (sem assinatura — não guarda nada sensível aqui, só o id
+// anônimo de visitante usado no limite de avaliação pública, ver tradeIn.ts).
+// A sessão de login (acima) continua sendo o cookie assinado do
+// express-session, esse aqui não mexe nela.
+app.use(cookieParser());
 
 const PgSession = connectPgSimple(session);
 

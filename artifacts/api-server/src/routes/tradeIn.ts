@@ -819,16 +819,42 @@ router.delete("/trade-in/:id", requireAuth, async (req, res): Promise<void> => {
 //    limite por IP (nunca por login, aqui não tem) — ver PUBLIC_AI_LIMIT.
 export const tradeInPublicRouter: IRouter = Router();
 
-const DEFAULT_PUBLIC_AI_LIMIT = 5; // avaliações por IA, por IP, por 24h, quando a loja não personalizou (ver tenant.publicTradeInAiLimit) — best-effort (reseta a cada deploy)
+// 10/09 → 20/09: era por IP, e várias pessoas de verdade (mesma casa, mesmo
+// wifi da loja, operadora com IP compartilhado) caíam no mesmo balde e se
+// bloqueavam umas às outras sem nunca ter avaliado nada. Trocado pra um id
+// anônimo de visitante gravado em cookie (1 por navegador, não por rede) —
+// ainda é best-effort (limpar cookies reseta, IP nunca foi diferente nisso),
+// mas resolve o caso real que gerava reclamação. Limite padrão também subiu
+// de 5 pra 15/dia (loja pode personalizar em tenant.publicTradeInAiLimit).
+const DEFAULT_PUBLIC_AI_LIMIT = 15; // avaliações por IA, por visitante, por 24h, quando a loja não personalizou
 const PUBLIC_AI_WINDOW_MS = 24 * 60 * 60 * 1000;
-const publicAiCallsByIp = new Map<string, number[]>();
+const VISITOR_COOKIE = "sc_vid";
+const VISITOR_COOKIE_MAX_AGE_MS = 400 * 24 * 60 * 60 * 1000; // ~400 dias (teto do Chrome pra Set-Cookie)
+const publicAiCallsByVisitor = new Map<string, number[]>();
 
-function publicAiRateLimited(ip: string, limit: number): boolean {
+// Lê o id do cookie se já existir; se não, gera um novo e grava (httpOnly:
+// não precisa do front ler, só o backend contar). IP fica só de fallback,
+// pro caso raríssimo de o navegador bloquear cookie de terceiro/cookie
+// nenhum — melhor ainda ter algum limite do que nenhum.
+function visitorId(req: Request, res: Response): string {
+  const existing = (req.cookies as Record<string, string> | undefined)?.[VISITOR_COOKIE];
+  if (existing) return existing;
+  const id = randomUUID();
+  res.cookie(VISITOR_COOKIE, id, {
+    httpOnly: true,
+    secure: process.env["NODE_ENV"] === "production",
+    sameSite: "lax",
+    maxAge: VISITOR_COOKIE_MAX_AGE_MS,
+  });
+  return id;
+}
+
+function publicAiRateLimited(key: string, limit: number): boolean {
   const now = Date.now();
-  const calls = (publicAiCallsByIp.get(ip) ?? []).filter((t) => now - t < PUBLIC_AI_WINDOW_MS);
-  if (calls.length >= limit) { publicAiCallsByIp.set(ip, calls); return true; }
+  const calls = (publicAiCallsByVisitor.get(key) ?? []).filter((t) => now - t < PUBLIC_AI_WINDOW_MS);
+  if (calls.length >= limit) { publicAiCallsByVisitor.set(key, calls); return true; }
   calls.push(now);
-  publicAiCallsByIp.set(ip, calls);
+  publicAiCallsByVisitor.set(key, calls);
   return false;
 }
 
@@ -910,9 +936,9 @@ tradeInPublicRouter.post("/trade-in-public/:slug/estimate", async (req: Request,
   const rows: BaseValueRow[] = baseRows.map((r) => ({ brand: r.brand, model: r.model, storage: r.storage, baseValue: Number(r.baseValue) }));
   const willUseTable = findBaseValueMatch(rows, fBrand, fModel, fMemory) != null;
   if (!willUseTable) {
-    const ip = req.ip ?? "unknown";
+    const vid = visitorId(req, res) || req.ip || "unknown";
     const aiLimit = tenant.publicTradeInAiLimit ?? DEFAULT_PUBLIC_AI_LIMIT;
-    if (publicAiRateLimited(ip, aiLimit)) {
+    if (publicAiRateLimited(vid, aiLimit)) {
       res.status(429).json({ error: "Limite de avaliações automáticas atingido por hoje. Deixe seu contato abaixo que a loja avalia manualmente e retorna com um valor." });
       return;
     }
