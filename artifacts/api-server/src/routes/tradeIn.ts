@@ -13,6 +13,10 @@ import {
 import { getMargins, getQuestionsConfig, MARGINS_KEY, type Margins } from "../lib/tradeInConfig";
 import { computeTradeInEstimate, askTradeInPriceAI, extractTradeInJson, formatBRL } from "../lib/tradeInEstimate";
 import { findBaseValueMatch, type BaseValueRow } from "../lib/tradeInBaseValues";
+import {
+  getEvalLimitConfig, saveEvalLimitConfig, evalPeriodStart, countEvaluationsBy,
+  evalUsageByUser, evalLimitBlockMessage, type EvalLimitPeriod,
+} from "../lib/tradeInEvalLimit";
 import { MEDIA_DIR } from "../lib/whatsappInbound";
 import { writeFile, mkdir } from "fs/promises";
 import { randomUUID } from "crypto";
@@ -252,6 +256,54 @@ router.patch("/trade-in/settings", requireAdmin, async (req, res): Promise<void>
   res.json({ ...updated, effectiveMarginPct: updated?.publicTradeInMarginPct ?? (await getMargins(tenantId)).t2 });
 });
 
+// ─── Limite de avaliações por vendedor (pedido 19/09) ───────────────────────
+// Cota por pessoa da equipe, por dia/semana/mês civis (fuso da loja). Todo
+// mundo lê (o vendedor precisa ver quanto já usou antes de começar); só admin
+// altera e só admin enxerga o uso da equipe inteira.
+router.get("/trade-in/eval-limit", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const cfg = await getEvalLimitConfig(tenantId);
+  const since = evalPeriodStart(cfg.period);
+  const userId = req.session.userId!;
+  const isAdmin = req.session.userRole === "admin";
+  res.json({
+    ...cfg,
+    periodStart: since.toISOString(),
+    myUsed: await countEvaluationsBy(tenantId, userId, since),
+    // Admin não é bloqueado pela própria cota (é quem ajusta o limite).
+    exemptMe: isAdmin,
+    usage: isAdmin ? await evalUsageByUser(tenantId, since) : [],
+  });
+});
+
+router.patch("/trade-in/eval-limit", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { enabled, limit, period } = req.body as { enabled?: unknown; limit?: unknown; period?: unknown };
+  const current = await getEvalLimitConfig(tenantId);
+  const nextLimit = limit === undefined ? current.limit : Math.round(Number(limit));
+  if (!Number.isFinite(nextLimit) || nextLimit < 1 || nextLimit > 500) {
+    res.status(400).json({ error: "Limite deve ser entre 1 e 500 avaliações" });
+    return;
+  }
+  const nextPeriod: EvalLimitPeriod = period === "day" || period === "week" || period === "month"
+    ? period
+    : current.period;
+  const cfg = {
+    enabled: enabled === undefined ? current.enabled : !!enabled,
+    limit: nextLimit,
+    period: nextPeriod,
+  };
+  await saveEvalLimitConfig(tenantId, cfg);
+  const since = evalPeriodStart(cfg.period);
+  res.json({
+    ...cfg,
+    periodStart: since.toISOString(),
+    myUsed: await countEvaluationsBy(tenantId, req.session.userId!, since),
+    exemptMe: true,
+    usage: await evalUsageByUser(tenantId, since),
+  });
+});
+
 // ─── Tabela de valores base (lista fixa, pedido 06/09) ──────────────────────
 // Alimenta o cálculo determinístico da avaliação PÚBLICA (ver
 // tradeInPublicRouter mais abaixo): pra marca/modelo/armazenamento cadastrado
@@ -371,6 +423,10 @@ router.post("/trade-in/base-price", requireAuth, requirePerm("usar_ia"), async (
   const payPct = 100 - marginPct;
 
   const uid = req.session.userId!;
+  // Cota do vendedor (pedido 19/09): bloqueia já no preço base, pra pessoa
+  // não responder o questionário inteiro e só então descobrir que estourou.
+  const quotaBlock = await evalLimitBlockMessage(tenantId, uid, req.session.userRole!);
+  if (quotaBlock) { res.status(429).json({ error: quotaBlock }); return; }
   if (inFlight.has(uid)) { res.status(429).json({ error: "Já existe uma avaliação em andamento. Aguarde." }); return; }
   const last = lastCallByUser.get(uid) ?? 0;
   if (Date.now() - last < COOLDOWN_MS) { res.status(429).json({ error: "Aguarde alguns segundos antes de avaliar novamente." }); return; }
@@ -457,6 +513,10 @@ router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (re
 
   // Cooldown + 1 chamada em andamento por usuário (chamadas de IA custam).
   const uid = req.session.userId!;
+  // Cota do vendedor (pedido 19/09) — checada de novo aqui porque dá pra
+  // chamar esta rota direto, sem passar pelo preço base.
+  const quotaBlock = await evalLimitBlockMessage(tenantId, uid, req.session.userRole!);
+  if (quotaBlock) { res.status(429).json({ error: quotaBlock }); return; }
   if (inFlight.has(uid)) { res.status(429).json({ error: "Já existe uma avaliação em andamento. Aguarde." }); return; }
   const last = lastCallByUser.get(uid) ?? 0;
   if (Date.now() - last < COOLDOWN_MS) {

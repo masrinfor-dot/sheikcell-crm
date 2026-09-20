@@ -1629,6 +1629,19 @@ export type AppSettings = {
   branding: Branding;
 };
 
+// Cota de avaliações de usados por pessoa da equipe (pedido 19/09).
+export type TradeInEvalPeriod = "day" | "week" | "month";
+
+export type TradeInEvalLimit = {
+  enabled: boolean;
+  limit: number;
+  period: TradeInEvalPeriod;
+  periodStart: string;
+  myUsed: number;
+  exemptMe: boolean;
+  usage: { userId: number; userName: string; role: string; used: number }[];
+};
+
 // Métricas do "Disparar mensagem para vários" (pedido 19/09).
 export type BroadcastDispatchLog = {
   id: number;
@@ -2500,6 +2513,11 @@ export const api = {
         publicTradeInEnabled: boolean; publicTradeInAiLimit: number | null;
         publicTradeInMarginPct: number | null; effectiveMarginPct: number;
       }>("/trade-in/settings", { method: "PATCH", body: JSON.stringify(data) }),
+    // Cota de avaliações por pessoa da equipe (pedido 19/09). `usage` só vem
+    // preenchido pro admin; vendedor recebe só o próprio `myUsed`.
+    evalLimit: () => req<TradeInEvalLimit>("/trade-in/eval-limit"),
+    saveEvalLimit: (data: { enabled?: boolean; limit?: number; period?: TradeInEvalPeriod }) =>
+      req<TradeInEvalLimit>("/trade-in/eval-limit", { method: "PATCH", body: JSON.stringify(data) }),
   },
   // Avaliação de usados PÚBLICA (vitrine, sem login) — ver tradeInPublicRouter.
   tradeInPublic: {

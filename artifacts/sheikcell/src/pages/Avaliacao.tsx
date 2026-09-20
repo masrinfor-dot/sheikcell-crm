@@ -1,12 +1,20 @@
 import { useState, useEffect } from "react";
-import { api, canEditModule, type TradeInEvaluation, type TradeInMargins, type TradeInQuestion, type TradeInQuestionsConfig, type TradeInBaseValue, type Store } from "@/lib/api";
+import { api, canEditModule, type TradeInEvaluation, type TradeInMargins, type TradeInQuestion, type TradeInQuestionsConfig, type TradeInBaseValue, type Store, type TradeInEvalLimit, type TradeInEvalPeriod } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import { AddressAutocompleteInput } from "@/components/AddressAutocompleteInput";
 import {
   Smartphone, Sparkles, History, ChevronDown, ChevronLeft, RefreshCw, BadgeDollarSign, Settings, X,
   ListChecks, Plus, Trash2, ArrowUp, ArrowDown, ImagePlus, Printer, Wallet, TrendingUp, LayoutDashboard, Landmark,
+  Gauge,
 } from "lucide-react";
+
+// Rótulos do período da cota de avaliações (pedido 19/09).
+const EVAL_PERIOD_LABELS: Record<TradeInEvalPeriod, string> = {
+  day: "por dia",
+  week: "por semana",
+  month: "por mês",
+};
 
 // Formas de pagamento oferecidas ao fechar a compra (nota de compra) — texto
 // livre no banco, a lista aqui só alimenta o <select>. EDITÁVEL pelo admin
@@ -199,9 +207,19 @@ export default function Avaliacao() {
   const [cfgPublicEnabled, setCfgPublicEnabled] = useState(true);
   const [cfgPublicAiLimit, setCfgPublicAiLimit] = useState("5");
   const [savingPublicCfg, setSavingPublicCfg] = useState(false);
+  // Cota de avaliações por pessoa da equipe (pedido 19/09): admin configura
+  // quantas cada vendedor pode fazer por dia/semana/mês; todo mundo vê o
+  // próprio consumo antes de começar uma avaliação.
+  const [evalLimit, setEvalLimit] = useState<TradeInEvalLimit | null>(null);
+  const [showEvalLimitCfg, setShowEvalLimitCfg] = useState(false);
+  const [cfgEvalLimitEnabled, setCfgEvalLimitEnabled] = useState(false);
+  const [cfgEvalLimitCount, setCfgEvalLimitCount] = useState("10");
+  const [cfgEvalLimitPeriod, setCfgEvalLimitPeriod] = useState<TradeInEvalPeriod>("day");
+  const [savingEvalLimit, setSavingEvalLimit] = useState(false);
 
   const fetchBaseValues = () => { api.tradeIn.baseValues().then(setBaseValues).catch(() => {}); };
   const fetchHistory = () => { api.tradeIn.list().then(setHistory).catch(() => {}); };
+  const fetchEvalLimit = () => { api.tradeIn.evalLimit().then(setEvalLimit).catch(() => {}); };
   useEffect(() => {
     fetchHistory();
     api.tradeIn.margins().then(setMargins).catch(() => {});
@@ -209,6 +227,7 @@ export default function Avaliacao() {
     api.tradeIn.paymentMethods().then(setPaymentMethods).catch(() => {});
     api.stores.list(true).then(setStores).catch(() => {});
     api.tradeIn.publicSettings().then(setPublicSettings).catch(() => {});
+    fetchEvalLimit();
     fetchBaseValues();
   }, []);
   // Loja sugerida quando ninguém escolheu nada ainda: a própria loja do
@@ -265,6 +284,8 @@ export default function Avaliacao() {
       setDealName(customerName.trim());
       setStep(3);
       fetchHistory();
+      // Acabou de consumir uma da cota — atualiza o contador na tela.
+      fetchEvalLimit();
     } catch (err) {
       toast({ title: "Erro na avaliação", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     } finally {
@@ -1142,9 +1163,29 @@ ${photosHtml}
                     className={`flex items-center gap-1 text-[11px] font-semibold ${publicSettings?.publicTradeInEnabled === false ? "text-red-600" : "text-primary"}`}>
                     <Wallet className="w-3 h-3" /> Avaliação na vitrine{publicSettings?.publicTradeInEnabled === false ? " (desligada)" : ""}
                   </button>
+                  <button onClick={() => {
+                      setCfgEvalLimitEnabled(evalLimit?.enabled ?? false);
+                      setCfgEvalLimitCount(String(evalLimit?.limit ?? 10));
+                      setCfgEvalLimitPeriod(evalLimit?.period ?? "day");
+                      fetchEvalLimit();
+                      setShowEvalLimitCfg(true);
+                    }}
+                    data-testid="button-eval-limit-settings"
+                    className="flex items-center gap-1 text-[11px] font-semibold text-primary">
+                    <Gauge className="w-3 h-3" /> Limite de avaliações{evalLimit?.enabled ? ` (${evalLimit.limit} ${EVAL_PERIOD_LABELS[evalLimit.period]})` : " (sem limite)"}
+                  </button>
                 </div>
               )}
             </div>
+            {/* Quanto este vendedor já consumiu da cota no período corrente —
+                aparece antes de começar, não só no erro ao estourar. */}
+            {evalLimit?.enabled && !evalLimit.exemptMe && (
+              <p className={`text-[11px] mb-1.5 ${evalLimit.myUsed >= evalLimit.limit ? "text-red-600 font-semibold" : "text-muted-foreground"}`}
+                data-testid="text-eval-limit-usage">
+                Suas avaliações: {evalLimit.myUsed}/{evalLimit.limit} {EVAL_PERIOD_LABELS[evalLimit.period]}
+                {evalLimit.myUsed >= evalLimit.limit ? " — cota atingida, fale com o admin." : ""}
+              </p>
+            )}
             <div className="grid grid-cols-3 gap-2">
               {MARGIN_TABLES.map((t) => (
                 <button key={t.table} onClick={() => setMarginTable(t.table)}
@@ -1948,6 +1989,113 @@ ${photosHtml}
               className="w-full py-2.5 rounded-xl bg-primary text-white font-semibold text-sm disabled:opacity-50">
               {savingPublicCfg ? "Salvando..." : "Salvar"}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Limite de avaliações por vendedor (pedido 19/09) */}
+      {showEvalLimitCfg && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowEvalLimitCfg(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-md max-h-[85vh] flex flex-col shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-6 pb-3 shrink-0">
+              <h3 className="font-bold flex items-center gap-2"><Gauge className="w-4 h-4 text-primary" /> Limite de avaliações</h3>
+              <button onClick={() => setShowEvalLimitCfg(false)}><X className="w-5 h-5 text-muted-foreground" /></button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-6 pb-6 space-y-4">
+              <p className="text-xs text-muted-foreground">
+                Cota de avaliações por pessoa da equipe. Cada avaliação usa IA (com custo), então isso segura o consumo sem depender de ninguém lembrar. Vale para a Avaliação de Usados aqui do CRM — a avaliação do cliente na vitrine pública tem o limite dela, separado.
+              </p>
+              <label className="flex items-center gap-2.5 rounded-xl border border-border p-3 cursor-pointer hover:bg-secondary/50 transition">
+                <input type="checkbox" checked={cfgEvalLimitEnabled} onChange={(e) => setCfgEvalLimitEnabled(e.target.checked)}
+                  data-testid="checkbox-eval-limit-enabled" className="w-4 h-4" />
+                <div>
+                  <p className="text-sm font-semibold">Limitar avaliações por vendedor</p>
+                  <p className="text-[11px] text-muted-foreground">Desligado: ninguém tem cota (como era antes). O admin nunca é bloqueado.</p>
+                </div>
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <p className="text-xs font-bold mb-1">Quantidade</p>
+                  <input type="number" min={1} max={500} value={cfgEvalLimitCount}
+                    onChange={(e) => setCfgEvalLimitCount(e.target.value)}
+                    data-testid="input-eval-limit-count"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm text-right" />
+                </div>
+                <div>
+                  <p className="text-xs font-bold mb-1">Período</p>
+                  <select value={cfgEvalLimitPeriod}
+                    onChange={(e) => setCfgEvalLimitPeriod(e.target.value as TradeInEvalPeriod)}
+                    data-testid="select-eval-limit-period"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm bg-white">
+                    <option value="day">Por dia</option>
+                    <option value="week">Por semana</option>
+                    <option value="month">Por mês</option>
+                  </select>
+                </div>
+              </div>
+              <p className="text-[11px] text-muted-foreground -mt-1">
+                A cota zera no começo de cada {cfgEvalLimitPeriod === "day" ? "dia" : cfgEvalLimitPeriod === "week" ? "semana (segunda-feira)" : "mês"}, no horário de Brasília — não é janela de 24h corridas.
+              </p>
+
+              {/* Consumo de cada pessoa no período corrente */}
+              <div>
+                <p className="text-xs font-bold mb-1.5">Consumo no período atual</p>
+                {!evalLimit || evalLimit.usage.length === 0 ? (
+                  <p className="text-[11px] text-muted-foreground">Ninguém avaliou neste período ainda.</p>
+                ) : (
+                  <div className="space-y-1">
+                    {evalLimit.usage.map((u) => {
+                      const isAdminUser = u.role === "admin";
+                      const pct = Math.min(100, Math.round((u.used / Math.max(1, evalLimit.limit)) * 100));
+                      const over = !isAdminUser && evalLimit.enabled && u.used >= evalLimit.limit;
+                      return (
+                        <div key={u.userId} className="flex items-center gap-2 text-[11px]">
+                          <span className="w-32 truncate" title={u.userName}>{u.userName}</span>
+                          <div className="flex-1 h-1.5 rounded-full bg-secondary overflow-hidden">
+                            <div className={`h-full rounded-full ${over ? "bg-red-500" : "bg-primary"}`} style={{ width: `${pct}%` }} />
+                          </div>
+                          <span className={`w-14 text-right tabular-nums ${over ? "text-red-600 font-semibold" : "text-muted-foreground"}`}>
+                            {u.used}{evalLimit.enabled && !isAdminUser ? `/${evalLimit.limit}` : ""}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <button
+                onClick={async () => {
+                  const limit = Math.round(Number(cfgEvalLimitCount));
+                  if (!Number.isFinite(limit) || limit < 1 || limit > 500) {
+                    toast({ title: "Quantidade inválida", description: "Use um número entre 1 e 500.", variant: "destructive" });
+                    return;
+                  }
+                  setSavingEvalLimit(true);
+                  try {
+                    const saved = await api.tradeIn.saveEvalLimit({
+                      enabled: cfgEvalLimitEnabled, limit, period: cfgEvalLimitPeriod,
+                    });
+                    setEvalLimit(saved);
+                    setShowEvalLimitCfg(false);
+                    toast({
+                      title: "Limite salvo! ✅",
+                      description: saved.enabled
+                        ? `${saved.limit} avaliações ${EVAL_PERIOD_LABELS[saved.period]} por vendedor.`
+                        : "Limite desligado — ninguém tem cota.",
+                    });
+                  } catch (err) {
+                    toast({ title: "Erro ao salvar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+                  } finally {
+                    setSavingEvalLimit(false);
+                  }
+                }}
+                disabled={savingEvalLimit}
+                data-testid="button-save-eval-limit"
+                className="w-full py-2.5 rounded-xl bg-primary text-white font-semibold text-sm disabled:opacity-50">
+                {savingEvalLimit ? "Salvando..." : "Salvar"}
+              </button>
+            </div>
           </div>
         </div>
       )}
