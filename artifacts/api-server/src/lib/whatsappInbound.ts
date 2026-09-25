@@ -1,6 +1,7 @@
 import {
   db, conversationsTable, messagesTable, sectorsTable, attendanceLogsTable, whatsappSessionsTable,
   tenantsTable, employeesTable, workShiftsTable, timeClockEntriesTable, crmContactsTable,
+  whatsappContactsTable,
 } from "@workspace/db";
 import { eq, and, desc, sql, inArray } from "drizzle-orm";
 import { resolveTodaysPunchKind } from "./timeBank";
@@ -176,6 +177,65 @@ export interface InboundWAPayload {
   // ponte do WhatsApp, pra diferenciar na Central de Atendimento.
   isCommunityMsg?: boolean;
   fromMe?: boolean;
+}
+
+// ─── Agenda de Contatos do WhatsApp (pedido 25/09, fase 1) ──────────────────
+export interface InboundWAContactPayload {
+  sessionKey: string;
+  contacts: Array<{
+    jid: string;
+    phone: string;
+    name?: string;
+    pushName?: string;
+    verifiedName?: string;
+    avatarUrl?: string;
+    isBusiness?: boolean;
+  }>;
+}
+
+// Recebe um lote de contatos encaminhado pela ponte (ver forwardContacts em
+// waConnection.ts) e grava/atualiza na agenda desta linha. Um evento pode
+// trazer o contato completo (sync inicial) ou só um campo (ex.: Baileys
+// reemite contacts.update só com pushName a cada mensagem inbound) — por
+// isso o UPDATE usa COALESCE: um campo ausente no evento novo NUNCA apaga um
+// valor já salvo por um evento anterior mais completo.
+export async function processInboundWAContacts(payload: InboundWAContactPayload): Promise<void> {
+  const { sessionKey, contacts } = payload;
+  if (!sessionKey || !Array.isArray(contacts) || contacts.length === 0) return;
+  const tenantId = await resolveTenantForSession(sessionKey);
+  if (tenantId == null) return; // linha desconhecida — mesmo fail-closed de processInboundWA
+
+  // Um único INSERT com ON CONFLICT não pode mirar a mesma chave duas vezes —
+  // um lote de app-state sync às vezes repete o mesmo jid; mantém só a
+  // última ocorrência de cada um.
+  const byJid = new Map<string, InboundWAContactPayload["contacts"][number]>();
+  for (const c of contacts) {
+    if (c?.jid && c?.phone) byJid.set(c.jid, c);
+  }
+  const rows = [...byJid.values()].map((c) => ({
+    tenantId,
+    sessionKey,
+    jid: c.jid,
+    phone: c.phone,
+    name: c.name ?? null,
+    pushName: c.pushName ?? null,
+    verifiedName: c.verifiedName ?? null,
+    avatarUrl: c.avatarUrl ?? null,
+    isBusiness: c.isBusiness ?? false,
+  }));
+  if (rows.length === 0) return;
+
+  await db.insert(whatsappContactsTable).values(rows).onConflictDoUpdate({
+    target: [whatsappContactsTable.tenantId, whatsappContactsTable.sessionKey, whatsappContactsTable.jid],
+    set: {
+      name: sql`coalesce(excluded.name, ${whatsappContactsTable.name})`,
+      pushName: sql`coalesce(excluded.push_name, ${whatsappContactsTable.pushName})`,
+      verifiedName: sql`coalesce(excluded.verified_name, ${whatsappContactsTable.verifiedName})`,
+      avatarUrl: sql`coalesce(excluded.avatar_url, ${whatsappContactsTable.avatarUrl})`,
+      isBusiness: sql`(excluded.is_business OR ${whatsappContactsTable.isBusiness})`,
+      updatedAt: new Date(),
+    },
+  });
 }
 
 export interface MetaInboundWAPayload {

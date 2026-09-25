@@ -25,6 +25,7 @@ export * from "./chat_saved_filters";
 export * from "./routing_rules";
 export * from "./whatsapp_sessions";
 export * from "./whatsapp_auth_state";
+export * from "./whatsapp_contacts";
 export * from "./internal_chat";
 export * from "./tasks";
 export * from "./quick_replies";

@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
-import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, messagePinsTable, attendanceLogsTable, attendanceStartEventsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, chatSavedFiltersTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, taskAssigneesTable, crmPurchasesTable, appSettingsTable, tradeInEvaluationsTable, timeClockEntriesTable, sensitiveActionLogTable, broadcastDispatchLogTable } from "@workspace/db";
+import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, messagePinsTable, attendanceLogsTable, attendanceStartEventsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, chatSavedFiltersTable, whatsappSessionsTable, whatsappContactsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, taskAssigneesTable, crmPurchasesTable, appSettingsTable, tradeInEvaluationsTable, timeClockEntriesTable, sensitiveActionLogTable, broadcastDispatchLogTable } from "@workspace/db";
 import { eq, desc, and, or, lt, gte, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { requireAuth, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
@@ -31,8 +31,10 @@ class SurveyDisabled extends Error {}
 import {
   processInboundWA,
   processMetaInboundWA,
+  processInboundWAContacts,
   type InboundWAPayload,
   type MetaInboundWAPayload,
+  type InboundWAContactPayload,
   MEDIA_DIR,
 } from "../lib/whatsappInbound";
 
@@ -3382,6 +3384,79 @@ router.post("/chat/webhook/whatsapp", async (req: Request, res: Response): Promi
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Erro ao processar mensagem" });
   }
+});
+
+// POST — Agenda de Contatos do WhatsApp (pedido 25/09, fase 1): a ponte
+// (waConnection.ts → forwardContacts) encaminha os lotes de contatos que o
+// Baileys sincroniza. Mesma autenticação (X-Bridge-Secret) do webhook de
+// mensagens acima — só a linha Baileys manda contato, não existe caminho
+// pela Meta Cloud API.
+router.post("/chat/webhook/whatsapp-contacts", async (req: Request, res: Response): Promise<void> => {
+  if (!verifyLegacyBridgeSecret(req)) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  try {
+    await processInboundWAContacts(req.body as InboundWAContactPayload);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Erro ao processar contatos" });
+  }
+});
+
+// GET — lista/busca a Agenda de Contatos do WhatsApp (pedido 25/09, fase 1).
+// Busca por nome/pushName/telefone; filtra por linha opcionalmente. Sem
+// busca, os mais recentemente atualizados aparecem primeiro (contato que
+// acabou de mandar mensagem tende a ser o mais relevante).
+router.get("/chat/whatsapp-contacts", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+  const sessionKey = typeof req.query.sessionKey === "string" ? req.query.sessionKey : undefined;
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "60"), 10) || 60, 1), 200);
+  const offset = Math.max(parseInt(String(req.query.offset ?? "0"), 10) || 0, 0);
+
+  const conditions = [eq(whatsappContactsTable.tenantId, tenantId)];
+  if (sessionKey) conditions.push(eq(whatsappContactsTable.sessionKey, sessionKey));
+  if (search) {
+    const digits = search.replace(/\D/g, "");
+    conditions.push(
+      or(
+        ilike(whatsappContactsTable.name, `%${search}%`),
+        ilike(whatsappContactsTable.pushName, `%${search}%`),
+        digits ? ilike(whatsappContactsTable.phone, `%${digits}%`) : ilike(whatsappContactsTable.phone, `%${search}%`),
+      )!,
+    );
+  }
+
+  const [rows, [{ count }]] = await Promise.all([
+    db
+      .select({
+        id: whatsappContactsTable.id,
+        sessionKey: whatsappContactsTable.sessionKey,
+        phone: whatsappContactsTable.phone,
+        name: whatsappContactsTable.name,
+        pushName: whatsappContactsTable.pushName,
+        verifiedName: whatsappContactsTable.verifiedName,
+        avatarUrl: whatsappContactsTable.avatarUrl,
+        isBusiness: whatsappContactsTable.isBusiness,
+        updatedAt: whatsappContactsTable.updatedAt,
+        sessionDisplayName: whatsappSessionsTable.displayName,
+        sessionColor: whatsappSessionsTable.color,
+        sessionIcon: whatsappSessionsTable.icon,
+      })
+      .from(whatsappContactsTable)
+      .leftJoin(
+        whatsappSessionsTable,
+        and(eq(whatsappSessionsTable.tenantId, whatsappContactsTable.tenantId), eq(whatsappSessionsTable.sessionKey, whatsappContactsTable.sessionKey)),
+      )
+      .where(and(...conditions))
+      .orderBy(desc(whatsappContactsTable.updatedAt))
+      .limit(limit)
+      .offset(offset),
+    db.select({ count: sql<number>`count(*)::int` }).from(whatsappContactsTable).where(and(...conditions)),
+  ]);
+
+  res.json({ rows, total: count, limit, offset });
 });
 
 // ─── AI reply suggestion ──────────────────────────────────────────────────

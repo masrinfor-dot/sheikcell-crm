@@ -403,6 +403,75 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
   }
 }
 
+// ─── Agenda de Contatos do WhatsApp (pedido 25/09, fase 1) ──────────────────
+// Baileys sincroniza a agenda continuamente via "app-state sync" — o mesmo
+// mecanismo que o WhatsApp Web usa pra se popular ao abrir — não só na
+// primeira conexão: roda em toda reconexão (a partir da versão salva do
+// LTHash) e também vai atualizando aos poucos conforme mensagens chegam
+// (Baileys reemite contacts.update com o pushName a cada mensagem inbound).
+// Então as linhas já conectadas hoje recebem a agenda aos poucos, sem
+// precisar reparear/escanear QR de novo.
+interface BaileysContactLike {
+  id: string;
+  phoneNumber?: string;
+  name?: string;
+  notify?: string;
+  verifiedName?: string;
+  imgUrl?: string | null;
+}
+
+// O Baileys 7 expõe o JID em formato "preferível" (pode ser @lid quando o
+// contato migrou pro ID interno novo) e, quando resolvido, o número de
+// telefone de verdade em phoneNumber — prioriza phoneNumber pra sempre
+// guardar o telefone real, nunca o @lid interno.
+function resolveContactPhoneJid(c: BaileysContactLike): string | undefined {
+  if (c.phoneNumber?.endsWith("@s.whatsapp.net")) return c.phoneNumber;
+  if (c.id?.endsWith("@s.whatsapp.net")) return c.id;
+  return undefined;
+}
+
+async function forwardContacts(s: Session, contacts: BaileysContactLike[]): Promise<void> {
+  const items = contacts
+    .map((c) => {
+      const jid = resolveContactPhoneJid(c);
+      if (!jid) return null;
+      return {
+        jid,
+        phone: jid.split("@")[0] ?? "",
+        name: c.name || undefined,
+        pushName: c.notify || undefined,
+        verifiedName: c.verifiedName || undefined,
+        avatarUrl: c.imgUrl && c.imgUrl !== "changed" ? c.imgUrl : undefined,
+        isBusiness: !!c.verifiedName,
+      };
+    })
+    .filter((c): c is NonNullable<typeof c> => c !== null && c.phone.length > 0);
+  if (items.length === 0) return;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const res = await fetch(`${API_SERVER_URL}/api/chat/webhook/whatsapp-contacts`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Bridge-Secret": BRIDGE_SECRET,
+      },
+      body: JSON.stringify({ sessionKey: s.key, contacts: items }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      logger.warn(
+        { status: res.status, body: body.slice(0, 200), sessionKey: s.key },
+        "API rejected forwarded WhatsApp contacts",
+      );
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export interface SessionState {
   sessionKey: string;
   status: ConnectionStatus;
@@ -516,6 +585,18 @@ async function connectSession(s: Session): Promise<void> {
           logger.warn({ err, sessionKey: s.key }, "Failed to forward inbound WhatsApp message");
         });
       }
+    });
+
+    // Agenda de Contatos (pedido 25/09, fase 1) — ver forwardContacts acima.
+    sock.ev.on("contacts.upsert", (contacts) => {
+      forwardContacts(s, contacts).catch((err) => {
+        logger.warn({ err, sessionKey: s.key }, "Failed to forward WhatsApp contacts (upsert)");
+      });
+    });
+    sock.ev.on("contacts.update", (contacts) => {
+      forwardContacts(s, contacts.filter((c): c is BaileysContactLike => !!c.id)).catch((err) => {
+        logger.warn({ err, sessionKey: s.key }, "Failed to forward WhatsApp contacts (update)");
+      });
     });
 
     sock.ev.on("connection.update", async (update) => {

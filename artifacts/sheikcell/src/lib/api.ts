@@ -2617,6 +2617,20 @@ export const api = {
     favorite: (userId: number) => req<{ ok: boolean }>(`/team-directory/${userId}/favorite`, { method: "POST" }),
     unfavorite: (userId: number) => req<{ ok: boolean }>(`/team-directory/${userId}/favorite`, { method: "DELETE" }),
   },
+  // Agenda de Contatos do WhatsApp (pedido 25/09, fase 1): contatos
+  // sincronizados via Baileys de cada linha — ver processInboundWAContacts.
+  whatsappContacts: {
+    list: (params?: { search?: string; sessionKey?: string; limit?: number; offset?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.search) qs.set("search", params.search);
+      if (params?.sessionKey) qs.set("sessionKey", params.sessionKey);
+      if (params?.limit) qs.set("limit", String(params.limit));
+      if (params?.offset) qs.set("offset", String(params.offset));
+      return req<{ rows: WhatsappContactRow[]; total: number; limit: number; offset: number }>(
+        `/chat/whatsapp-contacts?${qs.toString()}`,
+      );
+    },
+  },
   finance: {
     summary: (days: number, sectorId?: number | null, store?: string | null) =>
       req<FinanceSummary>(`/finance/summary?days=${days}${sectorId ? `&sectorId=${sectorId}` : ""}${store ? `&store=${encodeURIComponent(store)}` : ""}`),
@@ -3413,6 +3427,21 @@ export type TeamContact = {
   sectorId: number | null;
   sectorName: string | null;
   favorited: boolean;
+};
+
+export type WhatsappContactRow = {
+  id: number;
+  sessionKey: string;
+  phone: string;
+  name: string | null;
+  pushName: string | null;
+  verifiedName: string | null;
+  avatarUrl: string | null;
+  isBusiness: boolean;
+  updatedAt: string;
+  sessionDisplayName: string | null;
+  sessionColor: string | null;
+  sessionIcon: string | null;
 };
 
 export type SurveyReview = {
