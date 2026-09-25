@@ -511,11 +511,25 @@ function VideoBubble({ msg }: { msg: ChatMessage }) {
   );
 }
 
+// Mensagem type "doc" cujo arquivo é uma foto de verdade (cliente mandou
+// pelo botão "Documento" do WhatsApp em vez de "Foto" — comum em iPhone, e
+// também acontece pela API oficial da Meta). O WhatsApp classifica pela
+// forma de anexar, não pelo conteúdo real — a extensão salva já é a real
+// (.jpg/.png/…, ver saveMedia), então dá pra reconhecer e mostrar como foto
+// em vez do ícone genérico de arquivo. Usado tanto no balão da conversa
+// quanto no banco de arquivos compartilhados, pra não ficar inconsistente
+// (foto certa numa tela, "documento" errado na outra).
+function isImageDocMessage(msg: ChatMessage): boolean {
+  if (msg.type !== "doc" || !msg.mediaUrl) return false;
+  const filename = msg.metadata?.fileName ?? msg.mediaUrl.split("/").pop() ?? "";
+  return (msg.metadata?.mimeType?.startsWith("image/") ?? false) || /\.(jpe?g|png|gif|webp)$/i.test(filename);
+}
+
 function MediaContentRest({ msg }: { msg: ChatMessage }) {
   const openLightbox = useMediaLightbox();
   if (!msg.mediaUrl) return null;
 
-  if (msg.type === "image") {
+  if (msg.type === "image" || isImageDocMessage(msg)) {
     const url = msg.mediaUrl;
     return (
       <button onClick={() => openLightbox({ type: "image", src: url })} className="block mb-1" data-testid={`button-open-image-${msg.id}`}>
@@ -547,6 +561,8 @@ function MediaContentRest({ msg }: { msg: ChatMessage }) {
   if (msg.type === "doc") {
     const filename = msg.metadata?.fileName ?? msg.mediaUrl.split("/").pop() ?? "documento";
     const size = formatFileSize(msg.metadata?.fileSize);
+    // isImageDocMessage já filtrou os "doc" que são foto de verdade (ver
+    // acima) — chegando aqui, é documento mesmo (PDF ou outro).
     const isPdf = msg.metadata?.mimeType?.includes("pdf") || filename.toLowerCase().endsWith(".pdf");
     if (isPdf) {
       return (
@@ -5457,8 +5473,12 @@ export default function ChatCenter({
       {/* ── Banco de arquivos compartilhados desta conversa ──────────────── */}
       {showSharedFiles && activeConv && (() => {
         const media = messages.filter((m) => m.mediaUrl && (m.type === "image" || m.type === "doc" || m.type === "audio" || m.type === "video"));
-        const images = media.filter((m) => m.type === "image");
-        const docs = media.filter((m) => m.type === "doc");
+        // isImageDocMessage: "doc" que na verdade é foto (mandada pelo botão
+        // "Documento" do WhatsApp) entra em Fotos, não em Documentos — mesma
+        // regra do balão da conversa, pra não ficar inconsistente entre as
+        // duas telas.
+        const images = media.filter((m) => m.type === "image" || isImageDocMessage(m));
+        const docs = media.filter((m) => m.type === "doc" && !isImageDocMessage(m));
         const audios = media.filter((m) => m.type === "audio");
         const videos = media.filter((m) => m.type === "video");
         return (
