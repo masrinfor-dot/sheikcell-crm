@@ -45,10 +45,40 @@ jobs:
       - name: Instala dependências
         run: pnpm install --frozen-lockfile
 
-      - name: Aplica o schema no banco de teste (--force: banco novo/vazio, nunca deve esperar confirmação interativa)
+      - name: "Aplica o schema no banco de teste (--force: banco novo/vazio, nunca deve esperar confirmação interativa)"
         run: pnpm --filter @workspace/db run push-force
         env:
           DATABASE_URL: postgres://sheikcell:sheikcell123@localhost:5432/sheikcell
 
       - name: Roda os testes do api-server (inclui isolamento entre lojas)
         run: pnpm --filter @workspace/api-server run test
+
+      - name: Typecheck do monorepo inteiro
+        run: pnpm run typecheck
+
+  # Pedido 25/09 ("tem como automatizar a implantação"): antes disso, cada
+  # rodada de patch exigia clicar manualmente em "Implantar" nos 3 serviços
+  # no EasyPanel depois do push. Agora, todo push em producao QUE PASSAR no
+  # job "test" acima (testes + typecheck) aciona sozinho a "Deployment
+  # Trigger URL" de cada serviço (EasyPanel → serviço → aba Deployments) —
+  # sem token/senha no repositório: cada URL fica guardada como secret do
+  # GitHub Actions (Settings → Secrets and variables → Actions). Um serviço
+  # sem o secret configurado ainda é simplesmente pulado (não quebra o
+  # workflow), pra dar pra ligar um de cada vez.
+  deploy:
+    name: Implanta no EasyPanel
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/producao'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Implanta api
+        if: ${{ secrets.EASYPANEL_DEPLOY_HOOK_API != '' }}
+        run: curl -fsS "${{ secrets.EASYPANEL_DEPLOY_HOOK_API }}"
+
+      - name: Implanta web
+        if: ${{ secrets.EASYPANEL_DEPLOY_HOOK_WEB != '' }}
+        run: curl -fsS "${{ secrets.EASYPANEL_DEPLOY_HOOK_WEB }}"
+
+      - name: Implanta whatsapp
+        if: ${{ secrets.EASYPANEL_DEPLOY_HOOK_WHATSAPP != '' }}
+        run: curl -fsS "${{ secrets.EASYPANEL_DEPLOY_HOOK_WHATSAPP }}"
