@@ -345,6 +345,26 @@ async function upsertConversation(
     .orderBy(desc(conversationsTable.lastMessageAt))
     .limit(1);
 
+  // Reportado 25/09: "atendimento duplicado dentro do mesmo número" — duas
+  // mensagens do mesmo cliente chegando muito próximas (comum: cliente manda
+  // 2-3 mensagens seguidas antes de o backend terminar de processar a
+  // primeira) disparavam duas execuções concorrentes desta função. As duas
+  // faziam o SELECT acima, as duas encontravam "nada" (a primeira ainda não
+  // tinha commitado o INSERT) e as duas inseriam uma conversa nova pro mesmo
+  // telefone — a clássica corrida "select então insert" sem trava nenhuma.
+  // Corrigido só na hora de criar: se o SELECT rápido acima não achou nada,
+  // pega uma advisory lock do Postgres (escopada por loja+telefone+linha,
+  // libera sozinha no fim da transação) e RE-CONFIRMA dentro dela antes de
+  // inserir — só quem pegar a trava primeiro cria de verdade; quem estava
+  // esperando encontra a conversa já criada pelo primeiro e cai no fluxo
+  // normal de "conversa existente" (não duplica). A classificação por IA
+  // (classifyText, chamada externa lenta) continua fora da trava — não faz
+  // sentido segurar uma transação de banco aberta esperando uma API externa;
+  // no raríssimo caso de corrida real, o pior cenário é os dois lados
+  // calcularem o setor à toa, sem nenhuma duplicata (o segundo descarta o
+  // próprio cálculo ao achar a conversa do primeiro dentro da trava).
+  let wasCreated = false;
+
   if (!conv) {
     // Roteamento automático só considera regras e setores DESTA loja.
     // Prioridade 1: número/linha vinculado a um ou mais setores fixos
@@ -383,42 +403,73 @@ async function upsertConversation(
         .limit(1);
       targetSectorId = classified?.sectorId ?? first?.id ?? 1;
     }
-    [conv] = await db
-      .insert(conversationsTable)
-      .values({
-        tenantId,
-        phone: storedPhone,
-        name: pushName,
-        avatarUrl: avatarUrl ?? null,
-        channel: "whatsapp",
-        isCommunity,
-        sessionKey,
-        sectorId: targetSectorId,
-        status: "open",
-        lastMessage: displayContent,
-        lastMessageDirection: "inbound",
-        lastMessageAt: new Date(),
-        unreadCount: 1,
-      })
-      .returning();
-    broadcast("conversation_new", conv, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
-    // Keep the CRM in sync with atendimentos: register the customer as soon as
-    // the conversation starts, not only when it is resolved.
-    await ensureCrmContactForConversation(conv);
-    // "Pular fila" por palavra-chave (pedido 18/09, ex.: xerox) — tenta
-    // atribuir na hora a um vendedor ocioso do setor, em segundo plano;
-    // nunca roda pra grupo/comunidade (mesmo espírito da fila normal). Sem
-    // sucesso (ninguém elegível), a conversa segue no pool do setor,
-    // disponível pra assumir manualmente como qualquer outra — e o
-    // auto-atribuir normal logo abaixo ainda pode pegá-la depois.
-    if (classified?.skipQueue && !isCommunity && !isGroupJid) {
-      void tryAssignSkipQueue({ id: conv.id, tenantId, sectorId: targetSectorId });
+    // Chave da advisory lock: loja + telefone (já normalizado) + linha (a
+    // linha só entra pra não-grupo, igual ao filtro do SELECT lá em cima —
+    // mesmo cliente falando com 2 números da loja é 2 conversas de verdade,
+    // não pode travar uma esperando a outra). pg_advisory_xact_lock aceita
+    // dois int4: usa o tenantId direto e resume telefone+linha num hash com
+    // hashtext() — ambos como parâmetro (nunca concatenado na query).
+    const lockKeyStr = `${storedPhone}|${isGroupJid ? "" : sessionKey}`;
+    const created = await db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(${tenantId}, hashtext(${lockKeyStr}))`);
+      // Re-confirma DENTRO da trava: se outra chamada concorrente já criou a
+      // conversa entre o SELECT de fora e agora, usa a dela em vez de duplicar.
+      const [already] = await tx
+        .select()
+        .from(conversationsTable)
+        .where(and(...conditions))
+        .orderBy(desc(conversationsTable.lastMessageAt))
+        .limit(1);
+      if (already) return { row: already, isNew: false };
+      const [inserted] = await tx
+        .insert(conversationsTable)
+        .values({
+          tenantId,
+          phone: storedPhone,
+          name: pushName,
+          avatarUrl: avatarUrl ?? null,
+          channel: "whatsapp",
+          isCommunity,
+          sessionKey,
+          sectorId: targetSectorId,
+          status: "open",
+          lastMessage: displayContent,
+          lastMessageDirection: "inbound",
+          lastMessageAt: new Date(),
+          unreadCount: 1,
+        })
+        .returning();
+      return { row: inserted!, isNew: true };
+    });
+    conv = created.row;
+    wasCreated = created.isNew;
+    if (wasCreated) {
+      broadcast("conversation_new", conv, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+      // Keep the CRM in sync with atendimentos: register the customer as soon as
+      // the conversation starts, not only when it is resolved.
+      await ensureCrmContactForConversation(conv);
+      // "Pular fila" por palavra-chave (pedido 18/09, ex.: xerox) — tenta
+      // atribuir na hora a um vendedor ocioso do setor, em segundo plano;
+      // nunca roda pra grupo/comunidade (mesmo espírito da fila normal). Sem
+      // sucesso (ninguém elegível), a conversa segue no pool do setor,
+      // disponível pra assumir manualmente como qualquer outra — e o
+      // auto-atribuir normal logo abaixo ainda pode pegá-la depois.
+      if (classified?.skipQueue && !isCommunity && !isGroupJid) {
+        void tryAssignSkipQueue({ id: conv.id, tenantId, sectorId: targetSectorId });
+      }
+      // Fila do Central de Atendimento com auto-atribuição (pedido 14/09, opt-in
+      // por linha de WhatsApp): tenta atribuir esta conversa nova a um vendedor
+      // ocioso da fila, em segundo plano — nunca lança nem atrasa o webhook.
+      void autoAssignOnNewPoolConversation(conv);
     }
-    // Fila do Central de Atendimento com auto-atribuição (pedido 14/09, opt-in
-    // por linha de WhatsApp): tenta atribuir esta conversa nova a um vendedor
-    // ocioso da fila, em segundo plano — nunca lança nem atrasa o webhook.
-    void autoAssignOnNewPoolConversation(conv);
-  } else {
+    // wasCreated === false aqui = perdeu a corrida (outra chamada concorrente
+    // pegou a trava primeiro e já criou a conversa). Cai no mesmo tratamento
+    // de "conversa já existente" logo abaixo, pra registrar esta mensagem
+    // nela em vez de duplicar — nunca vai reabrir nada por engano, porque uma
+    // conversa recém-criada pelo outro lado nunca está "resolved"/"archived".
+  }
+
+  if (!wasCreated) {
     // Se o atendimento já foi finalizado (resolvido/arquivado) e o cliente volta
     // a mandar mensagem, reabrimos a conversa para "Potenciais": status "open" e
     // sem responsável, para que volte à triagem.
