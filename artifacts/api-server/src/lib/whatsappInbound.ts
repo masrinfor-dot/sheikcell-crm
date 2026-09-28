@@ -1021,6 +1021,26 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     ? `📨 Convite para o grupo "${msgContent.groupInviteMessage.groupName ?? "WhatsApp"}"`
     : "";
 
+  // Varre um objeto inteiro atrás de qualquer texto legível (título, corpo,
+  // rodapé, nome de botão) — usado como fallback pra tipos de mensagem cuja
+  // estrutura interna varia bastante entre versões do protocolo do WhatsApp
+  // (template, interativo/nativeFlow etc.), em vez de mapear campo por campo
+  // e quebrar de novo na próxima variação. Movido pra cima de onde era usado
+  // antes (só no templateMessage) porque o interactiveMessage, logo abaixo,
+  // também passou a precisar dele.
+  const NOISE_KEYS = new Set(["messageContextInfo", "senderKeyDistributionMessage"]);
+  const extractAnyText = (obj: unknown, depth = 0): string[] => {
+    if (depth > 5 || obj == null) return [];
+    if (typeof obj === "string") return obj.trim() ? [obj.trim()] : [];
+    if (Array.isArray(obj)) return obj.flatMap((v) => extractAnyText(v, depth + 1));
+    if (typeof obj === "object") {
+      return Object.entries(obj as Record<string, unknown>)
+        .filter(([k]) => !NOISE_KEYS.has(k))
+        .flatMap(([, v]) => extractAnyText(v, depth + 1));
+    }
+    return [];
+  };
+
   // Respostas de botão/lista/template/fluxo interativo (WhatsApp Business).
   const interactiveText =
     (msgContent?.buttonsResponseMessage?.selectedDisplayText
@@ -1037,7 +1057,19 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
       : null) ??
     (msgContent?.interactiveMessage?.body?.text
       ? `🔘 ${msgContent.interactiveMessage.header?.title ? `${msgContent.interactiveMessage.header.title}: ` : ""}${msgContent.interactiveMessage.body.text}`
-      : null) ??
+      : msgContent?.interactiveMessage
+        // Bug relatado 28/09 ("Tipo de mensagem não suportado
+        // (interactiveMessage"): nem todo cartão interativo tem body.text —
+        // um cartão só com cabeçalho + botões de fluxo nativo (nativeFlowMessage:
+        // catálogo, pedido, cobrança Pix sem descrição) chegava aqui com
+        // body.text vazio e caía direto no fallback "não suportado", mesmo
+        // sendo um tipo já mapeado. Mesmo truque do templateMessage: varre o
+        // objeto inteiro atrás de qualquer texto legível em vez de descartar.
+        ? (() => {
+            const parts = [...new Set(extractAnyText(msgContent.interactiveMessage))];
+            return parts.length ? `🔘 ${parts.join(" — ")}` : "🔘 Mensagem interativa";
+          })()
+        : null) ??
     (msgContent?.listMessage
       ? (() => {
           const lm = msgContent.listMessage!;
@@ -1100,7 +1132,8 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   // WhatsApp recebido (ajuda a diagnosticar e já é mais útil que um erro).
   // Também loga o objeto bruto inteiro, pra identificar o tipo exato sem
   // precisar que o usuário mande print da tela.
-  const NOISE_KEYS = new Set(["messageContextInfo", "senderKeyDistributionMessage"]);
+  // (NOISE_KEYS/extractAnyText ficam definidos mais acima agora — precisam
+  // rodar antes do interactiveText, que passou a usar extractAnyText também.)
   const keysOf = (obj: object | undefined) => obj
     ? Object.keys(obj).filter((k) => !NOISE_KEYS.has(k) && (obj as Record<string, unknown>)[k] != null)
     : [];
@@ -1117,17 +1150,6 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   // de mapear campo por campo — e quebrar de novo na próxima variação —
   // procura qualquer texto legível dentro do objeto inteiro (título, corpo,
   // rodapé, texto de botão) e junta numa mensagem só.
-  const extractAnyText = (obj: unknown, depth = 0): string[] => {
-    if (depth > 5 || obj == null) return [];
-    if (typeof obj === "string") return obj.trim() ? [obj.trim()] : [];
-    if (Array.isArray(obj)) return obj.flatMap((v) => extractAnyText(v, depth + 1));
-    if (typeof obj === "object") {
-      return Object.entries(obj as Record<string, unknown>)
-        .filter(([k]) => !NOISE_KEYS.has(k))
-        .flatMap(([, v]) => extractAnyText(v, depth + 1));
-    }
-    return [];
-  };
   const templateText = msgContent?.templateMessage
     ? (() => {
         const parts = [...new Set(extractAnyText(msgContent.templateMessage))];
