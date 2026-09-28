@@ -692,6 +692,12 @@ router.delete("/internal-chat/messages/:id", requireAuth, async (req, res): Prom
 // já manda o arquivo lido como data URL.
 const MEDIA_MIME_TO_EXT: Record<string, string> = {
   "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp",
+  // Bug relatado 28/09 ("Erro ao enviar arquivo — Tipo de arquivo não
+  // suportado" ao mandar vídeo no Chat Interno): vídeo nunca tinha suporte
+  // aqui — o Atendimento (routes/chat.ts) já suporta desde antes. "webm"
+  // fica reservado pra vídeo (mesma convenção do chat.ts); áudio gravado em
+  // webm salva como "weba" pra não colidir na hora de servir o arquivo.
+  "video/mp4": "mp4", "video/3gpp": "3gp", "video/webm": "webm", "video/quicktime": "mov",
   "audio/ogg": "ogg", "audio/mpeg": "mp3", "audio/mp4": "m4a",
   "audio/webm": "weba", "audio/aac": "aac", "audio/wav": "wav",
   "application/pdf": "pdf",
@@ -713,6 +719,7 @@ const EXT_FALLBACK_TO_MIME: Record<string, string> = {
   xls: "application/vnd.ms-excel",
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp",
+  mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime",
 };
 const MEDIA_MAX_BYTES = 20 * 1024 * 1024;
 
@@ -773,9 +780,11 @@ router.post("/internal-chat/conversations/:id/media", requireAuth, async (req, r
   const mediaUrl = `/api/internal-chat/media/${savedFilename}`;
 
   const isImage = mimetype.startsWith("image/");
+  const isVideo = mimetype.startsWith("video/");
   const isAudio = mimetype.startsWith("audio/");
-  const msgType: "image" | "audio" | "doc" = isImage ? "image" : isAudio ? "audio" : "doc";
-  const baseContent = isImage ? "📷 Foto" : isAudio ? "🎤 Áudio" : `📄 ${filename ?? "Documento"}`;
+  const msgType: "image" | "video" | "audio" | "doc" =
+    isImage ? "image" : isVideo ? "video" : isAudio ? "audio" : "doc";
+  const baseContent = isImage ? "📷 Foto" : isVideo ? "🎥 Vídeo" : isAudio ? "🎤 Áudio" : `📄 ${filename ?? "Documento"}`;
   const text = caption ? `${baseContent}\n${caption}` : baseContent;
 
   // Nome/tamanho reais do documento — o mediaUrl salvo usa nome aleatório
@@ -829,6 +838,7 @@ router.get("/internal-chat/media/:filename", requireAuth, async (req: Request, r
   const ext = path.extname(filename).slice(1).toLowerCase();
   const mimeMap: Record<string, string> = {
     jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp",
+    mp4: "video/mp4", "3gp": "video/3gpp", webm: "video/webm", mov: "video/quicktime",
     ogg: "audio/ogg", mp3: "audio/mpeg", m4a: "audio/mp4", weba: "audio/webm", aac: "audio/aac", wav: "audio/wav",
     pdf: "application/pdf", doc: "application/msword",
     docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",

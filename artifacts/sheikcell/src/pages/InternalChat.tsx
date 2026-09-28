@@ -9,13 +9,13 @@ const INTERNAL_CHAT_EVENTS_URL = "/api/internal-chat/events";
 import {
   Users, Send, Plus, X, Search, MessagesSquare, ChevronLeft, SquareKanban, ClipboardPlus, Trash2, Pencil,
   Paperclip, Mic, Square, Reply, Forward, FileText, Volume2, VolumeX, Bell, BellOff, Loader2, RefreshCw, Pin, PinOff,
-  FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Image, Check, Ban,
+  FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Image, Check, Ban, Video,
 } from "lucide-react";
 import TaskBoard from "./TaskBoard";
 
 // Rótulos/emoji fixos de mensagens de mídia sem legenda (ver POST .../media
 // no servidor) — usados para não exibir o placeholder como se fosse texto.
-const MEDIA_PLACEHOLDERS = new Set(["📷 Foto", "🎤 Áudio"]);
+const MEDIA_PLACEHOLDERS = new Set(["📷 Foto", "🎥 Vídeo", "🎤 Áudio"]);
 // Mesmo limite do endpoint POST .../media no servidor — valida no cliente
 // antes de ler o arquivo em base64, evitando esperar por um erro do servidor.
 const MEDIA_MAX_BYTES = 20 * 1024 * 1024;
@@ -33,7 +33,7 @@ function extractCaption(content: string): string {
 // balão da resposta) — texto puro, ou rótulo do tipo de mídia + legenda se houver.
 function replyPreviewText(r: { type: InternalMessage["type"]; content: string }): string {
   if (r.type === "text") return r.content;
-  const label = r.type === "image" ? "📷 Foto" : r.type === "audio" ? "🎤 Áudio" : r.content.split("\n")[0]!;
+  const label = r.type === "image" ? "📷 Foto" : r.type === "video" ? "🎥 Vídeo" : r.type === "audio" ? "🎤 Áudio" : r.content.split("\n")[0]!;
   const caption = extractCaption(r.content);
   return caption ? `${label} · ${caption}` : label;
 }
@@ -87,6 +87,15 @@ function InternalMediaContent({ msg, onTranscribed }: { msg: InternalMessage; on
       <a href={msg.mediaUrl} target="_blank" rel="noopener noreferrer" className="block mb-1">
         <img src={msg.mediaUrl} alt="Foto" className="max-w-full rounded-xl object-cover max-h-64 cursor-pointer hover:opacity-90 transition" />
       </a>
+    );
+  }
+  if (msg.type === "video") {
+    return (
+      <div className="mb-1">
+        <video controls preload="metadata" className="max-w-full rounded-xl max-h-64 bg-black" style={{ minWidth: 200 }}>
+          <source src={msg.mediaUrl} />
+        </video>
+      </div>
     );
   }
   if (msg.type === "doc") {
@@ -258,7 +267,7 @@ export default function InternalChat({ docked = false, onActiveConversationChang
   const [sendingMedia, setSendingMedia] = useState(false);
   const [recording, setRecording] = useState(false);
   const [recordSecs, setRecordSecs] = useState(0);
-  const [pendingAttachment, setPendingAttachment] = useState<{ file: File; kind: "image" | "doc" | "audio"; previewUrl: string | null } | null>(null);
+  const [pendingAttachment, setPendingAttachment] = useState<{ file: File; kind: "image" | "video" | "doc" | "audio"; previewUrl: string | null } | null>(null);
   const [attachCaption, setAttachCaption] = useState("");
   // Encaminhar mensagem: modal com a lista de conversas para escolher destino(s).
   const [forwardMsg, setForwardMsg] = useState<InternalMessage | null>(null);
@@ -789,7 +798,11 @@ export default function InternalChat({ docked = false, onActiveConversationChang
       toast({ title: "Arquivo muito grande", description: "O tamanho máximo é 20 MB.", variant: "destructive" });
       return;
     }
-    const kind: "image" | "doc" | "audio" = file.type.startsWith("image/") ? "image" : file.type.startsWith("audio/") ? "audio" : "doc";
+    const kind: "image" | "video" | "doc" | "audio" =
+      file.type.startsWith("image/") ? "image"
+      : file.type.startsWith("video/") ? "video"
+      : file.type.startsWith("audio/") ? "audio"
+      : "doc";
     const previewUrl = kind === "doc" ? null : URL.createObjectURL(file);
     setPendingAttachment({ file, kind, previewUrl });
     setAttachCaption("");
@@ -813,14 +826,14 @@ export default function InternalChat({ docked = false, onActiveConversationChang
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     // Bolha provisória sem mediaUrl (mostra "Enviando…") até o upload terminar
     // — mesmo padrão do ChatCenter.
-    const baseContent = kind === "image" ? "📷 Foto" : kind === "audio" ? "🎤 Áudio" : `📄 ${file.name}`;
+    const baseContent = kind === "image" ? "📷 Foto" : kind === "video" ? "🎥 Vídeo" : kind === "audio" ? "🎤 Áudio" : `📄 ${file.name}`;
     const optimistic: InternalMessage = {
       id: -Date.now(),
       conversationId: activeId,
       senderId: user?.id ?? 0,
       senderName: user?.name ?? "",
       content: captionText ? `${baseContent}\n${captionText}` : baseContent,
-      type: kind === "image" ? "image" : kind === "audio" ? "audio" : "doc",
+      type: kind === "image" ? "image" : kind === "video" ? "video" : kind === "audio" ? "audio" : "doc",
       mediaUrl: null,
       transcript: null,
       forwarded: false,
@@ -1457,6 +1470,7 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                             {m.type !== "text" && !m.mediaUrl && (
                               <div className={`flex items-center gap-2 text-sm italic ${mine ? "text-white/80" : "text-muted-foreground"}`}>
                                 {m.type === "image" && <Image className="w-4 h-4 shrink-0" />}
+                                {m.type === "video" && <Video className="w-4 h-4 shrink-0" />}
                                 {m.type === "audio" && <Volume2 className="w-4 h-4 shrink-0" />}
                                 {m.type === "doc" && <FileText className="w-4 h-4 shrink-0" />}
                                 <span>Enviando…{caption ? ` ${caption}` : ""}</span>
@@ -1526,6 +1540,12 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                   <div className="flex-1 min-w-0 flex items-center gap-2 rounded-lg border px-3 py-2 bg-muted/30" data-testid="attachment-preview">
                     {pendingAttachment.kind === "image" && pendingAttachment.previewUrl && (
                       <img src={pendingAttachment.previewUrl} alt="Preview" className="w-11 h-11 rounded-lg object-cover shrink-0" />
+                    )}
+                    {pendingAttachment.kind === "video" && (
+                      <div className="flex items-center gap-1.5 shrink-0 min-w-0 max-w-[140px]">
+                        <Video className="w-5 h-5 shrink-0 text-muted-foreground" />
+                        <span className="text-xs truncate min-w-0">{pendingAttachment.file.name}</span>
+                      </div>
                     )}
                     {pendingAttachment.kind === "audio" && pendingAttachment.previewUrl && (
                       <audio controls src={pendingAttachment.previewUrl} className="h-8 max-w-[170px] shrink-0" />
@@ -1598,7 +1618,7 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept="image/png,image/jpeg,image/gif,image/webp,audio/mpeg,audio/mp4,audio/ogg,audio/wav,audio/webm,audio/aac,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                  accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm,video/quicktime,video/3gpp,audio/mpeg,audio/mp4,audio/ogg,audio/wav,audio/webm,audio/aac,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                   className="hidden"
                   onChange={(e) => {
                     const f = e.target.files?.[0];

@@ -735,12 +735,12 @@ export type InternalMessage = {
   senderId: number;
   senderName: string;
   content: string;
-  type: "text" | "image" | "audio" | "doc";
+  type: "text" | "image" | "video" | "audio" | "doc";
   mediaUrl: string | null;
   transcript: string | null;
   forwarded: boolean;
   replyToId: number | null;
-  replyTo: { id: number; senderName: string; content: string; type: "text" | "image" | "audio" | "doc" } | null;
+  replyTo: { id: number; senderName: string; content: string; type: "text" | "image" | "video" | "audio" | "doc" } | null;
   metadata?: MessageMetadata | null;
   createdAt: string;
   editedAt?: string | null;
