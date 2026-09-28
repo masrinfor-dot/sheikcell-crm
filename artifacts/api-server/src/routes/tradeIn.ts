@@ -406,7 +406,7 @@ const extractJson = extractTradeInJson;
 
 // Preço base (estilo Trocafone): logo após informar marca/modelo/memória/cor,
 // estima o valor MÁXIMO de compra para aparelho em perfeito estado.
-router.post("/trade-in/base-price", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
+router.post("/trade-in/base-price", requireAuth, requirePerm("usar_ia_avaliacao"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { brand, model, memory, color } = req.body as { brand?: string; model?: string; memory?: string; color?: string };
   const fBrand = clean(brand, 40);
@@ -461,7 +461,7 @@ router.post("/trade-in/base-price", requireAuth, requirePerm("usar_ia"), async (
 });
 
 // Avaliação com IA: pesquisa preços atuais na web e sugere valor de compra.
-router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
+router.post("/trade-in/evaluate", requireAuth, requirePerm("usar_ia_avaliacao"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { device, answers, brand, model, memory, color, customerName } = req.body as {
     device?: string; answers?: Answers;

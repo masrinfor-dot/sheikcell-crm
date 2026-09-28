@@ -10,7 +10,17 @@ export const PERMISSION_KEYS = [
   "transferir",       // transferir conversa para outro setor
   "finalizar",        // finalizar atendimentos
   "criar_atendimento",// criar novo atendimento manualmente
-  "usar_ia",          // sugestão de resposta / correção com IA
+  "usar_ia",          // sugestão de resposta / correção com IA no Atendimento
+  // Bug relatado 28/09 ("Erro na avaliação: Você não tem permissão..."):
+  // a Avaliação (compra de aparelho usado) usava a MESMA chave "usar_ia" do
+  // Atendimento pra gatear a IA (/trade-in/base-price e /trade-in/evaluate
+  // em routes/tradeIn.ts). Um admin que desmarca "Usar sugestão de resposta
+  // com IA" pensando só no chat acaba, sem saber, bloqueando a Avaliação
+  // inteira do vendedor (o passo 2→3 do fluxo depende da IA). Agora é uma
+  // permissão própria, default liberado (mesma regra de ausência = liberado)
+  // — quem já tinha "usar_ia" desmarcado pra Atendimento volta a conseguir
+  // avaliar aparelhos até um admin restringir esta também, explicitamente.
+  "usar_ia_avaliacao", // avaliação de aparelho usado (compra) com IA
   "enviar_midia",     // enviar fotos, áudios e arquivos
   "adicionar_participante", // adicionar outro vendedor numa conversa do Atendimento
 ] as const;

@@ -91,6 +91,7 @@ export const PERMISSION_KEYS = [
   "finalizar",
   "criar_atendimento",
   "usar_ia",
+  "usar_ia_avaliacao",
   "enviar_midia",
   "adicionar_participante",
 ] as const;
@@ -100,7 +101,8 @@ export const PERMISSION_LABELS: Record<string, string> = {
   transferir: "Transferir conversa para outro setor",
   finalizar: "Finalizar atendimentos",
   criar_atendimento: "Criar novo atendimento manualmente",
-  usar_ia: "Usar sugestão de resposta com IA",
+  usar_ia: "Usar sugestão de resposta com IA (Atendimento)",
+  usar_ia_avaliacao: "Usar avaliação de aparelho com IA (Avaliação)",
   enviar_midia: "Enviar fotos, áudios e arquivos",
   adicionar_participante: "Adicionar outro vendedor numa conversa",
 };
