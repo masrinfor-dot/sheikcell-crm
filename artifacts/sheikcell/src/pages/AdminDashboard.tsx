@@ -2221,14 +2221,14 @@ export default function AdminDashboard() {
                           {hasGeofence ? `Geofence do Ponto: raio ${s.geofenceRadiusMeters}m` : "Geofence do Ponto: não configurado"}
                         </button>
                       )}
-                      {/* "Pular fila" por palavra-chave (pedido 18/09, ex.:
-                          xerox) — vendedores desta loja entram na lista de
+                      {/* "Pular fila" por palavra-chave (pedido 18/09) —
+                          vendedores desta loja entram na lista de
                           candidatos a receber conversa auto-atribuída direto,
                           sem esperar assumir manualmente. Ver regras abaixo. */}
                       <button type="button" onClick={() => toggleSkipQueueStore(s)} data-testid={`button-skip-queue-${s.id}`}
                         className={`text-[10px] font-semibold flex items-center gap-1 ${s.skipQueueEnabled ? "text-amber-600 hover:text-amber-700" : "text-muted-foreground hover:text-primary"}`}>
                         <Zap className="w-3 h-3" />
-                        {s.skipQueueEnabled ? "Pular fila (xerox): ativado" : "Pular fila (xerox): desativado"}
+                        {s.skipQueueEnabled ? "Pular fila: ativado" : "Pular fila: desativado"}
                       </button>
                     </div>
                     );
@@ -2245,12 +2245,12 @@ export default function AdminDashboard() {
               <p className="text-xs text-muted-foreground">
                 Quando uma mensagem nova bate com uma palavra-chave, a conversa vai direto pro setor escolhido.
                 Marcando <span className="font-semibold">Pular fila</span>, além de rotear ela já tenta atribuir na hora a um
-                vendedor livre desse setor (só considera vendedores de lojas com &quot;Pular fila (xerox)&quot; ativado, acima) —
+                vendedor livre desse setor (só considera vendedores de lojas com &quot;Pular fila&quot; ativado, acima) —
                 sem sucesso, a conversa fica normal no setor pra qualquer um assumir.
               </p>
               <form className="grid sm:grid-cols-2 gap-2" onSubmit={createRule}>
                 <input value={newRule.name} onChange={(e) => setNewRule({ ...newRule, name: e.target.value })}
-                  placeholder="Nome da regra (ex.: Xerox)" data-testid="input-new-rule-name"
+                  placeholder="Nome da regra (ex.: Impressão)" data-testid="input-new-rule-name"
                   className="px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
                 <select value={newRule.sectorId} onChange={(e) => setNewRule({ ...newRule, sectorId: e.target.value })}
                   data-testid="select-new-rule-sector"
@@ -2259,7 +2259,7 @@ export default function AdminDashboard() {
                   {activeSectors.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
                 <input value={newRule.keywords} onChange={(e) => setNewRule({ ...newRule, keywords: e.target.value })}
-                  placeholder="Palavras-chave, separadas por vírgula (ex.: xerox, impressão)" data-testid="input-new-rule-keywords"
+                  placeholder="Palavras-chave, separadas por vírgula (ex.: impressão, cópia)" data-testid="input-new-rule-keywords"
                   className="sm:col-span-2 px-3 py-2 rounded-xl border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30" />
                 <label className="flex items-center gap-2 text-xs font-medium">
                   <input type="checkbox" checked={newRule.skipQueue} onChange={(e) => setNewRule({ ...newRule, skipQueue: e.target.checked })}
