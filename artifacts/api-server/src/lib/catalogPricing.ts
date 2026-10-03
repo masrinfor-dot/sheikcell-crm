@@ -311,3 +311,20 @@ export function parcelasAtacadoDoProduto(
 ): OpcaoParcelamento[] {
   return listaDeParcelas(precoAtacadoDoProduto(produto, settings), settings, maxParcelas);
 }
+
+/**
+ * Opções de parcelamento (1x-12x) a partir de um valor à vista QUALQUER —
+ * usado pela simulação de troca na Vitrine pública (pedido 03/10): o cliente
+ * escolhe o usado, o valor estimado abate do preço à vista e o saldo é
+ * parcelado com a MESMA taxa por nº de parcelas da tabela da loja (taxa por
+ * cima do saldo, igual aplicarTaxaCartaoSobrePrecoAVista). Saldo zero ou
+ * negativo (usado vale mais que o aparelho) não tem o que parcelar.
+ */
+export function parcelasSobreValorAVista(
+  valorAVista: number,
+  settings: PricingSettings,
+  maxParcelas: number = MAX_PARCELAS_VITRINE,
+): OpcaoParcelamento[] {
+  if (!Number.isFinite(valorAVista) || valorAVista <= 0) return [];
+  return listaDeParcelas(valorAVista, settings, maxParcelas);
+}

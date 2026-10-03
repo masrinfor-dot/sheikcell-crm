@@ -61,7 +61,7 @@ function wantedProductFromCart(slug: string): string | null {
 type PublicQuestion = { key: string; label: string; options: { label: string }[] };
 type PublicQuestions = { apple: PublicQuestion[]; android: PublicQuestion[] };
 type EstimateResult =
-  | { method: "table" | "ai"; device: string; estimatedPrice: string }
+  | { method: "table" | "ai"; device: string; estimatedPrice: string; estimatedPriceValue?: number | null }
   | { blocked: true; message: string };
 
 export default function AvaliacaoPublica() {
@@ -93,7 +93,7 @@ export default function AvaliacaoPublica() {
   const [estimating, setEstimating] = useState(false);
   const [estimateError, setEstimateError] = useState<string | null>(null);
   const [blockedMessage, setBlockedMessage] = useState<string | null>(null);
-  const [result, setResult] = useState<{ estimatedPrice: string } | null>(null);
+  const [result, setResult] = useState<{ estimatedPrice: string; estimatedPriceValue?: number | null } | null>(null);
 
   const [finishing, setFinishing] = useState(false);
   const [finishError, setFinishError] = useState<string | null>(null);
@@ -186,7 +186,7 @@ export default function AvaliacaoPublica() {
         setBlockedMessage(r.message);
         setStep(3);
       } else if ("estimatedPrice" in r) {
-        setResult({ estimatedPrice: r.estimatedPrice });
+        setResult({ estimatedPrice: r.estimatedPrice, estimatedPriceValue: r.estimatedPriceValue ?? null });
         setStep(3);
       }
     } catch (err) {
@@ -223,7 +223,9 @@ export default function AvaliacaoPublica() {
       try {
         localStorage.setItem(tradeInStorageKey(slug), JSON.stringify({
           device, estimatedPriceLabel: result.estimatedPrice,
-          estimatedPriceValue: (() => {
+          // Valor já convertido pelo servidor (03/10); o parse local fica só
+          // de reserva pra resposta antiga (sem o campo).
+          estimatedPriceValue: result.estimatedPriceValue ?? (() => {
             const m = result.estimatedPrice.match(/[\d.,]+/);
             if (!m) return null;
             let s = m[0];
