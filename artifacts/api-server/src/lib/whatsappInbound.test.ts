@@ -9,7 +9,7 @@ process.env["OPENAI_API_KEY"] ??= "sk-fake-isolation-test";
 process.env["WHATSAPP_BRIDGE_URL"] ??= "http://localhost:3002";
 process.env["NODE_ENV"] ??= "development";
 
-const { db, tenantsTable, sectorsTable, conversationsTable, messagesTable, whatsappSessionsTable, attendanceLogsTable } = await import("@workspace/db");
+const { db, tenantsTable, sectorsTable, conversationsTable, messagesTable, whatsappSessionsTable, attendanceLogsTable, crmContactsTable, whatsappContactsTable } = await import("@workspace/db");
 const { eq } = await import("drizzle-orm");
 const { processInboundWA, MEDIA_DIR } = await import("./whatsappInbound.ts");
 
@@ -44,6 +44,11 @@ after(async () => {
   await db.delete(messagesTable).where(eq(messagesTable.tenantId, tenantId));
   await db.delete(attendanceLogsTable).where(eq(attendanceLogsTable.tenantId, tenantId));
   await db.delete(conversationsTable).where(eq(conversationsTable.tenantId, tenantId));
+  // O inbound cria o contato no CRM (crm_contacts.sector_id → sectors) e na
+  // agenda do WhatsApp (0132) — sem apagá-los antes, o delete de sectors
+  // falha por chave estrangeira e derruba o arquivo de teste inteiro.
+  await db.delete(crmContactsTable).where(eq(crmContactsTable.tenantId, tenantId));
+  await db.delete(whatsappContactsTable).where(eq(whatsappContactsTable.tenantId, tenantId));
   await db.delete(whatsappSessionsTable).where(eq(whatsappSessionsTable.tenantId, tenantId));
   await db.delete(sectorsTable).where(eq(sectorsTable.tenantId, tenantId));
   await db.delete(tenantsTable).where(eq(tenantsTable.id, tenantId));

@@ -70,15 +70,22 @@ jobs:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/producao'
     runs-on: ubuntu-latest
+    # `secrets` não pode ser usado em `if:` de step (o GitHub rejeita o
+    # arquivo inteiro e nenhum job roda — era por isso que todo run falhava
+    # em 0s). Os secrets passam por env, e o `if:` testa o env.
+    env:
+      HOOK_API: ${{ secrets.EASYPANEL_DEPLOY_HOOK_API }}
+      HOOK_WEB: ${{ secrets.EASYPANEL_DEPLOY_HOOK_WEB }}
+      HOOK_WHATSAPP: ${{ secrets.EASYPANEL_DEPLOY_HOOK_WHATSAPP }}
     steps:
       - name: Implanta api
-        if: ${{ secrets.EASYPANEL_DEPLOY_HOOK_API != '' }}
-        run: curl -fsS "${{ secrets.EASYPANEL_DEPLOY_HOOK_API }}"
+        if: ${{ env.HOOK_API != '' }}
+        run: curl -fsS "$HOOK_API"
 
       - name: Implanta web
-        if: ${{ secrets.EASYPANEL_DEPLOY_HOOK_WEB != '' }}
-        run: curl -fsS "${{ secrets.EASYPANEL_DEPLOY_HOOK_WEB }}"
+        if: ${{ env.HOOK_WEB != '' }}
+        run: curl -fsS "$HOOK_WEB"
 
       - name: Implanta whatsapp
-        if: ${{ secrets.EASYPANEL_DEPLOY_HOOK_WHATSAPP != '' }}
-        run: curl -fsS "${{ secrets.EASYPANEL_DEPLOY_HOOK_WHATSAPP }}"
+        if: ${{ env.HOOK_WHATSAPP != '' }}
+        run: curl -fsS "$HOOK_WHATSAPP"
