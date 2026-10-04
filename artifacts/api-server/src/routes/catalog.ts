@@ -33,6 +33,7 @@ import {
   parcelamento12xAtacadoDoProduto,
   parcelasDoProduto,
   parcelasAtacadoDoProduto,
+  parcelasSobreValorAVista,
   type PricingSettings,
   type OpcaoParcelamento,
 } from "../lib/catalogPricing";
@@ -2333,6 +2334,63 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
           }),
       }))
       .filter((p) => p.variants.length > 0),
+  });
+});
+
+// Simulação de troca dentro da Vitrine (pedido 03/10: "selecionar celular na
+// avaliação de usados, calcular com abatimento preço à vista e cartão
+// parcelado"). O valor do usado vem da estimativa pública
+// (/trade-in-public/:slug/estimate); aqui só abate do preço à vista da
+// variante escolhida e parcela o SALDO com a taxa de cartão da loja — a
+// mesma fórmula do resto da Vitrine (lib/catalogPricing.ts), sem expor
+// custo, margem nem a tabela de taxas. É só uma simulação (o valor do usado
+// é confirmado pela loja depois), então confiar no valor enviado é ok:
+// mesmo adulterado, só muda o que aparece na tela de quem adulterou.
+catalogPublicRouter.post("/catalog-public/:slug/trade-in-quote", async (req: Request, res: Response): Promise<void> => {
+  const rawSlug = Array.isArray(req.params.slug) ? req.params.slug[0] : req.params.slug;
+  const slug = (rawSlug ?? "").toLowerCase();
+  const [tenant] = await db.select().from(tenantsTable).where(eq(tenantsTable.catalogSlug, slug)).limit(1);
+  if (!tenant || !tenant.isActive || !tenant.enabledModules.includes("vitrine")) {
+    res.status(404).json({ error: "Vitrine não encontrada" });
+    return;
+  }
+  if (!tenant.enabledModules.includes("avaliacao") || !tenant.publicTradeInEnabled) {
+    res.status(404).json({ error: "Avaliação de usados indisponível nesta vitrine" });
+    return;
+  }
+  const body = (req.body ?? {}) as { variantId?: unknown; tradeInValue?: unknown };
+  const variantId = Number(body.variantId);
+  const tradeInValue = Number(body.tradeInValue);
+  if (!Number.isInteger(variantId) || variantId <= 0) { res.status(400).json({ error: "Aparelho inválido" }); return; }
+  if (!Number.isFinite(tradeInValue) || tradeInValue < 0 || tradeInValue > 1_000_000) { res.status(400).json({ error: "Valor do usado inválido" }); return; }
+
+  const [variant] = await db.select().from(catalogProductVariantsTable)
+    .where(and(eq(catalogProductVariantsTable.id, variantId), eq(catalogProductVariantsTable.tenantId, tenant.id)))
+    .limit(1);
+  if (!variant || variant.salePrice == null) { res.status(404).json({ error: "Aparelho não encontrado" }); return; }
+  const [product] = await db.select({ status: catalogProductsTable.status, categoryId: catalogProductsTable.categoryId })
+    .from(catalogProductsTable)
+    .where(and(eq(catalogProductsTable.id, variant.productId), eq(catalogProductsTable.tenantId, tenant.id)))
+    .limit(1);
+  if (!product || product.status !== "active") { res.status(404).json({ error: "Aparelho não encontrado" }); return; }
+
+  const settings = await getPricingSettings(tenant.id);
+  const pricing = withInstallmentPricing(variant, settings, product.categoryId);
+  // Sem custo cadastrado (preço digitado à mão), não há preço à vista
+  // calculado — usa o preço de venda como base e não oferece parcelamento
+  // (não dá pra saber quanto da taxa já está embutida nesse número).
+  const priceCash = pricing.priceCash ?? Number(variant.salePrice);
+  const deduction = Math.min(Math.round(tradeInValue * 100) / 100, priceCash);
+  const cashAfter = Math.round((priceCash - deduction) * 100) / 100;
+  const installmentOptions = pricing.priceCash != null ? parcelasSobreValorAVista(cashAfter, settings) : [];
+  res.json({
+    priceCash,
+    tradeInValue: deduction,
+    // Usado avaliado acima do preço do aparelho — o excedente a loja acerta
+    // no atendimento (mesma regra do carrinho: total nunca fica negativo).
+    exceedsPrice: tradeInValue > priceCash,
+    cashAfter,
+    installmentOptions,
   });
 });
 

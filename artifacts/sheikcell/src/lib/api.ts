@@ -2526,8 +2526,11 @@ export const api = {
     questions: (slug: string) =>
       req<{ apple: { key: string; label: string; options: { label: string }[] }[]; android: { key: string; label: string; options: { label: string }[] }[] }>(
         `/trade-in-public/${slug}/questions`),
+    // Aparelhos da tabela de valores base (sem valor) — pro cliente SELECIONAR o usado na Vitrine.
+    models: (slug: string) =>
+      req<{ models: { brand: string; model: string; storages: string[] }[] }>(`/trade-in-public/${slug}/models`),
     estimate: (slug: string, data: { brand: string; model: string; memory?: string; color?: string; answers: Record<string, string> }) =>
-      req<{ method: "table" | "ai"; device: string; estimatedPrice: string } | { blocked: true; message: string }>(
+      req<{ method: "table" | "ai"; device: string; estimatedPrice: string; estimatedPriceValue?: number | null } | { blocked: true; message: string }>(
         `/trade-in-public/${slug}/estimate`, { method: "POST", body: JSON.stringify(data) }),
     lead: (slug: string, data: { name: string; phone: string; brand: string; model: string; memory?: string; color?: string; answers?: Record<string, string>; estimatedPrice?: string; wantedProduct?: string }) =>
       req<{ ok: boolean; id: number; updated?: boolean }>(`/trade-in-public/${slug}/lead`, { method: "POST", body: JSON.stringify(data) }),
@@ -3279,6 +3282,10 @@ export const api = {
     // Cupom no carrinho da vitrine pública — validar (sem efeito colateral,
     // pode chamar de novo a cada edição do código) e resgatar (uma vez, ao
     // clicar em "Finalizar pedido no WhatsApp" — best-effort).
+    // Simulação de troca: abate o usado do preço à vista da variante e parcela o saldo (taxa de cartão da loja).
+    tradeInQuotePublic: (slug: string, variantId: number, tradeInValue: number) =>
+      req<{ priceCash: number; tradeInValue: number; exceedsPrice: boolean; cashAfter: number; installmentOptions: CatalogInstallmentOption[] }>(
+        `/catalog-public/${slug}/trade-in-quote`, { method: "POST", body: JSON.stringify({ variantId, tradeInValue }) }),
     validateCouponPublic: (slug: string, code: string, subtotal: number) =>
       req<CatalogCouponValidation>(`/catalog-public/${slug}/coupon/validate`, { method: "POST", body: JSON.stringify({ code, subtotal }) }),
     redeemCouponPublic: (slug: string, code: string) =>

@@ -11,7 +11,7 @@ import {
   PAYMENT_METHODS_KEY, DEFAULT_PAYMENT_METHODS, sanitizePaymentMethods,
 } from "../lib/tradeInPaymentMethods";
 import { getMargins, getQuestionsConfig, MARGINS_KEY, type Margins } from "../lib/tradeInConfig";
-import { computeTradeInEstimate, askTradeInPriceAI, extractTradeInJson, formatBRL } from "../lib/tradeInEstimate";
+import { computeTradeInEstimate, askTradeInPriceAI, extractTradeInJson, formatBRL, parseBRLValue } from "../lib/tradeInEstimate";
 import { findBaseValueMatch, type BaseValueRow } from "../lib/tradeInBaseValues";
 import {
   getEvalLimitConfig, saveEvalLimitConfig, evalPeriodStart, countEvaluationsBy,
@@ -886,6 +886,35 @@ tradeInPublicRouter.get("/trade-in-public/:slug/questions", async (req: Request,
   res.json({ apple: strip(cfg.apple), android: strip(cfg.android) });
 });
 
+// Lista de aparelhos pra o cliente SELECIONAR o usado na Vitrine (pedido
+// 03/10) — vem da tabela de valores base da loja, sem o valor (só marca,
+// modelo e armazenamentos). Modelo fora da lista o cliente digita, e a
+// estimativa cai na IA como já era (com o limite por visitante).
+tradeInPublicRouter.get("/trade-in-public/:slug/models", async (req: Request, res: Response): Promise<void> => {
+  const slug = String(req.params.slug ?? "");
+  const tenant = await tenantByPublicSlug(slug);
+  if (!tenant) { res.status(404).json({ error: "Avaliação não encontrada" }); return; }
+  const rows = await db.select({ brand: tradeInBaseValuesTable.brand, model: tradeInBaseValuesTable.model, storage: tradeInBaseValuesTable.storage })
+    .from(tradeInBaseValuesTable)
+    .where(eq(tradeInBaseValuesTable.tenantId, tenant.id))
+    .orderBy(tradeInBaseValuesTable.brand, tradeInBaseValuesTable.model, tradeInBaseValuesTable.storage);
+  const byKey = new Map<string, { brand: string; model: string; storages: string[] }>();
+  for (const r of rows) {
+    const brand = (r.brand ?? "").trim();
+    const model = (r.model ?? "").trim();
+    if (!brand || !model) continue;
+    const key = `${brand.toLowerCase()}|${model.toLowerCase()}`;
+    const cur = byKey.get(key) ?? { brand, model, storages: [] };
+    const st = (r.storage ?? "").trim();
+    if (st && !cur.storages.includes(st)) cur.storages.push(st);
+    byKey.set(key, cur);
+  }
+  // Armazenamento em ordem de tamanho (64GB, 128GB, ..., 1TB), não alfabética.
+  const sizeGb = (st: string) => { const m = st.match(/(\d+(?:[.,]\d+)?)\s*(tb|gb)?/i); if (!m) return Number.MAX_SAFE_INTEGER; const n = Number(m[1]!.replace(",", ".")); return /tb/i.test(m[2] ?? "") ? n * 1024 : n; };
+  const models = [...byKey.values()].map((m) => ({ ...m, storages: [...m.storages].sort((a, b) => sizeGb(a) - sizeGb(b)) }));
+  res.json({ models });
+});
+
 tradeInPublicRouter.post("/trade-in-public/:slug/estimate", async (req: Request, res: Response): Promise<void> => {
   const slug = String(req.params.slug ?? "");
   const tenant = await tenantByPublicSlug(slug);
@@ -953,7 +982,9 @@ tradeInPublicRouter.post("/trade-in-public/:slug/estimate", async (req: Request,
       marginPctOverride: tenant.publicTradeInMarginPct,
     });
     if (!estimate) { res.status(502).json({ error: "Não conseguimos calcular uma estimativa agora. Deixe seu contato que a loja avalia manualmente." }); return; }
-    res.json({ method: estimate.method, device: dev, estimatedPrice: estimate.estimatedPrice });
+    // estimatedPriceValue (03/10): número já convertido no servidor, pra
+    // simulação de troca da Vitrine não depender do parse do texto no front.
+    res.json({ method: estimate.method, device: dev, estimatedPrice: estimate.estimatedPrice, estimatedPriceValue: parseBRLValue(estimate.estimatedPrice) });
   } catch (err) {
     req.log.error({ err }, "Public trade-in estimate failed");
     res.status(503).json({ error: "Não conseguimos calcular uma estimativa agora. Deixe seu contato que a loja avalia manualmente." });

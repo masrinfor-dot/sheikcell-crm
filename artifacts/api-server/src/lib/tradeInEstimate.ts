@@ -100,3 +100,24 @@ export async function computeTradeInEstimate(opts: {
   if (!suggestedPrice) return null;
   return { method: "ai", estimatedPrice: suggestedPrice };
 }
+
+/**
+ * Converte o valor estimado ("R$ 1.234,56", "R$ 1.200", "1200", "R$ 1.200 a
+ * R$ 1.400") em número. A IA nem sempre devolve vírgula de centavos — e o
+ * front fazia Number("1.200") = 1,2 nesse caso. Regra: ponto seguido de
+ * exatamente 3 dígitos é separador de milhar; vírgula é decimal. Faixa
+ * ("X a Y") usa o PRIMEIRO valor (o conservador, que a loja confirma depois).
+ */
+export function parseBRLValue(label: string | null | undefined): number | null {
+  if (!label) return null;
+  const m = String(label).match(/\d[\d.,]*/);
+  if (!m) return null;
+  let s = m[0].replace(/[.,]$/, "");
+  if (s.includes(",")) {
+    s = s.replace(/\./g, "").replace(",", ".");
+  } else if (/^\d{1,3}(\.\d{3})+$/.test(s)) {
+    s = s.replace(/\./g, "");
+  }
+  const n = Number(s);
+  return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : null;
+}

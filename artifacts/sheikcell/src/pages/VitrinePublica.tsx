@@ -234,6 +234,10 @@ type TradeInDiscount = {
   device: string;
   estimatedPriceLabel: string;
   estimatedPriceValue: number | null;
+  // Respostas do checklist (título curto: resposta) — vão na mensagem do
+  // pedido pro vendedor já saber o estado do usado. Só a simulação dentro
+  // do produto preenche (o fluxo /avaliar manda o checklist no lead).
+  details?: string[];
 };
 
 // Ordenação da listagem — "Mais novos primeiro" é sempre a ordem padrão
@@ -441,22 +445,241 @@ function ProductCard({
   );
 }
 
+// Simulação de troca DENTRO do produto (pedido 03/10: "dentro da vitrine
+// colocar opção de selecionar celular na avaliação de usados, calcular com
+// abatimento preço à vista e cartão parcelado"). Antes, "Trocar por este
+// aparelho" tirava o cliente da vitrine pra /avaliar e o desconto só
+// aparecia no carrinho, sem mostrar como ficava o parcelamento. Agora o
+// cliente seleciona o usado (lista da tabela de valores base da loja, ou
+// digita se não achar), responde o checklist e vê na hora: à vista (Pix)
+// com o abatimento e o SALDO parcelado no cartão (taxa da loja por cima do
+// saldo — calculado no backend, /catalog-public/:slug/trade-in-quote).
+// O fluxo antigo (/avaliar) continua existindo pra quem só quer vender.
+type TradeInModel = { brand: string; model: string; storages: string[] };
+type TradeInQuestion = { key: string; label: string; options: { label: string }[] };
+type TradeInQuote = { priceCash: number; tradeInValue: number; exceedsPrice: boolean; cashAfter: number; installmentOptions: { parcelas: number; total: number; parcela: number }[] };
+const OTHER_MODEL = "__outro__";
+const FALLBACK_BRANDS = ["Apple", "Samsung", "Motorola", "Xiaomi", "Realme"];
+const FALLBACK_STORAGES = ["64GB", "128GB", "256GB", "512GB", "1TB"];
+
+function TradeInSimulator({ slug, variantId, onApply, onFullFlow }: {
+  slug: string;
+  variantId: number | null;
+  onApply: (discount: TradeInDiscount) => void;
+  onFullFlow: () => void;
+}) {
+  const [models, setModels] = useState<TradeInModel[] | null>(null);
+  const [questions, setQuestions] = useState<{ apple: TradeInQuestion[]; android: TradeInQuestion[] } | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [brand, setBrand] = useState("");
+  const [modelChoice, setModelChoice] = useState("");
+  const [typedModel, setTypedModel] = useState("");
+  const [storage, setStorage] = useState("");
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [estimating, setEstimating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [blocked, setBlocked] = useState<string | null>(null);
+  const [estimate, setEstimate] = useState<{ label: string; value: number; device: string } | null>(null);
+  const [quote, setQuote] = useState<TradeInQuote | null>(null);
+  const [showParcelas, setShowParcelas] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    Promise.all([api.tradeInPublic.models(slug), api.tradeInPublic.questions(slug)])
+      .then(([m, q]) => { if (alive) { setModels(m.models); setQuestions(q); } })
+      .catch(() => { if (alive) setLoadError("A simulação de troca não está disponível agora."); });
+    return () => { alive = false; };
+  }, [slug]);
+
+  const brands = useMemo(() => {
+    const fromTable = [...new Set((models ?? []).map((m) => m.brand))];
+    return fromTable.length > 0 ? fromTable : FALLBACK_BRANDS;
+  }, [models]);
+  const modelsForBrand = useMemo(() => (models ?? []).filter((m) => m.brand === brand), [models, brand]);
+  const pickedModel = modelChoice && modelChoice !== OTHER_MODEL ? modelsForBrand.find((m) => m.model === modelChoice) ?? null : null;
+  const modelName = modelChoice === OTHER_MODEL || modelsForBrand.length === 0 ? typedModel.trim() : modelChoice;
+  const storages = pickedModel && pickedModel.storages.length > 0 ? pickedModel.storages : FALLBACK_STORAGES;
+  const questionList = questions ? (/apple|iphone/i.test(brand) ? questions.apple : questions.android) : [];
+  const allAnswered = questionList.length > 0 && questionList.every((q) => answers[q.key]);
+  const canEstimate = !!brand && !!modelName && allAnswered && !estimating;
+
+  // Qualquer mudança no usado invalida o valor calculado (evita aplicar no
+  // pedido um valor de outro aparelho/estado).
+  const resetResult = () => { setEstimate(null); setQuote(null); setBlocked(null); setError(null); setShowParcelas(false); };
+
+  // Trocou a variante do aparelho NOVO (cor/armazenamento) com o usado já
+  // avaliado: recalcula só o abatimento/parcelas, sem refazer a avaliação.
+  useEffect(() => {
+    if (!estimate || variantId == null) return;
+    let alive = true;
+    api.catalog.tradeInQuotePublic(slug, variantId, estimate.value)
+      .then((q) => { if (alive) setQuote(q); })
+      .catch(() => { if (alive) setError("Não foi possível recalcular agora."); });
+    return () => { alive = false; };
+  }, [slug, variantId, estimate]);
+
+  const handleEstimate = async () => {
+    if (!canEstimate || variantId == null) return;
+    setEstimating(true);
+    resetResult();
+    try {
+      const r = await api.tradeInPublic.estimate(slug, { brand, model: modelName, memory: storage || undefined, answers });
+      if ("blocked" in r) { setBlocked(r.message); return; }
+      const value = r.estimatedPriceValue ?? null;
+      if (value == null || value <= 0) { setBlocked("Não conseguimos calcular um valor automático pra esse aparelho. Fale com a loja pra uma avaliação."); return; }
+      setEstimate({ label: r.estimatedPrice, value, device: r.device });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Não foi possível avaliar agora.");
+    } finally {
+      setEstimating(false);
+    }
+  };
+
+  const cardTop = quote?.installmentOptions.length ? quote.installmentOptions[quote.installmentOptions.length - 1] : null;
+
+  if (loadError) return <p className="text-xs text-red-600">{loadError}</p>;
+  if (!models || !questions) return <p className="text-xs text-neutral-400">Carregando…</p>;
+
+  return (
+    <div className="space-y-2.5" data-testid="trade-in-simulator">
+      <div>
+        <p className="text-[11px] font-semibold text-neutral-500 mb-1">Marca do seu usado</p>
+        <div className="flex flex-wrap gap-1.5">
+          {brands.map((b) => (
+            <button key={b} type="button" onClick={() => { setBrand(b); setModelChoice(""); setTypedModel(""); setStorage(""); setAnswers({}); resetResult(); }}
+              className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition ${b === brand ? "bg-neutral-900 text-white border-neutral-900" : "bg-white text-neutral-600 border-neutral-200 hover:border-neutral-400"}`}>
+              {b}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {brand && (
+        <div>
+          <p className="text-[11px] font-semibold text-neutral-500 mb-1">Modelo</p>
+          {modelsForBrand.length > 0 && (
+            <select value={modelChoice} onChange={(e) => { setModelChoice(e.target.value); setStorage(""); resetResult(); }}
+              data-testid="select-trade-in-model"
+              className="w-full rounded-lg border border-neutral-200 bg-white px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-400">
+              <option value="">Selecione o seu celular</option>
+              {modelsForBrand.map((m) => <option key={m.model} value={m.model}>{m.model}</option>)}
+              <option value={OTHER_MODEL}>Não achei meu modelo</option>
+            </select>
+          )}
+          {(modelChoice === OTHER_MODEL || modelsForBrand.length === 0) && (
+            <input value={typedModel} onChange={(e) => { setTypedModel(e.target.value); resetResult(); }} placeholder="Digite o modelo (ex.: iPhone 12)"
+              data-testid="input-trade-in-model"
+              className="mt-1.5 w-full rounded-lg border border-neutral-200 px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-400" />
+          )}
+        </div>
+      )}
+
+      {brand && modelName && (
+        <div>
+          <p className="text-[11px] font-semibold text-neutral-500 mb-1">Armazenamento</p>
+          <div className="flex flex-wrap gap-1.5">
+            {storages.map((st) => (
+              <button key={st} type="button" onClick={() => { setStorage(st); resetResult(); }}
+                className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition ${st === storage ? "bg-neutral-900 text-white border-neutral-900" : "bg-white text-neutral-600 border-neutral-200 hover:border-neutral-400"}`}>
+                {st}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {brand && modelName && questionList.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-[11px] font-semibold text-neutral-500">Estado do aparelho</p>
+          {questionList.map((q) => (
+            <label key={q.key} className="block">
+              <span className="text-[11px] text-neutral-600">{q.label}</span>
+              <select value={answers[q.key] ?? ""} onChange={(e) => { setAnswers((a) => ({ ...a, [q.key]: e.target.value })); resetResult(); }}
+                className="mt-0.5 w-full rounded-lg border border-neutral-200 bg-white px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-400">
+                <option value="">Selecione</option>
+                {q.options.map((o) => <option key={o.label} value={o.label}>{o.label}</option>)}
+              </select>
+            </label>
+          ))}
+        </div>
+      )}
+
+      {!estimate && !blocked && (
+        <button type="button" onClick={handleEstimate} disabled={!canEstimate || variantId == null} data-testid="button-trade-in-estimate"
+          className="w-full py-2.5 rounded-xl bg-neutral-900 text-white text-sm font-bold hover:bg-neutral-800 transition disabled:opacity-40">
+          {estimating ? "Calculando…" : "Calcular abatimento"}
+        </button>
+      )}
+
+      {error && <p className="text-xs text-red-600">{error}</p>}
+
+      {blocked && (
+        <div className="rounded-lg bg-amber-50 border border-amber-200 p-2.5 space-y-1.5">
+          <p className="text-xs text-amber-800 flex items-start gap-1.5"><AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" /> {blocked}</p>
+          <button type="button" onClick={onFullFlow} className="text-xs font-semibold text-blue-600 hover:underline">Fazer a avaliação com a loja</button>
+        </div>
+      )}
+
+      {estimate && quote && (
+        <div className="rounded-xl border border-emerald-200 bg-white p-3 space-y-1.5" data-testid="trade-in-result">
+          <div className="flex items-center justify-between text-xs text-neutral-500">
+            <span>Preço à vista</span><span className="line-through">{formatBRL(quote.priceCash)}</span>
+          </div>
+          <div className="flex items-center justify-between text-xs text-emerald-700 font-semibold">
+            <span className="truncate pr-2">Seu {estimate.device}</span><span className="shrink-0">−{formatBRL(quote.tradeInValue)}</span>
+          </div>
+          <div className="border-t border-neutral-100 pt-1.5">
+            <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-wide">Você paga</p>
+            <p className="text-2xl font-bold text-emerald-600" data-testid="text-trade-in-cash">{formatBRL(quote.cashAfter)}</p>
+            <p className="text-xs text-emerald-600 font-semibold">à vista (Pix)</p>
+            {cardTop && (
+              <button type="button" onClick={() => setShowParcelas((v) => !v)} data-testid="button-trade-in-installments"
+                className="text-sm text-neutral-700 bg-white border border-neutral-200 rounded-lg px-2 py-1 mt-1.5 inline-flex items-center gap-1.5 hover:border-neutral-300 transition">
+                ou {cardTop.parcelas}x de {formatBRL(cardTop.parcela)} no cartão <span className="text-blue-600 font-semibold text-xs">ver parcelas</span>
+              </button>
+            )}
+            {showParcelas && <InstallmentOptionsTable options={quote.installmentOptions} />}
+          </div>
+          {quote.exceedsPrice && (
+            <p className="text-[11px] text-neutral-500">Seu usado vale mais que este aparelho — a diferença a loja acerta com você no atendimento.</p>
+          )}
+          <p className="text-[10px] text-neutral-400">Valor do usado é uma estimativa, confirmado pela loja depois de conferir o aparelho.</p>
+          <button type="button"
+            onClick={() => onApply({
+              device: estimate.device,
+              estimatedPriceLabel: estimate.label,
+              estimatedPriceValue: estimate.value,
+              details: questionList.filter((q) => answers[q.key]).map((q) => `${q.key}: ${answers[q.key]}`),
+            })}
+            data-testid="button-apply-trade-in"
+            className="w-full py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 transition inline-flex items-center justify-center gap-1.5">
+            <ShoppingCart className="w-4 h-4" /> Adicionar ao pedido com essa troca
+          </button>
+          <button type="button" onClick={resetResult} className="w-full text-xs text-neutral-500 hover:underline">Simular outro usado</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Modal de detalhe do produto — abre ao clicar na foto ou no nome do card.
 // Mostra a foto em tamanho maior, descrição e critério de qualidade, e o
 // seletor de variação em 2 etapas quando o aparelho tem cor E armazenamento
 // variando (primeiro escolhe a cor, depois só os armazenamentos daquela
 // cor aparecem pra escolher).
 function ProductDetailModal({
-  p, wholesaleUnlocked, slug, trustBadges, paymentMethods, tradeInEnabled, onAddToCart, onClose,
+  p, wholesaleUnlocked, slug, trustBadges, paymentMethods, tradeInEnabled, onAddToCart, onApplyTradeIn, onClose,
 }: {
   p: CatalogPublicProduct; wholesaleUnlocked: boolean; slug: string; trustBadges: CatalogTrustBadge[]; paymentMethods: CatalogPaymentMethod[];
   // Avaliação de usados desligada na vitrine pública (pedido 18/09) — esconde
   // "Trocar por este aparelho (dar seu usado)" quando false.
   tradeInEnabled: boolean;
   onAddToCart: (item: { productId: number; variantId: number; model: string; storage: string | null; unitPrice: number | null; wholesale: boolean }, qty: number) => void;
+  onApplyTradeIn: (discount: TradeInDiscount) => void;
   onClose: () => void;
 }) {
   const [, navigate] = useLocation();
+  const [showTradeIn, setShowTradeIn] = useState(false);
   const [activePhoto, setActivePhoto] = useState(0);
   const [carouselApi, setCarouselApi] = useState<CarouselApi>();
   const [showCriteria, setShowCriteria] = useState(false);
@@ -810,20 +1033,37 @@ function ProductDetailModal({
                   <ShoppingCart className="w-4 h-4 sm:w-5 sm:h-5" /> Adicionar ao pedido
                 </button>
                 {!wholesaleUnlocked && tradeInEnabled && (
-                  <button type="button" disabled={!selected}
-                    onClick={() => {
-                      if (!selected) return;
-                      onAddToCart({
-                        productId: p.id, variantId: selected.id, model: p.model, storage: cartVariantLabel(selected),
-                        unitPrice: selected.salePrice != null ? Number(selected.salePrice) : null,
-                        wholesale: false,
-                      }, qty);
-                      navigate(`/avaliar/${slug}?troca=1`);
-                    }}
-                    data-testid="button-trade-in-for-product"
-                    className="mt-2 inline-flex items-center justify-center gap-1.5 w-full py-2.5 rounded-xl border-2 border-neutral-900 text-neutral-900 text-sm font-semibold hover:bg-neutral-50 transition disabled:opacity-40">
-                    <Wallet className="w-4 h-4" /> Trocar por este aparelho (dar seu usado)
-                  </button>
+                  <div className="mt-2 rounded-xl border-2 border-neutral-900 overflow-hidden">
+                    <button type="button" disabled={!selected} onClick={() => setShowTradeIn((v) => !v)}
+                      data-testid="button-trade-in-for-product"
+                      className="inline-flex items-center justify-center gap-1.5 w-full py-2.5 text-neutral-900 text-sm font-semibold hover:bg-neutral-50 transition disabled:opacity-40">
+                      <Wallet className="w-4 h-4" /> {showTradeIn ? "Fechar simulação de troca" : "Tem um usado? Simule a troca"}
+                    </button>
+                    {showTradeIn && selected && (
+                      <div className="border-t border-neutral-200 bg-neutral-50 p-3">
+                        <TradeInSimulator
+                          slug={slug}
+                          variantId={selected.id}
+                          onApply={(discount) => {
+                            onApplyTradeIn(discount);
+                            onAddToCart({
+                              productId: p.id, variantId: selected.id, model: p.model, storage: cartVariantLabel(selected),
+                              unitPrice: selected.salePrice != null ? Number(selected.salePrice) : null,
+                              wholesale: false,
+                            }, qty);
+                          }}
+                          onFullFlow={() => {
+                            onAddToCart({
+                              productId: p.id, variantId: selected.id, model: p.model, storage: cartVariantLabel(selected),
+                              unitPrice: selected.salePrice != null ? Number(selected.salePrice) : null,
+                              wholesale: false,
+                            }, qty);
+                            navigate(`/avaliar/${slug}?troca=1`);
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
                 )}
               </>
             ) : notifyDone ? (
@@ -974,6 +1214,11 @@ export default function VitrinePublica() {
     } catch { /* privado/bloqueado — segue sem persistir */ }
   }, [slug, cart]);
 
+  const applyTradeIn = (discount: TradeInDiscount) => {
+    setTradeIn(discount);
+    if (slug) { try { localStorage.setItem(tradeInStorageKey(slug), JSON.stringify(discount)); } catch { /* segue sem persistir */ } }
+  };
+
   const removeTradeIn = () => {
     setTradeIn(null);
     if (slug) { try { localStorage.removeItem(tradeInStorageKey(slug)); } catch { /* segue sem persistir */ } }
@@ -1068,6 +1313,7 @@ export default function VitrinePublica() {
     const tradeInLines = tradeIn ? [
       "",
       `Desconto do meu usado (${tradeIn.device}): ${tradeIn.estimatedPriceLabel} — valor sujeito a confirmação da loja depois de conferir o checklist`,
+      ...(tradeIn.details ?? []).map((d) => `• ${d}`),
     ] : [];
     const couponLines = couponApplied ? [
       "",
@@ -1438,6 +1684,7 @@ export default function VitrinePublica() {
           paymentMethods={data.paymentMethods}
           tradeInEnabled={data.tradeInEnabled}
           onAddToCart={(item, qty) => { addToCart(item, qty); setDetailProduct(null); }}
+          onApplyTradeIn={applyTradeIn}
           onClose={() => setDetailProduct(null)}
         />
       )}

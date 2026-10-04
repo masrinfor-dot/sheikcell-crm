@@ -9,6 +9,7 @@ import {
   parcelamento12xDoProduto,
   parcelasDoProduto,
   calcularPrecoVenda,
+  parcelasSobreValorAVista,
 } from "./catalogPricing";
 
 test("sanitizePricingSettings: categoryMarginOverrides ausente vira objeto vazio", () => {
@@ -150,4 +151,18 @@ test("chamadas sem categoryId continuam com o comportamento antigo (compatibilid
   // Sem passar categoryId nenhum (parâmetro omitido) — não deve quebrar nem mudar o resultado.
   const preco = precoVendaDoProduto(produto, settings);
   assert.equal(preco, calcularPrecoVenda({ custo: 500, margemPercent: settings.defaultMarginPercent, notaFiscalPercent: 0, taxaCartaoPercent: settings.cardFeeTable["1"] ?? 0, custoJaIncluiNotaFiscal: false }));
+});
+
+test("parcelasSobreValorAVista: saldo da troca parcelado com a taxa de cada nº de parcelas", () => {
+  const settings = sanitizePricingSettings({ cardFeeTable: { "1": 2, "12": 15 }, roundPricesUp: false });
+  const ops = parcelasSobreValorAVista(1000, settings);
+  assert.equal(ops.length, 12);
+  assert.equal(ops[0]!.total, Math.round((1000 / 0.98) * 100) / 100);
+  assert.equal(ops[11]!.total, Math.round((1000 / 0.85) * 100) / 100);
+  assert.equal(ops[11]!.parcelas, 12);
+});
+
+test("parcelasSobreValorAVista: saldo zero (usado cobre o aparelho) não tem parcelas", () => {
+  assert.deepEqual(parcelasSobreValorAVista(0, DEFAULT_PRICING_SETTINGS), []);
+  assert.deepEqual(parcelasSobreValorAVista(-50, DEFAULT_PRICING_SETTINGS), []);
 });
