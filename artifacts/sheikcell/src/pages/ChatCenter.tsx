@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo, Fragment, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { api, can, ApiError, type Conversation, type ChatMessage, type PinnedMessage, type Sector, type ChatLabel, type ChatSavedFilter, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata, type CatalogCoupon, type BroadcastDispatchLog, type BroadcastDispatchSummary } from "@/lib/api";
+import { api, can, ApiError, type Conversation, type ChatMessage, type PinnedMessage, type Sector, type ChatLabel, type ChatSavedFilter, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata, type CatalogCoupon, type BroadcastDispatchLog, type BroadcastDispatchSummary, type CrmPurchase, type AttendanceLog } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useActivityGuard } from "@/lib/activityGuard";
 import { useToast } from "@/hooks/use-toast";
@@ -275,6 +275,24 @@ function waSessionColor(key: string, sessions: WaSessionInfo[]): string {
 function waSessionIcon(key: string, sessions: WaSessionInfo[]): string | null {
   return sessions.find((x) => x.sessionKey === key)?.icon || null;
 }
+
+function fmtBRL(v: string | number | null | undefined): string {
+  const n = typeof v === "number" ? v : parseFloat(v ?? "0");
+  return (Number.isFinite(n) ? n : 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+}
+function fmtShortDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" }).replace(".", "");
+}
+
+// Etapas do atendimento mostradas na faixa abaixo do cabeçalho da conversa
+// (novo design). Espelham as abas da lista — é a jornada real que o sistema
+// já controla (Potencial → fila → atendimento → finalizado).
+const ATTENDANCE_STEPS: { id: Category; label: string }[] = [
+  { id: "potenciais", label: "Potencial" },
+  { id: "pendentes", label: "Na fila" },
+  { id: "ativos", label: "Em atendimento" },
+  { id: "resolvidas", label: "Finalizado" },
+];
 
 // Tempo que o cliente está esperando resposta, em texto curto
 // ("7 min", "2 h", "3 d"). Usado nos chips "aguardando"/"atrasado".
@@ -1502,17 +1520,21 @@ export default function ChatCenter({
   // vira um trilho estreito quando fechado) — estado persistido por
   // atendente via localStorage. No celular continua sendo overlay
   // fullscreen só quando expandido (ver classes no <aside> abaixo).
+  // Novo layout (out/2026): ficha do cliente aberta por padrão em telas
+  // largas (3 colunas, como no protótipo). Chave nova pra não herdar o
+  // "fechado" que todo mundo tinha salvo antes.
   const [infoCollapsed, setInfoCollapsed] = useState<boolean>(() => {
     try {
-      const saved = localStorage.getItem("shk_chat_info_collapsed");
-      return saved === null ? true : saved === "1";
+      const saved = localStorage.getItem("shk_chat_info_collapsed_v2");
+      if (saved !== null) return saved === "1";
+      return typeof window !== "undefined" ? window.innerWidth < 1280 : true;
     } catch {
       return true;
     }
   });
   useEffect(() => {
     try {
-      localStorage.setItem("shk_chat_info_collapsed", infoCollapsed ? "1" : "0");
+      localStorage.setItem("shk_chat_info_collapsed_v2", infoCollapsed ? "1" : "0");
     } catch {
       // ignore
     }
@@ -1529,6 +1551,13 @@ export default function ChatCenter({
 
   // AI reply suggestion in the composer
   const [suggesting, setSuggesting] = useState(false);
+  // Sugestão da IA mostrada num cartão acima do campo (novo design): o
+  // vendedor decide se usa — nada vai pro campo/cliente sem clique.
+  const [aiSuggestion, setAiSuggestion] = useState<string | null>(null);
+  // Ficha do cliente (novo design): compras e atendimentos anteriores do CRM
+  const [fichaPurchases, setFichaPurchases] = useState<CrmPurchase[]>([]);
+  const [fichaHistory, setFichaHistory] = useState<AttendanceLog[]>([]);
+  const [showEditInfo, setShowEditInfo] = useState(false);
 
   // Notification bell: inbound messages accumulated in arrival order
   const [showNotifications, setShowNotifications] = useState(false);
@@ -2918,8 +2947,8 @@ export default function ChatCenter({
     }
   };
 
-  const openSchedule = async (convId: number) => {
-    setSchedForm({ kind: "mensagem", content: "", sendAt: "" });
+  const openSchedule = async (convId: number, kind: "mensagem" | "retorno" = "mensagem") => {
+    setSchedForm({ kind, content: "", sendAt: "" });
     setShowSchedule(true);
     try { setSchedules(await api.chat.schedules.list(convId)); } catch { setSchedules([]); }
   };
@@ -3191,6 +3220,30 @@ export default function ChatCenter({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [infoCollapsed, activeId]);
 
+  // Ficha do cliente (novo design): próxima ação = agendamentos pendentes
+  // desta conversa (mesma lista do modal "Agendar"); compras e atendimentos
+  // anteriores vêm do CRM do contato.
+  useEffect(() => {
+    setAiSuggestion(null);
+    setShowEditInfo(false);
+  }, [activeId]);
+  useEffect(() => {
+    if (infoCollapsed || activeId == null) return;
+    let cancelled = false;
+    api.chat.schedules.list(activeId).then((r) => { if (!cancelled) setSchedules(r); }).catch(() => { if (!cancelled) setSchedules([]); });
+    return () => { cancelled = true; };
+  }, [infoCollapsed, activeId]);
+  useEffect(() => {
+    setFichaPurchases([]);
+    setFichaHistory([]);
+    const cid = infoContact?.id;
+    if (cid == null) return;
+    let cancelled = false;
+    api.crm.purchases.list(cid).then((r) => { if (!cancelled) setFichaPurchases(r); }).catch(() => {});
+    api.crm.serviceHistory(cid).then((r) => { if (!cancelled) setFichaHistory(r); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [infoContact?.id]);
+
   const handleSaveInfo = async () => {
     if (!infoContact) return;
     setInfoSaving(true);
@@ -3217,9 +3270,7 @@ export default function ChatCenter({
     setSuggesting(true);
     try {
       const { suggestion } = await api.chat.suggestReply(activeConv.id);
-      setMsgText(suggestion);
-      inputRef.current?.focus();
-      toast({ title: "Sugestão gerada — revise antes de enviar" });
+      setAiSuggestion(suggestion);
     } catch (err: unknown) {
       toast({ title: "IA indisponível", description: err instanceof Error ? err.message : "Erro ao gerar sugestão", variant: "destructive" });
     } finally { setSuggesting(false); }
@@ -4730,6 +4781,39 @@ export default function ChatCenter({
             </div>
           </div>
 
+          {/* Etapa do atendimento (novo design): faixa só de leitura com a
+              jornada real da conversa — as ações continuam nos botões acima. */}
+          {(() => {
+            const cur = conversationCategory(activeConv);
+            const idx = ATTENDANCE_STEPS.findIndex((st) => st.id === cur);
+            return (
+              <div className="bg-white border-b border-border px-3 md:px-5 py-2 hidden md:flex items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&>*]:shrink-0" data-testid="attendance-steps">
+                <span className="text-[11px] font-extrabold uppercase tracking-wider text-muted-foreground mr-1.5">Etapa</span>
+                {ATTENDANCE_STEPS.map((st, i) => (
+                  <Fragment key={st.id}>
+                    {i > 0 && <ChevronRight className="w-3.5 h-3.5 text-muted-foreground/50" />}
+                    <span
+                      aria-current={i === idx ? "step" : undefined}
+                      className={`inline-flex items-center gap-1 h-7 px-2.5 rounded-lg text-xs font-bold ${
+                        i === idx ? "bg-primary text-primary-foreground"
+                          : i < idx ? "bg-primary/10 text-primary"
+                          : "bg-white text-[#3D4552] border border-border"
+                      }`}
+                    >
+                      {i < idx && <Check className="w-3 h-3" />}
+                      {st.label}
+                    </span>
+                  </Fragment>
+                ))}
+                {infoContact?.profile && !isGroupConv(activeConv) && (
+                  <span className="ml-auto pl-3 inline-flex items-center gap-1 text-xs text-muted-foreground">
+                    Cliente <span className="shk-chip shk-chip-primary">{infoContact.profile}</span>
+                  </span>
+                )}
+              </div>
+            );
+          })()}
+
           {/* Label chips */}
           {currentLabels.length > 0 && (
             <div className="bg-white border-b border-border px-5 py-2 flex items-center gap-1.5 flex-wrap">
@@ -4953,8 +5037,41 @@ export default function ChatCenter({
             </div>
           ) : (
           <>
+          {/* Sugestão da IA (novo design): cartão acima do campo — só entra no
+              campo se o vendedor clicar em "Usar"; nada é enviado sozinho. */}
+          {aiSuggestion && composerMode === "message" && (
+            <div className={`bg-white px-3 md:px-5 pt-3 ${replyTarget ? "" : "border-t border-border"}`} data-testid="ai-suggestion-card">
+              <div className="rounded-xl border border-primary/30 p-3 flex gap-3 items-start flex-wrap">
+                <Sparkles className="w-5 h-5 text-primary shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-[200px]">
+                  <p className="text-[11px] font-extrabold uppercase tracking-wider text-primary">Sugestão da IA · você decide</p>
+                  <p className="text-sm mt-0.5 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">{aiSuggestion}</p>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => { setMsgText(aiSuggestion); setAiSuggestion(null); requestAnimationFrame(() => inputRef.current?.focus()); }}
+                    data-testid="button-use-ai-suggestion"
+                    className="h-9 px-3.5 rounded-lg bg-primary text-primary-foreground text-xs font-bold hover:opacity-90 transition"
+                  >
+                    Usar no campo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAiSuggestion(null)}
+                    aria-label="Dispensar sugestão"
+                    title="Dispensar sugestão"
+                    data-testid="button-dismiss-ai-suggestion"
+                    className="w-9 h-9 rounded-lg inline-flex items-center justify-center text-muted-foreground hover:bg-secondary transition"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
           {/* Mensagem (vai pro cliente) x Nota interna (só a equipe vê) */}
-          <div className={`flex items-center gap-2 px-3 md:px-5 pt-2.5 bg-white ${replyTarget ? "" : "border-t border-border"}`}>
+          <div className={`flex items-center gap-2 px-3 md:px-5 pt-2.5 bg-white ${replyTarget || (aiSuggestion && composerMode === "message") ? "" : "border-t border-border"}`}>
             <div className="inline-flex p-[3px] rounded-[10px] bg-[#F1F3F6] gap-0.5">
               <button type="button" onClick={() => setComposerMode("message")} data-testid="button-composer-mode-message"
                 aria-pressed={composerMode === "message"}
@@ -5197,7 +5314,7 @@ export default function ChatCenter({
           className={`shrink-0 md:border-l border-border bg-white flex-col overflow-hidden ${
             infoCollapsed
               ? "hidden md:flex md:w-12"
-              : "fixed inset-0 z-40 md:static md:z-auto flex w-full md:w-80"
+              : "fixed inset-0 z-40 md:static md:z-auto flex w-full md:w-80 xl:w-[340px]"
           }`}
           data-testid="panel-info"
         >
@@ -5235,7 +5352,149 @@ export default function ChatCenter({
                 </p>
               </div>
             ) : (
-              <div className="flex-1 overflow-y-auto p-4 space-y-3">
+              <div className="flex-1 overflow-y-auto p-4 space-y-5" data-testid="ficha-cliente">
+                {/* Identidade */}
+                <div className="flex items-center gap-3">
+                  <Avatar name={infoContact.name} src={activeConv?.avatarUrl} size="lg" />
+                  <div className="min-w-0">
+                    <p className="font-extrabold text-base tracking-tight truncate">{infoContact.name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      Cliente desde {new Date(infoContact.createdAt).toLocaleDateString("pt-BR", { month: "short", year: "numeric" }).replace(".", "")}
+                      {fichaHistory.length > 0 ? ` · ${fichaHistory.length} atendimento${fichaHistory.length > 1 ? "s" : ""}` : ""}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  <span className="shk-chip shk-chip-primary">{infoContact.profile}</span>
+                  {parseFloat(infoContact.totalPurchases ?? "0") > 0 && (
+                    <span className="shk-chip shk-chip-neutral">Compras: {fmtBRL(infoContact.totalPurchases)}</span>
+                  )}
+                  {infoContact.isBlocked && <span className="shk-chip shk-chip-late">Bloqueado</span>}
+                  {currentLabels.map((label) => (
+                    <span key={label} className="shk-chip shk-chip-outline">{label}</span>
+                  ))}
+                </div>
+
+                {/* Dados principais */}
+                <div className="grid grid-cols-2 gap-x-3 gap-y-3">
+                  {([
+                    ["Telefone", infoContact.phone ?? activeConv?.phone ?? "—", true],
+                    ["Cidade", infoContact.city || "—", false],
+                    ["Loja", infoContact.serviceStore || "—", false],
+                    ["Origem", infoContact.attendanceSource || "—", false],
+                  ] as const).map(([label, value, mono]) => (
+                    <div key={label} className="min-w-0">
+                      <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">{label}</p>
+                      <p className={`text-[13px] font-semibold truncate ${mono ? "font-mono tabular-nums font-medium" : ""}`} title={value}>{value}</p>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Próxima ação = próximo agendamento pendente desta conversa */}
+                {(() => {
+                  const next = [...schedules].sort((x, y) => new Date(x.sendAt).getTime() - new Date(y.sendAt).getTime())[0];
+                  return (
+                    <div className="rounded-xl border border-primary/25 bg-primary/[0.06] p-3.5 space-y-2.5" data-testid="ficha-proxima-acao">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-extrabold uppercase tracking-wider text-primary">Próxima ação</span>
+                        {schedules.length > 1 && <span className="text-[11px] font-bold text-[#3D4552]">+{schedules.length - 1} agendada{schedules.length > 2 ? "s" : ""}</span>}
+                      </div>
+                      {next ? (
+                        <div className="flex gap-2.5 items-start">
+                          <CalendarClock className="w-4 h-4 mt-0.5 shrink-0 text-foreground" />
+                          <div className="min-w-0">
+                            <p className="font-extrabold text-sm">
+                              {new Date(next.sendAt).toLocaleString("pt-BR", { weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                              <span className={`ml-1.5 align-middle shk-chip ${next.kind === "mensagem" ? "shk-chip-neutral" : "shk-chip-wait"}`}>{next.kind === "mensagem" ? "Mensagem" : "Retorno"}</span>
+                            </p>
+                            <p className="text-[13px] text-[#3D4552] line-clamp-2">{next.content}</p>
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="text-[13px] text-[#3D4552]">Nenhum retorno agendado para este cliente.</p>
+                      )}
+                      {activeConv && activeCategory !== "resolvidas" && (
+                        <div className="flex gap-1.5">
+                          <button type="button" onClick={() => openSchedule(activeConv.id, "retorno")} data-testid="button-ficha-agendar-retorno"
+                            className="flex-1 h-9 rounded-lg bg-foreground text-white text-xs font-bold hover:opacity-90 transition">
+                            Agendar retorno
+                          </button>
+                          {schedules.length > 0 && (
+                            <button type="button" onClick={() => openSchedule(activeConv.id)} data-testid="button-ficha-ver-agendamentos"
+                              className="flex-1 h-9 rounded-lg border border-[#D5D9E0] bg-white text-xs font-bold hover:bg-secondary transition">
+                              Ver agendamentos
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {/* Compras registradas no CRM */}
+                <div className="space-y-2">
+                  <div className="flex items-baseline justify-between">
+                    <p className="text-[11px] font-extrabold uppercase tracking-wider text-muted-foreground">Compras</p>
+                    {fichaPurchases.length > 0 && <span className="text-xs font-bold">{fmtBRL(infoContact.totalPurchases)}</span>}
+                  </div>
+                  {fichaPurchases.length === 0 ? (
+                    <p className="text-[13px] text-muted-foreground">Nenhuma compra registrada.</p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {fichaPurchases.slice(0, 3).map((pu) => (
+                        <div key={pu.id} className="flex items-center gap-2.5 rounded-xl border border-border px-3 py-2">
+                          <div className="min-w-0 flex-1">
+                            <p className="text-[13px] font-semibold truncate" title={pu.description}>{pu.description}</p>
+                            <p className="text-[11px] text-muted-foreground">{fmtShortDate(pu.purchaseDate)}{pu.category ? ` · ${pu.category}` : ""}</p>
+                          </div>
+                          <span className="text-[13px] font-extrabold shrink-0">{fmtBRL(pu.amount)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Atendimentos anteriores (histórico do CRM) */}
+                <div className="space-y-2">
+                  <p className="text-[11px] font-extrabold uppercase tracking-wider text-muted-foreground">Atendimentos anteriores</p>
+                  {fichaHistory.length === 0 ? (
+                    <p className="text-[13px] text-muted-foreground">Primeiro atendimento deste cliente.</p>
+                  ) : (
+                    <div className="divide-y divide-border/70">
+                      {fichaHistory.slice(0, 4).map((h) => (
+                        <div key={h.id} className="py-2 flex gap-2.5">
+                          <span className="mt-1.5 w-2 h-2 rounded-full bg-primary/60 shrink-0" />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex justify-between gap-2">
+                              <span className="text-[11px] font-extrabold uppercase tracking-wider text-[#3D4552] truncate">{h.sectorName}</span>
+                              <span className="text-[11px] text-muted-foreground font-mono shrink-0">{fmtShortDate(h.createdAt)}</span>
+                            </div>
+                            <p className="text-[13px] font-semibold">{h.resolutionReason || h.outcome || "Atendimento"}</p>
+                            {h.attendantName && <p className="text-[11px] text-muted-foreground">{h.attendantName}</p>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {infoContact.notes && !showEditInfo && (
+                  <div className="space-y-1">
+                    <p className="text-[11px] font-extrabold uppercase tracking-wider text-muted-foreground">Observações</p>
+                    <p className="text-[13px] whitespace-pre-wrap">{infoContact.notes}</p>
+                  </div>
+                )}
+
+                {/* Editar dados — o formulário de sempre, recolhido */}
+                <div className="border-t border-border pt-3 space-y-3">
+                  <button type="button" onClick={() => setShowEditInfo((v) => !v)} data-testid="button-toggle-edit-info"
+                    aria-expanded={showEditInfo}
+                    className="w-full flex items-center justify-between text-sm font-bold text-foreground hover:text-primary transition">
+                    <span className="inline-flex items-center gap-2"><Pencil className="w-3.5 h-3.5" />Editar dados do cliente</span>
+                    <ChevronDown className={`w-4 h-4 transition-transform ${showEditInfo ? "rotate-180" : ""}`} />
+                  </button>
+                  {showEditInfo && (
+                    <div className="space-y-3">
                 <div>
                   <label className="text-xs text-muted-foreground mb-1 block">Nome</label>
                   <input value={infoForm.name} onChange={(e) => setInfoForm({ ...infoForm, name: e.target.value })}
@@ -5308,6 +5567,13 @@ export default function ChatCenter({
                   {infoSaving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
                   Salvar informações
                 </button>
+                    </div>
+                  )}
+                  <button type="button" onClick={handleOpenCrm} disabled={crmLoading} data-testid="button-ficha-open-crm"
+                    className="w-full h-9 rounded-lg border border-border text-xs font-bold text-[#3D4552] hover:bg-secondary transition inline-flex items-center justify-center gap-1.5 disabled:opacity-50">
+                    <IdCard className="w-3.5 h-3.5" />Abrir ficha completa no CRM
+                  </button>
+                </div>
               </div>
             )}
           </>
