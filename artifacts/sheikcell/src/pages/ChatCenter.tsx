@@ -153,9 +153,9 @@ function cleanPastedText(text: string): string {
 }
 
 function channelIcon(ch: string, group?: boolean) {
-  if (group) return <Users className="w-3 h-3 text-green-600" />;
-  if (ch === "whatsapp") return <Smartphone className="w-3 h-3 text-green-500" />;
-  if (ch === "instagram") return <Instagram className="w-3 h-3 text-pink-500" />;
+  if (group) return <Users className="w-3 h-3 text-[#A1A1AA]" />;
+  if (ch === "whatsapp") return <Smartphone className="w-3 h-3 text-[#A1A1AA]" />;
+  if (ch === "instagram") return <Instagram className="w-3 h-3 text-[#A1A1AA]" />;
   return <MessageCircle className="w-3 h-3 text-muted-foreground" />;
 }
 
@@ -212,8 +212,8 @@ function broadcastDuration(startIso: string, endIso: string | null): string {
 function Avatar({ name, src, size = "md" }: { name: string; src?: string | null; size?: "sm" | "md" | "lg" }) {
   const [imgError, setImgError] = useState(false);
   const initials = name.split(" ").slice(0, 2).map((w) => w[0]).join("").toUpperCase();
-  const colors = ["bg-blue-500", "bg-purple-500", "bg-green-500", "bg-orange-500", "bg-pink-500", "bg-teal-500"];
-  const color = colors[name.charCodeAt(0) % colors.length];
+  // Neutro (out/2026): iniciais em cinza, sem arco-íris de cores
+  const color = "bg-[#E9E9EC] !text-[#3F3F46]";
   const sz = size === "sm" ? "w-8 h-8 text-xs" : size === "lg" ? "w-12 h-12 text-base" : "w-10 h-10 text-sm";
   if (src && !imgError) {
     return (
@@ -326,7 +326,7 @@ function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, sessionCol
     <button
       onClick={onClick}
       data-testid={`conv-item-${conv.id}`}
-      className={`w-full flex items-start gap-3 px-3 py-3 text-left rounded-xl transition ${active ? "bg-primary/[0.08]" : "hover:bg-secondary/70"}`}
+      className={`w-full flex items-start gap-3 px-3 py-3 text-left rounded-xl transition-colors duration-150 ${active ? "bg-[#EFEFF1]" : "hover:bg-[#F7F7F8]"}`}
     >
       <div className="relative shrink-0">
         <Avatar name={conv.name} src={conv.avatarUrl} size="md" />
@@ -360,7 +360,7 @@ function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, sessionCol
           <div className="flex items-center gap-1 shrink-0">
             {channelIcon(conv.channel, isGroup)}
             {conv.unreadCount > 0 && (
-              <span className="bg-primary text-primary-foreground text-[11px] rounded-full px-1.5 h-5 min-w-[20px] inline-flex items-center justify-center font-extrabold">
+              <span className="bg-foreground text-white text-[11px] rounded-full px-1.5 h-5 min-w-[20px] inline-flex items-center justify-center font-bold">
                 {conv.unreadCount > 99 ? "99+" : conv.unreadCount}
               </span>
             )}
@@ -394,11 +394,8 @@ function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, sessionCol
             </span>
           )}
           {sessionBadge && (
-            <span
-              className="shk-chip max-w-[110px]"
-              style={{ backgroundColor: `${sessionColor ?? WA_SESSION_DEFAULT_COLOR}1f`, color: sessionColor ?? WA_SESSION_DEFAULT_COLOR }}
-              title={`Recebida pelo número: ${sessionBadge}`}
-            >
+            <span className="shk-chip shk-chip-outline max-w-[120px]" title={`Recebida pelo número: ${sessionBadge}`}>
+              <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: sessionColor ?? WA_SESSION_DEFAULT_COLOR }} />
               {sessionIcon && <span>{sessionIcon}</span>}
               <span className="truncate">{sessionBadge}</span>
             </span>
@@ -1091,7 +1088,7 @@ function MsgBubble({ msg, onReply, onForward, highlighted, onJumpTo, isGroup, on
       className={`group flex items-center gap-1 mb-1.5 transition-colors duration-500 rounded-lg ${out ? "justify-end" : "justify-start"} ${highlighted ? "bg-amber-200/60" : ""}`}
     >
       {out && <>{manageButtons}{pinButton}{forwardButton}{replyButton}</>}
-      <div className={`max-w-[75%] rounded-2xl px-3.5 py-2.5 ${out ? "shk-bubble-out rounded-br-md" : "bg-white rounded-bl-md border border-border"}`}>
+      <div className={`max-w-[75%] rounded-2xl px-3.5 py-2.5 ${out ? "shk-bubble-out rounded-br-md" : "bg-white rounded-bl-md shadow-[0_1px_2px_rgba(16,16,20,0.05)] ring-1 ring-black/[0.05]"}`}>
         {!out && msg.senderName && isGroup && (
           msg.senderPhone && onStartConversation ? (
             <button
@@ -1114,9 +1111,9 @@ function MsgBubble({ msg, onReply, onForward, highlighted, onJumpTo, isGroup, on
           <button
             onClick={() => onJumpTo(msg.replyTo!.id)}
             data-testid={`button-jump-reply-${msg.id}`}
-            className="block w-full text-left mb-1 rounded-lg px-2 py-1 border-l-4 border-primary/50 bg-black/5 truncate"
+            className="block w-full text-left mb-1.5 rounded-lg px-2.5 py-1.5 border-l-2 border-[#A1A1AA] bg-black/[0.04] truncate"
           >
-            <div className="text-[11px] font-semibold text-primary">{msg.replyTo.senderName ?? "Cliente"}</div>
+            <div className="text-[11px] font-semibold text-foreground">{msg.replyTo.senderName ?? "Cliente"}</div>
             <div className="text-xs text-gray-600 truncate">{msg.replyTo.content}</div>
           </button>
         )}
@@ -1207,7 +1204,7 @@ function MsgBubble({ msg, onReply, onForward, highlighted, onJumpTo, isGroup, on
           {/* Assinatura de quem da equipe enviou — visível pra qualquer
               vendedor que abra a conversa depois (ex.: após transferência). */}
           {out && msg.senderName && (
-            <span className="text-[11px] font-bold text-[#3D4552]" data-testid={`text-sender-${msg.id}`}>{msg.senderName.split(" ")[0]} ·</span>
+            <span className="text-[11px] font-bold text-[#3F3F46]" data-testid={`text-sender-${msg.id}`}>{msg.senderName.split(" ")[0]} ·</span>
           )}
           <span className="text-[11px] text-gray-500 font-mono tabular-nums">{msgTime(msg.createdAt)}</span>
           {out && (
@@ -3651,7 +3648,7 @@ export default function ChatCenter({
   }
 
   return (
-    <div className="flex h-[calc(var(--vvh,100dvh)-7rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-88px-var(--shk-topbar-extra,0px))] bg-[#F4F5F7] overflow-hidden rounded-none md:rounded-2xl border-0 md:border border-border shadow-none md:shadow-sm">
+    <div className="flex h-[calc(var(--vvh,100dvh)-7rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-88px-var(--shk-topbar-extra,0px))] bg-[#F7F7F8] overflow-hidden rounded-none md:rounded-2xl border-0 md:border border-border shadow-none md:shadow-sm">
 
       {/* ── LEFT PANEL: conversation list ──────────────────────────────── */}
       <div className={`${activeConv ? "hidden md:flex" : "flex"} w-full md:w-80 lg:w-96 bg-white flex-col md:border-r border-border shrink-0`}>
@@ -3686,7 +3683,7 @@ export default function ChatCenter({
                   className="fixed inset-x-2 top-14 md:inset-x-auto md:w-96 z-[70] bg-white border border-border rounded-xl shadow-xl overflow-hidden"
                   style={notifPanelPos ?? undefined}
                 >
-                  <div className="border-b border-border bg-[#F7F8FA]">
+                  <div className="border-b border-border bg-[#F7F7F8]">
                     <div className="flex items-center justify-between px-3 py-2">
                       <span className="text-sm font-bold text-foreground">Notificações</span>
                       <div className="flex items-center gap-1">
@@ -3786,7 +3783,7 @@ export default function ChatCenter({
                     className="fixed inset-x-2 top-14 md:inset-x-auto md:w-[300px] z-[70] bg-white border border-border rounded-xl shadow-xl overflow-hidden"
                     style={numberPanelPos ?? undefined}
                   >
-                    <div className="border-b border-border bg-[#F7F8FA] px-3 py-2">
+                    <div className="border-b border-border bg-[#F7F7F8] px-3 py-2">
                       <span className="text-sm font-bold text-foreground">Atendimento por número</span>
                     </div>
                     <div className="max-h-[60vh] md:max-h-96 overflow-y-auto overscroll-contain divide-y divide-border/50">
@@ -3857,7 +3854,7 @@ export default function ChatCenter({
 
         {/* Search */}
         <div className="px-3 pb-2.5 bg-white">
-          <div className="flex items-center gap-2 bg-[#F7F8FA] rounded-xl px-3 h-10 border border-border focus-within:ring-2 focus-within:ring-primary/20">
+          <div className="flex items-center gap-2 bg-[#F7F7F8] rounded-xl px-3 h-10 border border-border focus-within:ring-2 focus-within:ring-black/5 focus-within:bg-white transition-colors">
             <Search className="w-4 h-4 text-muted-foreground shrink-0" />
             <input
               value={search}
@@ -3887,12 +3884,11 @@ export default function ChatCenter({
                 title={cat.help}
                 aria-pressed={isActive}
                 data-testid={`tab-category-${cat.id}`}
-                className={`inline-flex items-center gap-1.5 h-8 pl-2.5 pr-1.5 rounded-full text-xs font-semibold border transition ${isActive ? "bg-foreground text-white border-foreground" : "bg-white text-foreground border-border hover:bg-secondary/60"}`}
+                className={`inline-flex items-center gap-1.5 h-8 pl-3 pr-1.5 rounded-full text-xs font-semibold border transition-colors duration-150 ${isActive ? "bg-foreground text-white border-foreground" : "bg-white text-[#3F3F46] border-border hover:bg-[#F7F7F8]"}`}
               >
-                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: cat.color }} />
                 {cat.label}
                 <span
-                  className={`text-[11px] font-bold px-1.5 h-5 rounded-full min-w-[20px] inline-flex items-center justify-center ${isActive ? "bg-white/20 text-white" : "bg-[#EEF0F3] text-[#3D4552]"}`}
+                  className={`text-[11px] font-bold px-1.5 h-5 rounded-full min-w-[20px] inline-flex items-center justify-center ${isActive ? "bg-white/20 text-white" : "bg-[#F1F1F3] text-[#3F3F46]"}`}
                 >
                   {counts[cat.id]}
                 </span>
@@ -3905,7 +3901,7 @@ export default function ChatCenter({
             transmissão" — seleciona vários e manda a mesma mensagem. Só
             aparece pra quem já pode ver Resolvidos (canSeeResolved). */}
         {category === "resolvidas" && canSeeResolved && (
-          <div className="px-3 py-2 bg-[#F7F8FA] border-b border-border">
+          <div className="px-3 py-2 bg-[#F7F7F8] border-b border-border">
             {!broadcastMode ? (
               <div className="flex items-center gap-1.5">
                 <button
@@ -4025,7 +4021,7 @@ export default function ChatCenter({
 
         {/* Filters */}
         {showFilter && (
-          <div className="px-3 py-2 bg-[#F7F8FA] border-b border-border space-y-2">
+          <div className="px-3 py-2 bg-[#F7F7F8] border-b border-border space-y-2">
             <button
               onClick={() => setOnlyUnanswered((v) => !v)}
               data-testid="button-filter-unanswered"
@@ -4273,7 +4269,7 @@ export default function ChatCenter({
 
       {/* ── RIGHT PANEL: chat window ────────────────────────────────────── */}
       {!activeConv ? (
-        <div className="hidden md:flex flex-1 flex-col items-center justify-center text-muted-foreground bg-[#F4F5F7]">
+        <div className="hidden md:flex flex-1 flex-col items-center justify-center text-muted-foreground bg-[#F7F7F8]">
           <div className="w-20 h-20 rounded-2xl bg-white border border-border flex items-center justify-center mb-4">
             <MessageCircle className="w-10 h-10 text-primary/40" />
           </div>
@@ -4376,7 +4372,7 @@ export default function ChatCenter({
                 )}
                 {activeConv.origin === "fila" && (
                   <span
-                    className="shk-chip bg-blue-500/10 text-blue-700"
+                    className="shk-chip shk-chip-neutral"
                     title="Veio da fila do Central de Atendimento (auto-atribuído ou assumido)"
                   >
                     Fila #{activeConv.queueNumber}
@@ -4384,7 +4380,7 @@ export default function ChatCenter({
                 )}
                 {activeConv.origin === "manual" && (
                   <span
-                    className="shk-chip shk-chip-wait"
+                    className="shk-chip shk-chip-neutral"
                     title="Atendimento criado manualmente (Criar atendimento)"
                   >
                     Manual
@@ -4392,16 +4388,17 @@ export default function ChatCenter({
                 )}
                 {activeConv.channel === "whatsapp" && (waSessions.length > 1 || activeConv.sessionKey !== "default") && (
                   <span
-                    className="shk-chip truncate max-w-[160px]"
-                    style={{ backgroundColor: `${waSessionColor(activeConv.sessionKey, waSessions)}1f`, color: waSessionColor(activeConv.sessionKey, waSessions) }}
+                    className="shk-chip shk-chip-outline truncate max-w-[160px]"
                     title="Número de atendimento pelo qual esta conversa chega"
                   >
+                    <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: waSessionColor(activeConv.sessionKey, waSessions) }} />
                     {waSessionIcon(activeConv.sessionKey, waSessions) && <span className="mr-0.5">{waSessionIcon(activeConv.sessionKey, waSessions)}</span>}
                     via {waSessionLabel(activeConv.sessionKey, waSessions)}
                   </span>
                 )}
                 {activeConv.sector && (
-                  <span className="shk-chip text-white" style={{ backgroundColor: activeConv.sector.color }}>
+                  <span className="shk-chip shk-chip-outline">
+                    <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: activeConv.sector.color }} />
                     {activeConv.sector.name}
                   </span>
                 )}
@@ -4414,7 +4411,7 @@ export default function ChatCenter({
                 )}
                 {/* Data e hora de início do atendimento (quando foi assumido) */}
                 {activeConv.attendanceStartedAt && (
-                  <span className="hidden sm:inline-flex items-center gap-1 h-[22px] px-2 rounded-md text-[11px] font-bold whitespace-nowrap bg-[#EEF0F3] text-[#3D4552]" title="Início do atendimento" data-testid="text-attendance-started">
+                  <span className="hidden sm:inline-flex items-center gap-1 h-[22px] px-2 rounded-md text-[11px] font-bold whitespace-nowrap bg-transparent text-muted-foreground font-semibold" title="Início do atendimento" data-testid="text-attendance-started">
                     <CalendarClock className="w-3 h-3" />
                     Início: {new Date(activeConv.attendanceStartedAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" })}
                   </span>
@@ -4493,7 +4490,7 @@ export default function ChatCenter({
               <button
                 onClick={() => handleTogglePin(activeConv)}
                 data-testid="button-pin-conv"
-                className={`hidden md:inline-flex shk-icon-btn ${activeConv.pinned ? "!text-amber-500 !bg-amber-50 !border-amber-300 hover:!bg-amber-100" : ""}`}
+                className={`hidden md:inline-flex shk-icon-btn ${activeConv.pinned ? "!text-amber-500" : ""}`}
                 title={activeConv.pinned ? "Remover dos favoritos" : "Favoritar este contato"}
               >
                 {activeConv.pinned ? <Star className="w-3.5 h-3.5 fill-amber-500" /> : <StarOff className="w-3.5 h-3.5" />}
@@ -4503,7 +4500,7 @@ export default function ChatCenter({
                 <button
                   onClick={() => handleDeleteConv(activeConv.id, activeConv.name)}
                   data-testid="button-delete-conv"
-                  className="hidden md:inline-flex shk-icon-btn !text-red-600 hover:!bg-red-50"
+                  className="hidden md:inline-flex shk-icon-btn hover:!text-red-600 hover:!bg-red-50"
                   title="Excluir atendimento"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
@@ -4514,8 +4511,7 @@ export default function ChatCenter({
                 <button
                   onClick={() => handleClaim(activeConv.id)}
                   data-testid="button-claim-conv"
-                  className="inline-flex items-center justify-center w-9 h-9 rounded-lg text-white transition hover:opacity-90 shrink-0"
-                  style={{ backgroundColor: "#16a34a" }}
+                  className="inline-flex items-center justify-center w-9 h-9 rounded-lg bg-foreground text-white transition hover:bg-black shrink-0"
                   title="Iniciar atendimento"
                 >
                   <UserCircle2 className="w-3.5 h-3.5" />
@@ -4537,7 +4533,7 @@ export default function ChatCenter({
                 <button
                   onClick={() => handleFinalize(activeConv.id)}
                   data-testid="button-finalize-conv"
-                  className="inline-flex items-center gap-1.5 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-xs font-bold transition hover:opacity-90 shrink-0"
+                  className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-lg bg-foreground text-white text-xs font-bold transition-colors hover:bg-black shrink-0 ml-1"
                   title="Finalizar atendimento"
                 >
                   <CheckCheck className="w-3.5 h-3.5" />
@@ -4553,8 +4549,7 @@ export default function ChatCenter({
                 <button
                   onClick={() => handleReopenConv(activeConv.id, activeConv.assigneeId)}
                   data-testid="button-reopen-conv"
-                  className="inline-flex items-center gap-1.5 px-3 h-9 rounded-lg text-white text-xs font-bold transition hover:opacity-90 shrink-0"
-                  style={{ backgroundColor: "#16a34a" }}
+                  className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-lg bg-foreground text-white text-xs font-bold transition-colors hover:bg-black shrink-0 ml-1"
                   title="Reabrir atendimento"
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
@@ -4601,7 +4596,7 @@ export default function ChatCenter({
               <div className="relative">
                 <button
                   onClick={() => { setShowPriorityPicker((v) => !v); setShowStatusPicker(false); setShowLabelPicker(false); setShowTransferPicker(false); setShowParticipantPicker(false); }}
-                  className={`inline-flex items-center justify-center gap-1 h-9 px-2 rounded-lg border transition shrink-0 ${activeConv.priority ? PRIORITY_META[activeConv.priority]?.badge ?? "bg-white border-border" : "bg-white border-border text-[#3D4552] hover:bg-secondary"}`}
+                  className={`inline-flex items-center justify-center gap-1 h-9 px-2 rounded-lg border transition shrink-0 ${activeConv.priority ? PRIORITY_META[activeConv.priority]?.badge ?? "bg-white border-border" : "bg-transparent border-transparent text-[#52525B] hover:bg-[#F1F1F3]"}`}
                   title={activeConv.priority ? `Prioridade: ${PRIORITY_META[activeConv.priority]?.label}` : "Definir prioridade"}
                 >
                   <Flag className={`w-3.5 h-3.5 ${activeConv.priority ? "fill-current" : ""}`} />
@@ -4773,7 +4768,7 @@ export default function ChatCenter({
               <button
                 onClick={() => setInfoCollapsed((v) => !v)}
                 data-testid="button-toggle-info"
-                className={`inline-flex shk-icon-btn ${!infoCollapsed ? "!bg-primary !text-primary-foreground !border-primary" : ""}`}
+                className={`inline-flex shk-icon-btn ${!infoCollapsed ? "!bg-[#EDEDF0] !text-foreground" : ""}`}
                 title="Informações do cliente"
               >
                 <Info className="w-3.5 h-3.5" />
@@ -4791,13 +4786,13 @@ export default function ChatCenter({
                 <span className="text-[11px] font-extrabold uppercase tracking-wider text-muted-foreground mr-1.5">Etapa</span>
                 {ATTENDANCE_STEPS.map((st, i) => (
                   <Fragment key={st.id}>
-                    {i > 0 && <ChevronRight className="w-3.5 h-3.5 text-muted-foreground/50" />}
+                    {i > 0 && <span className={`w-5 h-px ${i <= idx ? "bg-[#A1A1AA]" : "bg-[#E4E4E7]"}`} />}
                     <span
                       aria-current={i === idx ? "step" : undefined}
-                      className={`inline-flex items-center gap-1 h-7 px-2.5 rounded-lg text-xs font-bold ${
-                        i === idx ? "bg-primary text-primary-foreground"
-                          : i < idx ? "bg-primary/10 text-primary"
-                          : "bg-white text-[#3D4552] border border-border"
+                      className={`inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-xs font-semibold ${
+                        i === idx ? "bg-foreground text-white"
+                          : i < idx ? "text-[#52525B]"
+                          : "text-[#A1A1AA]"
                       }`}
                     >
                       {i < idx && <Check className="w-3 h-3" />}
@@ -4910,9 +4905,10 @@ export default function ChatCenter({
           {/* Messages area — WhatsApp wallpaper */}
           <div
             ref={msgsContainerRef}
-            className="flex-1 overflow-y-auto px-3 md:px-6 py-5 bg-[#F4F5F7]"
+            className="flex-1 overflow-y-auto px-3 md:px-8 py-6 bg-[#F7F7F8]"
           >
             <MediaLightboxProvider>
+            <div className="max-w-[880px] mx-auto">
             {loadingMsgs ? (
               <div className="flex justify-center items-center h-20">
                 <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
@@ -4929,7 +4925,7 @@ export default function ChatCenter({
                       onClick={loadOlderMsgs}
                       disabled={loadingOlder}
                       data-testid="button-load-older"
-                      className="text-xs bg-white hover:bg-secondary text-primary font-semibold px-4 py-1.5 rounded-full border border-border transition disabled:opacity-60"
+                      className="text-xs bg-white hover:bg-[#F1F1F3] text-foreground font-semibold px-4 py-1.5 rounded-full border border-border transition-colors disabled:opacity-60"
                     >
                       {loadingOlder ? "Carregando..." : "Carregar mensagens antigas"}
                     </button>
@@ -4942,7 +4938,7 @@ export default function ChatCenter({
                     <Fragment key={msg.id}>
                       {showDaySeparator && (
                         <div className="flex justify-center my-2" data-testid={`day-separator-${msgDayKey(msg.createdAt)}`}>
-                          <span className="text-[11px] font-bold text-[#3D4552] bg-[#E6E9EE] px-3 py-1 rounded-full">
+                          <span className="text-[11px] font-semibold text-muted-foreground bg-[#EDEDF0] px-3 py-1 rounded-full">
                             {msgDayLabel(msg.createdAt)}
                           </span>
                         </div>
@@ -4970,13 +4966,14 @@ export default function ChatCenter({
                 <div ref={msgsEndRef} />
               </>
             )}
+            </div>
             </MediaLightboxProvider>
           </div>
 
           {/* Barra "respondendo a": some ao enviar/cancelar, vale pro próximo texto ou anexo. */}
           {replyTarget && (
             <div className="flex items-center gap-2 bg-white border-t border-border px-3 md:px-5 pt-2.5" data-testid="reply-preview-bar">
-              <div className="flex-1 min-w-0 bg-[#F1F3F6] rounded-lg px-3 py-1.5">
+              <div className="flex-1 min-w-0 bg-[#F2F2F4] rounded-lg px-3 py-1.5">
                 <div className="text-[11px] font-semibold text-primary">Respondendo a {replyTarget.senderName ?? "Cliente"}</div>
                 <div className="text-xs text-muted-foreground truncate">{replyTarget.content}</div>
               </div>
@@ -4999,8 +4996,7 @@ export default function ChatCenter({
                   }
                 }}
                 data-testid="button-start-attendance"
-                className="flex items-center gap-2 px-6 h-11 rounded-xl text-white text-sm font-bold transition hover:opacity-90"
-                style={{ backgroundColor: "#16a34a" }}
+                className="flex items-center gap-2 px-6 h-11 rounded-xl bg-foreground text-white text-sm font-bold transition-colors hover:bg-black"
               >
                 <UserCircle2 className="w-4 h-4" />
                 Iniciar atendimento
@@ -5030,7 +5026,7 @@ export default function ChatCenter({
                 onClick={() => handleFinishRecording(true)}
                 title="Enviar áudio"
                 data-testid="button-send-recording"
-                className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white hover:bg-primary/90 transition shrink-0"
+                className="w-10 h-10 rounded-full bg-foreground flex items-center justify-center text-white hover:bg-black transition-colors shrink-0"
               >
                 <Send className="w-4 h-4" />
               </button>
@@ -5040,11 +5036,11 @@ export default function ChatCenter({
           {/* Sugestão da IA (novo design): cartão acima do campo — só entra no
               campo se o vendedor clicar em "Usar"; nada é enviado sozinho. */}
           {aiSuggestion && composerMode === "message" && (
-            <div className={`bg-white px-3 md:px-5 pt-3 ${replyTarget ? "" : "border-t border-border"}`} data-testid="ai-suggestion-card">
-              <div className="rounded-xl border border-primary/30 p-3 flex gap-3 items-start flex-wrap">
-                <Sparkles className="w-5 h-5 text-primary shrink-0 mt-0.5" />
+            <div className={`bg-white px-3 md:px-5 pt-3 animate-in fade-in-0 slide-in-from-bottom-1 duration-200 ${replyTarget ? "" : "border-t border-border"}`} data-testid="ai-suggestion-card">
+              <div className="rounded-xl border border-border bg-[#FAFAFB] p-3 flex gap-3 items-start flex-wrap">
+                <Sparkles className="w-5 h-5 text-foreground shrink-0 mt-0.5" />
                 <div className="flex-1 min-w-[200px]">
-                  <p className="text-[11px] font-extrabold uppercase tracking-wider text-primary">Sugestão da IA · você decide</p>
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">Sugestão da IA · você decide</p>
                   <p className="text-sm mt-0.5 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">{aiSuggestion}</p>
                 </div>
                 <div className="flex items-center gap-1.5">
@@ -5052,7 +5048,7 @@ export default function ChatCenter({
                     type="button"
                     onClick={() => { setMsgText(aiSuggestion); setAiSuggestion(null); requestAnimationFrame(() => inputRef.current?.focus()); }}
                     data-testid="button-use-ai-suggestion"
-                    className="h-9 px-3.5 rounded-lg bg-primary text-primary-foreground text-xs font-bold hover:opacity-90 transition"
+                    className="h-9 px-3.5 rounded-lg bg-foreground text-white text-xs font-bold hover:bg-black transition-colors"
                   >
                     Usar no campo
                   </button>
@@ -5072,15 +5068,15 @@ export default function ChatCenter({
           )}
           {/* Mensagem (vai pro cliente) x Nota interna (só a equipe vê) */}
           <div className={`flex items-center gap-2 px-3 md:px-5 pt-2.5 bg-white ${replyTarget || (aiSuggestion && composerMode === "message") ? "" : "border-t border-border"}`}>
-            <div className="inline-flex p-[3px] rounded-[10px] bg-[#F1F3F6] gap-0.5">
+            <div className="inline-flex p-[3px] rounded-[10px] bg-[#F2F2F4] gap-0.5">
               <button type="button" onClick={() => setComposerMode("message")} data-testid="button-composer-mode-message"
                 aria-pressed={composerMode === "message"}
-                className={`text-xs font-bold h-[30px] px-3 rounded-lg transition ${composerMode === "message" ? "bg-foreground text-white" : "text-[#3D4552] hover:bg-white"}`}>
+                className={`text-xs font-bold h-[30px] px-3 rounded-lg transition ${composerMode === "message" ? "bg-foreground text-white" : "text-[#3F3F46] hover:bg-white"}`}>
                 Responder
               </button>
               <button type="button" onClick={() => { setComposerMode("note"); cancelReply(); }} data-testid="button-composer-mode-note"
                 aria-pressed={composerMode === "note"}
-                className={`flex items-center gap-1 text-xs font-bold h-[30px] px-3 rounded-lg transition ${composerMode === "note" ? "bg-[#6B4E00] text-white" : "text-[#3D4552] hover:bg-white"}`}>
+                className={`flex items-center gap-1 text-xs font-bold h-[30px] px-3 rounded-lg transition ${composerMode === "note" ? "bg-[#6B4E00] text-white" : "text-[#3F3F46] hover:bg-white"}`}>
                 <Lock className="w-3 h-3" />
                 Nota interna
               </button>
@@ -5116,7 +5112,7 @@ export default function ChatCenter({
               disabled={sending}
               title="Enviar foto ou documento"
               data-testid="button-attach-file"
-              className="w-9 h-9 rounded-lg flex items-center justify-center text-[#3D4552] hover:bg-secondary transition shrink-0 disabled:opacity-40"
+              className="w-9 h-9 rounded-lg flex items-center justify-center text-[#3F3F46] hover:bg-secondary transition shrink-0 disabled:opacity-40"
             >
               <Paperclip className="w-[18px] h-[18px]" />
             </button>
@@ -5129,7 +5125,7 @@ export default function ChatCenter({
                 disabled={sending}
                 title="Mensagens rápidas"
                 data-testid="button-quick-replies"
-                className="w-9 h-9 rounded-lg flex items-center justify-center text-[#3D4552] hover:bg-secondary transition disabled:opacity-40"
+                className="w-9 h-9 rounded-lg flex items-center justify-center text-[#3F3F46] hover:bg-secondary transition disabled:opacity-40"
               >
                 <Zap className="w-[18px] h-[18px]" />
               </button>
@@ -5182,7 +5178,7 @@ export default function ChatCenter({
                 disabled={sending}
                 title="Cupom de desconto"
                 data-testid="button-coupon-picker"
-                className="w-9 h-9 rounded-lg flex items-center justify-center text-[#3D4552] hover:bg-secondary transition disabled:opacity-40"
+                className="w-9 h-9 rounded-lg flex items-center justify-center text-[#3F3F46] hover:bg-secondary transition disabled:opacity-40"
               >
                 <Percent className="w-[18px] h-[18px]" />
               </button>
@@ -5233,7 +5229,7 @@ export default function ChatCenter({
               disabled={sending || suggesting}
               title="Sugerir resposta com IA (revise antes de enviar)"
               data-testid="button-suggest-reply"
-              className="w-9 h-9 rounded-lg flex items-center justify-center text-primary hover:bg-primary/10 transition shrink-0 disabled:opacity-40"
+              className="w-9 h-9 rounded-lg flex items-center justify-center text-[#3F3F46] hover:bg-secondary transition shrink-0 disabled:opacity-40"
             >
               {suggesting
                 ? <RefreshCw className="w-[18px] h-[18px] animate-spin" />
@@ -5254,7 +5250,7 @@ export default function ChatCenter({
                 lang="pt-BR"
                 rows={1}
                 data-testid="input-message"
-                className={`flex-1 min-w-0 resize-none rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 max-h-40 overflow-y-auto ${composerMode === "note" ? "shk-note shk-note-text placeholder:text-[#8A6D1F] focus:ring-[#C9A227]/30" : "bg-[#F7F8FA] border border-[#D5D9E0] focus:ring-primary/20 focus:bg-white"}`}
+                className={`flex-1 min-w-0 resize-none rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 max-h-40 overflow-y-auto ${composerMode === "note" ? "shk-note shk-note-text placeholder:text-[#8A6D1F] focus:ring-[#C9A227]/30" : "bg-[#F7F7F8] border border-[#E4E4E7] focus:ring-black/5 focus:bg-white focus:border-[#D4D4D8]"}`}
                 onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(e); } }}
                 onPaste={(e) => {
                   if (can(user, "enviar_midia")) {
@@ -5288,18 +5284,18 @@ export default function ChatCenter({
               />
               {msgText.trim() ? (
                 <button type="submit" disabled={sending} data-testid="button-send-message"
-                  className={`w-11 h-11 rounded-xl flex items-center justify-center text-white disabled:opacity-40 transition shrink-0 ${composerMode === "note" ? "bg-[#6B4E00] hover:bg-[#574000]" : "bg-primary hover:bg-primary/90"}`}>
+                  className={`w-11 h-11 rounded-xl flex items-center justify-center text-white disabled:opacity-40 transition shrink-0 ${composerMode === "note" ? "bg-[#6B4E00] hover:bg-[#574000]" : "bg-foreground hover:bg-black"}`}>
                   <Send className="w-4 h-4" />
                 </button>
               ) : composerMode === "message" && can(user, "enviar_midia") ? (
                 <button type="button" onClick={handleStartRecording} disabled={sending || requestingMic}
                   title={requestingMic ? "Aguardando o navegador liberar o microfone..." : "Gravar nota de voz"} data-testid="button-record-audio"
-                  className="w-11 h-11 rounded-xl bg-primary flex items-center justify-center text-white hover:bg-primary/90 disabled:opacity-40 transition shrink-0">
+                  className="w-11 h-11 rounded-xl bg-foreground flex items-center justify-center text-white hover:bg-black disabled:opacity-40 transition-colors shrink-0">
                   {requestingMic ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Mic className="w-4 h-4" />}
                 </button>
               ) : (
                 <button type="submit" disabled data-testid="button-send-message-disabled"
-                  className="w-11 h-11 rounded-xl bg-primary flex items-center justify-center text-white opacity-40 transition shrink-0">
+                  className="w-11 h-11 rounded-xl bg-foreground flex items-center justify-center text-white opacity-30 transition shrink-0">
                   <Send className="w-4 h-4" />
                 </button>
               )}
@@ -5321,7 +5317,7 @@ export default function ChatCenter({
           {infoCollapsed ? (
             <button
               onClick={() => setInfoCollapsed(false)}
-              className="flex flex-col items-center gap-2 py-4 w-full h-full text-muted-foreground hover:text-primary hover:bg-secondary transition"
+              className="flex flex-col items-center gap-2 py-4 w-full h-full text-muted-foreground hover:text-foreground hover:bg-[#F7F7F8] transition-colors"
               title="Mostrar informações do cliente"
               data-testid="button-expand-info"
             >
@@ -5332,7 +5328,7 @@ export default function ChatCenter({
           <>
             <div className="bg-white border-b border-border px-4 h-[52px] flex items-center justify-between shrink-0">
               <div className="flex items-center gap-2 text-foreground">
-                <IdCard className="w-4 h-4 text-primary" />
+                <IdCard className="w-4 h-4 text-muted-foreground" />
                 <span className="font-bold text-sm">Ficha do cliente</span>
               </div>
               <button onClick={() => setInfoCollapsed(true)} className="p-1.5 rounded-lg text-muted-foreground hover:bg-secondary transition" title="Recolher">
@@ -5352,7 +5348,7 @@ export default function ChatCenter({
                 </p>
               </div>
             ) : (
-              <div className="flex-1 overflow-y-auto p-4 space-y-5" data-testid="ficha-cliente">
+              <div className="flex-1 overflow-y-auto p-4 space-y-5 animate-in fade-in-0 duration-200" data-testid="ficha-cliente">
                 {/* Identidade */}
                 <div className="flex items-center gap-3">
                   <Avatar name={infoContact.name} src={activeConv?.avatarUrl} size="lg" />
@@ -5394,10 +5390,10 @@ export default function ChatCenter({
                 {(() => {
                   const next = [...schedules].sort((x, y) => new Date(x.sendAt).getTime() - new Date(y.sendAt).getTime())[0];
                   return (
-                    <div className="rounded-xl border border-primary/25 bg-primary/[0.06] p-3.5 space-y-2.5" data-testid="ficha-proxima-acao">
+                    <div className="rounded-xl border border-border bg-[#F7F7F8] p-3.5 space-y-2.5" data-testid="ficha-proxima-acao">
                       <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-extrabold uppercase tracking-wider text-primary">Próxima ação</span>
-                        {schedules.length > 1 && <span className="text-[11px] font-bold text-[#3D4552]">+{schedules.length - 1} agendada{schedules.length > 2 ? "s" : ""}</span>}
+                        <span className="text-[11px] font-extrabold uppercase tracking-wider text-foreground">Próxima ação</span>
+                        {schedules.length > 1 && <span className="text-[11px] font-bold text-[#3F3F46]">+{schedules.length - 1} agendada{schedules.length > 2 ? "s" : ""}</span>}
                       </div>
                       {next ? (
                         <div className="flex gap-2.5 items-start">
@@ -5407,11 +5403,11 @@ export default function ChatCenter({
                               {new Date(next.sendAt).toLocaleString("pt-BR", { weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
                               <span className={`ml-1.5 align-middle shk-chip ${next.kind === "mensagem" ? "shk-chip-neutral" : "shk-chip-wait"}`}>{next.kind === "mensagem" ? "Mensagem" : "Retorno"}</span>
                             </p>
-                            <p className="text-[13px] text-[#3D4552] line-clamp-2">{next.content}</p>
+                            <p className="text-[13px] text-[#3F3F46] line-clamp-2">{next.content}</p>
                           </div>
                         </div>
                       ) : (
-                        <p className="text-[13px] text-[#3D4552]">Nenhum retorno agendado para este cliente.</p>
+                        <p className="text-[13px] text-[#3F3F46]">Nenhum retorno agendado para este cliente.</p>
                       )}
                       {activeConv && activeCategory !== "resolvidas" && (
                         <div className="flex gap-1.5">
@@ -5421,7 +5417,7 @@ export default function ChatCenter({
                           </button>
                           {schedules.length > 0 && (
                             <button type="button" onClick={() => openSchedule(activeConv.id)} data-testid="button-ficha-ver-agendamentos"
-                              className="flex-1 h-9 rounded-lg border border-[#D5D9E0] bg-white text-xs font-bold hover:bg-secondary transition">
+                              className="flex-1 h-9 rounded-lg border border-[#D4D4D8] bg-white text-xs font-bold hover:bg-secondary transition">
                               Ver agendamentos
                             </button>
                           )}
@@ -5463,10 +5459,10 @@ export default function ChatCenter({
                     <div className="divide-y divide-border/70">
                       {fichaHistory.slice(0, 4).map((h) => (
                         <div key={h.id} className="py-2 flex gap-2.5">
-                          <span className="mt-1.5 w-2 h-2 rounded-full bg-primary/60 shrink-0" />
+                          <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-[#A1A1AA] shrink-0" />
                           <div className="min-w-0 flex-1">
                             <div className="flex justify-between gap-2">
-                              <span className="text-[11px] font-extrabold uppercase tracking-wider text-[#3D4552] truncate">{h.sectorName}</span>
+                              <span className="text-[11px] font-extrabold uppercase tracking-wider text-[#3F3F46] truncate">{h.sectorName}</span>
                               <span className="text-[11px] text-muted-foreground font-mono shrink-0">{fmtShortDate(h.createdAt)}</span>
                             </div>
                             <p className="text-[13px] font-semibold">{h.resolutionReason || h.outcome || "Atendimento"}</p>
@@ -5489,7 +5485,7 @@ export default function ChatCenter({
                 <div className="border-t border-border pt-3 space-y-3">
                   <button type="button" onClick={() => setShowEditInfo((v) => !v)} data-testid="button-toggle-edit-info"
                     aria-expanded={showEditInfo}
-                    className="w-full flex items-center justify-between text-sm font-bold text-foreground hover:text-primary transition">
+                    className="w-full flex items-center justify-between text-sm font-bold text-foreground hover:text-[#52525B] transition-colors">
                     <span className="inline-flex items-center gap-2"><Pencil className="w-3.5 h-3.5" />Editar dados do cliente</span>
                     <ChevronDown className={`w-4 h-4 transition-transform ${showEditInfo ? "rotate-180" : ""}`} />
                   </button>
@@ -5570,7 +5566,7 @@ export default function ChatCenter({
                     </div>
                   )}
                   <button type="button" onClick={handleOpenCrm} disabled={crmLoading} data-testid="button-ficha-open-crm"
-                    className="w-full h-9 rounded-lg border border-border text-xs font-bold text-[#3D4552] hover:bg-secondary transition inline-flex items-center justify-center gap-1.5 disabled:opacity-50">
+                    className="w-full h-9 rounded-lg border border-border text-xs font-bold text-[#3F3F46] hover:bg-secondary transition inline-flex items-center justify-center gap-1.5 disabled:opacity-50">
                     <IdCard className="w-3.5 h-3.5" />Abrir ficha completa no CRM
                   </button>
                 </div>

@@ -942,7 +942,7 @@ export default function AdminDashboard() {
           onMouseEnter={() => setSidebarHovered(true)}
           onMouseLeave={() => setSidebarHovered(false)}
           data-testid="sidebar-admin"
-          className={`hidden md:block ${sidebarHovered ? "w-56" : "w-14"} shrink-0 overflow-x-hidden bg-[#0F1419] sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3 transition-[width] duration-200 ease-in-out`}
+          className={`hidden md:block ${sidebarHovered ? "w-56" : "w-14"} shrink-0 overflow-x-hidden bg-[#18181B] sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3 transition-[width] duration-200 ease-in-out`}
         >
           {sidebarHovered ? (
           <div className="flex flex-col gap-3">
@@ -956,7 +956,7 @@ export default function AdminDashboard() {
               return (
                 <div key={group.key}>
                   <button onClick={() => toggleGroup(group.key)} data-testid={`group-toggle-${group.key}`}
-                    className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wide text-[#7D8794] hover:text-white transition">
+                    className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wide text-[#8B8B94] hover:text-white transition">
                     <group.icon className="w-3.5 h-3.5 shrink-0" />
                     <span className="flex-1 text-left truncate">{group.label}</span>
                     <ChevronDown className={`w-3.5 h-3.5 shrink-0 transition-transform ${collapsed ? "-rotate-90" : ""}`} />
@@ -966,7 +966,7 @@ export default function AdminDashboard() {
                       {groupTabs.map(({ id, label, icon: Icon }) => (
                         <button key={id} onClick={() => navigateToTab(id)} data-testid={`tab-${id}`}
                           className={`flex items-center gap-2 w-full pl-6 pr-3 py-2 rounded-lg text-xs font-semibold text-left transition-colors ${
-                            tabMatchesNav(id, tab) ? "bg-white/10 text-white" : "text-[#A9B1BD] hover:bg-white/5 hover:text-white"
+                            tabMatchesNav(id, tab) ? "bg-white/10 text-white" : "text-[#A1A1AA] hover:bg-white/5 hover:text-white"
                           }`}>
                           <Icon className="w-4 h-4 shrink-0" />{label}
                           {id === "equipe" && internalChatUnread > 0 && (
@@ -1000,7 +1000,7 @@ export default function AdminDashboard() {
               ).map(({ id, label, icon: Icon }) => (
                 <button key={id} onClick={() => navigateToTab(id)} title={label} data-testid={`tab-mini-${id}`}
                   className={`relative flex items-center justify-center w-10 h-10 rounded-lg transition-colors ${
-                    tabMatchesNav(id, tab) ? "bg-white/10 text-white" : "text-[#A9B1BD] hover:bg-white/5 hover:text-white"
+                    tabMatchesNav(id, tab) ? "bg-white/10 text-white" : "text-[#A1A1AA] hover:bg-white/5 hover:text-white"
                   }`}>
                   <Icon className="w-4 h-4 shrink-0" />
                   {id === "equipe" && internalChatUnread > 0 && (
