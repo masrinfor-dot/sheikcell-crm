@@ -56,36 +56,8 @@ jobs:
       - name: Typecheck do monorepo inteiro
         run: pnpm run typecheck
 
-  # Pedido 25/09 ("tem como automatizar a implantação"): antes disso, cada
-  # rodada de patch exigia clicar manualmente em "Implantar" nos 3 serviços
-  # no EasyPanel depois do push. Agora, todo push em producao QUE PASSAR no
-  # job "test" acima (testes + typecheck) aciona sozinho a "Deployment
-  # Trigger URL" de cada serviço (EasyPanel → serviço → aba Deployments) —
-  # sem token/senha no repositório: cada URL fica guardada como secret do
-  # GitHub Actions (Settings → Secrets and variables → Actions). Um serviço
-  # sem o secret configurado ainda é simplesmente pulado (não quebra o
-  # workflow), pra dar pra ligar um de cada vez.
-  deploy:
-    name: Implanta no EasyPanel
-    needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/producao'
-    runs-on: ubuntu-latest
-    # `secrets` não pode ser usado em `if:` de step (o GitHub rejeita o
-    # arquivo inteiro e nenhum job roda — era por isso que todo run falhava
-    # em 0s). Os secrets passam por env, e o `if:` testa o env.
-    env:
-      HOOK_API: ${{ secrets.EASYPANEL_DEPLOY_HOOK_API }}
-      HOOK_WEB: ${{ secrets.EASYPANEL_DEPLOY_HOOK_WEB }}
-      HOOK_WHATSAPP: ${{ secrets.EASYPANEL_DEPLOY_HOOK_WHATSAPP }}
-    steps:
-      - name: Implanta api
-        if: ${{ env.HOOK_API != '' }}
-        run: curl -fsS "$HOOK_API"
-
-      - name: Implanta web
-        if: ${{ env.HOOK_WEB != '' }}
-        run: curl -fsS "$HOOK_WEB"
-
-      - name: Implanta whatsapp
-        if: ${{ env.HOOK_WHATSAPP != '' }}
-        run: curl -fsS "$HOOK_WHATSAPP"
+  # Deploy: a partir de 05/10/2026 fica em imagens.yml — depois que este
+  # workflow passa em `producao`, o GitHub monta as imagens (api, web,
+  # whatsapp), publica no GHCR e chama o gatilho de deploy de cada serviço no
+  # EasyPanel, que só baixa a imagem e reinicia (sem compilar no servidor).
+  # Ver deploy/easypanel/IMAGENS.md.

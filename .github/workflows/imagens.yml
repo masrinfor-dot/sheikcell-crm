@@ -1,0 +1,132 @@
+name: Imagens Docker
+
+# Monta as imagens do CRM no GitHub e publica no GHCR; o EasyPanel só baixa
+# e reinicia (sem compilar no servidor — era isso que deixava o servidor com
+# a CPU em 100% a cada deploy). Depois chama o gatilho de deploy de cada
+# serviço no EasyPanel. Mesmo esquema do ERP (sheik-company-erp, 05/10/2026).
+#
+# Roda DEPOIS que o workflow "Testes" passa num push em `producao` (branch de
+# produção do CRM): testes + typecheck verdes → imagens → deploy. Também dá
+# pra disparar na mão pela aba Actions (workflow_dispatch).
+#
+# Imagens publicadas (uma por serviço do projeto "sheikcell" no EasyPanel):
+#   ghcr.io/masrinfor-dot/sheikcell-crm-api:producao
+#   ghcr.io/masrinfor-dot/sheikcell-crm-web:producao
+#   ghcr.io/masrinfor-dot/sheikcell-crm-whatsapp:producao
+# Cada versão ganha também a tag do commit (7 caracteres), pra voltar atrás.
+#
+# Troca da origem dos serviços no EasyPanel (uma vez só): deploy/easypanel/IMAGENS.md.
+#
+# Segredos (Settings → Secrets and variables → Actions → New repository
+# secret): a URL do "Gatilho de Implantação" de cada serviço, copiada da aba
+# Implantações no EasyPanel. Aceita os dois nomes (o antigo do test.yml e o
+# do ERP):
+#   EASYPANEL_DEPLOY_HOOK_API      ou EASYPANEL_DEPLOY_API_URL
+#   EASYPANEL_DEPLOY_HOOK_WEB      ou EASYPANEL_DEPLOY_WEB_URL
+#   EASYPANEL_DEPLOY_HOOK_WHATSAPP ou EASYPANEL_DEPLOY_WHATSAPP_URL
+# Sem o segredo, o deploy daquele serviço só avisa (nunca quebra o workflow).
+
+on:
+  workflow_run:
+    workflows: ['Testes']
+    branches: [producao]
+    types: [completed]
+  workflow_dispatch: {}
+
+# Um deploy por vez; um push novo espera o anterior terminar (nunca corta um
+# deploy no meio).
+concurrency:
+  group: imagens-producao
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Imagem ${{ matrix.service }}
+    # workflow_run dispara também quando os testes FALHAM — só segue no sucesso.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: api
+            dockerfile: deploy/easypanel/Dockerfile.api
+          - service: web
+            dockerfile: deploy/easypanel/Dockerfile.web
+          - service: whatsapp
+            dockerfile: deploy/easypanel/Dockerfile.whatsapp
+    steps:
+      # Em workflow_run o checkout padrão seria a branch default (main), não o
+      # commit testado — por isso o ref explícito.
+      - name: Checkout do commit testado
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Nome da imagem
+        id: tags
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}-${{ matrix.service }}" >> "$GITHUB_OUTPUT"
+          echo "sha=${HEAD_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.tags.outputs.image }}:producao
+            ${{ steps.tags.outputs.image }}:${{ steps.tags.outputs.sha }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  deploy:
+    name: Deploy ${{ matrix.service }}
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: api
+          - service: web
+          - service: whatsapp
+    steps:
+      - name: Disparar deploy no EasyPanel
+        env:
+          # `secrets` não pode ir em `if:` de step (invalida o arquivo inteiro);
+          # passa por env e o script testa.
+          URL_API: ${{ secrets.EASYPANEL_DEPLOY_HOOK_API || secrets.EASYPANEL_DEPLOY_API_URL }}
+          URL_WEB: ${{ secrets.EASYPANEL_DEPLOY_HOOK_WEB || secrets.EASYPANEL_DEPLOY_WEB_URL }}
+          URL_WHATSAPP: ${{ secrets.EASYPANEL_DEPLOY_HOOK_WHATSAPP || secrets.EASYPANEL_DEPLOY_WHATSAPP_URL }}
+          SERVICE: ${{ matrix.service }}
+        run: |
+          case "$SERVICE" in
+            api) URL="$URL_API";;
+            web) URL="$URL_WEB";;
+            whatsapp) URL="$URL_WHATSAPP";;
+          esac
+          if [ -z "$URL" ]; then
+            echo "::warning::Gatilho de deploy do $SERVICE não configurado (EASYPANEL_DEPLOY_HOOK_${SERVICE^^}) — deploy não disparado."
+            exit 0
+          fi
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL")
+          echo "$SERVICE → HTTP $code"
+          [ "$code" -ge 200 ] && [ "$code" -lt 300 ]
