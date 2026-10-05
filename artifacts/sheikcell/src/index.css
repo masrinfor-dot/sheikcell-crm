@@ -79,4 +79,46 @@
   .shk-badge-done {
     @apply text-xs font-semibold px-2 py-0.5 rounded-full bg-green-100 text-green-700;
   }
+
+  /* ── Novo design do Atendimento (protótipo aprovado out/2026) ──────────
+     Chips de status: fundo claro + texto escuro da mesma família (contraste
+     AA). Âmbar = aguardando, laranja = atrasado, cinza = neutro. Roxo/verde-
+     azulado só para identificar grupo/comunidade. */
+  .shk-chip {
+    @apply inline-flex items-center gap-1 h-[22px] px-2 rounded-md text-[11px] font-bold leading-none whitespace-nowrap;
+  }
+  .shk-chip-wait { background: #FEF3C7; color: #92400E; }
+  .shk-chip-late { background: #FFE4D6; color: #9A3412; }
+  .shk-chip-neutral { background: #EEF0F3; color: #3D4552; }
+  .shk-chip-outline { background: #FFFFFF; color: #3D4552; box-shadow: inset 0 0 0 1px #E3E6EB; }
+  .shk-chip-group { background: #EDE9FE; color: #5B21B6; }
+  .shk-chip-community { background: #CCFBF1; color: #115E59; }
+  .shk-chip-primary { @apply bg-primary/10 text-primary; }
+
+  /* Botão de ícone do cabeçalho da conversa */
+  /* Sem "display" aqui de propósito: quem usa põe inline-flex (ou
+     "hidden md:inline-flex"), senão a classe brigaria com o hidden. */
+  .shk-icon-btn {
+    @apply items-center justify-center w-9 h-9 rounded-lg border border-border bg-white text-[#3D4552] hover:bg-secondary transition shrink-0;
+  }
+  @media (max-width: 767px) {
+    .shk-icon-btn { width: 2.125rem; height: 2.125rem; }
+  }
+
+  /* Nota interna: nunca vai pro cliente — amarelo com borda tracejada pra
+     nunca confundir com mensagem enviada. */
+  .shk-note {
+    background: #FFF8DB;
+    border: 1px dashed #C9A227;
+  }
+  .shk-note-title { color: #6B4E00; }
+
+  /* Balão de mensagem enviada: tom claro da cor principal da loja
+     (--primary é configurável por loja em Aparência). */
+  .shk-bubble-out {
+    /* branco + 11% da cor principal por cima (sem color-mix, que celular
+       antigo não entende) */
+    background: linear-gradient(hsl(var(--primary) / 0.11), hsl(var(--primary) / 0.11)), #FFFFFF;
+  }
+  .shk-note-text { color: #3F3000; }
 }

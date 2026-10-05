@@ -11,10 +11,10 @@ import {
   Smartphone, Instagram, UserCircle2, Circle,
   ArrowRightLeft, FileText, Volume2, Image, Video, Mic, Users, Paperclip, IdCard,
   Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX, Zap, CalendarClock, AlertTriangle,
-  Pin, PinOff, Reply, StickyNote, Star, StarOff, ChevronLeft, ChevronRight,
+  Pin, PinOff, Reply, Star, StarOff, ChevronLeft, ChevronRight,
   MapPin, ShoppingBag, CreditCard, BarChart3, Ban, UserPlus, ExternalLink,
   FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Download, Maximize2, Pencil,
-  MoreVertical, RotateCcw, Percent, FolderOpen, Flag, Lock, Forward,
+  MoreVertical, RotateCcw, Percent, FolderOpen, Flag, Lock, Forward, Clock,
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -276,26 +276,51 @@ function waSessionIcon(key: string, sessions: WaSessionInfo[]): string | null {
   return sessions.find((x) => x.sessionKey === key)?.icon || null;
 }
 
+// Tempo que o cliente está esperando resposta, em texto curto
+// ("7 min", "2 h", "3 d"). Usado nos chips "aguardando"/"atrasado".
+function waitLabel(minutes: number): string {
+  if (minutes < 1) return "agora";
+  if (minutes < 60) return `${minutes} min`;
+  if (minutes < 1440) return `${Math.floor(minutes / 60)} h`;
+  return `${Math.floor(minutes / 1440)} d`;
+}
+
+// Minutos desde a última mensagem do CLIENTE ainda sem resposta da equipe.
+// null = não está esperando (última mensagem foi nossa, conversa finalizada
+// ou sem data). Mesma regra do alerta de "sem resposta" (isOverdue).
+function waitingMinutes(c: Conversation, now: number): number | null {
+  if (c.status === "resolved" || c.status === "archived" || c.isArchived) return null;
+  if (c.lastMessageDirection !== "inbound" || !c.lastMessageAt) return null;
+  return Math.max(0, Math.floor((now - new Date(c.lastMessageAt).getTime()) / 60000));
+}
+
 // ─── Conversation list item ─────────────────────────────────────────────────
-function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, sessionColor, sessionIcon, overdue }: { conv: Conversation; active: boolean; onClick: () => void; onTogglePin: () => void; sessionBadge?: string | null; sessionColor?: string | null; sessionIcon?: string | null; overdue?: boolean }) {
+function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, sessionColor, sessionIcon, overdue, waitingMin, currentUserId }: { conv: Conversation; active: boolean; onClick: () => void; onTogglePin: () => void; sessionBadge?: string | null; sessionColor?: string | null; sessionIcon?: string | null; overdue?: boolean; waitingMin?: number | null; currentUserId?: number }) {
   const prio = conv.priority ? PRIORITY_META[conv.priority] : null;
+  const isGroup = isGroupConv(conv);
+  const kind = conv.isCommunity ? "Comunidade" : isGroup ? "Grupo" : null;
+  const labelsList = conv.labels ? conv.labels.split(",").map((l) => l.trim()).filter(Boolean) : [];
+  const preview = conv.lastMessage ?? "Sem mensagens";
+  const previewWithSender = conv.lastMessage && conv.lastMessageDirection === "outbound" && conv.lastMessageSenderName
+    ? `${conv.lastMessageSenderName.split(" ")[0]}: ${preview}`
+    : preview;
   return (
     <button
       onClick={onClick}
       data-testid={`conv-item-${conv.id}`}
-      className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-secondary/60 transition border-b border-border/50 ${active ? "bg-primary/5 border-l-2 border-l-primary" : prio ? prio.border : ""}`}
+      className={`w-full flex items-start gap-3 px-3 py-3 text-left rounded-xl transition ${active ? "bg-primary/[0.08]" : "hover:bg-secondary/70"}`}
     >
       <div className="relative shrink-0">
         <Avatar name={conv.name} src={conv.avatarUrl} size="md" />
         <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-white ${STATUS_COLORS[conv.status] ?? "bg-gray-300"}`} />
       </div>
       <div className="flex-1 min-w-0">
-        <div className="flex items-center justify-between gap-1 mb-0.5">
-          <span className="font-semibold text-sm text-foreground truncate flex items-center gap-1">
+        <div className="flex items-center justify-between gap-1.5">
+          <span className="font-bold text-sm text-foreground truncate flex items-center gap-1.5">
             {prio && <span className={`w-2 h-2 rounded-full shrink-0 ${prio.dot}`} title={prio.label} data-testid={`priority-dot-${conv.id}`} />}
             {conv.name}
           </span>
-          <span className="flex items-center gap-1 shrink-0">
+          <span className="flex items-center gap-1.5 shrink-0">
             <span
               role="button"
               tabIndex={0}
@@ -307,52 +332,63 @@ function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, sessionCol
             >
               {conv.pinned
                 ? <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500" data-testid={`favorite-indicator-${conv.id}`} />
-                : <Star className="w-3.5 h-3.5 text-muted-foreground/50 hover:text-amber-500" />}
+                : <Star className="w-3.5 h-3.5 text-muted-foreground/40 hover:text-amber-500" />}
             </span>
-            <span className="text-xs text-muted-foreground">{timeAgo(conv.lastMessageAt)}</span>
+            <span className="text-[11px] text-muted-foreground font-mono tabular-nums">{timeAgo(conv.lastMessageAt)}</span>
           </span>
         </div>
-        <div className="flex items-center justify-between gap-1">
-          <p className="text-xs text-muted-foreground truncate flex-1">{conv.lastMessage ?? "Sem mensagens"}</p>
+        <div className="flex items-center justify-between gap-1.5 mt-0.5">
+          <p className="text-[13px] text-muted-foreground truncate flex-1">{previewWithSender}</p>
           <div className="flex items-center gap-1 shrink-0">
-            {overdue && (
-              <span className="text-[10px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full font-bold animate-pulse" title="Cliente aguardando resposta há mais tempo que o limite">
-                ⚠ sem resposta
-              </span>
-            )}
-            {sessionBadge && (
-              <span
-                className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold truncate max-w-[90px]"
-                style={{ backgroundColor: `${sessionColor ?? WA_SESSION_DEFAULT_COLOR}26`, color: sessionColor ?? WA_SESSION_DEFAULT_COLOR }}
-                title={`Recebida pelo número: ${sessionBadge}`}
-              >
-                {sessionIcon && <span className="mr-0.5">{sessionIcon}</span>}
-                {sessionBadge}
-              </span>
-            )}
-            {channelIcon(conv.channel, isGroupConv(conv))}
+            {channelIcon(conv.channel, isGroup)}
             {conv.unreadCount > 0 && (
-              <span className="bg-green-500 text-white text-xs rounded-full px-1.5 py-0.5 min-w-[18px] text-center font-bold">
+              <span className="bg-primary text-primary-foreground text-[11px] rounded-full px-1.5 h-5 min-w-[20px] inline-flex items-center justify-center font-extrabold">
                 {conv.unreadCount > 99 ? "99+" : conv.unreadCount}
               </span>
             )}
           </div>
         </div>
-        {conv.assignee && (
-          <div className="flex items-center gap-1 mt-1">
-            <UserCircle2 className="w-3 h-3 text-indigo-500 shrink-0" />
-            <span className="text-[10px] text-indigo-600 font-medium truncate" data-testid={`conv-assignee-${conv.id}`} title={`Atendido por ${conv.assignee.name}`}>
-              {conv.assignee.name}
+        <div className="flex gap-1 mt-1.5 flex-wrap">
+          {kind && (
+            <span className={`shk-chip ${conv.isCommunity ? "shk-chip-community" : "shk-chip-group"}`}>
+              <Users className="w-3 h-3" />{kind}
             </span>
-          </div>
-        )}
-        {conv.labels && (
-          <div className="flex gap-1 mt-1 flex-wrap">
-            {conv.labels.split(",").map((l) => l.trim()).filter(Boolean).slice(0, 2).map((label) => (
-              <span key={label} className="text-xs bg-primary/10 text-primary px-1.5 py-0.5 rounded-full">{label}</span>
-            ))}
-          </div>
-        )}
+          )}
+          {waitingMin != null && (
+            overdue ? (
+              <span className="shk-chip shk-chip-late" title="Cliente aguardando resposta há mais tempo que o limite" data-testid={`chip-overdue-${conv.id}`}>
+                <AlertTriangle className="w-3 h-3" />atrasado {waitLabel(waitingMin)}
+              </span>
+            ) : (
+              <span className="shk-chip shk-chip-wait" title="Cliente aguardando resposta" data-testid={`chip-waiting-${conv.id}`}>
+                <Clock className="w-3 h-3" />aguardando {waitLabel(waitingMin)}
+              </span>
+            )
+          )}
+          {prio && (
+            <span className={`shk-chip border ${prio.badge}`}>{prio.label}</span>
+          )}
+          {/* Responsável: só quando NÃO é você (na sua própria fila seria
+              repetido em todo item) */}
+          {conv.assignee && conv.assignee.id !== currentUserId && (
+            <span className="shk-chip shk-chip-outline max-w-[130px]" data-testid={`conv-assignee-${conv.id}`} title={`Atendido por ${conv.assignee.name}`}>
+              <UserCircle2 className="w-3 h-3 shrink-0" /><span className="truncate">{conv.assignee.name}</span>
+            </span>
+          )}
+          {sessionBadge && (
+            <span
+              className="shk-chip max-w-[110px]"
+              style={{ backgroundColor: `${sessionColor ?? WA_SESSION_DEFAULT_COLOR}1f`, color: sessionColor ?? WA_SESSION_DEFAULT_COLOR }}
+              title={`Recebida pelo número: ${sessionBadge}`}
+            >
+              {sessionIcon && <span>{sessionIcon}</span>}
+              <span className="truncate">{sessionBadge}</span>
+            </span>
+          )}
+          {labelsList.slice(0, 2).map((label) => (
+            <span key={label} className="shk-chip shk-chip-primary max-w-[110px]"><span className="truncate">{label}</span></span>
+          ))}
+        </div>
       </div>
     </button>
   );
@@ -934,18 +970,15 @@ function MsgBubble({ msg, onReply, onForward, highlighted, onJumpTo, isGroup, on
     return (
       <div
         id={`chat-msg-${msg.id}`}
-        className={`flex justify-center mb-1 transition-colors duration-500 rounded-lg ${highlighted ? "bg-amber-200/60" : ""}`}
+        className={`flex justify-center my-2 transition-colors duration-500 rounded-lg ${highlighted ? "bg-amber-200/60" : ""}`}
       >
-        <div className="max-w-[85%] rounded-xl px-3 py-2 shadow-sm bg-amber-50 border border-amber-300" data-testid={`note-${msg.id}`}>
-          <div className="flex items-center gap-1.5 mb-1">
-            <StickyNote className="w-3.5 h-3.5 text-amber-700 shrink-0" />
-            <span className="text-xs font-semibold text-amber-800">{msg.senderName ?? "Equipe"}</span>
-            <span className="text-[10px] text-amber-700/70">· nota interna</span>
+        <div className="w-full max-w-[560px] rounded-xl px-3.5 py-2.5 shk-note" data-testid={`note-${msg.id}`}>
+          <div className="flex items-center gap-1.5 mb-1 text-[11.5px] font-extrabold shk-note-title">
+            <Lock className="w-3.5 h-3.5 shrink-0" />
+            <span>Nota interna · só a equipe vê</span>
+            <span className="font-semibold">· {msg.senderName ?? "Equipe"} {msgTime(msg.createdAt)}</span>
           </div>
-          <p className="text-sm text-amber-900 whitespace-pre-wrap break-words">{linkifyText(msg.content)}</p>
-          <div className="text-right mt-1">
-            <span className="text-[11px] text-amber-700/70">{msgTime(msg.createdAt)}</span>
-          </div>
+          <p className="text-sm whitespace-pre-wrap break-words shk-note-text">{linkifyText(msg.content)}</p>
         </div>
       </div>
     );
@@ -1037,12 +1070,12 @@ function MsgBubble({ msg, onReply, onForward, highlighted, onJumpTo, isGroup, on
   return (
     <div
       id={`chat-msg-${msg.id}`}
-      className={`group flex items-center gap-1 mb-1 transition-colors duration-500 rounded-lg ${out ? "justify-end" : "justify-start"} ${highlighted ? "bg-amber-200/60" : ""}`}
+      className={`group flex items-center gap-1 mb-1.5 transition-colors duration-500 rounded-lg ${out ? "justify-end" : "justify-start"} ${highlighted ? "bg-amber-200/60" : ""}`}
     >
       {out && <>{manageButtons}{pinButton}{forwardButton}{replyButton}</>}
-      <div className={`max-w-[75%] rounded-2xl px-3 py-2 shadow-sm ${out ? "bg-[#dcf8c6] rounded-br-sm" : "bg-white rounded-bl-sm border border-border"}`}>
-        {!out && msg.senderName && (
-          isGroup && msg.senderPhone && onStartConversation ? (
+      <div className={`max-w-[75%] rounded-2xl px-3.5 py-2.5 ${out ? "shk-bubble-out rounded-br-md" : "bg-white rounded-bl-md border border-border"}`}>
+        {!out && msg.senderName && isGroup && (
+          msg.senderPhone && onStartConversation ? (
             <button
               onClick={() => onStartConversation({ name: msg.senderName!, phone: msg.senderPhone! })}
               data-testid={`button-start-participant-${msg.id}`}
@@ -1058,9 +1091,7 @@ function MsgBubble({ msg, onReply, onForward, highlighted, onJumpTo, isGroup, on
         {/* Quem da equipe enviou — visível pra qualquer vendedor que abra esta
             conversa depois (ex.: após transferência), não só quem respondeu.
             Data/hora já aparece sempre, junto ao status de entrega, mais abaixo. */}
-        {out && msg.senderName && (
-          <p className="text-[11px] font-semibold text-gray-600 mb-1 text-right" data-testid={`text-sender-${msg.id}`}>{msg.senderName}</p>
-        )}
+
         {msg.replyTo && (
           <button
             onClick={() => onJumpTo(msg.replyTo!.id)}
@@ -1154,8 +1185,13 @@ function MsgBubble({ msg, onReply, onForward, highlighted, onJumpTo, isGroup, on
           </div>
         )}
         <div className={`flex items-center gap-1 mt-1 ${out ? "justify-end" : "justify-start"}`}>
-          {msg.editedAt && <span className="text-[11px] text-gray-400 italic">editado</span>}
-          <span className="text-xs text-gray-500">{msgTime(msg.createdAt)}</span>
+          {msg.editedAt && <span className="text-[11px] text-gray-500 italic">editado</span>}
+          {/* Assinatura de quem da equipe enviou — visível pra qualquer
+              vendedor que abra a conversa depois (ex.: após transferência). */}
+          {out && msg.senderName && (
+            <span className="text-[11px] font-bold text-[#3D4552]" data-testid={`text-sender-${msg.id}`}>{msg.senderName.split(" ")[0]} ·</span>
+          )}
+          <span className="text-[11px] text-gray-500 font-mono tabular-nums">{msgTime(msg.createdAt)}</span>
           {out && (
             msg.status === "failed" ? (
               <span className="flex items-center gap-0.5 text-[11px] text-red-500" title="Falha no envio — WhatsApp não conectado ou número inválido">
@@ -3564,13 +3600,13 @@ export default function ChatCenter({
   }
 
   return (
-    <div className="flex h-[calc(var(--vvh,100dvh)-7rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-88px-var(--shk-topbar-extra,0px))] bg-[#f0f2f5] overflow-hidden rounded-none md:rounded-2xl border-0 md:border border-border shadow-none md:shadow-sm">
+    <div className="flex h-[calc(var(--vvh,100dvh)-7rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-88px-var(--shk-topbar-extra,0px))] bg-[#F4F5F7] overflow-hidden rounded-none md:rounded-2xl border-0 md:border border-border shadow-none md:shadow-sm">
 
       {/* ── LEFT PANEL: conversation list ──────────────────────────────── */}
       <div className={`${activeConv ? "hidden md:flex" : "flex"} w-full md:w-80 lg:w-96 bg-white flex-col md:border-r border-border shrink-0`}>
         {/* Header */}
-        <div className="px-4 py-3 border-b border-border bg-[#ededed] flex items-center justify-between">
-          <span className="font-bold text-foreground">Conversas</span>
+        <div className="px-4 pt-4 pb-2 bg-white flex items-center justify-between">
+          <span className="font-extrabold text-lg tracking-tight text-foreground">Atendimento</span>
           <div className="flex items-center gap-1">
             <div className="relative">
               <button
@@ -3599,7 +3635,7 @@ export default function ChatCenter({
                   className="fixed inset-x-2 top-14 md:inset-x-auto md:w-96 z-[70] bg-white border border-border rounded-xl shadow-xl overflow-hidden"
                   style={notifPanelPos ?? undefined}
                 >
-                  <div className="border-b border-border bg-[#ededed]">
+                  <div className="border-b border-border bg-[#F7F8FA]">
                     <div className="flex items-center justify-between px-3 py-2">
                       <span className="text-sm font-bold text-foreground">Notificações</span>
                       <div className="flex items-center gap-1">
@@ -3699,7 +3735,7 @@ export default function ChatCenter({
                     className="fixed inset-x-2 top-14 md:inset-x-auto md:w-[300px] z-[70] bg-white border border-border rounded-xl shadow-xl overflow-hidden"
                     style={numberPanelPos ?? undefined}
                   >
-                    <div className="border-b border-border bg-[#ededed] px-3 py-2">
+                    <div className="border-b border-border bg-[#F7F8FA] px-3 py-2">
                       <span className="text-sm font-bold text-foreground">Atendimento por número</span>
                     </div>
                     <div className="max-h-[60vh] md:max-h-96 overflow-y-auto overscroll-contain divide-y divide-border/50">
@@ -3769,9 +3805,9 @@ export default function ChatCenter({
         </div>
 
         {/* Search */}
-        <div className="px-3 py-2 bg-[#ededed]">
-          <div className="flex items-center gap-2 bg-white rounded-full px-3 py-1.5 border border-border">
-            <Search className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+        <div className="px-3 pb-2.5 bg-white">
+          <div className="flex items-center gap-2 bg-[#F7F8FA] rounded-xl px-3 h-10 border border-border focus-within:ring-2 focus-within:ring-primary/20">
+            <Search className="w-4 h-4 text-muted-foreground shrink-0" />
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -3783,8 +3819,9 @@ export default function ChatCenter({
           </div>
         </div>
 
-        {/* Category tabs: Favoritos / Potenciais / Pendentes / Ativos / Resolvidas */}
-        <div className="flex border-b border-border bg-white">
+        {/* Category tabs: Favoritos / Potenciais / Pendentes / Ativos / Resolvidas
+            (novo design: pílulas com contagem; a ativa fica escura) */}
+        <div className="flex gap-1.5 px-3 pb-3 border-b border-border bg-white overflow-x-auto md:flex-wrap md:overflow-visible [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&>*]:shrink-0">
           {CATEGORIES.filter((cat) =>
             (cat.id !== "potenciais" || can(user, "ver_potenciais")) &&
             // Resolvidas: admin/supervisor sempre; vendedor comum só se o
@@ -3797,17 +3834,14 @@ export default function ChatCenter({
                 key={cat.id}
                 onClick={() => setCategory(cat.id)}
                 title={cat.help}
+                aria-pressed={isActive}
                 data-testid={`tab-category-${cat.id}`}
-                className={`flex-1 flex flex-col items-center justify-center gap-0.5 py-2 px-1 text-xs font-semibold transition border-b-2 ${isActive ? "text-foreground" : "text-muted-foreground hover:bg-secondary/40 border-transparent"}`}
-                style={isActive ? { borderBottomColor: cat.color } : undefined}
+                className={`inline-flex items-center gap-1.5 h-8 pl-2.5 pr-1.5 rounded-full text-xs font-semibold border transition ${isActive ? "bg-foreground text-white border-foreground" : "bg-white text-foreground border-border hover:bg-secondary/60"}`}
               >
-                <span className="flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: cat.color }} />
-                  {cat.label}
-                </span>
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: cat.color }} />
+                {cat.label}
                 <span
-                  className="text-[11px] font-bold px-1.5 rounded-full min-w-[20px] text-center"
-                  style={{ backgroundColor: `${cat.color}1a`, color: cat.color }}
+                  className={`text-[11px] font-bold px-1.5 h-5 rounded-full min-w-[20px] inline-flex items-center justify-center ${isActive ? "bg-white/20 text-white" : "bg-[#EEF0F3] text-[#3D4552]"}`}
                 >
                   {counts[cat.id]}
                 </span>
@@ -3820,7 +3854,7 @@ export default function ChatCenter({
             transmissão" — seleciona vários e manda a mesma mensagem. Só
             aparece pra quem já pode ver Resolvidos (canSeeResolved). */}
         {category === "resolvidas" && canSeeResolved && (
-          <div className="px-3 py-2 bg-[#ededed] border-b border-border">
+          <div className="px-3 py-2 bg-[#F7F8FA] border-b border-border">
             {!broadcastMode ? (
               <div className="flex items-center gap-1.5">
                 <button
@@ -3940,7 +3974,7 @@ export default function ChatCenter({
 
         {/* Filters */}
         {showFilter && (
-          <div className="px-3 py-2 bg-[#ededed] border-b border-border space-y-2">
+          <div className="px-3 py-2 bg-[#F7F8FA] border-b border-border space-y-2">
             <button
               onClick={() => setOnlyUnanswered((v) => !v)}
               data-testid="button-filter-unanswered"
@@ -4064,7 +4098,7 @@ export default function ChatCenter({
         )}
 
         {/* List */}
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto px-2 py-1.5 space-y-0.5">
           {loadingConvs ? (
             Array.from({ length: 5 }).map((_, i) => (
               <div key={i} className="flex items-center gap-3 px-4 py-3 border-b border-border/50">
@@ -4128,6 +4162,8 @@ export default function ChatCenter({
                     }}
                     onTogglePin={() => void handleTogglePin(conv)}
                     overdue={isOverdue(conv)}
+                    waitingMin={isGroupConv(conv) && !isOverdue(conv) ? null : waitingMinutes(conv, nowTick)}
+                    currentUserId={user?.id}
                     sessionBadge={
                       // Só etiqueta quando há mais de um número de atendimento
                       // pareado (ou a conversa vem de uma conexão secundária).
@@ -4186,11 +4222,11 @@ export default function ChatCenter({
 
       {/* ── RIGHT PANEL: chat window ────────────────────────────────────── */}
       {!activeConv ? (
-        <div className="hidden md:flex flex-1 flex-col items-center justify-center text-muted-foreground bg-[#f0f2f5]">
-          <div className="w-20 h-20 rounded-full bg-secondary flex items-center justify-center mb-4">
-            <MessageCircle className="w-10 h-10 opacity-30" />
+        <div className="hidden md:flex flex-1 flex-col items-center justify-center text-muted-foreground bg-[#F4F5F7]">
+          <div className="w-20 h-20 rounded-2xl bg-white border border-border flex items-center justify-center mb-4">
+            <MessageCircle className="w-10 h-10 text-primary/40" />
           </div>
-          <p className="font-semibold text-lg">Central de Atendimento</p>
+          <p className="font-bold text-lg text-foreground">Central de Atendimento</p>
           <p className="text-sm mt-1">Selecione uma conversa para começar</p>
         </div>
       ) : (
@@ -4211,7 +4247,7 @@ export default function ChatCenter({
             </div>
           )}
           {/* Chat header */}
-          <div className="bg-[#ededed] border-b border-border px-2 md:px-4 py-2.5 flex items-center gap-2 md:gap-3 flex-wrap md:flex-nowrap">
+          <div className="bg-white border-b border-border px-2 md:px-5 py-3 flex items-center gap-x-2 gap-y-2.5 md:gap-x-3 flex-wrap">
             <button
               onClick={() => setActiveId(null)}
               data-testid="button-back-conv-list"
@@ -4235,7 +4271,7 @@ export default function ChatCenter({
             <MediaLightboxProvider>
               <HeaderAvatar name={activeConv.name} src={activeConv.avatarUrl} />
             </MediaLightboxProvider>
-            <div className="flex-1 min-w-0">
+            <div className="flex-1 min-w-0 md:min-w-[300px]">
               {editingConvName ? (
                 <div className="flex items-center gap-1 max-w-xs">
                   <input
@@ -4262,26 +4298,34 @@ export default function ChatCenter({
               ) : (
                 <button type="button" onClick={startEditConvName} title="Editar nome do contato" data-testid="button-edit-conv-name"
                   className="group flex items-center gap-1.5 max-w-full text-left">
-                  <p className="font-bold text-sm text-foreground truncate">{activeConv.name}</p>
+                  <p className="font-extrabold text-base tracking-tight text-foreground truncate">{activeConv.name}</p>
                   <Pencil className="w-3 h-3 text-muted-foreground opacity-0 group-hover:opacity-100 transition shrink-0" />
                 </button>
               )}
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                {channelIcon(activeConv.channel, isGroupConv(activeConv))}
-                <span>{activeConv.isCommunity ? "Comunidade do WhatsApp" : isGroupConv(activeConv) ? "Grupo do WhatsApp" : activeConv.phone}</span>
+              {/* No celular: uma linha só, arrastável pro lado (não empurra a conversa pra baixo) */}
+              <div className="flex items-center gap-1.5 mt-1 text-xs text-muted-foreground overflow-x-auto sm:overflow-visible sm:flex-wrap [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&>*]:shrink-0">
+                {(() => {
+                  const w = waitingMinutes(activeConv, nowTick);
+                  if (w == null || (isGroupConv(activeConv) && !isOverdue(activeConv))) return null;
+                  return isOverdue(activeConv)
+                    ? <span className="shk-chip shk-chip-late" data-testid="chip-header-overdue"><AlertTriangle className="w-3 h-3" />atrasado {waitLabel(w)}</span>
+                    : <span className="shk-chip shk-chip-wait" data-testid="chip-header-waiting"><Clock className="w-3 h-3" />aguardando {waitLabel(w)}</span>;
+                })()}
+                <span className="inline-flex items-center gap-1">
+                  {channelIcon(activeConv.channel, isGroupConv(activeConv))}
+                  <span className={activeConv.isCommunity || isGroupConv(activeConv) ? "" : "font-mono tabular-nums"}>{activeConv.isCommunity ? "Comunidade do WhatsApp" : isGroupConv(activeConv) ? "Grupo do WhatsApp" : activeConv.phone}</span>
+                </span>
                 {activeConv.assigneeId != null && (
                   <span
-                    className="px-1.5 py-0.5 rounded-full font-semibold bg-secondary text-foreground/70"
-                    style={{ fontSize: "10px" }}
+                    className="shk-chip shk-chip-neutral font-mono"
                     title="Protocolo deste atendimento, gerado desde o início"
                   >
-                    Protocolo #{activeConv.id}
+                    #{activeConv.id}
                   </span>
                 )}
                 {activeConv.origin === "fila" && (
                   <span
-                    className="px-1.5 py-0.5 rounded-full font-semibold bg-blue-500/10 text-blue-600"
-                    style={{ fontSize: "10px" }}
+                    className="shk-chip bg-blue-500/10 text-blue-700"
                     title="Veio da fila do Central de Atendimento (auto-atribuído ou assumido)"
                   >
                     Fila #{activeConv.queueNumber}
@@ -4289,8 +4333,7 @@ export default function ChatCenter({
                 )}
                 {activeConv.origin === "manual" && (
                   <span
-                    className="px-1.5 py-0.5 rounded-full font-semibold bg-amber-500/10 text-amber-600"
-                    style={{ fontSize: "10px" }}
+                    className="shk-chip shk-chip-wait"
                     title="Atendimento criado manualmente (Criar atendimento)"
                   >
                     Manual
@@ -4298,8 +4341,8 @@ export default function ChatCenter({
                 )}
                 {activeConv.channel === "whatsapp" && (waSessions.length > 1 || activeConv.sessionKey !== "default") && (
                   <span
-                    className="px-1.5 py-0.5 rounded-full font-semibold truncate max-w-[140px]"
-                    style={{ fontSize: "10px", backgroundColor: `${waSessionColor(activeConv.sessionKey, waSessions)}26`, color: waSessionColor(activeConv.sessionKey, waSessions) }}
+                    className="shk-chip truncate max-w-[160px]"
+                    style={{ backgroundColor: `${waSessionColor(activeConv.sessionKey, waSessions)}1f`, color: waSessionColor(activeConv.sessionKey, waSessions) }}
                     title="Número de atendimento pelo qual esta conversa chega"
                   >
                     {waSessionIcon(activeConv.sessionKey, waSessions) && <span className="mr-0.5">{waSessionIcon(activeConv.sessionKey, waSessions)}</span>}
@@ -4307,27 +4350,27 @@ export default function ChatCenter({
                   </span>
                 )}
                 {activeConv.sector && (
-                  <span className="px-1.5 py-0.5 rounded-full text-white font-medium" style={{ backgroundColor: activeConv.sector.color, fontSize: "10px" }}>
+                  <span className="shk-chip text-white" style={{ backgroundColor: activeConv.sector.color }}>
                     {activeConv.sector.name}
                   </span>
                 )}
                 {/* Quem está atendendo esta conversa */}
                 {activeConv.assignee && (
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-semibold truncate max-w-[160px]" style={{ fontSize: "10px" }} title="Vendedor responsável pelo atendimento" data-testid="text-conv-assignee">
+                  <span className="shk-chip shk-chip-outline truncate max-w-[180px]" title="Vendedor responsável pelo atendimento" data-testid="text-conv-assignee">
                     <UserCircle2 className="w-3 h-3" />
-                    {activeConv.assignee.name}
+                    Resp. {activeConv.assignee.name}
                   </span>
                 )}
                 {/* Data e hora de início do atendimento (quando foi assumido) */}
                 {activeConv.attendanceStartedAt && (
-                  <span className="hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 font-medium" style={{ fontSize: "10px" }} title="Início do atendimento" data-testid="text-attendance-started">
+                  <span className="hidden sm:inline-flex items-center gap-1 h-[22px] px-2 rounded-md text-[11px] font-bold whitespace-nowrap bg-[#EEF0F3] text-[#3D4552]" title="Início do atendimento" data-testid="text-attendance-started">
                     <CalendarClock className="w-3 h-3" />
                     Início: {new Date(activeConv.attendanceStartedAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" })}
                   </span>
                 )}
               </div>
             </div>
-            <div className="flex items-center gap-1 flex-wrap justify-end max-w-full shrink-0" ref={headerPickersRef}>
+            <div className="flex items-center gap-1.5 flex-wrap justify-end max-w-full shrink-0" ref={headerPickersRef}>
               {/* Busca de texto DENTRO desta conversa — diferente da busca da
                   lista de conversas (que filtra por nome/número). */}
               <button
@@ -4335,9 +4378,9 @@ export default function ChatCenter({
                 onClick={() => setShowMsgSearch((v) => !v)}
                 data-testid="button-search-in-conv"
                 title="Buscar nesta conversa"
-                className={`p-1.5 rounded-lg hover:bg-secondary transition ${showMsgSearch ? "bg-secondary" : ""}`}
+                className={`inline-flex shk-icon-btn ${showMsgSearch ? "!bg-secondary" : ""}`}
               >
-                <Search className="w-4 h-4 text-muted-foreground" />
+                <Search className="w-4 h-4" />
               </button>
               {/* Banco de arquivos compartilhados desta conversa (fotos,
                   documentos, áudios já trocados). */}
@@ -4346,9 +4389,9 @@ export default function ChatCenter({
                 onClick={() => setShowSharedFiles(true)}
                 data-testid="button-shared-files"
                 title="Arquivos compartilhados"
-                className="p-1.5 rounded-lg hover:bg-secondary transition"
+                className="inline-flex shk-icon-btn"
               >
-                <FolderOpen className="w-4 h-4 text-muted-foreground" />
+                <FolderOpen className="w-4 h-4" />
               </button>
               {/* Menu "mais ações" — só no celular. Agrupa favoritar/excluir/CRM
                   (as ações menos usadas) pra não estourar a largura da tela.
@@ -4358,7 +4401,7 @@ export default function ChatCenter({
                   onClick={() => setShowMobileMore((v) => !v)}
                   data-testid="button-mobile-more-actions"
                   title="Mais ações"
-                  className={`p-2 rounded-lg border transition ${showMobileMore ? "bg-secondary border-border" : "bg-white border-border hover:bg-secondary"}`}
+                  className={`inline-flex shk-icon-btn ${showMobileMore ? "!bg-secondary" : ""}`}
                 >
                   <MoreVertical className="w-3.5 h-3.5 text-muted-foreground" />
                 </button>
@@ -4399,7 +4442,7 @@ export default function ChatCenter({
               <button
                 onClick={() => handleTogglePin(activeConv)}
                 data-testid="button-pin-conv"
-                className={`hidden md:inline-flex p-2 rounded-lg border transition ${activeConv.pinned ? "text-amber-500 bg-amber-50 border-amber-300 hover:bg-amber-100" : "text-muted-foreground bg-white border-border hover:bg-secondary"}`}
+                className={`hidden md:inline-flex shk-icon-btn ${activeConv.pinned ? "!text-amber-500 !bg-amber-50 !border-amber-300 hover:!bg-amber-100" : ""}`}
                 title={activeConv.pinned ? "Remover dos favoritos" : "Favoritar este contato"}
               >
                 {activeConv.pinned ? <Star className="w-3.5 h-3.5 fill-amber-500" /> : <StarOff className="w-3.5 h-3.5" />}
@@ -4409,7 +4452,7 @@ export default function ChatCenter({
                 <button
                   onClick={() => handleDeleteConv(activeConv.id, activeConv.name)}
                   data-testid="button-delete-conv"
-                  className="hidden md:inline-flex p-2 rounded-lg text-red-600 bg-white border border-border hover:bg-red-50 transition"
+                  className="hidden md:inline-flex shk-icon-btn !text-red-600 hover:!bg-red-50"
                   title="Excluir atendimento"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
@@ -4420,7 +4463,7 @@ export default function ChatCenter({
                 <button
                   onClick={() => handleClaim(activeConv.id)}
                   data-testid="button-claim-conv"
-                  className="p-2 rounded-lg text-white transition hover:opacity-90"
+                  className="inline-flex items-center justify-center w-9 h-9 rounded-lg text-white transition hover:opacity-90 shrink-0"
                   style={{ backgroundColor: "#16a34a" }}
                   title="Iniciar atendimento"
                 >
@@ -4432,7 +4475,7 @@ export default function ChatCenter({
                 <button
                   onClick={() => openSchedule(activeConv.id)}
                   data-testid="button-schedule"
-                  className="p-2 rounded-lg bg-white border border-border hover:bg-secondary transition text-indigo-600"
+                  className="inline-flex shk-icon-btn"
                   title="Agendar mensagem ou retorno"
                 >
                   <CalendarClock className="w-3.5 h-3.5" />
@@ -4443,8 +4486,7 @@ export default function ChatCenter({
                 <button
                   onClick={() => handleFinalize(activeConv.id)}
                   data-testid="button-finalize-conv"
-                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-white text-xs font-semibold transition hover:opacity-90"
-                  style={{ backgroundColor: "#6b7280" }}
+                  className="inline-flex items-center gap-1.5 px-3 h-9 rounded-lg bg-primary text-primary-foreground text-xs font-bold transition hover:opacity-90 shrink-0"
                   title="Finalizar atendimento"
                 >
                   <CheckCheck className="w-3.5 h-3.5" />
@@ -4460,7 +4502,7 @@ export default function ChatCenter({
                 <button
                   onClick={() => handleReopenConv(activeConv.id, activeConv.assigneeId)}
                   data-testid="button-reopen-conv"
-                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-white text-xs font-semibold transition hover:opacity-90"
+                  className="inline-flex items-center gap-1.5 px-3 h-9 rounded-lg text-white text-xs font-bold transition hover:opacity-90 shrink-0"
                   style={{ backgroundColor: "#16a34a" }}
                   title="Reabrir atendimento"
                 >
@@ -4472,7 +4514,7 @@ export default function ChatCenter({
               <div className="relative">
                 <button
                   onClick={() => { setShowStatusPicker((v) => !v); setShowPriorityPicker(false); setShowLabelPicker(false); setShowTransferPicker(false); setShowParticipantPicker(false); }}
-                  className="flex items-center gap-1 p-2 rounded-lg bg-white border border-border hover:bg-secondary transition"
+                  className="inline-flex shk-icon-btn !w-auto px-2 gap-1"
                   title={`Status: ${STATUS_LABELS[activeConv.status] ?? activeConv.status}`}
                 >
                   <Circle className={`w-3 h-3 fill-current ${activeConv.status === "open" ? "text-green-500" : activeConv.status === "pending" ? "text-amber-500" : "text-gray-400"}`} />
@@ -4508,7 +4550,7 @@ export default function ChatCenter({
               <div className="relative">
                 <button
                   onClick={() => { setShowPriorityPicker((v) => !v); setShowStatusPicker(false); setShowLabelPicker(false); setShowTransferPicker(false); setShowParticipantPicker(false); }}
-                  className={`flex items-center gap-1 p-2 rounded-lg border transition ${activeConv.priority ? PRIORITY_META[activeConv.priority]?.badge ?? "bg-white border-border" : "bg-white border-border hover:bg-secondary"}`}
+                  className={`inline-flex items-center justify-center gap-1 h-9 px-2 rounded-lg border transition shrink-0 ${activeConv.priority ? PRIORITY_META[activeConv.priority]?.badge ?? "bg-white border-border" : "bg-white border-border text-[#3D4552] hover:bg-secondary"}`}
                   title={activeConv.priority ? `Prioridade: ${PRIORITY_META[activeConv.priority]?.label}` : "Definir prioridade"}
                 >
                   <Flag className={`w-3.5 h-3.5 ${activeConv.priority ? "fill-current" : ""}`} />
@@ -4536,12 +4578,12 @@ export default function ChatCenter({
               {/* Labels */}
               <div className="relative">
                 <button onClick={() => { setShowLabelPicker((v) => !v); setShowTransferPicker(false); setShowParticipantPicker(false); setShowStatusPicker(false); setShowPriorityPicker(false); }}
-                  className="p-2 rounded-lg bg-white border border-border hover:bg-secondary transition"
+                  className="inline-flex shk-icon-btn"
                   title="Etiquetas">
                   <Tag className="w-3.5 h-3.5" />
                 </button>
                 {showLabelPicker && (
-                  <div className="absolute right-0 top-9 bg-white border border-border rounded-xl shadow-lg z-20 p-2 min-w-[180px]">
+                  <div className="absolute right-0 top-11 bg-white border border-border rounded-xl shadow-lg z-20 p-2 min-w-[180px]">
                     {labels.length === 0 ? (
                       <p className="text-xs text-muted-foreground px-3 py-2">Nenhuma etiqueta criada.</p>
                     ) : (
@@ -4567,13 +4609,13 @@ export default function ChatCenter({
               <div className="relative">
                 <button
                   onClick={() => { setShowTransferPicker((v) => !v); setShowLabelPicker(false); setShowParticipantPicker(false); setShowStatusPicker(false); setShowPriorityPicker(false); }}
-                  className="p-2 rounded-lg bg-white border border-border hover:bg-secondary transition"
+                  className="inline-flex shk-icon-btn"
                   title="Transferir para outro setor"
                 >
                   <ArrowRightLeft className="w-3.5 h-3.5" />
                 </button>
                 {showTransferPicker && (
-                  <div className="absolute right-0 top-9 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden min-w-[220px] max-h-[60vh] overflow-y-auto">
+                  <div className="absolute right-0 top-11 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden min-w-[220px] max-h-[60vh] overflow-y-auto">
                     <div className="px-3 py-2 border-b border-border text-xs font-semibold text-muted-foreground">
                       Transferir para outro setor:
                     </div>
@@ -4616,7 +4658,7 @@ export default function ChatCenter({
               <div className="relative">
                 <button
                   onClick={() => { setShowParticipantPicker((v) => !v); setShowLabelPicker(false); setShowTransferPicker(false); setShowStatusPicker(false); setShowPriorityPicker(false); }}
-                  className="relative p-2 rounded-lg bg-white border border-border hover:bg-secondary transition"
+                  className="relative inline-flex shk-icon-btn"
                   title="Vendedores nesta conversa"
                 >
                   <Users className="w-3.5 h-3.5" />
@@ -4627,7 +4669,7 @@ export default function ChatCenter({
                   )}
                 </button>
                 {showParticipantPicker && (
-                  <div className="absolute right-0 top-9 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden min-w-[220px]">
+                  <div className="absolute right-0 top-11 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden min-w-[220px]">
                     <div className="px-3 py-2 border-b border-border text-xs font-semibold text-muted-foreground">
                       Nesta conversa
                     </div>
@@ -4669,7 +4711,7 @@ export default function ChatCenter({
                 onClick={handleOpenCrm}
                 disabled={crmLoading}
                 data-testid="button-open-crm"
-                className="hidden md:inline-flex p-2 rounded-lg bg-white border border-border hover:bg-secondary transition disabled:opacity-50"
+                className="hidden md:inline-flex shk-icon-btn disabled:opacity-50"
                 title="Abrir ficha do cliente no CRM"
               >
                 {crmLoading
@@ -4680,7 +4722,7 @@ export default function ChatCenter({
               <button
                 onClick={() => setInfoCollapsed((v) => !v)}
                 data-testid="button-toggle-info"
-                className={`p-2 rounded-lg border transition ${!infoCollapsed ? "bg-primary text-white border-primary" : "bg-white border-border hover:bg-secondary"}`}
+                className={`inline-flex shk-icon-btn ${!infoCollapsed ? "!bg-primary !text-primary-foreground !border-primary" : ""}`}
                 title="Informações do cliente"
               >
                 <Info className="w-3.5 h-3.5" />
@@ -4690,9 +4732,9 @@ export default function ChatCenter({
 
           {/* Label chips */}
           {currentLabels.length > 0 && (
-            <div className="bg-white border-b border-border px-4 py-1.5 flex items-center gap-2 flex-wrap">
+            <div className="bg-white border-b border-border px-5 py-2 flex items-center gap-1.5 flex-wrap">
               {currentLabels.map((label) => (
-                <span key={label} className="flex items-center gap-1 text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-full">
+                <span key={label} className="shk-chip shk-chip-primary !h-6">
                   <Tag className="w-2.5 h-2.5" />{label}
                   <button onClick={() => handleLabel(label)} className="ml-0.5 opacity-60 hover:opacity-100"><X className="w-2.5 h-2.5" /></button>
                 </span>
@@ -4784,8 +4826,7 @@ export default function ChatCenter({
           {/* Messages area — WhatsApp wallpaper */}
           <div
             ref={msgsContainerRef}
-            className="flex-1 overflow-y-auto px-4 py-4"
-            style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400'%3E%3Crect width='400' height='400' fill='%23e5ddd5'/%3E%3C/svg%3E\")", backgroundColor: "#e5ddd5" }}
+            className="flex-1 overflow-y-auto px-3 md:px-6 py-5 bg-[#F4F5F7]"
           >
             <MediaLightboxProvider>
             {loadingMsgs ? (
@@ -4793,7 +4834,7 @@ export default function ChatCenter({
                 <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
               </div>
             ) : messages.length === 0 ? (
-              <div className="text-center text-xs text-muted-foreground py-8 bg-white/50 rounded-xl px-4">
+              <div className="text-center text-xs text-muted-foreground py-8 bg-white border border-border rounded-xl px-4">
                 Nenhuma mensagem ainda. Inicie a conversa!
               </div>
             ) : (
@@ -4804,7 +4845,7 @@ export default function ChatCenter({
                       onClick={loadOlderMsgs}
                       disabled={loadingOlder}
                       data-testid="button-load-older"
-                      className="text-xs bg-white/90 hover:bg-white text-primary font-medium px-4 py-1.5 rounded-full shadow-sm border border-border transition disabled:opacity-60"
+                      className="text-xs bg-white hover:bg-secondary text-primary font-semibold px-4 py-1.5 rounded-full border border-border transition disabled:opacity-60"
                     >
                       {loadingOlder ? "Carregando..." : "Carregar mensagens antigas"}
                     </button>
@@ -4817,7 +4858,7 @@ export default function ChatCenter({
                     <Fragment key={msg.id}>
                       {showDaySeparator && (
                         <div className="flex justify-center my-2" data-testid={`day-separator-${msgDayKey(msg.createdAt)}`}>
-                          <span className="text-[11px] font-medium text-muted-foreground bg-white/90 px-3 py-1 rounded-full shadow-sm border border-border">
+                          <span className="text-[11px] font-bold text-[#3D4552] bg-[#E6E9EE] px-3 py-1 rounded-full">
                             {msgDayLabel(msg.createdAt)}
                           </span>
                         </div>
@@ -4850,8 +4891,8 @@ export default function ChatCenter({
 
           {/* Barra "respondendo a": some ao enviar/cancelar, vale pro próximo texto ou anexo. */}
           {replyTarget && (
-            <div className="flex items-center gap-2 bg-[#f0f2f5] border-t border-border px-3 pt-2" data-testid="reply-preview-bar">
-              <div className="flex-1 min-w-0 bg-white border-l-4 border-primary/60 rounded-lg px-2.5 py-1.5">
+            <div className="flex items-center gap-2 bg-white border-t border-border px-3 md:px-5 pt-2.5" data-testid="reply-preview-bar">
+              <div className="flex-1 min-w-0 bg-[#F1F3F6] rounded-lg px-3 py-1.5">
                 <div className="text-[11px] font-semibold text-primary">Respondendo a {replyTarget.senderName ?? "Cliente"}</div>
                 <div className="text-xs text-muted-foreground truncate">{replyTarget.content}</div>
               </div>
@@ -4864,7 +4905,7 @@ export default function ChatCenter({
 
           {/* Input — bloqueado até alguém iniciar o atendimento (assumir a conversa) */}
           {!activeConv.assignee && activeCategory !== "resolvidas" ? (
-            <div className="bg-[#f0f2f5] border-t border-border px-3 py-3 flex flex-col items-center gap-1.5">
+            <div className="bg-white border-t border-border px-3 py-3.5 flex flex-col items-center gap-1.5">
               <button
                 onClick={() => {
                   if (activeCategory === "potenciais") {
@@ -4874,7 +4915,7 @@ export default function ChatCenter({
                   }
                 }}
                 data-testid="button-start-attendance"
-                className="flex items-center gap-2 px-6 py-2.5 rounded-full text-white text-sm font-semibold transition hover:opacity-90"
+                className="flex items-center gap-2 px-6 h-11 rounded-xl text-white text-sm font-bold transition hover:opacity-90"
                 style={{ backgroundColor: "#16a34a" }}
               >
                 <UserCircle2 className="w-4 h-4" />
@@ -4886,7 +4927,7 @@ export default function ChatCenter({
             </div>
           ) : (
           recording ? (
-            <div className="bg-[#f0f2f5] border-t border-border px-3 py-2.5 flex items-center gap-3" data-testid="bar-recording">
+            <div className="bg-white border-t border-border px-3 md:px-5 py-3 flex items-center gap-3" data-testid="bar-recording">
               <button
                 type="button"
                 onClick={() => handleFinishRecording(false)}
@@ -4913,16 +4954,23 @@ export default function ChatCenter({
           ) : (
           <>
           {/* Mensagem (vai pro cliente) x Nota interna (só a equipe vê) */}
-          <div className="flex items-center gap-1 bg-[#f0f2f5] border-t border-border px-3 pt-2">
-            <button type="button" onClick={() => setComposerMode("message")} data-testid="button-composer-mode-message"
-              className={`text-xs font-medium px-2.5 py-1 rounded-full transition ${composerMode === "message" ? "bg-primary text-white" : "bg-white text-muted-foreground border border-border hover:bg-secondary"}`}>
-              Mensagem
-            </button>
-            <button type="button" onClick={() => { setComposerMode("note"); cancelReply(); }} data-testid="button-composer-mode-note"
-              className={`flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-full transition ${composerMode === "note" ? "bg-amber-500 text-white" : "bg-white text-muted-foreground border border-border hover:bg-secondary"}`}>
-              <StickyNote className="w-3 h-3" />
-              Nota interna
-            </button>
+          <div className={`flex items-center gap-2 px-3 md:px-5 pt-2.5 bg-white ${replyTarget ? "" : "border-t border-border"}`}>
+            <div className="inline-flex p-[3px] rounded-[10px] bg-[#F1F3F6] gap-0.5">
+              <button type="button" onClick={() => setComposerMode("message")} data-testid="button-composer-mode-message"
+                aria-pressed={composerMode === "message"}
+                className={`text-xs font-bold h-[30px] px-3 rounded-lg transition ${composerMode === "message" ? "bg-foreground text-white" : "text-[#3D4552] hover:bg-white"}`}>
+                Responder
+              </button>
+              <button type="button" onClick={() => { setComposerMode("note"); cancelReply(); }} data-testid="button-composer-mode-note"
+                aria-pressed={composerMode === "note"}
+                className={`flex items-center gap-1 text-xs font-bold h-[30px] px-3 rounded-lg transition ${composerMode === "note" ? "bg-[#6B4E00] text-white" : "text-[#3D4552] hover:bg-white"}`}>
+                <Lock className="w-3 h-3" />
+                Nota interna
+              </button>
+            </div>
+            {composerMode === "note" && (
+              <span className="text-[11px] font-semibold shk-note-title hidden sm:inline">Não vai para o WhatsApp</span>
+            )}
           </div>
           {/* flex-wrap (só até sm): em celulares estreitos, os 4 botões de
               ação (anexo, respostas rápidas, cupom, IA) já somam quase 180px
@@ -4931,7 +4979,7 @@ export default function ChatCenter({
               pra mensagens curtas. O grupo campo+enviar abaixo força
               w-full nesse breakpoint, then joga pra própria linha; a partir
               de sm (tablet/desktop) volta tudo numa linha só, como sempre foi. */}
-          <form onSubmit={handleSend} className={`border-t border-border px-3 py-2.5 flex items-center flex-wrap sm:flex-nowrap gap-2 ${composerMode === "note" ? "bg-amber-50" : "bg-[#f0f2f5]"}`}>
+          <form onSubmit={handleSend} className="bg-white px-3 md:px-5 pt-2 pb-3 flex items-center flex-wrap sm:flex-nowrap gap-1.5">
             <input
               ref={fileInputRef}
               type="file"
@@ -4951,9 +4999,9 @@ export default function ChatCenter({
               disabled={sending}
               title="Enviar foto ou documento"
               data-testid="button-attach-file"
-              className="w-9 h-9 rounded-full flex items-center justify-center text-muted-foreground hover:bg-secondary transition shrink-0 disabled:opacity-40"
+              className="w-9 h-9 rounded-lg flex items-center justify-center text-[#3D4552] hover:bg-secondary transition shrink-0 disabled:opacity-40"
             >
-              <Paperclip className="w-4 h-4" />
+              <Paperclip className="w-[18px] h-[18px]" />
             </button>
             )}
             {quickReplies.length > 0 && (
@@ -4964,9 +5012,9 @@ export default function ChatCenter({
                 disabled={sending}
                 title="Mensagens rápidas"
                 data-testid="button-quick-replies"
-                className="w-9 h-9 rounded-full flex items-center justify-center text-amber-600 bg-amber-100 hover:bg-amber-200 transition disabled:opacity-40"
+                className="w-9 h-9 rounded-lg flex items-center justify-center text-[#3D4552] hover:bg-secondary transition disabled:opacity-40"
               >
-                <Zap className="w-4 h-4" />
+                <Zap className="w-[18px] h-[18px]" />
               </button>
               {showQuickReplies && (
                 <div className="absolute bottom-11 left-0 bg-white border border-border rounded-xl shadow-lg z-30 w-80 max-w-[90vw] max-h-80 overflow-y-auto">
@@ -5017,9 +5065,9 @@ export default function ChatCenter({
                 disabled={sending}
                 title="Cupom de desconto"
                 data-testid="button-coupon-picker"
-                className="w-9 h-9 rounded-full flex items-center justify-center text-emerald-700 bg-emerald-100 hover:bg-emerald-200 transition disabled:opacity-40"
+                className="w-9 h-9 rounded-lg flex items-center justify-center text-[#3D4552] hover:bg-secondary transition disabled:opacity-40"
               >
-                <Percent className="w-4 h-4" />
+                <Percent className="w-[18px] h-[18px]" />
               </button>
               {showCouponPicker && (
                 <div className="absolute bottom-11 left-0 bg-white border border-border rounded-xl shadow-lg z-30 w-80 max-w-[90vw] max-h-80 overflow-y-auto">
@@ -5068,11 +5116,11 @@ export default function ChatCenter({
               disabled={sending || suggesting}
               title="Sugerir resposta com IA (revise antes de enviar)"
               data-testid="button-suggest-reply"
-              className="w-9 h-9 rounded-full flex items-center justify-center text-primary bg-primary/10 hover:bg-primary/20 transition shrink-0 disabled:opacity-40"
+              className="w-9 h-9 rounded-lg flex items-center justify-center text-primary hover:bg-primary/10 transition shrink-0 disabled:opacity-40"
             >
               {suggesting
-                ? <RefreshCw className="w-4 h-4 animate-spin" />
-                : <Sparkles className="w-4 h-4" />}
+                ? <RefreshCw className="w-[18px] h-[18px] animate-spin" />
+                : <Sparkles className="w-[18px] h-[18px]" />}
             </button>
             </>)}
             {/* Campo + botão de enviar sempre juntos — em telas estreitas
@@ -5084,12 +5132,12 @@ export default function ChatCenter({
                 ref={inputRef as React.RefObject<HTMLTextAreaElement>}
                 value={msgText}
                 onChange={(e) => setMsgText(e.target.value)}
-                placeholder={composerMode === "note" ? "Escreva uma nota interna (só a equipe vê)..." : "Digite uma mensagem..."}
+                placeholder={composerMode === "note" ? "Nota interna: só a equipe vê. Não vai para o WhatsApp." : "Digite uma mensagem..."}
                 spellCheck
                 lang="pt-BR"
                 rows={1}
                 data-testid="input-message"
-                className="flex-1 min-w-0 resize-none bg-white rounded-2xl px-4 py-2.5 text-sm border border-border outline-none focus:ring-2 focus:ring-primary/20 max-h-40 overflow-y-auto"
+                className={`flex-1 min-w-0 resize-none rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 max-h-40 overflow-y-auto ${composerMode === "note" ? "shk-note shk-note-text placeholder:text-[#8A6D1F] focus:ring-[#C9A227]/30" : "bg-[#F7F8FA] border border-[#D5D9E0] focus:ring-primary/20 focus:bg-white"}`}
                 onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(e); } }}
                 onPaste={(e) => {
                   if (can(user, "enviar_midia")) {
@@ -5123,18 +5171,18 @@ export default function ChatCenter({
               />
               {msgText.trim() ? (
                 <button type="submit" disabled={sending} data-testid="button-send-message"
-                  className={`w-10 h-10 rounded-full flex items-center justify-center text-white disabled:opacity-40 transition shrink-0 ${composerMode === "note" ? "bg-amber-500 hover:bg-amber-600" : "bg-primary hover:bg-primary/90"}`}>
+                  className={`w-11 h-11 rounded-xl flex items-center justify-center text-white disabled:opacity-40 transition shrink-0 ${composerMode === "note" ? "bg-[#6B4E00] hover:bg-[#574000]" : "bg-primary hover:bg-primary/90"}`}>
                   <Send className="w-4 h-4" />
                 </button>
               ) : composerMode === "message" && can(user, "enviar_midia") ? (
                 <button type="button" onClick={handleStartRecording} disabled={sending || requestingMic}
                   title={requestingMic ? "Aguardando o navegador liberar o microfone..." : "Gravar nota de voz"} data-testid="button-record-audio"
-                  className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white hover:bg-primary/90 disabled:opacity-40 transition shrink-0">
+                  className="w-11 h-11 rounded-xl bg-primary flex items-center justify-center text-white hover:bg-primary/90 disabled:opacity-40 transition shrink-0">
                   {requestingMic ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Mic className="w-4 h-4" />}
                 </button>
               ) : (
                 <button type="submit" disabled data-testid="button-send-message-disabled"
-                  className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white opacity-40 transition shrink-0">
+                  className="w-11 h-11 rounded-xl bg-primary flex items-center justify-center text-white opacity-40 transition shrink-0">
                   <Send className="w-4 h-4" />
                 </button>
               )}
@@ -5165,12 +5213,12 @@ export default function ChatCenter({
             </button>
           ) : (
           <>
-            <div className="bg-primary px-4 py-3 text-white flex items-center justify-between shrink-0">
-              <div className="flex items-center gap-2">
-                <Info className="w-4 h-4" />
-                <span className="font-semibold text-sm">Informações do cliente</span>
+            <div className="bg-white border-b border-border px-4 h-[52px] flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2 text-foreground">
+                <IdCard className="w-4 h-4 text-primary" />
+                <span className="font-bold text-sm">Ficha do cliente</span>
               </div>
-              <button onClick={() => setInfoCollapsed(true)} className="p-1 rounded-lg hover:bg-white/20 transition" title="Recolher">
+              <button onClick={() => setInfoCollapsed(true)} className="p-1.5 rounded-lg text-muted-foreground hover:bg-secondary transition" title="Recolher">
                 <ChevronLeft className="w-4 h-4" />
               </button>
             </div>
