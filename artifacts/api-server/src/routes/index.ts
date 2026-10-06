@@ -36,6 +36,7 @@ import tvboxRouter from "./tvbox";
 import pdfRouter from "./pdf";
 import rotinasRouter, { enforceMandatoryRoutines } from "./rotinas";
 import catalogRouter, { catalogPublicRouter } from "./catalog";
+import catalogExportRouter from "./catalogExport";
 import geoRouter from "./geo";
 
 const router: IRouter = Router();
@@ -81,6 +82,8 @@ router.use(tvboxRouter);
 router.use(pdfRouter);
 router.use(rotinasRouter);
 router.use(catalogRouter);
+// Exportação da Vitrine pro ERP (04/10/2026) — ver routes/catalogExport.ts.
+router.use(catalogExportRouter);
 // Sem requireAuth: a vitrine pública é vista por clientes sem login.
 router.use(catalogPublicRouter);
 // Sem requireAuth: avaliação de usados pública (cliente avalia o próprio
