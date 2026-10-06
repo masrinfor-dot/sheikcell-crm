@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, can, canEditModule, ApiError, type InternalConversation, type InternalMessage, type MessageMetadata } from "@/lib/api";
+import { api, can, canEditModule, ApiError, type InternalConversation, type InternalMessage, type MessageMetadata, type InternalChatSearchHit } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { reportInternalChatUnread } from "@/hooks/useInternalChatNotifier";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -202,6 +202,22 @@ function renderWithMentions(content: string, names: string[], myName: string | u
   });
 }
 
+// Destaca o termo pesquisado no trecho do resultado.
+function highlightTerm(text: string, term: string) {
+  if (!term) return text;
+  const i = text.toLowerCase().indexOf(term.toLowerCase());
+  if (i === -1) return text;
+  const start = Math.max(0, i - 30);
+  return (
+    <>
+      {start > 0 && "…"}
+      {text.slice(start, i)}
+      <mark className="bg-amber-200 text-foreground rounded px-0.5">{text.slice(i, i + term.length)}</mark>
+      {text.slice(i + term.length)}
+    </>
+  );
+}
+
 function timeLabel(iso: string | null): string {
   if (!iso) return "";
   const d = new Date(iso);
@@ -278,6 +294,12 @@ export default function InternalChat({ docked = false, onActiveConversationChang
   // temporário ao pular para a mensagem original clicando na citação.
   const [replyTarget, setReplyTarget] = useState<InternalMessage | null>(null);
   const [highlightedMsgId, setHighlightedMsgId] = useState<number | null>(null);
+  // Pesquisa nas conversas (06/10/2026): texto digitado, resultados e a
+  // mensagem para onde pular quando a conversa terminar de carregar.
+  const [chatSearch, setChatSearch] = useState("");
+  const [searchHits, setSearchHits] = useState<InternalChatSearchHit[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [pendingJumpId, setPendingJumpId] = useState<number | null>(null);
 
   const activeIdRef = useRef<number | null>(null);
   activeIdRef.current = activeId;
@@ -365,8 +387,24 @@ export default function InternalChat({ docked = false, onActiveConversationChang
   }, [activeId]);
 
   useEffect(() => {
+    if (pendingJumpId != null) return; // vai pular para a mensagem pesquisada
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, pendingJumpId]);
+
+  // Pesquisa com espera curta enquanto digita (mínimo 2 letras).
+  useEffect(() => {
+    const q = chatSearch.trim();
+    if (q.length < 2) { setSearchHits(null); setSearching(false); return; }
+    setSearching(true);
+    let cancelled = false;
+    const t = setTimeout(() => {
+      api.internalChat.search(q)
+        .then((hits) => { if (!cancelled) setSearchHits(hits); })
+        .catch(() => { if (!cancelled) setSearchHits([]); })
+        .finally(() => { if (!cancelled) setSearching(false); });
+    }, 300);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [chatSearch]);
 
   // Campo de mensagem multi-linha: cresce junto com o texto (até o limite
   // visual de max-h-32, quando passa a rolar em vez de crescer mais).
@@ -1033,6 +1071,29 @@ export default function InternalChat({ docked = false, onActiveConversationChang
     setTimeout(() => setHighlightedMsgId((cur) => (cur === id ? null : cur)), 1500);
   };
 
+  // Resultado da pesquisa: abre a conversa e, quando as mensagens chegarem,
+  // pula até a mensagem com o realce temporário.
+  const openSearchHit = (hit: InternalChatSearchHit) => {
+    setPendingJumpId(hit.id);
+    if (activeId === hit.conversationId) {
+      setMessages((prev) => [...prev]);
+    } else {
+      setActiveId(hit.conversationId);
+    }
+  };
+
+  useEffect(() => {
+    if (pendingJumpId == null || messages.length === 0) return;
+    if (messages[0] && messages.some((m) => m.id === pendingJumpId)) {
+      const id = pendingJumpId;
+      setTimeout(() => { scrollToMessage(id); setPendingJumpId(null); }, 80);
+    } else if (activeId != null && messages.every((m) => m.conversationId === activeId)) {
+      toast({ title: "Mensagem antiga", description: "Ela é anterior às 500 últimas mensagens desta conversa." });
+      setPendingJumpId(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, pendingJumpId]);
+
   const onTranscribed = (id: number, transcript: string) => {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, transcript } : m)));
   };
@@ -1126,6 +1187,61 @@ export default function InternalChat({ docked = false, onActiveConversationChang
               )}
             </div>
           </div>
+          <div className="px-3 py-2 border-b shrink-0">
+            <div className="relative">
+              <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <input
+                value={chatSearch}
+                onChange={(e) => setChatSearch(e.target.value)}
+                placeholder="Pesquisar nas conversas..."
+                aria-label="Pesquisar nas conversas"
+                data-testid="input-internal-chat-search"
+                className="w-full pl-8 pr-7 py-1.5 text-sm rounded-md border bg-background focus:outline-none focus:ring-2 focus:ring-primary/40"
+              />
+              {chatSearch && (
+                <button
+                  onClick={() => setChatSearch("")}
+                  aria-label="Limpar pesquisa"
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 p-0.5 text-muted-foreground hover:text-foreground"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
+          {searchHits !== null || searching ? (
+            <div className="flex-1 overflow-y-auto" data-testid="internal-chat-search-results">
+              {searching && searchHits === null && (
+                <div className="p-4 text-center text-xs text-muted-foreground flex items-center justify-center gap-1">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> Pesquisando...
+                </div>
+              )}
+              {searchHits !== null && searchHits.length === 0 && (
+                <div className="p-4 text-center text-xs text-muted-foreground">Nada encontrado para "{chatSearch.trim()}".</div>
+              )}
+              {searchHits?.map((hit) => {
+                const conv = conversations.find((c) => c.id === hit.conversationId);
+                const text = (hit.content && !isMediaPlaceholder(hit.content) ? hit.content : hit.transcript) ?? hit.content;
+                return (
+                  <button
+                    key={hit.id}
+                    onClick={() => openSearchHit(hit)}
+                    data-testid={`internal-search-hit-${hit.id}`}
+                    className="w-full text-left px-3 py-2 border-b border-border/50 hover:bg-primary/10 transition-colors"
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-xs font-semibold truncate">{conv?.name ?? "Conversa"}</span>
+                      <span className="text-[10px] text-muted-foreground shrink-0">{timeLabel(hit.createdAt)}</span>
+                    </div>
+                    <div className="text-xs text-muted-foreground truncate">
+                      <span className="font-medium text-foreground/80">{hit.senderName}:</span>{" "}
+                      {highlightTerm(text, chatSearch.trim())}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
           <div className="flex-1 overflow-y-auto">
             {conversations.length === 0 && (
               <div className="p-4 text-center text-xs text-muted-foreground">Nenhuma conversa ainda.</div>
@@ -1173,6 +1289,7 @@ export default function InternalChat({ docked = false, onActiveConversationChang
               </button>
             ))}
           </div>
+          )}
     </>
   );
 
