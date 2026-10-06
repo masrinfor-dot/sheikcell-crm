@@ -1,8 +1,8 @@
 import { Router, type IRouter } from "express";
-import { db, appSettingsTable, tenantAiCredentialsTable } from "@workspace/db";
+import { db, appSettingsTable, tenantAiCredentialsTable, tenantErpIntegrationsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
-import { encryptSecret } from "../lib/aiCredentialsCrypto";
+import { decryptSecret, encryptSecret } from "../lib/aiCredentialsCrypto";
 
 const router: IRouter = Router();
 
@@ -323,6 +323,97 @@ router.delete("/settings/ai", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   await db.delete(tenantAiCredentialsTable).where(eq(tenantAiCredentialsTable.tenantId, tenantId));
   res.json(await aiCredentialsStatus(tenantId));
+});
+
+// ── Integração com o ERP Prumo (06/10/2026) — só admin, guarda a chave do ERP ──
+// GET nunca devolve a chave, só os últimos 4, o endereço e como foi a última busca.
+async function erpStatus(tenantId: number) {
+  const [row] = await db.select().from(tenantErpIntegrationsTable)
+    .where(eq(tenantErpIntegrationsTable.tenantId, tenantId)).limit(1);
+  return {
+    configured: !!row,
+    baseUrl: row?.baseUrl ?? "https://api.sheikcell.com.br/api/v1",
+    last4: row?.last4 ?? null,
+    osMessagesEnabled: row?.osMessagesEnabled ?? false,
+    lastPollAt: row?.lastPollAt ?? null,
+    lastError: row?.lastError ?? null,
+    sentCount: row?.sentCount ?? 0,
+  };
+}
+
+function validErpBaseUrl(raw: string): string | null {
+  try {
+    const u = new URL(raw.trim());
+    if (u.protocol !== "https:" && !(u.protocol === "http:" && ["localhost", "127.0.0.1"].includes(u.hostname))) return null;
+    return u.toString().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
+router.get("/settings/erp", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  res.json(await erpStatus(tenantId));
+});
+
+router.patch("/settings/erp", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { baseUrl, apiKey, osMessagesEnabled } = req.body as { baseUrl?: string; apiKey?: string; osMessagesEnabled?: boolean };
+  const [existing] = await db.select({ tenantId: tenantErpIntegrationsTable.tenantId }).from(tenantErpIntegrationsTable)
+    .where(eq(tenantErpIntegrationsTable.tenantId, tenantId)).limit(1);
+  const url = baseUrl !== undefined ? validErpBaseUrl(baseUrl) : undefined;
+  if (baseUrl !== undefined && !url) { res.status(400).json({ error: "Endereço do ERP inválido (use https://…/api/v1)" }); return; }
+
+  if (apiKey !== undefined) {
+    const key = typeof apiKey === "string" ? apiKey.trim() : "";
+    if (!/^erp_[0-9a-f]{12}_[A-Za-z0-9_-]{20,}$/.test(key)) {
+      res.status(400).json({ error: "Chave inválida — a chave do ERP começa com \"erp_\" (Auxiliares › Integrações no ERP)" });
+      return;
+    }
+    const enc = encryptSecret(key);
+    const values = {
+      baseUrl: url ?? "https://api.sheikcell.com.br/api/v1",
+      encryptedApiKey: enc.ciphertext, iv: enc.iv, authTag: enc.authTag, keyVersion: enc.keyVersion,
+      last4: key.slice(-4), lastError: null,
+      ...(osMessagesEnabled !== undefined ? { osMessagesEnabled: !!osMessagesEnabled } : {}),
+    };
+    await db.insert(tenantErpIntegrationsTable).values({ tenantId, ...values })
+      .onConflictDoUpdate({ target: tenantErpIntegrationsTable.tenantId, set: { ...values, updatedAt: new Date() } });
+  } else {
+    if (!existing) { res.status(400).json({ error: "Cole a chave do ERP primeiro" }); return; }
+    await db.update(tenantErpIntegrationsTable).set({
+      ...(url ? { baseUrl: url } : {}),
+      ...(osMessagesEnabled !== undefined ? { osMessagesEnabled: !!osMessagesEnabled } : {}),
+      updatedAt: new Date(),
+    }).where(eq(tenantErpIntegrationsTable.tenantId, tenantId));
+  }
+  res.json(await erpStatus(tenantId));
+});
+
+router.post("/settings/erp/test", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const [row] = await db.select().from(tenantErpIntegrationsTable)
+    .where(eq(tenantErpIntegrationsTable.tenantId, tenantId)).limit(1);
+  if (!row) { res.status(400).json({ error: "Cole a chave do ERP primeiro" }); return; }
+  try {
+    const { pingErp } = await import("../lib/erpOsMessages");
+    const key = decryptSecret({ ciphertext: row.encryptedApiKey, iv: row.iv, authTag: row.authTag, keyVersion: row.keyVersion });
+    const ping = await pingErp(row.baseUrl, key);
+    res.json({
+      ok: true,
+      tenant: ping.tenant,
+      keyName: ping.key?.name ?? null,
+      canSendOsMessages: (ping.key?.scopes ?? []).includes("service_orders.notify"),
+    });
+  } catch (err) {
+    res.status(502).json({ error: `Não conectou no ERP: ${String(err instanceof Error ? err.message : err).slice(0, 200)}` });
+  }
+});
+
+router.delete("/settings/erp", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  await db.delete(tenantErpIntegrationsTable).where(eq(tenantErpIntegrationsTable.tenantId, tenantId));
+  res.json(await erpStatus(tenantId));
 });
 
 export default router;
