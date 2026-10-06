@@ -343,13 +343,13 @@ export default function AttendantDashboard() {
           onMouseEnter={() => setSidebarHovered(true)}
           onMouseLeave={() => setSidebarHovered(false)}
           data-testid="sidebar-attendant"
-          className={`hidden md:block ${sidebarHovered ? "w-52" : "w-14"} shrink-0 overflow-x-hidden border-r border-border bg-white sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3 transition-[width] duration-200 ease-in-out`}
+          className={`hidden md:block ${sidebarHovered ? "w-52" : "w-14"} shrink-0 overflow-x-hidden bg-[#18181B] sticky top-14 self-start h-[calc(100vh-3.5rem)] overflow-y-auto p-3 transition-[width] duration-200 ease-in-out`}
         >
           <div className="flex flex-col gap-1">
             {MAIN_TABS.filter(({ module }) => moduleGranted(module)).map(({ id, label, icon: Icon }) => (
               <button key={id} onClick={() => setMainTab(id)} title={sidebarHovered ? undefined : label}
                 className={`flex items-center gap-2 w-full px-3 py-2.5 rounded-lg text-xs font-semibold text-left transition-colors whitespace-nowrap ${
-                  mainTab === id ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                  mainTab === id ? "bg-white/10 text-white" : "text-[#A1A1AA] hover:bg-white/5 hover:text-white"
                 }`}>
                 <Icon className="w-4 h-4 shrink-0" />{sidebarHovered && <span className="truncate">{label}</span>}
               </button>
