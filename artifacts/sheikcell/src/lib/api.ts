@@ -222,6 +222,16 @@ export type FinanceBankMetrics = {
   salesByPaymentMethod: { paymentMethod: "credito" | "debito" | "pix"; count: number; grossCents: number }[];
 };
 
+export interface InternalChatSearchHit {
+  id: number;
+  conversationId: number;
+  senderName: string;
+  content: string;
+  transcript: string | null;
+  type: InternalMessage["type"];
+  createdAt: string;
+}
+
 export type InternalMessage = {
   id: number;
   conversationId: number;
@@ -971,6 +981,8 @@ export const api = {
     createGroup: (name: string, memberIds: number[]) =>
       req<InternalConversation>("/internal-chat/conversations/group", { method: "POST", body: JSON.stringify({ name, memberIds }) }),
     messages: (id: number) => req<InternalMessage[]>(`/internal-chat/conversations/${id}/messages`),
+    search: (q: string) =>
+      req<InternalChatSearchHit[]>(`/internal-chat/search?q=${encodeURIComponent(q)}`),
     send: (id: number, content: string, replyToId?: number) =>
       req<InternalMessage>(`/internal-chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content, replyToId }) }),
     markRead: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}/read`, { method: "POST" }),

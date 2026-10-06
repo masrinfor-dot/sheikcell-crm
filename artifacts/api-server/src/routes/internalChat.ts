@@ -1,6 +1,6 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import { db, internalConversationsTable, internalConversationMembersTable, internalMessagesTable, usersTable } from "@workspace/db";
-import { eq, and, asc, inArray, sql, ne } from "drizzle-orm";
+import { eq, and, desc, inArray, sql, ne, or, ilike } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { requireAuth, requireAdmin, requireTenant, isTenantSuspended } from "../middlewares/auth";
 import {
@@ -230,6 +230,52 @@ router.get("/internal-chat/conversations", requireAuth, async (req, res): Promis
   res.json(result);
 });
 
+// ─── Pesquisar nas conversas (06/10/2026) ─────────────────────────────────
+// Procura o texto (e a transcrição dos áudios) nas mensagens de todas as
+// conversas de que o usuário participa — nunca nas dos outros. Mais recentes
+// primeiro, até 50 resultados.
+function escapeLike(term: string): string {
+  return term.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+router.get("/internal-chat/search", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const userId = req.session.userId!;
+  const raw = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  if (raw.length < 2) { res.json([]); return; }
+  const term = `%${escapeLike(raw.slice(0, 100))}%`;
+
+  // A sala geral é de todos: garante que a pessoa é membro antes de pesquisar.
+  const generalId = await ensureGeneralRoom(tenantId);
+  await ensureMembership(generalId, userId, tenantId);
+
+  const rows = await db
+    .select({
+      id: internalMessagesTable.id,
+      conversationId: internalMessagesTable.conversationId,
+      senderName: usersTable.name,
+      content: internalMessagesTable.content,
+      transcript: internalMessagesTable.transcript,
+      type: internalMessagesTable.type,
+      createdAt: internalMessagesTable.createdAt,
+    })
+    .from(internalMessagesTable)
+    .innerJoin(internalConversationMembersTable, and(
+      eq(internalConversationMembersTable.conversationId, internalMessagesTable.conversationId),
+      eq(internalConversationMembersTable.userId, userId),
+    ))
+    .innerJoin(internalConversationsTable, eq(internalConversationsTable.id, internalMessagesTable.conversationId))
+    .innerJoin(usersTable, eq(internalMessagesTable.senderId, usersTable.id))
+    .where(and(
+      eq(internalConversationsTable.tenantId, tenantId),
+      or(ilike(internalMessagesTable.content, term), ilike(internalMessagesTable.transcript, term)),
+    ))
+    .orderBy(desc(internalMessagesTable.createdAt))
+    .limit(50);
+
+  res.json(rows);
+});
+
 // ─── Create a group conversation (grupo do chat interno) ───────────────────
 // Any staff user may create a group, naming it and escolhendo os participantes.
 // O criador sempre entra como membro. Grupos usam o mesmo escopo dos diretos:
@@ -419,8 +465,11 @@ router.get("/internal-chat/conversations/:id/messages", requireAuth, async (req,
     .leftJoin(repliedMsg, eq(internalMessagesTable.replyToId, repliedMsg.id))
     .leftJoin(repliedSender, eq(repliedMsg.senderId, repliedSender.id))
     .where(eq(internalMessagesTable.conversationId, convId))
-    .orderBy(asc(internalMessagesTable.createdAt))
+    // As 500 mais RECENTES (antes vinham as 500 mais antigas: numa conversa
+    // grande as novas sumiam), devolvidas em ordem de envio.
+    .orderBy(desc(internalMessagesTable.createdAt))
     .limit(500);
+  rows.reverse();
 
   // Mark as read.
   await db
