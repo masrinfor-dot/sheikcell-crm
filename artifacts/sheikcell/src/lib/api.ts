@@ -1584,6 +1584,16 @@ export type Branding = {
 
 // Nunca inclui a chave em si — só o suficiente pra loja reconhecer qual
 // chave está salva (últimos 4 caracteres) e se está em uso.
+export interface ErpIntegrationStatus {
+  configured: boolean;
+  baseUrl: string;
+  last4: string | null;
+  osMessagesEnabled: boolean;
+  lastPollAt: string | null;
+  lastError: string | null;
+  sentCount: number;
+}
+
 export type AiCredentialsStatus = {
   hasKey: boolean;
   last4: string | null;
@@ -3092,6 +3102,14 @@ export const api = {
       save: (data: { apiKey?: string; useOwnKey?: boolean }) =>
         req<AiCredentialsStatus>("/settings/ai", { method: "PATCH", body: JSON.stringify(data) }),
       remove: () => req<AiCredentialsStatus>("/settings/ai", { method: "DELETE" }),
+    },
+    erp: {
+      get: () => req<ErpIntegrationStatus>("/settings/erp"),
+      save: (data: { baseUrl?: string; apiKey?: string; osMessagesEnabled?: boolean }) =>
+        req<ErpIntegrationStatus>("/settings/erp", { method: "PATCH", body: JSON.stringify(data) }),
+      test: () =>
+        req<{ ok: boolean; tenant: string; keyName: string | null; canSendOsMessages: boolean }>("/settings/erp/test", { method: "POST" }),
+      remove: () => req<ErpIntegrationStatus>("/settings/erp", { method: "DELETE" }),
     },
   },
   tasks: {

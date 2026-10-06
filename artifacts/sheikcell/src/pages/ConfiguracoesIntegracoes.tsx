@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { api, type AiCredentialsStatus } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { Plug, KeyRound, Trash2, CheckCircle2 } from "lucide-react";
+import ErpIntegrationCard from "@/components/ErpIntegrationCard";
 
 // Chave da OpenAI própria da loja: quando configurada e ligada, substitui a
 // chave global da plataforma em todos os recursos de IA (robô, sugestão de
@@ -56,6 +57,8 @@ export default function ConfiguracoesIntegracoes() {
         <h2 className="font-bold text-foreground flex items-center gap-2"><Plug className="w-5 h-5" /> Integrações</h2>
         <p className="text-xs text-muted-foreground mt-1">Conecte a própria conta OpenAI pra esta loja usar a sua chave em vez da chave da plataforma.</p>
       </div>
+
+      <ErpIntegrationCard />
 
       <div className="shk-card p-5 space-y-4">
         <div className="flex items-center gap-2 mb-1">

@@ -271,6 +271,11 @@ export async function sendSurveyReminders(): Promise<void> {
 
 export function startScheduler(): void {
   setInterval(() => { void deliverScheduledMessages(); }, 30_000);
+  // Mensagens das OS do ERP Prumo (06/10/2026): busca a fila do ERP a cada
+  // minuto, manda pelo WhatsApp e abre o atendimento (ver erpOsMessages.ts).
+  setInterval(() => {
+    void import("./erpOsMessages").then((m) => m.runErpOsMessages()).catch(() => {});
+  }, 60_000);
   // Lembrete da pesquisa de satisfação: granularidade de minutos basta.
   setInterval(() => { void sendSurveyReminders(); }, 60_000);
   // Preenche vendedores ociosos da fila do Central de Atendimento que os
