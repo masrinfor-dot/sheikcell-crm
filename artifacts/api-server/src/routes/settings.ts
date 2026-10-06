@@ -2,8 +2,9 @@ import { Router, type IRouter } from "express";
 import { db, appSettingsTable, tenantAiCredentialsTable, tenantErpIntegrationsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
-import { decryptSecret, encryptSecret } from "../lib/aiCredentialsCrypto";
+import { encryptSecret } from "../lib/aiCredentialsCrypto";
 import { validErpBaseUrl } from "../lib/erpBaseUrl";
+import { decryptErpSecret, encryptErpSecret } from "../lib/erpCrypto";
 
 const router: IRouter = Router();
 
@@ -362,7 +363,7 @@ router.patch("/settings/erp", requireAdmin, async (req, res): Promise<void> => {
       res.status(400).json({ error: "Chave inválida — a chave do ERP começa com \"erp_\" (Auxiliares › Integrações no ERP)" });
       return;
     }
-    const enc = encryptSecret(key);
+    const enc = encryptErpSecret(key);
     const values = {
       baseUrl: url ?? "https://api.sheikcell.com.br/api/v1",
       encryptedApiKey: enc.ciphertext, iv: enc.iv, authTag: enc.authTag, keyVersion: enc.keyVersion,
@@ -389,7 +390,7 @@ router.post("/settings/erp/test", requireAdmin, async (req, res): Promise<void> 
   if (!row) { res.status(400).json({ error: "Cole a chave do ERP primeiro" }); return; }
   try {
     const { pingErp } = await import("../lib/erpOsMessages");
-    const key = decryptSecret({ ciphertext: row.encryptedApiKey, iv: row.iv, authTag: row.authTag, keyVersion: row.keyVersion });
+    const key = decryptErpSecret({ ciphertext: row.encryptedApiKey, iv: row.iv, authTag: row.authTag, keyVersion: row.keyVersion });
     const ping = await pingErp(row.baseUrl, key);
     res.json({
       ok: true,
