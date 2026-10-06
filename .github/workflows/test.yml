@@ -61,3 +61,13 @@ jobs:
   # whatsapp), publica no GHCR e chama o gatilho de deploy de cada serviço no
   # EasyPanel, que só baixa a imagem e reinicia (sem compilar no servidor).
   # Ver deploy/easypanel/IMAGENS.md.
+
+  imagens:
+    name: Imagens e deploy
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/producao'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/imagens.yml
+    secrets: inherit
