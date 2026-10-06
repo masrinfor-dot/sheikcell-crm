@@ -5,9 +5,9 @@ name: Imagens Docker
 # a CPU em 100% a cada deploy). Depois chama o gatilho de deploy de cada
 # serviço no EasyPanel. Mesmo esquema do ERP (sheik-company-erp, 05/10/2026).
 #
-# Roda DEPOIS que o workflow "Testes" passa num push em `producao` (branch de
-# produção do CRM): testes + typecheck verdes → imagens → deploy. Também dá
-# pra disparar na mão pela aba Actions (workflow_dispatch).
+# Roda DEPOIS do job de testes num push em `producao` (branch de produção do
+# CRM): testes + typecheck verdes → imagens → deploy. Também dá pra disparar
+# na mão pela aba Actions (workflow_dispatch, escolhendo a branch producao).
 #
 # Imagens publicadas (uma por serviço do projeto "sheikcell" no EasyPanel):
 #   ghcr.io/masrinfor-dot/sheikcell-crm-api:producao
@@ -26,11 +26,12 @@ name: Imagens Docker
 #   EASYPANEL_DEPLOY_HOOK_WHATSAPP ou EASYPANEL_DEPLOY_WHATSAPP_URL
 # Sem o segredo, o deploy daquele serviço só avisa (nunca quebra o workflow).
 
+# Chamado pelo test.yml (job `imagens`, depois dos testes, só em push em
+# producao). Não dá pra usar `workflow_run` aqui: esse gatilho só funciona
+# com o arquivo na branch PADRÃO do repositório (main), e a produção do CRM
+# é a branch `producao`.
 on:
-  workflow_run:
-    workflows: ['Testes']
-    branches: [producao]
-    types: [completed]
+  workflow_call: {}
   workflow_dispatch: {}
 
 # Um deploy por vez; um push novo espera o anterior terminar (nunca corta um
@@ -42,8 +43,6 @@ concurrency:
 jobs:
   build:
     name: Imagem ${{ matrix.service }}
-    # workflow_run dispara também quando os testes FALHAM — só segue no sucesso.
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -59,12 +58,8 @@ jobs:
           - service: whatsapp
             dockerfile: deploy/easypanel/Dockerfile.whatsapp
     steps:
-      # Em workflow_run o checkout padrão seria a branch default (main), não o
-      # commit testado — por isso o ref explícito.
-      - name: Checkout do commit testado
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -78,11 +73,9 @@ jobs:
 
       - name: Nome da imagem
         id: tags
-        env:
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           echo "image=ghcr.io/${GITHUB_REPOSITORY,,}-${{ matrix.service }}" >> "$GITHUB_OUTPUT"
-          echo "sha=${HEAD_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6
