@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import {
-  api, can, ApiError, canEditModule, CATALOG_CONDITIONS, CATALOG_CONDITION_CRITERIA,
+  api, can, ApiError, canEditModule, API_BASE, CATALOG_CONDITIONS, CATALOG_CONDITION_CRITERIA,
   type CatalogProduct, type CatalogPricingSettings, type CatalogImportItem, type CatalogCondition,
   type CatalogImportVariant, type CatalogPhotoSearchResult, type CatalogCategory, type CatalogAiSpecs,
   type CatalogTrustBadge, type CatalogStockNotification, type CatalogPaymentMethod, type CatalogProductReview,
@@ -12,7 +12,7 @@ import { requestChatExpand } from "@/lib/chatWidgetBus";
 import {
   Smartphone, Plus, X, Search, Trash2, Pencil, Sparkles, Settings2, Link2,
   Copy, ImagePlus, Check, AlertTriangle, Loader2, MessageCircle, Info, Calculator,
-  Tags, Tag, Lock, KeyRound, Package, ShieldCheck, Bell, Percent, ListChecks, CreditCard, Star, Wallet,
+  Tags, Tag, Lock, KeyRound, Package, ShieldCheck, Bell, Percent, ListChecks, CreditCard, Star, Wallet, Download,
   Wifi, Cpu, MapPin, Monitor, Camera, Video, MemoryStick,
 } from "lucide-react";
 
@@ -1668,6 +1668,15 @@ export default function VitrineAparelhos() {
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700 hover:bg-emerald-200 transition">
             <MessageCircle className="w-3.5 h-3.5" /> Copiar catálogo pro WhatsApp
           </button>
+        )}
+        {user?.role === "admin" && (
+          // Exportação pro ERP (04/10/2026): a Vitrine está migrando pro
+          // sheik-company-erp — este botão baixa o JSON que o ERP importa em
+          // Vitrine › Importar do CRM. Rota: routes/catalogExport.ts.
+          <a href={`${API_BASE}/catalog/export`} download data-testid="button-export-erp"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-indigo-100 text-indigo-700 hover:bg-indigo-200 transition">
+            <Download className="w-3.5 h-3.5" /> Exportar para o ERP
+          </a>
         )}
         {canManage && products.some(productNeedsMorePhotos) && (
           <button onClick={handleFetchMissingPhotos} disabled={fetchingMissingPhotos} data-testid="button-fetch-missing-photos"
