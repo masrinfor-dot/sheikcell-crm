@@ -3,6 +3,7 @@ import { db, appSettingsTable, tenantAiCredentialsTable, tenantErpIntegrationsTa
 import { eq } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
 import { encryptSecret } from "../lib/aiCredentialsCrypto";
+import { validErpBaseUrl } from "../lib/erpBaseUrl";
 import { decryptErpSecret, encryptErpSecret } from "../lib/erpCrypto";
 
 const router: IRouter = Router();
@@ -342,15 +343,6 @@ async function erpStatus(tenantId: number) {
   };
 }
 
-function validErpBaseUrl(raw: string): string | null {
-  try {
-    const u = new URL(raw.trim());
-    if (u.protocol !== "https:" && !(u.protocol === "http:" && ["localhost", "127.0.0.1"].includes(u.hostname))) return null;
-    return u.toString().replace(/\/+$/, "");
-  } catch {
-    return null;
-  }
-}
 
 router.get("/settings/erp", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;

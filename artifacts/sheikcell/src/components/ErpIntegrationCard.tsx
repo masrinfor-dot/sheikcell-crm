@@ -83,7 +83,9 @@ export default function ErpIntegrationCard() {
       <div>
         <label className="text-xs font-medium mb-1 block">Endereço da API do ERP</label>
         <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} data-testid="input-erp-base-url"
+          placeholder="https://api.sheikcell.com.br/api/v1"
           className="w-full px-3 py-2 rounded-xl border border-border text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/30" />
+        <p className="text-[10px] text-muted-foreground mt-1">É o endereço da API (api.…/api/v1), não o das telas do ERP.</p>
       </div>
       <div>
         <label className="text-xs font-medium mb-1 block">{status?.configured ? "Trocar chave" : "Colar a chave do ERP"}</label>
