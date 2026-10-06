@@ -1,6 +1,6 @@
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { db, conversationsTable, sectorsTable, tenantErpIntegrationsTable } from "@workspace/db";
-import { decryptSecret } from "./aiCredentialsCrypto";
+import { decryptErpSecret } from "./erpCrypto";
 import { normalizePhone, phoneVariants } from "./phone";
 import { sendOutboundText } from "./outbound";
 import { logger } from "./logger";
@@ -101,7 +101,7 @@ export async function runErpOsMessages(): Promise<void> {
     for (const row of rows) {
       let apiKey: string;
       try {
-        apiKey = decryptSecret({ ciphertext: row.encryptedApiKey, iv: row.iv, authTag: row.authTag, keyVersion: row.keyVersion });
+        apiKey = decryptErpSecret({ ciphertext: row.encryptedApiKey, iv: row.iv, authTag: row.authTag, keyVersion: row.keyVersion });
       } catch (err) {
         await db.update(tenantErpIntegrationsTable).set({ lastError: "Não foi possível ler a chave do ERP (cofre).", lastPollAt: new Date() })
           .where(eq(tenantErpIntegrationsTable.tenantId, row.tenantId));
