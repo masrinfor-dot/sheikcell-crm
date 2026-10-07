@@ -3,7 +3,7 @@ import {
   db, sectorsTable, tenantsTable, usersTable, routingRulesTable, conversationsTable,
   quickRepliesTable, whatsappSessionsTable, OPTIONAL_MODULES, type OptionalModule,
 } from "@workspace/db";
-import { eq, and, count } from "drizzle-orm";
+import { eq, and, count, sql } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
 import { assertWithinLimit } from "../lib/planLimits";
 
@@ -131,6 +131,7 @@ router.delete("/sectors/:id", requireAdmin, async (req, res): Promise<void> => {
     return;
   }
 
+  try {
   await db.transaction(async (tx) => {
     // Referências opcionais: desvincula (não apaga histórico nenhum).
     await tx.update(conversationsTable).set({ sectorId: null })
@@ -152,9 +153,30 @@ router.delete("/sectors/:id", requireAdmin, async (req, res): Promise<void> => {
     // faz sentido, por isso a regra em si é excluída junto.
     await tx.delete(routingRulesTable)
       .where(and(eq(routingRulesTable.sectorId, id), eq(routingRulesTable.tenantId, tenantId)));
+    // Qualquer outra tabela com chave estrangeira pra sectors (tarefas, TV
+    // Box, rotinas, contatos do CRM, setor padrão antigo do WhatsApp...) —
+    // lida do próprio banco pra nenhum módulo novo voltar a travar a
+    // exclusão (bug 07/10: "Failed query: delete from sectors"). Coluna
+    // opcional vira null; o id do setor é único no banco todo, então o
+    // UPDATE só alcança linhas desta loja.
+    const fks = await tx.execute<{ tbl: string; col: string; nullable: boolean }>(sql`
+      SELECT c.conrelid::regclass::text AS tbl, a.attname AS col, NOT a.attnotnull AS nullable
+      FROM pg_constraint c
+      JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+      WHERE c.contype = 'f' AND c.confrelid = 'sectors'::regclass AND array_length(c.conkey, 1) = 1
+    `);
+    for (const fk of fks.rows) {
+      if (!fk.nullable) continue;
+      await tx.execute(sql`UPDATE ${sql.raw(fk.tbl)} SET ${sql.identifier(fk.col)} = NULL WHERE ${sql.identifier(fk.col)} = ${id}`);
+    }
     await tx.delete(sectorsTable)
       .where(and(eq(sectorsTable.id, id), eq(sectorsTable.tenantId, tenantId)));
   });
+  } catch (err) {
+    req.log.error({ err, sectorId: id }, "Falha ao excluir setor");
+    res.status(409).json({ error: "Este setor ainda está em uso em outro cadastro e não pôde ser excluído. Desative-o (editar → Inativo) — ele some das opções sem perder histórico." });
+    return;
+  }
 
   res.json({ ok: true });
 });
