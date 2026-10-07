@@ -84,6 +84,10 @@ export const conversationsTable = pgTable("conversations", {
   // última loja conhecida, pra relatório de "não resolvidos" ainda conseguir
   // localizar a loja mesmo sem atendente atual.
   storeId: integer("store_id").references(() => storesTable.id),
+  // Loja que o ROBÔ escolheu pro cliente (07/10/2026) — diferente de storeId
+  // (loja de quem atendeu). Só etiqueta: todos os vendedores do setor
+  // continuam vendo a conversa.
+  targetStoreId: integer("target_store_id").references(() => storesTable.id, { onDelete: "set null" }),
   // Pesquisa de satisfação: aponta o attendance_log aguardando a nota do
   // cliente (setado quando a pesquisa foi enviada; limpo na primeira resposta).
   pendingSurveyLogId: integer("pending_survey_log_id"),

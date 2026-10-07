@@ -9,6 +9,7 @@ import {
   conversationsTable,
   messagesTable,
   sectorsTable,
+  storesTable,
   chatLabelsTable,
   tradeInEvaluationsTable,
   whatsappSessionsTable,
@@ -202,6 +203,73 @@ export function routeToSectorTool(sectors: { id: number; name: string }[]): BotT
   };
 }
 
+// ---------- direcionamento por loja (07/10/2026) ----------
+
+type StoreForBot = { id: number; name: string; city: string | null; address: string | null };
+type SectorForBot = { id: number; name: string; description: string | null };
+
+async function activeStores(tenantId: number): Promise<StoreForBot[]> {
+  return db.select({ id: storesTable.id, name: storesTable.name, city: storesTable.city, address: storesTable.address })
+    .from(storesTable).where(and(eq(storesTable.isActive, true), eq(storesTable.tenantId, tenantId)));
+}
+
+async function changeTargetStore(conversationId: number, storeId: number): Promise<void> {
+  const [conv] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, conversationId));
+  if (!conv || conv.targetStoreId === storeId) return;
+  const [updated] = await db.update(conversationsTable).set({ targetStoreId: storeId, updatedAt: new Date() })
+    .where(eq(conversationsTable.id, conversationId)).returning();
+  if (!updated) return;
+  broadcast("conversation_updated", updated, {
+    tenantId: updated.tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey,
+    isPotential: isPotentialConversation(updated), restrictedTo: await restrictedRecipients(updated),
+  });
+}
+
+/** Marca a loja que vai atender o cliente (etiqueta — todo o setor continua vendo). */
+export function routeToStoreTool(stores: StoreForBot[]): BotTool {
+  return {
+    name: "route_to_store",
+    description: "Marca qual loja física vai atender o cliente, assim que souber (pela cidade/bairro do cliente ou pela loja que ele pediu). Pode chamar de novo se mudar.",
+    parameters: {
+      type: "object",
+      properties: {
+        store: { type: "string", enum: stores.map((s) => s.name), description: "Nome exato da loja" },
+      },
+      required: ["store"],
+    },
+    execute: async (args, ctx) => {
+      const name = String(args["store"] ?? "");
+      const match = stores.find((s) => s.name.toLowerCase() === name.toLowerCase());
+      if (!match) return `Loja "${name}" não existe. Lojas válidas: ${stores.map((s) => s.name).join(", ")}.`;
+      await changeTargetStore(ctx.conversationId, match.id);
+      return `Conversa marcada para a loja "${match.name}".`;
+    },
+  };
+}
+
+/**
+ * Bloco do prompt com o "treinamento de direcionamento": lojas, setores e o
+ * roteiro escrito pelo admin. Puro (testável).
+ */
+export function buildRoutingPrompt(guide: string, stores: StoreForBot[], sectors: SectorForBot[]): string {
+  if (stores.length === 0 && sectors.length === 0 && !guide.trim()) return "";
+  const lines: string[] = ["", "", "DIRECIONAMENTO DO CLIENTE:"];
+  if (sectors.length > 0) {
+    lines.push("Setores (cada vendedor atende só o seu):");
+    for (const s of sectors) lines.push(`- ${s.name}${s.description ? `: ${s.description}` : ""}`);
+  }
+  if (stores.length > 0) {
+    lines.push("Lojas:");
+    for (const s of stores) lines.push(`- ${s.name}${[s.city, s.address].filter(Boolean).length ? ` (${[s.city, s.address].filter(Boolean).join(" — ")})` : ""}`);
+  }
+  if (guide.trim()) lines.push("Regras da loja para direcionar:", guide.trim());
+  lines.push(
+    "Como fazer: descubra, com perguntas simples e curtas (uma por vez, sem formulário), o que o cliente precisa e de qual cidade/bairro ele é ou qual loja prefere — só pergunte o que ainda não estiver claro na conversa.",
+    `Assim que souber o assunto, chame route_to_sector.${stores.length > 0 ? " Assim que souber a loja, chame route_to_store." : ""} Depois diga ao cliente, em uma frase, para qual setor${stores.length > 0 ? " e loja" : ""} ele foi encaminhado.`,
+  );
+  return lines.join("\n");
+}
+
 // ---------- etiquetas (ferramenta do robô) ----------
 
 // Pedido 16/09: "permite que o robô com IA direcione para setores de forma
@@ -347,9 +415,10 @@ function evaluateUsedDeviceTool(questionsConfig: TradeInQuestionsConfig): BotToo
 async function aiAnswer(tenantId: number, conversationId: number | null, settings: BotSettingsRow, question: string): Promise<string | null> {
   try {
     const sectors = conversationId != null
-      ? await db.select({ id: sectorsTable.id, name: sectorsTable.name })
+      ? await db.select({ id: sectorsTable.id, name: sectorsTable.name, description: sectorsTable.description })
           .from(sectorsTable).where(and(eq(sectorsTable.isActive, true), eq(sectorsTable.tenantId, tenantId)))
       : [];
+    const stores = conversationId != null ? await activeStores(tenantId) : [];
     const labels = conversationId != null
       ? await db.select({ name: chatLabelsTable.name })
           .from(chatLabelsTable).where(and(eq(chatLabelsTable.isActive, true), eq(chatLabelsTable.tenantId, tenantId)))
@@ -357,6 +426,7 @@ async function aiAnswer(tenantId: number, conversationId: number | null, setting
     const history = conversationId != null ? await buildConversationHistory(conversationId) : [];
     const tools: BotTool[] = [];
     if (sectors.length > 0) tools.push(routeToSectorTool(sectors));
+    if (stores.length > 0) tools.push(routeToStoreTool(stores));
     if (conversationId != null) tools.push(applyLabelTool(tenantId, labels));
     // Avaliação de usados por conversa (pedido 17/09) — só entra na lista de
     // ferramentas quando o admin ligou o interruptor (settings.tradeInEnabled)
@@ -373,7 +443,7 @@ async function aiAnswer(tenantId: number, conversationId: number | null, setting
     }
     const { replyText } = await runBotAgent({
       maxTokens: 300,
-      systemPrompt: `Você é ${settings.botName}, assistente virtual de uma loja de celulares no WhatsApp. Responda em português, curto e simpático. Responda SOMENTE com base nas informações abaixo. Se a resposta não estiver nas informações, diga que vai verificar com a equipe e que um atendente já vai falar com o cliente. Nunca invente preços, prazos ou promoções.\n\nINFORMAÇÕES DA LOJA:\n${settings.knowledgeBase || "(nenhuma informação cadastrada)"}${sectors.length > 0 ? `\n\nSe perceber, pela pergunta do cliente, que o assunto é de outro setor (diferente do setor atual da conversa), chame a ferramenta route_to_sector pra corrigir — só quando tiver razoável confiança.` : ""}${conversationId != null ? `\n\nSe o assunto da conversa já estiver razoavelmente claro, use a ferramenta apply_label pra etiquetar (reaproveitando uma etiqueta existente sempre que possível).` : ""}${tradeInAvailable ? `\n\nSe o cliente quiser avaliar, trocar ou vender um aparelho usado, você pode conduzir a avaliação direto na conversa (pergunte marca, modelo e o estado do aparelho, uma pergunta por vez, do seu jeito natural de sempre) e chamar a ferramenta evaluate_used_device quando tiver tudo, pra dar uma estimativa de valor.` : ""}${history.length > 0 ? `\n\nAs mensagens anteriores desta MESMA conversa estão no histórico abaixo — leia com atenção antes de responder. NUNCA repita uma pergunta que o cliente já respondeu ali, e não peça de novo uma informação que ele já deu. Se já houver informação suficiente pra encaminhar, encaminhe (via route_to_sector) em vez de continuar perguntando.` : ""}`,
+      systemPrompt: `Você é ${settings.botName}, assistente virtual de uma loja de celulares no WhatsApp. Responda em português, curto e simpático. Responda SOMENTE com base nas informações abaixo. Se a resposta não estiver nas informações, diga que vai verificar com a equipe e que um atendente já vai falar com o cliente. Nunca invente preços, prazos ou promoções.\n\nINFORMAÇÕES DA LOJA:\n${settings.knowledgeBase || "(nenhuma informação cadastrada)"}${conversationId != null ? buildRoutingPrompt(settings.routingGuide, stores, sectors) : ""}${sectors.length > 0 ? `\n\nSe perceber, pela pergunta do cliente, que o assunto é de outro setor (diferente do setor atual da conversa), chame a ferramenta route_to_sector pra corrigir — só quando tiver razoável confiança.` : ""}${conversationId != null ? `\n\nSe o assunto da conversa já estiver razoavelmente claro, use a ferramenta apply_label pra etiquetar (reaproveitando uma etiqueta existente sempre que possível).` : ""}${tradeInAvailable ? `\n\nSe o cliente quiser avaliar, trocar ou vender um aparelho usado, você pode conduzir a avaliação direto na conversa (pergunte marca, modelo e o estado do aparelho, uma pergunta por vez, do seu jeito natural de sempre) e chamar a ferramenta evaluate_used_device quando tiver tudo, pra dar uma estimativa de valor.` : ""}${history.length > 0 ? `\n\nAs mensagens anteriores desta MESMA conversa estão no histórico abaixo — leia com atenção antes de responder. NUNCA repita uma pergunta que o cliente já respondeu ali, e não peça de novo uma informação que ele já deu. Se já houver informação suficiente pra encaminhar, encaminhe (via route_to_sector) em vez de continuar perguntando.` : ""}`,
       history,
       userMessage: question,
       tools,
@@ -388,19 +458,21 @@ async function aiAnswer(tenantId: number, conversationId: number | null, setting
 
 export async function aiClassify(tenantId: number, conversationId: number | null, settings: BotSettingsRow, answers: string[]): Promise<{ summary: string }> {
   // Multi-loja: só considera os setores e etiquetas DESTA loja na triagem.
-  const sectors = await db.select({ id: sectorsTable.id, name: sectorsTable.name })
+  const sectors = await db.select({ id: sectorsTable.id, name: sectorsTable.name, description: sectorsTable.description })
     .from(sectorsTable).where(and(eq(sectorsTable.isActive, true), eq(sectorsTable.tenantId, tenantId)));
+  const stores = await activeStores(tenantId);
   const labels = await db.select({ name: chatLabelsTable.name })
     .from(chatLabelsTable).where(and(eq(chatLabelsTable.isActive, true), eq(chatLabelsTable.tenantId, tenantId)));
   const qs = toEngineSettings(settings).questions;
   const qa = qs.map((q, i) => `P: ${q.question}\nR: ${answers[i] ?? "(sem resposta)"}`).join("\n");
   const tools: BotTool[] = [];
   if (conversationId != null && sectors.length > 0) tools.push(routeToSectorTool(sectors));
+  if (conversationId != null && stores.length > 0) tools.push(routeToStoreTool(stores));
   if (conversationId != null) tools.push(applyLabelTool(tenantId, labels));
   try {
     const { replyText } = await runBotAgent({
       maxTokens: 200,
-      systemPrompt: `Você faz a triagem de clientes de uma loja de celulares. Leia as respostas do cliente e: 1) responda com um resumo de 1-2 frases (em português) do que o cliente quer, pro atendente humano ler rápido; 2) se conseguir identificar com razoável confiança qual setor deve atender, chame a ferramenta route_to_sector; 3) se o assunto já estiver claro, chame também apply_label pra etiquetar (reaproveitando uma etiqueta existente sempre que possível). Setores disponíveis: ${sectors.map((s) => s.name).join(", ") || "(nenhum)"}.`,
+      systemPrompt: `Você faz a triagem de clientes de uma loja de celulares. Leia as respostas do cliente e: 1) responda com um resumo de 1-2 frases (em português) do que o cliente quer, pro atendente humano ler rápido; 2) se conseguir identificar com razoável confiança qual setor deve atender, chame a ferramenta route_to_sector; 3) se o assunto já estiver claro, chame também apply_label pra etiquetar (reaproveitando uma etiqueta existente sempre que possível). Setores disponíveis: ${sectors.map((s) => s.name).join(", ") || "(nenhum)"}.${stores.length > 0 ? ` Se as respostas indicarem a cidade/bairro ou a loja do cliente, chame também route_to_store.` : ""}${buildRoutingPrompt(settings.routingGuide, stores, sectors)}`,
       userMessage: qa,
       tools,
       ctx: { tenantId, conversationId: conversationId ?? 0 },

@@ -72,6 +72,8 @@ router.put("/bot/settings", requireModuleAccess("robo"), async (req, res): Promi
     // sem aviso nenhum pro admin — folga generosa pra caber crescimento
     // futuro sem precisar mexer aqui de novo.
     knowledgeBase: String(body["knowledgeBase"] ?? existing.knowledgeBase).trim().slice(0, 30000),
+    // Treinamento de direcionamento (07/10/2026) — ver buildRoutingPrompt.
+    routingGuide: String(body["routingGuide"] ?? existing.routingGuide).trim().slice(0, 8000),
     urgencyWords: str("urgencyWords", existing.urgencyWords, 500),
     questions,
     mode,

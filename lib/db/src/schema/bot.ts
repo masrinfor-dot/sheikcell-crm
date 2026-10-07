@@ -10,6 +10,10 @@ export const botSettingsTable = pgTable("bot_settings", {
   // [{ question: string, options?: string[] }]
   questions: jsonb("questions").notNull(),
   knowledgeBase: text("knowledge_base").notNull().default(""),
+  // Treinamento de direcionamento (07/10/2026): como o robô escolhe a loja
+  // e o setor de cada cliente, com perguntas simples. Vai no prompt junto
+  // com a lista de lojas (cidade/endereço) e setores (descrição).
+  routingGuide: text("routing_guide").notNull().default(""),
   doneMessage: text("done_message").notNull().default("Perfeito, obrigado! 🙌 Já vou te passar para um de nossos vendedores. Enquanto isso, pode me perguntar qualquer dúvida."),
   handoffMessage: text("handoff_message").notNull().default("Certo! Um atendente vai falar com você já já. 😉"),
   // always = sempre até um vendedor assumir; off_hours = só fora do expediente

@@ -287,6 +287,22 @@ export default function Robo() {
               <textarea value={s.knowledgeBase} onChange={(e) => set({ knowledgeBase: e.target.value })} rows={6}
                 placeholder={"Ex.:\nHorário: seg a sáb, 9h às 18h\nEndereço: Rua X, 123 — Centro\nAceitamos cartão, Pix e dinheiro\nGarantia de 90 dias nos consertos"} className={INPUT} />
             </div>
+            {/* Treinamento de direcionamento (07/10/2026): ensina o robô a
+                levar cada cliente pra loja e o setor certos. As lojas
+                (com cidade/endereço) e os setores (com descrição) já vão
+                sozinhos pro robô — aqui entram as regras da casa. */}
+            <div>
+              <label className="font-bold text-sm">Treinamento: direcionar para loja e setor</label>
+              <p className="text-[10px] text-muted-foreground">
+                O robô já conhece as lojas (nome, cidade e endereço cadastrados em Administração › Lojas da Rede) e os setores (nome e descrição).
+                Escreva aqui as regras da casa: de qual cidade/bairro cada loja atende, o que só uma loja faz, quando mandar para cada setor.
+                Ele faz perguntas simples, marca a loja na conversa e manda para o setor certo.
+              </p>
+              <textarea value={s.routingGuide ?? ""} onChange={(e) => set({ routingGuide: e.target.value })} rows={7} data-testid="textarea-routing-guide"
+                placeholder={"Ex.:\nCliente de Padre Paraíso → loja PADRE PARAISO -02\nCliente de São Jacinto ou Teófilo Otoni → loja SÃO JACINTO - 04\nConserto, tela, bateria, não liga → setor Assistência Técnica\nComprar parcelado no carnê → setor CREDIARIO\nCompra em quantidade / lojista → setor DISTRIBUIDORA - ATACADO\nSe o cliente não souber a cidade, pergunte o bairro ou qual loja fica mais perto"}
+                className={INPUT} />
+              <p className="text-[10px] text-muted-foreground mt-1">Para o robô conversar só com IA (sem perguntas fixas), deixe a lista de perguntas de filtragem vazia.</p>
+            </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="font-semibold">Máx. respostas de IA por conversa</label>
