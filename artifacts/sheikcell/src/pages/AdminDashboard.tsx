@@ -2682,7 +2682,13 @@ export default function AdminDashboard() {
                             senão editar o cadastro trocaria o setor sem querer
                             (mostrado com "(inativo)" pra ficar claro). O primeiro
                             marcado vira o setor primário (roteamento/exibição). */}
-                        <label className="text-xs font-medium mb-1 block">Setor(es)</label>
+                        {/* Vendedor fica em UM setor só (pedido 07/10/2026) —
+                            marcar outro troca; supervisor e vendedor chefe
+                            continuam podendo ter vários. */}
+                        <label className="text-xs font-medium mb-1 block">{userForm.role === "vendedor" ? "Setor (vendedor atende um só)" : "Setor(es)"}</label>
+                        {userForm.role === "vendedor" && userForm.sectorIds.length > 1 && (
+                          <p className="text-[11px] text-amber-700 mb-1">Este vendedor está em {userForm.sectorIds.length} setores — deixe só um para salvar.</p>
+                        )}
                         <div className="flex flex-wrap gap-1.5">
                           {activeSectors.map((s) => {
                             const checked = userForm.sectorIds.includes(s.id);
@@ -2694,7 +2700,7 @@ export default function AdminDashboard() {
                                   onChange={(e) => setUserForm({
                                     ...userForm,
                                     sectorIds: e.target.checked
-                                      ? [...userForm.sectorIds, s.id]
+                                      ? (userForm.role === "vendedor" ? [s.id] : [...userForm.sectorIds, s.id])
                                       : userForm.sectorIds.filter((sid) => sid !== s.id),
                                   })} />
                                 {s.name}

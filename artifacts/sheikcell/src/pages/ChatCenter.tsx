@@ -313,7 +313,7 @@ function waitingMinutes(c: Conversation, now: number): number | null {
 }
 
 // ─── Conversation list item ─────────────────────────────────────────────────
-function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, sessionColor, sessionIcon, overdue, waitingMin, currentUserId }: { conv: Conversation; active: boolean; onClick: () => void; onTogglePin: () => void; sessionBadge?: string | null; sessionColor?: string | null; sessionIcon?: string | null; overdue?: boolean; waitingMin?: number | null; currentUserId?: number }) {
+function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, sessionColor, sessionIcon, overdue, waitingMin, currentUserId, targetStoreName }: { conv: Conversation; active: boolean; onClick: () => void; onTogglePin: () => void; sessionBadge?: string | null; sessionColor?: string | null; sessionIcon?: string | null; overdue?: boolean; waitingMin?: number | null; currentUserId?: number; targetStoreName?: string | null }) {
   const prio = conv.priority ? PRIORITY_META[conv.priority] : null;
   const isGroup = isGroupConv(conv);
   const kind = conv.isCommunity ? "Comunidade" : isGroup ? "Grupo" : null;
@@ -367,6 +367,11 @@ function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, sessionCol
           </div>
         </div>
         <div className="flex gap-1 mt-1.5 flex-wrap">
+          {targetStoreName && (
+            <span className="shk-chip shk-chip-neutral" title="Loja escolhida pelo robô" data-testid={`chip-target-store-${conv.id}`}>
+              <MapPin className="w-3 h-3" />{targetStoreName}
+            </span>
+          )}
           {kind && (
             <span className={`shk-chip ${conv.isCommunity ? "shk-chip-community" : "shk-chip-group"}`}>
               <Users className="w-3 h-3" />{kind}
@@ -1493,6 +1498,11 @@ export default function ChatCenter({
   const [schedForm, setSchedForm] = useState<{ kind: "mensagem" | "retorno"; content: string; sendAt: string }>({ kind: "mensagem", content: "", sendAt: "" });
   const [schedSaving, setSchedSaving] = useState(false);
   const [waSessions, setWaSessions] = useState<WaSessionInfo[]>([]);
+  // Nome das lojas pra etiqueta "loja escolhida pelo robô" (07/10/2026).
+  const [storeNames, setStoreNames] = useState<Record<number, string>>({});
+  useEffect(() => {
+    api.stores.list(true).then((list) => setStoreNames(Object.fromEntries(list.map((st) => [st.id, st.name])))).catch(() => {});
+  }, []);
   const [newForm, setNewForm] = useState({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "", sessionKey: "default" });
   // Uso atual da trava anti-disparo em massa (Atendimento ativo), consultado
   // ao abrir o modal de Nova Conversa — mostra o risco ANTES de tentar criar.
@@ -4213,6 +4223,7 @@ export default function ChatCenter({
                     overdue={isOverdue(conv)}
                     waitingMin={isGroupConv(conv) && !isOverdue(conv) ? null : waitingMinutes(conv, nowTick)}
                     currentUserId={user?.id}
+                    targetStoreName={conv.targetStoreId ? storeNames[conv.targetStoreId] ?? null : null}
                     sessionBadge={
                       // Só etiqueta quando há mais de um número de atendimento
                       // pareado (ou a conversa vem de uma conexão secundária).
@@ -4370,6 +4381,11 @@ export default function ChatCenter({
                     title="Protocolo deste atendimento, gerado desde o início"
                   >
                     #{activeConv.id}
+                  </span>
+                )}
+                {activeConv.targetStoreId && storeNames[activeConv.targetStoreId] && (
+                  <span className="shk-chip shk-chip-neutral" title="Loja escolhida pelo robô" data-testid="chip-active-target-store">
+                    <MapPin className="w-3 h-3" />{storeNames[activeConv.targetStoreId]}
                   </span>
                 )}
                 {activeConv.origin === "fila" && (

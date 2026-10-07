@@ -13,6 +13,8 @@ import { assertWithinLimit, getLimitsAndUsage, type LimitField } from "../lib/pl
 
 const router: IRouter = Router();
 
+const VENDEDOR_UM_SETOR = "Vendedor fica em um setor só. Escolha apenas um (supervisor e vendedor chefe podem ter vários).";
+
 // Dashboard summary
 // ─── Quem está online + horários de acesso ──────────────────────────────────
 router.get("/admin/team-status", requireAdminOrSupervisor, async (req, res): Promise<void> => {
@@ -506,6 +508,9 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
     ? await sanitizeSectorIds(sectorIds, tenantId)
     : (sectorId != null ? [sectorId] : []);
   if (resolvedSectorIds === null) { res.status(400).json({ error: "Setor inválido" }); return; }
+  if (resolvedRole === "vendedor" && resolvedSectorIds.length > 1) {
+    res.status(400).json({ error: VENDEDOR_UM_SETOR }); return;
+  }
 
   // Vendedores must be assigned to a real sector (da própria loja)
   if (resolvedRole === "vendedor" && resolvedSectorIds.length === 0) {
@@ -610,6 +615,18 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
     }
     updateData.sectorId = sectorId;
     updateData.sectorIds = sectorId != null ? [sectorId] : [];
+  }
+  // Vendedor fica em UM setor só (pedido 07/10/2026: "cada vendedor vai
+  // ficar exclusivamente com um setor"). Vale ao salvar — quem já tinha
+  // vários continua igual até ser editado.
+  if (Array.isArray(updateData.sectorIds) && (updateData.sectorIds as number[]).length > 1) {
+    let effRole = updateData.role as string | undefined;
+    if (!effRole) {
+      const [cur] = await db.select({ role: usersTable.role }).from(usersTable)
+        .where(and(eq(usersTable.id, id), eq(usersTable.tenantId, tenantId))).limit(1);
+      effRole = cur?.role;
+    }
+    if (effRole === "vendedor") { res.status(400).json({ error: VENDEDOR_UM_SETOR }); return; }
   }
   if (adminAccess !== undefined) updateData.adminAccess = sanitizeAdminAccess(adminAccess);
   if (moduleAccess !== undefined) {

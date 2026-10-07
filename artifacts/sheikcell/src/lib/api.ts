@@ -780,7 +780,7 @@ export type BotQuestion = { question: string; options?: string[] };
 
 export type BotSettings = {
   id: number; enabled: boolean; botName: string; greeting: string;
-  questions: BotQuestion[]; knowledgeBase: string;
+  questions: BotQuestion[]; knowledgeBase: string; routingGuide: string;
   doneMessage: string; handoffMessage: string;
   mode: "always" | "off_hours"; hoursStart: string; hoursEnd: string;
   urgencyWords: string; maxPerConversation: number; maxPerDay: number;
@@ -1712,6 +1712,8 @@ export type TaskReportBucket = {
 export type Conversation = {
   id: number;
   phone: string;
+  // Loja escolhida pelo robô (07/10/2026) — só etiqueta.
+  targetStoreId?: number | null;
   name: string;
   avatarUrl: string | null;
   channel: string;

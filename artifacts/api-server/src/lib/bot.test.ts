@@ -76,3 +76,19 @@ test("route_to_sector pra conversa inexistente não lança", async () => {
   const result = await tool.execute({ sector: "Vendas" }, { tenantId, conversationId: 999999999 });
   assert.equal(typeof result, "string");
 });
+
+test("robô: treinamento de direcionamento lista lojas, setores e regras", async () => {
+  const { buildRoutingPrompt } = await import("./bot");
+  assert.equal(buildRoutingPrompt("", [], []), "");
+  const p = buildRoutingPrompt(
+    "Cliente de Padre Paraíso → loja PP",
+    [{ id: 2, name: "PADRE PARAISO -02", city: "Padre Paraíso", address: null }],
+    [{ id: 3, name: "Assistência Técnica", description: "Reparos" }, { id: 7, name: "CREDIARIO", description: null }],
+  );
+  assert.match(p, /PADRE PARAISO -02 \(Padre Paraíso\)/);
+  assert.match(p, /- Assistência Técnica: Reparos/);
+  assert.match(p, /- CREDIARIO\n/);
+  assert.match(p, /Cliente de Padre Paraíso → loja PP/);
+  assert.match(p, /route_to_store/);
+  assert.doesNotMatch(buildRoutingPrompt("", [], [{ id: 1, name: "X", description: null }]), /route_to_store/);
+});
