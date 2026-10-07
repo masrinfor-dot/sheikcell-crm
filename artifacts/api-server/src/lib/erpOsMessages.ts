@@ -33,11 +33,11 @@ export function erpUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/, "")}${path}`;
 }
 
-async function erpFetch(baseUrl: string, apiKey: string, path: string, init?: RequestInit) {
+export async function erpFetch(baseUrl: string, apiKey: string, path: string, init?: RequestInit, timeoutMs = FETCH_TIMEOUT_MS) {
   const res = await fetch(erpUrl(baseUrl, path), {
     ...init,
     headers: { "Content-Type": "application/json", "X-Api-Key": apiKey, ...(init?.headers ?? {}) },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");

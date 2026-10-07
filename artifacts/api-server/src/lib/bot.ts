@@ -14,7 +14,8 @@ import {
   tradeInEvaluationsTable,
   whatsappSessionsTable,
 } from "@workspace/db";
-import { botStep, type BotSettingsShape, type BotQuestion } from "./botEngine";
+import { botStep, wantsHumanOrUrgent, type BotSettingsShape, type BotQuestion } from "./botEngine";
+import { detectOsStatusQuestion, formatOsStatusReply, hasErpIntegration, lookupOsStatus } from "./erpOsStatus";
 import { sendOutboundText } from "./outbound";
 import { broadcast } from "./sseEmitter";
 import { isPotentialConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES } from "./conversationScope";
@@ -410,6 +411,85 @@ function evaluateUsedDeviceTool(questionsConfig: TradeInQuestionsConfig): BotToo
   };
 }
 
+// ---------- situação da OS no ERP (07/10/2026) ----------
+
+const ASSIST_SECTOR_NAME = "Assistência Técnica";
+
+/** Nota interna na conversa (o vendedor vê, o cliente não recebe). */
+async function postSystemNote(conv: Conv, content: string, senderName: string): Promise<void> {
+  const [sysMsg] = await db.insert(messagesTable).values({
+    tenantId: conv.tenantId,
+    conversationId: conv.id,
+    content,
+    direction: "outbound",
+    type: "system",
+    status: "sent",
+    senderName,
+  }).returning();
+  broadcast("message", { conversationId: conv.id, message: sysMsg },
+    { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+}
+
+/** Leva a conversa para o setor da assistência, se a loja tiver um ativo (não cria). */
+async function routeToAssistSector(conv: Conv): Promise<void> {
+  const [sector] = await db.select({ id: sectorsTable.id }).from(sectorsTable)
+    .where(and(eq(sectorsTable.tenantId, conv.tenantId), eq(sectorsTable.name, ASSIST_SECTOR_NAME), eq(sectorsTable.isActive, true)))
+    .limit(1);
+  if (sector) await changeSector(conv.id, sector.id);
+}
+
+/**
+ * Cliente perguntou da OS/conserto ("Quero falar sobre a OS LJ01-2026-0004",
+ * "meu celular já ficou pronto?"): consulta o ERP com o WhatsApp de quem
+ * escreveu e responde a situação real, sem gastar IA. true = respondeu;
+ * false = não era pergunta de OS, não achou OS no número do cliente ou o ERP
+ * não respondeu — aí o robô segue o fluxo de sempre (encaminhar ao humano).
+ */
+async function tryAnswerOsStatus(conv: Conv, text: string, settings: BotSettingsRow): Promise<boolean> {
+  const intent = detectOsStatusQuestion(text);
+  if (!intent || !conv.phone) return false;
+  const lookup = await lookupOsStatus(conv.tenantId, conv.phone, intent.number);
+  if (lookup.kind !== "ok") return false;
+  const reply = formatOsStatusReply(lookup.answer, lookup.askedNumberMissing);
+  if (!reply) return false;
+  if (settings.typingDelaySeconds > 0) await sleep(settings.typingDelaySeconds * 1000);
+  const sent = await sendOutboundText(conv.id, reply, settings.botName);
+  if (!sent) return false;
+  try {
+    const summary = lookup.answer.orders.map((o) => `${o.number ?? "?"} (${o.statusLabel})`).join(", ");
+    await postSystemNote(conv, `🤖 Robô informou ao cliente a situação da OS consultando o ERP: ${summary}.`, settings.botName);
+    await routeToAssistSector(conv);
+  } catch (err) {
+    logger.warn({ err, conversationId: conv.id }, "Robô: falha ao anotar a consulta de OS");
+  }
+  return true;
+}
+
+/** Ferramenta da IA: mesma consulta, para perguntas que a regra não reconhece. */
+export function serviceOrderStatusTool(): BotTool {
+  return {
+    name: "check_service_order_status",
+    description: "Consulta no sistema da loja (ERP) a situação real da ordem de serviço (OS) / conserto do cliente desta conversa, pelo número de WhatsApp dele. Use quando o cliente perguntar do conserto, da OS, se o aparelho já ficou pronto, previsão de entrega ou valor para retirar. Nunca invente situação ou prazo: use só o que esta ferramenta devolver.",
+    parameters: {
+      type: "object",
+      properties: {
+        os_number: { type: "string", description: "Número da OS se o cliente informou (ex.: LJ01-2026-000004). Deixe vazio para listar as OS em aberto do cliente." },
+      },
+    },
+    execute: async (args, ctx) => {
+      const [conv] = await db.select({ phone: conversationsTable.phone }).from(conversationsTable)
+        .where(eq(conversationsTable.id, ctx.conversationId)).limit(1);
+      if (!conv?.phone) return "Não há número de WhatsApp nesta conversa para consultar. Diga que um atendente vai verificar.";
+      const raw = typeof args["os_number"] === "string" ? args["os_number"].trim().slice(0, 40) : "";
+      const lookup = await lookupOsStatus(ctx.tenantId, conv.phone, raw || null);
+      if (lookup.kind !== "ok") return "O sistema da loja não respondeu agora. Diga ao cliente que um atendente vai verificar a OS e já retorna — não invente situação nem prazo.";
+      const reply = formatOsStatusReply(lookup.answer, lookup.askedNumberMissing);
+      if (!reply) return "Nenhuma OS encontrada para o número de WhatsApp deste cliente (pode estar cadastrada em outro telefone). Diga que um atendente vai verificar e encaminhe para o setor de assistência técnica — não invente situação.";
+      return `Situação encontrada no sistema (repasse ao cliente com estas informações, sem inventar nada):\n${reply}`;
+    },
+  };
+}
+
 // ---------- IA ----------
 
 async function aiAnswer(tenantId: number, conversationId: number | null, settings: BotSettingsRow, question: string): Promise<string | null> {
@@ -428,6 +508,9 @@ async function aiAnswer(tenantId: number, conversationId: number | null, setting
     if (sectors.length > 0) tools.push(routeToSectorTool(sectors));
     if (stores.length > 0) tools.push(routeToStoreTool(stores));
     if (conversationId != null) tools.push(applyLabelTool(tenantId, labels));
+    // Situação da OS no ERP (07/10/2026) — só com a integração cadastrada.
+    const osStatusAvailable = conversationId != null && (await hasErpIntegration(tenantId));
+    if (osStatusAvailable) tools.push(serviceOrderStatusTool());
     // Avaliação de usados por conversa (pedido 17/09) — só entra na lista de
     // ferramentas quando o admin ligou o interruptor (settings.tradeInEnabled)
     // e existe uma conversa de verdade pra registrar o lead.
@@ -443,7 +526,7 @@ async function aiAnswer(tenantId: number, conversationId: number | null, setting
     }
     const { replyText } = await runBotAgent({
       maxTokens: 300,
-      systemPrompt: `Você é ${settings.botName}, assistente virtual de uma loja de celulares no WhatsApp. Responda em português, curto e simpático. Responda SOMENTE com base nas informações abaixo. Se a resposta não estiver nas informações, diga que vai verificar com a equipe e que um atendente já vai falar com o cliente. Nunca invente preços, prazos ou promoções.\n\nINFORMAÇÕES DA LOJA:\n${settings.knowledgeBase || "(nenhuma informação cadastrada)"}${conversationId != null ? buildRoutingPrompt(settings.routingGuide, stores, sectors) : ""}${sectors.length > 0 ? `\n\nSe perceber, pela pergunta do cliente, que o assunto é de outro setor (diferente do setor atual da conversa), chame a ferramenta route_to_sector pra corrigir — só quando tiver razoável confiança.` : ""}${conversationId != null ? `\n\nSe o assunto da conversa já estiver razoavelmente claro, use a ferramenta apply_label pra etiquetar (reaproveitando uma etiqueta existente sempre que possível).` : ""}${tradeInAvailable ? `\n\nSe o cliente quiser avaliar, trocar ou vender um aparelho usado, você pode conduzir a avaliação direto na conversa (pergunte marca, modelo e o estado do aparelho, uma pergunta por vez, do seu jeito natural de sempre) e chamar a ferramenta evaluate_used_device quando tiver tudo, pra dar uma estimativa de valor.` : ""}${history.length > 0 ? `\n\nAs mensagens anteriores desta MESMA conversa estão no histórico abaixo — leia com atenção antes de responder. NUNCA repita uma pergunta que o cliente já respondeu ali, e não peça de novo uma informação que ele já deu. Se já houver informação suficiente pra encaminhar, encaminhe (via route_to_sector) em vez de continuar perguntando.` : ""}`,
+      systemPrompt: `Você é ${settings.botName}, assistente virtual de uma loja de celulares no WhatsApp. Responda em português, curto e simpático. Responda SOMENTE com base nas informações abaixo. Se a resposta não estiver nas informações, diga que vai verificar com a equipe e que um atendente já vai falar com o cliente. Nunca invente preços, prazos ou promoções.\n\nINFORMAÇÕES DA LOJA:\n${settings.knowledgeBase || "(nenhuma informação cadastrada)"}${conversationId != null ? buildRoutingPrompt(settings.routingGuide, stores, sectors) : ""}${sectors.length > 0 ? `\n\nSe perceber, pela pergunta do cliente, que o assunto é de outro setor (diferente do setor atual da conversa), chame a ferramenta route_to_sector pra corrigir — só quando tiver razoável confiança.` : ""}${conversationId != null ? `\n\nSe o assunto da conversa já estiver razoavelmente claro, use a ferramenta apply_label pra etiquetar (reaproveitando uma etiqueta existente sempre que possível).` : ""}${tradeInAvailable ? `\n\nSe o cliente quiser avaliar, trocar ou vender um aparelho usado, você pode conduzir a avaliação direto na conversa (pergunte marca, modelo e o estado do aparelho, uma pergunta por vez, do seu jeito natural de sempre) e chamar a ferramenta evaluate_used_device quando tiver tudo, pra dar uma estimativa de valor.` : ""}${osStatusAvailable ? `\n\nSe o cliente perguntar do conserto, da ordem de serviço (OS), se o aparelho já ficou pronto, previsão ou valor para retirar, chame check_service_order_status e responda só com o que ela devolver.` : ""}${history.length > 0 ? `\n\nAs mensagens anteriores desta MESMA conversa estão no histórico abaixo — leia com atenção antes de responder. NUNCA repita uma pergunta que o cliente já respondeu ali, e não peça de novo uma informação que ele já deu. Se já houver informação suficiente pra encaminhar, encaminhe (via route_to_sector) em vez de continuar perguntando.` : ""}`,
       history,
       userMessage: question,
       tools,
@@ -581,6 +664,10 @@ async function handle(conv: Conv, text: string): Promise<void> {
     if (!state) return;
   }
   if (!state.active) return;
+
+  // Pergunta da situação da OS/conserto: responde com o que está no ERP
+  // (pedido de atendente/urgência continua indo direto para humano).
+  if (!wantsHumanOrUrgent(text, settings.urgencyWords) && (await tryAnswerOsStatus(conv, text, settings))) return;
 
   const engineState = {
     stage: state.stage,
