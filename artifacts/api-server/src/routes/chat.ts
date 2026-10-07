@@ -21,6 +21,7 @@ import { isPotentialConversation, isRestrictedConversation, restrictedRecipients
 import { autoAssignOnNewPoolConversation, autoAssignOnVendorFreed } from "../lib/queueAutoAssign";
 import { ensureCrmContactForConversation, syncCrmAttendant } from "../lib/crmSync";
 import { sendOutboundText } from "../lib/outbound";
+import { instagramMediaKind, markSentExternalId, publicApiBaseFromRequest, sendInstagramMedia, sendInstagramText, type InstagramSendResult } from "../lib/instagram";
 import { normalizePhone, phoneVariants } from "../lib/phone";
 import { getSurveySettings, buildSurveyMessage } from "../lib/surveySettings";
 import { maybeGenerateKbSuggestion } from "../lib/knowledgeLearning";
@@ -1235,6 +1236,17 @@ router.post("/chat/conversations/:id/media", requireAuth, requireChatAccess(), r
 
   broadcast("message", { conversationId: id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
 
+  if (conv.channel === "instagram" && conv.phone) {
+    const phone = conv.phone;
+    const sent = await deliverInstagram(req, res, conv, msg, async () => {
+      const r = await sendInstagramMedia({ tenantId: conv.tenantId, phone }, savedFilename, instagramMediaKind(msgType), publicApiBaseFromRequest(req));
+      // Instagram não tem legenda em anexo: o texto vai numa mensagem à parte.
+      if (r.ok && caption?.trim()) await sendInstagramText({ tenantId: conv.tenantId, phone }, caption.trim());
+      return r;
+    });
+    if (sent) return;
+  }
+
   // Forward to WhatsApp bridge
   if (conv.channel === "whatsapp" && conv.phone) {
     const bridgeUrl = process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
@@ -1389,6 +1401,12 @@ router.post("/chat/conversations/:id/messages", requireAuth, requireChatAccess()
 
   broadcast("message", { conversationId: id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
 
+  if (conv.channel === "instagram" && conv.phone) {
+    const phone = conv.phone;
+    const text = showNameToCustomer ? `${senderName}:\n${content.trim()}` : content.trim();
+    if (await deliverInstagram(req, res, conv, msg, () => sendInstagramText({ tenantId: conv.tenantId, phone }, text))) return;
+  }
+
   // Forward to WhatsApp bridge (now uses Meta Cloud API) if this is a WhatsApp conversation
   if (conv.channel === "whatsapp" && conv.phone) {
     const bridgeUrl = process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
@@ -1442,6 +1460,26 @@ router.post("/chat/conversations/:id/messages", requireAuth, requireChatAccess()
 
   res.status(201).json(msg);
 });
+
+// Instagram Direct (07/10/2026): entrega pela API da Meta. Sucesso grava o id
+// da Meta (o eco do webhook não duplica); falha marca "failed" e devolve o
+// motivo em sendError (ex.: janela de 24h fechada) pra tela avisar.
+async function deliverInstagram(
+  req: Request, res: Response,
+  conv: typeof conversationsTable.$inferSelect,
+  msg: typeof messagesTable.$inferSelect & { replyTo: unknown },
+  send: () => Promise<InstagramSendResult>,
+): Promise<boolean> {
+  const r = await send();
+  if (r.ok) { await markSentExternalId(msg.id, r.messageId); return false; }
+  req.log.warn({ error: r.error, conversationId: conv.id }, "Instagram: envio falhou — mensagem salva mas não entregue");
+  const [failedRow] = await db.update(messagesTable).set({ status: "failed" }).where(eq(messagesTable.id, msg.id)).returning();
+  if (!failedRow) return false;
+  const failedMsg = { ...failedRow, replyTo: msg.replyTo, sendError: r.error };
+  broadcast("message_updated", { conversationId: conv.id, message: failedMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  res.status(201).json(failedMsg);
+  return true;
+}
 
 // ─── Encaminhar mensagem entre conversas ───────────────────────────────────
 // Estilo WhatsApp: copia uma mensagem (texto ou mídia) de uma conversa pra
@@ -1551,6 +1589,14 @@ router.post("/chat/messages/:id/forward", requireAuth, requireChatAccess(), asyn
   }).where(eq(conversationsTable.id, targetId));
 
   broadcast("message", { conversationId: targetId, message: msg }, { tenantId: targetConv.tenantId, sectorId: targetConv.sectorId, sessionKey: targetConv.sessionKey, isPotential: isPotentialConversation(targetConv), restrictedTo: await restrictedRecipients(targetConv) });
+
+  if (targetConv.channel === "instagram" && targetConv.phone) {
+    const phone = targetConv.phone;
+    const sent = await deliverInstagram(req, res, targetConv, msg, () => source.type === "text"
+      ? sendInstagramText({ tenantId: targetConv.tenantId, phone }, showNameToCustomer ? `${senderName}:\n${source.content}` : source.content)
+      : sendInstagramMedia({ tenantId: targetConv.tenantId, phone }, path.basename(newMediaUrl!), instagramMediaKind(source.type), publicApiBaseFromRequest(req)));
+    if (sent) return;
+  }
 
   if (targetConv.channel === "whatsapp" && targetConv.phone) {
     let delivered = true;

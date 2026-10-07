@@ -61,8 +61,16 @@ export async function sendOutboundText(conversationId: number, content: string, 
     { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
 
   let delivered = true;
-  if (conv.channel === "whatsapp") {
-    delivered = await sendRawWhatsAppText(conv.phone, conv.sessionKey, content);
+  if (conv.channel === "whatsapp" || conv.channel === "instagram") {
+    if (conv.channel === "instagram") {
+      // Import tardio: lib/instagram puxa o inbound (evita ciclo de import).
+      const ig = await import("./instagram");
+      const r = await ig.sendInstagramText({ tenantId: conv.tenantId, phone: conv.phone }, content);
+      delivered = r.ok;
+      if (r.ok && msg) await ig.markSentExternalId(msg.id, r.messageId);
+    } else {
+      delivered = await sendRawWhatsAppText(conv.phone, conv.sessionKey, content);
+    }
     if (!delivered && msg) {
       const [failedMsg] = await db.update(messagesTable).set({ status: "failed" })
         .where(eq(messagesTable.id, msg.id)).returning();

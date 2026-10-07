@@ -12,6 +12,7 @@ import whatsappProxyRouter from "./whatsapp";
 import internalChatRouter from "./internalChat";
 import tasksRouter from "./tasks";
 import settingsRouter from "./settings";
+import instagramRouter, { instagramPublicRouter } from "./instagram";
 import partnerLinksRouter from "./partnerLinks";
 import tradeInRouter, { tradeInPublicRouter } from "./tradeIn";
 import trainingsRouter, { enforceMandatoryTrainings } from "./trainings";
@@ -60,6 +61,7 @@ router.use(whatsappProxyRouter);
 router.use(internalChatRouter);
 router.use(tasksRouter);
 router.use(settingsRouter);
+router.use(instagramRouter);
 router.use(partnerLinksRouter);
 router.use(tradeInRouter);
 router.use(trainingsRouter);
@@ -89,6 +91,9 @@ router.use(catalogPublicRouter);
 // Sem requireAuth: avaliação de usados pública (cliente avalia o próprio
 // aparelho na vitrine, sem login) — ver tradeInPublicRouter em tradeIn.ts.
 router.use(tradeInPublicRouter);
+// Sem requireAuth: webhook do Instagram Direct (Meta) e mídia por link
+// assinado — ver routes/instagram.ts.
+router.use(instagramPublicRouter);
 router.use(geoRouter);
 
 export default router;

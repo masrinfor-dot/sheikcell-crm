@@ -3,6 +3,7 @@ import { api, type AiCredentialsStatus } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { Plug, KeyRound, Trash2, CheckCircle2 } from "lucide-react";
 import ErpIntegrationCard from "@/components/ErpIntegrationCard";
+import InstagramIntegrationCard from "@/components/InstagramIntegrationCard";
 
 // Chave da OpenAI própria da loja: quando configurada e ligada, substitui a
 // chave global da plataforma em todos os recursos de IA (robô, sugestão de
@@ -59,6 +60,8 @@ export default function ConfiguracoesIntegracoes() {
       </div>
 
       <ErpIntegrationCard />
+
+      <InstagramIntegrationCard />
 
       <div className="shk-card p-5 space-y-4">
         <div className="flex items-center gap-2 mb-1">
