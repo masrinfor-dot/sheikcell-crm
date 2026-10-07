@@ -2572,6 +2572,7 @@ export default function ChatCenter({
       setMessages((prev) => prev.some((m) => m.id === msg.id)
         ? prev.filter((m) => m.id !== optimistic.id)
         : prev.map((m) => m.id === optimistic.id ? msg : m));
+      if (msg.sendError) toast({ title: "Mensagem não entregue", description: msg.sendError, variant: "destructive" });
     } catch {
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
       setMsgText(text);
@@ -2625,6 +2626,7 @@ export default function ChatCenter({
       setMessages((prev) => prev.some((m) => m.id === msg.id)
         ? prev.filter((m) => m.id !== optimistic.id)
         : prev.map((m) => m.id === optimistic.id ? msg : m));
+      if (msg.sendError) toast({ title: `${file.name} não foi entregue`, description: msg.sendError, variant: "destructive" });
     } catch {
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
       toast({ title: `Erro ao enviar ${file.name}`, variant: "destructive" });
@@ -4360,7 +4362,7 @@ export default function ChatCenter({
                 })()}
                 <span className="inline-flex items-center gap-1">
                   {channelIcon(activeConv.channel, isGroupConv(activeConv))}
-                  <span className={activeConv.isCommunity || isGroupConv(activeConv) ? "" : "font-mono tabular-nums"}>{activeConv.isCommunity ? "Comunidade do WhatsApp" : isGroupConv(activeConv) ? "Grupo do WhatsApp" : activeConv.phone}</span>
+                  <span className={activeConv.isCommunity || isGroupConv(activeConv) ? "" : "font-mono tabular-nums"}>{activeConv.isCommunity ? "Comunidade do WhatsApp" : isGroupConv(activeConv) ? "Grupo do WhatsApp" : activeConv.channel === "instagram" ? "Instagram Direct" : activeConv.phone}</span>
                 </span>
                 {activeConv.assigneeId != null && (
                   <span

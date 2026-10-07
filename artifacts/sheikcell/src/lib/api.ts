@@ -1604,6 +1604,21 @@ export interface ErpIntegrationStatus {
   sentCount: number;
 }
 
+export interface InstagramIntegrationStatus {
+  configured: boolean;
+  enabled: boolean;
+  igUserId: string | null;
+  username: string | null;
+  tokenLast4: string | null;
+  tokenExpiresAt: string | null;
+  hasAppSecret: boolean;
+  sectorId: number | null;
+  lastWebhookAt: string | null;
+  lastError: string | null;
+  webhookUrl: string;
+  verifyToken: string | null;
+}
+
 export type AiCredentialsStatus = {
   hasKey: boolean;
   last4: string | null;
@@ -1820,6 +1835,8 @@ export type ChatMessage = {
   replyTo?: { id: number; senderName: string | null; content: string; type: string } | null;
   metadata?: MessageMetadata | null;
   forwarded?: boolean;
+  // Só na resposta do envio que falhou (ex.: Instagram fora da janela de 24h).
+  sendError?: string;
 };
 
 // "Marcar mensagem" no Atendimento (igual WhatsApp): compartilhado entre
@@ -3122,6 +3139,14 @@ export const api = {
       test: () =>
         req<{ ok: boolean; tenant: string; keyName: string | null; canSendOsMessages: boolean }>("/settings/erp/test", { method: "POST" }),
       remove: () => req<ErpIntegrationStatus>("/settings/erp", { method: "DELETE" }),
+    },
+    instagram: {
+      get: () => req<InstagramIntegrationStatus>("/settings/instagram"),
+      save: (data: { accessToken?: string; appSecret?: string; sectorId?: number | null; enabled?: boolean }) =>
+        req<InstagramIntegrationStatus>("/settings/instagram", { method: "PATCH", body: JSON.stringify(data) }),
+      test: () =>
+        req<{ ok: boolean; username: string | null; igUserId: string; webhookSubscribed: boolean; webhookError: string | null }>("/settings/instagram/test", { method: "POST" }),
+      remove: () => req<InstagramIntegrationStatus>("/settings/instagram", { method: "DELETE" }),
     },
   },
   tasks: {

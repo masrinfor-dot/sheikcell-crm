@@ -295,7 +295,7 @@ function mimeToExt(mime: string): string {
   return map[mime] ?? mime.split("/")[1] ?? "bin";
 }
 
-async function saveMedia(
+export async function saveMedia(
   base64: string,
   rawMime: string,
 ): Promise<string> {

@@ -355,5 +355,10 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("./pontoReminders").then((m) => m.sendPontoReminders()).catch(() => {});
   }, 10 * 60_000);
+  // Instagram Direct: o token vale 60 dias — renova os que vencem em menos
+  // de 15 (checa a cada 6h; só chama a Meta quando precisa).
+  setInterval(() => {
+    void import("./instagram").then((m) => m.refreshInstagramTokens()).catch(() => {});
+  }, 6 * 3600_000);
   logger.info("Agendador de mensagens iniciado (tick 30s)");
 }
