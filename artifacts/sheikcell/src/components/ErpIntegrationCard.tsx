@@ -53,6 +53,7 @@ export default function ErpIntegrationCard() {
       </div>
       <p className="text-xs text-muted-foreground">
         A cada mudança da OS no ERP (orçamento, aguardando peça, pronta, entregue…), o CRM manda a mensagem com peças, valores, laudo e o link de acompanhamento pelo WhatsApp e abre o atendimento no setor "Assistência Técnica".
+        Com a chave salva, o robô do WhatsApp também responde quando o cliente pergunta da OS ("meu celular já ficou pronto?"), consultando a situação no ERP pelo número de quem escreveu.
       </p>
 
       {status?.configured && (

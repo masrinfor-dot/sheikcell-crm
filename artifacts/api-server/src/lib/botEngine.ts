@@ -32,6 +32,11 @@ function norm(s: string): string {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
 
+/** Pedido de atendente ou palavra de urgência: o robô para e passa para humano. */
+export function wantsHumanOrUrgent(text: string, urgencyWords: string): boolean {
+  return isUrgent(text, urgencyWords) || wantsHuman(text);
+}
+
 function wantsHuman(text: string): boolean {
   const t = norm(text);
   return /\b(atendente|humano|pessoa de verdade|falar com alguem|falar com um vendedor|vendedor)\b/.test(t);
