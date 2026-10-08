@@ -15,6 +15,7 @@ import settingsRouter from "./settings";
 import instagramRouter, { instagramPublicRouter } from "./instagram";
 import partnerLinksRouter from "./partnerLinks";
 import tradeInRouter, { tradeInPublicRouter } from "./tradeIn";
+import tradeInExportRouter, { tradeInExportPublicRouter } from "./tradeInExport";
 import trainingsRouter, { enforceMandatoryTrainings } from "./trainings";
 import rhRouter from "./rh";
 import rhDpRouter, { enforceMandatoryClockIn } from "./rhDp";
@@ -63,6 +64,8 @@ router.use(tasksRouter);
 router.use(settingsRouter);
 router.use(instagramRouter);
 router.use(partnerLinksRouter);
+// Avaliação de usados → ERP (07/10/2026): exportar e desligar aqui.
+router.use(tradeInExportRouter);
 router.use(tradeInRouter);
 router.use(trainingsRouter);
 router.use(rhRouter);
@@ -91,6 +94,9 @@ router.use(catalogPublicRouter);
 // Sem requireAuth: avaliação de usados pública (cliente avalia o próprio
 // aparelho na vitrine, sem login) — ver tradeInPublicRouter em tradeIn.ts.
 router.use(tradeInPublicRouter);
+// Sem requireAuth: fotos das avaliações por link assinado (72h), só pro ERP
+// baixar na importação — ver routes/tradeInExport.ts.
+router.use(tradeInExportPublicRouter);
 // Sem requireAuth: webhook do Instagram Direct (Meta) e mídia por link
 // assinado — ver routes/instagram.ts.
 router.use(instagramPublicRouter);

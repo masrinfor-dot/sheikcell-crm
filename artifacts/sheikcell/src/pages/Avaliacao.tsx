@@ -3,6 +3,7 @@ import { api, canEditModule, type TradeInEvaluation, type TradeInMargins, type T
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import { AddressAutocompleteInput } from "@/components/AddressAutocompleteInput";
+import TradeInErpCard, { TradeInMovedNotice } from "@/components/TradeInErpCard";
 import {
   Smartphone, Sparkles, History, ChevronDown, ChevronLeft, RefreshCw, BadgeDollarSign, Settings, X,
   ListChecks, Plus, Trash2, ArrowUp, ArrowDown, ImagePlus, Printer, Wallet, TrendingUp, LayoutDashboard, Landmark,
@@ -69,6 +70,10 @@ export default function Avaliacao() {
   // admin ou supervisor (vendedor comum só fecha o negócio uma vez).
   const canManagePurchased = user?.role === "admin" || user?.role === "supervisor";
 
+  // Avaliação passada pro ERP (07/10/2026) — ver TradeInErpCard.
+  const [erpMove, setErpMove] = useState<{ moved: boolean; erpUrl: string }>({ moved: false, erpUrl: "" });
+  useEffect(() => { api.tradeIn.moved().then(setErpMove).catch(() => {}); }, []);
+  const isAdmin = user?.role === "admin";
   const [step, setStep] = useState(1);
   const [marginTable, setMarginTable] = useState<1 | 2 | 3>(2);
   const [margins, setMargins] = useState<TradeInMargins | null>(null);
@@ -691,6 +696,8 @@ ${photosHtml}
         </div>
       </div>
 
+      {isAdmin && <TradeInErpCard moved={erpMove.moved} erpUrl={erpMove.erpUrl} onChange={setErpMove} />}
+
       {/* Celulares comprados — só negócios já fechados */}
       {showPurchased && (
         <div className="shk-card p-4 space-y-3">
@@ -1028,7 +1035,9 @@ ${photosHtml}
         </div>
       )}
 
-      {!canEdit ? (
+      {erpMove.moved ? (
+        <TradeInMovedNotice erpUrl={erpMove.erpUrl} />
+      ) : !canEdit ? (
         <div className="shk-card p-6 text-center text-muted-foreground">
           <p className="text-sm font-semibold">Você só tem acesso de visualização à Avaliação de Usados.</p>
           <p className="text-xs mt-1">Peça ao administrador para liberar edição — enquanto isso, consulte o histórico acima.</p>

@@ -2502,6 +2502,10 @@ export const api = {
   },
   tradeIn: {
     list: () => req<TradeInEvaluation[]>("/trade-in"),
+    // Avaliação passada pro ERP (07/10/2026).
+    moved: () => req<{ moved: boolean; erpUrl: string }>("/trade-in/moved"),
+    setMoved: (data: { moved?: boolean; erpUrl?: string }) =>
+      req<{ moved: boolean; erpUrl: string }>("/trade-in/moved", { method: "PUT", body: JSON.stringify(data) }),
     basePrice: (data: { brand: string; model: string; memory?: string; color?: string; marginTable?: 1 | 2 | 3 }) =>
       req<{ device: string; marketPrice: string; basePrice: string }>(
         "/trade-in/base-price", { method: "POST", body: JSON.stringify(data) }),
