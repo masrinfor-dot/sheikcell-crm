@@ -1606,6 +1606,11 @@ export interface ErpIntegrationStatus {
   hrImportedAt: string | null;
   hrLastSyncAt: string | null;
   hrLastError: string | null;
+  hrMovedToErp: boolean;
+  hrMovedAt: string | null;
+  hrHistoryDoneAt: string | null;
+  hrHistoryCursors: Record<string, number>;
+  erpWebUrl: string | null;
 }
 
 export interface InstagramIntegrationStatus {
@@ -2774,7 +2779,8 @@ export const api = {
     // positions === null → loja sem cargo configurado, `stages` já vem pronto
     // (processo único, comportamento de sempre). positions !== null → o
     // candidato precisa escolher 1 vaga antes (ver publicPositionStages).
-    publicProcess: (token: string) => req<{ positions: { id: number; name: string }[] | null; stages: RhStage[] | null }>(`/rh/public/${token}`),
+    publicProcess: (token: string) => req<{ positions: { id: number; name: string }[] | null; stages: RhStage[] | null; movedTo?: string }>(`/rh/public/${token}`),
+    moved: () => req<{ moved: boolean; webUrl: string | null }>("/rh/moved"),
     publicPositionStages: (token: string, positionId: number) =>
       req<{ stages: RhStage[] }>(`/rh/public/${token}/position/${positionId}`),
     publicApply: (token: string, data: {
@@ -3140,7 +3146,7 @@ export const api = {
     },
     erp: {
       get: () => req<ErpIntegrationStatus>("/settings/erp"),
-      save: (data: { baseUrl?: string; apiKey?: string; osMessagesEnabled?: boolean; hrSyncEnabled?: boolean }) =>
+      save: (data: { baseUrl?: string; apiKey?: string; osMessagesEnabled?: boolean; hrSyncEnabled?: boolean; hrMovedToErp?: boolean }) =>
         req<ErpIntegrationStatus>("/settings/erp", { method: "PATCH", body: JSON.stringify(data) }),
       test: () =>
         req<{ ok: boolean; tenant: string; keyName: string | null; canSendOsMessages: boolean; canSyncHr: boolean }>("/settings/erp/test", { method: "POST" }),

@@ -9,6 +9,7 @@ import { requireModuleAccess } from "../lib/moduleAccess";
 import { normalizePhone } from "../lib/phone";
 import { getEmployee, CONTRACT_TYPES } from "./rhDp";
 import { DOCS_DIR } from "./documents";
+import { hrMovedInfo } from "../lib/hrMoved";
 import path from "path";
 import { randomUUID, randomBytes } from "crypto";
 import { existsSync } from "fs";
@@ -206,6 +207,10 @@ router.post("/rh-dp/public/:token/documents", async (req, res): Promise<void> =>
   if (!token) { res.status(404).json({ error: "Link inválido" }); return; }
   const [employee] = await db.select().from(employeesTable).where(eq(employeesTable.documentsUploadToken, token));
   if (!employee) { res.status(404).json({ error: "Link inválido ou expirado. Peça um novo link para o RH." }); return; }
+  if ((await hrMovedInfo(employee.tenantId)).moved) {
+    res.status(410).json({ error: "Este link não recebe mais documentos. Peça o novo link para o RH." });
+    return;
+  }
 
   const b = (req.body ?? {}) as Record<string, unknown>;
   const docTypeRaw = sanitizeDocType(b.docType);

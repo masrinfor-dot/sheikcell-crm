@@ -94,6 +94,31 @@ export default function ErpIntegrationCard() {
           {status.hrLastError && (
             <p className="text-[11px] text-red-700 flex items-start gap-1"><AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" /> {status.hrLastError}</p>
           )}
+          {status.hrSyncEnabled && (
+            <div className="pt-2 border-t border-emerald-200 space-y-1">
+              {status.hrMovedToErp ? (
+                <>
+                  <p className="font-semibold">RH no ERP desde {status.hrMovedAt ? new Date(status.hrMovedAt).toLocaleDateString("pt-BR") : "—"}.</p>
+                  <p className="text-[11px]">
+                    {status.hrHistoryDoneAt
+                      ? `Histórico todo enviado em ${new Date(status.hrHistoryDoneAt).toLocaleString("pt-BR")}.`
+                      : `Enviando o histórico: ${Object.values(status.hrHistoryCursors ?? {}).filter((v) => v === -1).length} de 13 partes prontas…`}
+                    {" "}As telas de RH daqui ficam só de consulta; o ponto pelo WhatsApp continua aqui.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <button type="button" disabled={busy || !status.erpWebUrl} data-testid="button-erp-hr-move"
+                    onClick={() => window.confirm("Mudar o RH para o ERP? Recrutamento, contratação, departamento pessoal e documentos passam a ser feitos só no ERP (aqui fica de consulta). O link \"Trabalhe conosco\" continua o mesmo e abre no ERP. O ponto pelo WhatsApp continua aqui.")
+                      && run(() => api.settings.erp.save({ hrMovedToErp: true }), "RH mudando para o ERP")}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-700 text-white text-[11px] font-semibold disabled:opacity-50">
+                    Mudar o RH para o ERP
+                  </button>
+                  {!status.erpWebUrl && <p className="text-[11px]">Clique em Testar primeiro (o ERP informa o endereço das telas).</p>}
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
 
