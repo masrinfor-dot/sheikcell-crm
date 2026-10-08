@@ -1602,6 +1602,10 @@ export interface ErpIntegrationStatus {
   lastPollAt: string | null;
   lastError: string | null;
   sentCount: number;
+  hrSyncEnabled: boolean;
+  hrImportedAt: string | null;
+  hrLastSyncAt: string | null;
+  hrLastError: string | null;
 }
 
 export interface InstagramIntegrationStatus {
@@ -3136,10 +3140,10 @@ export const api = {
     },
     erp: {
       get: () => req<ErpIntegrationStatus>("/settings/erp"),
-      save: (data: { baseUrl?: string; apiKey?: string; osMessagesEnabled?: boolean }) =>
+      save: (data: { baseUrl?: string; apiKey?: string; osMessagesEnabled?: boolean; hrSyncEnabled?: boolean }) =>
         req<ErpIntegrationStatus>("/settings/erp", { method: "PATCH", body: JSON.stringify(data) }),
       test: () =>
-        req<{ ok: boolean; tenant: string; keyName: string | null; canSendOsMessages: boolean }>("/settings/erp/test", { method: "POST" }),
+        req<{ ok: boolean; tenant: string; keyName: string | null; canSendOsMessages: boolean; canSyncHr: boolean }>("/settings/erp/test", { method: "POST" }),
       remove: () => req<ErpIntegrationStatus>("/settings/erp", { method: "DELETE" }),
     },
     instagram: {
