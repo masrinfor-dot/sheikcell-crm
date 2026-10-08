@@ -18,12 +18,16 @@ import {
   evalUsageByUser, evalLimitBlockMessage, type EvalLimitPeriod,
 } from "../lib/tradeInEvalLimit";
 import { MEDIA_DIR } from "../lib/whatsappInbound";
+import { blockWhenMovedToErp } from "./tradeInExport";
 import { writeFile, mkdir } from "fs/promises";
 import { randomUUID } from "crypto";
 import path from "path";
 
 const router: IRouter = Router();
 router.use("/trade-in", requireModuleAccess("avaliacao"));
+// Avaliação passada pro ERP (07/10/2026): avaliar e fechar compra param
+// aqui (o histórico continua visível e dá pra exportar de novo).
+router.use(["/trade-in/base-price", "/trade-in/evaluate", "/trade-in/:id/close", "/trade-in/:id/photos"], blockWhenMovedToErp);
 
 // Anti-abuso: 1 avaliação por vez por usuário + intervalo mínimo entre chamadas.
 const COOLDOWN_MS = 15000;
