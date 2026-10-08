@@ -276,6 +276,11 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("./erpOsMessages").then((m) => m.runErpOsMessages()).catch(() => {});
   }, 60_000);
+  // RH com o ERP (07/10/2026): batidas do WhatsApp, fechamento do mês e
+  // documentos da contratação vão para o ERP (dono do cadastro) a cada 5 min.
+  setInterval(() => {
+    void import("./erpHrSync").then((m) => m.runErpHrSync()).catch(() => {});
+  }, 5 * 60_000);
   // Lembrete da pesquisa de satisfação: granularidade de minutos basta.
   setInterval(() => { void sendSurveyReminders(); }, 60_000);
   // Preenche vendedores ociosos da fila do Central de Atendimento que os

@@ -18,6 +18,17 @@ export const tenantErpIntegrationsTable = pgTable("tenant_erp_integrations", {
   lastPollAt: timestamp("last_poll_at", { withTimezone: true }),
   lastError: text("last_error"),
   sentCount: integer("sent_count").notNull().default(0),
+  // RH com o ERP (07/10/2026): o ERP é o dono de todo o cadastro; o CRM só
+  // manda as batidas do WhatsApp, o fechamento do mês e os documentos da
+  // contratação que recolhe. Cursores = último id já enviado ao ERP.
+  hrSyncEnabled: boolean("hr_sync_enabled").notNull().default(false),
+  hrImportedAt: timestamp("hr_imported_at", { withTimezone: true }),
+  hrLastPullAt: timestamp("hr_last_pull_at", { withTimezone: true }),
+  hrLastPunchId: integer("hr_last_punch_id").notNull().default(0),
+  hrLastClosureId: integer("hr_last_closure_id").notNull().default(0),
+  hrLastDocumentId: integer("hr_last_document_id").notNull().default(0),
+  hrLastSyncAt: timestamp("hr_last_sync_at", { withTimezone: true }),
+  hrLastError: text("hr_last_error"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });

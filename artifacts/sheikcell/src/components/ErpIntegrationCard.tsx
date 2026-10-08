@@ -40,8 +40,11 @@ export default function ErpIntegrationCard() {
     const r = await api.settings.erp.test();
     toast({
       title: `Conectado ao ERP: ${r.tenant}`,
-      description: r.canSendOsMessages ? "A chave pode buscar as mensagens das OS." : "A chave NÃO tem o acesso \"Mensagens das OS\" — gere outra no ERP.",
-      variant: r.canSendOsMessages ? "default" : "destructive",
+      description: [
+        r.canSendOsMessages ? "Mensagens das OS: ok." : "Sem o acesso \"Mensagens das OS\".",
+        r.canSyncHr ? "RH: ok." : "Sem o acesso \"RH (colaboradores e ponto)\".",
+      ].join(" "),
+      variant: r.canSendOsMessages || r.canSyncHr ? "default" : "destructive",
     });
   }, "Teste concluído");
 
@@ -49,7 +52,7 @@ export default function ErpIntegrationCard() {
     <div className="shk-card p-5 space-y-4" data-testid="erp-integration-card">
       <div className="flex items-center gap-2">
         <Link2 className="w-4 h-4 text-primary" />
-        <h3 className="font-bold text-sm text-foreground">ERP Prumo — mensagens das OS</h3>
+        <h3 className="font-bold text-sm text-foreground">ERP Prumo — mensagens das OS e RH</h3>
       </div>
       <p className="text-xs text-muted-foreground">
         A cada mudança da OS no ERP (orçamento, aguardando peça, pronta, entregue…), o CRM manda a mensagem com peças, valores, laudo e o link de acompanhamento pelo WhatsApp e abre o atendimento no setor "Assistência Técnica".
@@ -76,6 +79,19 @@ export default function ErpIntegrationCard() {
           </p>
           {status.lastError && (
             <p className="text-[11px] text-red-700 flex items-start gap-1"><AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" /> {status.lastError}</p>
+          )}
+          <label className="flex items-center gap-2 font-medium pt-2 border-t border-emerald-200">
+            <input type="checkbox" checked={status.hrSyncEnabled} disabled={busy} data-testid="checkbox-erp-hr-sync"
+              onChange={(e) => run(() => api.settings.erp.save({ hrSyncEnabled: e.target.checked }), e.target.checked ? "RH ligado ao ERP" : "RH desligado do ERP")} />
+            RH no ERP: mandar batidas de ponto, fechamento do mês e documentos da contratação
+          </label>
+          <p className="text-[11px]">
+            O ERP é o dono do cadastro dos colaboradores (salário, documentos, folha). Aqui fica só o ponto pelo WhatsApp.
+            {" "}{status.hrImportedAt ? `Importação inicial feita em ${new Date(status.hrImportedAt).toLocaleString("pt-BR")}.` : "Ao ligar, os colaboradores daqui vão uma vez para o ERP."}
+            {status.hrLastSyncAt ? ` Última sincronização: ${new Date(status.hrLastSyncAt).toLocaleString("pt-BR")}.` : ""}
+          </p>
+          {status.hrLastError && (
+            <p className="text-[11px] text-red-700 flex items-start gap-1"><AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" /> {status.hrLastError}</p>
           )}
         </div>
       )}

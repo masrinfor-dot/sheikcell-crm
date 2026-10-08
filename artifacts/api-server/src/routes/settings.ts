@@ -339,6 +339,11 @@ async function erpStatus(tenantId: number) {
     lastPollAt: row?.lastPollAt ?? null,
     lastError: row?.lastError ?? null,
     sentCount: row?.sentCount ?? 0,
+    // RH (07/10/2026): batidas, fechamento e documentos vão para o ERP (dono do cadastro).
+    hrSyncEnabled: row?.hrSyncEnabled ?? false,
+    hrImportedAt: row?.hrImportedAt ?? null,
+    hrLastSyncAt: row?.hrLastSyncAt ?? null,
+    hrLastError: row?.hrLastError ?? null,
   };
 }
 
@@ -359,7 +364,7 @@ router.get("/settings/erp", requireAdmin, async (req, res): Promise<void> => {
 
 router.patch("/settings/erp", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { baseUrl, apiKey, osMessagesEnabled } = req.body as { baseUrl?: string; apiKey?: string; osMessagesEnabled?: boolean };
+  const { baseUrl, apiKey, osMessagesEnabled, hrSyncEnabled } = req.body as { baseUrl?: string; apiKey?: string; osMessagesEnabled?: boolean; hrSyncEnabled?: boolean };
   const [existing] = await db.select({ tenantId: tenantErpIntegrationsTable.tenantId }).from(tenantErpIntegrationsTable)
     .where(eq(tenantErpIntegrationsTable.tenantId, tenantId)).limit(1);
   const url = baseUrl !== undefined ? validErpBaseUrl(baseUrl) : undefined;
@@ -377,6 +382,7 @@ router.patch("/settings/erp", requireAdmin, async (req, res): Promise<void> => {
       encryptedApiKey: enc.ciphertext, iv: enc.iv, authTag: enc.authTag, keyVersion: enc.keyVersion,
       last4: key.slice(-4), lastError: null,
       ...(osMessagesEnabled !== undefined ? { osMessagesEnabled: !!osMessagesEnabled } : {}),
+      ...(hrSyncEnabled !== undefined ? { hrSyncEnabled: !!hrSyncEnabled } : {}),
     };
     await db.insert(tenantErpIntegrationsTable).values({ tenantId, ...values })
       .onConflictDoUpdate({ target: tenantErpIntegrationsTable.tenantId, set: { ...values, updatedAt: new Date() } });
@@ -385,6 +391,7 @@ router.patch("/settings/erp", requireAdmin, async (req, res): Promise<void> => {
     await db.update(tenantErpIntegrationsTable).set({
       ...(url ? { baseUrl: url } : {}),
       ...(osMessagesEnabled !== undefined ? { osMessagesEnabled: !!osMessagesEnabled } : {}),
+      ...(hrSyncEnabled !== undefined ? { hrSyncEnabled: !!hrSyncEnabled } : {}),
       updatedAt: new Date(),
     }).where(eq(tenantErpIntegrationsTable.tenantId, tenantId));
   }
@@ -405,6 +412,7 @@ router.post("/settings/erp/test", requireAdmin, async (req, res): Promise<void> 
       tenant: ping.tenant,
       keyName: ping.key?.name ?? null,
       canSendOsMessages: (ping.key?.scopes ?? []).includes("service_orders.notify"),
+      canSyncHr: (ping.key?.scopes ?? []).includes("hr.sync"),
     });
   } catch (err) {
     res.status(502).json({ error: `Não conectou no ERP: ${String(err instanceof Error ? err.message : err).slice(0, 200)}` });
