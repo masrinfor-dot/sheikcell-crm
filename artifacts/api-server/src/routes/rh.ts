@@ -4,6 +4,7 @@ import { db, rhSettingsTable, rhCandidatesTable, rhPositionsTable } from "@works
 import { eq, and, desc, asc } from "drizzle-orm";
 import { requireTenant } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
+import { hrMovedInfo } from "../lib/hrMoved";
 
 const router: IRouter = Router();
 
@@ -249,6 +250,12 @@ router.get("/rh/public/:token", async (req, res): Promise<void> => {
   if (!settings) {
     res.status(404).json({ error: "Link inválido ou expirado" }); return;
   }
+  // RH no ERP: o mesmo link continua valendo, a página abre no ERP.
+  const moved = await hrMovedInfo(settings.tenantId);
+  if (moved.moved && moved.webUrl) {
+    res.json({ movedTo: `${moved.webUrl}/candidatura/${settings.publicToken}`, positions: null, stages: null });
+    return;
+  }
   const positions = await getActivePositions(settings.tenantId);
   if (positions.length > 0) {
     res.json({ positions, stages: null });
@@ -281,6 +288,11 @@ router.post("/rh/public/:token/apply", async (req, res): Promise<void> => {
   const settings = await getSettingsByToken(req.params.token);
   if (!settings) {
     res.status(404).json({ error: "Link inválido ou expirado" }); return;
+  }
+  const moved = await hrMovedInfo(settings.tenantId);
+  if (moved.moved) {
+    res.status(409).json({ error: "As candidaturas agora são pelo novo endereço — abra o link de novo.", movedTo: moved.webUrl ? `${moved.webUrl}/candidatura/${settings.publicToken}` : null });
+    return;
   }
   const body = (req.body ?? {}) as {
     name?: string; phone?: string; email?: string; cpf?: string; positionId?: number;
@@ -382,6 +394,13 @@ router.post("/rh/public/:token/apply", async (req, res): Promise<void> => {
 });
 
 // ── Admin ──────────────────────────────────────────────────────────────────
+
+// RH no ERP (07/10/2026): as telas mostram o aviso e o link do ERP.
+router.get("/rh/moved", requireModuleAccess("rh"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const info = await hrMovedInfo(tenantId);
+  res.json({ moved: info.moved, webUrl: info.webUrl });
+});
 
 router.get("/rh/settings", requireModuleAccess("rh"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;

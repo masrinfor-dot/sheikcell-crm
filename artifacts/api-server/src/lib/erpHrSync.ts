@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { and, asc, eq, gt, isNotNull } from "drizzle-orm";
+import { and, asc, eq, gt, inArray } from "drizzle-orm";
 import {
   db,
   employeesTable,
@@ -10,7 +10,9 @@ import {
   tenantErpIntegrationsTable,
   timeBankClosuresTable,
   timeClockEntriesTable,
+  timeClockEntryEditsTable,
 } from "@workspace/db";
+import { sendHistory } from "./erpHrHistory";
 import { decryptErpSecret } from "./erpCrypto";
 import { erpUrl } from "./erpOsMessages";
 import { normalizePhone } from "./phone";
@@ -35,7 +37,7 @@ const DOCUMENT_BATCH = 10;
 const MAX_DOC_BYTES = 15 * 1024 * 1024;
 const EMPLOYEE_DOCS_DIR = path.join(DOCS_DIR, "colaboradores");
 
-async function erpCall<T>(baseUrl: string, apiKey: string, pathName: string, init?: RequestInit): Promise<T> {
+export async function erpCall<T>(baseUrl: string, apiKey: string, pathName: string, init?: RequestInit): Promise<T> {
   const res = await fetch(erpUrl(baseUrl, pathName), {
     ...init,
     headers: { "Content-Type": "application/json", "X-Api-Key": apiKey, ...(init?.headers ?? {}) },
@@ -48,7 +50,7 @@ async function erpCall<T>(baseUrl: string, apiKey: string, pathName: string, ini
   return res.json() as Promise<T>;
 }
 
-const post = <T>(baseUrl: string, apiKey: string, pathName: string, body: unknown) =>
+export const post = <T>(baseUrl: string, apiKey: string, pathName: string, body: unknown) =>
   erpCall<T>(baseUrl, apiKey, pathName, { method: "POST", body: JSON.stringify(body) });
 
 const norm = (s: string | null | undefined) =>
@@ -173,6 +175,7 @@ async function syncTenant(row: typeof tenantErpIntegrationsTable.$inferSelect, a
       employeeId: timeClockEntriesTable.employeeId,
       kind: timeClockEntriesTable.kind,
       at: timeClockEntriesTable.at,
+      source: timeClockEntriesTable.source,
     }).from(timeClockEntriesTable)
       .where(and(eq(timeClockEntriesTable.tenantId, tenantId), gt(timeClockEntriesTable.id, punchCursor)))
       .orderBy(asc(timeClockEntriesTable.id)).limit(PUNCH_BATCH);
@@ -183,6 +186,7 @@ async function syncTenant(row: typeof tenantErpIntegrationsTable.$inferSelect, a
         crmEmployeeId: String(p.employeeId),
         kind: p.kind,
         at: p.at.toISOString(),
+        source: p.source,
       })),
     });
     if (res.missing?.length) {
@@ -191,6 +195,26 @@ async function syncTenant(row: typeof tenantErpIntegrationsTable.$inferSelect, a
     punchCursor = batch[batch.length - 1]!.id;
     await setState(tenantId, { hrLastPunchId: punchCursor });
     if (batch.length < PUNCH_BATCH) break;
+  }
+
+  // 3b) Batidas corrigidas ou apagadas aqui (histórico de edições): o ERP
+  // atualiza a mesma batida ou apaga.
+  const edits = await db.select().from(timeClockEntryEditsTable)
+    .where(and(eq(timeClockEntryEditsTable.tenantId, tenantId), gt(timeClockEntryEditsTable.id, row.hrLastEditId)))
+    .orderBy(asc(timeClockEntryEditsTable.id)).limit(PUNCH_BATCH);
+  if (edits.length) {
+    const deleted = edits.filter((e) => e.action === "delete" && e.entryId != null).map((e) => String(e.entryId));
+    const editedIds = [...new Set(edits.filter((e) => e.action === "edit" && e.entryId != null).map((e) => e.entryId!))];
+    if (deleted.length) await post(baseUrl, apiKey, "/integrations/hr/punches/delete", { crmEntryIds: deleted });
+    if (editedIds.length) {
+      const current = await db.select().from(timeClockEntriesTable)
+        .where(and(eq(timeClockEntriesTable.tenantId, tenantId), inArray(timeClockEntriesTable.id, editedIds)));
+      if (current.length)
+        await post(baseUrl, apiKey, "/integrations/hr/punches", {
+          items: current.map((p) => ({ crmEntryId: String(p.id), crmEmployeeId: String(p.employeeId), kind: p.kind, at: p.at.toISOString(), source: p.source })),
+        });
+    }
+    await setState(tenantId, { hrLastEditId: edits[edits.length - 1]!.id });
   }
 
   // 4) Fechamento do mês (snapshot congelado do banco de horas + faltas).
@@ -217,26 +241,31 @@ async function syncTenant(row: typeof tenantErpIntegrationsTable.$inferSelect, a
     await setState(tenantId, { hrLastClosureId: closures[closures.length - 1]!.id });
   }
 
-  // 5) Documentos da contratação recolhidos aqui → cadastro no ERP.
+  // 5) Documentos da contratação recolhidos aqui → cadastro no ERP (arquivo
+  // ou texto, como o contrato gerado).
   const docs = await db.select().from(employeeDocumentsTable)
-    .where(and(
-      eq(employeeDocumentsTable.tenantId, tenantId),
-      gt(employeeDocumentsTable.id, row.hrLastDocumentId),
-      isNotNull(employeeDocumentsTable.storedName),
-    ))
+    .where(and(eq(employeeDocumentsTable.tenantId, tenantId), gt(employeeDocumentsTable.id, row.hrLastDocumentId)))
     .orderBy(asc(employeeDocumentsTable.id)).limit(DOCUMENT_BATCH);
   for (const d of docs) {
     try {
-      const buf = await readFile(path.join(EMPLOYEE_DOCS_DIR, path.basename(d.storedName!)));
-      if (buf.length > 0 && buf.length <= MAX_DOC_BYTES) {
-        await post(baseUrl, apiKey, "/integrations/hr/documents", {
-          crmEmployeeId: String(d.employeeId),
-          crmDocumentId: String(d.id),
-          fileName: d.fileName ?? `${d.docType}`,
-          mimeType: d.mimeType ?? "application/octet-stream",
-          dataBase64: buf.toString("base64"),
-          description: d.label ?? d.docType,
-        });
+      const common = {
+        crmEmployeeId: String(d.employeeId),
+        crmDocumentId: String(d.id),
+        docType: d.docType,
+        description: d.label ?? undefined,
+        expiresAt: d.expiresAt ?? undefined,
+      };
+      if (d.storedName) {
+        const buf = await readFile(path.join(EMPLOYEE_DOCS_DIR, path.basename(d.storedName)));
+        if (buf.length > 0 && buf.length <= MAX_DOC_BYTES)
+          await post(baseUrl, apiKey, "/integrations/hr/documents", {
+            ...common,
+            fileName: d.fileName ?? `${d.docType}`,
+            mimeType: d.mimeType ?? "application/octet-stream",
+            dataBase64: buf.toString("base64"),
+          });
+      } else if (d.textContent?.trim()) {
+        await post(baseUrl, apiKey, "/integrations/hr/documents", { ...common, textContent: d.textContent });
       }
     } catch (err) {
       // Arquivo sumiu do disco ou o ERP recusou o tipo: segue para o próximo.
@@ -245,4 +274,7 @@ async function syncTenant(row: typeof tenantErpIntegrationsTable.$inferSelect, a
     }
     await setState(tenantId, { hrLastDocumentId: d.id });
   }
+
+  // 6) RH mudou para o ERP: manda o histórico todo, um tipo por vez.
+  if (row.hrMovedToErp && !row.hrHistoryDoneAt) await sendHistory(row, apiKey);
 }

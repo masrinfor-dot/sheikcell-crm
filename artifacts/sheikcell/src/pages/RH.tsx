@@ -204,10 +204,22 @@ export default function RH() {
   const { user } = useAuth();
   const canEdit = canEditModule(user, "rh");
   const [group, setGroup] = useState<"recrutamento" | "dp">("recrutamento");
+  // RH no ERP (07/10/2026): aqui vira consulta; alterações são no ERP.
+  const [moved, setMoved] = useState<{ moved: boolean; webUrl: string | null } | null>(null);
+  useEffect(() => { api.rh.moved().then(setMoved).catch(() => setMoved(null)); }, []);
   const [dpView, setDpView] = useState<"painel" | "colaboradores" | "escalas" | "ponto" | "banco-horas" | "afastamentos" | "ferias" | "feriados" | "fechamentos" | "demissoes" | "relatorios" | "farol-risco" | "acoes-lote">("painel");
 
   return (
     <div className="space-y-4">
+      {moved?.moved && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 flex flex-wrap items-center gap-2" data-testid="rh-moved-banner">
+          <AlertTriangle className="w-4 h-4" />
+          <span className="flex-1">O RH agora fica no <b>ERP Prumo</b>: recrutamento, contratação, departamento pessoal e documentos. Aqui é só consulta — o ponto pelo WhatsApp continua igual.</span>
+          {moved.webUrl && (
+            <a href={`${moved.webUrl}/rh`} target="_blank" rel="noreferrer" className="px-3 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-semibold">Abrir o RH no ERP</a>
+          )}
+        </div>
+      )}
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <h2 className="text-lg font-bold flex items-center gap-2"><Users className="w-5 h-5 text-primary" /> RH</h2>
         <div className="flex gap-1.5">

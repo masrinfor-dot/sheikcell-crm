@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { employeeForErp, leaveDaysInMonth } from "./erpHrMapping";
+import { employeeForErp, isAllowedAfterMove, leaveDaysInMonth } from "./erpHrMapping";
 
 test("RH → ERP: faltas injustificadas e afastamentos contados só dentro do mês", () => {
   const out = leaveDaysInMonth([
@@ -21,4 +21,12 @@ test("RH → ERP: importação inicial leva o cadastro do CRM com o id dele", ()
   assert.equal(row.storeName, "Padre Paraíso");
   assert.equal(row.jobTitle, "Vendedora");
   assert.equal(row.salaryCents, 220000);
+});
+
+test("RH no ERP: aqui continua bater o ponto e consultar; o resto vai para o ERP", () => {
+  assert.equal(isAllowedAfterMove("GET", "/rh-dp/employees"), true);
+  assert.equal(isAllowedAfterMove("POST", "/rh-dp/me/punch"), true);
+  assert.equal(isAllowedAfterMove("POST", "/rh-dp/leave-records"), false);
+  assert.equal(isAllowedAfterMove("PATCH", "/rh/candidates/3"), false);
+  assert.equal(isAllowedAfterMove("POST", "/rh-dp/me/vacation-requests"), false);
 });

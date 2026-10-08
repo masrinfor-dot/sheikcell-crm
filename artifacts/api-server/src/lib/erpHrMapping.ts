@@ -43,3 +43,10 @@ export function leaveDaysInMonth(leaves: Leave[], periodMonth: string): { absenc
   return { absenceDays, leaveDays };
 }
 
+/** O que continua aqui depois da mudança: bater o ponto e ler. */
+export function isAllowedAfterMove(method: string, path: string): boolean {
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return true;
+  if (/^\/rh-dp\/me\/punch\b/.test(path)) return true;
+  if (/^\/rh\/moved\b/.test(path)) return true;
+  return false;
+}

@@ -1,4 +1,4 @@
-import { pgTable, integer, text, boolean, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, integer, text, boolean, timestamp, jsonb } from "drizzle-orm/pg-core";
 
 // Ligação desta loja com o ERP Prumo (06/10/2026): endereço da API do ERP e a
 // chave de integração gerada lá (Auxiliares › Integrações). A chave nunca é
@@ -29,6 +29,15 @@ export const tenantErpIntegrationsTable = pgTable("tenant_erp_integrations", {
   hrLastDocumentId: integer("hr_last_document_id").notNull().default(0),
   hrLastSyncAt: timestamp("hr_last_sync_at", { withTimezone: true }),
   hrLastError: text("hr_last_error"),
+  hrLastEditId: integer("hr_last_edit_id").notNull().default(0),
+  // RH mudou para o ERP (07/10/2026 — parte 5): as telas de RH daqui ficam só
+  // de consulta, o link "Trabalhe conosco" vai para o ERP e o histórico todo é
+  // enviado (cursor por tipo). O ponto pelo WhatsApp continua aqui.
+  hrMovedToErp: boolean("hr_moved_to_erp").notNull().default(false),
+  hrMovedAt: timestamp("hr_moved_at", { withTimezone: true }),
+  hrHistoryCursors: jsonb("hr_history_cursors").$type<Record<string, number>>().notNull().default({}),
+  hrHistoryDoneAt: timestamp("hr_history_done_at", { withTimezone: true }),
+  erpWebUrl: text("erp_web_url"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });

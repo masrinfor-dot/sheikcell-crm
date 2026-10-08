@@ -345,6 +345,11 @@ async function erpStatus(tenantId: number) {
     hrImportedAt: row?.hrImportedAt ?? null,
     hrLastSyncAt: row?.hrLastSyncAt ?? null,
     hrLastError: row?.hrLastError ?? null,
+    hrMovedToErp: row?.hrMovedToErp ?? false,
+    hrMovedAt: row?.hrMovedAt ?? null,
+    hrHistoryDoneAt: row?.hrHistoryDoneAt ?? null,
+    hrHistoryCursors: row?.hrHistoryCursors ?? {},
+    erpWebUrl: row?.erpWebUrl ?? null,
   };
 }
 
@@ -356,7 +361,20 @@ router.get("/settings/erp", requireAdmin, async (req, res): Promise<void> => {
 
 router.patch("/settings/erp", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { baseUrl, apiKey, osMessagesEnabled, hrSyncEnabled } = req.body as { baseUrl?: string; apiKey?: string; osMessagesEnabled?: boolean; hrSyncEnabled?: boolean };
+  const { baseUrl, apiKey, osMessagesEnabled, hrSyncEnabled, hrMovedToErp } = req.body as { baseUrl?: string; apiKey?: string; osMessagesEnabled?: boolean; hrSyncEnabled?: boolean; hrMovedToErp?: boolean };
+  // Mudar o RH para o ERP: precisa do RH ligado e do endereço das telas do ERP (vem do "Testar").
+  let movePatch: Record<string, unknown> = {};
+  if (hrMovedToErp !== undefined) {
+    const [cur] = await db.select().from(tenantErpIntegrationsTable).where(eq(tenantErpIntegrationsTable.tenantId, tenantId)).limit(1);
+    if (hrMovedToErp && (!cur?.hrSyncEnabled || !cur?.erpWebUrl)) {
+      res.status(400).json({ error: "Ligue o RH no ERP e clique em Testar antes de mudar o RH para o ERP." }); return;
+    }
+    movePatch = hrMovedToErp
+      ? { hrMovedToErp: true, hrMovedAt: cur?.hrMovedAt ?? new Date(), hrHistoryDoneAt: null }
+      : { hrMovedToErp: false };
+    const { forgetHrMoved } = await import("../lib/hrMoved");
+    forgetHrMoved(tenantId);
+  }
   const [existing] = await db.select({ tenantId: tenantErpIntegrationsTable.tenantId }).from(tenantErpIntegrationsTable)
     .where(eq(tenantErpIntegrationsTable.tenantId, tenantId)).limit(1);
   const url = baseUrl !== undefined ? validErpBaseUrl(baseUrl) : undefined;
@@ -384,6 +402,7 @@ router.patch("/settings/erp", requireAdmin, async (req, res): Promise<void> => {
       ...(url ? { baseUrl: url } : {}),
       ...(osMessagesEnabled !== undefined ? { osMessagesEnabled: !!osMessagesEnabled } : {}),
       ...(hrSyncEnabled !== undefined ? { hrSyncEnabled: !!hrSyncEnabled } : {}),
+      ...movePatch,
       updatedAt: new Date(),
     }).where(eq(tenantErpIntegrationsTable.tenantId, tenantId));
   }
@@ -399,12 +418,19 @@ router.post("/settings/erp/test", requireAdmin, async (req, res): Promise<void> 
     const { pingErp } = await import("../lib/erpOsMessages");
     const key = decryptErpSecret({ ciphertext: row.encryptedApiKey, iv: row.iv, authTag: row.authTag, keyVersion: row.keyVersion });
     const ping = await pingErp(row.baseUrl, key);
+    // Guarda o endereço das telas do ERP (link "Trabalhe conosco" e avisos do RH).
+    const webUrl = typeof ping.webUrl === "string" ? ping.webUrl : null;
+    if (webUrl && /^https?:\/\//.test(webUrl)) {
+      await db.update(tenantErpIntegrationsTable).set({ erpWebUrl: webUrl.replace(/\/+$/, "") })
+        .where(eq(tenantErpIntegrationsTable.tenantId, tenantId));
+    }
     res.json({
       ok: true,
       tenant: ping.tenant,
       keyName: ping.key?.name ?? null,
       canSendOsMessages: (ping.key?.scopes ?? []).includes("service_orders.notify"),
       canSyncHr: (ping.key?.scopes ?? []).includes("hr.sync"),
+      erpWebUrl: webUrl,
     });
   } catch (err) {
     res.status(502).json({ error: `Não conectou no ERP: ${String(err instanceof Error ? err.message : err).slice(0, 200)}` });

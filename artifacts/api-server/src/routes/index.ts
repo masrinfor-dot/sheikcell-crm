@@ -17,6 +17,7 @@ import partnerLinksRouter from "./partnerLinks";
 import tradeInRouter, { tradeInPublicRouter } from "./tradeIn";
 import trainingsRouter, { enforceMandatoryTrainings } from "./trainings";
 import rhRouter from "./rh";
+import { blockWhenHrMoved } from "../lib/hrMoved";
 import rhDpRouter, { enforceMandatoryClockIn } from "./rhDp";
 import employeeHiringRouter from "./employeeHiring";
 import rafflesRouter from "./raffles";
@@ -65,6 +66,8 @@ router.use(instagramRouter);
 router.use(partnerLinksRouter);
 router.use(tradeInRouter);
 router.use(trainingsRouter);
+// RH no ERP (07/10/2026): depois da mudança, o RH daqui é só consulta.
+router.use((req, res, next) => { void blockWhenHrMoved(req, res, next); });
 router.use(rhRouter);
 router.use(rhDpRouter);
 router.use(employeeHiringRouter);

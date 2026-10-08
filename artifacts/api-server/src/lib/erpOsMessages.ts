@@ -52,6 +52,7 @@ export async function pingErp(baseUrl: string, apiKey: string) {
     ok: boolean;
     tenant: string;
     key: { name: string; prefix: string; scopes: string[] };
+    webUrl?: string | null;
   }>;
 }
 

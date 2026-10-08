@@ -49,6 +49,8 @@ export default function Candidatura() {
     if (!token) { setError("Link inválido"); return; }
     api.rh.publicProcess(token)
       .then((r) => {
+        // RH no ERP (07/10/2026): o mesmo link abre a candidatura no ERP.
+        if (r.movedTo) { window.location.replace(r.movedTo); return; }
         if (r.positions) { setPositions(r.positions); setStep(-2); }
         else setStages(r.stages);
       })
