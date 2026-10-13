@@ -7,12 +7,13 @@
 import { Router, type IRouter } from "express";
 import { createHmac } from "node:crypto";
 import { requireFeature, requireTenant } from "../middlewares/auth";
-import { db, whatsappSessionsTable, conversationsTable, sectorsTable } from "@workspace/db";
+import { db, whatsappSessionsTable, whatsappAuthStateTable, conversationsTable, sectorsTable } from "@workspace/db";
 import { and, eq, inArray, isNotNull, notInArray, sql } from "drizzle-orm";
 import { assertWithinLimit } from "../lib/planLimits";
 import { broadcast } from "../lib/sseEmitter";
 import { restrictedRecipients } from "../lib/conversationScope";
 import { fillIdleQueueVendors } from "../lib/queueAutoAssign";
+import { DEFAULT_SESSION_KEY, mayInsertOnStatusPersist } from "../lib/whatsappSessionRows";
 
 const router: IRouter = Router();
 
@@ -25,7 +26,6 @@ const BRIDGE_SECRET = createHmac("sha256", _sessionSeed)
   .update("whatsapp-bridge-v1")
   .digest("hex");
 
-const DEFAULT_SESSION_KEY = "default";
 const VALID_KEY = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 
 export interface BridgeWAState {
@@ -54,29 +54,25 @@ export interface AdminWAState extends BridgeWAState {
 async function persistSessionState(tenantId: number, key: string, state: BridgeWAState): Promise<void> {
   try {
     const isConnected = state.status === "connected";
-    await db
-      .insert(whatsappSessionsTable)
-      .values({
-        tenantId,
-        sessionKey: key,
-        status: state.status,
-        phoneNumber: state.phoneNumber,
-        phoneId: state.phoneId,
-        errorMessage: state.errorMessage,
-        lastHeartbeatAt: isConnected ? new Date() : undefined,
-        updatedAt: new Date(),
-      })
-      .onConflictDoUpdate({
-        target: whatsappSessionsTable.sessionKey,
-        set: {
-          status: state.status,
-          phoneNumber: state.phoneNumber,
-          phoneId: state.phoneId,
-          errorMessage: state.errorMessage,
-          lastHeartbeatAt: isConnected ? new Date() : undefined,
-          updatedAt: new Date(),
-        },
-      });
+    const set = {
+      status: state.status,
+      phoneNumber: state.phoneNumber,
+      phoneId: state.phoneId,
+      errorMessage: state.errorMessage,
+      lastHeartbeatAt: isConnected ? new Date() : undefined,
+      updatedAt: new Date(),
+    };
+    // Só a "default" da loja 1 pode nascer aqui; qualquer outra conexão só é
+    // ATUALIZADA — nunca reinserida depois de excluída (ver whatsappSessionRows.ts).
+    if (mayInsertOnStatusPersist(tenantId, key)) {
+      await db
+        .insert(whatsappSessionsTable)
+        .values({ tenantId, sessionKey: key, ...set })
+        .onConflictDoUpdate({ target: whatsappSessionsTable.sessionKey, set });
+      return;
+    }
+    await db.update(whatsappSessionsTable).set(set)
+      .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId)));
   } catch {
     /* non-critical */
   }
@@ -480,13 +476,27 @@ router.delete("/whatsapp/sessions/:key", requireFeature("whatsapp"), async (req,
     .limit(1);
   if (!owned) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
 
+  // 1) Bridge: logout + derruba o socket + apaga as credenciais. Falha ou
+  //    bridge fora do ar NÃO impede a exclusão: a linha e as credenciais são
+  //    apagadas aqui mesmo (abaixo), e o bridge nunca reabre uma conexão sem
+  //    linha cadastrada (nem ao reiniciar, nem num "start" atrasado).
+  let bridgeStopped = false;
   try {
-    const { ok, data, status } = await fetchFromBridge(`/whatsapp/sessions/${key}`, "DELETE");
-    if (!ok) { res.status(status).json(data); return; }
+    const { ok } = await fetchFromBridge(`/whatsapp/sessions/${key}`, "DELETE");
+    bridgeStopped = ok;
   } catch {
-    // Bridge offline — still remove the DB row so it won't be restarted.
+    /* bridge offline — segue com a limpeza no banco */
+  }
+
+  // 2) Banco: apaga a linha da conexão e as credenciais (sessão do WhatsApp)
+  //    — idempotente se o bridge já tiver feito. Conversas e mensagens ficam.
+  try {
     await db.delete(whatsappSessionsTable)
       .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId)));
+    await db.delete(whatsappAuthStateTable).where(eq(whatsappAuthStateTable.sessionKey, key));
+  } catch {
+    res.status(500).json({ error: "Erro ao remover a conexão — tente novamente" });
+    return;
   }
 
   // Reatribuição de conversas: SÓ a loja 1 (legado) pode voltar para a conexão
@@ -501,7 +511,7 @@ router.delete("/whatsapp/sessions/:key", requireFeature("whatsapp"), async (req,
       .where(and(eq(conversationsTable.sessionKey, key), eq(conversationsTable.tenantId, tenantId)));
   }
 
-  res.json({ ok: true });
+  res.json({ ok: true, bridgeStopped });
 });
 
 // ─── Status (single session; ?session=key, default "default") ──────────────

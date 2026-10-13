@@ -348,6 +348,11 @@ export default function AdminDashboard() {
   const [userRows, setUserRows] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [waSessions, setWaSessions] = useState<WASession[] | null>(null);
+  // Exclusão de conexão (bug 13/10): o painel consulta /whatsapp/sessions a
+  // cada 2,5s — uma consulta que saiu ANTES da exclusão podia voltar depois
+  // dela e redesenhar o card apagado. Cada exclusão incrementa esta "época";
+  // respostas de consultas iniciadas numa época anterior são descartadas.
+  const waEpochRef = useRef(0);
   const [waLoading, setWaLoading] = useState(false);
   const [newConnName, setNewConnName] = useState("");
   // Visão Geral "viva": o que precisa de atenção agora e prévia do chat
@@ -514,9 +519,13 @@ export default function AdminDashboard() {
   }, []);
 
   const fetchWAStatus = useCallback(async () => {
+    const epoch = waEpochRef.current;
     try {
       const r = await fetch("/api/whatsapp/sessions", { credentials: "include" });
-      if (r.ok) setWaSessions(await r.json() as WASession[]);
+      if (!r.ok) return;
+      const data = await r.json() as WASession[];
+      if (epoch !== waEpochRef.current) return; // resposta velha (anterior a uma exclusão)
+      setWaSessions(data);
     } catch { /* silent */ }
   }, []);
 
@@ -1647,7 +1656,13 @@ export default function AdminDashboard() {
                         if (!window.confirm(msg)) return;
                         setWaLoading(true);
                         try {
+                          waEpochRef.current++;
                           const r = await fetch(`/api/whatsapp/sessions/${s.sessionKey}`, { method: "DELETE", credentials: "include" });
+                          waEpochRef.current++;
+                          if (r.ok && s.sessionKey !== "default") {
+                            // Some na hora — não espera a próxima consulta.
+                            setWaSessions((prev) => prev?.filter((x) => x.sessionKey !== s.sessionKey) ?? prev);
+                          }
                           if (!r.ok) {
                             const d = await r.json().catch(() => null) as { error?: string } | null;
                             toast({ title: "Erro", description: d?.error ?? "Erro ao remover", variant: "destructive" });
