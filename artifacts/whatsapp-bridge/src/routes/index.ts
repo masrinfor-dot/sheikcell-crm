@@ -60,7 +60,12 @@ router.get("/whatsapp/sessions", requireBridgeSecret, async (_req, res): Promise
 router.post("/whatsapp/sessions", requireBridgeSecret, async (req, res): Promise<void> => {
   const key = sessionKeyFrom((req.body as { session?: string })?.session);
   if (!key) { res.status(400).json({ error: "session inválida (use letras minúsculas, números, - e _)" }); return; }
-  await startSession(key);
+  const started = await startSession(key);
+  if (!started) {
+    // Conexão não cadastrada (ou acabou de ser excluída) — nunca recria.
+    res.status(404).json({ error: "Conexão não encontrada", sessionKey: key });
+    return;
+  }
   res.json({ ok: true, sessionKey: key });
 });
 
@@ -71,7 +76,7 @@ router.delete("/whatsapp/sessions/:key", requireBridgeSecret, async (req, res): 
   if (key === DEFAULT_SESSION_KEY) {
     // A conexão principal não pode sumir do sistema, mas pode ser "excluída":
     // apaga tudo (logout + credenciais) e volta zerada aguardando novo QR.
-    await removeSession(key);
+    await removeSession(key, { keepRow: true });
     await startSession(key);
     res.json({ ok: true, restarted: true, message: "Conexão apagada — aguarde o novo QR code" });
     return;

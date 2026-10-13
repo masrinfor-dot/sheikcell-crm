@@ -98,17 +98,6 @@ function clearReconnectTimer(s: Session) {
   }
 }
 
-// Multi-loja: a loja dona da sessão é derivada da PRÓPRIA chave — "default"
-// pertence à loja 1 (legado) e chaves novas são "t{tenantId}-...". Chave fora
-// desses formatos não tem dono verificável → null (nunca cai na loja 1).
-function tenantOfSessionKey(key: string): number | null {
-  if (key === "default") return 1;
-  const m = /^t(\d+)-/.exec(key);
-  if (!m) return null;
-  const t = Number(m[1]);
-  return Number.isInteger(t) && t > 0 ? t : null;
-}
-
 async function persistStatus(
   key: string,
   status: string,
@@ -124,25 +113,44 @@ async function persistStatus(
       lastHeartbeatAt: isConnected ? new Date() : undefined,
       updatedAt: new Date(),
     };
-    const tenantId = tenantOfSessionKey(key);
-    if (tenantId == null) {
-      // Dono não verificável pela chave: NUNCA insere (o default do schema
-      // atribuiria a loja 1 — vazamento). Só atualiza a linha existente, e o
-      // update não toca tenant_id, preservando a posse registrada pela API.
-      await db.update(whatsappSessionsTable).set(set)
-        .where(eq(whatsappSessionsTable.sessionKey, key));
+    // Bug "excluo a conexão e ela continua aparecendo" (13/10): isto era um
+    // UPSERT — um evento de QR/close que chegava DEPOIS da exclusão (ou de
+    // um socket que ainda estava abrindo) reinseria a linha apagada, sem
+    // nome (displayName null → card aparecia como "t1-..."), e o painel
+    // voltava a mostrar "Aguardando QR". Agora o bridge só ATUALIZA a linha
+    // existente: quem cria conexão é a API (POST /whatsapp/sessions). Única
+    // exceção: a "default" (loja 1), que é a conexão principal legada e
+    // nunca é excluída de verdade.
+    if (key === DEFAULT_SESSION_KEY) {
+      await db
+        .insert(whatsappSessionsTable)
+        .values({ sessionKey: key, tenantId: 1, phoneId: null, ...set })
+        .onConflictDoUpdate({
+          target: whatsappSessionsTable.sessionKey,
+          // tenant_id fica FORA do set: um upsert jamais transfere a sessão de loja.
+          set,
+        });
       return;
     }
-    await db
-      .insert(whatsappSessionsTable)
-      .values({ sessionKey: key, tenantId, phoneId: null, ...set })
-      .onConflictDoUpdate({
-        target: whatsappSessionsTable.sessionKey,
-        // tenant_id fica FORA do set: um upsert jamais transfere a sessão de loja.
-        set,
-      });
+    await db.update(whatsappSessionsTable).set(set)
+      .where(eq(whatsappSessionsTable.sessionKey, key));
   } catch (e) {
     logger.warn({ err: e, sessionKey: key }, "Failed to persist WhatsApp session status to DB");
+  }
+}
+
+/** A conexão ainda está cadastrada (linha em whatsapp_sessions)? A "default"
+ *  sempre conta como cadastrada. Usado pra nunca (re)abrir socket de uma
+ *  conexão que já foi excluída. Erro de banco → false (fail closed). */
+async function isSessionRegistered(key: string): Promise<boolean> {
+  if (key === DEFAULT_SESSION_KEY) return true;
+  try {
+    const rows = await db.select({ id: whatsappSessionsTable.id }).from(whatsappSessionsTable)
+      .where(eq(whatsappSessionsTable.sessionKey, key)).limit(1);
+    return rows.length > 0;
+  } catch (e) {
+    logger.warn({ err: e, sessionKey: key }, "Failed to check WhatsApp session row — not starting");
+    return false;
   }
 }
 
@@ -498,8 +506,15 @@ export function getAllSessionStates(): SessionState[] {
 
 /** Starts a session. Creates it if it doesn't exist yet. Idempotent: no-op
  *  when the session already has a live socket (open, waiting for QR or
- *  connecting) so repeated calls never spawn parallel sockets. */
-export async function startSession(key: string): Promise<void> {
+ *  connecting) so repeated calls never spawn parallel sockets.
+ *  Returns false (and starts nothing) when the connection is not registered
+ *  in whatsapp_sessions — e.g. it was just deleted and a late "start" request
+ *  (painel em polling) chegou depois da exclusão. */
+export async function startSession(key: string): Promise<boolean> {
+  if (!sessions.has(key) && !(await isSessionRegistered(key))) {
+    logger.info({ sessionKey: key }, "Ignoring start for unregistered (deleted?) WhatsApp session");
+    return false;
+  }
   let s = sessions.get(key);
   if (!s) {
     s = newSession(key);
@@ -508,8 +523,9 @@ export async function startSession(key: string): Promise<void> {
   s.stopped = false;
   // Already has a live socket (open, showing QR, or handshake in progress) —
   // never spawn a second parallel socket for the same key.
-  if (s.sock) return;
+  if (s.sock) return true;
   await connectSession(s);
+  return true;
 }
 
 /** Disconnects, clears auth and reconnects fresh (new QR) — "trocar número". */
@@ -538,20 +554,30 @@ export async function disconnectAndReset(key: string): Promise<void> {
   void connectSession(s);
 }
 
-/** Permanently removes a session: stop socket, clear auth, delete DB row. */
-export async function removeSession(key: string): Promise<void> {
+/** Permanently removes a session: stop socket (logout), clear auth, delete
+ *  DB row. `keepRow` is used for the "default" connection, which is reset
+ *  (and restarted by the caller) instead of disappearing. */
+export async function removeSession(key: string, opts: { keepRow?: boolean } = {}): Promise<void> {
   const s = sessions.get(key);
   if (s) {
+    // stopped ANTES de qualquer await: handlers de evento, reconexões
+    // agendadas e um connectSession em andamento passam a ignorar a sessão.
     s.stopped = true;
     clearReconnectTimer(s);
-    if (s.sock) {
-      try { s.sock.logout().catch(() => {}); } catch { /* ignore */ }
-      try { s.sock.end(undefined); } catch { /* ignore */ }
-      s.sock = null;
-    }
     sessions.delete(key);
+    const sock = s.sock;
+    s.sock = null;
+    if (sock) {
+      // Logout (com teto de 5s) enquanto as credenciais ainda existem, pra
+      // desvincular o aparelho no WhatsApp; depois fecha o socket.
+      try { await Promise.race([sock.logout(), sleep(5000)]); } catch { /* ignore */ }
+      try { sock.end(undefined); } catch { /* ignore */ }
+    }
   }
+  // Apaga as credenciais DEPOIS do logout — um creds.update atrasado do
+  // socket antigo não pode deixar credencial órfã pra trás.
   await clearAuthState(key);
+  if (opts.keepRow) return;
   try {
     await db.delete(whatsappSessionsTable).where(eq(whatsappSessionsTable.sessionKey, key));
   } catch (e) {
@@ -565,6 +591,9 @@ async function connectSession(s: Session): Promise<void> {
 
   try {
     const { state, saveCreds } = await useDatabaseAuthState(s.key);
+    // A sessão pode ter sido excluída enquanto as credenciais carregavam —
+    // não abre um socket "fantasma" que ficaria gerando QR pra sempre.
+    if (s.stopped || sessions.get(s.key) !== s) return;
 
     const sock = makeWASocket({
       auth: state,
@@ -575,11 +604,13 @@ async function connectSession(s: Session): Promise<void> {
     s.sock = sock;
 
     sock.ev.on("creds.update", () => {
+      // Sessão excluída: não regrava credenciais que acabaram de ser apagadas.
+      if (s.stopped) return;
       void saveCreds();
     });
 
     sock.ev.on("messages.upsert", ({ messages, type }) => {
-      if (type !== "notify") return;
+      if (type !== "notify" || s.stopped) return;
       for (const m of messages) {
         forwardInboundMessage(s, m).catch((err) => {
           logger.warn({ err, sessionKey: s.key }, "Failed to forward inbound WhatsApp message");
@@ -606,7 +637,10 @@ async function connectSession(s: Session): Promise<void> {
 
       if (qr) {
         try {
-          s.qr = await toDataURL(qr, { margin: 1 });
+          const dataUrl = await toDataURL(qr, { margin: 1 });
+          // Excluída/substituída durante o await: o QR não pode ressuscitá-la.
+          if (s.sock !== sock || s.stopped) return;
+          s.qr = dataUrl;
           s.status = "qr";
           s.error = null;
           logger.info({ sessionKey: s.key }, "QR code generated — scan with WhatsApp");
@@ -636,18 +670,21 @@ async function connectSession(s: Session): Promise<void> {
         if (isLoggedOut) {
           logger.info({ sessionKey: s.key }, "Session logged out — clearing auth state");
           await clearAuthState(s.key);
+          if (s.sock !== sock || s.stopped) return;
           s.qr = null;
           s.status = "close";
           s.phone = null;
           s.error = "Sessão encerrada (logged out). Escaneie o QR novamente.";
           await persistStatus(s.key, "disconnected", null, s.error);
           s.reconnectAttempts = 0;
+          if (s.stopped) return;
           // Reconnect fresh to get new QR
           s.reconnectTimer = setTimeout(() => void connectSession(s), 2000);
         } else {
           s.status = "connecting";
           s.error = `Desconectado (código ${statusCode ?? "?"}). Reconectando…`;
           await persistStatus(s.key, "reconnecting", s.phone, s.error);
+          if (s.sock !== sock || s.stopped) return;
 
           const delay = Math.min(1000 * 2 ** s.reconnectAttempts, 30_000);
           s.reconnectAttempts++;
@@ -661,6 +698,7 @@ async function connectSession(s: Session): Promise<void> {
     s.status = "close";
     logger.error({ err, sessionKey: s.key }, "Failed to create WhatsApp socket");
     await persistStatus(s.key, "error", null, s.error);
+    if (s.stopped) return;
 
     const delay = Math.min(1000 * 2 ** s.reconnectAttempts, 30_000);
     s.reconnectAttempts++;
