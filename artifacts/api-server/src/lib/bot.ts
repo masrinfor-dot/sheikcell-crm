@@ -515,7 +515,9 @@ async function aiAnswer(tenantId: number, conversationId: number | null, setting
     // ferramentas quando o admin ligou o interruptor (settings.tradeInEnabled)
     // e existe uma conversa de verdade pra registrar o lead.
     let tradeInAvailable = false;
-    if (conversationId != null && settings.tradeInEnabled) {
+    // Avaliação passada pro ERP (07/10/2026): o robô para de avaliar aqui.
+    const { tradeInMovedToErp } = await import("./tradeInMoved");
+    if (conversationId != null && settings.tradeInEnabled && !(await tradeInMovedToErp(tenantId))) {
       try {
         const questionsConfig = await getTradeInQuestionsConfig(tenantId);
         tools.push(evaluateUsedDeviceTool(questionsConfig));
