@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
-import { db, appSettingsTable, tenantAiCredentialsTable, tenantErpIntegrationsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { db, appSettingsTable, tenantAiCredentialsTable, tenantErpIntegrationsTable, whatsappSessionsTable } from "@workspace/db";
+import { and, eq } from "drizzle-orm";
 import { requireAuth, requireAdmin, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
 import { encryptSecret } from "../lib/aiCredentialsCrypto";
 import { validErpBaseUrl } from "../lib/erpBaseUrl";
@@ -350,6 +350,13 @@ async function erpStatus(tenantId: number) {
     hrHistoryDoneAt: row?.hrHistoryDoneAt ?? null,
     hrHistoryCursors: row?.hrHistoryCursors ?? {},
     erpWebUrl: row?.erpWebUrl ?? null,
+    // Pedidos de clientes sem estoque (16/10/2026): linha de atacado → IA do ERP.
+    demandSessionKey: row?.demandSessionKey ?? null,
+    demandSyncEnabled: row?.demandSyncEnabled ?? false,
+    demandLastSyncAt: row?.demandLastSyncAt ?? null,
+    demandLastError: row?.demandLastError ?? null,
+    demandSentCount: row?.demandSentCount ?? 0,
+    demandPendingCount: row?.demandPendingCount ?? 0,
   };
 }
 
@@ -361,7 +368,31 @@ router.get("/settings/erp", requireAdmin, async (req, res): Promise<void> => {
 
 router.patch("/settings/erp", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { baseUrl, apiKey, osMessagesEnabled, hrSyncEnabled, hrMovedToErp } = req.body as { baseUrl?: string; apiKey?: string; osMessagesEnabled?: boolean; hrSyncEnabled?: boolean; hrMovedToErp?: boolean };
+  const { baseUrl, apiKey, osMessagesEnabled, hrSyncEnabled, hrMovedToErp, demandSessionKey, demandSyncEnabled } = req.body as {
+    baseUrl?: string; apiKey?: string; osMessagesEnabled?: boolean; hrSyncEnabled?: boolean; hrMovedToErp?: boolean;
+    demandSessionKey?: string | null; demandSyncEnabled?: boolean;
+  };
+  // Linha de atacado (16/10/2026): precisa ser uma linha de WhatsApp desta loja.
+  const demandPatch: Record<string, unknown> = {};
+  if (demandSessionKey !== undefined) {
+    if (demandSessionKey === null || demandSessionKey === "") {
+      demandPatch.demandSessionKey = null;
+      demandPatch.demandSyncEnabled = false;
+    } else {
+      const [line] = await db.select({ k: whatsappSessionsTable.sessionKey }).from(whatsappSessionsTable)
+        .where(and(eq(whatsappSessionsTable.tenantId, tenantId), eq(whatsappSessionsTable.sessionKey, String(demandSessionKey)))).limit(1);
+      if (!line && !(tenantId === 1 && demandSessionKey === "default")) { res.status(400).json({ error: "Linha de WhatsApp inválida" }); return; }
+      demandPatch.demandSessionKey = String(demandSessionKey);
+    }
+  }
+  if (demandSyncEnabled !== undefined) {
+    if (demandSyncEnabled) {
+      const [cur] = await db.select({ k: tenantErpIntegrationsTable.demandSessionKey }).from(tenantErpIntegrationsTable).where(eq(tenantErpIntegrationsTable.tenantId, tenantId)).limit(1);
+      if (!(demandPatch.demandSessionKey ?? cur?.k)) { res.status(400).json({ error: "Escolha a linha de atacado antes de ligar" }); return; }
+    }
+    demandPatch.demandSyncEnabled = !!demandSyncEnabled;
+    if (demandSyncEnabled) demandPatch.demandLastError = null;
+  }
   // Mudar o RH para o ERP: precisa do RH ligado e do endereço das telas do ERP (vem do "Testar").
   let movePatch: Record<string, unknown> = {};
   if (hrMovedToErp !== undefined) {
@@ -393,6 +424,7 @@ router.patch("/settings/erp", requireAdmin, async (req, res): Promise<void> => {
       last4: key.slice(-4), lastError: null,
       ...(osMessagesEnabled !== undefined ? { osMessagesEnabled: !!osMessagesEnabled } : {}),
       ...(hrSyncEnabled !== undefined ? { hrSyncEnabled: !!hrSyncEnabled } : {}),
+      ...demandPatch,
     };
     await db.insert(tenantErpIntegrationsTable).values({ tenantId, ...values })
       .onConflictDoUpdate({ target: tenantErpIntegrationsTable.tenantId, set: { ...values, updatedAt: new Date() } });
@@ -403,10 +435,20 @@ router.patch("/settings/erp", requireAdmin, async (req, res): Promise<void> => {
       ...(osMessagesEnabled !== undefined ? { osMessagesEnabled: !!osMessagesEnabled } : {}),
       ...(hrSyncEnabled !== undefined ? { hrSyncEnabled: !!hrSyncEnabled } : {}),
       ...movePatch,
+      ...demandPatch,
       updatedAt: new Date(),
     }).where(eq(tenantErpIntegrationsTable.tenantId, tenantId));
   }
   res.json(await erpStatus(tenantId));
+});
+
+// Manda agora as conversas da linha de atacado (sem esperar os 30 min).
+router.post("/settings/erp/demand/run", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { syncTenantDemand } = await import("../lib/erpDemandSync");
+  const r = await syncTenantDemand(tenantId);
+  if (r.error) { res.status(502).json({ ...r, error: r.error }); return; }
+  res.json({ ok: true, ...r, status: await erpStatus(tenantId) });
 });
 
 router.post("/settings/erp/test", requireAdmin, async (req, res): Promise<void> => {
