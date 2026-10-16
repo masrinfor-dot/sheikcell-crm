@@ -1611,6 +1611,13 @@ export interface ErpIntegrationStatus {
   hrHistoryDoneAt: string | null;
   hrHistoryCursors: Record<string, number>;
   erpWebUrl: string | null;
+  // Pedidos de clientes sem estoque (16/10/2026): linha de atacado → IA do ERP.
+  demandSessionKey: string | null;
+  demandSyncEnabled: boolean;
+  demandLastSyncAt: string | null;
+  demandLastError: string | null;
+  demandSentCount: number;
+  demandPendingCount: number;
 }
 
 export interface InstagramIntegrationStatus {
@@ -3150,8 +3157,10 @@ export const api = {
     },
     erp: {
       get: () => req<ErpIntegrationStatus>("/settings/erp"),
-      save: (data: { baseUrl?: string; apiKey?: string; osMessagesEnabled?: boolean; hrSyncEnabled?: boolean; hrMovedToErp?: boolean }) =>
+      save: (data: { baseUrl?: string; apiKey?: string; osMessagesEnabled?: boolean; hrSyncEnabled?: boolean; hrMovedToErp?: boolean; demandSessionKey?: string | null; demandSyncEnabled?: boolean }) =>
         req<ErpIntegrationStatus>("/settings/erp", { method: "PATCH", body: JSON.stringify(data) }),
+      demandRun: () =>
+        req<{ ok: boolean; conversations: number; messages: number; requests: number; outOfStock: number; status: ErpIntegrationStatus }>("/settings/erp/demand/run", { method: "POST" }),
       test: () =>
         req<{ ok: boolean; tenant: string; keyName: string | null; canSendOsMessages: boolean; canSyncHr: boolean }>("/settings/erp/test", { method: "POST" }),
       remove: () => req<ErpIntegrationStatus>("/settings/erp", { method: "DELETE" }),
