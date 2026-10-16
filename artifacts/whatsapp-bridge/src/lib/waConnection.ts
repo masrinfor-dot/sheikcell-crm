@@ -7,6 +7,7 @@
  *   a "default" session is created if none exist.
  */
 import makeWASocket, {
+  Browsers,
   DisconnectReason,
   downloadMediaMessage,
   proto,
@@ -71,6 +72,11 @@ interface Session {
   // never delays another number's sends.
   sendChain: Promise<void>;
   lastSendAt: number;
+  // Histórico ao conectar (pedido 16/10, Compras e ADM): lido de
+  // whatsapp_sessions.history_import_enabled a cada socket novo. Os lotes vão
+  // para o CRM numa fila própria, em ordem, sem atrasar mensagens ao vivo.
+  historyImport: boolean;
+  historyChain: Promise<void>;
 }
 
 const sessions = new Map<string, Session>();
@@ -88,6 +94,8 @@ function newSession(key: string): Session {
     stopped: false,
     sendChain: Promise.resolve(),
     lastSendAt: 0,
+    historyImport: false,
+    historyChain: Promise.resolve(),
   };
 }
 
@@ -411,6 +419,129 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
   }
 }
 
+// ─── Histórico ao conectar (pedido 16/10, Compras e ADM) ─────────────────────
+// Com history_import_enabled ligado na linha, o socket é criado pedindo o
+// histórico completo ao celular (browser "Desktop" + shouldSyncHistoryMessage
+// sempre true). O Baileys entrega o histórico em pedaços (messaging-history.set);
+// cada pedaço vira lotes de até 500 mensagens para POST
+// /api/chat/webhook/whatsapp-history (ver lib/whatsappHistory.ts no api-server),
+// mensagens recebidas E enviadas, sem baixar mídia antiga.
+
+async function resolvePnJid(s: Session, jid: string | undefined, alt?: string | null): Promise<string | undefined> {
+  if (!jid || !jid.endsWith("@lid")) return jid;
+  if (alt && alt.endsWith("@s.whatsapp.net")) return alt;
+  try {
+    const mapping = (s.sock as unknown as {
+      signalRepository?: { lidMapping?: { getPNForLID?: (lid: string) => Promise<string | null> } };
+    })?.signalRepository?.lidMapping;
+    const pn = await mapping?.getPNForLID?.(jid);
+    if (pn && pn.endsWith("@s.whatsapp.net")) return pn;
+  } catch { /* sem mapeamento */ }
+  return jid;
+}
+
+const HISTORY_INVISIBLE = new Set(["reactionMessage", "protocolMessage", "pollUpdateMessage", "keepInChatMessage", "pinInChatMessage", "secretEncryptedMessage", "albumMessage", "encReactionMessage", "senderKeyDistributionMessage", "messageContextInfo"]);
+
+function historyMediaType(msg: proto.IMessage): { mediaType?: "image" | "video" | "audio" | "doc" | "sticker"; mediaMimeType?: string } {
+  const inner = msg.ephemeralMessage?.message ?? msg.viewOnceMessage?.message ?? msg.viewOnceMessageV2?.message ?? msg.documentWithCaptionMessage?.message ?? msg;
+  if (inner.imageMessage) return { mediaType: "image", mediaMimeType: inner.imageMessage.mimetype ?? "image/jpeg" };
+  if (inner.stickerMessage) return { mediaType: "sticker", mediaMimeType: inner.stickerMessage.mimetype ?? "image/webp" };
+  if (inner.videoMessage) return { mediaType: "video", mediaMimeType: inner.videoMessage.mimetype ?? "video/mp4" };
+  if (inner.ptvMessage) return { mediaType: "video", mediaMimeType: inner.ptvMessage.mimetype ?? "video/mp4" };
+  if (inner.audioMessage) return { mediaType: "audio", mediaMimeType: inner.audioMessage.mimetype ?? "audio/ogg" };
+  if (inner.documentMessage) return { mediaType: "doc", mediaMimeType: inner.documentMessage.mimetype ?? "application/octet-stream" };
+  return {};
+}
+
+interface HistoryItem {
+  remoteJid: string;
+  id: string;
+  fromMe: boolean;
+  isGroup: boolean;
+  participant?: string;
+  pushName?: string;
+  timestamp?: number;
+  chatName?: string;
+  message: proto.IMessage;
+  mediaType?: "image" | "video" | "audio" | "doc" | "sticker";
+  mediaMimeType?: string;
+}
+
+async function toHistoryItem(s: Session, m: WAMessage, chatNames: Map<string, string>): Promise<HistoryItem | null> {
+  const rawJid = m.key?.remoteJid ?? "";
+  if (!rawJid || rawJid.endsWith("@broadcast") || rawJid.endsWith("@newsletter") || rawJid === "status@broadcast") return null;
+  const id = m.key?.id;
+  const msg = m.message;
+  if (!id || !msg) return null;
+  const keys = Object.keys(msg).filter((k) => (msg as Record<string, unknown>)[k] != null);
+  if (keys.length === 0 || keys.every((k) => HISTORY_INVISIBLE.has(k))) return null;
+  const isGroup = rawJid.endsWith("@g.us");
+  const remoteJid = isGroup ? rawJid : await resolvePnJid(s, rawJid, (m.key as { remoteJidAlt?: string }).remoteJidAlt);
+  if (!remoteJid) return null;
+  const participant = isGroup ? await resolvePnJid(s, m.key?.participant ?? undefined, m.key?.participantAlt) : undefined;
+  const ts = typeof m.messageTimestamp === "number" ? m.messageTimestamp
+    : m.messageTimestamp != null ? Number(m.messageTimestamp) : undefined;
+  return {
+    remoteJid,
+    id,
+    fromMe: !!m.key?.fromMe,
+    isGroup,
+    participant,
+    pushName: m.pushName ?? undefined,
+    timestamp: Number.isFinite(ts) ? ts : undefined,
+    chatName: chatNames.get(rawJid) ?? chatNames.get(remoteJid),
+    message: msg,
+    ...historyMediaType(msg),
+  };
+}
+
+async function postHistoryBatch(s: Session, items: HistoryItem[]): Promise<void> {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(`${API_SERVER_URL}/api/chat/webhook/whatsapp-history`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Bridge-Secret": BRIDGE_SECRET },
+        body: JSON.stringify({ sessionKey: s.key, messages: items }),
+        signal: AbortSignal.timeout(120_000),
+      });
+      if (res.ok) {
+        const body = await res.json().catch(() => ({})) as Record<string, unknown>;
+        logger.info({ sessionKey: s.key, sent: items.length, ...body }, "Histórico do WhatsApp enviado ao CRM");
+        return;
+      }
+      logger.warn({ sessionKey: s.key, status: res.status, attempt }, "CRM recusou lote de histórico");
+    } catch (err) {
+      logger.warn({ err, sessionKey: s.key, attempt }, "Falha ao enviar lote de histórico ao CRM");
+    }
+    await sleep(2000 * attempt);
+  }
+}
+
+function enqueueHistory(
+  s: Session,
+  data: { chats?: Array<{ id?: string | null; name?: string | null }>; contacts?: BaileysContactLike[]; messages?: WAMessage[]; syncType?: unknown; progress?: number | null },
+): void {
+  if (!s.historyImport || s.stopped) return;
+  s.historyChain = s.historyChain.then(async () => {
+    if (s.stopped) return;
+    if (data.contacts?.length) await forwardContacts(s, data.contacts).catch(() => {});
+    const chatNames = new Map<string, string>();
+    for (const c of data.chats ?? []) if (c.id && c.name) chatNames.set(c.id, c.name);
+    const items: HistoryItem[] = [];
+    for (const m of data.messages ?? []) {
+      const it = await toHistoryItem(s, m, chatNames).catch(() => null);
+      if (it) items.push(it);
+    }
+    logger.info({ sessionKey: s.key, syncType: data.syncType, progress: data.progress, messages: items.length }, "Pedaço de histórico do WhatsApp recebido");
+    for (let i = 0; i < items.length; i += 500) {
+      if (s.stopped) return;
+      await postHistoryBatch(s, items.slice(i, i + 500));
+    }
+  }).catch((err) => {
+    logger.warn({ err, sessionKey: s.key }, "Erro ao processar pedaço de histórico");
+  });
+}
+
 // ─── Agenda de Contatos do WhatsApp (pedido 25/09, fase 1) ──────────────────
 // Baileys sincroniza a agenda continuamente via "app-state sync" — o mesmo
 // mecanismo que o WhatsApp Web usa pra se popular ao abrir — não só na
@@ -528,6 +659,38 @@ export async function startSession(key: string): Promise<boolean> {
   return true;
 }
 
+async function readHistoryImportFlag(key: string): Promise<boolean> {
+  try {
+    const [row] = await db.select({ v: whatsappSessionsTable.historyImportEnabled })
+      .from(whatsappSessionsTable).where(eq(whatsappSessionsTable.sessionKey, key)).limit(1);
+    return !!row?.v;
+  } catch {
+    return false;
+  }
+}
+
+/** Recria o socket de uma linha AINDA NÃO conectada (aguardando QR), pra que
+ *  o QR novo já saia com a configuração atual (ex.: "Puxar histórico ao
+ *  conectar" acabou de ser ligado). Linha conectada não é tocada — devolve
+ *  false. Não apaga credenciais. */
+export async function restartPendingSession(key: string): Promise<boolean> {
+  const s = sessions.get(key);
+  if (!s) return startSession(key);
+  if (s.status === "open") return false;
+  clearReconnectTimer(s);
+  if (s.sock) {
+    const old = s.sock;
+    s.sock = null; // eventos do socket antigo passam a ser ignorados
+    try { old.end(undefined); } catch { /* ignore */ }
+  }
+  s.qr = null;
+  s.status = "connecting";
+  s.reconnectAttempts = 0;
+  s.stopped = false;
+  void connectSession(s);
+  return true;
+}
+
 /** Disconnects, clears auth and reconnects fresh (new QR) — "trocar número". */
 export async function disconnectAndReset(key: string): Promise<void> {
   const s = sessions.get(key);
@@ -595,11 +758,17 @@ async function connectSession(s: Session): Promise<void> {
     // não abre um socket "fantasma" que ficaria gerando QR pra sempre.
     if (s.stopped || sessions.get(s.key) !== s) return;
 
+    s.historyImport = await readHistoryImportFlag(s.key);
     const sock = makeWASocket({
       auth: state,
       printQRInTerminal: false,
       logger: logger.child({ module: "baileys", sessionKey: s.key }) as never,
       connectTimeoutMs: 30_000,
+      // Linha com "Puxar histórico ao conectar": identifica como WhatsApp
+      // Desktop (o celular só manda o histórico completo para desktop) e
+      // aceita todos os tipos de pedaço, inclusive o FULL. Demais linhas
+      // seguem exatamente como antes.
+      ...(s.historyImport ? { browser: Browsers.macOS("Desktop"), shouldSyncHistoryMessage: () => true } : {}),
     });
     s.sock = sock;
 
@@ -616,6 +785,12 @@ async function connectSession(s: Session): Promise<void> {
           logger.warn({ err, sessionKey: s.key }, "Failed to forward inbound WhatsApp message");
         });
       }
+    });
+
+    // Histórico ao conectar (pedido 16/10) — ver enqueueHistory acima.
+    sock.ev.on("messaging-history.set", (data) => {
+      if (s.sock !== sock) return;
+      enqueueHistory(s, data as Parameters<typeof enqueueHistory>[1]);
     });
 
     // Agenda de Contatos (pedido 25/09, fase 1) — ver forwardContacts acima.

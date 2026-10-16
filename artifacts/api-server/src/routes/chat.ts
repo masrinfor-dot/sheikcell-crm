@@ -38,6 +38,7 @@ import {
   type InboundWAContactPayload,
   MEDIA_DIR,
 } from "../lib/whatsappInbound";
+import { processWAHistoryBatch, type WAHistoryPayload } from "../lib/whatsappHistory";
 
 const router: IRouter = Router();
 
@@ -3447,6 +3448,22 @@ router.post("/chat/webhook/whatsapp-contacts", async (req: Request, res: Respons
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Erro ao processar contatos" });
+  }
+});
+
+// POST — histórico do WhatsApp encaminhado pelo bridge ao parear uma linha
+// com "Puxar histórico ao conectar" (pedido 16/10, Compras e ADM). Lotes de
+// até 1000 mensagens; ver lib/whatsappHistory.ts.
+router.post("/chat/webhook/whatsapp-history", async (req: Request, res: Response): Promise<void> => {
+  if (!verifyLegacyBridgeSecret(req)) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  try {
+    const result = await processWAHistoryBatch(req.body as WAHistoryPayload);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Erro ao importar histórico" });
   }
 });
 

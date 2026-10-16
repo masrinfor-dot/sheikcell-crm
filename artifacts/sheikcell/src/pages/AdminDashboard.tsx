@@ -121,6 +121,8 @@ type WASession = {
   surveyDisabled: boolean;
   defaultSectorIds: number[];
   botEnabled: boolean;
+  historyImportEnabled: boolean;
+  directAssigneeId: number | null;
 };
 
 type UserRow = {
@@ -1434,6 +1436,74 @@ export default function AdminDashboard() {
                     </p>
                   )}
                   {s.errorMessage && <p className="text-xs text-red-600">{s.errorMessage}</p>}
+                </div>
+
+                {/* Compras e ADM (pedido 16/10): responsável fixo da linha —
+                    conversa nova ou reaberta por este número entra direto em
+                    "Ativos" com ele — e histórico das conversas ao conectar. */}
+                <div className="mb-3 px-2 py-2 rounded-lg border border-border/60 bg-secondary/20 space-y-2.5"
+                  data-testid={`wa-direct-assignee-${s.sessionKey}`}>
+                  <label className="block text-sm">
+                    <span className="font-medium">Conversas entram direto em Ativos com</span>
+                    <select
+                      value={s.directAssigneeId ?? ""}
+                      onChange={async (e) => {
+                        const userId = e.target.value ? Number(e.target.value) : null;
+                        const r = await fetch(`/api/whatsapp/sessions/${s.sessionKey}/direct-assignee`, {
+                          method: "POST", credentials: "include",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ userId }),
+                        });
+                        if (!r.ok) {
+                          const body = await r.json().catch(() => ({})) as { error?: string };
+                          toast({ title: "Não foi possível salvar", description: body.error ?? "Tente de novo.", variant: "destructive" });
+                        }
+                        fetchWAStatus();
+                      }}
+                      className="mt-1 w-full h-9 rounded-md border border-input bg-background px-2 text-sm"
+                    >
+                      <option value="">Ninguém (fluxo normal: Potenciais e fila)</option>
+                      {userRows.filter((u) => u.isActive || u.id === s.directAssigneeId).map((u) => (
+                        <option key={u.id} value={u.id}>{u.name}</option>
+                      ))}
+                    </select>
+                    <p className="text-[11px] text-muted-foreground mt-1">
+                      Para números internos (Compras, ADM): toda conversa nova ou que volta por este número já cai nos
+                      Ativos desta pessoa, e a ficha no CRM fica em "Ativo". Sem passar pela fila nem pelo robô.
+                    </p>
+                  </label>
+                  <label className="flex items-start gap-2.5 cursor-pointer text-sm"
+                    data-testid={`checkbox-wa-history-import-${s.sessionKey}`}>
+                    <input
+                      type="checkbox"
+                      checked={s.historyImportEnabled}
+                      onChange={async (e) => {
+                        const enabled = e.target.checked;
+                        const r = await fetch(`/api/whatsapp/sessions/${s.sessionKey}/history-import`, {
+                          method: "POST", credentials: "include",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ enabled }),
+                        });
+                        const body = await r.json().catch(() => ({})) as { restarted?: boolean };
+                        if (enabled && s.status === "connected") {
+                          toast({ title: "Vale no próximo pareamento", description: "Este número já está conectado. Para puxar o histórico, use \"Desconectar / Trocar número\" e escaneie o QR de novo." });
+                        } else if (enabled && body.restarted) {
+                          toast({ title: "QR atualizado", description: "Escaneie o QR novo para conectar já puxando o histórico." });
+                        }
+                        fetchWAStatus();
+                      }}
+                      className="w-4 h-4 mt-0.5 accent-[var(--primary)] shrink-0"
+                    />
+                    <span>
+                      <span className="font-medium">Puxar histórico de conversas ao conectar</span>
+                      <p className="text-[11px] text-muted-foreground -mt-0.5">
+                        Ao escanear o QR, o CRM grava as conversas antigas (recebidas e enviadas, inclusive grupos) com
+                        os nomes da agenda do WhatsApp. Ligue ANTES de escanear: o WhatsApp só manda o histórico na
+                        hora do pareamento. Fotos e arquivos antigos aparecem só como "📷 Foto"/"📄 arquivo". Sem
+                        responsável definido acima, as conversas antigas vão para Resolvidas.
+                      </p>
+                    </span>
+                  </label>
                 </div>
 
                 {/* Robô ligado/desligado POR LINHA (pedido 17/09: "decidir em

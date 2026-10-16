@@ -1,7 +1,7 @@
 import {
   db, conversationsTable, messagesTable, sectorsTable, attendanceLogsTable, whatsappSessionsTable,
   tenantsTable, employeesTable, workShiftsTable, timeClockEntriesTable, crmContactsTable,
-  whatsappContactsTable,
+  whatsappContactsTable, usersTable,
 } from "@workspace/db";
 import { eq, and, desc, sql, inArray } from "drizzle-orm";
 import { resolveTodaysPunchKind } from "./timeBank";
@@ -39,7 +39,7 @@ const LEGACY_TENANT_ID = 1;
 // sessionKey do webhook. FAIL CLOSED: só a chave legada "default" mapeia para
 // a loja 1; qualquer outra chave sem linha em whatsapp_sessions é rejeitada
 // (retorna null e a mensagem é descartada) — nunca cai em outra loja.
-async function resolveTenantForSession(sessionKey: string): Promise<number | null> {
+export async function resolveTenantForSession(sessionKey: string): Promise<number | null> {
   if (sessionKey === DEFAULT_SESSION_KEY) return LEGACY_TENANT_ID;
   const [row] = await db
     .select({ tenantId: whatsappSessionsTable.tenantId })
@@ -236,6 +236,34 @@ export async function processInboundWAContacts(payload: InboundWAContactPayload)
       updatedAt: new Date(),
     },
   });
+
+  // Linhas com "Puxar histórico" (pedido 16/10, Compras e ADM): o nome salvo
+  // na agenda costuma chegar DEPOIS do histórico — quando chega, a conversa e
+  // a ficha do CRM passam a mostrar o mesmo nome do WhatsApp. Só troca nome
+  // que ainda é o telefone ou o nome de perfil (pushName); nunca sobrescreve
+  // um nome que alguém editou à mão no CRM.
+  const [flags] = await db.select({ historyImportEnabled: whatsappSessionsTable.historyImportEnabled })
+    .from(whatsappSessionsTable)
+    .where(and(eq(whatsappSessionsTable.sessionKey, sessionKey), eq(whatsappSessionsTable.tenantId, tenantId)))
+    .limit(1);
+  if (!flags?.historyImportEnabled) return;
+  const named = rows
+    .filter((r) => r.name && r.name.trim())
+    .map((r) => ({ phone: normalizePhone(r.phone), name: r.name!.trim(), push: r.pushName }))
+    .filter((r) => r.phone);
+  for (let i = 0; i < named.length; i += 200) {
+    const values = sql.join(named.slice(i, i + 200).map((v) => sql`(${v.phone}::text, ${v.name}::text, ${v.push}::text)`), sql`, `);
+    await db.execute(sql`
+      update conversations c set name = v.name, updated_at = now()
+      from (values ${values}) as v(phone, name, push)
+      where c.tenant_id = ${tenantId} and c.session_key = ${sessionKey} and c.phone = v.phone
+        and c.name <> v.name and (c.name = c.phone or c.name = v.push or c.name ~ '^[0-9+ ()-]+$')`);
+    await db.execute(sql`
+      update crm_contacts k set name = v.name, updated_at = now()
+      from (values ${values}) as v(phone, name, push)
+      where k.tenant_id = ${tenantId} and k.phone = v.phone
+        and k.name <> v.name and (k.name = k.phone or k.name = v.push or k.name ~ '^[0-9+ ()-]+$')`);
+  }
 }
 
 export interface MetaInboundWAPayload {
@@ -336,6 +364,28 @@ async function downloadMetaMedia(
   } catch {
     return null;
   }
+}
+
+/**
+ * Responsável fixo da linha (pedido 16/10, linhas de Compras e ADM): quando a
+ * linha tem direct_assignee_id e esse usuário segue ativo na mesma loja, a
+ * conversa nova/reaberta por ela já entra em "Ativos" com ele. Usuário
+ * desativado ou de outra loja = null (fluxo normal), nunca atribui a quem
+ * não pode atender.
+ */
+export async function resolveDirectAssignee(tenantId: number, sessionKey: string): Promise<number | null> {
+  const [row] = await db
+    .select({ id: usersTable.id })
+    .from(whatsappSessionsTable)
+    .innerJoin(usersTable, eq(usersTable.id, whatsappSessionsTable.directAssigneeId))
+    .where(and(
+      eq(whatsappSessionsTable.sessionKey, sessionKey),
+      eq(whatsappSessionsTable.tenantId, tenantId),
+      eq(usersTable.tenantId, tenantId),
+      eq(usersTable.isActive, true),
+    ))
+    .limit(1);
+  return row?.id ?? null;
 }
 
 async function upsertConversation(
@@ -443,6 +493,7 @@ async function upsertConversation(
       .where(and(eq(whatsappSessionsTable.sessionKey, sessionKey), eq(whatsappSessionsTable.tenantId, tenantId)))
       .limit(1);
     const linkedSectorIds = sessionRow?.defaultSectorIds ?? [];
+    const directAssigneeId = await resolveDirectAssignee(tenantId, sessionKey);
     // Só chama a IA/regras de palavra-chave uma vez, mesmo que o resultado
     // sirva tanto pra decidir o setor (quando o número não está fixo em um
     // só) quanto pra decidir se PULA A FILA (pedido 18/09) — que vale pelo
@@ -493,6 +544,8 @@ async function upsertConversation(
           sessionKey,
           sectorId: targetSectorId,
           status: "open",
+          // Linha com responsável fixo: nasce em "Ativos" com ele.
+          ...(directAssigneeId != null ? { assigneeId: directAssigneeId, attendanceStartedAt: new Date() } : {}),
           lastMessage: displayContent,
           lastMessageDirection: "inbound",
           lastMessageAt: new Date(),
@@ -514,13 +567,13 @@ async function upsertConversation(
       // sucesso (ninguém elegível), a conversa segue no pool do setor,
       // disponível pra assumir manualmente como qualquer outra — e o
       // auto-atribuir normal logo abaixo ainda pode pegá-la depois.
-      if (classified?.skipQueue && !isCommunity && !isGroupJid) {
+      if (directAssigneeId == null && classified?.skipQueue && !isCommunity && !isGroupJid) {
         void tryAssignSkipQueue({ id: conv.id, tenantId, sectorId: targetSectorId });
       }
       // Fila do Central de Atendimento com auto-atribuição (pedido 14/09, opt-in
       // por linha de WhatsApp): tenta atribuir esta conversa nova a um vendedor
       // ocioso da fila, em segundo plano — nunca lança nem atrasa o webhook.
-      void autoAssignOnNewPoolConversation(conv);
+      if (directAssigneeId == null) void autoAssignOnNewPoolConversation(conv);
     }
     // wasCreated === false aqui = perdeu a corrida (outra chamada concorrente
     // pegou a trava primeiro e já criou a conversa). Cai no mesmo tratamento
@@ -534,6 +587,9 @@ async function upsertConversation(
     // a mandar mensagem, reabrimos a conversa para "Potenciais": status "open" e
     // sem responsável, para que volte à triagem.
     const reopen = conv.status === "resolved" || conv.status === "archived";
+    // Linha com responsável fixo: reabre direto em "Ativos" com ele, em vez
+    // de voltar pra triagem (Potenciais).
+    const reopenAssigneeId = reopen ? await resolveDirectAssignee(tenantId, sessionKey) : null;
     const [updated] = await db
       .update(conversationsTable)
       .set({
@@ -543,7 +599,7 @@ async function upsertConversation(
         lastMessageAt: new Date(),
         unreadCount: sql`${conversationsTable.unreadCount} + 1`,
         updatedAt: new Date(),
-        ...(reopen ? { status: "open", assigneeId: null, attendanceStartedAt: null } : {}),
+        ...(reopen ? { status: "open", assigneeId: reopenAssigneeId, attendanceStartedAt: reopenAssigneeId != null ? new Date() : null } : {}),
         ...(avatarUrl && avatarUrl !== conv.avatarUrl ? { avatarUrl } : {}),
         ...(syncName && pushName && pushName !== conv.name ? { name: pushName } : {}),
         // Autocorrige se a 1ª mensagem chegou antes do metadata do grupo
@@ -564,7 +620,7 @@ async function upsertConversation(
       await syncCrmAttendant(updated);
       // Fila com auto-atribuição (pedido 14/09): a conversa reaberta também
       // entra no pool sem dono — mesma tentativa de auto-atribuir de cima.
-      void autoAssignOnNewPoolConversation(updated);
+      if (reopenAssigneeId == null) void autoAssignOnNewPoolConversation(updated);
     }
   }
 
@@ -870,56 +926,14 @@ async function applyRevoke(targetId: string): Promise<void> {
   if (updated) await broadcastMessageUpdated(updated);
 }
 
-export async function processInboundWA(body: InboundWAPayload): Promise<void> {
-  const fromMe = body.data?.key?.fromMe ?? body.fromMe ?? false;
-  if (fromMe) return;
-  const isGroup = body.isGroupMsg ?? (body.data?.key?.remoteJid?.includes("@g.us") ?? false);
-
-  const remoteJid =
-    body.data?.key?.remoteJid ?? (body.phone ? `${body.phone}@s.whatsapp.net` : null);
-  // Grupos/comunidades: o identificador da conversa é o JID completo do grupo
-  // (não há telefone). Contatos 1:1 continuam usando só os dígitos.
-  const phone = isGroup
-    ? (remoteJid ?? "unknown")
-    : remoteJid?.replace("@s.whatsapp.net", "").replace("@c.us", "") ?? "unknown";
-  const pushName = body.data?.pushName ?? body.senderName ?? phone;
-  // Nome da conversa: nome do grupo (subject) para grupos/comunidades; nome do contato para 1:1.
-  const convName = isGroup
-    ? (body.data?.groupSubject || (body.isCommunityMsg ? "Comunidade do WhatsApp" : "Grupo do WhatsApp"))
-    : pushName;
-  // Telefone de quem mandou DENTRO do grupo (participante) — permite abrir
-  // uma conversa 1:1 com ele a partir da Central. Se vier como "@lid" sem
-  // resolução (a ponte não conseguiu mapear pro telefone real), não é um
-  // número utilizável — descarta em vez de gravar um JID inválido.
-  const participantJid = isGroup ? body.data?.key?.participant : undefined;
-  const senderPhone = participantJid && !participantJid.endsWith("@lid")
-    ? participantJid.replace("@s.whatsapp.net", "").replace("@c.us", "")
-    : null;
-
-  // Reação a uma mensagem existente: atualiza a lista de reações da
-  // mensagem-alvo em vez de criar uma mensagem nova. Emoji vazio = reação
-  // removida (comportamento nativo do WhatsApp).
-  if (body.data?.reaction) {
-    await applyReaction(body.data.reaction.targetId, body.data.reaction.emoji, pushName);
-    return;
-  }
-
-  // Edição de mensagem: sobrescreve o conteúdo da mensagem original e marca
-  // o horário da edição (exibida como "editado" na Central).
-  if (body.data?.edit) {
-    const edited = body.data.edit.message;
-    const newText = edited?.conversation ?? edited?.extendedTextMessage?.text ?? "";
-    if (newText) await applyEdit(body.data.edit.targetId, newText);
-    return;
-  }
-
-  // Cliente apagou a mensagem original ("apagar para todos") — sobrescreve o
-  // conteúdo com um placeholder em vez de deixar sumir sem explicação.
-  if (body.data?.revoke) {
-    await applyRevoke(body.data.revoke.targetId);
-    return;
-  }
-
+/**
+ * Interpreta o conteúdo de uma mensagem do WhatsApp (texto, mídia, contato,
+ * localização, enquete, pagamento, botões, template…) e devolve o tipo e o
+ * texto de exibição. Função pura (não grava nada) — compartilhada entre a
+ * mensagem ao vivo (processInboundWA) e a importação de histórico
+ * (lib/whatsappHistory.ts), pra que as duas mostrem a mensagem igual.
+ */
+export function describeWAContent(body: Pick<InboundWAPayload, "data" | "text">) {
   const mediaType = body.data?.mediaType ?? null;
   const mediaBase64 = body.data?.mediaBase64 ?? null;
   const mediaMimeType = body.data?.mediaMimeType ?? null;
@@ -1088,33 +1102,6 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
       : null) ??
     "";
 
-  const externalId = body.data?.key?.id ?? body.messageId ?? null;
-
-  // Dedup: em reconexões o Baileys pode reentregar a mesma mensagem
-  // (messages.upsert repetido). Se já gravamos esse ID, ignora.
-  if (externalId) {
-    const [dup] = await db
-      .select({ id: messagesTable.id })
-      .from(messagesTable)
-      .where(and(eq(messagesTable.externalId, externalId), eq(messagesTable.direction, "inbound")))
-      .limit(1);
-    if (dup) return;
-  }
-
-  let mediaUrl: string | null = null;
-  if (mediaBase64 && mediaMimeType) {
-    try {
-      mediaUrl = await saveMedia(mediaBase64, mediaMimeType);
-    } catch (err) {
-      // Sem este log, uma mídia que falha ao salvar (limite de tamanho,
-      // MIME não suportado, ou o volume/disco do MEDIA_DIR indisponível)
-      // vira silenciosamente uma mensagem sem mídia ("vídeo/foto não abre")
-      // e não sobra nenhum rastro pra descobrir o motivo real depois.
-      logger.error({ err, mediaMimeType, bytes: mediaBase64.length }, "Falha ao salvar mídia inbound (bridge)");
-      mediaUrl = null;
-    }
-  }
-
   const docFileName = msgContent?.documentMessage?.fileName ?? null;
   const docFileSizeRaw = msgContent?.documentMessage?.fileLength;
   const docFileSize = typeof docFileSizeRaw === "number" ? docFileSizeRaw
@@ -1192,6 +1179,89 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
       : mediaType === "sticker" ? "🙂 Figurinha"
       : unknownKind ? `⚠️ Tipo de mensagem não suportado (${unknownKind})`
       : "⚠️ Tipo de mensagem não suportado");
+
+  return { mediaType, mediaBase64, mediaMimeType, msgContent, text, msgType, displayContent, docFileName, docFileSize };
+}
+
+export async function processInboundWA(body: InboundWAPayload): Promise<void> {
+  const fromMe = body.data?.key?.fromMe ?? body.fromMe ?? false;
+  if (fromMe) return;
+  const isGroup = body.isGroupMsg ?? (body.data?.key?.remoteJid?.includes("@g.us") ?? false);
+
+  const remoteJid =
+    body.data?.key?.remoteJid ?? (body.phone ? `${body.phone}@s.whatsapp.net` : null);
+  // Grupos/comunidades: o identificador da conversa é o JID completo do grupo
+  // (não há telefone). Contatos 1:1 continuam usando só os dígitos.
+  const phone = isGroup
+    ? (remoteJid ?? "unknown")
+    : remoteJid?.replace("@s.whatsapp.net", "").replace("@c.us", "") ?? "unknown";
+  const pushName = body.data?.pushName ?? body.senderName ?? phone;
+  // Nome da conversa: nome do grupo (subject) para grupos/comunidades; nome do contato para 1:1.
+  const convName = isGroup
+    ? (body.data?.groupSubject || (body.isCommunityMsg ? "Comunidade do WhatsApp" : "Grupo do WhatsApp"))
+    : pushName;
+  // Telefone de quem mandou DENTRO do grupo (participante) — permite abrir
+  // uma conversa 1:1 com ele a partir da Central. Se vier como "@lid" sem
+  // resolução (a ponte não conseguiu mapear pro telefone real), não é um
+  // número utilizável — descarta em vez de gravar um JID inválido.
+  const participantJid = isGroup ? body.data?.key?.participant : undefined;
+  const senderPhone = participantJid && !participantJid.endsWith("@lid")
+    ? participantJid.replace("@s.whatsapp.net", "").replace("@c.us", "")
+    : null;
+
+  // Reação a uma mensagem existente: atualiza a lista de reações da
+  // mensagem-alvo em vez de criar uma mensagem nova. Emoji vazio = reação
+  // removida (comportamento nativo do WhatsApp).
+  if (body.data?.reaction) {
+    await applyReaction(body.data.reaction.targetId, body.data.reaction.emoji, pushName);
+    return;
+  }
+
+  // Edição de mensagem: sobrescreve o conteúdo da mensagem original e marca
+  // o horário da edição (exibida como "editado" na Central).
+  if (body.data?.edit) {
+    const edited = body.data.edit.message;
+    const newText = edited?.conversation ?? edited?.extendedTextMessage?.text ?? "";
+    if (newText) await applyEdit(body.data.edit.targetId, newText);
+    return;
+  }
+
+  // Cliente apagou a mensagem original ("apagar para todos") — sobrescreve o
+  // conteúdo com um placeholder em vez de deixar sumir sem explicação.
+  if (body.data?.revoke) {
+    await applyRevoke(body.data.revoke.targetId);
+    return;
+  }
+
+  const { mediaType, mediaBase64, mediaMimeType, text, msgType, displayContent, docFileName, docFileSize } = describeWAContent(body);
+
+  const externalId = body.data?.key?.id ?? body.messageId ?? null;
+
+  // Dedup: em reconexões o Baileys pode reentregar a mesma mensagem
+  // (messages.upsert repetido). Se já gravamos esse ID, ignora.
+  if (externalId) {
+    const [dup] = await db
+      .select({ id: messagesTable.id })
+      .from(messagesTable)
+      .where(and(eq(messagesTable.externalId, externalId), eq(messagesTable.direction, "inbound")))
+      .limit(1);
+    if (dup) return;
+  }
+
+  let mediaUrl: string | null = null;
+  if (mediaBase64 && mediaMimeType) {
+    try {
+      mediaUrl = await saveMedia(mediaBase64, mediaMimeType);
+    } catch (err) {
+      // Sem este log, uma mídia que falha ao salvar (limite de tamanho,
+      // MIME não suportado, ou o volume/disco do MEDIA_DIR indisponível)
+      // vira silenciosamente uma mensagem sem mídia ("vídeo/foto não abre")
+      // e não sobra nenhum rastro pra descobrir o motivo real depois.
+      logger.error({ err, mediaMimeType, bytes: mediaBase64.length }, "Falha ao salvar mídia inbound (bridge)");
+      mediaUrl = null;
+    }
+  }
+
 
   const sessionKey =
     typeof body.sessionKey === "string" && /^[a-z0-9][a-z0-9_-]{0,39}$/.test(body.sessionKey)

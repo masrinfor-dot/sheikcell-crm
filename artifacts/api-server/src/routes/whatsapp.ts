@@ -7,7 +7,7 @@
 import { Router, type IRouter } from "express";
 import { createHmac } from "node:crypto";
 import { requireFeature, requireTenant } from "../middlewares/auth";
-import { db, whatsappSessionsTable, whatsappAuthStateTable, conversationsTable, sectorsTable } from "@workspace/db";
+import { db, whatsappSessionsTable, whatsappAuthStateTable, conversationsTable, sectorsTable, usersTable } from "@workspace/db";
 import { and, eq, inArray, isNotNull, notInArray, sql } from "drizzle-orm";
 import { assertWithinLimit } from "../lib/planLimits";
 import { broadcast } from "../lib/sseEmitter";
@@ -49,6 +49,8 @@ export interface AdminWAState extends BridgeWAState {
   surveyDisabled: boolean;
   defaultSectorIds: number[];
   botEnabled: boolean;
+  historyImportEnabled: boolean;
+  directAssigneeId: number | null;
 }
 
 async function persistSessionState(tenantId: number, key: string, state: BridgeWAState): Promise<void> {
@@ -129,6 +131,8 @@ function offlineState(
     surveyDisabled: row?.surveyDisabled ?? false,
     defaultSectorIds: row?.defaultSectorIds ?? [],
     botEnabled: row?.botEnabled ?? true,
+    historyImportEnabled: row?.historyImportEnabled ?? false,
+    directAssigneeId: row?.directAssigneeId ?? null,
   };
 }
 
@@ -177,6 +181,8 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         surveyDisabled: row?.surveyDisabled ?? false,
         defaultSectorIds: row?.defaultSectorIds ?? [],
         botEnabled: row?.botEnabled ?? true,
+        historyImportEnabled: row?.historyImportEnabled ?? false,
+        directAssigneeId: row?.directAssigneeId ?? null,
       });
     } else if (bridgeAvailable) {
       // Bridge is up but doesn't know this session yet — ask it to start it.
@@ -197,6 +203,8 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         surveyDisabled: row?.surveyDisabled ?? false,
         defaultSectorIds: row?.defaultSectorIds ?? [],
         botEnabled: row?.botEnabled ?? true,
+        historyImportEnabled: row?.historyImportEnabled ?? false,
+        directAssigneeId: row?.directAssigneeId ?? null,
       });
       void fetchFromBridge("/whatsapp/sessions", "POST", { session: key }).catch(() => {});
     } else {
@@ -357,6 +365,59 @@ router.post("/whatsapp/sessions/:key/bot-enabled", requireFeature("whatsapp"), a
     .returning();
   if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
   res.json({ ok: true, botEnabled: updated.botEnabled });
+});
+
+// ─── Histórico ao conectar (pedido 16/10: linhas de Compras e ADM) ──────
+// Ligado, o próximo pareamento desta linha pede o histórico completo ao
+// celular e o CRM grava as conversas antigas (ver lib/whatsappHistory.ts).
+// O WhatsApp só envia o histórico no momento de escanear o QR: se a linha
+// ainda não está conectada, reinicia o socket no bridge pra que o QR novo já
+// saia com essa configuração; se já está conectada, vale só no próximo
+// pareamento (a tela avisa).
+router.post("/whatsapp/sessions/:key/history-import", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const enabled = !!(req.body as { enabled?: boolean } | undefined)?.enabled;
+  const [updated] = await db
+    .update(whatsappSessionsTable)
+    .set({ historyImportEnabled: enabled, updatedAt: new Date() })
+    .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId)))
+    .returning();
+  if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+  let restarted = false;
+  if (updated.status !== "connected") {
+    try {
+      const r = await fetchFromBridge(`/whatsapp/sessions/${encodeURIComponent(key)}/restart`, "POST", {});
+      restarted = r.ok;
+    } catch { /* bridge fora do ar: aplica no próximo boot do bridge */ }
+  }
+  res.json({ ok: true, historyImportEnabled: updated.historyImportEnabled, restarted });
+});
+
+// ─── Responsável fixo da linha (mesmo pedido) ─────────────────────────────
+// Conversa nova ou reaberta por este número entra direto em "Ativos" com
+// este usuário. userId null volta ao fluxo normal (Potenciais/fila).
+router.post("/whatsapp/sessions/:key/direct-assignee", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const raw = (req.body as { userId?: unknown } | undefined)?.userId;
+  let userId: number | null = null;
+  if (raw !== null && raw !== undefined && raw !== "") {
+    userId = Number(raw);
+    if (!Number.isInteger(userId)) { res.status(400).json({ error: "Usuário inválido" }); return; }
+    // Só usuário ativo da MESMA loja.
+    const [u] = await db.select({ id: usersTable.id }).from(usersTable)
+      .where(and(eq(usersTable.id, userId), eq(usersTable.tenantId, tenantId), eq(usersTable.isActive, true)))
+      .limit(1);
+    if (!u) { res.status(400).json({ error: "Usuário não encontrado ou inativo" }); return; }
+  }
+  const [updated] = await db
+    .update(whatsappSessionsTable)
+    .set({ directAssigneeId: userId, updatedAt: new Date() })
+    .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId)))
+    .returning();
+  if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+  res.json({ ok: true, directAssigneeId: updated.directAssigneeId });
 });
 
 // ─── Setores desta linha, pra direcionamento automático (pedido 16/09:
@@ -545,6 +606,8 @@ router.get("/whatsapp/status", requireFeature("whatsapp"), async (req, res): Pro
         surveyDisabled: row?.surveyDisabled ?? false,
         defaultSectorIds: row?.defaultSectorIds ?? [],
         botEnabled: row?.botEnabled ?? true,
+        historyImportEnabled: row?.historyImportEnabled ?? false,
+        directAssigneeId: row?.directAssigneeId ?? null,
       };
       res.json(result);
       return;
