@@ -1,4 +1,5 @@
 import { pgTable, serial, text, timestamp, integer, boolean, jsonb } from "drizzle-orm/pg-core";
+import { usersTable } from "./users";
 
 export const whatsappSessionsTable = pgTable("whatsapp_sessions", {
   tenantId: integer("tenant_id").notNull().default(1),
@@ -49,6 +50,17 @@ export const whatsappSessionsTable = pgTable("whatsapp_sessions", {
   // nenhuma linha muda de comportamento até o admin desligar explicitamente
   // em Administração → WhatsApp. Ver uso em lib/bot.ts (botWouldHandle/handle).
   botEnabled: boolean("bot_enabled").notNull().default(true),
+  // Histórico ao conectar (pedido 16/10, linhas de Compras e ADM): ao parear
+  // esta linha, o bridge pede o histórico completo ao celular e o CRM grava
+  // as conversas antigas (recebidas e enviadas, com a data original) — sem
+  // robô, pesquisa nem notificação. Só vale para pareamentos feitos com isto
+  // ligado: o WhatsApp só envia o histórico no momento de escanear o QR.
+  // Ver lib/whatsappHistory.ts (API) e messaging-history.set (bridge).
+  historyImportEnabled: boolean("history_import_enabled").notNull().default(false),
+  // Responsável fixo da linha (mesmo pedido): conversa nova ou reaberta por
+  // este número já entra em "Ativos" com este usuário, sem passar por
+  // Potenciais/Pendentes/fila. null = fluxo normal de sempre.
+  directAssigneeId: integer("direct_assignee_id").references(() => usersTable.id, { onDelete: "set null" }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

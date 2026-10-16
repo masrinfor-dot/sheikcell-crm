@@ -3,6 +3,7 @@ import { createHmac } from "node:crypto";
 import { getWAState, sendWAMessage, sendWAMedia } from "../lib/whatsapp";
 import {
   disconnectAndReset,
+  restartPendingSession,
   startSession,
   removeSession,
   getAllSessionStates,
@@ -83,6 +84,15 @@ router.delete("/whatsapp/sessions/:key", requireBridgeSecret, async (req, res): 
   }
   await removeSession(key);
   res.json({ ok: true });
+});
+
+// Recria o socket de uma linha aguardando QR (nova configuração, ex.: puxar
+// histórico ao conectar). Linha já conectada não é tocada.
+router.post("/whatsapp/sessions/:key/restart", requireBridgeSecret, async (req, res): Promise<void> => {
+  const key = sessionKeyFrom(req.params.key);
+  if (!key) { res.status(400).json({ error: "session inválida" }); return; }
+  const restarted = await restartPendingSession(key);
+  res.json({ ok: true, restarted });
 });
 
 router.post("/whatsapp/reset", requireBridgeSecret, async (req, res): Promise<void> => {
