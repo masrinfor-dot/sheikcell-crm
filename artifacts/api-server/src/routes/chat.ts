@@ -38,7 +38,7 @@ import {
   type InboundWAContactPayload,
   MEDIA_DIR,
 } from "../lib/whatsappInbound";
-import { processWAHistoryBatch, type WAHistoryPayload } from "../lib/whatsappHistory";
+import { processWAHistoryArchived, processWAHistoryBatch, type WAHistoryArchivedPayload, type WAHistoryPayload } from "../lib/whatsappHistory";
 
 const router: IRouter = Router();
 
@@ -3464,6 +3464,21 @@ router.post("/chat/webhook/whatsapp-history", async (req: Request, res: Response
     res.json({ ok: true, ...result });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Erro ao importar histórico" });
+  }
+});
+
+// POST — conversas arquivadas no celular depois que o histórico já foi
+// gravado (pedido 17/10): saem de Ativos só as recém-importadas e intocadas.
+router.post("/chat/webhook/whatsapp-history-archived", async (req: Request, res: Response): Promise<void> => {
+  if (!verifyLegacyBridgeSecret(req)) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  try {
+    const result = await processWAHistoryArchived(req.body as WAHistoryArchivedPayload);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Erro ao processar arquivadas" });
   }
 });
 
