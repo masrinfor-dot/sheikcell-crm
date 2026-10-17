@@ -5,6 +5,7 @@ import {
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
+import TvBoxErpCard, { TvBoxMovedNotice } from "@/components/TvBoxErpCard";
 import {
   Tv, Plus, X, Pencil, Settings as SettingsIcon, RefreshCw,
   AlertCircle, CheckCircle2, Clock, Ban, History,
@@ -40,8 +41,13 @@ const centsFromInput = (v: string): number => Math.round(Number(v.replace(/\./g,
 
 export default function TvBox() {
   const { user } = useAuth();
-  const canEdit = canEditModule(user, "tvbox");
   const { toast } = useToast();
+  const isAdmin = user?.role === "admin";
+  // TV Box passada para o ERP (17/10/2026): desligada aqui, o painel é só
+  // consulta (o servidor também recusa qualquer alteração).
+  const [erpMove, setErpMove] = useState<{ moved: boolean; erpUrl: string }>({ moved: false, erpUrl: "" });
+  useEffect(() => { api.tvbox.moved().then(setErpMove).catch(() => {}); }, []);
+  const canEdit = canEditModule(user, "tvbox") && !erpMove.moved;
 
   const [clients, setClients] = useState<TvBoxClient[]>([]);
   const [overview, setOverview] = useState<TvBoxOverview | null>(null);
@@ -189,6 +195,9 @@ export default function TvBox() {
           )}
         </div>
       </div>
+
+      {erpMove.moved && <TvBoxMovedNotice erpUrl={erpMove.erpUrl} />}
+      {isAdmin && <TvBoxErpCard moved={erpMove.moved} erpUrl={erpMove.erpUrl} onChange={setErpMove} />}
 
       {overview && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
