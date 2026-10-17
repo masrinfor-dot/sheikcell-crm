@@ -9,6 +9,7 @@ import {
   type CatalogMarketCheckVerdict, type TradeInEvaluation, type CatalogCoupon,
 } from "@/lib/api";
 import { requestChatExpand } from "@/lib/chatWidgetBus";
+import VitrineErpRedirect from "@/components/VitrineErpRedirect";
 import {
   Smartphone, Plus, X, Search, Trash2, Pencil, Sparkles, Settings2, Link2,
   Copy, ImagePlus, Check, AlertTriangle, Loader2, MessageCircle, Info, Calculator,
@@ -1632,6 +1633,7 @@ export default function VitrineAparelhos() {
             </div>
           </div>
         )}
+        {user?.role === "admin" && <VitrineErpRedirect slug={slug} />}
       </div>
 
       {/* Filtros */}
