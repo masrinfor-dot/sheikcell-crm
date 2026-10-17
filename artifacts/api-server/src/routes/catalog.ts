@@ -24,6 +24,7 @@ import { requireAuth, requireAdmin, requireTenant } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import { requirePerm } from "../lib/permissions";
 import { logger } from "../lib/logger";
+import { vitrineRedirectFor } from "../lib/vitrineRedirect";
 import {
   sanitizePricingSettings,
   precoVendaDoProduto,
@@ -2258,6 +2259,10 @@ catalogPublicRouter.get("/catalog-public/:slug", async (req: Request, res: Respo
 
   const retailWa = tenant.catalogWhatsapp ?? tenant.contactPhone ?? null;
   res.json({
+    // Vitrine pública no ERP (17/10/2026): com "Redirecionar a vitrine
+    // pública para o ERP" ligado, a página daqui vai para <erp>/loja/<slug>
+    // (reserva do 302 do nginx — ex.: aparelho com o app em cache).
+    redirectTo: await vitrineRedirectFor(tenant.id, slug),
     storeName: tenant.name,
     // Logo (reaproveita a mesma logo de Configurações → Aparência) e imagem
     // de fundo (exclusiva da vitrine, ver /catalog/banner-image) — ambas
