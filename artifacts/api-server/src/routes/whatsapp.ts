@@ -50,6 +50,7 @@ export interface AdminWAState extends BridgeWAState {
   defaultSectorIds: number[];
   botEnabled: boolean;
   historyImportEnabled: boolean;
+  phoneOutboundEnabled: boolean;
   directAssigneeId: number | null;
 }
 
@@ -132,6 +133,7 @@ function offlineState(
     defaultSectorIds: row?.defaultSectorIds ?? [],
     botEnabled: row?.botEnabled ?? true,
     historyImportEnabled: row?.historyImportEnabled ?? false,
+    phoneOutboundEnabled: row?.phoneOutboundEnabled ?? false,
     directAssigneeId: row?.directAssigneeId ?? null,
   };
 }
@@ -182,6 +184,7 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         defaultSectorIds: row?.defaultSectorIds ?? [],
         botEnabled: row?.botEnabled ?? true,
         historyImportEnabled: row?.historyImportEnabled ?? false,
+        phoneOutboundEnabled: row?.phoneOutboundEnabled ?? false,
         directAssigneeId: row?.directAssigneeId ?? null,
       });
     } else if (bridgeAvailable) {
@@ -204,6 +207,7 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         defaultSectorIds: row?.defaultSectorIds ?? [],
         botEnabled: row?.botEnabled ?? true,
         historyImportEnabled: row?.historyImportEnabled ?? false,
+        phoneOutboundEnabled: row?.phoneOutboundEnabled ?? false,
         directAssigneeId: row?.directAssigneeId ?? null,
       });
       void fetchFromBridge("/whatsapp/sessions", "POST", { session: key }).catch(() => {});
@@ -392,6 +396,22 @@ router.post("/whatsapp/sessions/:key/history-import", requireFeature("whatsapp")
     } catch { /* bridge fora do ar: aplica no próximo boot do bridge */ }
   }
   res.json({ ok: true, historyImportEnabled: updated.historyImportEnabled, restarted });
+});
+
+// ─── Mensagens enviadas pelo celular (pedido 17/10) ───────────────────────
+// Ligado, o que alguém digita direto no celular desta linha aparece na
+// conversa do CRM como mensagem enviada. Vale na hora, sem reconectar.
+router.post("/whatsapp/sessions/:key/phone-outbound", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const enabled = !!(req.body as { enabled?: boolean } | undefined)?.enabled;
+  const [updated] = await db
+    .update(whatsappSessionsTable)
+    .set({ phoneOutboundEnabled: enabled, updatedAt: new Date() })
+    .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId)))
+    .returning();
+  if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+  res.json({ ok: true, phoneOutboundEnabled: updated.phoneOutboundEnabled });
 });
 
 // ─── Responsável fixo da linha (mesmo pedido) ─────────────────────────────
@@ -607,6 +627,7 @@ router.get("/whatsapp/status", requireFeature("whatsapp"), async (req, res): Pro
         defaultSectorIds: row?.defaultSectorIds ?? [],
         botEnabled: row?.botEnabled ?? true,
         historyImportEnabled: row?.historyImportEnabled ?? false,
+        phoneOutboundEnabled: row?.phoneOutboundEnabled ?? false,
         directAssigneeId: row?.directAssigneeId ?? null,
       };
       res.json(result);
