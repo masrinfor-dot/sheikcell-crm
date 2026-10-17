@@ -2767,6 +2767,10 @@ export const api = {
   },
   raffles: {
     list: () => req<Raffle[]>("/raffles"),
+    // Sorteios passados pro ERP (17/10/2026).
+    moved: () => req<{ moved: boolean; erpUrl: string }>("/raffles/moved"),
+    setMoved: (data: { moved?: boolean; erpUrl?: string }) =>
+      req<{ moved: boolean; erpUrl: string }>("/raffles/moved", { method: "PUT", body: JSON.stringify(data) }),
     create: (data: Partial<Raffle>) => req<Raffle>("/raffles", { method: "POST", body: JSON.stringify(data) }),
     update: (id: number, data: Partial<Raffle>) => req<Raffle>(`/raffles/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/raffles/${id}`, { method: "DELETE" }),

@@ -3,6 +3,7 @@ import { api, type Raffle, type RaffleDraw, type Sector, type User } from "@/lib
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import { Gift, Plus, X, Trash2, Pencil, Play, History, Users, RefreshCw, Eye, Send } from "lucide-react";
+import RafflesErpCard, { RafflesMovedNotice } from "@/components/RafflesErpCard";
 
 const WEEKDAYS = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
 
@@ -52,6 +53,9 @@ export default function Sorteios() {
   const [vendedores, setVendedores] = useState<User[]>([]);
   const [waSessions, setWaSessions] = useState<{ sessionKey: string; displayName: string | null; phoneNumber: string | null }[]>([]);
   const [loading, setLoading] = useState(true);
+  // Sorteios passados pro ERP (17/10/2026): desligado aqui = só consulta.
+  const [erp, setErp] = useState<{ moved: boolean; erpUrl: string }>({ moved: false, erpUrl: "" });
+  const readOnly = erp.moved;
 
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Raffle | null>(null);
@@ -64,6 +68,7 @@ export default function Sorteios() {
   const [runningId, setRunningId] = useState<number | null>(null);
 
   useEffect(() => {
+    api.raffles.moved().then(setErp).catch(() => {});
     Promise.all([
       api.raffles.list(),
       api.sectors.list().catch(() => [] as Sector[]),
@@ -235,11 +240,16 @@ export default function Sorteios() {
         <h2 className="text-lg font-bold flex items-center gap-2">
           <Gift className="w-5 h-5 text-primary" /> Sorteios
         </h2>
-        <button onClick={() => openForm()} data-testid="button-add-raffle"
-          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-primary text-white text-xs font-semibold hover:opacity-90 transition">
-          <Plus className="w-3.5 h-3.5" /> Novo sorteio
-        </button>
+        {!readOnly && (
+          <button onClick={() => openForm()} data-testid="button-add-raffle"
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-primary text-white text-xs font-semibold hover:opacity-90 transition">
+            <Plus className="w-3.5 h-3.5" /> Novo sorteio
+          </button>
+        )}
       </div>
+
+      {readOnly && <RafflesMovedNotice erpUrl={erp.erpUrl} />}
+      {user?.role === "admin" && <RafflesErpCard moved={erp.moved} erpUrl={erp.erpUrl} onChange={setErp} />}
 
       {loading ? (
         <p className="text-sm text-muted-foreground">Carregando...</p>
@@ -271,6 +281,7 @@ export default function Sorteios() {
                   </button>
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0">
+                  {!readOnly && (<>
                   <button onClick={() => handleRun(r)} disabled={runningId === r.id} data-testid={`button-run-raffle-${r.id}`}
                     className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-primary/10 text-primary text-[11px] font-bold hover:bg-primary/20 transition disabled:opacity-50">
                     {runningId === r.id ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />} Sortear agora
@@ -280,12 +291,15 @@ export default function Sorteios() {
                     className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-secondary text-muted-foreground text-[11px] font-bold hover:bg-secondary/80 transition disabled:opacity-50">
                     <Eye className="w-3 h-3" /> Sortear p/ revisar
                   </button>
+                  </>)}
                   <button onClick={() => openDraws(r)} title="Histórico"
                     className="p-1.5 rounded-lg hover:bg-secondary transition"><History className="w-4 h-4 text-muted-foreground" /></button>
+                  {!readOnly && (<>
                   <button onClick={() => openForm(r)} title="Editar"
                     className="p-1.5 rounded-lg hover:bg-secondary transition"><Pencil className="w-4 h-4 text-muted-foreground" /></button>
                   <button onClick={() => handleDelete(r)} title="Excluir"
                     className="p-1.5 rounded-lg hover:bg-secondary transition"><Trash2 className="w-4 h-4 text-destructive" /></button>
+                  </>)}
                 </div>
               </div>
             </div>
@@ -512,7 +526,7 @@ export default function Sorteios() {
                             <span className="font-semibold truncate">🏆 {w.name || w.phone}</span>
                             <span className="flex items-center gap-1.5 shrink-0">
                               <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${badgeClass}`}>{badgeLabel}</span>
-                              {!w.sent && (
+                              {!w.sent && !readOnly && (
                                 <button onClick={() => handleResend(d.id, w.phone)} disabled={resending != null}
                                   data-testid={`button-resend-winner-${d.id}-${i}`}
                                   className="text-[10px] px-1.5 py-0.5 rounded font-bold bg-primary text-white hover:opacity-90 disabled:opacity-50 transition">
@@ -524,7 +538,7 @@ export default function Sorteios() {
                         );
                       })}
                     </div>
-                    {d.winners.some((w) => !w.sent) && (
+                    {d.winners.some((w) => !w.sent) && !readOnly && (
                       <button onClick={() => handleSendAll(d.id)} disabled={sendingAllId != null}
                         data-testid={`button-send-all-${d.id}`}
                         className="mt-2 w-full flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg bg-primary/10 text-primary text-[11px] font-bold hover:bg-primary/20 transition disabled:opacity-50">
