@@ -26,6 +26,7 @@ import botRouter from "./bot";
 import financeRouter from "./finance";
 import financePaymentsRouter from "./financePayments";
 import documentsRouter from "./documents";
+import documentsExportRouter, { documentsExportPublicRouter } from "./documentsExport";
 import meetingsRouter from "./meetings";
 import storesRouter from "./stores";
 import resultsRouter from "./results";
@@ -78,6 +79,8 @@ router.use(rafflesRouter);
 router.use(botRouter);
 router.use(financeRouter);
 router.use(financePaymentsRouter);
+// Documentos → ERP (17/10/2026): exportar e desligar aqui.
+router.use(documentsExportRouter);
 router.use(documentsRouter);
 router.use(meetingsRouter);
 router.use(storesRouter);
@@ -100,6 +103,9 @@ router.use(tradeInPublicRouter);
 // Sem requireAuth: fotos das avaliações por link assinado (72h), só pro ERP
 // baixar na importação — ver routes/tradeInExport.ts.
 router.use(tradeInExportPublicRouter);
+// Sem requireAuth: arquivos dos documentos por link assinado (72h), só pro
+// ERP baixar na importação — ver routes/documentsExport.ts.
+router.use(documentsExportPublicRouter);
 // Sem requireAuth: webhook do Instagram Direct (Meta) e mídia por link
 // assinado — ver routes/instagram.ts.
 router.use(instagramPublicRouter);

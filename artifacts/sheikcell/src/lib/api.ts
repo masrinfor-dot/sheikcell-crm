@@ -3225,6 +3225,10 @@ export const api = {
       req<DocumentItem>("/documents", { method: "POST", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/documents/${id}`, { method: "DELETE" }),
     fileUrl: (id: number) => `/api/documents/${id}/file`,
+    // Documentos passados pro ERP (17/10/2026).
+    moved: () => req<{ moved: boolean; erpUrl: string }>("/documents/moved"),
+    setMoved: (data: { moved?: boolean; erpUrl?: string }) =>
+      req<{ moved: boolean; erpUrl: string }>("/documents/moved", { method: "PUT", body: JSON.stringify(data) }),
   },
   catalog: {
     list: () => req<{ settings: CatalogPricingSettings; products: CatalogProduct[] }>("/catalog/products"),

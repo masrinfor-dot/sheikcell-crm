@@ -4,6 +4,7 @@ import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import { FolderArchive, Plus, X, Search, FileText, Image, Download, Trash2, Eye } from "lucide-react";
 import Reunioes from "@/components/Reunioes";
+import DocumentsErpCard, { DocumentsMovedNotice } from "@/components/DocumentsErpCard";
 
 const CATEGORIES: { value: string; label: string; badge: string }[] = [
   { value: "ata", label: "Ata de Reunião", badge: "bg-violet-100 text-violet-700" },
@@ -38,10 +39,15 @@ export default function Documentos() {
   // de produto, não de módulo) — mas supervisor agora também precisa do
   // nível "edit" em Documentos (senão o backend bloqueia o upload mesmo com
   // o botão visível).
-  const canManage = (user?.role === "admin" || user?.role === "supervisor") && canEditModule(user, "documentos");
+  // Documentos passados pro ERP (17/10/2026) — ver DocumentsErpCard.
+  // Desligado aqui, a lista fica só para consulta.
+  const [erpMove, setErpMove] = useState<{ moved: boolean; erpUrl: string }>({ moved: false, erpUrl: "" });
+  const isAdmin = user?.role === "admin";
+  const canManage = (user?.role === "admin" || user?.role === "supervisor") && canEditModule(user, "documentos") && !erpMove.moved;
 
   useEffect(() => {
     api.documents.list().then(setDocs).catch(() => {}).finally(() => setLoading(false));
+    api.documents.moved().then(setErpMove).catch(() => {});
   }, []);
 
   const openAdd = () => {
@@ -96,6 +102,9 @@ export default function Documentos() {
       <Reunioes onDocumentCreated={(doc) => setDocs((prev) => [{ ...doc, uploaderName: user?.name ?? null }, ...prev])} />
 
       <div className="border-t border-border" />
+
+      {erpMove.moved && <DocumentsMovedNotice erpUrl={erpMove.erpUrl} />}
+      {isAdmin && <DocumentsErpCard moved={erpMove.moved} erpUrl={erpMove.erpUrl} onChange={setErpMove} />}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
