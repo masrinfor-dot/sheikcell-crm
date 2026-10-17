@@ -1,4 +1,4 @@
-import { Router, type IRouter, type Request, type Response } from "express";
+import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
 import { db, documentsTable, usersTable } from "@workspace/db";
 import { eq, and, desc } from "drizzle-orm";
 import { requireAuth, requireAdminOrSupervisor, requireTenant } from "../middlewares/auth";
@@ -7,6 +7,7 @@ import path from "path";
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
 import { mkdir, writeFile, unlink } from "fs/promises";
+import { documentsMovedToErp } from "../lib/documentsMoved";
 
 const router: IRouter = Router();
 router.use("/documents", requireModuleAccess("documentos"));
@@ -69,6 +70,17 @@ function contentMatchesMime(buf: Buffer, mime: string): boolean {
   }
 }
 
+// Depois de "Desligar no CRM" (documentos no ERP, 17/10/2026), enviar e
+// excluir aqui devolvem 410 — a lista continua para consulta.
+async function blockWhenMoved(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const tenantId = req.session?.tenantId;
+  if (typeof tenantId === "number" && (await documentsMovedToErp(tenantId))) {
+    res.status(410).json({ error: "Os documentos da loja agora ficam no ERP." });
+    return;
+  }
+  next();
+}
+
 // ─── Listar documentos ───────────────────────────────────────────────────────
 router.get("/documents", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
@@ -93,7 +105,7 @@ router.get("/documents", requireAuth, async (req, res): Promise<void> => {
 });
 
 // ─── Enviar documento (base64, como as mídias do chat) ──────────────────────
-router.post("/documents", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+router.post("/documents", requireAdminOrSupervisor, blockWhenMoved, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { title, category, description, fileName, mimeType, data } = req.body ?? {};
   const cleanTitle = typeof title === "string" ? title.trim().slice(0, 200) : "";
@@ -151,7 +163,7 @@ router.get("/documents/:id/file", requireAuth, async (req: Request, res: Respons
 });
 
 // ─── Excluir documento ───────────────────────────────────────────────────────
-router.delete("/documents/:id", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+router.delete("/documents/:id", requireAdminOrSupervisor, blockWhenMoved, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const [doc] = await db.select().from(documentsTable)
