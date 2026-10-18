@@ -77,6 +77,10 @@ interface Session {
   // para o CRM numa fila própria, em ordem, sem atrasar mensagens ao vivo.
   historyImport: boolean;
   historyChain: Promise<void>;
+  // Conversa arquivada no celular? (pedido 17/10: só as conversas ABERTAS no
+  // WhatsApp entram em Ativos). O celular manda os chats e as mensagens em
+  // pedaços separados, então o estado fica guardado durante a sincronização.
+  historyArchived: Map<string, boolean>;
   // Mensagens enviadas PELO SISTEMA (id → quando): a mensagem própria que o
   // Baileys reemite depois do envio é ignorada, pra não duplicar no CRM o
   // que o CRM já gravou. Só o que foi digitado no celular segue adiante.
@@ -100,6 +104,7 @@ function newSession(key: string): Session {
     lastSendAt: 0,
     historyImport: false,
     historyChain: Promise.resolve(),
+    historyArchived: new Map(),
     sentIds: new Map(),
   };
 }
@@ -500,6 +505,8 @@ interface HistoryItem {
   pushName?: string;
   timestamp?: number;
   chatName?: string;
+  /** true = arquivada no celular; ausente = não sabemos (trata como aberta). */
+  chatArchived?: boolean;
   message: proto.IMessage;
   mediaType?: "image" | "video" | "audio" | "doc" | "sticker";
   mediaMimeType?: string;
@@ -528,6 +535,7 @@ async function toHistoryItem(s: Session, m: WAMessage, chatNames: Map<string, st
     pushName: m.pushName ?? undefined,
     timestamp: Number.isFinite(ts) ? ts : undefined,
     chatName: chatNames.get(rawJid) ?? chatNames.get(remoteJid),
+    chatArchived: s.historyArchived.get(rawJid) ?? s.historyArchived.get(remoteJid),
     message: msg,
     ...historyMediaType(msg),
   };
@@ -557,14 +565,17 @@ async function postHistoryBatch(s: Session, items: HistoryItem[]): Promise<void>
 
 function enqueueHistory(
   s: Session,
-  data: { chats?: Array<{ id?: string | null; name?: string | null }>; contacts?: BaileysContactLike[]; messages?: WAMessage[]; syncType?: unknown; progress?: number | null },
+  data: { chats?: Array<{ id?: string | null; name?: string | null; archived?: boolean | null }>; contacts?: BaileysContactLike[]; messages?: WAMessage[]; syncType?: unknown; progress?: number | null },
 ): void {
   if (!s.historyImport || s.stopped) return;
   s.historyChain = s.historyChain.then(async () => {
     if (s.stopped) return;
     if (data.contacts?.length) await forwardContacts(s, data.contacts).catch(() => {});
     const chatNames = new Map<string, string>();
-    for (const c of data.chats ?? []) if (c.id && c.name) chatNames.set(c.id, c.name);
+    for (const c of data.chats ?? []) {
+      if (c.id && c.name) chatNames.set(c.id, c.name);
+      if (c.id && c.archived != null) s.historyArchived.set(c.id, !!c.archived);
+    }
     const items: HistoryItem[] = [];
     for (const m of data.messages ?? []) {
       const it = await toHistoryItem(s, m, chatNames).catch(() => null);
@@ -578,6 +589,27 @@ function enqueueHistory(
   }).catch((err) => {
     logger.warn({ err, sessionKey: s.key }, "Erro ao processar pedaço de histórico");
   });
+}
+
+/** Conversas arquivadas no celular depois que o histórico já foi gravado. */
+async function forwardArchived(s: Session, rawJids: string[]): Promise<void> {
+  const jids: string[] = [];
+  for (const raw of rawJids) {
+    if (raw.endsWith("@broadcast") || raw.endsWith("@newsletter")) continue;
+    const j = raw.endsWith("@g.us") ? raw : await resolvePnJid(s, raw, undefined).catch(() => null);
+    if (j) jids.push(j);
+  }
+  if (jids.length === 0) return;
+  try {
+    await fetch(`${API_SERVER_URL}/api/chat/webhook/whatsapp-history-archived`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Bridge-Secret": BRIDGE_SECRET },
+      body: JSON.stringify({ sessionKey: s.key, jids }),
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (err) {
+    logger.warn({ err, sessionKey: s.key }, "Falha ao avisar o CRM das conversas arquivadas");
+  }
 }
 
 // ─── Agenda de Contatos do WhatsApp (pedido 25/09, fase 1) ──────────────────
@@ -797,6 +829,7 @@ async function connectSession(s: Session): Promise<void> {
     if (s.stopped || sessions.get(s.key) !== s) return;
 
     s.historyImport = await readHistoryImportFlag(s.key);
+    s.historyArchived.clear();
     const sock = makeWASocket({
       auth: state,
       printQRInTerminal: false,
@@ -836,6 +869,24 @@ async function connectSession(s: Session): Promise<void> {
       if (s.sock !== sock) return;
       enqueueHistory(s, data as Parameters<typeof enqueueHistory>[1]);
     });
+
+    // Arquivadas no celular (pedido 17/10): o estado pode vir separado do
+    // histórico (sincronização de app-state). Guarda pro histórico que ainda
+    // vai chegar e avisa o CRM pras conversas que o histórico já criou.
+    const onChatsArchive = (chats: Array<{ id?: string | null; archived?: boolean | null }>) => {
+      if (s.sock !== sock || !s.historyImport) return;
+      const archived: string[] = [];
+      for (const c of chats) {
+        if (!c.id || c.archived == null) continue;
+        s.historyArchived.set(c.id, !!c.archived);
+        if (c.archived) archived.push(c.id);
+      }
+      if (archived.length > 0) {
+        s.historyChain = s.historyChain.then(() => forwardArchived(s, archived)).catch(() => {});
+      }
+    };
+    sock.ev.on("chats.upsert", (chats) => onChatsArchive(chats));
+    sock.ev.on("chats.update", (chats) => onChatsArchive(chats));
 
     // Agenda de Contatos (pedido 25/09, fase 1) — ver forwardContacts acima.
     sock.ev.on("contacts.upsert", (contacts) => {

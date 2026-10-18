@@ -1469,7 +1469,7 @@ export default function AdminDashboard() {
                       ))}
                     </select>
                     <p className="text-[11px] text-muted-foreground mt-1">
-                      Para números internos (Compras, ADM): toda conversa nova ou que volta por este número já cai nos
+                      Para números internos (ADM, Atacado, Compras): toda conversa nova ou que volta por este número já cai nos
                       Ativos desta pessoa, e a ficha no CRM fica em "Ativo". Sem passar pela fila nem pelo robô.
                     </p>
                   </label>
@@ -1525,8 +1525,9 @@ export default function AdminDashboard() {
                       <p className="text-[11px] text-muted-foreground -mt-0.5">
                         Ao escanear o QR, o CRM grava as conversas antigas (recebidas e enviadas, inclusive grupos) com
                         os nomes da agenda do WhatsApp. Ligue ANTES de escanear: o WhatsApp só manda o histórico na
-                        hora do pareamento. Fotos e arquivos antigos aparecem só como "📷 Foto"/"📄 arquivo". Sem
-                        responsável definido acima, as conversas antigas vão para Resolvidas.
+                        hora do pareamento. Fotos e arquivos antigos aparecem só como "📷 Foto"/"📄 arquivo". As
+                        conversas ABERTAS no celular entram em Ativos com o responsável acima; as arquivadas no
+                        celular (ou todas, se não houver responsável) vão para Resolvidas.
                       </p>
                     </span>
                   </label>
