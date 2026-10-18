@@ -230,3 +230,43 @@ test("nome da agenda que chega depois troca o telefone pelo nome, sem mexer em n
     .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.phone, "5533922221111")));
   assert.equal(kept?.name, "Contador Tales");
 });
+
+test("mensagem digitada no celular: só grava com a opção ligada, como enviada, sem duplicar", async () => {
+  const own = (id: string, text: string) => ({
+    sessionKey: keyAtivos,
+    isGroupMsg: false,
+    data: {
+      key: { remoteJid: "5533988887777@s.whatsapp.net", fromMe: true, id },
+      message: { conversation: text },
+      messageTimestamp: t0 + 600,
+    },
+  });
+  // Desligada (padrão): ignora.
+  await processInboundWA(own(`P0-${rnd}`, "não deve aparecer"));
+  const [conv] = await db.select().from(conversationsTable)
+    .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.phone, "5533988887777")));
+  let msgs = await db.select().from(messagesTable).where(eq(messagesTable.externalId, `P0-${rnd}`));
+  assert.equal(msgs.length, 0);
+
+  await db.update(whatsappSessionsTable).set({ phoneOutboundEnabled: true }).where(eq(whatsappSessionsTable.sessionKey, keyAtivos));
+  await processInboundWA(own(`P1-${rnd}`, "Pode mandar pela transportadora"));
+  await processInboundWA(own(`P1-${rnd}`, "Pode mandar pela transportadora")); // reentrega
+  msgs = await db.select().from(messagesTable).where(eq(messagesTable.externalId, `P1-${rnd}`));
+  assert.equal(msgs.length, 1);
+  assert.equal(msgs[0]!.direction, "outbound");
+  assert.equal(msgs[0]!.conversationId, conv!.id);
+  assert.equal(msgs[0]!.senderName, "Celular (Compras)");
+  const [after] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, conv!.id));
+  assert.equal(after?.lastMessage, "Pode mandar pela transportadora");
+  assert.equal(after?.lastMessageDirection, "outbound");
+  assert.equal(after?.unreadCount, conv!.unreadCount);
+
+  // Apagar pelo celular atualiza a mensagem no CRM.
+  await processInboundWA({
+    sessionKey: keyAtivos,
+    isGroupMsg: false,
+    data: { key: { remoteJid: "5533988887777@s.whatsapp.net", fromMe: true, id: `P2-${rnd}` }, revoke: { targetId: `P1-${rnd}` } },
+  });
+  const [revoked] = await db.select().from(messagesTable).where(eq(messagesTable.externalId, `P1-${rnd}`));
+  assert.ok(revoked?.deletedAt);
+});

@@ -122,6 +122,7 @@ type WASession = {
   defaultSectorIds: number[];
   botEnabled: boolean;
   historyImportEnabled: boolean;
+  phoneOutboundEnabled: boolean;
   directAssigneeId: number | null;
 };
 
@@ -1471,6 +1472,31 @@ export default function AdminDashboard() {
                       Para números internos (ADM, Atacado, Compras): toda conversa nova ou que volta por este número já cai nos
                       Ativos desta pessoa, e a ficha no CRM fica em "Ativo". Sem passar pela fila nem pelo robô.
                     </p>
+                  </label>
+                  <label className="flex items-start gap-2.5 cursor-pointer text-sm"
+                    data-testid={`checkbox-wa-phone-outbound-${s.sessionKey}`}>
+                    <input
+                      type="checkbox"
+                      checked={s.phoneOutboundEnabled}
+                      onChange={async (e) => {
+                        const enabled = e.target.checked;
+                        await fetch(`/api/whatsapp/sessions/${s.sessionKey}/phone-outbound`, {
+                          method: "POST", credentials: "include",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ enabled }),
+                        });
+                        fetchWAStatus();
+                      }}
+                      className="w-4 h-4 mt-0.5 accent-[var(--primary)] shrink-0"
+                    />
+                    <span>
+                      <span className="font-medium">Mostrar mensagens enviadas pelo celular</span>
+                      <p className="text-[11px] text-muted-foreground -mt-0.5">
+                        O que alguém digitar direto no celular deste número aparece na conversa do sistema como
+                        mensagem enviada (com foto, áudio e arquivo). Vale na hora, sem reconectar. O que o sistema
+                        envia não duplica.
+                      </p>
+                    </span>
                   </label>
                   <label className="flex items-start gap-2.5 cursor-pointer text-sm"
                     data-testid={`checkbox-wa-history-import-${s.sessionKey}`}>
