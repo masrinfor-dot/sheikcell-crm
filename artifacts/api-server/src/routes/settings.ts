@@ -396,6 +396,7 @@ router.patch("/settings/erp", requireAdmin, async (req, res): Promise<void> => {
     };
     await db.insert(tenantErpIntegrationsTable).values({ tenantId, ...values })
       .onConflictDoUpdate({ target: tenantErpIntegrationsTable.tenantId, set: { ...values, updatedAt: new Date() } });
+    (await import("../lib/erpExchanges")).forgetErpScopes(tenantId);
   } else {
     if (!existing) { res.status(400).json({ error: "Cole a chave do ERP primeiro" }); return; }
     await db.update(tenantErpIntegrationsTable).set({
@@ -417,7 +418,9 @@ router.post("/settings/erp/test", requireAdmin, async (req, res): Promise<void> 
   try {
     const { pingErp } = await import("../lib/erpOsMessages");
     const key = decryptErpSecret({ ciphertext: row.encryptedApiKey, iv: row.iv, authTag: row.authTag, keyVersion: row.keyVersion });
-    const ping = await pingErp(row.baseUrl, key);
+    const { withErpTenant, rememberErpScopes } = await import("../lib/erpExchanges");
+    const ping = await withErpTenant(tenantId, () => pingErp(row.baseUrl, key));
+    rememberErpScopes(tenantId, ping.key?.scopes ?? []);
     // Guarda o endereço das telas do ERP (link "Trabalhe conosco" e avisos do RH).
     const webUrl = typeof ping.webUrl === "string" ? ping.webUrl : null;
     if (webUrl && /^https?:\/\//.test(webUrl)) {
@@ -440,6 +443,7 @@ router.post("/settings/erp/test", requireAdmin, async (req, res): Promise<void> 
 router.delete("/settings/erp", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   await db.delete(tenantErpIntegrationsTable).where(eq(tenantErpIntegrationsTable.tenantId, tenantId));
+  (await import("../lib/erpExchanges")).forgetErpScopes(tenantId);
   res.json(await erpStatus(tenantId));
 });
 

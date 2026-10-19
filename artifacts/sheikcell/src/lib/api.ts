@@ -1613,6 +1613,52 @@ export interface ErpIntegrationStatus {
   erpWebUrl: string | null;
 }
 
+// Trocas com o ERP (19/10/2026): mapa do que vai e vem e histórico (90 dias).
+export type ErpFlowStatus = "ON" | "OFF" | "NO_ACCESS" | "MANUAL";
+export type ErpDirection = "CRM_TO_ERP" | "ERP_TO_CRM";
+export interface ErpExchangeFlow {
+  key: string;
+  label: string;
+  what: string;
+  scope: string | null;
+  frequency: string;
+  manual: string | null;
+  directions: ErpDirection[];
+  status: ErpFlowStatus;
+  reason: string;
+  lastExchangeAt: string | null;
+  todayOk: number;
+  todayErrors: number;
+}
+export interface ErpExchangeFlows {
+  configured: boolean;
+  keyScopes: string[] | null;
+  pingError: string | null;
+  flows: ErpExchangeFlow[];
+}
+export interface ErpExchangeRow {
+  id: number;
+  flow: string;
+  direction: ErpDirection;
+  method: string;
+  path: string;
+  httpStatus: number | null;
+  ok: boolean;
+  durationMs: number;
+  itemCount: number | null;
+  summary: string | null;
+  error: string | null;
+  createdAt: string;
+}
+export interface ErpExchangeList {
+  items: ErpExchangeRow[];
+  total: number;
+  page: number;
+  pageSize: number;
+  today: { total: number; ok: number; errors: number; crmToErp: number; erpToCrm: number };
+  retentionDays: number;
+}
+
 export interface InstagramIntegrationStatus {
   configured: boolean;
   enabled: boolean;
@@ -3155,6 +3201,9 @@ export const api = {
       test: () =>
         req<{ ok: boolean; tenant: string; keyName: string | null; canSendOsMessages: boolean; canSyncHr: boolean }>("/settings/erp/test", { method: "POST" }),
       remove: () => req<ErpIntegrationStatus>("/settings/erp", { method: "DELETE" }),
+      exchangeFlows: () => req<ErpExchangeFlows>("/settings/erp/exchanges/flows"),
+      exchanges: (params: Record<string, string>) =>
+        req<ErpExchangeList>(`/settings/erp/exchanges?${new URLSearchParams(params).toString()}`),
     },
     instagram: {
       get: () => req<InstagramIntegrationStatus>("/settings/instagram"),

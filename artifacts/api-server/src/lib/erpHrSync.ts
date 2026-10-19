@@ -14,7 +14,8 @@ import {
 } from "@workspace/db";
 import { sendHistory } from "./erpHrHistory";
 import { decryptErpSecret } from "./erpCrypto";
-import { erpUrl } from "./erpOsMessages";
+import { erpFetch } from "./erpOsMessages";
+import { withErpTenant } from "./erpExchanges";
 import { normalizePhone } from "./phone";
 import { logger } from "./logger";
 import { DOCS_DIR } from "../routes/documents";
@@ -37,17 +38,9 @@ const DOCUMENT_BATCH = 10;
 const MAX_DOC_BYTES = 15 * 1024 * 1024;
 const EMPLOYEE_DOCS_DIR = path.join(DOCS_DIR, "colaboradores");
 
+// Mesmo erpFetch das OS (registra a troca no histórico), com prazo maior.
 export async function erpCall<T>(baseUrl: string, apiKey: string, pathName: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(erpUrl(baseUrl, pathName), {
-    ...init,
-    headers: { "Content-Type": "application/json", "X-Api-Key": apiKey, ...(init?.headers ?? {}) },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`ERP respondeu ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
-  }
-  return res.json() as Promise<T>;
+  return erpFetch(baseUrl, apiKey, pathName, init, FETCH_TIMEOUT_MS) as Promise<T>;
 }
 
 export const post = <T>(baseUrl: string, apiKey: string, pathName: string, body: unknown) =>
@@ -77,13 +70,13 @@ export async function runErpHrSync(): Promise<void> {
   try {
     const rows = await db.select().from(tenantErpIntegrationsTable)
       .where(eq(tenantErpIntegrationsTable.hrSyncEnabled, true));
-    for (const row of rows) {
+    for (const row of rows) await withErpTenant(row.tenantId, async () => {
       let apiKey: string;
       try {
         apiKey = decryptErpSecret({ ciphertext: row.encryptedApiKey, iv: row.iv, authTag: row.authTag, keyVersion: row.keyVersion });
       } catch {
         await setState(row.tenantId, { hrLastError: "Não foi possível ler a chave do ERP (cofre)." });
-        continue;
+        return;
       }
       try {
         await syncTenant(row, apiKey);
@@ -95,7 +88,7 @@ export async function runErpHrSync(): Promise<void> {
           hrLastSyncAt: new Date(),
         });
       }
-    }
+    });
   } finally {
     running = false;
   }
