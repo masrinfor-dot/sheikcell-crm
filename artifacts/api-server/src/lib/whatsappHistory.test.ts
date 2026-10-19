@@ -270,3 +270,16 @@ test("mensagem digitada no celular: só grava com a opção ligada, como enviada
   const [revoked] = await db.select().from(messagesTable).where(eq(messagesTable.externalId, `P1-${rnd}`));
   assert.ok(revoked?.deletedAt);
 });
+
+test("conversa criada pelo celular puxa o nome já cadastrado na ficha do CRM", async () => {
+  await db.insert(crmContactsTable).values({ tenantId, name: "Loja Parceira Itambacuri", contact: "5533933332222", phone: "5533933332222" });
+  await db.update(whatsappSessionsTable).set({ phoneOutboundEnabled: true }).where(eq(whatsappSessionsTable.sessionKey, keyAtivos));
+  await processInboundWA({
+    sessionKey: keyAtivos,
+    isGroupMsg: false,
+    data: { key: { remoteJid: "5533933332222@s.whatsapp.net", fromMe: true, id: `R1-${rnd}` }, message: { conversation: "Bom dia! Por nada" } },
+  });
+  const [conv] = await db.select().from(conversationsTable)
+    .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.phone, "5533933332222")));
+  assert.equal(conv?.name, "Loja Parceira Itambacuri");
+});
