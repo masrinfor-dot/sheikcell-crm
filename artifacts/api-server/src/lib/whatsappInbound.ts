@@ -242,11 +242,17 @@ export async function processInboundWAContacts(payload: InboundWAContactPayload)
   // a ficha do CRM passam a mostrar o mesmo nome do WhatsApp. Só troca nome
   // que ainda é o telefone ou o nome de perfil (pushName); nunca sobrescreve
   // um nome que alguém editou à mão no CRM.
-  const [flags] = await db.select({ historyImportEnabled: whatsappSessionsTable.historyImportEnabled })
+  // 19/10: vale também para linhas com "mensagens enviadas pelo celular" ou
+  // responsável fixo — conversas criadas pelo celular nascem só com o número.
+  const [flags] = await db.select({
+    historyImportEnabled: whatsappSessionsTable.historyImportEnabled,
+    phoneOutboundEnabled: whatsappSessionsTable.phoneOutboundEnabled,
+    directAssigneeId: whatsappSessionsTable.directAssigneeId,
+  })
     .from(whatsappSessionsTable)
     .where(and(eq(whatsappSessionsTable.sessionKey, sessionKey), eq(whatsappSessionsTable.tenantId, tenantId)))
     .limit(1);
-  if (!flags?.historyImportEnabled) return;
+  if (!flags?.historyImportEnabled && !flags?.phoneOutboundEnabled && flags?.directAssigneeId == null) return;
   const named = rows
     .filter((r) => r.name && r.name.trim())
     .map((r) => ({ phone: normalizePhone(r.phone), name: r.name!.trim(), push: r.pushName }))
