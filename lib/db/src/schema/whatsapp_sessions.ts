@@ -1,4 +1,4 @@
-import { pgTable, serial, text, timestamp, integer } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, timestamp, integer, boolean } from "drizzle-orm/pg-core";
 
 export const whatsappSessionsTable = pgTable("whatsapp_sessions", {
   tenantId: integer("tenant_id").notNull().default(1),
@@ -10,6 +10,9 @@ export const whatsappSessionsTable = pgTable("whatsapp_sessions", {
   phoneId: text("phone_id"),
   errorMessage: text("error_message"),
   lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
+  // WhatsApp de compras (19/10/2026): toda mensagem recebida nesta conexão é
+  // encaminhada ao ERP (listas de preço dos fornecedores). Ver lib/erpForward.ts.
+  forwardToErp: boolean("forward_to_erp").notNull().default(false),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

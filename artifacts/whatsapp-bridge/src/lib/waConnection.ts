@@ -249,8 +249,11 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
     ? { targetId: msg.protocolMessage.key.id, message: msg.protocolMessage.editedMessage ?? undefined }
     : undefined;
 
-  // Mídia pode vir embrulhada (mensagem temporária / visualização única).
-  const inner = msg.ephemeralMessage?.message ?? msg.viewOnceMessage?.message ?? msg.viewOnceMessageV2?.message ?? msg;
+  // Mídia pode vir embrulhada (mensagem temporária / visualização única /
+  // documento com legenda — o PDF da lista de preço que o fornecedor manda
+  // com texto junto vem assim, 19/10/2026).
+  const unwrapped = msg.ephemeralMessage?.message ?? msg.viewOnceMessage?.message ?? msg.viewOnceMessageV2?.message ?? msg;
+  const inner = unwrapped.documentWithCaptionMessage?.message ?? unwrapped;
 
   let mediaBase64: string | undefined;
   let mediaMimeType: string | undefined;

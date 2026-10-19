@@ -39,6 +39,8 @@ export interface AdminWAState extends BridgeWAState {
   displayName: string | null;
   lastHeartbeatAt: string | null;
   bridgeAvailable: boolean;
+  /** WhatsApp de compras: mensagens vão ao ERP (19/10/2026). */
+  forwardToErp: boolean;
 }
 
 async function persistSessionState(tenantId: number, key: string, state: BridgeWAState): Promise<void> {
@@ -109,6 +111,7 @@ function offlineState(
   return {
     sessionKey: key,
     displayName: row?.displayName ?? null,
+    forwardToErp: row?.forwardToErp ?? false,
     mode: "baileys",
     status: "reconnecting",
     phoneNumber: row?.phoneNumber ?? null,
@@ -157,6 +160,7 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         ...live,
         sessionKey: key,
         displayName: row?.displayName ?? null,
+        forwardToErp: row?.forwardToErp ?? false,
         lastHeartbeatAt: row?.lastHeartbeatAt?.toISOString() ?? null,
         bridgeAvailable: true,
       });
@@ -165,6 +169,7 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
       result.push({
         sessionKey: key,
         displayName: row?.displayName ?? null,
+        forwardToErp: row?.forwardToErp ?? false,
         mode: "baileys",
         status: "connecting",
         phoneNumber: row?.phoneNumber ?? null,
@@ -250,6 +255,25 @@ router.post("/whatsapp/sessions/:key/rename", requireFeature("whatsapp"), async 
   res.json({ ok: true });
 });
 
+// ─── WhatsApp de compras: encaminhar ao ERP (19/10/2026) ───────────────────
+// Marca a conexão cujo número é o de compras: toda mensagem de fornecedor
+// recebida nela vai ao ERP (Prumo) para a IA ler a lista de preço. Ver
+// lib/erpForward.ts; precisa de ERP_API_URL e ERP_API_KEY no servidor.
+router.post("/whatsapp/sessions/:key/forward-to-erp", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const { enabled } = req.body as { enabled?: boolean };
+  if (typeof enabled !== "boolean") { res.status(400).json({ error: "Informe enabled (true/false)" }); return; }
+  const [updated] = await db
+    .update(whatsappSessionsTable)
+    .set({ forwardToErp: enabled, updatedAt: new Date() })
+    .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId)))
+    .returning();
+  if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+  const { erpForwardConfigured } = await import("../lib/erpForward");
+  res.json({ ok: true, forwardToErp: updated.forwardToErp, erpConfigured: erpForwardConfigured() });
+});
+
 // ─── Remove a connection ────────────────────────────────────────────────────
 router.delete("/whatsapp/sessions/:key", requireFeature("whatsapp"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
@@ -324,6 +348,7 @@ router.get("/whatsapp/status", requireFeature("whatsapp"), async (req, res): Pro
         ...bridgeState,
         sessionKey: key,
         displayName: row?.displayName ?? null,
+        forwardToErp: row?.forwardToErp ?? false,
         lastHeartbeatAt: row?.lastHeartbeatAt?.toISOString() ?? null,
         bridgeAvailable: true,
       };

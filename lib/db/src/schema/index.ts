@@ -35,3 +35,4 @@ export * from "./financeAudit";
 export * from "./system_board";
 export * from "./team_favorites";
 export * from "./password_reset_tokens";
+export * from "./erp_forward_queue";

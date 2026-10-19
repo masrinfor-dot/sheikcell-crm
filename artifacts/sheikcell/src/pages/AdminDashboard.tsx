@@ -70,6 +70,8 @@ type WASession = {
   lastHeartbeatAt: string | null;
   errorMessage: string | null;
   bridgeAvailable: boolean;
+  /** WhatsApp de compras: mensagens de fornecedores vão ao ERP (19/10/2026). */
+  forwardToErp?: boolean;
 };
 
 type UserRow = {
@@ -873,6 +875,29 @@ export default function AdminDashboard() {
                     </p>
                   )}
                   {s.errorMessage && <p className="text-xs text-red-600">{s.errorMessage}</p>}
+                  {/* WhatsApp de compras (19/10/2026): toda mensagem de fornecedor vai ao ERP (Prumo) para a IA ler a lista de preço. */}
+                  <label className="flex items-center gap-2 pt-1 text-xs cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={!!s.forwardToErp}
+                      onChange={async (e) => {
+                        const enabled = e.target.checked;
+                        const r = await fetch(`/api/whatsapp/sessions/${s.sessionKey}/forward-to-erp`, {
+                          method: "POST", credentials: "include",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ enabled }),
+                        });
+                        const body = await r.json().catch(() => ({}));
+                        if (r.ok && enabled && body?.erpConfigured === false) {
+                          window.alert("Marcado. Mas o servidor ainda não tem ERP_API_URL e ERP_API_KEY configurados — as listas só vão ao ERP depois disso.");
+                        }
+                        fetchWAStatus();
+                      }}
+                    />
+                    <span className={s.forwardToErp ? "font-semibold text-foreground" : ""}>
+                      WhatsApp de compras: mandar listas de fornecedores ao ERP
+                    </span>
+                  </label>
                 </div>
 
                 {/* QR code */}

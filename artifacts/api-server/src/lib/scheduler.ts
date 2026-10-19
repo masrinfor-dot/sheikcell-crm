@@ -290,5 +290,11 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("./financeBank/pollJob").then((m) => m.pollPagBankAccounts()).catch(() => {});
   }, 5 * 60_000);
+  // Fila do ERP (listas de preço do WhatsApp de compras, 19/10/2026): reenvia
+  // o que falhou, com espera crescente. Roda uma vez logo no boot também.
+  void import("./erpForward").then((m) => m.runErpForwardQueue()).catch(() => {});
+  setInterval(() => {
+    void import("./erpForward").then((m) => m.runErpForwardQueue()).catch(() => {});
+  }, 60_000);
   logger.info("Agendador de mensagens iniciado (tick 30s)");
 }

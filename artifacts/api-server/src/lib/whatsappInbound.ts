@@ -67,6 +67,9 @@ export interface InboundWAMessageContent {
   ephemeralMessage?: { message?: InboundWAMessageContent };
   viewOnceMessage?: { message?: InboundWAMessageContent };
   viewOnceMessageV2?: { message?: InboundWAMessageContent };
+  // Documento (PDF, planilha) mandado COM legenda: o WhatsApp embrulha o
+  // documentMessage dentro deste (19/10/2026 — listas de preço dos fornecedores).
+  documentWithCaptionMessage?: { message?: InboundWAMessageContent };
 }
 
 export interface InboundWAPayload {
@@ -494,6 +497,7 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     rawMsg?.ephemeralMessage?.message ??
     rawMsg?.viewOnceMessage?.message ??
     rawMsg?.viewOnceMessageV2?.message ??
+    rawMsg?.documentWithCaptionMessage?.message ??
     rawMsg;
 
   const text =
@@ -656,6 +660,32 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   // Conflito = mensagem duplicada chegando em paralelo; não notifica de novo.
   if (!msg) return;
   broadcast("message", { conversationId: conv.id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+
+  // WhatsApp de compras (19/10/2026): conexão marcada "encaminhar ao ERP" manda
+  // toda mensagem de fornecedor (texto, foto, PDF, planilha) para o ERP ler a
+  // lista de preço com IA. Fila própria com nova tentativa; nunca atrasa o
+  // webhook. Grupos, áudios, vídeos e figurinhas não vão (não são listas).
+  if (!isGroup && externalId && mediaType !== "audio" && mediaType !== "video" && mediaType !== "sticker") {
+    void import("./erpForward")
+      .then(async (m) => {
+        if (!m.erpForwardConfigured() || !(await m.sessionForwardsToErp(sessionKey, tenantId))) return;
+        await m.enqueueErpForward({
+          tenantId,
+          sessionKey,
+          externalId,
+          conversationId: conv.id,
+          senderPhone: phone,
+          senderName: pushName,
+          receivedAt: body.data?.messageTimestamp ? new Date(body.data.messageTimestamp * 1000) : new Date(),
+          text: text || null,
+          fileName: docFileName,
+          mimeType: mediaMimeType,
+          mediaUrl,
+          mediaBase64: mediaUrl ? null : mediaBase64,
+        });
+      })
+      .catch(() => {});
+  }
 
   // Robô de pré-atendimento (assíncrono: nunca atrasa nem derruba o webhook)
   if (msgType === "text") {
