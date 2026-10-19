@@ -9,6 +9,7 @@
 import makeWASocket, {
   Browsers,
   DisconnectReason,
+  fetchLatestWaWebVersion,
   downloadMediaMessage,
   proto,
   type WASocket,
@@ -729,6 +730,27 @@ export async function startSession(key: string): Promise<boolean> {
   return true;
 }
 
+// Versão do WhatsApp Web anunciada ao conectar (19/10/2026: "não está gerando
+// QR code"). A versão embutida no Baileys 7.0.0-rc14 é de julho; quando o
+// WhatsApp passa a recusar versões antigas, o pareamento novo cai antes do
+// QR (código 405) e fica em "reconectando" para sempre. Busca a versão atual
+// do WhatsApp Web (cache de 6h); sem internet ou erro, usa a embutida.
+let waVersionCache: { version: [number, number, number]; at: number } | null = null;
+async function currentWaVersion(): Promise<[number, number, number] | undefined> {
+  if (waVersionCache && Date.now() - waVersionCache.at < 6 * 60 * 60_000) return waVersionCache.version;
+  try {
+    const r = await withTimeout(fetchLatestWaWebVersion({}), 8000, "versão do WhatsApp Web");
+    if (r?.isLatest && Array.isArray(r.version) && r.version.length === 3) {
+      waVersionCache = { version: r.version as [number, number, number], at: Date.now() };
+      logger.info({ version: r.version }, "Versão do WhatsApp Web atualizada");
+      return waVersionCache.version;
+    }
+  } catch (err) {
+    logger.warn({ err }, "Não deu para buscar a versão do WhatsApp Web — usando a do Baileys");
+  }
+  return waVersionCache?.version;
+}
+
 async function readHistoryImportFlag(key: string): Promise<boolean> {
   try {
     const [row] = await db.select({ v: whatsappSessionsTable.historyImportEnabled })
@@ -830,7 +852,10 @@ async function connectSession(s: Session): Promise<void> {
 
     s.historyImport = await readHistoryImportFlag(s.key);
     s.historyArchived.clear();
+    const waVersion = await currentWaVersion();
+    if (s.stopped || sessions.get(s.key) !== s) return;
     const sock = makeWASocket({
+      ...(waVersion ? { version: waVersion } : {}),
       auth: state,
       printQRInTerminal: false,
       logger: logger.child({ module: "baileys", sessionKey: s.key }) as never,
