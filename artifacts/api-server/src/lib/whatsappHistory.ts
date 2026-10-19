@@ -13,10 +13,15 @@
 // - Grupos entram também (nome do grupo como nome da conversa).
 // - Nome do contato: o salvo na agenda DESTA linha (whatsapp_contacts) →
 //   nome do chat no WhatsApp → nome do perfil (pushName) → telefone.
-// - Conversa nova: se a linha tem responsável fixo (direct_assignee_id), já
-//   nasce em "Ativos" com ele (e a ficha do CRM em "Ativo"); sem
-//   responsável, nasce em Resolvidas — nunca enche Potenciais com centenas
-//   de conversas antigas nem dispara a fila.
+// - Conversa nova: se a linha tem responsável fixo (direct_assignee_id) E a
+//   conversa está ABERTA no celular, já nasce em "Ativos" com ele (e a ficha
+//   do CRM em "Ativo"). Arquivada no celular, ou linha sem responsável:
+//   nasce em Resolvidas — nunca enche Ativos/Potenciais com conversa velha
+//   nem dispara a fila. (pedido 17/10: "atendimentos ativos direto das
+//   conversas abertas no WhatsApp de cada um" — ADM, Atacado e Compras.)
+// - Arquivada DEPOIS que o histórico já gravou (o celular manda esse estado
+//   separado): processWAHistoryArchived fecha só as conversas que a
+//   importação acabou de criar e que ninguém mexeu desde então.
 // - Conversa que já existe: só recebe as mensagens que faltam; status e
 //   responsável não mudam.
 // - Nunca dispara robô, pesquisa, check-in de ponto nem som/alerta de
@@ -50,6 +55,8 @@ export interface WAHistoryMessage {
   timestamp?: number;
   /** Nome do chat no WhatsApp (nome do grupo, ou nome que o celular mostra para o contato). */
   chatName?: string;
+  /** Conversa arquivada no celular (true) — vai pra Resolvidas, não pra Ativos. */
+  chatArchived?: boolean;
   message?: NonNullable<InboundWAPayload["data"]>["message"];
   mediaType?: "image" | "video" | "audio" | "doc" | "sticker";
   mediaMimeType?: string;
@@ -148,7 +155,7 @@ export async function processWAHistoryBatch(payload: WAHistoryPayload): Promise<
   return result;
 }
 
-async function importConversation(input: {
+export async function importConversation(input: {
   tenantId: number;
   sessionKey: string;
   key: string;
@@ -156,8 +163,10 @@ async function importConversation(input: {
   sectorId: number | null;
   directAssigneeId: number | null;
   outboundSenderName: string;
-}): Promise<{ created: boolean; inserted: number; ignored: number }> {
-  const { tenantId, sessionKey, key, list, sectorId, directAssigneeId, outboundSenderName } = input;
+  /** Arquivo já salvo por mensagem (id do WhatsApp → /media/...), só no caminho ao vivo. */
+  mediaUrls?: Map<string, string>;
+}): Promise<{ created: boolean; inserted: number; ignored: number; conv?: typeof conversationsTable.$inferSelect; rows?: (typeof messagesTable.$inferSelect)[] }> {
+  const { tenantId, sessionKey, key, list, sectorId, directAssigneeId, outboundSenderName, mediaUrls } = input;
   const isGroup = key.endsWith("@g.us");
   const storedPhone = isGroup ? key : normalizePhone(key);
   const matchCandidates = isGroup ? [key] : phoneVariants(key);
@@ -181,6 +190,8 @@ async function importConversation(input: {
   const newestAt = newest.m.timestamp ? new Date(newest.m.timestamp * 1000) : new Date();
   const lastInboundPush = [...list].reverse().find((m) => !m.fromMe && !isGroup && m.pushName)?.pushName;
   const chatName = [...list].reverse().find((m) => m.chatName)?.chatName;
+  const archivedOnPhone = [...list].reverse().find((m) => m.chatArchived != null)?.chatArchived === true;
+  const goesToActive = directAssigneeId != null && !archivedOnPhone;
 
   let agendaName: string | null = null;
   if (!isGroup) {
@@ -220,10 +231,11 @@ async function importConversation(input: {
       channel: "whatsapp",
       sessionKey,
       sectorId,
-      // Com responsável fixo: "Ativos" com ele. Sem: Resolvidas (só consulta).
-      status: directAssigneeId != null ? "open" : "resolved",
-      assigneeId: directAssigneeId,
-      attendanceStartedAt: directAssigneeId != null ? new Date() : null,
+      // Aberta no celular + responsável fixo: "Ativos" com ele. Arquivada ou
+      // sem responsável: Resolvidas (só consulta).
+      status: goesToActive ? "open" : "resolved",
+      assigneeId: goesToActive ? directAssigneeId : null,
+      attendanceStartedAt: goesToActive ? new Date() : null,
       lastMessage: newest.d.displayContent,
       lastMessageDirection: newest.m.fromMe ? "outbound" : "inbound",
       lastMessageSenderName: newest.m.fromMe ? outboundSenderName : null,
@@ -262,30 +274,32 @@ async function importConversation(input: {
         senderName: m.fromMe ? outboundSenderName : (m.pushName || (isGroup ? participantPhone : name) || null),
         senderPhone: m.fromMe ? null : participantPhone,
         externalId: m.id,
-        mediaUrl: null,
+        mediaUrl: mediaUrls?.get(m.id) ?? null,
         metadata,
         createdAt: m.timestamp ? new Date(m.timestamp * 1000) : new Date(),
       };
     });
 
-  let inserted = 0;
+  const insertedRows: (typeof messagesTable.$inferSelect)[] = [];
   // Em pedaços, pra não estourar o limite de parâmetros do Postgres.
   for (let i = 0; i < rows.length; i += 200) {
     const chunk = rows.slice(i, i + 200);
-    const res = await db.insert(messagesTable).values(chunk).onConflictDoNothing().returning({ id: messagesTable.id });
-    inserted += res.length;
+    const res = await db.insert(messagesTable).values(chunk).onConflictDoNothing().returning();
+    insertedRows.push(...res);
   }
+  const inserted = insertedRows.length;
   const ignored = list.length - inserted;
 
   if (created) {
     broadcast("conversation_new", conv, { tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
     // Ficha no CRM com o mesmo nome e já em "Ativo" quando há responsável.
     await ensureCrmContactForConversation(conv);
-    return { created, inserted, ignored };
+    return { created, inserted, ignored, conv, rows: insertedRows };
   }
 
   // Conversa existente: atualiza o "última mensagem" só se o histórico trouxe
   // algo mais novo; acerta o nome se ainda é só o telefone.
+  let current = conv;
   const patch: Partial<typeof conversationsTable.$inferInsert> = {};
   if (inserted > 0 && (!conv.lastMessageAt || newestAt > conv.lastMessageAt)) {
     patch.lastMessage = newest.d.displayContent;
@@ -299,8 +313,152 @@ async function importConversation(input: {
     const [updated] = await db.update(conversationsTable).set({ ...patch, updatedAt: new Date() })
       .where(eq(conversationsTable.id, conv.id)).returning();
     if (updated) {
+      current = updated;
       broadcast("conversation_updated", updated, { tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey, isPotential: isPotentialConversation(updated), restrictedTo: await restrictedRecipients(updated) });
     }
   }
-  return { created, inserted, ignored };
+  return { created, inserted, ignored, conv: current, rows: insertedRows };
+}
+
+/**
+ * Mensagem digitada direto no celular da linha (pedido 17/10), encaminhada
+ * pelo bridge como fromMe. Grava como mensagem ENVIADA na conversa — só com
+ * "Mostrar mensagens enviadas pelo celular" ligado na linha. Mesmo caminho do
+ * histórico (importConversation): sem duplicar, sem robô, sem "não lida";
+ * conversa nova segue a regra da linha (Ativos com o responsável fixo ou,
+ * sem responsável, Resolvidas). A tela atualiza na hora (SSE "message").
+ */
+export async function processOwnPhoneMessage(
+  body: InboundWAPayload,
+  helpers: {
+    applyEdit: (targetId: string, newContent: string) => Promise<void>;
+    applyRevoke: (targetId: string) => Promise<void>;
+    saveMedia: (base64: string, mime: string) => Promise<string>;
+  },
+): Promise<void> {
+  const sessionKey = typeof body.sessionKey === "string" && VALID_SESSION.test(body.sessionKey) ? body.sessionKey : null;
+  if (!sessionKey) return;
+  const tenantId = await resolveTenantForSession(sessionKey);
+  if (tenantId == null) return;
+  const [session] = await db.select({
+    phoneOutboundEnabled: whatsappSessionsTable.phoneOutboundEnabled,
+    defaultSectorIds: whatsappSessionsTable.defaultSectorIds,
+    displayName: whatsappSessionsTable.displayName,
+  }).from(whatsappSessionsTable)
+    .where(and(eq(whatsappSessionsTable.sessionKey, sessionKey), eq(whatsappSessionsTable.tenantId, tenantId)))
+    .limit(1);
+  if (!session?.phoneOutboundEnabled) return;
+
+  const data = body.data;
+  if (!data?.key?.remoteJid || !data.key.id) return;
+  if (data.reaction) return;
+  // Editar/apagar pelo celular uma mensagem que já está no CRM.
+  if (data.edit) {
+    const t = data.edit.message?.conversation ?? data.edit.message?.extendedTextMessage?.text ?? "";
+    if (t) await helpers.applyEdit(data.edit.targetId, t);
+    return;
+  }
+  if (data.revoke) { await helpers.applyRevoke(data.revoke.targetId); return; }
+
+  const isGroup = body.isGroupMsg ?? data.key.remoteJid.endsWith("@g.us");
+  const key = historyConversationKey(data.key.remoteJid, isGroup);
+  if (!key) return;
+
+  const mediaUrls = new Map<string, string>();
+  if (data.mediaBase64 && data.mediaMimeType) {
+    try {
+      mediaUrls.set(data.key.id, await helpers.saveMedia(data.mediaBase64, data.mediaMimeType));
+    } catch (err) {
+      logger.error({ err, mime: data.mediaMimeType }, "Falha ao salvar mídia enviada pelo celular");
+    }
+  }
+
+  let sectorId: number | null = session.defaultSectorIds?.[0] ?? null;
+  if (sectorId == null) {
+    const [first] = await db.select({ id: sectorsTable.id }).from(sectorsTable)
+      .where(and(eq(sectorsTable.isActive, true), eq(sectorsTable.tenantId, tenantId)))
+      .limit(1);
+    sectorId = first?.id ?? null;
+  }
+
+  const r = await importConversation({
+    tenantId,
+    sessionKey,
+    key,
+    sectorId,
+    directAssigneeId: await resolveDirectAssignee(tenantId, sessionKey),
+    outboundSenderName: session.displayName?.trim() ? `Celular (${session.displayName.trim()})` : "Celular",
+    mediaUrls,
+    list: [{
+      remoteJid: data.key.remoteJid,
+      id: data.key.id,
+      fromMe: true,
+      isGroup,
+      timestamp: data.messageTimestamp,
+      chatName: isGroup ? data.groupSubject : undefined,
+      message: data.message,
+      mediaType: data.mediaType,
+      mediaMimeType: data.mediaMimeType,
+    }],
+  });
+  if (!r.conv || !r.rows?.length) return;
+  const conv = r.conv;
+  const scope = { tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) };
+  for (const message of r.rows) broadcast("message", { conversationId: conv.id, message }, scope);
+}
+
+// Janela em que uma conversa criada pelo histórico ainda pode ser fechada
+// pelo aviso de "arquivada" que chega atrasado do celular.
+const ARCHIVE_GRACE_MS = 6 * 3600_000;
+
+export interface WAHistoryArchivedPayload {
+  sessionKey?: string;
+  jids?: string[];
+}
+
+/**
+ * O celular avisou que estas conversas estão arquivadas. Fecha (Resolvidas,
+ * sem responsável) só as que o histórico criou há pouco e que não tiveram
+ * nenhuma mensagem depois da importação — atendimento de verdade nunca é
+ * fechado por aqui.
+ */
+export async function processWAHistoryArchived(payload: WAHistoryArchivedPayload, now = new Date()): Promise<{ resolved: number }> {
+  const sessionKey = typeof payload.sessionKey === "string" && VALID_SESSION.test(payload.sessionKey) ? payload.sessionKey : null;
+  if (!sessionKey) return { resolved: 0 };
+  const tenantId = await resolveTenantForSession(sessionKey);
+  if (tenantId == null) return { resolved: 0 };
+  const [session] = await db.select({ historyImportEnabled: whatsappSessionsTable.historyImportEnabled })
+    .from(whatsappSessionsTable)
+    .where(and(eq(whatsappSessionsTable.sessionKey, sessionKey), eq(whatsappSessionsTable.tenantId, tenantId)))
+    .limit(1);
+  if (!session?.historyImportEnabled) return { resolved: 0 };
+
+  const phones = new Set<string>();
+  for (const jid of (payload.jids ?? []).slice(0, 2000)) {
+    if (typeof jid !== "string") continue;
+    const isGroup = jid.endsWith("@g.us");
+    const key = historyConversationKey(jid, isGroup);
+    if (!key) continue;
+    if (isGroup) phones.add(key);
+    else for (const v of phoneVariants(key)) phones.add(v);
+  }
+  if (phones.size === 0) return { resolved: 0 };
+
+  const since = new Date(now.getTime() - ARCHIVE_GRACE_MS);
+  const updated = await db.update(conversationsTable)
+    .set({ status: "resolved", assigneeId: null, attendanceStartedAt: null, updatedAt: now })
+    .where(and(
+      eq(conversationsTable.tenantId, tenantId),
+      eq(conversationsTable.sessionKey, sessionKey),
+      eq(conversationsTable.status, "open"),
+      inArray(conversationsTable.phone, [...phones]),
+      sql`${conversationsTable.createdAt} >= ${since}`,
+      // Nada novo desde a importação: a última mensagem é anterior à criação.
+      sql`(${conversationsTable.lastMessageAt} is null or ${conversationsTable.lastMessageAt} <= ${conversationsTable.createdAt})`,
+    ))
+    .returning();
+  for (const conv of updated) {
+    broadcast("conversation_updated", conv, { tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  }
+  return { resolved: updated.length };
 }

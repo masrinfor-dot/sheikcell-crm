@@ -77,6 +77,14 @@ interface Session {
   // para o CRM numa fila própria, em ordem, sem atrasar mensagens ao vivo.
   historyImport: boolean;
   historyChain: Promise<void>;
+  // Conversa arquivada no celular? (pedido 17/10: só as conversas ABERTAS no
+  // WhatsApp entram em Ativos). O celular manda os chats e as mensagens em
+  // pedaços separados, então o estado fica guardado durante a sincronização.
+  historyArchived: Map<string, boolean>;
+  // Mensagens enviadas PELO SISTEMA (id → quando): a mensagem própria que o
+  // Baileys reemite depois do envio é ignorada, pra não duplicar no CRM o
+  // que o CRM já gravou. Só o que foi digitado no celular segue adiante.
+  sentIds: Map<string, number>;
 }
 
 const sessions = new Map<string, Session>();
@@ -96,6 +104,8 @@ function newSession(key: string): Session {
     lastSendAt: 0,
     historyImport: false,
     historyChain: Promise.resolve(),
+    historyArchived: new Map(),
+    sentIds: new Map(),
   };
 }
 
@@ -219,8 +229,8 @@ async function getGroupInfo(s: Session, jid: string): Promise<{ subject: string 
  * persisted and broadcast to the attendance UI. Includes the sessionKey so the
  * conversation is tied to the WhatsApp number that received it.
  */
-async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
-  if (m.key?.fromMe) return;
+async function forwardInboundMessage(s: Session, m: WAMessage, opts: { allowFromMe?: boolean } = {}): Promise<void> {
+  if (m.key?.fromMe && !opts.allowFromMe) return;
   let remoteJid = m.key?.remoteJid ?? "";
   // Status e canais (newsletter) ficam de fora; grupos e comunidades (@g.us)
   // agora são encaminhados para a Central de Atendimento.
@@ -378,7 +388,7 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
     isGroupMsg: isGroup,
     isCommunityMsg: groupInfo?.isCommunity ?? false,
     data: {
-      key: { remoteJid, fromMe: false, id: m.key?.id ?? undefined, participant },
+      key: { remoteJid, fromMe: !!m.key?.fromMe, id: m.key?.id ?? undefined, participant },
       message: msg,
       pushName: m.pushName ?? undefined,
       groupSubject: groupInfo?.subject,
@@ -417,6 +427,39 @@ async function forwardInboundMessage(s: Session, m: WAMessage): Promise<void> {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+// ─── Mensagens enviadas pelo celular (pedido 17/10) ─────────────────────────
+// O que alguém digita direto no celular da linha chega como mensagem própria
+// (fromMe). O bridge encaminha ao CRM — que só grava se a linha tiver
+// "Mostrar mensagens enviadas pelo celular" ligado — exceto o que o próprio
+// sistema enviou (sentIds), que o CRM já tem.
+const SENT_ID_TTL_MS = 30 * 60_000;
+
+async function sendTracked(s: Session, jid: string, content: Parameters<WASocket["sendMessage"]>[1]) {
+  const sent = await s.sock!.sendMessage(jid, content);
+  const id = sent?.key?.id;
+  if (id) {
+    const now = Date.now();
+    s.sentIds.set(id, now);
+    if (s.sentIds.size > 500) {
+      for (const [k, t] of s.sentIds) if (now - t > SENT_ID_TTL_MS) s.sentIds.delete(k);
+    }
+  }
+  return sent;
+}
+
+function forwardOwnPhoneMessage(s: Session, m: WAMessage): void {
+  const id = m.key?.id;
+  if (!id) return;
+  // Espera o envio do sistema terminar de registrar o id (o Baileys pode
+  // reemitir a mensagem própria um instante antes do sendMessage resolver).
+  setTimeout(() => {
+    if (s.stopped || s.sentIds.has(id)) return;
+    forwardInboundMessage(s, m, { allowFromMe: true }).catch((err) => {
+      logger.warn({ err, sessionKey: s.key }, "Failed to forward own (phone) WhatsApp message");
+    });
+  }, 2000);
 }
 
 // ─── Histórico ao conectar (pedido 16/10, Compras e ADM) ─────────────────────
@@ -462,6 +505,8 @@ interface HistoryItem {
   pushName?: string;
   timestamp?: number;
   chatName?: string;
+  /** true = arquivada no celular; ausente = não sabemos (trata como aberta). */
+  chatArchived?: boolean;
   message: proto.IMessage;
   mediaType?: "image" | "video" | "audio" | "doc" | "sticker";
   mediaMimeType?: string;
@@ -490,6 +535,7 @@ async function toHistoryItem(s: Session, m: WAMessage, chatNames: Map<string, st
     pushName: m.pushName ?? undefined,
     timestamp: Number.isFinite(ts) ? ts : undefined,
     chatName: chatNames.get(rawJid) ?? chatNames.get(remoteJid),
+    chatArchived: s.historyArchived.get(rawJid) ?? s.historyArchived.get(remoteJid),
     message: msg,
     ...historyMediaType(msg),
   };
@@ -519,14 +565,17 @@ async function postHistoryBatch(s: Session, items: HistoryItem[]): Promise<void>
 
 function enqueueHistory(
   s: Session,
-  data: { chats?: Array<{ id?: string | null; name?: string | null }>; contacts?: BaileysContactLike[]; messages?: WAMessage[]; syncType?: unknown; progress?: number | null },
+  data: { chats?: Array<{ id?: string | null; name?: string | null; archived?: boolean | null }>; contacts?: BaileysContactLike[]; messages?: WAMessage[]; syncType?: unknown; progress?: number | null },
 ): void {
   if (!s.historyImport || s.stopped) return;
   s.historyChain = s.historyChain.then(async () => {
     if (s.stopped) return;
     if (data.contacts?.length) await forwardContacts(s, data.contacts).catch(() => {});
     const chatNames = new Map<string, string>();
-    for (const c of data.chats ?? []) if (c.id && c.name) chatNames.set(c.id, c.name);
+    for (const c of data.chats ?? []) {
+      if (c.id && c.name) chatNames.set(c.id, c.name);
+      if (c.id && c.archived != null) s.historyArchived.set(c.id, !!c.archived);
+    }
     const items: HistoryItem[] = [];
     for (const m of data.messages ?? []) {
       const it = await toHistoryItem(s, m, chatNames).catch(() => null);
@@ -540,6 +589,27 @@ function enqueueHistory(
   }).catch((err) => {
     logger.warn({ err, sessionKey: s.key }, "Erro ao processar pedaço de histórico");
   });
+}
+
+/** Conversas arquivadas no celular depois que o histórico já foi gravado. */
+async function forwardArchived(s: Session, rawJids: string[]): Promise<void> {
+  const jids: string[] = [];
+  for (const raw of rawJids) {
+    if (raw.endsWith("@broadcast") || raw.endsWith("@newsletter")) continue;
+    const j = raw.endsWith("@g.us") ? raw : await resolvePnJid(s, raw, undefined).catch(() => null);
+    if (j) jids.push(j);
+  }
+  if (jids.length === 0) return;
+  try {
+    await fetch(`${API_SERVER_URL}/api/chat/webhook/whatsapp-history-archived`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Bridge-Secret": BRIDGE_SECRET },
+      body: JSON.stringify({ sessionKey: s.key, jids }),
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (err) {
+    logger.warn({ err, sessionKey: s.key }, "Falha ao avisar o CRM das conversas arquivadas");
+  }
 }
 
 // ─── Agenda de Contatos do WhatsApp (pedido 25/09, fase 1) ──────────────────
@@ -759,6 +829,7 @@ async function connectSession(s: Session): Promise<void> {
     if (s.stopped || sessions.get(s.key) !== s) return;
 
     s.historyImport = await readHistoryImportFlag(s.key);
+    s.historyArchived.clear();
     const sock = makeWASocket({
       auth: state,
       printQRInTerminal: false,
@@ -779,7 +850,13 @@ async function connectSession(s: Session): Promise<void> {
     });
 
     sock.ev.on("messages.upsert", ({ messages, type }) => {
-      if (type !== "notify" || s.stopped) return;
+      if (s.stopped) return;
+      // Mensagem própria (digitada no celular): "notify" ao vivo, "append"
+      // quando chega depois de o bridge ficar offline. Ver forwardOwnPhoneMessage.
+      for (const m of messages) {
+        if (m.key?.fromMe && (type === "notify" || type === "append")) forwardOwnPhoneMessage(s, m);
+      }
+      if (type !== "notify") return;
       for (const m of messages) {
         forwardInboundMessage(s, m).catch((err) => {
           logger.warn({ err, sessionKey: s.key }, "Failed to forward inbound WhatsApp message");
@@ -792,6 +869,24 @@ async function connectSession(s: Session): Promise<void> {
       if (s.sock !== sock) return;
       enqueueHistory(s, data as Parameters<typeof enqueueHistory>[1]);
     });
+
+    // Arquivadas no celular (pedido 17/10): o estado pode vir separado do
+    // histórico (sincronização de app-state). Guarda pro histórico que ainda
+    // vai chegar e avisa o CRM pras conversas que o histórico já criou.
+    const onChatsArchive = (chats: Array<{ id?: string | null; archived?: boolean | null }>) => {
+      if (s.sock !== sock || !s.historyImport) return;
+      const archived: string[] = [];
+      for (const c of chats) {
+        if (!c.id || c.archived == null) continue;
+        s.historyArchived.set(c.id, !!c.archived);
+        if (c.archived) archived.push(c.id);
+      }
+      if (archived.length > 0) {
+        s.historyChain = s.historyChain.then(() => forwardArchived(s, archived)).catch(() => {});
+      }
+    };
+    sock.ev.on("chats.upsert", (chats) => onChatsArchive(chats));
+    sock.ev.on("chats.update", (chats) => onChatsArchive(chats));
 
     // Agenda de Contatos (pedido 25/09, fase 1) — ver forwardContacts acima.
     sock.ev.on("contacts.upsert", (contacts) => {
@@ -1106,7 +1201,7 @@ export async function sendMessage(key: string, to: string, text: string): Promis
   const jid = await resolveJid(s, to);
   await enqueueSend(s, jid, text.length, async () => {
     const cur = requireOpenSession(key);
-    await cur.sock!.sendMessage(jid, { text });
+    await sendTracked(cur, jid, { text });
   });
   logger.info({ phone, sessionKey: key }, "WhatsApp message sent via Baileys");
 }
@@ -1127,9 +1222,9 @@ export async function sendMedia(
   await enqueueSend(s, jid, caption?.length ?? 30, async () => {
     const cur = requireOpenSession(key);
     if (type === "image") {
-      await cur.sock!.sendMessage(jid, { image: buffer, mimetype, caption });
+      await sendTracked(cur, jid, { image: buffer, mimetype, caption });
     } else if (type === "video") {
-      await cur.sock!.sendMessage(jid, { video: buffer, mimetype, caption });
+      await sendTracked(cur, jid, { video: buffer, mimetype, caption });
     } else if (type === "audio") {
       // O WhatsApp só toca áudio de forma confiável em ogg/opus. Gravações do
       // navegador vêm em webm/mp4 — apenas renomear o tipo corrompe o arquivo
@@ -1171,13 +1266,13 @@ export async function sendMedia(
       } else {
         audioMime = "audio/ogg; codecs=opus";
       }
-      await cur.sock!.sendMessage(jid, {
+      await sendTracked(cur, jid, {
         audio,
         mimetype: audioMime,
         ptt: ptt ?? false,
       });
     } else {
-      await cur.sock!.sendMessage(jid, {
+      await sendTracked(cur, jid, {
         document: buffer,
         mimetype,
         fileName: filename ?? "documento",

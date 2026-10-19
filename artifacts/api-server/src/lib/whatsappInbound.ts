@@ -1185,7 +1185,13 @@ export function describeWAContent(body: Pick<InboundWAPayload, "data" | "text">)
 
 export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   const fromMe = body.data?.key?.fromMe ?? body.fromMe ?? false;
-  if (fromMe) return;
+  if (fromMe) {
+    // Digitada no celular da linha (pedido 17/10) — ver lib/whatsappHistory.ts.
+    // Import tardio: whatsappHistory importa este arquivo (evita ciclo).
+    const { processOwnPhoneMessage } = await import("./whatsappHistory");
+    await processOwnPhoneMessage(body, { applyEdit, applyRevoke, saveMedia });
+    return;
+  }
   const isGroup = body.isGroupMsg ?? (body.data?.key?.remoteJid?.includes("@g.us") ?? false);
 
   const remoteJid =

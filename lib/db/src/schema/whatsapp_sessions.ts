@@ -60,6 +60,11 @@ export const whatsappSessionsTable = pgTable("whatsapp_sessions", {
   // Responsável fixo da linha (mesmo pedido): conversa nova ou reaberta por
   // este número já entra em "Ativos" com este usuário, sem passar por
   // Potenciais/Pendentes/fila. null = fluxo normal de sempre.
+  // Mensagens enviadas pelo celular (pedido 17/10): o que alguém digita
+  // direto no celular desta linha aparece na conversa do CRM como enviada.
+  // O bridge nunca reenvia o que o próprio sistema mandou (sem duplicar).
+  // Ver processOwnPhoneMessage em lib/whatsappHistory.ts.
+  phoneOutboundEnabled: boolean("phone_outbound_enabled").notNull().default(false),
   directAssigneeId: integer("direct_assignee_id").references(() => usersTable.id, { onDelete: "set null" }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

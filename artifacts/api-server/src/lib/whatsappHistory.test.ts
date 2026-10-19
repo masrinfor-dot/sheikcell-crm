@@ -12,7 +12,7 @@ const {
   attendanceLogsTable, crmContactsTable, whatsappContactsTable, usersTable,
 } = await import("@workspace/db");
 const { eq, and, asc } = await import("drizzle-orm");
-const { processWAHistoryBatch, historyConversationKey, pickHistoryName } = await import("./whatsappHistory.ts");
+const { processWAHistoryBatch, processWAHistoryArchived, historyConversationKey, pickHistoryName } = await import("./whatsappHistory.ts");
 const { processInboundWA, processInboundWAContacts } = await import("./whatsappInbound.ts");
 
 const MARK = "__TEST_WA_HISTORY__";
@@ -145,6 +145,45 @@ test("sem responsável, conversas antigas vão para Resolvidas (não enchem Pote
   assert.equal(conv?.assigneeId, null);
 });
 
+test("arquivada no celular vai para Resolvidas, mesmo com responsável fixo (só as abertas viram Ativos)", async () => {
+  await processWAHistoryBatch({
+    sessionKey: keyAtivos,
+    messages: [
+      { remoteJid: "5533977776666@s.whatsapp.net", id: `ARQ1-${rnd}`, fromMe: false, isGroup: false, pushName: "Antigo", chatArchived: true, timestamp: t0, message: { conversation: "oi, faz tempo" } },
+    ],
+  });
+  const [conv] = await db.select().from(conversationsTable)
+    .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.phone, "5533977776666")));
+  assert.equal(conv?.status, "resolved");
+  assert.equal(conv?.assigneeId, null);
+});
+
+test("aviso de arquivada que chega depois fecha só a conversa recém-importada e intocada", async () => {
+  await processWAHistoryBatch({
+    sessionKey: keyAtivos,
+    messages: [
+      { remoteJid: "5533922221111@s.whatsapp.net", id: `ARQ2-${rnd}`, fromMe: false, isGroup: false, pushName: "Tardio", timestamp: t0, message: { conversation: "pedido antigo" } },
+      { remoteJid: "5533922220000@s.whatsapp.net", id: `ARQ3-${rnd}`, fromMe: false, isGroup: false, pushName: "Vivo", timestamp: t0, message: { conversation: "pedido antigo 2" } },
+    ],
+  });
+  // A segunda recebeu mensagem nova depois da importação: atendimento de verdade.
+  await db.update(conversationsTable).set({ lastMessageAt: new Date(Date.now() + 60_000) })
+    .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.phone, "5533922220000")));
+
+  const r = await processWAHistoryArchived({ sessionKey: keyAtivos, jids: ["5533922221111@s.whatsapp.net", "5533922220000@s.whatsapp.net"] });
+  assert.equal(r.resolved, 1);
+  const rows = await db.select().from(conversationsTable)
+    .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.sessionKey, keyAtivos)));
+  const byPhone = new Map(rows.map((c) => [c.phone, c]));
+  assert.equal(byPhone.get("5533922221111")?.status, "resolved");
+  assert.equal(byPhone.get("5533922221111")?.assigneeId, null);
+  assert.equal(byPhone.get("5533922220000")?.status, "open");
+  assert.equal(byPhone.get("5533922220000")?.assigneeId, userId);
+
+  // Linha sem a opção ligada: ignora.
+  assert.equal((await processWAHistoryArchived({ sessionKey: keyOff, jids: ["5533922220000@s.whatsapp.net"] })).resolved, 0);
+});
+
 test("mensagem ao vivo numa linha com responsável fixo já nasce em Ativos com ele", async () => {
   await processInboundWA({
     sessionKey: keyAtivos,
@@ -190,4 +229,44 @@ test("nome da agenda que chega depois troca o telefone pelo nome, sem mexer em n
   const [kept] = await db.select().from(conversationsTable)
     .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.phone, "5533922221111")));
   assert.equal(kept?.name, "Contador Tales");
+});
+
+test("mensagem digitada no celular: só grava com a opção ligada, como enviada, sem duplicar", async () => {
+  const own = (id: string, text: string) => ({
+    sessionKey: keyAtivos,
+    isGroupMsg: false,
+    data: {
+      key: { remoteJid: "5533988887777@s.whatsapp.net", fromMe: true, id },
+      message: { conversation: text },
+      messageTimestamp: t0 + 600,
+    },
+  });
+  // Desligada (padrão): ignora.
+  await processInboundWA(own(`P0-${rnd}`, "não deve aparecer"));
+  const [conv] = await db.select().from(conversationsTable)
+    .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.phone, "5533988887777")));
+  let msgs = await db.select().from(messagesTable).where(eq(messagesTable.externalId, `P0-${rnd}`));
+  assert.equal(msgs.length, 0);
+
+  await db.update(whatsappSessionsTable).set({ phoneOutboundEnabled: true }).where(eq(whatsappSessionsTable.sessionKey, keyAtivos));
+  await processInboundWA(own(`P1-${rnd}`, "Pode mandar pela transportadora"));
+  await processInboundWA(own(`P1-${rnd}`, "Pode mandar pela transportadora")); // reentrega
+  msgs = await db.select().from(messagesTable).where(eq(messagesTable.externalId, `P1-${rnd}`));
+  assert.equal(msgs.length, 1);
+  assert.equal(msgs[0]!.direction, "outbound");
+  assert.equal(msgs[0]!.conversationId, conv!.id);
+  assert.equal(msgs[0]!.senderName, "Celular (Compras)");
+  const [after] = await db.select().from(conversationsTable).where(eq(conversationsTable.id, conv!.id));
+  assert.equal(after?.lastMessage, "Pode mandar pela transportadora");
+  assert.equal(after?.lastMessageDirection, "outbound");
+  assert.equal(after?.unreadCount, conv!.unreadCount);
+
+  // Apagar pelo celular atualiza a mensagem no CRM.
+  await processInboundWA({
+    sessionKey: keyAtivos,
+    isGroupMsg: false,
+    data: { key: { remoteJid: "5533988887777@s.whatsapp.net", fromMe: true, id: `P2-${rnd}` }, revoke: { targetId: `P1-${rnd}` } },
+  });
+  const [revoked] = await db.select().from(messagesTable).where(eq(messagesTable.externalId, `P1-${rnd}`));
+  assert.ok(revoked?.deletedAt);
 });
