@@ -66,7 +66,7 @@ export default function Sorteios() {
     Promise.all([
       api.raffles.list(),
       api.sectors.list().catch(() => [] as Sector[]),
-      api.admin.users.list().catch(() => []),
+      api.admin.users.list().catch(() => [] as (User & { isActive: boolean; createdAt: string })[]),
       api.chat.waSessions().catch(() => []),
     ]).then(([r, s, u, w]) => {
       setRaffles(r);

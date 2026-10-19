@@ -1,0 +1,47 @@
+name: CI
+
+# Typecheck do monorepo inteiro (libs, api-server, whatsapp-bridge, sheikcell,
+# sheikcell-mobile, mockup-sandbox, scripts) em todo pull request e em todo
+# push na main.
+#
+# O job `typecheck` é o "status check obrigatório" da regra de proteção da
+# branch main (Settings › Branches). É isso que permite ligar a mesclagem
+# automática (auto-merge) dos PRs: o GitHub só mescla sozinho quando esse
+# check passa. O nome do job NÃO pode mudar sem atualizar a regra de proteção.
+on:
+  pull_request: {} # qualquer base
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Um push novo no mesmo PR cancela o typecheck anterior (economiza minutos);
+# na main cada push roda até o fim.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # Sem `packageManager` no package.json da raiz, fixa o pnpm 10 (mesma
+      # major usada no desenvolvimento e no test.yml da branch producao).
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Instala dependências
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck do monorepo
+        run: pnpm run typecheck

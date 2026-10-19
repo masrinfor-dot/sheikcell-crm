@@ -1,0 +1,73 @@
+name: Promover main para producao
+
+# O EasyPanel publica a partir da branch `producao`. Este workflow leva a
+# `main` até a `producao` automaticamente a cada push na main (o que antes
+# era feito na mão), SEMPRE por fast-forward:
+#
+#   main ──push──▶ producao   (só se producao for ancestral da main)
+#
+# Se a `producao` tiver commits que não estão na `main` (as branches
+# divergiram), o job FALHA com a explicação e não toca em nada. Nunca é usado
+# force push: a `producao` só anda para a frente, e a reconciliação de uma
+# divergência é decisão humana (merge manual).
+#
+# Atenção: um push feito com o GITHUB_TOKEN não dispara outros workflows
+# (regra do GitHub). Para que a promoção também rode o test.yml/imagens.yml
+# da `producao` (testes → imagens no GHCR → deploy no EasyPanel), crie um
+# token pessoal fine-grained com "Contents: Read and write" neste repositório
+# e salve como segredo `PROMOTE_TOKEN` (Settings › Secrets and variables ›
+# Actions). Sem o segredo o workflow usa o GITHUB_TOKEN e só move a branch.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+# Uma promoção por vez, na ordem dos pushes (nunca cancela a anterior).
+concurrency:
+  group: promote-producao
+  cancel-in-progress: false
+
+jobs:
+  promover:
+    name: Fast-forward main → producao
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # histórico completo: precisa para testar o fast-forward
+          token: ${{ secrets.PROMOTE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Verifica se producao pode avançar por fast-forward
+        run: |
+          set -euo pipefail
+
+          if ! git fetch origin producao; then
+            echo "Branch producao ainda não existe no remoto: será criada a partir da main."
+            exit 0
+          fi
+
+          if git merge-base --is-ancestor origin/producao HEAD; then
+            echo "OK: producao ($(git rev-parse --short origin/producao)) é ancestral da main ($(git rev-parse --short HEAD)). Fast-forward possível."
+            exit 0
+          fi
+
+          echo "::error::A branch producao tem commits que NÃO estão na main. Promoção automática cancelada."
+          echo ""
+          echo "Commits que existem em producao e não existem em main:"
+          git log --oneline HEAD..origin/producao
+          echo ""
+          echo "Commits que existem em main e não existem em producao:"
+          git log --oneline origin/producao..HEAD
+          echo ""
+          echo "Precisa de merge manual: traga a producao para a main (ou a main para a"
+          echo "producao) resolvendo os conflitos, e deixe a producao como ancestral da main."
+          echo "Este workflow NUNCA faz force push na producao."
+          exit 1
+
+      - name: Avança producao até a main (fast-forward)
+        # Sem --force: se alguém tiver empurrado na producao entre o passo
+        # anterior e este, o próprio git recusa o push (non-fast-forward).
+        run: git push origin HEAD:producao
