@@ -22,7 +22,7 @@ export class ApiError extends Error {
 // (ex.: importação de lista, busca de fotos), onde sem ele um proxy/rede
 // travada deixa o spinner girando pra sempre em vez de mostrar um erro.
 // Chamadas normais (sem timeoutMs) mantêm o comportamento de sempre.
-async function req<T>(path: string, opts?: RequestInit & { timeoutMs?: number }): Promise<T> {
+export async function req<T>(path: string, opts?: RequestInit & { timeoutMs?: number }): Promise<T> {
   const { timeoutMs, ...init } = opts ?? {};
   const controller = timeoutMs ? new AbortController() : null;
   const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;

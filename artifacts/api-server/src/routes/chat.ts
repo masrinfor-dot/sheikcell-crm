@@ -753,6 +753,20 @@ router.get("/chat/conversations/:id", requireAuth, requireChatAccess(), async (r
   res.json(await enrichConversation(conv));
 });
 
+// ─── Compras do cliente no ERP (19/10/2026) ────────────────────────────────
+// Últimas vendas concluídas do cliente no ERP Prumo, pelo telefone da
+// conversa (chave do ERP com "Vendas do atendimento"). Sem ligação ou sem o
+// acesso: { available: false } e a ficha não mostra nada.
+router.get("/chat/conversations/:id/erp-purchases", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+  const { customerPurchasesFromErp } = await import("../lib/erpSalesSync");
+  res.json(await customerPurchasesFromErp(tenantId, conv.phone));
+});
+
 // ─── Fixar / desafixar conversa (por usuário) ──────────────────────────────
 router.post("/chat/conversations/:id/pin", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;

@@ -17,6 +17,7 @@ import {
   MoreVertical, RotateCcw, Percent, FolderOpen, Flag, Lock, Forward, Clock,
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
+import ErpPurchasesBlock from "@/components/ErpPurchasesBlock";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
 import { MediaLightboxProvider, useMediaLightbox } from "@/components/MediaLightbox";
 import { PdfBubble } from "@/components/PdfPreview";
@@ -5491,6 +5492,9 @@ export default function ChatCenter({
                     </div>
                   )}
                 </div>
+
+                {/* Compras do cliente no ERP (19/10/2026). */}
+                {activeConv && <ErpPurchasesBlock conversationId={activeConv.id} />}
 
                 {infoContact.notes && !showEditInfo && (
                   <div className="space-y-1">

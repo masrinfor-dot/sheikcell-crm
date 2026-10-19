@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type ErpIntegrationStatus } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { Link2, Trash2, CheckCircle2, AlertTriangle } from "lucide-react";
+import ErpSalesSyncBlock from "./ErpSalesSyncBlock";
 
 // Ligação com o ERP Prumo (06/10/2026): endereço da API e a chave gerada no
 // ERP (Auxiliares › Integrações, acesso "Mensagens das OS"). Ligado, o CRM
@@ -121,6 +122,9 @@ export default function ErpIntegrationCard() {
           )}
         </div>
       )}
+
+      {/* Vendas do atendimento (19/10/2026). */}
+      {status?.configured && <ErpSalesSyncBlock />}
 
       <div>
         <label className="text-xs font-medium mb-1 block">Endereço da API do ERP</label>
