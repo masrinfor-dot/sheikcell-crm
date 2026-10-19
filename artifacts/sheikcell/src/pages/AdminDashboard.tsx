@@ -1523,7 +1523,7 @@ export default function AdminDashboard() {
                     <span>
                       <span className="font-medium">Puxar histórico de conversas ao conectar</span>
                       <p className="text-[11px] text-muted-foreground -mt-0.5">
-                        Ao escanear o QR, o CRM grava as conversas antigas (recebidas e enviadas, inclusive grupos) com
+                        Ao escanear o QR, o CRM grava as conversas recentes (recebidas e enviadas, inclusive grupos) com
                         os nomes da agenda do WhatsApp. Ligue ANTES de escanear: o WhatsApp só manda o histórico na
                         hora do pareamento. Fotos e arquivos antigos aparecem só como "📷 Foto"/"📄 arquivo". As
                         conversas ABERTAS no celular entram em Ativos com o responsável acima; as arquivadas no
