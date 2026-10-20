@@ -25,6 +25,7 @@ import rafflesRouter from "./raffles";
 import rafflesExportRouter from "./rafflesExport";
 import botRouter from "./bot";
 import financeRouter from "./finance";
+import erpSalesRouter from "./erpSales";
 import financePaymentsRouter from "./financePayments";
 import documentsRouter from "./documents";
 import documentsExportRouter, { documentsExportPublicRouter } from "./documentsExport";
@@ -82,6 +83,7 @@ router.use(rafflesExportRouter);
 router.use(rafflesRouter);
 router.use(botRouter);
 router.use(financeRouter);
+router.use(erpSalesRouter);
 router.use(financePaymentsRouter);
 // Documentos → ERP (17/10/2026): exportar e desligar aqui.
 router.use(documentsExportRouter);

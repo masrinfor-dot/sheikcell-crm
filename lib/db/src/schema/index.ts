@@ -46,3 +46,4 @@ export * from "./sensitive_action_log";
 export * from "./broadcast_dispatch_log";
 export * from "./erp_integration";
 export * from "./instagram";
+export * from "./erp_sales";

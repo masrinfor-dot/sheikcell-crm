@@ -290,6 +290,11 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("./erpDemandSync").then((m) => m.runErpDemandSync()).catch(() => {});
   }, 30 * 60_000);
+  // Vendas do atendimento (19/10/2026): atendimentos (telefone, atendente,
+  // setor, loja, último contato) vão para o ERP marcar as vendas, a cada 10 min.
+  setInterval(() => {
+    void import("./erpSalesSync").then((m) => m.runErpSalesSync()).catch(() => {});
+  }, 10 * 60_000);
   // Lembrete da pesquisa de satisfação: granularidade de minutos basta.
   setInterval(() => { void sendSurveyReminders(); }, 60_000);
   // Preenche vendedores ociosos da fila do Central de Atendimento que os
