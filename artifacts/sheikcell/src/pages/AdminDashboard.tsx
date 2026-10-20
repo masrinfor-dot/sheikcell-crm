@@ -1774,7 +1774,6 @@ export default function AdminDashboard() {
                   <div className="flex items-start gap-2.5 text-sm" data-testid={`wa-refresh-profile-${s.sessionKey}`}>
                     <button
                       type="button"
-                      disabled={s.status !== "connected"}
                       onClick={async () => {
                         const r = await fetch(`/api/whatsapp/sessions/${s.sessionKey}/refresh-profile`, { method: "POST", credentials: "include" });
                         const body = await r.json().catch(() => ({})) as { error?: string; agenda?: boolean; conversations?: number };
@@ -1784,10 +1783,10 @@ export default function AdminDashboard() {
                         }
                         toast({
                           title: "Atualizando agenda e fotos",
-                          description: `${body.agenda ? "Agenda pedida ao WhatsApp. " : ""}As fotos de ${body.conversations ?? 0} conversa(s) vão aparecendo aos poucos (algumas por minuto).`,
+                          description: `${body.agenda ? "Agenda pedida ao WhatsApp. " : "O WhatsApp desta linha não respondeu agora; os nomes já cadastrados foram acertados e a agenda será pedida quando ela estiver conectada. "}As fotos de ${body.conversations ?? 0} conversa(s) vão aparecendo aos poucos (algumas por minuto).`,
                         });
                       }}
-                      className="px-3 py-1.5 rounded-lg border border-border text-xs font-semibold shrink-0 disabled:opacity-50"
+                      className="px-3 py-1.5 rounded-lg border border-border text-xs font-semibold shrink-0 cursor-pointer hover:bg-secondary active:scale-[0.98]"
                       data-testid={`button-wa-refresh-profile-${s.sessionKey}`}
                     >
                       Atualizar agenda e fotos

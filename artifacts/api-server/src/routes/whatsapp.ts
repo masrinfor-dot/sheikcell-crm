@@ -412,7 +412,8 @@ router.post("/whatsapp/sessions/:key/refresh-profile", requireFeature("whatsapp"
   const [row] = await db.select({ status: whatsappSessionsTable.status }).from(whatsappSessionsTable)
     .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId))).limit(1);
   if (!row) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
-  if (row.status !== "connected") { res.status(409).json({ error: "Conecte a linha primeiro (o WhatsApp precisa estar ligado)." }); return; }
+  // Não trava pelo status gravado (pode estar atrasado): tenta a ponte; se a
+  // linha estiver fora, os nomes já cadastrados são acertados do mesmo jeito.
   const { refreshLineProfile } = await import("../lib/waProfile");
   res.json({ ok: true, ...(await refreshLineProfile(tenantId, key)) });
 });

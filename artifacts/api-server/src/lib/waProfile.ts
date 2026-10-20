@@ -130,9 +130,10 @@ export async function runAvatarRefresh(opts: { perSession?: number; pauseMs?: nu
   if (running) return totals;
   running = true;
   try {
+    // Todas as linhas (o status gravado pode estar atrasado): a linha que não
+    // responder devolve "offline" e a rodada pula para a próxima.
     const sessions = await db.select({ tenantId: whatsappSessionsTable.tenantId, sessionKey: whatsappSessionsTable.sessionKey })
-      .from(whatsappSessionsTable)
-      .where(eq(whatsappSessionsTable.status, "connected"));
+      .from(whatsappSessionsTable);
     for (const s of sessions) {
       const convs = await conversationsNeedingAvatar(s.tenantId, s.sessionKey, opts.perSession ?? PER_SESSION_PER_RUN);
       for (const c of convs) {
