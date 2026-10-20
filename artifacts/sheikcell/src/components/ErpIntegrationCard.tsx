@@ -13,6 +13,9 @@ export default function ErpIntegrationCard() {
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState(false);
+  // Linhas de WhatsApp da loja, pra escolher a de atacado (16/10/2026).
+  const [waLines, setWaLines] = useState<{ sessionKey: string; displayName: string | null; phoneNumber: string | null }[]>([]);
+  useEffect(() => { api.chat.waSessions().then(setWaLines).catch(() => {}); }, []);
 
   const load = () => {
     api.settings.erp.get().then((s) => { setStatus(s); setBaseUrl(s.baseUrl); }).catch(() => {});
@@ -118,6 +121,51 @@ export default function ErpIntegrationCard() {
                 </>
               )}
             </div>
+          )}
+        </div>
+      )}
+
+      {status?.configured && (
+        <div className="rounded-xl border border-border p-3 space-y-2 text-xs" data-testid="erp-demand-block">
+          <p className="font-bold text-sm">Pedidos de clientes sem estoque (atacado)</p>
+          <p className="text-[11px] text-muted-foreground">
+            As conversas da linha de atacado vão para a IA do ERP, que lista o que os clientes pediram e confere o estoque.
+            A lista fica no ERP, em Compras › Pedidos de clientes. Só o texto do cliente é enviado; primeira rodada: últimos 90 dias.
+            A chave do ERP precisa do acesso "Pedidos de clientes (atacado)".
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <select value={status.demandSessionKey ?? ""} disabled={busy} data-testid="select-erp-demand-line"
+              onChange={(e) => run(() => api.settings.erp.save({ demandSessionKey: e.target.value || null }), e.target.value ? "Linha de atacado salva" : "Linha de atacado removida")}
+              className="px-2 py-1.5 rounded-lg border border-border bg-white text-xs">
+              <option value="">Linha de atacado: escolher…</option>
+              {waLines.map((l) => (
+                <option key={l.sessionKey} value={l.sessionKey}>{l.displayName || l.sessionKey}{l.phoneNumber ? ` · ${l.phoneNumber}` : ""}</option>
+              ))}
+            </select>
+            <label className="flex items-center gap-2 font-medium">
+              <input type="checkbox" checked={status.demandSyncEnabled} disabled={busy || !status.demandSessionKey} data-testid="checkbox-erp-demand"
+                onChange={(e) => run(() => api.settings.erp.save({ demandSyncEnabled: e.target.checked }), e.target.checked ? "Pedidos de clientes ligados" : "Pedidos de clientes desligados")} />
+              Mandar para o ERP
+            </label>
+            {status.demandSyncEnabled && (
+              <button type="button" disabled={busy} data-testid="button-erp-demand-run"
+                onClick={() => run(async () => {
+                  const r = await api.settings.erp.demandRun();
+                  toast({ title: `${r.requests} pedido(s) lidos em ${r.conversations} conversa(s)`, description: `${r.outOfStock} sem estoque nesta rodada.` });
+                  return r.status;
+                }, "Conversas enviadas ao ERP")}
+                className="px-3 py-1.5 rounded-lg border border-border text-[11px] font-semibold disabled:opacity-50">
+                Enviar agora
+              </button>
+            )}
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            {status.demandLastSyncAt ? `Último envio: ${new Date(status.demandLastSyncAt).toLocaleString("pt-BR")}` : "Ainda não enviou."}
+            {" "}· {status.demandSentCount} pedido(s) lido(s)
+            {status.demandPendingCount > 0 ? ` · ${status.demandPendingCount} conversa(s) ainda por mandar` : ""}
+          </p>
+          {status.demandLastError && (
+            <p className="text-[11px] text-red-700 flex items-start gap-1"><AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" /> {status.demandLastError}</p>
           )}
         </div>
       )}
