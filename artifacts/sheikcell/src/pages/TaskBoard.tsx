@@ -303,6 +303,9 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
   const [showReport, setShowReport] = useState(false);
   const [report, setReport] = useState<{ bySector: TaskReportBucket[]; byUser: TaskReportBucket[] } | null>(null);
   const isGlobal = user?.role === "admin" || user?.role === "supervisor";
+  // Quadro de tarefas unificado (19/10/2026): com as tarefas no ERP, este
+  // quadro mostra e edita as mesmas de lá (aviso + link para abrir no ERP).
+  const [erpBoard, setErpBoard] = useState<{ moved: boolean; erpUrl: string | null } | null>(null);
 
   const fetchTasks = useCallback(async () => {
     try {
@@ -319,7 +322,18 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
     api.chatUsers().then(setTeam).catch(() => {});
     api.tasks.notifications.unread().then((r) => setUnreadTaskIds(new Set(r.taskIds))).catch(() => {});
     api.tasks.reminders.unread().then(setReminders).catch(() => {});
+    api.tasks.erpStatus().then(setErpBoard).catch(() => {});
   }, [fetchTasks]);
+
+  // Lembretes também por consulta a cada 2 min: com as tarefas no ERP os
+  // avisos vêm de lá (não chegam pelo SSE daqui).
+  useEffect(() => {
+    const t = setInterval(() => {
+      api.tasks.reminders.unread().then(setReminders).catch(() => {});
+      api.tasks.notifications.unread().then((r) => setUnreadTaskIds(new Set(r.taskIds))).catch(() => {});
+    }, 120_000);
+    return () => clearInterval(t);
+  }, []);
 
   // Lembrete de compromisso em tempo real: chega via SSE (mesmo canal que o
   // resto do sistema já usa — sseEmitter.ts no backend) assim que o job
@@ -358,7 +372,8 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
 
   const dismissReminder = (r: TaskReminder) => {
     setReminders((prev) => prev.filter((x) => x.id !== r.id));
-    if (r.id > 0) api.tasks.reminders.markRead(r.id).catch(() => {});
+    // id negativo = aviso só da tela (SSE); texto = aviso do ERP (tarefas no ERP).
+    if (typeof r.id === "string" || r.id > 0) api.tasks.reminders.markRead(r.id).catch(() => {});
   };
 
   // Busca de cliente do CRM com debounce simples (evita bater na API a cada tecla).
@@ -647,6 +662,17 @@ export default function TaskBoard({ compact = false }: { compact?: boolean } = {
           )}
         </div>
       </div>
+
+      {erpBoard?.moved && (
+        <div className="flex items-center gap-2 rounded-xl border border-sky-200 bg-sky-50 px-3.5 py-2.5 text-xs text-sky-900" data-testid="tasks-erp-banner">
+          <span className="flex-1">As tarefas agora moram no ERP Prumo — este quadro mostra e edita as mesmas de lá.</span>
+          {erpBoard.erpUrl && (
+            <a href={erpBoard.erpUrl} target="_blank" rel="noopener noreferrer" className="font-semibold underline underline-offset-2 shrink-0">
+              Abrir no ERP
+            </a>
+          )}
+        </div>
+      )}
 
       {/* Stats bar */}
       <div className={`grid gap-3 ${compact ? "grid-cols-2" : "grid-cols-2 sm:grid-cols-4"}`}>
