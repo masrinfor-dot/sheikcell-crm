@@ -1016,20 +1016,21 @@ export type Task = {
 };
 
 export type TaskComment = {
-  id: number; taskId: number; authorId: number | null;
+  // Tarefas no ERP (19/10/2026): ids do ERP são texto (uuid).
+  id: number | string; taskId: number; authorId: number | null;
   authorName: string | null; content: string; createdAt: string;
   mediaUrl?: string | null; mediaType?: string | null;
 };
 
 export type TaskSubtask = {
-  id: number; taskId: number; title: string; isDone: boolean; position: number; createdAt: string;
+  id: number | string; taskId: number; title: string; isDone: boolean; position: number; createdAt: string;
 };
 
 // Agenda: lembrete de compromisso (dueDate + alertMinutesBefore), gerado
 // automaticamente pelo servidor e entregue em tempo real via SSE
 // ("task_reminder") + listado aqui pra quem perdeu o evento (offline).
 export type TaskReminder = {
-  id: number; taskId: number; title: string; dueDate: string; read: boolean; createdAt: string;
+  id: number | string; taskId: number; title: string; dueDate: string; read: boolean; createdAt: string;
 };
 
 // ── Quadro de Sistema (Dev) ── problemas/atualizações/implementações do
@@ -1712,6 +1713,16 @@ export type BroadcastDispatchSummary = {
 export type OutboundUsage = {
   hourly: { used: number; limit: number };
   daily: { used: number; limit: number };
+};
+
+export type TasksErpImportReport = {
+  tasks: number; created: number; existing: number; comments: number; subtasks: number;
+  files: number; fileErrors: number; assigneesLinked: number; peopleWithoutErpUser: string[]; at?: string;
+};
+
+export type TasksErpStatus = {
+  moved: boolean; movedAt: string | null; configured: boolean; erpUrl: string | null;
+  localTasks: number; lastImport: TasksErpImportReport | null;
 };
 
 export type TaskReportBucket = {
@@ -3155,6 +3166,14 @@ export const api = {
       test: () =>
         req<{ ok: boolean; tenant: string; keyName: string | null; canSendOsMessages: boolean; canSyncHr: boolean }>("/settings/erp/test", { method: "POST" }),
       remove: () => req<ErpIntegrationStatus>("/settings/erp", { method: "DELETE" }),
+      // Quadro de tarefas unificado (19/10/2026): mudar as tarefas para o ERP.
+      tasks: {
+        get: () => req<TasksErpStatus>("/settings/erp/tasks"),
+        check: () => req<{ ok: boolean; erpUsers: number; crmUsersWithoutErpUser: string[] }>("/settings/erp/tasks/check", { method: "POST" }),
+        move: () => req<{ ok: boolean; report: TasksErpImportReport; moved: boolean }>("/settings/erp/tasks/move", { method: "POST" }),
+        importAgain: () => req<{ ok: boolean; report: TasksErpImportReport; moved: boolean }>("/settings/erp/tasks/import", { method: "POST" }),
+        back: () => req<{ ok: boolean; moved: boolean }>("/settings/erp/tasks/back", { method: "POST" }),
+      },
     },
     instagram: {
       get: () => req<InstagramIntegrationStatus>("/settings/instagram"),
@@ -3189,9 +3208,9 @@ export const api = {
     subtasks: (id: number) => req<TaskSubtask[]>(`/tasks/${id}/subtasks`),
     addSubtask: (id: number, title: string) =>
       req<TaskSubtask>(`/tasks/${id}/subtasks`, { method: "POST", body: JSON.stringify({ title }) }),
-    updateSubtask: (id: number, subId: number, data: Partial<{ isDone: boolean; title: string; position: number }>) =>
+    updateSubtask: (id: number, subId: number | string, data: Partial<{ isDone: boolean; title: string; position: number }>) =>
       req<TaskSubtask>(`/tasks/${id}/subtasks/${subId}`, { method: "PATCH", body: JSON.stringify(data) }),
-    removeSubtask: (id: number, subId: number) =>
+    removeSubtask: (id: number, subId: number | string) =>
       req<{ ok: boolean }>(`/tasks/${id}/subtasks/${subId}`, { method: "DELETE" }),
     remove: (id: number) => req<{ ok: boolean }>(`/tasks/${id}`, { method: "DELETE" }),
     notifications: {
@@ -3200,8 +3219,10 @@ export const api = {
     },
     reminders: {
       unread: () => req<TaskReminder[]>("/tasks/reminders/unread"),
-      markRead: (id: number) => req<{ ok: boolean }>(`/tasks/reminders/${id}/read`, { method: "POST" }),
+      markRead: (id: number | string) => req<{ ok: boolean }>(`/tasks/reminders/${id}/read`, { method: "POST" }),
     },
+    // Quadro de tarefas unificado (19/10/2026): as tarefas moram no ERP?
+    erpStatus: () => req<{ moved: boolean; erpUrl: string | null }>("/tasks/erp-status"),
   },
   systemBoard: {
     list: () => req<SystemBoardItem[]>("/system-board"),

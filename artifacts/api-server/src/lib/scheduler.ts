@@ -186,6 +186,12 @@ export async function deliverScheduledMessages(): Promise<void> {
           await db.update(tasksTable).set({ status: "done", updatedAt: new Date() })
             .where(eq(tasksTable.id, item.taskId));
         }
+        // Tarefas no ERP (19/10/2026): a tarefa espelho mora lá.
+        if (item.erpTaskNumber != null && delivered) {
+          await import("./erpTasks")
+            .then((m) => m.finishErpMirrorTask(item.tenantId, item.erpTaskNumber!, item.createdById, "done"))
+            .catch((err) => logger.warn({ err, scheduledId: item.id }, "ERP: não deu para concluir a tarefa espelho"));
+        }
       } catch (err) {
         logger.warn({ err, scheduledId: item.id }, "Falha ao processar mensagem agendada");
         await db.update(scheduledMessagesTable).set({ status: "failed" })

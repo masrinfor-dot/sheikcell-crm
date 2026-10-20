@@ -186,6 +186,23 @@ router.get("/admin/dashboard-attention", requireAdminOrSupervisor, async (req, r
     .orderBy(asc(tasksTable.dueDate))
     .limit(5);
 
+  // Tarefas no ERP (19/10/2026): as atrasadas vêm de lá (se o ERP não
+  // responder, a lista fica vazia — o resto da Visão Geral segue).
+  let overdueSource: { id: number; title: string; assigneeName: string | null; dueDate: Date | null }[] = overdueRows;
+  const erpT = await import("../lib/erpTasks");
+  if (await erpT.tasksMoved(tenantId)) {
+    overdueSource = [];
+    const c = await erpT.erpTasksConn(tenantId);
+    if (c) {
+      const list: import("../lib/erpTasks").ErpTask[] = await erpT.erpTasks<import("../lib/erpTasks").ErpTask[]>(c, "").catch(() => []);
+      overdueSource = list
+        .filter((t) => t.status !== "done" && t.dueDate && new Date(t.dueDate) < new Date())
+        .sort((a, b) => a.dueDate!.localeCompare(b.dueDate!))
+        .slice(0, 5)
+        .map((t) => ({ id: t.number, title: t.title, assigneeName: t.assignees.map((a) => a.name).join(", ") || null, dueDate: new Date(t.dueDate!) }));
+    }
+  }
+
   // "Tempo Médio" do card do dashboard: usa MEDIANA (percentile_cont 0.5), não
   // média aritmética. serviceTimeSeconds conta desde que o vendedor assumiu a
   // conversa até o encerramento — inclui qualquer tempo parado esperando o
@@ -246,7 +263,7 @@ router.get("/admin/dashboard-attention", requireAdminOrSupervisor, async (req, r
       sectorName: c.sectorName,
       waitingMinutes: c.lastMessageAt ? Math.floor((now - c.lastMessageAt.getTime()) / 60_000) : null,
     })),
-    overdueTasks: overdueRows.map((t) => ({
+    overdueTasks: overdueSource.map((t) => ({
       id: t.id,
       title: t.title,
       assigneeName: t.assigneeName,

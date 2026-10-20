@@ -17,5 +17,7 @@ export const scheduledMessagesTable = pgTable("scheduled_messages", {
   status: text("status").notNull().default("pending"),     // pending | sent | done | failed | cancelled
   createdById: integer("created_by_id").references(() => usersTable.id),
   taskId: integer("task_id").references(() => tasksTable.id),
+  // Tarefas no ERP (19/10/2026): número da tarefa espelho lá (taskId fica nulo).
+  erpTaskNumber: integer("erp_task_number"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
