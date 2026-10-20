@@ -39,6 +39,7 @@ import superadminSaasRouter from "./superadminSaas";
 import systemBoardRouter from "./systemBoard";
 import teamDirectoryRouter from "./teamDirectory";
 import ticketsRouter from "./tickets";
+import gerenteRouter from "./gerente";
 import tvboxRouter from "./tvbox";
 import pdfRouter from "./pdf";
 import rotinasRouter, { enforceMandatoryRoutines } from "./rotinas";
@@ -123,5 +124,6 @@ router.use(documentsExportPublicRouter);
 // assinado — ver routes/instagram.ts.
 router.use(instagramPublicRouter);
 router.use(geoRouter);
+router.use(gerenteRouter);
 
 export default router;

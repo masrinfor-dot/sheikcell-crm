@@ -172,6 +172,17 @@ export const CRM_ERP_FLOWS: readonly ErpFlowDef[] = [
     ],
   },
   {
+    key: "supplier_prices",
+    label: "Listas de preço dos fornecedores (WhatsApp de compras)",
+    what: "Cada mensagem, foto, PDF ou planilha que os fornecedores mandam no WhatsApp de compras vai para o ERP, que lê com IA e monta a cotação (Compras › Cotações).",
+    scope: "supplier_prices.write",
+    frequency: "Na hora em que a mensagem chega (com novas tentativas se o ERP estiver fora)",
+    enabledHint: "Marque \"Encaminhar listas de fornecedores ao ERP\" na conexão do número de compras (Administração › WhatsApp).",
+    routes: [
+      { method: "POST", path: "/supplier-price-lists", direction: "CRM_TO_ERP", one: "lista de fornecedor enviada", many: "listas de fornecedor enviadas" },
+    ],
+  },
+  {
     key: "raffles_export",
     label: "Sorteios (arquivo)",
     what: "Arquivo com os sorteios e os resultados do CRM, que o ERP importa.",

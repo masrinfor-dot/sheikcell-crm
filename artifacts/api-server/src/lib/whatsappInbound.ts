@@ -1294,6 +1294,15 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     if (handled) return;
   }
 
+  // Gerente IA: mensagem do celular pessoal do dono (número autorizado) em
+  // qualquer linha da loja — vira registro/resposta do Gerente, nunca
+  // conversa de atendimento (a equipe não vê). Antes da pesquisa e do robô.
+  if (!isGroup) {
+    const { tryConsumeGerenteInbound } = await import("./gerente");
+    const handled = await tryConsumeGerenteInbound({ tenantId, sessionKey, phone, text, msgType, mediaUrl, externalId });
+    if (handled) return;
+  }
+
   // Pesquisa de satisfação: se a resposta consumiu a pesquisa, não reabre a
   // conversa nem aciona o robô.
   if (!isGroup) {
@@ -1338,6 +1347,32 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   // Conflito = mensagem duplicada chegando em paralelo; não notifica de novo.
   if (!msg) return;
   broadcast("message", { conversationId: conv.id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+
+  // WhatsApp de compras (19/10/2026): conexão marcada "encaminhar ao ERP" manda
+  // toda mensagem de fornecedor (texto, foto, PDF, planilha) para o ERP ler a
+  // lista de preço com IA. Fila própria com nova tentativa; nunca atrasa o
+  // webhook. Grupos, áudios, vídeos e figurinhas não vão (não são listas).
+  if (!isGroup && externalId && mediaType !== "audio" && mediaType !== "video" && mediaType !== "sticker") {
+    void import("./erpForward")
+      .then(async (m) => {
+        if (!(await m.sessionForwardsToErp(sessionKey, tenantId)) || !(await m.erpForwardConfigured(tenantId))) return;
+        await m.enqueueErpForward({
+          tenantId,
+          sessionKey,
+          externalId,
+          conversationId: conv.id,
+          senderPhone: phone,
+          senderName: pushName,
+          receivedAt: body.data?.messageTimestamp ? new Date(body.data.messageTimestamp * 1000) : new Date(),
+          text: text || null,
+          fileName: docFileName,
+          mimeType: mediaMimeType,
+          mediaUrl,
+          mediaBase64: mediaUrl ? null : mediaBase64,
+        });
+      })
+      .catch((err) => logger.warn({ err, sessionKey }, "WhatsApp de compras: não deu para enfileirar ao ERP"));
+  }
 
   // Robô de pré-atendimento (assíncrono: nunca atrasa nem derruba o webhook)
   if (msgType === "text") {
@@ -1476,6 +1511,13 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
         // resposta consumiu a pesquisa, não reabre a conversa nem aciona o robô.
         // Meta Cloud API usa a conexão padrão → loja 1 (legado).
         const tenantId = LEGACY_TENANT_ID;
+        {
+          const { tryConsumeGerenteInbound } = await import("./gerente");
+          const gerenteHandled = await tryConsumeGerenteInbound({
+            tenantId, sessionKey: "default", phone, text, msgType, mediaUrl, externalId: externalId ?? null,
+          });
+          if (gerenteHandled) continue;
+        }
         const surveyHandled = await tryConsumeSurveyReply({
           tenantId,
           phone,

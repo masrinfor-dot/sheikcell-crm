@@ -291,6 +291,12 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("./erpHrSync").then((m) => m.runErpHrSync()).catch(() => {});
   }, 5 * 60_000);
+  // Fila do ERP (listas de preço do WhatsApp de compras, 19/10/2026): reenvia
+  // o que falhou, com espera crescente. Roda uma vez logo no boot também.
+  void import("./erpForward").then((m) => m.runErpForwardQueue()).catch(() => {});
+  setInterval(() => {
+    void import("./erpForward").then((m) => m.runErpForwardQueue()).catch(() => {});
+  }, 60_000);
   // Pedidos de clientes sem estoque (16/10/2026): conversas da linha de
   // atacado vão pra IA do ERP a cada 30 min (ver erpDemandSync.ts).
   setInterval(() => {
@@ -307,6 +313,11 @@ export function startScheduler(): void {
   }, 6 * 60 * 60_000);
   // Lembrete da pesquisa de satisfação: granularidade de minutos basta.
   setInterval(() => { void sendSurveyReminders(); }, 60_000);
+  // Gerente IA (19/10/2026): lembretes, avisos de compromisso e o resumo
+  // "Meu dia" do dono pelo WhatsApp (ver gerente.ts).
+  setInterval(() => {
+    void import("./gerente").then((m) => m.runGerenteNotifications()).catch(() => {});
+  }, 60_000);
   // Preenche vendedores ociosos da fila do Central de Atendimento que os
   // gatilhos por evento (conversa nova / vendedor liberado — ver
   // queueAutoAssign.ts) não cobrem: quem já estava zerado antes de ligar

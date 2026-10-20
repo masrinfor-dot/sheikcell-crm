@@ -36,20 +36,20 @@ export async function transcribeMessage(messageId: number): Promise<string> {
   return p;
 }
 
-async function doTranscribe(messageId: number): Promise<string> {
-  const [msg] = await db.select().from(messagesTable).where(eq(messagesTable.id, messageId)).limit(1);
-  if (!msg) throw new Error("Mensagem não encontrada");
-  if (msg.transcript) return msg.transcript;
-  if (msg.type !== "audio" || !msg.mediaUrl) throw new Error("Esta mensagem não é um áudio");
-
+/**
+ * Transcreve um arquivo de áudio salvo em MEDIA_DIR (a partir da URL
+ * /api/chat/media/<uuid>.<ext>) — sem tocar na tabela messages. Usado pelo
+ * Gerente IA, cujos áudios nunca viram mensagem de atendimento.
+ */
+export async function transcribeAudioFile(mediaUrl: string, tenantId: number): Promise<string> {
+  const openai = await getOpenAiClientForTenant(tenantId);
   // mediaUrl é sempre /api/chat/media/<uuid>.<ext> gerado por nós — ainda
   // assim, valida o basename para nunca ler fora do diretório de mídia.
-  const filename = path.basename(msg.mediaUrl);
+  const filename = path.basename(mediaUrl);
   if (!/^[a-f0-9-]{36}\.[a-z0-9]{2,5}$/i.test(filename)) throw new Error("Arquivo de áudio inválido");
   const ext = filename.split(".").pop()!.toLowerCase();
   const mime = AUDIO_MIME[ext] ?? "audio/ogg";
   const buf = await readFile(path.join(MEDIA_DIR, filename));
-  const openai = await getOpenAiClientForTenant(msg.tenantId);
 
   const r = await openai.audio.transcriptions.create({
     model: "whisper-1",
@@ -59,6 +59,16 @@ async function doTranscribe(messageId: number): Promise<string> {
   });
   const text = (r.text ?? "").trim().slice(0, 4000);
   if (!text) throw new Error("Não consegui entender o áudio");
+  return text;
+}
+
+async function doTranscribe(messageId: number): Promise<string> {
+  const [msg] = await db.select().from(messagesTable).where(eq(messagesTable.id, messageId)).limit(1);
+  if (!msg) throw new Error("Mensagem não encontrada");
+  if (msg.transcript) return msg.transcript;
+  if (msg.type !== "audio" || !msg.mediaUrl) throw new Error("Esta mensagem não é um áudio");
+
+  const text = await transcribeAudioFile(msg.mediaUrl, msg.tenantId);
 
   await db.update(messagesTable).set({ transcript: text }).where(eq(messagesTable.id, messageId));
   logger.info({ messageId }, "Áudio transcrito");

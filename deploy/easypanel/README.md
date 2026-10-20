@@ -17,6 +17,8 @@ O sistema tem 4 serviços dentro de um mesmo projeto do EasyPanel:
 - `OPENAI_API_KEY` — sua chave da OpenAI (recursos de IA)
 - `WHATSAPP_BRIDGE_URL` — `http://sheikcell_whatsapp:3002`
 - `LOG_LEVEL` — `info` (opcional)
+- `ERP_API_URL` e `ERP_API_KEY` (opcionais) — WhatsApp de compras → ERP (listas de preço dos fornecedores lidas pela IA do Prumo). O CRM usa primeiro a integração gravada em Administração › Integrações (endereço da API e chave do ERP, por loja); estas variáveis são o fallback. URL da API do ERP com `/api/v1` e chave gerada no ERP em Auxiliares › Integrações com o acesso "Listas de preço dos fornecedores". Depois, em Administração › WhatsApp, marque "Encaminhar listas de fornecedores ao ERP" na conexão do número de compras.
+  - **Enviar conversas anteriores:** com a opção marcada, o bloco da conexão mostra "Fila para o ERP: X pendentes · Y enviadas · Z falharam" (botão "Tentar de novo" quando algo falhou) e o botão "Enviar conversas anteriores ao ERP…". Ele manda o histórico que já está no CRM (importado ao conectar ou recebido antes de marcar): escolha o período (7 a 90 dias) e os contatos (todos marcados; busca por nome ou telefone). Vão só mensagens recebidas de texto, foto, PDF e planilha fora de grupo; áudio, vídeo, figurinha e mensagem apagada não vão. O que já entrou na fila não duplica (id da mensagem no WhatsApp), e o ERP recebe aos poucos pelo agendador (não é em rajada). Limite de 5.000 mensagens por clique — a tela avisa quantas ficaram de fora; clique de novo para o resto.
 
 ### Serviço `whatsapp`
 - `DATABASE_URL` — o MESMO do serviço api

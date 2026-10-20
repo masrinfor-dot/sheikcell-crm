@@ -51,6 +51,8 @@ export interface AdminWAState extends BridgeWAState {
   botEnabled: boolean;
   historyImportEnabled: boolean;
   phoneOutboundEnabled: boolean;
+  /** WhatsApp de compras: mensagens de fornecedores vão ao ERP (19/10/2026). */
+  forwardToErp: boolean;
   directAssigneeId: number | null;
 }
 
@@ -134,6 +136,7 @@ function offlineState(
     botEnabled: row?.botEnabled ?? true,
     historyImportEnabled: row?.historyImportEnabled ?? false,
     phoneOutboundEnabled: row?.phoneOutboundEnabled ?? false,
+    forwardToErp: row?.forwardToErp ?? false,
     directAssigneeId: row?.directAssigneeId ?? null,
   };
 }
@@ -185,6 +188,7 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         botEnabled: row?.botEnabled ?? true,
         historyImportEnabled: row?.historyImportEnabled ?? false,
         phoneOutboundEnabled: row?.phoneOutboundEnabled ?? false,
+        forwardToErp: row?.forwardToErp ?? false,
         directAssigneeId: row?.directAssigneeId ?? null,
       });
     } else if (bridgeAvailable) {
@@ -208,6 +212,7 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         botEnabled: row?.botEnabled ?? true,
         historyImportEnabled: row?.historyImportEnabled ?? false,
         phoneOutboundEnabled: row?.phoneOutboundEnabled ?? false,
+        forwardToErp: row?.forwardToErp ?? false,
         directAssigneeId: row?.directAssigneeId ?? null,
       });
       void fetchFromBridge("/whatsapp/sessions", "POST", { session: key }).catch(() => {});
@@ -412,6 +417,103 @@ router.post("/whatsapp/sessions/:key/phone-outbound", requireFeature("whatsapp")
     .returning();
   if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
   res.json({ ok: true, phoneOutboundEnabled: updated.phoneOutboundEnabled });
+});
+
+// ─── WhatsApp de compras: encaminhar ao ERP (19/10/2026) ───────────────────
+// Marca a conexão cujo número é o de compras: toda mensagem de fornecedor
+// recebida nela vai ao ERP (Prumo) para a IA ler a lista de preço. Ver
+// lib/erpForward.ts; precisa da integração com o ERP (Administração ›
+// Integrações) ou de ERP_API_URL e ERP_API_KEY no servidor.
+router.post("/whatsapp/sessions/:key/forward-to-erp", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const { enabled } = (req.body ?? {}) as { enabled?: boolean };
+  if (typeof enabled !== "boolean") { res.status(400).json({ error: "Informe enabled (true/false)" }); return; }
+  const [updated] = await db
+    .update(whatsappSessionsTable)
+    .set({ forwardToErp: enabled, updatedAt: new Date() })
+    .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId)))
+    .returning();
+  if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+  const { erpForwardConfigured } = await import("../lib/erpForward");
+  res.json({ ok: true, forwardToErp: updated.forwardToErp, erpConfigured: await erpForwardConfigured(tenantId) });
+});
+
+// ─── WhatsApp de compras: conversas anteriores + situação da fila ──────────
+// O histórico já gravado no CRM (mensagens recebidas antes de marcar a
+// conexão, ou importadas ao conectar) pode ser mandado ao ERP em lote. Ver
+// enqueueErpForwardHistory em lib/erpForward.ts.
+async function sessionRowForTenant(key: string, tenantId: number) {
+  const [row] = await db
+    .select({ forwardToErp: whatsappSessionsTable.forwardToErp })
+    .from(whatsappSessionsTable)
+    .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId)))
+    .limit(1);
+  return row ?? null;
+}
+
+function parseHistoryDays(raw: unknown, fallback: number, maxDays: number): number | null {
+  if (raw == null || raw === "") return fallback;
+  const n = typeof raw === "number" ? raw : Number(String(raw));
+  if (!Number.isInteger(n) || n < 1 || n > maxDays) return null;
+  return n;
+}
+
+// Resumo para a tela: situação da fila desta conexão e contatos (fora de
+// grupo/comunidade) com mensagens que iriam ao ERP no período.
+router.get("/whatsapp/sessions/:key/erp-forward/summary", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const erp = await import("../lib/erpForward");
+  const days = parseHistoryDays(req.query["days"], erp.HISTORY_DEFAULT_DAYS, erp.HISTORY_MAX_DAYS);
+  if (days == null) { res.status(400).json({ error: `Informe days entre 1 e ${erp.HISTORY_MAX_DAYS}` }); return; }
+  if (!(await sessionRowForTenant(key, tenantId))) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+  res.json(await erp.erpForwardSummary(tenantId, key, days));
+});
+
+// Enfileira as conversas anteriores (todas ou só os contatos escolhidos).
+// Não manda na hora: o agendador esvazia a fila no ritmo dele.
+router.post("/whatsapp/sessions/:key/erp-forward/history", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const erp = await import("../lib/erpForward");
+  const body = (req.body ?? {}) as { days?: unknown; conversationIds?: unknown };
+  const days = parseHistoryDays(body.days, erp.HISTORY_DEFAULT_DAYS, erp.HISTORY_MAX_DAYS);
+  if (days == null) { res.status(400).json({ error: `Informe days entre 1 e ${erp.HISTORY_MAX_DAYS}` }); return; }
+  let conversationIds: number[] | undefined;
+  if (body.conversationIds != null) {
+    if (!Array.isArray(body.conversationIds) || body.conversationIds.length > 1000
+      || !body.conversationIds.every((id) => Number.isInteger(id) && (id as number) > 0)) {
+      res.status(400).json({ error: "conversationIds deve ser uma lista de ids (até 1.000)" }); return;
+    }
+    conversationIds = body.conversationIds as number[];
+    if (!conversationIds.length) { res.status(400).json({ error: "Escolha pelo menos um contato" }); return; }
+  }
+  const session = await sessionRowForTenant(key, tenantId);
+  if (!session) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+  if (!session.forwardToErp) {
+    res.status(400).json({ error: "Marque \"Encaminhar listas de fornecedores ao ERP\" nesta conexão antes de enviar as conversas anteriores." });
+    return;
+  }
+  if (!(await erp.erpForwardConfigured(tenantId))) {
+    res.status(400).json({ error: "ERP não configurado: cole o endereço e a chave do ERP em Administração › Integrações (ou configure ERP_API_URL e ERP_API_KEY no servidor)." });
+    return;
+  }
+  const result = await erp.enqueueErpForwardHistory(tenantId, key, days, conversationIds);
+  // Começa a mandar já (no ritmo do tick), em vez de esperar até 1 min.
+  if (result.queued > 0) void erp.runErpForwardQueue().catch(() => {});
+  res.json({ ...result, limit: erp.HISTORY_MAX_MESSAGES });
+});
+
+// Linhas que o ERP recusou (ou esgotaram as tentativas) voltam para a fila.
+router.post("/whatsapp/sessions/:key/erp-forward/retry-failed", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  if (!(await sessionRowForTenant(key, tenantId))) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+  const erp = await import("../lib/erpForward");
+  const retried = await erp.retryFailedErpForward(tenantId, key);
+  if (retried > 0) void erp.runErpForwardQueue().catch(() => {});
+  res.json({ retried });
 });
 
 // ─── Responsável fixo da linha (mesmo pedido) ─────────────────────────────
@@ -628,6 +730,7 @@ router.get("/whatsapp/status", requireFeature("whatsapp"), async (req, res): Pro
         botEnabled: row?.botEnabled ?? true,
         historyImportEnabled: row?.historyImportEnabled ?? false,
         phoneOutboundEnabled: row?.phoneOutboundEnabled ?? false,
+        forwardToErp: row?.forwardToErp ?? false,
         directAssigneeId: row?.directAssigneeId ?? null,
       };
       res.json(result);
