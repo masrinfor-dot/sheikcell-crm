@@ -170,3 +170,15 @@ export const gerenteTaskDispatchesTable = pgTable("gerente_task_dispatches", {
   index("gerente_task_dispatches_task_idx").on(t.taskId),
 ]);
 export type GerenteTaskDispatch = typeof gerenteTaskDispatchesTable.$inferSelect;
+
+// WhatsApp de cada pessoa da equipe para receber tarefas do Gerente IA
+// (o cadastro do RH foi para o ERP — o número fica aqui).
+export const gerenteTeamPhonesTable = pgTable("gerente_team_phones", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull(),
+  userId: integer("user_id").notNull(),
+  phone: text("phone").notNull(),
+  lastTestAt: timestamp("last_test_at", { withTimezone: true }),
+  lastTestOk: boolean("last_test_ok"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [uniqueIndex("gerente_team_phones_tenant_user_uq").on(t.tenantId, t.userId)]);

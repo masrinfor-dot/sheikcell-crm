@@ -8,7 +8,7 @@
 // de um "feito". Qualquer outra mensagem dele segue o fluxo normal.
 import { and, eq, desc, inArray, isNull, lt, gte, ne } from "drizzle-orm";
 import {
-  db, gerenteTaskDispatchesTable, employeesTable, tasksTable, taskCommentsTable, whatsappSessionsTable,
+  db, gerenteTaskDispatchesTable, gerenteTeamPhonesTable, employeesTable, tasksTable, taskCommentsTable, whatsappSessionsTable,
 } from "@workspace/db";
 import { normalizePhone } from "./phone";
 import { sendRawWhatsAppText } from "./outbound";
@@ -19,6 +19,11 @@ const OPEN = ["enviada", "aguardando_prova"];
 const PROOF_WINDOW_MS = 2 * 3_600_000;
 
 async function sellerPhone(tenantId: number, userId: number): Promise<string | null> {
+  // 1º: número cadastrado no Gerente IA (Configurações → Equipe no WhatsApp).
+  const [t] = await db.select({ phone: gerenteTeamPhonesTable.phone }).from(gerenteTeamPhonesTable)
+    .where(and(eq(gerenteTeamPhonesTable.tenantId, tenantId), eq(gerenteTeamPhonesTable.userId, userId))).limit(1);
+  if (t?.phone) return t.phone;
+  // 2º: telefone antigo do cadastro do RH (antes do RH ir pro ERP).
   const [e] = await db.select({ phone: employeesTable.phone }).from(employeesTable)
     .where(and(eq(employeesTable.tenantId, tenantId), eq(employeesTable.userId, userId), eq(employeesTable.isActive, true)))
     .limit(1);
@@ -50,7 +55,7 @@ export async function dispatchTaskToSeller(tenantId: number, p: {
     const phone = await sellerPhone(tenantId, p.userId);
     if (!phone) {
       await db.insert(gerenteTaskDispatchesTable).values({ tenantId, taskId: p.taskId, userId: p.userId, assigneeName: p.assigneeName, status: "sem_telefone" });
-      return `⚠️ ${p.assigneeName.split(" ")[0]} não tem WhatsApp no cadastro do RH — a tarefa ficou só no quadro.`;
+      return `⚠️ ${p.assigneeName.split(" ")[0]} não tem WhatsApp cadastrado (Gerente IA → Configurações → Equipe no WhatsApp) — a tarefa ficou só no quadro.`;
     }
     const first = p.assigneeName.split(" ")[0];
     const text = [
@@ -175,4 +180,19 @@ export async function runTaskOverdueChecks(tenantId: number): Promise<number> {
     n++;
   }
   return n;
+}
+
+/** Telefone sugerido (RH antigo) para pré-preencher a tela de equipe. */
+export async function suggestedPhones(tenantId: number): Promise<Map<number, string>> {
+  const rows = await db.select({ userId: employeesTable.userId, phone: employeesTable.phone }).from(employeesTable)
+    .where(and(eq(employeesTable.tenantId, tenantId), eq(employeesTable.isActive, true)));
+  const m = new Map<number, string>();
+  for (const r of rows) { const p = normalizePhone(r.phone ?? ""); if (r.userId && p && p.length >= 12) m.set(r.userId, p); }
+  return m;
+}
+
+/** Mensagem de teste para um vendedor. Devolve a linha usada ou null. */
+export async function sendTeamTest(tenantId: number, phone: string, name: string, ownerSessionKey: string | null): Promise<string | null> {
+  const text = `👋 Olá, ${name.split(" ")[0]}! Este é um teste do *Gerente IA* da Sheikcell.\nA partir de agora as tarefas da loja chegam por aqui. Quando terminar uma, responda *feito* + o número da tarefa e mande uma *foto* como prova. 📸\n\nResponda *ok* pra confirmar que recebeu.`;
+  return sendVia(phone, await pickLine(tenantId, ownerSessionKey), text);
 }

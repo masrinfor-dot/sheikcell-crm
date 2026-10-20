@@ -16,7 +16,7 @@ const {
   db, tenantsTable, sectorsTable, usersTable, conversationsTable, messagesTable, whatsappSessionsTable,
   attendanceLogsTable, crmContactsTable, whatsappContactsTable, tasksTable, taskAssigneesTable,
   gerenteSettingsTable, gerenteMessagesTable, gerenteRemindersTable, gerenteEntriesTable, gerenteBillsTable,
-  gerenteEventsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable, employeesTable, taskCommentsTable,
+  gerenteEventsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable, employeesTable, taskCommentsTable, gerenteTeamPhonesTable,
 } = await import("@workspace/db");
 const { eq, and, desc } = await import("drizzle-orm");
 const { processInboundWA } = await import("./whatsappInbound.ts");
@@ -63,6 +63,7 @@ async function wipe(): Promise<void> {
     await db.delete(gerenteBillsTable).where(eq(gerenteBillsTable.tenantId, id));
     await db.delete(gerenteSettingsTable).where(eq(gerenteSettingsTable.tenantId, id));
     await db.delete(gerenteTaskDispatchesTable).where(eq(gerenteTaskDispatchesTable.tenantId, id));
+    await db.delete(gerenteTeamPhonesTable).where(eq(gerenteTeamPhonesTable.tenantId, id));
     await db.delete(taskCommentsTable).where(eq(taskCommentsTable.tenantId, id));
     await db.delete(employeesTable).where(eq(employeesTable.tenantId, id));
     await db.delete(taskAssigneesTable).where(eq(taskAssigneesTable.tenantId, id));
@@ -321,4 +322,13 @@ test("tarefa vai pro WhatsApp do vendedor; 'feito' pede foto; foto fecha a taref
   assert.equal(comments.length, 1);
   assert.equal(comments[0]!.mediaType, "image");
   await waitFor(async () => bridgeSends.find((s) => s.to === OWNER_PHONE_CANONICAL && /concluiu/.test(s.text)));
+});
+
+test("número da Equipe no WhatsApp tem prioridade sobre o telefone antigo do RH", async () => {
+  await db.insert(gerenteTeamPhonesTable).values({ tenantId, userId, phone: "5533977776666" });
+  bridgeSends.length = 0;
+  const r = await handlePanelMessage(tenantId, "tarefa pro Nilmar: repor películas até 17h");
+  assert.match(r.replies[0]!, /Enviada no WhatsApp de Nilmar/);
+  assert.ok(bridgeSends.find((s) => s.to === "5533977776666" && /repor películas/.test(s.text)));
+  assert.equal(bridgeSends.filter((s) => s.to === "5533988776655").length, 0);
 });

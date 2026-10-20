@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import {
   api,
   type GerenteSettings, type GerenteOverview, type GerenteEvent, type GerenteReminder,
-  type GerenteEntry, type GerenteBill, type GerenteMessage, type GerenteScope,
+  type GerenteEntry, type GerenteBill, type GerenteMessage, type GerenteScope, type GerenteTeamMember,
 } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -590,6 +590,63 @@ function Conversar() {
   );
 }
 
+// ─── Equipe no WhatsApp ──────────────────────────────────────────────────────
+function EquipeWhatsapp() {
+  const { toast } = useToast();
+  const [rows, setRows] = useState<GerenteTeamMember[]>([]);
+  const [draft, setDraft] = useState<Record<number, string>>({});
+  const [busy, setBusy] = useState<number | null>(null);
+  const load = useCallback(async () => {
+    try {
+      const r = await api.gerente.team.list();
+      setRows(r);
+      setDraft(Object.fromEntries(r.map((m) => [m.id, m.phone ?? m.suggestedPhone ?? ""])));
+    } catch (err) { toast({ title: "Erro", description: errMsg(err), variant: "destructive" }); }
+  }, [toast]);
+  useEffect(() => { void load(); }, [load]);
+
+  const save = async (m: GerenteTeamMember, andTest: boolean) => {
+    setBusy(m.id);
+    try {
+      await api.gerente.team.setPhone(m.id, draft[m.id] ?? "");
+      if (andTest && (draft[m.id] ?? "").trim()) {
+        await api.gerente.team.test(m.id);
+        toast({ title: `Teste enviado para ${m.name.split(" ")[0]} ✅`, description: "Peça pra pessoa confirmar que recebeu." });
+      } else toast({ title: "Salvo" });
+      await load();
+    } catch (err) { toast({ title: "Erro", description: errMsg(err), variant: "destructive" }); await load(); }
+    finally { setBusy(null); }
+  };
+
+  return (
+    <div className="shk-card p-4 space-y-2 lg:col-span-2">
+      <p className="font-semibold flex items-center gap-1"><Smartphone className="w-3.5 h-3.5" /> Equipe no WhatsApp</p>
+      <p className="text-[10px] text-muted-foreground">Número de cada pessoa para receber as tarefas do Gerente IA e responder <b>feito</b> + foto. Campo em amarelo = número antigo do RH, ainda não confirmado — salve para usar.</p>
+      <div className="divide-y divide-border">
+        {rows.map((m) => {
+          const saved = !!m.phone;
+          const suggested = !saved && !!m.suggestedPhone;
+          return (
+            <div key={m.id} className="py-2 flex flex-wrap items-center gap-2">
+              <div className="w-44 min-w-0">
+                <div className="font-semibold truncate">{m.name}</div>
+                <div className="text-[10px] text-muted-foreground truncate">{m.role}{m.storeName ? ` · ${m.storeName}` : ""}</div>
+              </div>
+              <input className={`flex-1 min-w-[150px] px-3 py-1.5 rounded-lg border text-xs bg-background ${suggested ? "border-amber-400 bg-amber-50" : "border-border"}`}
+                value={draft[m.id] ?? ""} onChange={(e) => setDraft({ ...draft, [m.id]: e.target.value })} placeholder="33 99999-0000" />
+              <button onClick={() => save(m, false)} disabled={busy === m.id} className={BTN_GHOST}>Salvar</button>
+              <button onClick={() => save(m, true)} disabled={busy === m.id || !(draft[m.id] ?? "").trim()} className={BTN_PRIMARY}>{busy === m.id ? "..." : "Salvar e testar"}</button>
+              <span className="text-[10px] w-28 text-right">
+                {m.lastTestAt ? (m.lastTestOk ? <span className="text-green-700">✅ teste {fmtDT(m.lastTestAt)}</span> : <span className="text-red-600">❌ falhou {fmtDT(m.lastTestAt)}</span>) : saved ? <span className="text-muted-foreground">sem teste</span> : <span className="text-muted-foreground">sem número</span>}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ─── Configurações ───────────────────────────────────────────────────────────
 function Config({ settings, onSaved }: { settings: GerenteSettings; onSaved: (s: GerenteSettings) => void }) {
   const { toast } = useToast();
@@ -622,6 +679,7 @@ function Config({ settings, onSaved }: { settings: GerenteSettings; onSaved: (s:
 
   return (
     <div className="grid lg:grid-cols-2 gap-4 items-start text-xs">
+      <EquipeWhatsapp />
       <div className="shk-card p-4 space-y-3">
         <label className="flex items-center gap-2 font-bold text-sm">
           <input type="checkbox" checked={s.enabled} onChange={(e) => setS({ ...s, enabled: e.target.checked })} data-testid="toggle-gerente-enabled" /> Gerente IA ligado
