@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import {
   api,
   type GerenteSettings, type GerenteOverview, type GerenteEvent, type GerenteReminder,
-  type GerenteEntry, type GerenteBill, type GerenteMessage, type GerenteScope, type GerenteTeamMember,
+  type GerenteEntry, type GerenteBill, type GerenteMessage, type GerenteScope, type GerenteTeamMember, type GerenteErpAction,
 } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -590,6 +590,71 @@ function Conversar() {
   );
 }
 
+// ─── ERP (linha ADM) ─────────────────────────────────────────────────────────
+const ERP_TYPE: Record<string, string> = { CREATE_PAYABLE: "Conta a pagar", CREATE_RECEIVABLE: "Conta a receber", SETTLE_PAYABLE: "Baixa a pagar", SETTLE_RECEIVABLE: "Baixa a receber" };
+const ERP_STATUS: Record<string, { label: string; color: string }> = {
+  PENDENTE: { label: "Aguardando aprovação", color: "bg-amber-100 text-amber-700" },
+  APROVADA: { label: "Aprovada · lançada", color: "bg-green-100 text-green-700" },
+  RECUSADA: { label: "Recusada", color: "bg-slate-100 text-slate-600" },
+  ERRO: { label: "Erro ao lançar", color: "bg-red-100 text-red-700" },
+  FALHA_ENVIO: { label: "Não enviada", color: "bg-red-100 text-red-700" },
+};
+
+function ErpAdm({ settings, onSaved }: { settings: GerenteSettings; onSaved: (s: GerenteSettings) => void }) {
+  const { toast } = useToast();
+  const [key, setKey] = useState("");
+  const [status, setStatus] = useState<string | null>(null);
+  const [rows, setRows] = useState<GerenteErpAction[]>([]);
+  const load = useCallback(async () => { try { setRows(await api.gerente.erp.actions()); } catch { /* ok */ } }, []);
+  useEffect(() => { void load(); }, [load]);
+
+  const saveKey = async () => {
+    try { const r = await api.gerente.erp.setKey(key); setStatus(`${r.ok ? "✅" : "⚠️"} ${r.message}`); setKey(""); onSaved({ ...settings, erpAgentKeySet: true }); }
+    catch (err) { toast({ title: "Erro", description: errMsg(err), variant: "destructive" }); }
+  };
+  const test = async () => { try { const r = await api.gerente.erp.test(); setStatus(`${r.ok ? "✅" : "⚠️"} ${r.message}`); } catch (err) { setStatus(`⚠️ ${errMsg(err)}`); } };
+  const setLine = async (k: string) => {
+    try { const u = await api.gerente.settings.update({ admSessionKey: k || null }); onSaved({ ...settings, ...u, lines: settings.lines }); toast({ title: "Linha ADM salva" }); }
+    catch (err) { toast({ title: "Erro", description: errMsg(err), variant: "destructive" }); }
+  };
+  const resend = async (id: number) => { try { const r = await api.gerente.erp.resend(id); toast({ title: r.message.slice(0, 120) }); await load(); } catch (err) { toast({ title: "Erro", description: errMsg(err), variant: "destructive" }); } };
+
+  return (
+    <div className="shk-card p-4 space-y-3 lg:col-span-2">
+      <p className="font-semibold">🧾 ERP — linha ADM (boletos, contas e pagamentos)</p>
+      <p className="text-[10px] text-muted-foreground">Na linha ADM, conta (<i>pagar 1.500 aluguel dia 10/11</i>), baixa (<i>paguei 1.500 aluguel</i>) e qualquer <b>foto/PDF de boleto ou comprovante</b> viram pedido na fila do ERP — nada é lançado sem aprovação em <b>ERP › Financeiro › Aprovações do agente</b>. Fotos e PDFs mandados em outras linhas também vão pro ERP.</p>
+      <div className="grid md:grid-cols-2 gap-3">
+        <label>Linha ADM
+          <select className={INPUT} value={settings.admSessionKey ?? ""} onChange={(e) => setLine(e.target.value)}>
+            <option value="">— nenhuma —</option>
+            {settings.lines.map((l) => <option key={l.sessionKey} value={l.sessionKey}>{l.displayName ?? l.sessionKey}{l.phoneNumber ? ` (${fmtPhone(l.phoneNumber)})` : ""} — {l.status}</option>)}
+          </select>
+        </label>
+        <div>
+          <span>Chave do agente do ERP {settings.erpAgentKeySet ? <b className="text-green-700">· cadastrada</b> : <b className="text-red-600">· falta</b>}</span>
+          <div className="flex gap-2 mt-1">
+            <input className="flex-1 px-3 py-2 rounded-xl border border-border text-sm bg-background" type="password" value={key} onChange={(e) => setKey(e.target.value)} placeholder="agk_..." />
+            <button onClick={saveKey} disabled={!key.trim()} className={BTN_PRIMARY}>Salvar</button>
+            <button onClick={test} disabled={!settings.erpAgentKeySet} className={BTN_GHOST}>Testar</button>
+          </div>
+        </div>
+      </div>
+      {status && <p className="text-xs bg-muted/40 rounded-lg p-2">{status}</p>}
+      <div className="divide-y divide-border max-h-[360px] overflow-auto">
+        {rows.length === 0 && <p className="text-xs text-muted-foreground py-2">Nenhum pedido enviado ao ERP ainda.</p>}
+        {rows.map((r) => (
+          <div key={r.id} className="py-2 flex items-center gap-2 text-xs">
+            <span className="font-mono text-muted-foreground w-24 shrink-0">{fmtDT(r.createdAt)}</span>
+            <span className="flex-1 min-w-0"><b>{ERP_TYPE[r.type] ?? r.type}</b> · {r.summary}{r.message && r.status !== "PENDENTE" ? <span className="text-muted-foreground"> — {r.message}</span> : null}</span>
+            <span className={`px-1.5 py-0.5 rounded text-[10px] whitespace-nowrap ${ERP_STATUS[r.status]?.color ?? ""}`}>{ERP_STATUS[r.status]?.label ?? r.status}</span>
+            {r.status === "FALHA_ENVIO" && <button onClick={() => resend(r.id)} className={BTN_GHOST}>Reenviar</button>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ─── Equipe no WhatsApp ──────────────────────────────────────────────────────
 function EquipeWhatsapp() {
   const { toast } = useToast();
@@ -679,6 +744,7 @@ function Config({ settings, onSaved }: { settings: GerenteSettings; onSaved: (s:
 
   return (
     <div className="grid lg:grid-cols-2 gap-4 items-start text-xs">
+      <ErpAdm settings={s} onSaved={(n) => { setS(n); onSaved(n); }} />
       <EquipeWhatsapp />
       <div className="shk-card p-4 space-y-3">
         <label className="flex items-center gap-2 font-bold text-sm">

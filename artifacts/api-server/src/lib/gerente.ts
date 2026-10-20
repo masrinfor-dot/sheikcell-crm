@@ -27,7 +27,7 @@ import { sendRawWhatsAppText } from "./outbound";
 import { logger } from "./logger";
 import {
   parseByRules, extractWhen, parseSpLocal, spDateISO, spTimeHM, withinRange, fmtWhen, fmtDateISO,
-  describeNow, brl, cleanTitle, norm, HELP_TEXT, type RuleIntent,
+  describeNow, brl, cleanTitle, norm, HELP_TEXT, parseBRL as parseBRLText, type RuleIntent,
 } from "./gerenteRules";
 
 export const GERENTE_MODULE = "gerente";
@@ -777,8 +777,26 @@ async function processOne(input: GerenteInput): Promise<string[]> {
   let refs: MsgRef[] = [];
   let intents: string[] = [];
 
+  // Documento do ERP esperando dado que faltou (valor/vencimento): esta
+  // mensagem completa o pedido.
+  const erpFill = await tryFillErpDoc(settings, phone, text, input.inMessageId);
+  if (erpFill) {
+    await saveRepliesAndSend(input, erpFill, ["erp_completar"], []);
+    return erpFill;
+  }
+
   // Confirmação pendente: "sim/não" resolve antes de qualquer outra coisa.
   const rule = parseByRules(text);
+
+  // Linha ADM: conta, "paguei" e "recebi" vão pra fila de aprovação do ERP
+  // em vez do controle local do Gerente.
+  if (rule && sessionKey && settings.admSessionKey === sessionKey && (rule.kind === "conta" || rule.kind === "gasto" || rule.kind === "receita")) {
+    const r = await erpFromRule(settings, phone, rule, text, input.inMessageId);
+    if (r) {
+      await saveRepliesAndSend(input, [r], [`erp_${rule.kind}`], []);
+      return [r];
+    }
+  }
   // Pedido de busca de cliente é frequente e barato — regra própria.
   const client = !rule ? text.match(/^(?:o que (?:eu )?combinei com|cliente|busca(?:r)? cliente|quem [eé])\s+(?:(?:o|a)\s+)?(.+?)\??$/i) : null;
 
@@ -808,6 +826,12 @@ async function processOne(input: GerenteInput): Promise<string[]> {
     }
   }
 
+  await saveRepliesAndSend(input, replies, intents, refs);
+  return replies;
+}
+
+async function saveRepliesAndSend(input: GerenteInput, replies: string[], intents: string[], refs: MsgRef[]): Promise<void> {
+  const { tenantId, phone, sessionKey, source } = input;
   await db.update(gerenteMessagesTable).set({ intent: intents.join(",").slice(0, 200) || null, payload: { refs } })
     .where(eq(gerenteMessagesTable.id, input.inMessageId));
   for (const r of replies) {
@@ -817,7 +841,83 @@ async function processOne(input: GerenteInput): Promise<string[]> {
       if (!ok) logger.warn({ tenantId, sessionKey }, "Gerente IA: bridge não aceitou o envio");
     }
   }
-  return replies;
+}
+
+// ─── ERP (linha ADM e documentos) ────────────────────────────────────────────
+
+type ErpDocPending = { type: "erp_doc"; erpType: string; payload: Record<string, unknown>; summary: string; mediaUrl: string | null; caption: string; missing: string[] };
+
+async function erpFromRule(settings: GerenteSettings, phone: string, rule: RuleIntent, text: string, inMessageId: number): Promise<string | null> {
+  const { submitErpAction } = await import("./gerenteErp");
+  if (rule.kind === "conta") {
+    const type = rule.billKind === "pagar" ? "CREATE_PAYABLE" as const : "CREATE_RECEIVABLE" as const;
+    return submitErpAction(settings, {
+      type, senderPhone: phone, messageText: text, sourceMessageId: inMessageId,
+      summary: `${rule.description} · ${brl(rule.amountCents)} · vence ${fmtDateISO(rule.dueDate)}`,
+      payload: { description: rule.description, totalAmount: rule.amountCents / 100, dueDate: rule.dueDate, paymentKind: "BOLETO" },
+    });
+  }
+  if (rule.kind === "gasto" || rule.kind === "receita") {
+    const type = rule.kind === "gasto" ? "SETTLE_PAYABLE" as const : "SETTLE_RECEIVABLE" as const;
+    return submitErpAction(settings, {
+      type, senderPhone: phone, messageText: text, sourceMessageId: inMessageId,
+      summary: `${rule.description} · ${brl(rule.amountCents)} · pago ${fmtDateISO(spDateISO())}`,
+      payload: { description: rule.description, amount: rule.amountCents / 100, amountPaid: rule.amountCents / 100, paidAt: spDateISO() },
+    });
+  }
+  return null;
+}
+
+/** Foto/PDF do dono: lê boleto ou comprovante e manda pra fila do ERP. */
+export async function handleOwnerDocument(settings: GerenteSettings, phone: string, mediaUrl: string, caption: string, inMessageId: number): Promise<string[]> {
+  const erp = await import("./gerenteErp");
+  if (!(await erp.erpAgentConfigured(settings))) {
+    return ["Recebi o arquivo, mas ainda não estou ligado ao ERP pra lançar. Cole a chave do agente em Gerente IA → Configurações → ERP."];
+  }
+  const media = await erp.loadMedia(mediaUrl);
+  if (!media) return ["Não consegui abrir esse arquivo. Mande como foto (JPG/PNG) ou PDF."];
+  let doc: Awaited<ReturnType<typeof erp.readFinancialDoc>> = null;
+  try { doc = await erp.readFinancialDoc(settings.tenantId, media, caption); } catch (err) { logger.warn({ err }, "Gerente IA: falha ao ler documento"); }
+  if (!doc) return ["Não consegui ler o documento. Pode mandar de novo, mais nítido?"];
+  const action = erp.actionFromDoc(doc, caption);
+  if (!action) return [`Li o arquivo, mas não parece boleto nem comprovante${doc.descricao ? ` (${doc.descricao})` : ""}. Se for, me diga: *boleto*, *comprovante* ou *conta a receber*.`];
+  if (action.missing.length) {
+    const pending: ErpDocPending = { type: "erp_doc", erpType: action.type, payload: action.payload, summary: action.summary, mediaUrl, caption, missing: action.missing };
+    await db.insert(gerentePendingActionsTable)
+      .values({ tenantId: settings.tenantId, phone, action: pending, summary: action.summary, expiresAt: new Date(Date.now() + 60 * 60_000) })
+      .onConflictDoUpdate({ target: [gerentePendingActionsTable.tenantId, gerentePendingActionsTable.phone], set: { action: pending, summary: action.summary, expiresAt: new Date(Date.now() + 60 * 60_000), createdAt: new Date() } });
+    return [`Li: ${action.summary}
+Faltou: *${action.missing.join(" e ")}*. Me responde (ex.: *350,00 vence 25/10*).`];
+  }
+  return [await erp.submitErpAction(settings, { type: action.type, payload: action.payload, summary: action.summary, senderPhone: phone, messageText: caption || action.summary, attachment: media, sourceMessageId: inMessageId })];
+}
+
+async function tryFillErpDoc(settings: GerenteSettings, phone: string, text: string, inMessageId: number): Promise<string[] | null> {
+  const [p] = await db.select().from(gerentePendingActionsTable)
+    .where(and(eq(gerentePendingActionsTable.tenantId, settings.tenantId), eq(gerentePendingActionsTable.phone, phone))).limit(1);
+  const a = p?.action as ErpDocPending | undefined;
+  if (!p || a?.type !== "erp_doc") return null;
+  if (p.expiresAt.getTime() < Date.now()) { await db.delete(gerentePendingActionsTable).where(eq(gerentePendingActionsTable.id, p.id)); return null; }
+  if (/^(nao|não|cancela|esquece)\b/i.test(text)) {
+    await db.delete(gerentePendingActionsTable).where(eq(gerentePendingActionsTable.id, p.id));
+    return ["Ok, descartei esse documento."];
+  }
+  const payload = { ...a.payload };
+  const money = text.match(/(?:r\$\s*)?(\d{1,3}(?:\.\d{3})*(?:,\d{1,2})|\d+(?:[.,]\d{1,2})?)/i);
+  const { when } = extractWhen(` ${text} `);
+  const isSettle = a.erpType.startsWith("SETTLE");
+  if (a.missing.includes("valor") && money) {
+    const cents = parseBRLText(money[1]!);
+    if (cents) { if (isSettle) { payload["amount"] = cents / 100; payload["amountPaid"] = cents / 100; } else payload["totalAmount"] = cents / 100; }
+  }
+  if (a.missing.includes("vencimento") && when) payload["dueDate"] = spDateISO(when);
+  const still = a.missing.filter((m) => (m === "valor" ? !(payload["totalAmount"] ?? payload["amountPaid"]) : m === "vencimento" ? !payload["dueDate"] : true));
+  if (still.length) return [`Ainda falta: *${still.join(" e ")}*. Ex.: *350,00 vence 25/10* (ou *não* pra descartar).`];
+  await db.delete(gerentePendingActionsTable).where(eq(gerentePendingActionsTable.id, p.id));
+  const erp = await import("./gerenteErp");
+  const media = a.mediaUrl ? await erp.loadMedia(a.mediaUrl) : null;
+  const summary = `${a.summary}${payload["totalAmount"] ? ` · ${brl(Math.round(Number(payload["totalAmount"]) * 100))}` : ""}${payload["dueDate"] ? ` · vence ${fmtDateISO(String(payload["dueDate"]))}` : ""}`;
+  return [await erp.submitErpAction(settings, { type: a.erpType as never, payload, summary, senderPhone: phone, messageText: a.caption || summary, attachment: media, sourceMessageId: inMessageId })];
 }
 
 // ─── Entrada pelo WhatsApp (chamada pelo webhook) ────────────────────────────
@@ -863,6 +963,14 @@ export async function tryConsumeGerenteInbound(input: {
     invalidateGerenteCache(input.tenantId);
 
     void (async () => {
+      // Foto/PDF (boleto, comprovante): vai pra fila do ERP, legenda como contexto.
+      if ((input.msgType === "image" || input.msgType === "doc") && input.mediaUrl) {
+        const settingsNow = await getGerenteSettings(input.tenantId);
+        const replies = await handleOwnerDocument(settingsNow, phone, input.mediaUrl, text, saved.id);
+        await db.update(gerenteMessagesTable).set({ intent: "erp_documento" }).where(eq(gerenteMessagesTable.id, saved.id));
+        for (const r of replies) { await saveOut(input.tenantId, phone, input.sessionKey, r, "whatsapp"); await sendRawWhatsAppText(phone, input.sessionKey, r); }
+        return;
+      }
       let body = text;
       if (!body && isAudio) {
         try {
@@ -987,6 +1095,13 @@ async function runNotificationsOnce(): Promise<{ sent: number }> {
         const mins = Math.max(0, Math.round((e.startsAt.getTime() - now.getTime()) / 60_000));
         const ok = await notifyOwner(settings, `📅 *${mins > 0 ? `Em ${mins} min` : "Agora"}:* ${e.title}${e.location ? ` — ${e.location}` : ""}${e.participants ? ` (com ${e.participants})` : ""}`);
         if (ok) { await db.update(gerenteEventsTable).set({ remindedAt: now, updatedAt: now }).where(eq(gerenteEventsTable.id, e.id)); sent++; }
+      }
+
+      try {
+        const { pollErpActions } = await import("./gerenteErp");
+        sent += await pollErpActions(settings, (t) => notifyOwner(settings, t));
+      } catch (err) {
+        logger.warn({ err, tenantId: settings.tenantId }, "Gerente IA: falha ao acompanhar pedidos do ERP");
       }
 
       try {
