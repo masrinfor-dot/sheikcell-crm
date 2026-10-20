@@ -196,7 +196,7 @@ export type SensitiveActionLogEntry = {
 export const OPTIONAL_MODULES = [
   "chat", "crm", "equipe", "financeiro", "diretorio", "tarefas", "resultados", "history",
   "avaliacao", "financeiras", "rh", "treinamentos", "questionarios", "sorteios", "documentos", "robo",
-  "relatorios", "tvbox", "rotinas", "vitrine", "pagamentos",
+  "relatorios", "tvbox", "rotinas", "vitrine", "pagamentos", "gerente",
 ] as const;
 export type OptionalModule = typeof OPTIONAL_MODULES[number];
 
@@ -236,6 +236,7 @@ export const MODULE_LABELS: Record<OptionalModule, string> = {
   rotinas: "Rotinas e Produtividade",
   vitrine: "Vitrine Aparelhos",
   pagamentos: "Pagamentos entre Filiais",
+  gerente: "Gerente IA",
 };
 // "Básico" = o conjunto padrão do CRM (o que antes era núcleo sempre ligado);
 // "Completo" = básico + todos os módulos de negócio adicionais.
@@ -1584,6 +1585,39 @@ export type TvBoxSettings = {
   overdueMessageIntervalDays: number;
   reminderMessageTemplate: string;
   chargeMessageTemplate: string;
+};
+
+// ─── Gerente IA ──────────────────────────────────────────────────────────────
+export type GerenteScope = "pessoal" | "empresa";
+export type GerenteSettings = {
+  id: number; tenantId: number; enabled: boolean; assistantName: string; authorizedPhones: string[];
+  quietStart: string; quietEnd: string; dailyDigestTime: string | null; dailyDigestSentOn: string | null;
+  lastSessionKey: string | null; lastPhone: string | null; createdAt: string; updatedAt: string;
+  lines: { sessionKey: string; displayName: string | null; phoneNumber: string | null; status: string }[];
+};
+export type GerenteEvent = {
+  id: number; title: string; startsAt: string; endsAt: string | null; location: string | null; participants: string | null;
+  scope: GerenteScope; storeName: string | null; notes: string | null; status: "agendado" | "concluido" | "cancelado";
+  remindMinutesBefore: number; remindedAt: string | null; createdAt: string;
+};
+export type GerenteReminder = {
+  id: number; title: string; dueAt: string; urgent: boolean; status: "pendente" | "concluido" | "cancelado";
+  sentAt: string | null; snoozeCount: number; taskId: number | null; createdAt: string;
+};
+export type GerenteEntry = {
+  id: number; kind: "gasto" | "receita"; amountCents: number; description: string; category: string | null; scope: GerenteScope;
+  storeName: string | null; paymentMethod: string | null; installments: number; reimbursementPending: boolean; entryDate: string; createdAt: string;
+};
+export type GerenteBill = {
+  id: number; kind: "pagar" | "receber"; description: string; amountCents: number; dueDate: string; counterparty: string | null;
+  responsible: string | null; scope: GerenteScope; storeName: string | null; status: "aberta" | "paga" | "cancelada"; paidAt: string | null; createdAt: string;
+};
+export type GerenteMessage = {
+  id: number; phone: string; direction: "in" | "out"; source: "whatsapp" | "painel" | "sistema"; content: string; intent: string | null; createdAt: string;
+};
+export type GerenteOverview = {
+  today: string; events: GerenteEvent[]; reminders: GerenteReminder[]; billsDueToday: GerenteBill[]; billsUpcoming: GerenteBill[];
+  month: { kind: "gasto" | "receita"; scope: GerenteScope; total: number }[]; digest: string;
 };
 
 export type Branding = {
@@ -3114,6 +3148,44 @@ export const api = {
     update: (id: number, data: Partial<{ name: string; url: string }>) =>
       req<PartnerLink>(`/partner-links/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/partner-links/${id}`, { method: "DELETE" }),
+  },
+  gerente: {
+    settings: {
+      get: () => req<GerenteSettings>("/gerente/settings"),
+      update: (data: Partial<Pick<GerenteSettings, "enabled" | "assistantName" | "authorizedPhones" | "quietStart" | "quietEnd" | "dailyDigestTime">>) =>
+        req<GerenteSettings>("/gerente/settings", { method: "PATCH", body: JSON.stringify(data) }),
+    },
+    overview: () => req<GerenteOverview>("/gerente/overview"),
+    events: {
+      list: (from?: string, days = 30) => req<GerenteEvent[]>(`/gerente/events?days=${days}${from ? `&from=${from}` : ""}`),
+      create: (data: { title: string; startsAt: string; endsAt?: string | null; location?: string; participants?: string; scope?: GerenteScope; notes?: string; remindMinutesBefore?: number }) =>
+        req<GerenteEvent>("/gerente/events", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<{ title: string; startsAt: string; endsAt: string | null; location: string; participants: string; scope: GerenteScope; notes: string; status: GerenteEvent["status"]; remindMinutesBefore: number }>) =>
+        req<GerenteEvent>(`/gerente/events/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    },
+    reminders: {
+      list: (all = false) => req<GerenteReminder[]>(`/gerente/reminders${all ? "?all=1" : ""}`),
+      create: (data: { title: string; dueAt: string; urgent?: boolean }) =>
+        req<GerenteReminder>("/gerente/reminders", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<{ title: string; dueAt: string; urgent: boolean; status: GerenteReminder["status"] }>) =>
+        req<GerenteReminder>(`/gerente/reminders/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    },
+    entries: {
+      list: (month?: string) => req<{ month: string; rows: GerenteEntry[] }>(`/gerente/entries${month ? `?month=${month}` : ""}`),
+      create: (data: { kind: "gasto" | "receita"; amountCents: number; description: string; category?: string; scope?: GerenteScope; storeName?: string; paymentMethod?: string; installments?: number; reimbursementPending?: boolean; entryDate?: string }) =>
+        req<GerenteEntry>("/gerente/entries", { method: "POST", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/gerente/entries/${id}`, { method: "DELETE" }),
+    },
+    bills: {
+      list: (all = false) => req<GerenteBill[]>(`/gerente/bills${all ? "?all=1" : ""}`),
+      create: (data: { kind: "pagar" | "receber"; description: string; amountCents: number; dueDate: string; counterparty?: string; responsible?: string; scope?: GerenteScope; storeName?: string }) =>
+        req<GerenteBill>("/gerente/bills", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<{ description: string; amountCents: number; dueDate: string; counterparty: string; responsible: string; status: GerenteBill["status"] }>) =>
+        req<GerenteBill>(`/gerente/bills/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    },
+    messages: (limit = 80) => req<GerenteMessage[]>(`/gerente/messages?limit=${limit}`),
+    chat: (text: string) => req<{ replies: string[] }>("/gerente/chat", { method: "POST", body: JSON.stringify({ text }), timeoutMs: 60_000 }),
+    wipe: () => req<{ ok: boolean }>("/gerente/data", { method: "DELETE", body: JSON.stringify({ confirm: "APAGAR" }) }),
   },
   tvbox: {
     clients: {

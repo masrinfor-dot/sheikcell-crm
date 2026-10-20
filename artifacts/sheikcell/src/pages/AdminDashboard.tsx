@@ -47,19 +47,21 @@ import {
   AlertTriangle, WifiOff,
   FolderArchive, Headphones, BarChart3, SlidersHorizontal, Palette, ChevronDown, Wrench,
   ArrowRight, Filter, BookUser, LifeBuoy, FileBarChart2, Plug, Tv, ListChecks, PanelTop, ArrowLeftRight, Eye, History, Tags, MapPin, Contact,
+  BrainCircuit,
 } from "lucide-react";
 import Resultados from "./Resultados";
 import Relatorios from "./Relatorios";
 import TvBox from "./TvBox";
+import GerenteIa from "./GerenteIa";
 
-type Tab = "dashboard" | "resultados" | "relatorios" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "vitrine" | "treinamentos" | "documentos" | "rh" | "meuponto" | "sorteios" | "robo" | "financeiro" | "pagamentos" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "wacontatos" | "quickreplies" | "aparencia" | "integracoes" | "precos" | "sistema" | "diretorio" | "suporte" | "tvbox" | "rotinas";
+type Tab = "dashboard" | "resultados" | "relatorios" | "chat" | "equipe" | "tarefas" | "financeiras" | "avaliacao" | "vitrine" | "treinamentos" | "documentos" | "rh" | "meuponto" | "sorteios" | "robo" | "financeiro" | "pagamentos" | "crm" | "history" | "users" | "sectors" | "whatsapp" | "wacontatos" | "quickreplies" | "aparencia" | "integracoes" | "precos" | "sistema" | "diretorio" | "suporte" | "tvbox" | "rotinas" | "gerente";
 
 // Mesma lista de valores do type Tab acima (manter em sincronia) — usada só
 // pra validar o valor salvo em sessionStorage antes de confiar nele (ver
 // TAB_STORAGE_KEY abaixo). Sem essa validação, um valor antigo/inválido
 // salvo antes de uma aba ser removida do sistema quebraria o app inteiro
 // ao carregar de novo.
-const ALL_TAB_IDS: Tab[] = ["dashboard", "resultados", "relatorios", "chat", "equipe", "tarefas", "financeiras", "avaliacao", "vitrine", "treinamentos", "documentos", "rh", "meuponto", "sorteios", "robo", "financeiro", "pagamentos", "crm", "history", "users", "sectors", "whatsapp", "wacontatos", "quickreplies", "aparencia", "integracoes", "precos", "sistema", "diretorio", "suporte", "tvbox", "rotinas"];
+const ALL_TAB_IDS: Tab[] = ["dashboard", "resultados", "relatorios", "chat", "equipe", "tarefas", "financeiras", "avaliacao", "vitrine", "treinamentos", "documentos", "rh", "meuponto", "sorteios", "robo", "financeiro", "pagamentos", "crm", "history", "users", "sectors", "whatsapp", "wacontatos", "quickreplies", "aparencia", "integracoes", "precos", "sistema", "diretorio", "suporte", "tvbox", "rotinas", "gerente"];
 
 // Pedido do lojista (11/09): atualizar a página (F5) não pode voltar pra
 // tela inicial — mantém a última aba aberta. sessionStorage (não
@@ -82,7 +84,7 @@ type TabGroup = { key: string; label: string; icon: typeof LayoutDashboard; tabI
 // lista de navegação (ver `suporteTab` mais abaixo).
 const TAB_GROUPS: TabGroup[] = [
   { key: "atendimento", label: "Atendimento", icon: Headphones, tabIds: ["chat", "equipe", "crm", "avaliacao", "vitrine", "financeiras", "sorteios"] },
-  { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["relatorios", "tarefas", "documentos", "meuponto", "rh"] },
+  { key: "gestao", label: "Gestão", icon: BarChart3, tabIds: ["relatorios", "gerente", "tarefas", "documentos", "meuponto", "rh"] },
   { key: "administracao", label: "Administração", icon: Settings, tabIds: ["users", "sectors", "financeiro", "pagamentos", "quickreplies", "whatsapp", "wacontatos", "robo", "tvbox"] },
   { key: "configuracoes", label: "Configurações", icon: SlidersHorizontal, tabIds: ["aparencia", "integracoes", "precos"] },
   { key: "sistema", label: "Sistema (Dev)", icon: Wrench, tabIds: ["sistema"] },
@@ -1045,6 +1047,9 @@ export default function AdminDashboard() {
     { id: "avaliacao" as Tab, label: "Avaliação de Usados", icon: BadgeDollarSign, adminOnly: false, module: "avaliacao" as OptionalModule },
     { id: "vitrine" as Tab, label: "Vitrine Aparelhos", icon: Smartphone, adminOnly: false, module: "vitrine" as OptionalModule },
     { id: "tvbox" as Tab, label: "TV Box", icon: Tv, adminOnly: false, module: "tvbox" as OptionalModule },
+    // Gerente IA (19/10/2026): secretária executiva do dono por WhatsApp —
+    // vida pessoal/financeira do lojista, por isso só admin.
+    { id: "gerente" as Tab, label: "Gerente IA", icon: BrainCircuit, adminOnly: true, module: "gerente" as OptionalModule },
     { id: "documentos" as Tab, label: "Documentos", icon: FolderArchive, adminOnly: false, module: "documentos" as OptionalModule },
     { id: "suporte" as Tab, label: "Suporte", icon: LifeBuoy, adminOnly: false },
     // "RH" é o item único de menu (ver RH_GROUP_IDS/tabMatchesNav acima);
@@ -1504,6 +1509,7 @@ export default function AdminDashboard() {
         {tab === "vitrine" && <VitrineAparelhos />}
 
         {tab === "tvbox" && <TvBox />}
+        {tab === "gerente" && <GerenteIa />}
 
 
         {/* === RH / ROTINAS E PRODUTIVIDADE / DIRETÓRIO / TREINAMENTOS (fundidos em um só item de menu) === */}
