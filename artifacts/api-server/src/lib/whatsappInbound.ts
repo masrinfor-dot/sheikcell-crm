@@ -606,7 +606,9 @@ async function upsertConversation(
         unreadCount: sql`${conversationsTable.unreadCount} + 1`,
         updatedAt: new Date(),
         ...(reopen ? { status: "open", assigneeId: reopenAssigneeId, attendanceStartedAt: reopenAssigneeId != null ? new Date() : null } : {}),
-        ...(avatarUrl && avatarUrl !== conv.avatarUrl ? { avatarUrl } : {}),
+        // Foto guardada no CRM (lib/waProfile.ts) não é trocada pelo link do
+        // WhatsApp, que expira em poucos dias; a rotina renova a guardada.
+        ...(avatarUrl && avatarUrl !== conv.avatarUrl && !conv.avatarUrl?.startsWith("/api/chat/avatars/") ? { avatarUrl } : {}),
         ...(syncName && pushName && pushName !== conv.name ? { name: pushName } : {}),
         // Autocorrige se a 1ª mensagem chegou antes do metadata do grupo
         // resolver "é Comunidade" (timeout/erro pontual) — nunca desmarca

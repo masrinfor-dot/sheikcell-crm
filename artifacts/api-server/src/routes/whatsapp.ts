@@ -403,6 +403,20 @@ router.post("/whatsapp/sessions/:key/history-import", requireFeature("whatsapp")
   res.json({ ok: true, historyImportEnabled: updated.historyImportEnabled, restarted });
 });
 
+// ─── Fotos e nomes (pedido 20/10) ─────────────────────────────────────────
+// "Atualizar agenda e fotos": pede a agenda inteira de novo ao WhatsApp,
+// preenche os nomes que são só número e busca de novo as fotos da linha.
+router.post("/whatsapp/sessions/:key/refresh-profile", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const [row] = await db.select({ status: whatsappSessionsTable.status }).from(whatsappSessionsTable)
+    .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId))).limit(1);
+  if (!row) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+  if (row.status !== "connected") { res.status(409).json({ error: "Conecte a linha primeiro (o WhatsApp precisa estar ligado)." }); return; }
+  const { refreshLineProfile } = await import("../lib/waProfile");
+  res.json({ ok: true, ...(await refreshLineProfile(tenantId, key)) });
+});
+
 // ─── Mensagens enviadas pelo celular (pedido 17/10) ───────────────────────
 // Ligado, o que alguém digita direto no celular desta linha aparece na
 // conversa do CRM como mensagem enviada. Vale na hora, sem reconectar.

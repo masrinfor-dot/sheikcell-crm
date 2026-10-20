@@ -297,6 +297,14 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("./erpForward").then((m) => m.runErpForwardQueue()).catch(() => {});
   }, 60_000);
+  // Fotos de perfil e nomes do WhatsApp (20/10/2026, ver waProfile.ts):
+  // fotos aos poucos a cada 5 min; nomes "só número" a cada 30 min.
+  setInterval(() => {
+    void import("./waProfile").then((m) => m.runAvatarRefresh()).catch(() => {});
+  }, 5 * 60_000);
+  setInterval(() => {
+    void import("./waProfile").then((m) => m.fillNumberOnlyNames()).catch(() => {});
+  }, 30 * 60_000);
   // Pedidos de clientes sem estoque (16/10/2026): conversas da linha de
   // atacado vão pra IA do ERP a cada 30 min (ver erpDemandSync.ts).
   setInterval(() => {

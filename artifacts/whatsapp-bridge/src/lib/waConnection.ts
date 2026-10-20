@@ -1196,6 +1196,52 @@ async function resolveJid(s: Session, to: string): Promise<string> {
   throw new Error(`O número ${digits} não está no WhatsApp — confira o DDD/DDI e o nono dígito`);
 }
 
+// ─── Fotos de perfil e agenda (pedido 20/10/2026) ───────────────────────────
+// "O CRM tem que puxar as fotos de perfil também e os nomes já cadastrados no
+// WhatsApp". O link da foto que o WhatsApp devolve expira em poucos dias, por
+// isso a ponte baixa a imagem e devolve os bytes: o CRM guarda no próprio
+// disco. Quem chama (CRM) controla o ritmo, para não chamar atenção do WhatsApp.
+
+const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
+
+/** Foto de perfil (imagem já baixada) de um contato ou grupo desta linha. null = sem foto/privada. */
+export async function fetchProfilePicture(
+  key: string,
+  target: string,
+): Promise<{ mimeType: string; data: Buffer } | null> {
+  const s = requireOpenSession(key);
+  let jid: string;
+  if (target.endsWith("@g.us")) jid = target;
+  else {
+    const r = await checkNumber(key, target);
+    if (!r.exists || !r.jid) return null;
+    jid = r.jid;
+  }
+  let url: string | undefined;
+  try {
+    url = await s.sock!.profilePictureUrl(jid, "image", 10_000);
+  } catch {
+    return null; // sem foto ou privacidade restrita
+  }
+  if (!url) return null;
+  avatarCache.set(jid, { url, at: Date.now() });
+  const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+  if (!res.ok) return null;
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.byteLength === 0 || buf.byteLength > MAX_AVATAR_BYTES) return null;
+  return { mimeType: (res.headers.get("content-type") ?? "image/jpeg").split(";")[0]!.trim(), data: buf };
+}
+
+/**
+ * Pede ao WhatsApp a agenda e o resto do "app state" de novo, desde o começo.
+ * Os contatos que chegam caem nos eventos contacts.upsert/update, que já
+ * mandam os nomes da agenda para o CRM.
+ */
+export async function resyncContacts(key: string): Promise<void> {
+  const s = requireOpenSession(key);
+  await s.sock!.resyncAppState(["critical_block", "critical_unblock_low", "regular_high", "regular_low", "regular"], true);
+}
+
 /**
  * Verifica se um número existe no WhatsApp (usado ao criar atendimento manual).
  * Lança erro se a sessão não estiver conectada ou o onWhatsApp falhar — o

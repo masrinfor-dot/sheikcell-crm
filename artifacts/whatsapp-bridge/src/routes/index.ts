@@ -8,6 +8,8 @@ import {
   removeSession,
   getAllSessionStates,
   checkNumber,
+  fetchProfilePicture,
+  resyncContacts,
   DEFAULT_SESSION_KEY,
 } from "../lib/waConnection";
 
@@ -113,6 +115,34 @@ router.post("/whatsapp/check-number", requireBridgeSecret, async (req, res): Pro
   } catch (err) {
     // Sessão desconectada ou onWhatsApp indisponível — deixe o chamador decidir.
     res.status(503).json({ error: err instanceof Error ? err.message : "verificação indisponível" });
+  }
+});
+
+// Foto de perfil já baixada (o link do WhatsApp expira; o CRM guarda a imagem).
+router.post("/whatsapp/profile-picture", requireBridgeSecret, async (req, res): Promise<void> => {
+  const { target, session } = (req.body ?? {}) as { target?: string; session?: string };
+  const key = sessionKeyFrom(session);
+  if (!key) { res.status(400).json({ error: "session inválida" }); return; }
+  if (!target || typeof target !== "string" || target.length > 80) { res.status(400).json({ error: "target obrigatório" }); return; }
+  try {
+    const pic = await fetchProfilePicture(key, target);
+    if (!pic) { res.json({ found: false }); return; }
+    res.json({ found: true, mimeType: pic.mimeType, dataBase64: pic.data.toString("base64") });
+  } catch (err) {
+    res.status(503).json({ error: err instanceof Error ? err.message : "foto indisponível" });
+  }
+});
+
+// Pede ao WhatsApp a agenda de novo (os nomes chegam ao CRM pelos eventos de contatos).
+router.post("/whatsapp/resync-contacts", requireBridgeSecret, async (req, res): Promise<void> => {
+  const { session } = (req.body ?? {}) as { session?: string };
+  const key = sessionKeyFrom(session);
+  if (!key) { res.status(400).json({ error: "session inválida" }); return; }
+  try {
+    await resyncContacts(key);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(503).json({ error: err instanceof Error ? err.message : "agenda indisponível" });
   }
 });
 
