@@ -4,6 +4,7 @@ import { normalizePhone, phoneVariants } from "./phone";
 import { sendOutboundText } from "./outbound";
 import { logger } from "./logger";
 import { getTvBoxSettings, renderTvBoxMessage } from "./tvBoxSettings";
+import { tvBoxMovedToErp } from "./tvBoxMoved";
 
 const TV_BOX_SECTOR_NAME = "TV Box";
 
@@ -73,7 +74,8 @@ const BATCH_LIMIT = 30;
 
 // ── Lembrete pré-vencimento (um por fatura) ──────────────────────────────────
 let remindersRunning = false;
-export async function sendTvBoxReminders(now: Date = new Date()): Promise<void> {
+// `onlyTenantId`: restringe a uma loja (usado nos testes).
+export async function sendTvBoxReminders(now: Date = new Date(), onlyTenantId?: number): Promise<void> {
   if (remindersRunning) return;
   remindersRunning = true;
   try {
@@ -92,6 +94,7 @@ export async function sendTvBoxReminders(now: Date = new Date()): Promise<void> 
         isNull(tvBoxInvoicesTable.reminderSentAt),
         eq(tvBoxClientsTable.status, "ativo"),
         lte(tvBoxInvoicesTable.dueDate, sql`(current_date + interval '27 days')::date`),
+        onlyTenantId != null ? eq(tvBoxInvoicesTable.tenantId, onlyTenantId) : undefined,
       ))
       .limit(BATCH_LIMIT * 3); // filtro fino por loja reduz mais abaixo
 
@@ -106,6 +109,9 @@ export async function sendTvBoxReminders(now: Date = new Date()): Promise<void> 
           settingsByTenant.set(c.tenantId, cfg);
         }
         if (!cfg.enabled) continue;
+        // TV Box passada para o ERP ("Desligar no CRM"): o CRM não lembra nem
+        // cobra mais ninguém desta loja. Sem cache de propósito — vale na hora.
+        if (await tvBoxMovedToErp(c.tenantId)) continue;
         const dueMs = new Date(`${c.dueDate}T00:00:00`).getTime();
         const daysUntilDue = Math.ceil((dueMs - now.getTime()) / 86_400_000);
         if (daysUntilDue < 0 || daysUntilDue > cfg.reminderDaysBefore) continue;
@@ -138,7 +144,7 @@ export async function sendTvBoxReminders(now: Date = new Date()): Promise<void> 
 
 // ── Cobrança recorrente pós-vencimento ───────────────────────────────────────
 let chargesRunning = false;
-export async function sendTvBoxCharges(now: Date = new Date()): Promise<void> {
+export async function sendTvBoxCharges(now: Date = new Date(), onlyTenantId?: number): Promise<void> {
   if (chargesRunning) return;
   chargesRunning = true;
   try {
@@ -155,6 +161,7 @@ export async function sendTvBoxCharges(now: Date = new Date()): Promise<void> {
         eq(tvBoxInvoicesTable.status, "pendente"),
         eq(tvBoxClientsTable.status, "ativo"),
         sql`${tvBoxInvoicesTable.dueDate} < ${today}::date`,
+        onlyTenantId != null ? eq(tvBoxInvoicesTable.tenantId, onlyTenantId) : undefined,
       ))
       .limit(BATCH_LIMIT * 3);
 
@@ -169,6 +176,9 @@ export async function sendTvBoxCharges(now: Date = new Date()): Promise<void> {
           settingsByTenant.set(c.tenantId, cfg);
         }
         if (!cfg.enabled) continue;
+        // TV Box passada para o ERP ("Desligar no CRM"): o CRM não lembra nem
+        // cobra mais ninguém desta loja. Sem cache de propósito — vale na hora.
+        if (await tvBoxMovedToErp(c.tenantId)) continue;
         const daysOverdue = Math.floor((now.getTime() - new Date(`${c.dueDate}T00:00:00`).getTime()) / 86_400_000);
         const dueForCharge = c.lastChargeSentAt == null
           || (now.getTime() - c.lastChargeSentAt.getTime()) >= cfg.overdueMessageIntervalDays * 86_400_000;

@@ -3135,6 +3135,10 @@ export const api = {
       generate: () => req<{ created: number }>("/tvbox/invoices/generate", { method: "POST" }),
     },
     overview: () => req<TvBoxOverview>("/tvbox/overview"),
+    // TV Box passada para o ERP (17/10/2026) — ver TvBoxErpCard.
+    moved: () => req<{ moved: boolean; erpUrl: string }>("/tvbox/moved"),
+    setMoved: (data: { moved?: boolean; erpUrl?: string }) =>
+      req<{ moved: boolean; erpUrl: string }>("/tvbox/moved", { method: "PUT", body: JSON.stringify(data) }),
     settings: {
       get: () => req<TvBoxSettings>("/tvbox/settings"),
       update: (data: Partial<TvBoxSettings>) =>
