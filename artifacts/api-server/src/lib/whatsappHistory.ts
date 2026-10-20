@@ -92,11 +92,46 @@ export function pickHistoryName(input: {
   phone: string;
   agendaName?: string | null;
   chatName?: string | null;
+  /** Nome já cadastrado no sistema (ficha do CRM, agenda de outra linha ou outra conversa). */
+  registeredName?: string | null;
   pushName?: string | null;
 }): string {
   const clean = (v?: string | null) => (v ?? "").trim();
   if (input.isGroup) return clean(input.chatName) || "Grupo do WhatsApp";
-  return clean(input.agendaName) || clean(input.chatName) || clean(input.pushName) || input.phone;
+  return clean(input.agendaName) || clean(input.chatName) || clean(input.registeredName) || clean(input.pushName) || input.phone;
+}
+
+const ONLY_DIGITS = /^[0-9+ ()-]+$/;
+
+/**
+ * Nome já cadastrado para o número (pedido 19/10: "puxa os nomes já
+ * cadastrados"), na ordem: ficha do CRM → agenda do WhatsApp de qualquer
+ * linha da loja → outra conversa do mesmo número. Ignora nomes que são só o
+ * telefone.
+ */
+export async function findRegisteredName(tenantId: number, matchCandidates: string[]): Promise<string | null> {
+  if (matchCandidates.length === 0) return null;
+  const crm = await db.select({ name: crmContactsTable.name }).from(crmContactsTable)
+    .where(and(eq(crmContactsTable.tenantId, tenantId), inArray(crmContactsTable.phone, matchCandidates)))
+    .orderBy(desc(crmContactsTable.updatedAt))
+    .limit(5);
+  const fromCrm = crm.map((r) => r.name?.trim()).find((n) => n && !ONLY_DIGITS.test(n));
+  if (fromCrm) return fromCrm;
+  const agenda = await db.select({ name: whatsappContactsTable.name }).from(whatsappContactsTable)
+    .where(and(
+      eq(whatsappContactsTable.tenantId, tenantId),
+      inArray(whatsappContactsTable.phone, matchCandidates),
+      sql`${whatsappContactsTable.name} is not null and ${whatsappContactsTable.name} <> ''`,
+    ))
+    .orderBy(desc(whatsappContactsTable.updatedAt))
+    .limit(5);
+  const fromAgenda = agenda.map((r) => r.name?.trim()).find((n) => n && !ONLY_DIGITS.test(n));
+  if (fromAgenda) return fromAgenda;
+  const convs = await db.select({ name: conversationsTable.name }).from(conversationsTable)
+    .where(and(eq(conversationsTable.tenantId, tenantId), inArray(conversationsTable.phone, matchCandidates)))
+    .orderBy(desc(conversationsTable.lastMessageAt))
+    .limit(10);
+  return convs.map((r) => r.name?.trim()).find((n) => n && !ONLY_DIGITS.test(n)) ?? null;
 }
 
 export async function processWAHistoryBatch(payload: WAHistoryPayload): Promise<WAHistoryResult> {
@@ -205,7 +240,8 @@ export async function importConversation(input: {
       .limit(1);
     agendaName = agenda?.name ?? null;
   }
-  const name = pickHistoryName({ isGroup, phone: storedPhone, agendaName, chatName, pushName: lastInboundPush });
+  const registeredName = !isGroup && !agendaName && !chatName ? await findRegisteredName(tenantId, matchCandidates) : null;
+  const name = pickHistoryName({ isGroup, phone: storedPhone, agendaName, chatName, registeredName, pushName: lastInboundPush });
 
   const conditions = [
     eq(conversationsTable.tenantId, tenantId),

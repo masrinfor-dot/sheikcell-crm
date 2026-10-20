@@ -287,6 +287,11 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("./erpForward").then((m) => m.runErpForwardQueue()).catch(() => {});
   }, 60_000);
+  // Pedidos de clientes sem estoque (16/10/2026): conversas da linha de
+  // atacado vão pra IA do ERP a cada 30 min (ver erpDemandSync.ts).
+  setInterval(() => {
+    void import("./erpDemandSync").then((m) => m.runErpDemandSync()).catch(() => {});
+  }, 30 * 60_000);
   // Lembrete da pesquisa de satisfação: granularidade de minutos basta.
   setInterval(() => { void sendSurveyReminders(); }, 60_000);
   // Preenche vendedores ociosos da fila do Central de Atendimento que os

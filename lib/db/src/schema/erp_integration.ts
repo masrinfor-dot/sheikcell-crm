@@ -38,8 +38,24 @@ export const tenantErpIntegrationsTable = pgTable("tenant_erp_integrations", {
   hrHistoryCursors: jsonb("hr_history_cursors").$type<Record<string, number>>().notNull().default({}),
   hrHistoryDoneAt: timestamp("hr_history_done_at", { withTimezone: true }),
   erpWebUrl: text("erp_web_url"),
+  // Pedidos de clientes sem estoque (16/10/2026): conversas da linha de
+  // atacado vão pra IA do ERP (Compras › Pedidos de clientes).
+  demandSessionKey: text("demand_session_key"),
+  demandSyncEnabled: boolean("demand_sync_enabled").notNull().default(false),
+  demandLastSyncAt: timestamp("demand_last_sync_at", { withTimezone: true }),
+  demandLastError: text("demand_last_error"),
+  demandSentCount: integer("demand_sent_count").notNull().default(0),
+  demandPendingCount: integer("demand_pending_count").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });
 
 export type TenantErpIntegration = typeof tenantErpIntegrationsTable.$inferSelect;
+
+// Até onde cada conversa da linha de atacado já foi mandada pro ERP.
+export const erpDemandCursorsTable = pgTable("erp_demand_cursors", {
+  conversationId: integer("conversation_id").primaryKey(),
+  tenantId: integer("tenant_id").notNull(),
+  lastMessageId: integer("last_message_id").notNull().default(0),
+  syncedAt: timestamp("synced_at", { withTimezone: true }).notNull().defaultNow(),
+});

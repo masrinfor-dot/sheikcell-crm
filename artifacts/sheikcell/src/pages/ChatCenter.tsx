@@ -2329,6 +2329,14 @@ export default function ChatCenter({
     };
   }, [activeId, user, fetchConvs, fetchMsgs, fetchPinnedMessages]);
 
+  // Setores novos (ou reativados) aparecem nos filtros sem recarregar a página.
+  useEffect(() => {
+    const reload = () => { api.sectors.list().then(setSectors).catch(() => {}); };
+    const t = setInterval(reload, 60_000);
+    window.addEventListener("focus", reload);
+    return () => { clearInterval(t); window.removeEventListener("focus", reload); };
+  }, []);
+
   useEffect(() => {
     api.sectors.list().then(setSectors).catch(() => {});
     api.chatUsers().then(setChatUsers).catch(() => {});
@@ -3528,9 +3536,22 @@ export default function ChatCenter({
   // Pra admin/supervisor (que realmente gerenciam o tenant inteiro) as
   // opções continuam completas; pro vendedor, só o próprio setor e os
   // colegas do próprio setor aparecem como opção.
-  const isManager = user?.role === "admin" || user?.role === "supervisor";
-  const filterableSectors = isManager ? sectors : sectors.filter((s) => s.id === user?.sectorId);
-  const filterableChatUsers = isManager ? chatUsers : chatUsers.filter((u) => u.sectorId === user?.sectorId);
+  // 19/10/2026 ("nem todos os setores aparecem nos filtros"): superadmin
+  // também gerencia tudo; vendedor em mais de um setor vê todos os SEUS
+  // setores (antes só o principal); e setor que aparece nas conversas da
+  // lista entra como opção mesmo inativo, pra nunca existir conversa que o
+  // filtro não alcança.
+  const isManager = user?.role === "admin" || user?.role === "supervisor" || user?.role === "superadmin";
+  const mySectorIds = new Set<number>(
+    [user?.sectorId, ...(user?.sectors ?? []).map((s) => s.id)].filter((id): id is number => id != null),
+  );
+  const sectorOptions = (() => {
+    const byId = new Map<number, Sector>(sectors.map((s) => [s.id, s]));
+    for (const c of convs) if (c.sector && !byId.has(c.sector.id)) byId.set(c.sector.id, c.sector);
+    return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+  })();
+  const filterableSectors = isManager ? sectorOptions : sectorOptions.filter((s) => mySectorIds.has(s.id));
+  const filterableChatUsers = isManager ? chatUsers : chatUsers.filter((u) => u.sectorId != null && mySectorIds.has(u.sectorId));
 
   const visibleConvs = convs.filter((c) =>
     // Busca por nome ou número (aceita número digitado com espaços/traços).
