@@ -1333,6 +1333,32 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   if (!msg) return;
   broadcast("message", { conversationId: conv.id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
 
+  // WhatsApp de compras (19/10/2026): conexão marcada "encaminhar ao ERP" manda
+  // toda mensagem de fornecedor (texto, foto, PDF, planilha) para o ERP ler a
+  // lista de preço com IA. Fila própria com nova tentativa; nunca atrasa o
+  // webhook. Grupos, áudios, vídeos e figurinhas não vão (não são listas).
+  if (!isGroup && externalId && mediaType !== "audio" && mediaType !== "video" && mediaType !== "sticker") {
+    void import("./erpForward")
+      .then(async (m) => {
+        if (!(await m.sessionForwardsToErp(sessionKey, tenantId)) || !(await m.erpForwardConfigured(tenantId))) return;
+        await m.enqueueErpForward({
+          tenantId,
+          sessionKey,
+          externalId,
+          conversationId: conv.id,
+          senderPhone: phone,
+          senderName: pushName,
+          receivedAt: body.data?.messageTimestamp ? new Date(body.data.messageTimestamp * 1000) : new Date(),
+          text: text || null,
+          fileName: docFileName,
+          mimeType: mediaMimeType,
+          mediaUrl,
+          mediaBase64: mediaUrl ? null : mediaBase64,
+        });
+      })
+      .catch((err) => logger.warn({ err, sessionKey }, "WhatsApp de compras: não deu para enfileirar ao ERP"));
+  }
+
   // Robô de pré-atendimento (assíncrono: nunca atrasa nem derruba o webhook)
   if (msgType === "text") {
     void import("./bot").then((m) => m.handleBotInbound(conv, displayContent)).catch(() => {});

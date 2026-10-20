@@ -123,6 +123,8 @@ type WASession = {
   botEnabled: boolean;
   historyImportEnabled: boolean;
   phoneOutboundEnabled: boolean;
+  /** WhatsApp de compras: mensagens de fornecedores vão ao ERP (19/10/2026). */
+  forwardToErp?: boolean;
   directAssigneeId: number | null;
 };
 
@@ -1528,6 +1530,47 @@ export default function AdminDashboard() {
                         hora do pareamento. Fotos e arquivos antigos aparecem só como "📷 Foto"/"📄 arquivo". As
                         conversas ABERTAS no celular entram em Ativos com o responsável acima; as arquivadas no
                         celular (ou todas, se não houver responsável) vão para Resolvidas.
+                      </p>
+                    </span>
+                  </label>
+                  {/* WhatsApp de compras (19/10/2026): toda mensagem de fornecedor
+                      (texto, foto, PDF, planilha) vai ao ERP (Prumo) para a IA ler
+                      a lista de preço. Fila com nova tentativa — ERP fora do ar não
+                      perde nada. Usa a integração de Administração › Integrações
+                      (ou ERP_API_URL/ERP_API_KEY do servidor). */}
+                  <label className="flex items-start gap-2.5 cursor-pointer text-sm"
+                    data-testid={`checkbox-wa-forward-erp-${s.sessionKey}`}>
+                    <input
+                      type="checkbox"
+                      checked={!!s.forwardToErp}
+                      onChange={async (e) => {
+                        const enabled = e.target.checked;
+                        const r = await fetch(`/api/whatsapp/sessions/${s.sessionKey}/forward-to-erp`, {
+                          method: "POST", credentials: "include",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ enabled }),
+                        });
+                        const body = await r.json().catch(() => ({})) as { error?: string; erpConfigured?: boolean };
+                        if (!r.ok) {
+                          toast({ title: "Não foi possível salvar", description: body.error ?? "Tente de novo.", variant: "destructive" });
+                        } else if (enabled && body.erpConfigured === false) {
+                          toast({
+                            title: "Marcado, mas o ERP ainda não está ligado",
+                            description: "Cole o endereço e a chave do ERP em Administração › Integrações (ou configure ERP_API_URL e ERP_API_KEY no servidor). As listas só vão ao ERP depois disso.",
+                            variant: "destructive",
+                          });
+                        }
+                        fetchWAStatus();
+                      }}
+                      className="w-4 h-4 mt-0.5 accent-[var(--primary)] shrink-0"
+                    />
+                    <span>
+                      <span className="font-medium">Encaminhar listas de fornecedores ao ERP (WhatsApp de compras)</span>
+                      <p className="text-[11px] text-muted-foreground -mt-0.5">
+                        Toda mensagem de fornecedor recebida por este número (texto, foto, PDF, planilha) vai ao ERP, que lê a
+                        lista de preço com IA. Áudios, vídeos, figurinhas e grupos não vão. Se o ERP estiver fora do ar, fica na
+                        fila e é reenviado. Usa a chave do ERP de Administração › Integrações, que precisa do acesso
+                        "Listas de preço dos fornecedores".
                       </p>
                     </span>
                   </label>

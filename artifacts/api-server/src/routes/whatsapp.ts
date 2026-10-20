@@ -51,6 +51,8 @@ export interface AdminWAState extends BridgeWAState {
   botEnabled: boolean;
   historyImportEnabled: boolean;
   phoneOutboundEnabled: boolean;
+  /** WhatsApp de compras: mensagens de fornecedores vão ao ERP (19/10/2026). */
+  forwardToErp: boolean;
   directAssigneeId: number | null;
 }
 
@@ -134,6 +136,7 @@ function offlineState(
     botEnabled: row?.botEnabled ?? true,
     historyImportEnabled: row?.historyImportEnabled ?? false,
     phoneOutboundEnabled: row?.phoneOutboundEnabled ?? false,
+    forwardToErp: row?.forwardToErp ?? false,
     directAssigneeId: row?.directAssigneeId ?? null,
   };
 }
@@ -185,6 +188,7 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         botEnabled: row?.botEnabled ?? true,
         historyImportEnabled: row?.historyImportEnabled ?? false,
         phoneOutboundEnabled: row?.phoneOutboundEnabled ?? false,
+        forwardToErp: row?.forwardToErp ?? false,
         directAssigneeId: row?.directAssigneeId ?? null,
       });
     } else if (bridgeAvailable) {
@@ -208,6 +212,7 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         botEnabled: row?.botEnabled ?? true,
         historyImportEnabled: row?.historyImportEnabled ?? false,
         phoneOutboundEnabled: row?.phoneOutboundEnabled ?? false,
+        forwardToErp: row?.forwardToErp ?? false,
         directAssigneeId: row?.directAssigneeId ?? null,
       });
       void fetchFromBridge("/whatsapp/sessions", "POST", { session: key }).catch(() => {});
@@ -412,6 +417,26 @@ router.post("/whatsapp/sessions/:key/phone-outbound", requireFeature("whatsapp")
     .returning();
   if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
   res.json({ ok: true, phoneOutboundEnabled: updated.phoneOutboundEnabled });
+});
+
+// ─── WhatsApp de compras: encaminhar ao ERP (19/10/2026) ───────────────────
+// Marca a conexão cujo número é o de compras: toda mensagem de fornecedor
+// recebida nela vai ao ERP (Prumo) para a IA ler a lista de preço. Ver
+// lib/erpForward.ts; precisa da integração com o ERP (Administração ›
+// Integrações) ou de ERP_API_URL e ERP_API_KEY no servidor.
+router.post("/whatsapp/sessions/:key/forward-to-erp", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const { enabled } = (req.body ?? {}) as { enabled?: boolean };
+  if (typeof enabled !== "boolean") { res.status(400).json({ error: "Informe enabled (true/false)" }); return; }
+  const [updated] = await db
+    .update(whatsappSessionsTable)
+    .set({ forwardToErp: enabled, updatedAt: new Date() })
+    .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId)))
+    .returning();
+  if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+  const { erpForwardConfigured } = await import("../lib/erpForward");
+  res.json({ ok: true, forwardToErp: updated.forwardToErp, erpConfigured: await erpForwardConfigured(tenantId) });
 });
 
 // ─── Responsável fixo da linha (mesmo pedido) ─────────────────────────────
@@ -628,6 +653,7 @@ router.get("/whatsapp/status", requireFeature("whatsapp"), async (req, res): Pro
         botEnabled: row?.botEnabled ?? true,
         historyImportEnabled: row?.historyImportEnabled ?? false,
         phoneOutboundEnabled: row?.phoneOutboundEnabled ?? false,
+        forwardToErp: row?.forwardToErp ?? false,
         directAssigneeId: row?.directAssigneeId ?? null,
       };
       res.json(result);

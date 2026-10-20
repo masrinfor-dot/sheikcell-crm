@@ -45,4 +45,5 @@ export * from "./finance_payments";
 export * from "./sensitive_action_log";
 export * from "./broadcast_dispatch_log";
 export * from "./erp_integration";
+export * from "./erp_forward_queue";
 export * from "./instagram";

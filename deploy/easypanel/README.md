@@ -17,6 +17,7 @@ O sistema tem 4 serviços dentro de um mesmo projeto do EasyPanel:
 - `OPENAI_API_KEY` — sua chave da OpenAI (recursos de IA)
 - `WHATSAPP_BRIDGE_URL` — `http://sheikcell_whatsapp:3002`
 - `LOG_LEVEL` — `info` (opcional)
+- `ERP_API_URL` e `ERP_API_KEY` (opcionais) — WhatsApp de compras → ERP (listas de preço dos fornecedores lidas pela IA do Prumo). O CRM usa primeiro a integração gravada em Administração › Integrações (endereço da API e chave do ERP, por loja); estas variáveis são o fallback. URL da API do ERP com `/api/v1` e chave gerada no ERP em Auxiliares › Integrações com o acesso "Listas de preço dos fornecedores". Depois, em Administração › WhatsApp, marque "Encaminhar listas de fornecedores ao ERP" na conexão do número de compras.
 
 ### Serviço `whatsapp`
 - `DATABASE_URL` — o MESMO do serviço api

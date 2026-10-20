@@ -65,6 +65,11 @@ export const whatsappSessionsTable = pgTable("whatsapp_sessions", {
   // O bridge nunca reenvia o que o próprio sistema mandou (sem duplicar).
   // Ver processOwnPhoneMessage em lib/whatsappHistory.ts.
   phoneOutboundEnabled: boolean("phone_outbound_enabled").notNull().default(false),
+  // WhatsApp de compras (19/10/2026): toda mensagem de fornecedor recebida
+  // nesta linha (texto, foto, PDF, planilha) é encaminhada ao ERP (Prumo),
+  // que lê a lista de preço com IA. Default false: nenhuma linha muda até o
+  // admin marcar em Administração → WhatsApp. Ver lib/erpForward.ts.
+  forwardToErp: boolean("forward_to_erp").notNull().default(false),
   directAssigneeId: integer("direct_assignee_id").references(() => usersTable.id, { onDelete: "set null" }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
