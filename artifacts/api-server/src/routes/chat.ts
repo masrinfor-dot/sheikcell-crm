@@ -39,6 +39,7 @@ import {
   MEDIA_DIR,
 } from "../lib/whatsappInbound";
 import { processWAHistoryArchived, processWAHistoryBatch, type WAHistoryArchivedPayload, type WAHistoryPayload } from "../lib/whatsappHistory";
+import { AVATAR_DIR } from "../lib/waProfile";
 
 const router: IRouter = Router();
 
@@ -3272,6 +3273,27 @@ router.post("/chat/messages/:id/transcribe", requireAuth, requireChatAccess(), a
 });
 
 // ─── Serve saved media files ───────────────────────────────────────────────
+// Foto de perfil guardada no CRM (20/10/2026, ver lib/waProfile.ts). Só a
+// loja dona da conversa vê.
+router.get("/chat/avatars/:id", requireAuth, async (req: Request, res: Response): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ error: "id inválido" }); return; }
+  const [conv] = await db.select({ id: conversationsTable.id }).from(conversationsTable)
+    .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
+  if (!conv) { res.status(404).json({ error: "Foto não encontrada" }); return; }
+  for (const [ext, type] of [["jpg", "image/jpeg"], ["png", "image/png"], ["webp", "image/webp"]] as const) {
+    const file = path.join(AVATAR_DIR, `${id}.${ext}`);
+    if (existsSync(file)) {
+      res.setHeader("Content-Type", type);
+      res.setHeader("Cache-Control", "private, max-age=86400");
+      res.sendFile(file);
+      return;
+    }
+  }
+  res.status(404).json({ error: "Foto não encontrada" });
+});
+
 router.get("/chat/media/:filename", requireAuth, async (req: Request, res: Response): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const filename = path.basename(req.params.filename as string);

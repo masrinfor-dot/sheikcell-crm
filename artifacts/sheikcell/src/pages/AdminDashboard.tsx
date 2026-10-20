@@ -1769,6 +1769,34 @@ export default function AdminDashboard() {
                       </p>
                     </span>
                   </label>
+                  {/* Fotos e nomes (20/10/2026): pede a agenda de novo ao WhatsApp,
+                      troca nomes que são só número e busca de novo as fotos. */}
+                  <div className="flex items-start gap-2.5 text-sm" data-testid={`wa-refresh-profile-${s.sessionKey}`}>
+                    <button
+                      type="button"
+                      disabled={s.status !== "connected"}
+                      onClick={async () => {
+                        const r = await fetch(`/api/whatsapp/sessions/${s.sessionKey}/refresh-profile`, { method: "POST", credentials: "include" });
+                        const body = await r.json().catch(() => ({})) as { error?: string; agenda?: boolean; conversations?: number };
+                        if (!r.ok) {
+                          toast({ title: "Não foi possível atualizar", description: body.error ?? "Tente de novo.", variant: "destructive" });
+                          return;
+                        }
+                        toast({
+                          title: "Atualizando agenda e fotos",
+                          description: `${body.agenda ? "Agenda pedida ao WhatsApp. " : ""}As fotos de ${body.conversations ?? 0} conversa(s) vão aparecendo aos poucos (algumas por minuto).`,
+                        });
+                      }}
+                      className="px-3 py-1.5 rounded-lg border border-border text-xs font-semibold shrink-0 disabled:opacity-50"
+                      data-testid={`button-wa-refresh-profile-${s.sessionKey}`}
+                    >
+                      Atualizar agenda e fotos
+                    </button>
+                    <p className="text-[11px] text-muted-foreground">
+                      Traz os nomes salvos na agenda deste WhatsApp para as conversas que estão só com o número e busca de novo as fotos de perfil.
+                      O CRM guarda as fotos e renova a cada 3 dias sozinho.
+                    </p>
+                  </div>
                   {/* WhatsApp de compras (19/10/2026): toda mensagem de fornecedor
                       (texto, foto, PDF, planilha) vai ao ERP (Prumo) para a IA ler
                       a lista de preço. Fila com nova tentativa — ERP fora do ar não

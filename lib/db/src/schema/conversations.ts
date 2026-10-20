@@ -29,6 +29,8 @@ export const conversationsTable = pgTable("conversations", {
   phone: text("phone").notNull(),
   name: text("name").notNull(),
   avatarUrl: text("avatar_url"),
+  // Quando a foto de perfil foi buscada por último (20/10/2026); null = buscar.
+  avatarFetchedAt: timestamp("avatar_fetched_at", { withTimezone: true }),
   channel: text("channel").notNull().default("whatsapp"), // whatsapp | instagram | manual
   // Comunidade do WhatsApp (ou o canal de avisos dela) — diferente de grupo
   // comum, embora ambos cheguem com o mesmo tipo de JID (@g.us). Resolvido
