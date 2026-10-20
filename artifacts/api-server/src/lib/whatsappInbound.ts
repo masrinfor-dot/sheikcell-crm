@@ -1294,6 +1294,15 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     if (handled) return;
   }
 
+  // Gerente IA: mensagem do celular pessoal do dono (número autorizado) em
+  // qualquer linha da loja — vira registro/resposta do Gerente, nunca
+  // conversa de atendimento (a equipe não vê). Antes da pesquisa e do robô.
+  if (!isGroup) {
+    const { tryConsumeGerenteInbound } = await import("./gerente");
+    const handled = await tryConsumeGerenteInbound({ tenantId, sessionKey, phone, text, msgType, mediaUrl, externalId });
+    if (handled) return;
+  }
+
   // Pesquisa de satisfação: se a resposta consumiu a pesquisa, não reabre a
   // conversa nem aciona o robô.
   if (!isGroup) {
@@ -1502,6 +1511,13 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
         // resposta consumiu a pesquisa, não reabre a conversa nem aciona o robô.
         // Meta Cloud API usa a conexão padrão → loja 1 (legado).
         const tenantId = LEGACY_TENANT_ID;
+        {
+          const { tryConsumeGerenteInbound } = await import("./gerente");
+          const gerenteHandled = await tryConsumeGerenteInbound({
+            tenantId, sessionKey: "default", phone, text, msgType, mediaUrl, externalId: externalId ?? null,
+          });
+          if (gerenteHandled) continue;
+        }
         const surveyHandled = await tryConsumeSurveyReply({
           tenantId,
           phone,

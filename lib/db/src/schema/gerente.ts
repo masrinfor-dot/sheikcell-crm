@@ -1,0 +1,146 @@
+import { pgTable, serial, text, integer, timestamp, boolean, jsonb, date, uniqueIndex, index } from "drizzle-orm/pg-core";
+import { tasksTable } from "./tasks";
+
+// ─── Gerente IA ──────────────────────────────────────────────────────────────
+// Secretária executiva / gerente geral por WhatsApp (antes "Meu Acessor",
+// protótipo à parte). Vive dentro do CRM e usa a(s) linha(s) de WhatsApp já
+// conectadas: só mensagens vindas de um NÚMERO AUTORIZADO (o celular pessoal
+// do dono da loja) entram aqui — nunca viram conversa de atendimento, nunca
+// aparecem pra equipe. Tudo que o dono pede vira um registro com destino,
+// responsável, prazo e acompanhamento.
+
+// Configuração por loja (1 linha por tenant).
+export const gerenteSettingsTable = pgTable("gerente_settings", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull().unique(),
+  enabled: boolean("enabled").notNull().default(true),
+  assistantName: text("assistant_name").notNull().default("Gerente IA"),
+  // Telefones (normalizados, só dígitos com DDI — ver lib/phone.ts) cujas
+  // mensagens são tratadas pelo Gerente IA. Lista vazia = ninguém é atendido.
+  authorizedPhones: jsonb("authorized_phones").$type<string[]>().notNull().default([]),
+  // Horário de descanso: lembretes não urgentes não são enviados nessa faixa
+  // (ficam pra primeira hora útil). "HH:MM" no fuso de São Paulo.
+  quietStart: text("quiet_start").notNull().default("22:00"),
+  quietEnd: text("quiet_end").notNull().default("07:00"),
+  // Resumo "Meu dia" enviado automaticamente nesse horário (null = desligado).
+  dailyDigestTime: text("daily_digest_time").default("07:30"),
+  dailyDigestSentOn: date("daily_digest_sent_on"),
+  // Última linha/telefone por onde o dono falou — é por aí que os lembretes
+  // proativos saem (sem isso, não há como escolher uma linha).
+  lastSessionKey: text("last_session_key"),
+  lastPhone: text("last_phone"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Histórico da conversa do dono com o Gerente IA (entrada e saída), com a
+// interpretação feita — serve de memória curta pra IA e de auditoria
+// ("o que eu pedi ontem?"). Nunca vai pra tabela messages do atendimento.
+export const gerenteMessagesTable = pgTable("gerente_messages", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull(),
+  phone: text("phone").notNull(),
+  sessionKey: text("session_key"),
+  direction: text("direction").notNull(), // in | out
+  source: text("source").notNull().default("whatsapp"), // whatsapp | painel | sistema
+  content: text("content").notNull(),
+  // Nome da(s) ação(ões) executada(s) (ex.: "criar_lembrete") e argumentos —
+  // só nas mensagens de entrada.
+  intent: text("intent"),
+  payload: jsonb("payload"),
+  // ID da mensagem no WhatsApp — dedupe em reentrega (reconexão do Baileys).
+  externalId: text("external_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("gerente_messages_tenant_created_idx").on(t.tenantId, t.createdAt),
+  uniqueIndex("gerente_messages_external_id_uq").on(t.externalId),
+]);
+
+// Agenda: compromissos pessoais e da empresa.
+export const gerenteEventsTable = pgTable("gerente_events", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull(),
+  title: text("title").notNull(),
+  startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
+  endsAt: timestamp("ends_at", { withTimezone: true }),
+  location: text("location"),
+  participants: text("participants"),
+  scope: text("scope").notNull().default("empresa"), // pessoal | empresa
+  storeName: text("store_name"),
+  notes: text("notes"),
+  status: text("status").notNull().default("agendado"), // agendado | concluido | cancelado
+  remindMinutesBefore: integer("remind_minutes_before").notNull().default(30),
+  remindedAt: timestamp("reminded_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index("gerente_events_tenant_starts_idx").on(t.tenantId, t.startsAt)]);
+
+// Lembretes: avisados pelo WhatsApp no horário; respondem a "feito" e "adia".
+export const gerenteRemindersTable = pgTable("gerente_reminders", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull(),
+  title: text("title").notNull(),
+  dueAt: timestamp("due_at", { withTimezone: true }).notNull(),
+  urgent: boolean("urgent").notNull().default(false),
+  status: text("status").notNull().default("pendente"), // pendente | concluido | cancelado
+  sentAt: timestamp("sent_at", { withTimezone: true }),
+  snoozeCount: integer("snooze_count").notNull().default(0),
+  // Lembrete nascido de uma tarefa do quadro (opcional).
+  taskId: integer("task_id").references(() => tasksTable.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index("gerente_reminders_tenant_due_idx").on(t.tenantId, t.dueAt)]);
+
+// Gastos e receitas (lançamentos avulsos ditados pelo dono).
+export const gerenteEntriesTable = pgTable("gerente_entries", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull(),
+  kind: text("kind").notNull(), // gasto | receita
+  amountCents: integer("amount_cents").notNull(),
+  description: text("description").notNull(),
+  category: text("category"),
+  scope: text("scope").notNull().default("empresa"), // pessoal | empresa
+  storeName: text("store_name"),
+  paymentMethod: text("payment_method"),
+  installments: integer("installments").notNull().default(1),
+  reimbursementPending: boolean("reimbursement_pending").notNull().default(false),
+  entryDate: date("entry_date").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index("gerente_entries_tenant_date_idx").on(t.tenantId, t.entryDate)]);
+
+// Contas a pagar e a receber — baixa só com confirmação explícita do dono.
+export const gerenteBillsTable = pgTable("gerente_bills", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull(),
+  kind: text("kind").notNull(), // pagar | receber
+  description: text("description").notNull(),
+  amountCents: integer("amount_cents").notNull(),
+  dueDate: date("due_date").notNull(),
+  counterparty: text("counterparty"),
+  responsible: text("responsible"),
+  scope: text("scope").notNull().default("empresa"), // pessoal | empresa
+  storeName: text("store_name"),
+  status: text("status").notNull().default("aberta"), // aberta | paga | cancelada
+  paidAt: timestamp("paid_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index("gerente_bills_tenant_due_idx").on(t.tenantId, t.dueDate)]);
+
+// Ação aguardando confirmação ("sim"/"não") do dono — ex.: baixar uma conta.
+// Uma por telefone; expira sozinha.
+export const gerentePendingActionsTable = pgTable("gerente_pending_actions", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull(),
+  phone: text("phone").notNull(),
+  action: jsonb("action").$type<Record<string, unknown>>().notNull(),
+  summary: text("summary").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [uniqueIndex("gerente_pending_actions_tenant_phone_uq").on(t.tenantId, t.phone)]);
+
+export type GerenteSettings = typeof gerenteSettingsTable.$inferSelect;
+export type GerenteMessage = typeof gerenteMessagesTable.$inferSelect;
+export type GerenteEvent = typeof gerenteEventsTable.$inferSelect;
+export type GerenteReminder = typeof gerenteRemindersTable.$inferSelect;
+export type GerenteEntry = typeof gerenteEntriesTable.$inferSelect;
+export type GerenteBill = typeof gerenteBillsTable.$inferSelect;

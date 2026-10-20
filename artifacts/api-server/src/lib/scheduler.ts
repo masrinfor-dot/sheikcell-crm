@@ -294,6 +294,11 @@ export function startScheduler(): void {
   }, 30 * 60_000);
   // Lembrete da pesquisa de satisfação: granularidade de minutos basta.
   setInterval(() => { void sendSurveyReminders(); }, 60_000);
+  // Gerente IA (19/10/2026): lembretes, avisos de compromisso e o resumo
+  // "Meu dia" do dono pelo WhatsApp (ver gerente.ts).
+  setInterval(() => {
+    void import("./gerente").then((m) => m.runGerenteNotifications()).catch(() => {});
+  }, 60_000);
   // Preenche vendedores ociosos da fila do Central de Atendimento que os
   // gatilhos por evento (conversa nova / vendedor liberado — ver
   // queueAutoAssign.ts) não cobrem: quem já estava zerado antes de ligar
