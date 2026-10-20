@@ -31,7 +31,17 @@ const toLocalInput = (iso: string): string => {
     .formatToParts(new Date(iso)).reduce<Record<string, string>>((acc, x) => { acc[x.type] = x.value; return acc; }, {});
   return `${p["year"]}-${p["month"]}-${p["day"]}T${p["hour"] === "24" ? "00" : p["hour"]}:${p["minute"]}`;
 };
-const centsFromInput = (v: string): number => Math.round(Number(v.replace(/\./g, "").replace(",", ".")) * 100);
+// "1.250,50" (BR) → 125050; "49.90" (sem vírgula, ponto decimal) → 4990;
+// "1.250" (milhar) → 125000 — mesma regra do parseBRL do servidor.
+const centsFromInput = (v: string): number => {
+  let s = v.replace(/r\$/i, "").replace(/\s/g, "").trim();
+  if (!s) return NaN;
+  if (/,\d{1,2}$/.test(s)) s = s.replace(/\./g, "").replace(",", ".");
+  else if (/\.\d{3}$/.test(s) && !/,/.test(s)) s = s.replace(/\./g, "");
+  else s = s.replace(",", ".");
+  const n = Number(s);
+  return Number.isFinite(n) ? Math.round(n * 100) : NaN;
+};
 const fmtPhone = (p: string): string => {
   const d = p.replace(/\D/g, "");
   const local = d.startsWith("55") && d.length >= 12 ? d.slice(2) : d;
@@ -445,13 +455,15 @@ function Config({ settings, onSaved }: { settings: GerenteSettings; onSaved: (s:
     setSaving(true);
     try {
       const updated = await api.gerente.settings.update({ enabled: s.enabled, assistantName: s.assistantName, authorizedPhones: s.authorizedPhones, quietStart: s.quietStart, quietEnd: s.quietEnd, dailyDigestTime: s.dailyDigestTime });
-      onSaved({ ...s, ...updated, lines: s.lines }); toast({ title: "Configurações salvas ✅" });
+      onSaved({ ...s, ...updated, lines: s.lines });
+      if (updated.warnings?.length) toast({ title: "Salvo, mas confira", description: updated.warnings.join(" "), variant: "destructive" });
+      else toast({ title: "Configurações salvas ✅" });
     } catch (err) { toast({ title: "Erro ao salvar", description: errMsg(err), variant: "destructive" }); }
     finally { setSaving(false); }
   };
   const addPhone = () => {
     const d = newPhone.replace(/\D/g, "");
-    if (d.length < 10) { toast({ title: "Número inválido", description: "Use DDD + número, ex.: 33 99140-8604", variant: "destructive" }); return; }
+    if (d.length < 10) { toast({ title: "Número inválido", description: "Use DDD + número, ex.: 33 99999-0000", variant: "destructive" }); return; }
     setS({ ...s, authorizedPhones: [...new Set([...s.authorizedPhones, d])] }); setNewPhone("");
   };
   const wipe = async () => {
@@ -479,7 +491,7 @@ function Config({ settings, onSaved }: { settings: GerenteSettings; onSaved: (s:
             ))}
           </div>
           <div className="flex gap-2 mt-2">
-            <input className="flex-1 px-3 py-1.5 rounded-lg border border-border text-xs bg-background" value={newPhone} onChange={(e) => setNewPhone(e.target.value)} placeholder="33 99140-8604" onKeyDown={(e) => { if (e.key === "Enter") addPhone(); }} />
+            <input className="flex-1 px-3 py-1.5 rounded-lg border border-border text-xs bg-background" value={newPhone} onChange={(e) => setNewPhone(e.target.value)} placeholder="33 99999-0000" onKeyDown={(e) => { if (e.key === "Enter") addPhone(); }} />
             <button onClick={addPhone} className={BTN_GHOST}><Plus className="w-3 h-3" /></button>
           </div>
         </div>

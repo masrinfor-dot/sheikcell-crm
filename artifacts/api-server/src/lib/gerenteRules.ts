@@ -45,7 +45,12 @@ export function spTimeHM(date: Date = new Date()): string {
 /** Monta um Date a partir de data/hora LOCAL de São Paulo. */
 export function spDate(y: number, m: number, d: number, hh = 0, mm = 0): Date {
   const pad = (n: number) => String(n).padStart(2, "0");
-  return new Date(`${y}-${pad(m)}-${pad(d)}T${pad(hh)}:${pad(mm)}:00${SP_OFFSET}`);
+  const date = new Date(`${y}-${pad(m)}-${pad(d)}T${pad(hh)}:${pad(mm)}:00${SP_OFFSET}`);
+  // Data inválida ("31/11") NÃO pode virar 01/12 em silêncio — devolve NaN.
+  if (Number.isNaN(date.getTime())) return date;
+  const back = spParts(date);
+  if (back.y !== y || back.m !== m || back.d !== d || back.hh !== hh || back.mm !== mm) return new Date(NaN);
+  return date;
 }
 
 /**
@@ -138,12 +143,13 @@ const WEEKDAY_WORDS: Record<string, number> = {
  * Sem hora explícita, usa `defaultHour`.
  */
 export function extractWhen(text: string, now: Date = new Date(), defaultHour = 9): { when: Date | null; rest: string } {
-  let t = ` ${text.replace(/\s+/g, " ").trim()} `;
+  // Pontuação vira espaço: "amanhã, às 14h" tem que achar "amanhã" e "14h".
+  let t = ` ${text.replace(/[,;!?]/g, " ").replace(/\.(?=\s|$)/g, " ").replace(/\s+/g, " ").trim()} `;
   const n = spParts(now);
   // Estado num objeto (e não em variáveis soltas) de propósito: atribuição
   // dentro de callback não é vista pelo narrowing do TypeScript.
-  const st: { y: number; m: number; d: number; hh: number | null; mm: number; dateFound: boolean; relative: Date | null; period: "manha" | "tarde" | "noite" | null } =
-    { y: n.y, m: n.m, d: n.d, hh: null, mm: 0, dateFound: false, relative: null, period: null };
+  const st: { y: number; m: number; d: number; hh: number | null; mm: number; dateFound: boolean; relative: Date | null; period: "manha" | "tarde" | "noite" | null; ambiguousHour: boolean } =
+    { y: n.y, m: n.m, d: n.d, hh: null, mm: 0, dateFound: false, relative: null, period: null, ambiguousHour: false };
 
   const take = (re: RegExp, fn: (mt: RegExpMatchArray) => void): boolean => {
     const mt = t.match(re);
@@ -191,12 +197,18 @@ export function extractWhen(text: string, now: Date = new Date(), defaultHour = 
   take(/\s(?:as|às|ao|pras|pro|para as|para)?\s*(\d{1,2})(?::|h)(\d{2})\s?(?:h|hs|horas)?\b/i, (mt) => {
     st.hh = Number(mt[1]); st.mm = Number(mt[2]);
   });
-  if (st.hh == null) take(/\s(?:as|às|pras|para as)\s+(\d{1,2})\s?(?:h|hs|horas?)?\b/i, (mt) => { st.hh = Number(mt[1]); });
+  if (st.hh == null) take(/\s(?:as|às|pras|para as)\s+(\d{1,2})\s?(h|hs|horas?)?\b/i, (mt) => {
+    st.hh = Number(mt[1]);
+    // "às 3" (sem "h", sem "da manhã") é 15h na prática — ninguém marca
+    // compromisso pras 3 da madrugada. "às 3h" continua literal.
+    if (!mt[2]) st.ambiguousHour = true;
+  });
   if (st.hh == null) take(/\s(\d{1,2})\s?(?:h|hs|horas)\b/i, (mt) => { st.hh = Number(mt[1]); });
   if (st.hh == null) take(/\s(meio[- ]dia)\s/i, () => { st.hh = 12; });
   // Período do dia (só ajusta a hora padrão)
   take(/\s(?:de|da|do|a|à|pela|na|no)\s+(manha|manhã|tarde|noite)\s/i, (mt) => { st.period = norm(mt[1]!) as typeof st.period; });
   if (st.hh != null && (st.period === "tarde" || st.period === "noite") && st.hh < 12) st.hh += 12;
+  if (st.hh != null && st.ambiguousHour && !st.period && st.hh >= 1 && st.hh <= 6) st.hh += 12;
   if (st.hh == null && st.period) st.hh = st.period === "manha" ? 9 : st.period === "tarde" ? 15 : 20;
 
   const rest = t.replace(/\s+/g, " ").trim();
@@ -251,7 +263,10 @@ export function parseByRules(raw: string, now: Date = new Date()): RuleIntent | 
   if (/^(desfaz|desfazer|apaga o ultimo|apagar ultimo|cancela o ultimo|volta)[.!]?$/.test(t)) return { kind: "desfazer" };
 
   // adia 1h / adiar 30 min / adia amanhã / adia pra amanhã 9h
-  const adia = t.match(/^(?:adiar|adie|adia|mais tarde|depois)(?:\s+(?:pra|para|em|por))?\s*(.*)$/);
+  // "depois de amanhã reunião..." NÃO é adiar — "depois"/"mais tarde" só valem
+  // sozinhos ("depois") ou com prazo relativo ("depois em 1h").
+  const adia = t.match(/^(?:adiar|adie|adia)(?=\s|$)(?:\s+(?:pra|para|em|por))?\s*(.*)$/)
+    ?? t.match(/^(?:mais tarde|depois)(?:\s+(?:em|daqui a|daqui))?\s*(\d+\s*(?:h|hora|horas|min|minuto|minutos))?$/);
   if (adia) {
     const arg = adia[1]?.trim() ?? "";
     if (!arg) return { kind: "adiar", minutes: 60, when: null };
@@ -277,15 +292,40 @@ export function parseByRules(raw: string, now: Date = new Date()): RuleIntent | 
   const scopeOf = (s: string): "pessoal" | "empresa" => (/\b(pessoal|minha|meu|casa|familia)\b/.test(norm(s)) ? "pessoal" : "empresa");
 
   // Gasto / receita: "gastei 50 no almoço", "gasto 1.200 aluguel", "recebi 300 do João"
-  const money = text.match(/^(gastei|gasto|paguei|despesa|comprei|recebi|receita|entrou|ganhei|vendi)\s+(?:de\s+)?(?:r\$\s*)?([\d.,]+)\s*(?:reais|r\$|conto|pila)?\s*(?:com|em|no|na|de|do|da|pra|para|-|:)?\s*(.*)$/i);
-  if (money) {
-    const verb = norm(money[1]!);
-    const amountCents = parseBRL(money[2]!);
-    const description = cleanTitle(money[3] ?? "") || (verb.startsWith("receb") || verb === "entrou" || verb === "ganhei" || verb === "vendi" ? "Receita" : "Gasto");
+  // Preposição só conta se vier seguida de espaço — senão "recebi 300 daniel"
+  // viraria "niel". Em "comprei"/"vendi" o 1º número costuma ser QUANTIDADE
+  // ("vendi 2 iphones por 3000"): o valor é o que vem depois de "por", ou
+  // um número com cara de dinheiro (R$, vírgula decimal, "reais"); sem isso,
+  // deixa pra IA.
+  const MONEY_VERBS = /^(gastei|gasto|paguei|despesa|comprei|recebi|receita|entrou|ganhei|vendi)(?=\s)/i;
+  const moneyVerb = text.match(MONEY_VERBS);
+  if (moneyVerb) {
+    const verb = norm(moneyVerb[1]!);
+    const isIncome = ["recebi", "receita", "entrou", "ganhei", "vendi"].includes(verb);
+    const afterVerb = text.slice(moneyVerb[0].length).trim();
+    let amountCents: number | null = null;
+    let descRaw = "";
+    const por = verb === "comprei" || verb === "vendi"
+      ? afterVerb.match(/^(.*?)\s+por\s+(?:r\$\s*)?([\d.,]+)\s*(?:reais)?\s*(.*)$/i)
+      : null;
+    if (por) {
+      amountCents = parseBRL(por[2]!);
+      descRaw = `${por[1] ?? ""} ${por[3] ?? ""}`;
+    } else {
+      const first = afterVerb.match(/^(?:de\s+)?(r\$\s*)?([\d.,]+)\s*(reais|r\$|conto|pila)?(?:\s+(?:com|em|no|na|de|do|da|pra|para)(?=\s)|\s*[-:])?\s*(.*)$/i);
+      if (first) {
+        const looksLikeMoney = !!first[1] || !!first[3] || /[,]\d{1,2}$/.test(first[2]!) || /\.\d{3}/.test(first[2]!);
+        if (!(verb === "comprei" || verb === "vendi") || looksLikeMoney) {
+          amountCents = parseBRL(first[2]!);
+          descRaw = first[4] ?? "";
+        }
+      }
+    }
     if (amountCents != null && amountCents > 0) {
-      const isIncome = ["recebi", "receita", "entrou", "ganhei", "vendi"].includes(verb);
+      const description = cleanTitle(descRaw) || (isIncome ? "Receita" : "Gasto");
       return { kind: isIncome ? "receita" : "gasto", amountCents, description, scope: scopeOf(description) };
     }
+    // Sem valor reconhecível: segue pras outras regras / IA.
   }
 
   // Conta: "conta a pagar 1.500 aluguel dia 10/11", "pagar 300 energia até 25/10", "receber 500 do João amanhã"
@@ -301,7 +341,7 @@ export function parseByRules(raw: string, now: Date = new Date()): RuleIntent | 
   }
 
   // Lembrete: "lembra de ligar pro Tales amanhã às 9h", "me lembre às 15h de ...", "lembrete: pagar luz 10/11"
-  const rem = text.match(/^(?:me\s+)?(?:lembra|lembre|lembrar|lembrete|alerta|avisa|avise|me avisa)(?:-me|\s+me)?\s*:?\s*(.*)$/i);
+  const rem = text.match(/^(?:me\s+)?(?:lembra|lembre|lembrar|lembrete|alerta|avisa|avise|me avisa)(?:-me|\s+me)?(?=\s|:|$)\s*:?\s*(.*)$/i);
   if (rem) {
     const body = rem[1] ?? "";
     const urgent = /\b(urgente|urgência|urgencia|importante)\b/i.test(body);
@@ -315,12 +355,18 @@ export function parseByRules(raw: string, now: Date = new Date()): RuleIntent | 
   }
 
   // Tarefa: "tarefa: trocar a vitrine para o Nilmar até sexta", "tarefa pro Vagner: conferir estoque"
-  const task = text.match(/^(?:nova\s+)?tarefa\s*(?:pro|pra|para)?\s*(?:o|a)?\s*([A-Za-zÀ-ÿ]+)?\s*:?\s*(.*)$/i);
+  // Nome do responsável só quando vem depois de pro/pra/para ("tarefa pra Ana:
+  // ..." ou "... pro Nilmar até sexta"); artigo "o/a" só se seguido de espaço
+  // — senão "Ana" vira "na" e "Otávio" vira "távio".
+  const task = text.match(/^(?:nova\s+)?tarefa(?=\s|:|$)(?:\s+(?:pro|pra|para)\s+(?:(?:o|a)\s+)?([A-Za-zÀ-ÿ]+))?\s*:?\s*(.*)$/i);
   if (task && (task[2] ?? "").trim()) {
     let assignee: string | null = task[1] ?? null;
     let body = task[2] ?? "";
-    if (assignee && /^(de|do|da|que|o|a)$/i.test(assignee)) assignee = null;
-    const forMatch = body.match(/\s(?:pro|pra|para)\s+(?:o|a)?\s*([A-Za-zÀ-ÿ]+)\b/i);
+    // Responsável no meio da frase: usa a ÚLTIMA ocorrência de "pro/pra X"
+    // ("ligar pro fornecedor para o Otávio" → Otávio). Se X não for ninguém
+    // da equipe, a tarefa fica sem responsável e a resposta avisa.
+    const forMatches = [...body.matchAll(/\s(?:pro|pra|para)\s+(?:(?:o|a)\s+)?([A-Za-zÀ-ÿ]+)(?=\s|:|$)/gi)];
+    const forMatch = forMatches[forMatches.length - 1];
     if (!assignee && forMatch) { assignee = forMatch[1]!; body = body.replace(forMatch[0], " "); }
     const priority: "baixa" | "media" | "alta" = /\b(urgente|alta|prioridade)\b/i.test(body) ? "alta" : /\b(baixa|quando der)\b/i.test(body) ? "baixa" : "media";
     const { when, rest } = extractWhen(` ${body.replace(/(^|\s)(ate|até)(?=\s|$)/gi, " ")} `, now, 18);
@@ -329,7 +375,7 @@ export function parseByRules(raw: string, now: Date = new Date()): RuleIntent | 
   }
 
   // Compromisso: "reunião com o contador amanhã às 14h", "agendar dentista sexta 10h", "compromisso: ..."
-  const appt = text.match(/^(?:agendar|agenda|marcar|marca|compromisso|reuniao|reunião|encontro|visita|consulta)\s*:?\s*(.*)$/i);
+  const appt = text.match(/^(?:agendar|agenda|marcar|marca|compromisso|reuniao|reunião|encontro|visita|consulta)(?=\s|:|$)\s*:?\s*(.*)$/i);
   if (appt) {
     const prefix = norm(text.split(/\s|:/)[0] ?? "");
     const keepPrefix = ["reuniao", "encontro", "visita", "consulta"].includes(prefix);

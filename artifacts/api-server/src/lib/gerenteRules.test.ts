@@ -127,3 +127,72 @@ test("withinRange cruza a meia-noite", () => {
   assert.equal(withinRange("12:00", "22:00", "07:00"), false);
   assert.equal(withinRange("12:00", "09:00", "18:00"), true);
 });
+
+// ─── Regressões da revisão de código (19/10) ─────────────────────────────────
+
+test("nomes que começam com a/o não perdem a 1ª letra (Ana, Amanda, Otávio)", () => {
+  const t = parseByRules("tarefa pra Ana: conferir estoque", NOW);
+  assert.ok(t && t.kind === "tarefa");
+  assert.equal(t.assignee, "Ana");
+  const t2 = parseByRules("tarefa pro Amanda conferir caixa", NOW);
+  assert.ok(t2 && t2.kind === "tarefa");
+  assert.equal(t2.assignee, "Amanda");
+  const t3 = parseByRules("tarefa: ligar pro fornecedor para o Otávio", NOW);
+  assert.ok(t3 && t3.kind === "tarefa");
+  assert.equal(t3.assignee, "Otávio");
+});
+
+test("preposição só vale com espaço: 'recebi 300 daniel', 'gastei 50 nathalia'", () => {
+  const r = parseByRules("recebi 300 daniel", NOW);
+  assert.ok(r && r.kind === "receita");
+  assert.equal(r.description, "daniel");
+  const g = parseByRules("gastei 50 nathalia", NOW);
+  assert.ok(g && g.kind === "gasto");
+  assert.equal(g.description, "nathalia");
+  const e = parseByRules("paguei 200 emerson", NOW);
+  assert.ok(e && e.kind === "gasto");
+  assert.equal(e.description, "emerson");
+});
+
+test("'tarefa <verbo> ... pro Nilmar' não trata o verbo como responsável", () => {
+  const t = parseByRules("tarefa conferir estoque pro Nilmar até sexta", NOW);
+  assert.ok(t && t.kind === "tarefa");
+  assert.equal(t.assignee, "Nilmar");
+  assert.equal(t.title, "conferir estoque");
+});
+
+test("prefixos não engolem outras frases: depois de amanhã, visitar, lembrando", () => {
+  const c = parseByRules("depois de amanhã reunião com o contador às 10h", NOW);
+  assert.ok(c == null || c.kind !== "adiar", "não pode virar adiar");
+  assert.equal(parseByRules("depois", NOW)?.kind, "adiar");
+  const v = parseByRules("visitar o fornecedor amanhã às 10h", NOW);
+  assert.ok(v == null || v.kind !== "compromisso");
+  const l = parseByRules("lembrando que amanhã às 9h tem reunião", NOW);
+  assert.ok(l == null || l.kind !== "lembrete");
+});
+
+test("hora ambígua 'às 3' vira 15h; 'às 3h' e 'às 3 da manhã' ficam literais; pontuação não quebra", () => {
+  assert.equal(sp(extractWhen(" ligar pro João às 3 ", NOW).when), "2026-10-19 15:00");
+  assert.equal(sp(extractWhen(" plantão às 3h ", NOW).when), "2026-10-20 03:00");
+  assert.equal(sp(extractWhen(" plantão às 3 da manhã ", NOW).when), "2026-10-20 03:00");
+  const r = parseByRules("reunião amanhã, às 14h", NOW);
+  assert.ok(r && r.kind === "compromisso");
+  assert.equal(sp(r.startsAt), "2026-10-20 14:00");
+  assert.equal(r.title, "reunião");
+});
+
+test("data inválida (31/11) não vira 01/12 em silêncio", () => {
+  assert.equal(extractWhen(" pagar luz dia 31/11 ", NOW).when, null);
+});
+
+test("'vendi 2 iphones por 3000': valor é o que vem depois de 'por'", () => {
+  const v = parseByRules("vendi 2 iphones por 3000", NOW);
+  assert.ok(v && v.kind === "receita");
+  assert.equal(v.amountCents, 300000);
+  assert.match(v.description, /2 iphones/);
+  // "comprei 3 capinhas" sem valor com cara de dinheiro → não é lançamento pelas regras
+  assert.equal(parseByRules("comprei 3 capinhas", NOW), null);
+  // mas "comprei 3,50 de bala" é
+  const c = parseByRules("comprei 3,50 de bala", NOW);
+  assert.ok(c && c.kind === "gasto" && c.amountCents === 350);
+});

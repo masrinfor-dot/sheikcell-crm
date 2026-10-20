@@ -3153,7 +3153,7 @@ export const api = {
     settings: {
       get: () => req<GerenteSettings>("/gerente/settings"),
       update: (data: Partial<Pick<GerenteSettings, "enabled" | "assistantName" | "authorizedPhones" | "quietStart" | "quietEnd" | "dailyDigestTime">>) =>
-        req<GerenteSettings>("/gerente/settings", { method: "PATCH", body: JSON.stringify(data) }),
+        req<Omit<GerenteSettings, "lines"> & { warnings?: string[] }>("/gerente/settings", { method: "PATCH", body: JSON.stringify(data) }),
     },
     overview: () => req<GerenteOverview>("/gerente/overview"),
     events: {

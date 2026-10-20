@@ -6,8 +6,10 @@ import { Router, type IRouter } from "express";
 import {
   db, gerenteSettingsTable, gerenteMessagesTable, gerenteEventsTable, gerenteRemindersTable,
   gerenteEntriesTable, gerenteBillsTable, gerentePendingActionsTable, whatsappSessionsTable,
+  crmContactsTable, conversationsTable,
 } from "@workspace/db";
-import { eq, and, desc, asc, gte, lt, sql } from "drizzle-orm";
+import { eq, and, desc, asc, gte, lt, inArray, sql } from "drizzle-orm";
+import { phoneVariants } from "../lib/phone";
 import { requireAdmin, requireModule, requireTenant } from "../middlewares/auth";
 import {
   getGerenteSettings, invalidateGerenteCache, normalizeAuthorizedPhones, handlePanelMessage, buildDigest,
@@ -38,11 +40,26 @@ router.patch("/gerente/settings", async (req, res): Promise<void> => {
   const set: Partial<typeof gerenteSettingsTable.$inferInsert> = { updatedAt: new Date() };
   if (typeof b["enabled"] === "boolean") set.enabled = b["enabled"];
   if (typeof b["assistantName"] === "string" && b["assistantName"].trim()) set.assistantName = b["assistantName"].trim().slice(0, 40);
+  const warnings: string[] = [];
   if (Array.isArray(b["authorizedPhones"])) {
-    const phones = normalizeAuthorizedPhones(b["authorizedPhones"]);
-    if (phones.length !== b["authorizedPhones"].filter((v) => String(v ?? "").trim()).length) {
-      res.status(400).json({ error: "Há um número inválido na lista. Use DDD + número (ex.: 33 99140-8604)." });
+    const raw = b["authorizedPhones"].map((v) => String(v ?? "").trim()).filter(Boolean);
+    const invalid = raw.filter((v) => normalizeAuthorizedPhones([v]).length === 0);
+    if (invalid.length) {
+      res.status(400).json({ error: `Número inválido: ${invalid.join(", ")}. Use DDD + número (ex.: 33 99999-0000).` });
       return;
+    }
+    const phones = normalizeAuthorizedPhones(raw);
+    // Um dígito trocado autoriza o celular de um cliente — e as mensagens
+    // dele passam a sumir do atendimento. Avisa se o número já é um cliente
+    // conhecido desta loja (contato do CRM ou conversa), sem bloquear.
+    for (const ph of phones) {
+      const variants = phoneVariants(ph);
+      const [contact] = await db.select({ name: crmContactsTable.name }).from(crmContactsTable)
+        .where(and(eq(crmContactsTable.tenantId, tenantId), inArray(crmContactsTable.phone, variants))).limit(1);
+      const [conv] = contact ? [] : await db.select({ name: conversationsTable.name }).from(conversationsTable)
+        .where(and(eq(conversationsTable.tenantId, tenantId), inArray(conversationsTable.phone, variants))).limit(1);
+      const known = contact?.name ?? conv?.name;
+      if (known) warnings.push(`${ph} já é um cliente da loja ("${known}") — confira se é mesmo o número do dono.`);
     }
     set.authorizedPhones = phones;
   }
@@ -53,7 +70,7 @@ router.patch("/gerente/settings", async (req, res): Promise<void> => {
   await getGerenteSettings(tenantId);
   const [updated] = await db.update(gerenteSettingsTable).set(set).where(eq(gerenteSettingsTable.tenantId, tenantId)).returning();
   invalidateGerenteCache(tenantId);
-  res.json(updated);
+  res.json({ ...updated, warnings });
 });
 
 // ─── Meu dia ─────────────────────────────────────────────────────────────────

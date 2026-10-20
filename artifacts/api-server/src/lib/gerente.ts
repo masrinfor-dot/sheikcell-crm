@@ -13,12 +13,12 @@
 //     e manda o resumo "Meu dia" de manhã.
 // Nunca lança pra fora: falha aqui não pode derrubar o webhook do WhatsApp.
 import type OpenAI from "openai";
-import { and, eq, desc, asc, gte, lte, lt, isNull, inArray, ilike, ne, sql } from "drizzle-orm";
+import { and, eq, desc, asc, gte, lte, lt, isNull, isNotNull, inArray, ilike, ne, sql } from "drizzle-orm";
 import {
   db,
   gerenteSettingsTable, gerenteMessagesTable, gerenteEventsTable, gerenteRemindersTable,
   gerenteEntriesTable, gerenteBillsTable, gerentePendingActionsTable,
-  tasksTable, taskAssigneesTable, usersTable, storesTable, tenantsTable,
+  tasksTable, taskAssigneesTable, usersTable, storesTable, tenantsTable, whatsappSessionsTable,
   crmContactsTable, crmInternalNotesTable, conversationsTable,
   type GerenteSettings,
 } from "@workspace/db";
@@ -85,7 +85,7 @@ export function isAuthorizedPhone(settings: Pick<GerenteSettings, "authorizedPho
 
 // ─── Memória da conversa ─────────────────────────────────────────────────────
 
-type MsgRef = { table: "reminder" | "entry" | "bill" | "event" | "task"; id: number };
+type MsgRef = { table: "reminder" | "entry" | "bill" | "event" | "task" | "bill_paid"; id: number };
 type ActionResult = { text: string; ref?: MsgRef };
 
 async function saveOut(tenantId: number, phone: string, sessionKey: string | null, content: string, source: string): Promise<void> {
@@ -215,19 +215,20 @@ async function createEvent(tenantId: number, p: {
   };
 }
 
-// "feito"/"adia" se referem ao último lembrete AVISADO; se nenhum foi
-// avisado ainda, ao pendente mais próximo de vencer. (Sem o "nulls last",
-// o DESC do Postgres põe os não avisados na frente — bug pego no teste.)
+// "feito"/"adia" se referem SÓ ao último lembrete já AVISADO (sentAt
+// preenchido). Um lembrete que ainda não tocou nunca é concluído/adiado por
+// um "feito" solto — o dono pode estar respondendo a outra coisa.
 async function lastSentReminder(tenantId: number) {
   const [r] = await db.select().from(gerenteRemindersTable).where(and(
     eq(gerenteRemindersTable.tenantId, tenantId), eq(gerenteRemindersTable.status, "pendente"),
-  )).orderBy(sql`${gerenteRemindersTable.sentAt} desc nulls last`, asc(gerenteRemindersTable.dueAt)).limit(1);
+    isNotNull(gerenteRemindersTable.sentAt),
+  )).orderBy(desc(gerenteRemindersTable.sentAt)).limit(1);
   return r ?? null;
 }
 
 async function completeLastReminder(tenantId: number): Promise<string> {
   const r = await lastSentReminder(tenantId);
-  if (!r) return "Não tenho nenhum lembrete pendente pra marcar como feito. 👍";
+  if (!r) return "Nenhum lembrete avisado está pendente. Mande *lembretes* pra ver a lista. 👍";
   await db.update(gerenteRemindersTable).set({ status: "concluido", updatedAt: new Date() }).where(eq(gerenteRemindersTable.id, r.id));
   if (r.taskId != null) {
     await db.update(tasksTable).set({ status: "done", updatedAt: new Date() }).where(and(eq(tasksTable.id, r.taskId), eq(tasksTable.tenantId, tenantId)));
@@ -237,8 +238,8 @@ async function completeLastReminder(tenantId: number): Promise<string> {
 
 async function snoozeLastReminder(tenantId: number, minutes: number | null, when: Date | null): Promise<string> {
   const r = await lastSentReminder(tenantId);
-  if (!r) return "Não tenho nenhum lembrete pendente pra adiar.";
-  const dueAt = when ?? new Date(Date.now() + (minutes ?? 60) * 60_000);
+  if (!r) return "Nenhum lembrete avisado está pendente pra adiar. Mande *lembretes* pra ver a lista.";
+  const dueAt = when ?? new Date(Math.max(Date.now(), r.dueAt.getTime()) + (minutes ?? 60) * 60_000);
   await db.update(gerenteRemindersTable).set({ dueAt, sentAt: null, snoozeCount: r.snoozeCount + 1, updatedAt: new Date() })
     .where(eq(gerenteRemindersTable.id, r.id));
   return `⏳ Adiado: *${r.title}* — aviso de novo ${fmtWhen(dueAt)}.`;
@@ -258,6 +259,7 @@ async function undoLast(tenantId: number, phone: string): Promise<string> {
       else if (ref.table === "bill") { await db.delete(gerenteBillsTable).where(and(eq(gerenteBillsTable.id, ref.id), eq(gerenteBillsTable.tenantId, tenantId))); done.push("conta"); }
       else if (ref.table === "event") { await db.delete(gerenteEventsTable).where(and(eq(gerenteEventsTable.id, ref.id), eq(gerenteEventsTable.tenantId, tenantId))); done.push("compromisso"); }
       else if (ref.table === "task") { await db.update(tasksTable).set({ isArchived: true, updatedAt: new Date() }).where(and(eq(tasksTable.id, ref.id), eq(tasksTable.tenantId, tenantId))); done.push("tarefa (arquivada)"); }
+      else if (ref.table === "bill_paid") { await db.update(gerenteBillsTable).set({ status: "aberta", paidAt: null, updatedAt: new Date() }).where(and(eq(gerenteBillsTable.id, ref.id), eq(gerenteBillsTable.tenantId, tenantId))); done.push("baixa da conta (reaberta)"); }
     }
     await db.update(gerenteMessagesTable).set({ payload: { ...(m.payload as object), refs: [], undone: true } }).where(eq(gerenteMessagesTable.id, m.id));
     return `↩️ Desfeito: ${done.join(", ")} de "${m.content.slice(0, 80)}".`;
@@ -268,7 +270,9 @@ async function undoLast(tenantId: number, phone: string): Promise<string> {
 // ─── Confirmação ("baixa só com confirmação") ────────────────────────────────
 
 type PendingAction =
-  | { type: "pay_bill"; billId: number }
+  // withEntry: além da baixa, lança o gasto/receita correspondente (quando o
+  // dono disse "paguei X" e X era uma conta em aberto).
+  | { type: "pay_bill"; billId: number; withEntry?: boolean }
   | { type: "cancel_bill"; billId: number }
   | { type: "cancel_event"; eventId: number }
   | { type: "cancel_reminder"; reminderId: number };
@@ -280,35 +284,47 @@ async function setPending(tenantId: number, phone: string, action: PendingAction
   return `${summary}\nConfirma? Responda *sim* ou *não*.`;
 }
 
-async function resolvePending(tenantId: number, phone: string, yes: boolean): Promise<string> {
+async function resolvePending(tenantId: number, phone: string, yes: boolean): Promise<{ text: string; refs: MsgRef[] }> {
   const [p] = await db.select().from(gerentePendingActionsTable)
     .where(and(eq(gerentePendingActionsTable.tenantId, tenantId), eq(gerentePendingActionsTable.phone, phone))).limit(1);
-  if (!p) return yes ? "Não tenho nada aguardando confirmação. 👍" : "Certo, nada pendente.";
+  if (!p) return { text: yes ? "Não tenho nada aguardando confirmação. 👍" : "Certo, nada pendente.", refs: [] };
   await db.delete(gerentePendingActionsTable).where(eq(gerentePendingActionsTable.id, p.id));
-  if (p.expiresAt.getTime() < Date.now()) return "Essa confirmação expirou — me peça de novo, por favor.";
-  if (!yes) return "Ok, cancelado. Nada foi alterado.";
+  if (p.expiresAt.getTime() < Date.now()) return { text: "Essa confirmação expirou — me peça de novo, por favor.", refs: [] };
+  if (!yes) return { text: "Ok, cancelado. Nada foi alterado.", refs: [] };
   const a = p.action as PendingAction;
+  const one = (text: string, ...refs: MsgRef[]) => ({ text, refs });
   if (a.type === "pay_bill") {
     const [b] = await db.update(gerenteBillsTable).set({ status: "paga", paidAt: new Date(), updatedAt: new Date() })
-      .where(and(eq(gerenteBillsTable.id, a.billId), eq(gerenteBillsTable.tenantId, tenantId))).returning();
-    return b ? `✅ Baixa dada: *${b.description}* (${brl(b.amountCents)}).` : "Não achei mais essa conta.";
+      .where(and(eq(gerenteBillsTable.id, a.billId), eq(gerenteBillsTable.tenantId, tenantId), eq(gerenteBillsTable.status, "aberta"))).returning();
+    if (!b) return one("Não achei mais essa conta em aberto.");
+    const refs: MsgRef[] = [{ table: "bill_paid", id: b.id }];
+    let extra = "";
+    if (a.withEntry) {
+      const e = await createEntry(tenantId, {
+        kind: b.kind === "pagar" ? "gasto" : "receita", amountCents: b.amountCents, description: b.description,
+        scope: b.scope === "pessoal" ? "pessoal" : "empresa", storeName: b.storeName,
+      });
+      if (e.ref) refs.push(e.ref);
+      extra = `\n${e.text}`;
+    }
+    return { text: `✅ Baixa dada: *${b.description}* (${brl(b.amountCents)}).${extra}`, refs };
   }
   if (a.type === "cancel_bill") {
     const [b] = await db.update(gerenteBillsTable).set({ status: "cancelada", updatedAt: new Date() })
       .where(and(eq(gerenteBillsTable.id, a.billId), eq(gerenteBillsTable.tenantId, tenantId))).returning();
-    return b ? `🗑️ Conta cancelada: *${b.description}*.` : "Não achei mais essa conta.";
+    return one(b ? `🗑️ Conta cancelada: *${b.description}*.` : "Não achei mais essa conta.");
   }
   if (a.type === "cancel_event") {
     const [e] = await db.update(gerenteEventsTable).set({ status: "cancelado", updatedAt: new Date() })
       .where(and(eq(gerenteEventsTable.id, a.eventId), eq(gerenteEventsTable.tenantId, tenantId))).returning();
-    return e ? `🗑️ Compromisso cancelado: *${e.title}*.` : "Não achei mais esse compromisso.";
+    return one(e ? `🗑️ Compromisso cancelado: *${e.title}*.` : "Não achei mais esse compromisso.");
   }
   if (a.type === "cancel_reminder") {
     const [r] = await db.update(gerenteRemindersTable).set({ status: "cancelado", updatedAt: new Date() })
       .where(and(eq(gerenteRemindersTable.id, a.reminderId), eq(gerenteRemindersTable.tenantId, tenantId))).returning();
-    return r ? `🗑️ Lembrete cancelado: *${r.title}*.` : "Não achei mais esse lembrete.";
+    return one(r ? `🗑️ Lembrete cancelado: *${r.title}*.` : "Não achei mais esse lembrete.");
   }
-  return "Ok.";
+  return one("Ok.");
 }
 
 // ─── Consultas ───────────────────────────────────────────────────────────────
@@ -625,22 +641,26 @@ async function buildSystemPrompt(tenantId: number, settings: GerenteSettings): P
   ].join("\n");
 }
 
-async function loadHistory(tenantId: number, phone: string): Promise<OpenAI.Chat.Completions.ChatCompletionMessageParam[]> {
+async function loadHistory(tenantId: number, phone: string, beforeMessageId: number): Promise<OpenAI.Chat.Completions.ChatCompletionMessageParam[]> {
+  // Só o que veio ANTES da mensagem atual (por id) — duas mensagens rápidas
+  // do dono ou um aviso do agendador no meio não podem entrar como "atual".
+  // Avisos do sistema ficam de fora: não são fala da IA nesta conversa.
   const rows = await db.select({ direction: gerenteMessagesTable.direction, content: gerenteMessagesTable.content })
     .from(gerenteMessagesTable)
-    .where(and(eq(gerenteMessagesTable.tenantId, tenantId), eq(gerenteMessagesTable.phone, phone)))
-    .orderBy(desc(gerenteMessagesTable.id)).limit(HISTORY_LIMIT + 1);
-  // A última "in" é a mensagem atual (já gravada) — fica de fora do histórico.
-  const prior = rows.slice(1).reverse();
-  return prior.map((r) => ({ role: r.direction === "in" ? "user" : "assistant", content: r.content.slice(0, 1500) }) as OpenAI.Chat.Completions.ChatCompletionMessageParam);
+    .where(and(
+      eq(gerenteMessagesTable.tenantId, tenantId), eq(gerenteMessagesTable.phone, phone),
+      lt(gerenteMessagesTable.id, beforeMessageId), ne(gerenteMessagesTable.source, "sistema"),
+    ))
+    .orderBy(desc(gerenteMessagesTable.id)).limit(HISTORY_LIMIT);
+  return rows.reverse().map((r) => ({ role: r.direction === "in" ? "user" : "assistant", content: r.content.slice(0, 1500) }) as OpenAI.Chat.Completions.ChatCompletionMessageParam);
 }
 
-async function runAi(tenantId: number, phone: string, settings: GerenteSettings, text: string): Promise<{ replies: string[]; refs: MsgRef[]; intents: string[] } | null> {
+async function runAi(tenantId: number, phone: string, settings: GerenteSettings, text: string, inMessageId: number): Promise<{ replies: string[]; refs: MsgRef[]; intents: string[] } | null> {
   const { getOpenAiClientForTenant } = await import("./aiClient");
   const openai = await getOpenAiClientForTenant(tenantId);
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
     { role: "system", content: await buildSystemPrompt(tenantId, settings) },
-    ...(await loadHistory(tenantId, phone)),
+    ...(await loadHistory(tenantId, phone, inMessageId)),
     { role: "user", content: text.slice(0, 2000) },
   ];
   const completion = await openai.chat.completions.create({
@@ -688,14 +708,24 @@ async function applyRule(intent: RuleIntent, tenantId: number, phone: string): P
   const one = (text: string, ref?: MsgRef) => ({ replies: [text], refs: ref ? [ref] : [] });
   switch (intent.kind) {
     case "ajuda": return one(HELP_TEXT);
-    case "confirmar": return one(await resolvePending(tenantId, phone, intent.yes));
+    case "confirmar": { const r = await resolvePending(tenantId, phone, intent.yes); return { replies: [r.text], refs: r.refs }; }
     case "feito": return one(await completeLastReminder(tenantId));
     case "adiar": return one(await snoozeLastReminder(tenantId, intent.minutes, intent.when));
     case "desfazer": return one(await undoLast(tenantId, phone));
     case "consultar": return one(await runQuery(tenantId, intent.what, { days: intent.what === "agenda" ? 7 : 1 }));
     case "lembrete": { const r = await createReminder(tenantId, { title: intent.title, dueAt: intent.dueAt, urgent: intent.urgent }); return one(r.text, r.ref); }
     case "gasto":
-    case "receita": { const r = await createEntry(tenantId, { kind: intent.kind, amountCents: intent.amountCents, description: intent.description, scope: intent.scope }); return one(r.text, r.ref); }
+    case "receita": {
+      // "paguei 1500 aluguel" com uma conta "aluguel" em aberto: é a quitação
+      // dela, não um gasto solto — oferece a baixa (confirmação) e, no "sim",
+      // lança o gasto junto. Sem conta correspondente, lançamento normal.
+      const bill = await findBill(tenantId, intent.description);
+      if (bill && bill.kind === (intent.kind === "gasto" ? "pagar" : "receber") && Math.abs(bill.amountCents - intent.amountCents) <= Math.max(100, Math.round(bill.amountCents * 0.02))) {
+        return one(await setPending(tenantId, phone, { type: "pay_bill", billId: bill.id, withEntry: true },
+          `Isso quita a conta *${bill.description}* (${brl(bill.amountCents)}, vence ${fmtDateISO(bill.dueDate)}). Dou baixa e lanço o ${intent.kind}?`));
+      }
+      const r = await createEntry(tenantId, { kind: intent.kind, amountCents: intent.amountCents, description: intent.description, scope: intent.scope }); return one(r.text, r.ref);
+    }
     case "conta": { const r = await createBill(tenantId, { kind: intent.billKind, description: intent.description, amountCents: intent.amountCents, dueDate: intent.dueDate }); return one(r.text, r.ref); }
     case "tarefa": { const r = await createTask(tenantId, { title: intent.title, assigneeName: intent.assignee, dueAt: intent.dueAt, priority: intent.priority }); return one(r.text, r.ref); }
     case "compromisso": { const r = await createEvent(tenantId, { title: intent.title, startsAt: intent.startsAt, scope: intent.scope }); return one(r.text, r.ref); }
@@ -733,7 +763,7 @@ async function processOne(input: GerenteInput): Promise<string[]> {
   // Confirmação pendente: "sim/não" resolve antes de qualquer outra coisa.
   const rule = parseByRules(text);
   // Pedido de busca de cliente é frequente e barato — regra própria.
-  const client = !rule ? text.match(/^(?:o que (?:eu )?combinei com|cliente|busca(?:r)? cliente|quem [eé])\s+(?:o|a)?\s*(.+?)\??$/i) : null;
+  const client = !rule ? text.match(/^(?:o que (?:eu )?combinei com|cliente|busca(?:r)? cliente|quem [eé])\s+(?:(?:o|a)\s+)?(.+?)\??$/i) : null;
 
   if (rule) {
     const r = await applyRule(rule, tenantId, phone);
@@ -743,7 +773,7 @@ async function processOne(input: GerenteInput): Promise<string[]> {
   } else {
     let ai: Awaited<ReturnType<typeof runAi>> = null;
     try {
-      ai = await runAi(tenantId, phone, settings, text);
+      ai = await runAi(tenantId, phone, settings, text, input.inMessageId);
     } catch (err) {
       logger.warn({ err, tenantId }, "Gerente IA: falha na IA");
     }
@@ -784,11 +814,22 @@ export async function tryConsumeGerenteInbound(input: {
   tenantId: number; sessionKey: string; phone: string; text: string; msgType: string;
   mediaUrl: string | null; externalId: string | null;
 }): Promise<boolean> {
+  // Reconhecimento (barato, cacheado): qualquer erro aqui = não é o dono,
+  // segue o fluxo normal.
+  let authorized = false;
   try {
     const { settings, moduleOn } = await cachedContext(input.tenantId);
-    if (!moduleOn || !settings.enabled) return false;
-    if (!isAuthorizedPhone(settings, input.phone)) return false;
+    authorized = moduleOn && settings.enabled && isAuthorizedPhone(settings, input.phone);
+  } catch (err) {
+    logger.warn({ err, tenantId: input.tenantId }, "Gerente IA: falha ao avaliar mensagem recebida");
+    return false;
+  }
+  if (!authorized) return false;
 
+  // Daqui pra frente a mensagem É do dono: erro = descarta e loga, NUNCA
+  // devolve false — senão a mensagem pessoal dele vira atendimento e a
+  // equipe vê.
+  try {
     const phone = normalizePhone(input.phone);
     const isAudio = input.msgType === "audio" && !!input.mediaUrl;
     const text = input.text.trim();
@@ -830,8 +871,8 @@ export async function tryConsumeGerenteInbound(input: {
 
     return true;
   } catch (err) {
-    logger.warn({ err, tenantId: input.tenantId }, "Gerente IA: falha ao avaliar mensagem recebida");
-    return false;
+    logger.error({ err, tenantId: input.tenantId }, "Gerente IA: falha ao tratar mensagem do dono (descartada, não vira atendimento)");
+    return true;
   }
 }
 
@@ -848,12 +889,31 @@ export async function handlePanelMessage(tenantId: number, text: string): Promis
 
 // ─── Avisos proativos (job periódico) ────────────────────────────────────────
 
+/**
+ * Manda um aviso pro dono: primeiro pela última linha por onde ele falou;
+ * se o bridge recusar (linha caiu), tenta as outras linhas conectadas da
+ * loja. Só grava no histórico quando o envio foi aceito — senão a aba
+ * Conversar vira uma parede de avisos que nunca chegaram.
+ */
 async function notifyOwner(settings: GerenteSettings, text: string): Promise<boolean> {
   const phone = settings.lastPhone ?? settings.authorizedPhones[0];
   if (!phone || !settings.lastSessionKey) return false;
-  await saveOut(settings.tenantId, phone, settings.lastSessionKey, text, "sistema");
-  return sendRawWhatsAppText(phone, settings.lastSessionKey, text);
+  const others = await db.select({ sessionKey: whatsappSessionsTable.sessionKey }).from(whatsappSessionsTable)
+    .where(and(eq(whatsappSessionsTable.tenantId, settings.tenantId), eq(whatsappSessionsTable.status, "connected")));
+  const candidates = [settings.lastSessionKey, ...others.map((o) => o.sessionKey).filter((k) => k !== settings.lastSessionKey)];
+  for (const sessionKey of candidates) {
+    if (await sendRawWhatsAppText(phone, sessionKey, text)) {
+      await saveOut(settings.tenantId, phone, sessionKey, text, "sistema");
+      return true;
+    }
+  }
+  logger.warn({ tenantId: settings.tenantId }, "Gerente IA: nenhuma linha aceitou o aviso");
+  return false;
 }
+
+// Uma rodada por vez: com o bridge lento (timeout de 60 s por envio) a rodada
+// pode passar de 1 min, e a seguinte reenviaria os mesmos lembretes.
+let notificationsRunning = false;
 
 /**
  * Roda a cada minuto: lembretes vencidos, compromissos chegando e o resumo
@@ -861,6 +921,16 @@ async function notifyOwner(settings: GerenteSettings, text: string): Promise<boo
  * em try/catch — uma falha nunca trava as outras.
  */
 export async function runGerenteNotifications(): Promise<{ sent: number }> {
+  if (notificationsRunning) return { sent: 0 };
+  notificationsRunning = true;
+  try {
+    return await runNotificationsOnce();
+  } finally {
+    notificationsRunning = false;
+  }
+}
+
+async function runNotificationsOnce(): Promise<{ sent: number }> {
   let sent = 0;
   const now = new Date();
   const hm = spTimeHM(now);

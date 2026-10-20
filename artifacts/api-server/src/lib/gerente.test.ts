@@ -222,6 +222,59 @@ test("aviso de lembrete vencido sai pelo WhatsApp e 'feito' conclui", async () =
   assert.equal(after2!.status, "concluido");
 });
 
+test("'feito' solto não conclui lembrete que nunca foi avisado", async () => {
+  const [r] = await db.insert(gerenteRemindersTable).values({
+    tenantId, title: "lembrete futuro", dueAt: new Date(Date.now() + 3 * 3_600_000),
+  }).returning();
+  const reply = await handlePanelMessage(tenantId, "feito");
+  assert.match(reply.replies[0]!, /Nenhum lembrete avisado/);
+  const [after] = await db.select().from(gerenteRemindersTable).where(eq(gerenteRemindersTable.id, r!.id));
+  assert.equal(after!.status, "pendente");
+  await db.delete(gerenteRemindersTable).where(eq(gerenteRemindersTable.id, r!.id));
+});
+
+test("'paguei 1500 aluguel' com conta aberta oferece a baixa; 'sim' quita e lança; 'desfazer' reabre", async () => {
+  const offer = await handlePanelMessage(tenantId, "paguei 1.500 aluguel");
+  assert.match(offer.replies[0]!, /quita a conta/);
+  const [still] = await db.select().from(gerenteBillsTable).where(and(eq(gerenteBillsTable.tenantId, tenantId), eq(gerenteBillsTable.description, "aluguel")));
+  assert.equal(still!.status, "aberta");
+  const yes = await handlePanelMessage(tenantId, "sim");
+  assert.match(yes.replies[0]!, /Baixa dada/);
+  assert.match(yes.replies[0]!, /Gasto lançado/);
+  const [paid] = await db.select().from(gerenteBillsTable).where(eq(gerenteBillsTable.id, still!.id));
+  assert.equal(paid!.status, "paga");
+  const entries = await db.select().from(gerenteEntriesTable).where(and(eq(gerenteEntriesTable.tenantId, tenantId), eq(gerenteEntriesTable.description, "aluguel")));
+  assert.equal(entries.length, 1);
+  const undo = await handlePanelMessage(tenantId, "desfazer");
+  assert.match(undo.replies[0]!, /reaberta/);
+  const [reopened] = await db.select().from(gerenteBillsTable).where(eq(gerenteBillsTable.id, still!.id));
+  assert.equal(reopened!.status, "aberta");
+  const entriesAfter = await db.select().from(gerenteEntriesTable).where(and(eq(gerenteEntriesTable.tenantId, tenantId), eq(gerenteEntriesTable.description, "aluguel")));
+  assert.equal(entriesAfter.length, 0);
+});
+
+test("aviso que o bridge recusa não entra no histórico e tenta de novo depois", async () => {
+  const [r] = await db.insert(gerenteRemindersTable).values({
+    tenantId, title: "aviso com bridge fora", dueAt: new Date(Date.now() - 60_000), urgent: true,
+  }).returning();
+  const saved = process.env["WHATSAPP_BRIDGE_URL"];
+  process.env["WHATSAPP_BRIDGE_URL"] = "http://127.0.0.1:1"; // porta fechada → recusa na hora
+  try {
+    await runGerenteNotifications();
+  } finally {
+    process.env["WHATSAPP_BRIDGE_URL"] = saved;
+  }
+  const outs = await db.select().from(gerenteMessagesTable).where(and(eq(gerenteMessagesTable.tenantId, tenantId), eq(gerenteMessagesTable.direction, "out")));
+  assert.equal(outs.filter((m) => /aviso com bridge fora/.test(m.content)).length, 0, "não pode gravar aviso que não saiu");
+  const [after] = await db.select().from(gerenteRemindersTable).where(eq(gerenteRemindersTable.id, r!.id));
+  assert.equal(after!.sentAt, null);
+  // Bridge de volta: sai e grava uma vez.
+  bridgeSends.length = 0;
+  await runGerenteNotifications();
+  assert.equal(bridgeSends.filter((s) => /aviso com bridge fora/.test(s.text)).length, 1);
+  await db.update(gerenteRemindersTable).set({ status: "concluido" }).where(eq(gerenteRemindersTable.id, r!.id));
+});
+
 test("Gerente desligado: mensagem do dono volta a ser atendimento comum", async () => {
   await db.update(gerenteSettingsTable).set({ enabled: false }).where(eq(gerenteSettingsTable.tenantId, tenantId));
   invalidateGerenteCache(tenantId);
