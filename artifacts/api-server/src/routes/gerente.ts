@@ -6,7 +6,7 @@ import { Router, type IRouter } from "express";
 import {
   db, gerenteSettingsTable, gerenteMessagesTable, gerenteEventsTable, gerenteRemindersTable,
   gerenteEntriesTable, gerenteBillsTable, gerentePendingActionsTable, whatsappSessionsTable,
-  crmContactsTable, conversationsTable, tasksTable, taskAssigneesTable, usersTable, gerenteTaskDispatchesTable, gerenteTeamPhonesTable,
+  crmContactsTable, conversationsTable, tasksTable, taskAssigneesTable, usersTable, gerenteTaskDispatchesTable, gerenteTeamPhonesTable, gerenteErpActionsTable,
 } from "@workspace/db";
 import { eq, and, desc, asc, gte, lt, ne, inArray, sql } from "drizzle-orm";
 import { phoneVariants } from "../lib/phone";
@@ -27,11 +27,14 @@ const idParam = (raw: string): number | null => { const n = Number(raw); return 
 // ─── Configuração ────────────────────────────────────────────────────────────
 router.get("/gerente/settings", async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const s = await getGerenteSettings(tenantId);
+  const full = await getGerenteSettings(tenantId);
+  const { erpAgentKeyCiphertext, erpAgentKeyIv, erpAgentKeyAuthTag, erpAgentKeyVersion, ...s } = full;
+  void erpAgentKeyIv; void erpAgentKeyAuthTag; void erpAgentKeyVersion;
+  const erpAgentKeySet = !!erpAgentKeyCiphertext;
   // Linhas de WhatsApp da loja — pra mostrar por onde os avisos saem.
   const lines = await db.select({ sessionKey: whatsappSessionsTable.sessionKey, displayName: whatsappSessionsTable.displayName, phoneNumber: whatsappSessionsTable.phoneNumber, status: whatsappSessionsTable.status })
     .from(whatsappSessionsTable).where(eq(whatsappSessionsTable.tenantId, tenantId));
-  res.json({ ...s, lines });
+  res.json({ ...s, erpAgentKeySet, lines });
 });
 
 router.patch("/gerente/settings", async (req, res): Promise<void> => {
@@ -63,6 +66,13 @@ router.patch("/gerente/settings", async (req, res): Promise<void> => {
     }
     set.authorizedPhones = phones;
   }
+  if (b["admSessionKey"] === null || b["admSessionKey"] === "") set.admSessionKey = null;
+  else if (typeof b["admSessionKey"] === "string") {
+    const [line] = await db.select({ k: whatsappSessionsTable.sessionKey }).from(whatsappSessionsTable)
+      .where(and(eq(whatsappSessionsTable.tenantId, tenantId), eq(whatsappSessionsTable.sessionKey, b["admSessionKey"]))).limit(1);
+    if (!line) { res.status(400).json({ error: "Linha de WhatsApp não encontrada." }); return; }
+    set.admSessionKey = line.k;
+  }
   if (isHM(b["quietStart"])) set.quietStart = b["quietStart"];
   if (isHM(b["quietEnd"])) set.quietEnd = b["quietEnd"];
   if (b["dailyDigestTime"] === null) set.dailyDigestTime = null;
@@ -70,7 +80,43 @@ router.patch("/gerente/settings", async (req, res): Promise<void> => {
   await getGerenteSettings(tenantId);
   const [updated] = await db.update(gerenteSettingsTable).set(set).where(eq(gerenteSettingsTable.tenantId, tenantId)).returning();
   invalidateGerenteCache(tenantId);
-  res.json({ ...updated, warnings });
+  const { erpAgentKeyCiphertext: _c, erpAgentKeyIv: _i, erpAgentKeyAuthTag: _a, erpAgentKeyVersion: _v, ...safe } = updated!;
+  void _i; void _a; void _v;
+  res.json({ ...safe, erpAgentKeySet: !!_c, warnings });
+});
+
+// ─── ERP (linha ADM) ─────────────────────────────────────────────────────────
+router.put("/gerente/erp-key", async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = String((req.body as { key?: unknown })?.key ?? "").trim();
+  if (key && !/^agk_[A-Za-z0-9_-]{10,}$/.test(key)) { res.status(400).json({ error: "A chave do agente começa com agk_ (ERP › Financeiro › Aprovações do agente › Chaves)." }); return; }
+  await getGerenteSettings(tenantId);
+  const { saveAgentKey, pingAgent } = await import("../lib/gerenteErp");
+  await saveAgentKey(tenantId, key || null);
+  invalidateGerenteCache(tenantId);
+  res.json(key ? await pingAgent(await getGerenteSettings(tenantId)) : { ok: true, message: "Chave removida." });
+});
+
+router.post("/gerente/erp-key/test", async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { pingAgent } = await import("../lib/gerenteErp");
+  res.json(await pingAgent(await getGerenteSettings(tenantId)));
+});
+
+router.get("/gerente/erp-actions", async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rows = await db.select({
+    id: gerenteErpActionsTable.id, type: gerenteErpActionsTable.type, summary: gerenteErpActionsTable.summary,
+    status: gerenteErpActionsTable.status, message: gerenteErpActionsTable.message, createdAt: gerenteErpActionsTable.createdAt, updatedAt: gerenteErpActionsTable.updatedAt,
+  }).from(gerenteErpActionsTable).where(eq(gerenteErpActionsTable.tenantId, tenantId)).orderBy(desc(gerenteErpActionsTable.id)).limit(60);
+  res.json(rows);
+});
+
+router.post("/gerente/erp-actions/:id/resend", async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = idParam(req.params["id"]!); if (id == null) { res.status(400).json({ error: "ID inválido" }); return; }
+  const { resendErpAction } = await import("../lib/gerenteErp");
+  res.json({ message: await resendErpAction(await getGerenteSettings(tenantId), id) });
 });
 
 // ─── Equipe no WhatsApp ──────────────────────────────────────────────────────

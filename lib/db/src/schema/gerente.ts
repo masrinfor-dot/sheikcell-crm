@@ -29,6 +29,14 @@ export const gerenteSettingsTable = pgTable("gerente_settings", {
   // proativos saem (sem isso, não há como escolher uma linha).
   lastSessionKey: text("last_session_key"),
   lastPhone: text("last_phone"),
+  // Linha ADM: o que o dono manda nela (boleto, conta, "paguei") vai para a
+  // fila de aprovação do ERP (Financeiro › Aprovações do agente).
+  admSessionKey: text("adm_session_key"),
+  // Chave do agente do ERP (agk_...), cifrada com o mesmo cofre do ERP.
+  erpAgentKeyCiphertext: text("erp_agent_key_ciphertext"),
+  erpAgentKeyIv: text("erp_agent_key_iv"),
+  erpAgentKeyAuthTag: text("erp_agent_key_auth_tag"),
+  erpAgentKeyVersion: integer("erp_agent_key_version"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -182,3 +190,22 @@ export const gerenteTeamPhonesTable = pgTable("gerente_team_phones", {
   lastTestOk: boolean("last_test_ok"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [uniqueIndex("gerente_team_phones_tenant_user_uq").on(t.tenantId, t.userId)]);
+
+// Pedido mandado à fila de aprovação do ERP (agent actions). O ERP é a fonte
+// da verdade; aqui só o espelho pra mostrar no painel e avisar no WhatsApp
+// quando for aprovado/recusado.
+export const gerenteErpActionsTable = pgTable("gerente_erp_actions", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull(),
+  erpActionId: text("erp_action_id"),
+  type: text("type").notNull(), // CREATE_PAYABLE | CREATE_RECEIVABLE | SETTLE_PAYABLE | SETTLE_RECEIVABLE
+  summary: text("summary").notNull(),
+  status: text("status").notNull().default("PENDENTE"), // PENDENTE | APROVADA | RECUSADA | ERRO | FALHA_ENVIO
+  message: text("message"),
+  payload: jsonb("payload"),
+  sourceMessageId: integer("source_message_id"),
+  notifiedStatus: text("notified_status"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index("gerente_erp_actions_tenant_idx").on(t.tenantId, t.createdAt)]);
+export type GerenteErpAction = typeof gerenteErpActionsTable.$inferSelect;

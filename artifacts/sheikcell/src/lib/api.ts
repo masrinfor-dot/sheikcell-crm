@@ -1594,6 +1594,7 @@ export type GerenteSettings = {
   id: number; tenantId: number; enabled: boolean; assistantName: string; authorizedPhones: string[];
   quietStart: string; quietEnd: string; dailyDigestTime: string | null; dailyDigestSentOn: string | null;
   lastSessionKey: string | null; lastPhone: string | null; createdAt: string; updatedAt: string;
+  admSessionKey: string | null; erpAgentKeySet: boolean;
   lines: { sessionKey: string; displayName: string | null; phoneNumber: string | null; status: string }[];
 };
 export type GerenteEvent = {
@@ -1615,6 +1616,9 @@ export type GerenteBill = {
 };
 export type GerenteMessage = {
   id: number; phone: string; direction: "in" | "out"; source: "whatsapp" | "painel" | "sistema"; content: string; intent: string | null; createdAt: string;
+};
+export type GerenteErpAction = {
+  id: number; type: string; summary: string; status: "PENDENTE" | "APROVADA" | "RECUSADA" | "ERRO" | "FALHA_ENVIO"; message: string | null; createdAt: string; updatedAt: string;
 };
 export type GerenteTeamMember = {
   id: number; name: string; role: string; storeName: string | null; phone: string | null; suggestedPhone: string | null;
@@ -3224,10 +3228,16 @@ export const api = {
   gerente: {
     settings: {
       get: () => req<GerenteSettings>("/gerente/settings"),
-      update: (data: Partial<Pick<GerenteSettings, "enabled" | "assistantName" | "authorizedPhones" | "quietStart" | "quietEnd" | "dailyDigestTime">>) =>
+      update: (data: Partial<Pick<GerenteSettings, "enabled" | "assistantName" | "authorizedPhones" | "quietStart" | "quietEnd" | "dailyDigestTime" | "admSessionKey">>) =>
         req<Omit<GerenteSettings, "lines"> & { warnings?: string[] }>("/gerente/settings", { method: "PATCH", body: JSON.stringify(data) }),
     },
     overview: () => req<GerenteOverview>("/gerente/overview"),
+    erp: {
+      setKey: (key: string) => req<{ ok: boolean; message: string }>("/gerente/erp-key", { method: "PUT", body: JSON.stringify({ key }) }),
+      test: () => req<{ ok: boolean; message: string }>("/gerente/erp-key/test", { method: "POST" }),
+      actions: () => req<GerenteErpAction[]>("/gerente/erp-actions"),
+      resend: (id: number) => req<{ message: string }>(`/gerente/erp-actions/${id}/resend`, { method: "POST", timeoutMs: 90_000 }),
+    },
     team: {
       list: () => req<GerenteTeamMember[]>("/gerente/team"),
       setPhone: (userId: number, phone: string) => req<{ ok: boolean; phone: string | null }>(`/gerente/team/${userId}`, { method: "PUT", body: JSON.stringify({ phone }) }),

@@ -16,7 +16,7 @@ const {
   db, tenantsTable, sectorsTable, usersTable, conversationsTable, messagesTable, whatsappSessionsTable,
   attendanceLogsTable, crmContactsTable, whatsappContactsTable, tasksTable, taskAssigneesTable,
   gerenteSettingsTable, gerenteMessagesTable, gerenteRemindersTable, gerenteEntriesTable, gerenteBillsTable,
-  gerenteEventsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable, employeesTable, taskCommentsTable, gerenteTeamPhonesTable,
+  gerenteEventsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable, employeesTable, taskCommentsTable, gerenteTeamPhonesTable, gerenteErpActionsTable, tenantErpIntegrationsTable,
 } = await import("@workspace/db");
 const { eq, and, desc } = await import("drizzle-orm");
 const { processInboundWA } = await import("./whatsappInbound.ts");
@@ -34,6 +34,7 @@ let tenantId: number;
 let userId: number;
 let server: Server;
 const bridgeSends: { to: string; text: string; session: string }[] = [];
+const erpPosts: { auth: string; body: Record<string, any> }[] = [];
 
 async function waitFor<T>(fn: () => Promise<T | null | undefined>, ms = 4000): Promise<T> {
   const until = Date.now() + ms;
@@ -64,6 +65,8 @@ async function wipe(): Promise<void> {
     await db.delete(gerenteSettingsTable).where(eq(gerenteSettingsTable.tenantId, id));
     await db.delete(gerenteTaskDispatchesTable).where(eq(gerenteTaskDispatchesTable.tenantId, id));
     await db.delete(gerenteTeamPhonesTable).where(eq(gerenteTeamPhonesTable.tenantId, id));
+    await db.delete(gerenteErpActionsTable).where(eq(gerenteErpActionsTable.tenantId, id));
+    await db.delete(tenantErpIntegrationsTable).where(eq(tenantErpIntegrationsTable.tenantId, id));
     await db.delete(taskCommentsTable).where(eq(taskCommentsTable.tenantId, id));
     await db.delete(employeesTable).where(eq(employeesTable.tenantId, id));
     await db.delete(taskAssigneesTable).where(eq(taskAssigneesTable.tenantId, id));
@@ -88,6 +91,20 @@ before(async () => {
     req.on("data", (c) => { body += c; });
     req.on("end", () => {
       if (req.url === "/whatsapp/send") bridgeSends.push(JSON.parse(body));
+      if (req.url === "/erp/agent/actions" && req.method === "POST") {
+        const j = JSON.parse(body);
+        erpPosts.push({ auth: String(req.headers["authorization"] ?? ""), body: j });
+        if (j.payload?.personName === "Fornecedor Inexistente") {
+          res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ message: "Não achei a pessoa \"Fornecedor Inexistente\"." }));
+          return;
+        }
+        res.writeHead(201, { "Content-Type": "application/json" }).end(JSON.stringify({ id: `act-${erpPosts.length}`, status: "PENDENTE", message: "Recebido. Está aguardando aprovação no ERP." }));
+        return;
+      }
+      if (req.url?.startsWith("/erp/agent/actions/") && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ status: "APROVADA", message: "Aprovado por Fulano. Já está lançado no ERP." }));
+        return;
+      }
       res.writeHead(200, { "Content-Type": "application/json" }).end("{\"ok\":true}");
     });
   });
@@ -331,4 +348,66 @@ test("número da Equipe no WhatsApp tem prioridade sobre o telefone antigo do RH
   assert.match(r.replies[0]!, /Enviada no WhatsApp de Nilmar/);
   assert.ok(bridgeSends.find((s) => s.to === "5533977776666" && /repor películas/.test(s.text)));
   assert.equal(bridgeSends.filter((s) => s.to === "5533988776655").length, 0);
+});
+
+test("linha ADM: conta vai pra fila de aprovação do ERP (não é lançada local); beneficiário desconhecido vai nas observações; aprovação avisa o dono", async () => {
+  const { encryptErpSecret } = await import("./erpCrypto.ts");
+  const { saveAgentKey } = await import("./gerenteErp.ts");
+  const port = Number(new URL(process.env["WHATSAPP_BRIDGE_URL"]!).port);
+  const enc = encryptErpSecret("erp_test_key_123");
+  await db.insert(tenantErpIntegrationsTable).values({ tenantId, baseUrl: `http://127.0.0.1:${port}/erp`, encryptedApiKey: enc.ciphertext, iv: enc.iv, authTag: enc.authTag, keyVersion: enc.keyVersion, last4: "0123" });
+  await saveAgentKey(tenantId, "agk_testkey_abcdefghij");
+  await db.update(gerenteSettingsTable).set({ admSessionKey: sessionKey }).where(eq(gerenteSettingsTable.tenantId, tenantId));
+  invalidateGerenteCache(tenantId);
+  const billsBefore = (await db.select().from(gerenteBillsTable).where(eq(gerenteBillsTable.tenantId, tenantId))).length;
+
+  erpPosts.length = 0; bridgeSends.length = 0;
+  await inbound("pagar 350 energia dia 25/12", OWNER_PHONE_JID, "msg-adm-1");
+  await waitFor(async () => bridgeSends.find((s) => /aguardando aprovação/.test(s.text)));
+  assert.equal(erpPosts.length, 1);
+  assert.equal(erpPosts[0]!.auth, "Bearer agk_testkey_abcdefghij");
+  assert.equal(erpPosts[0]!.body.type, "CREATE_PAYABLE");
+  assert.equal(erpPosts[0]!.body.payload.totalAmount, 350);
+  assert.match(erpPosts[0]!.body.payload.dueDate, /-12-25$/);
+  const billsAfter = (await db.select().from(gerenteBillsTable).where(eq(gerenteBillsTable.tenantId, tenantId))).length;
+  assert.equal(billsAfter, billsBefore, "na linha ADM não lança conta local");
+
+  // Beneficiário que o ERP não conhece: reenvia sem a pessoa, nome nas observações.
+  const { submitErpAction } = await import("./gerenteErp.ts");
+  const { getGerenteSettings } = await import("./gerente.ts");
+  erpPosts.length = 0;
+  const reply = await submitErpAction(await getGerenteSettings(tenantId), {
+    type: "CREATE_PAYABLE", summary: "Peças", senderPhone: OWNER_PHONE_CANONICAL, messageText: "boleto",
+    payload: { description: "Peças", totalAmount: 120, dueDate: "2026-12-01", personName: "Fornecedor Inexistente" },
+  });
+  assert.match(reply, /aguardando aprovação/);
+  assert.equal(erpPosts.length, 2);
+  assert.equal(erpPosts[1]!.body.payload.personName, undefined);
+  assert.match(erpPosts[1]!.body.payload.notes, /Fornecedor Inexistente/);
+
+  // Job: aprovado no ERP → avisa o dono uma vez.
+  bridgeSends.length = 0;
+  await runGerenteNotifications();
+  assert.ok(bridgeSends.find((s) => s.to === OWNER_PHONE_CANONICAL && /ERP — Conta a pagar/.test(s.text) && /Aprovado/.test(s.text)));
+  const rows = await db.select().from(gerenteErpActionsTable).where(eq(gerenteErpActionsTable.tenantId, tenantId));
+  assert.ok(rows.every((r) => r.status === "APROVADA"));
+  bridgeSends.length = 0;
+  await runGerenteNotifications();
+  assert.equal(bridgeSends.filter((s) => /ERP —/.test(s.text)).length, 0, "não avisa duas vezes");
+});
+
+test("documento sem valor: pergunta, e a resposta completa e manda pro ERP", async () => {
+  const erp = await import("./gerenteErp.ts");
+  const action = erp.actionFromDoc({ tipo: "boleto", descricao: "Internet", valor: null, vencimento: "2026-12-10", data_pagamento: null, linha_digitavel: "123", beneficiario: null, beneficiario_documento: null, pagador: null, observacao: null }, "");
+  assert.ok(action && action.missing.includes("valor") && action.type === "CREATE_PAYABLE");
+  const { getGerenteSettings } = await import("./gerente.ts");
+  const settings = await getGerenteSettings(tenantId);
+  await db.insert(gerentePendingActionsTable).values({ tenantId, phone: OWNER_PHONE_CANONICAL, action: { type: "erp_doc", erpType: action.type, payload: action.payload, summary: action.summary, mediaUrl: null, caption: "", missing: action.missing }, summary: action.summary, expiresAt: new Date(Date.now() + 600_000) })
+    .onConflictDoUpdate({ target: [gerentePendingActionsTable.tenantId, gerentePendingActionsTable.phone], set: { action: { type: "erp_doc", erpType: action.type, payload: action.payload, summary: action.summary, mediaUrl: null, caption: "", missing: action.missing }, expiresAt: new Date(Date.now() + 600_000) } });
+  erpPosts.length = 0;
+  void settings;
+  const r = await handlePanelMessage(tenantId, "199,90");
+  assert.match(r.replies[0]!, /aguardando aprovação/);
+  assert.equal(erpPosts.length, 1);
+  assert.equal(erpPosts[0]!.body.payload.totalAmount, 199.9);
 });
