@@ -393,7 +393,7 @@ export const HELP_TEXT = [
   "• *Lembrete* — \"lembra de ligar pro contador amanhã às 9h\"",
   "• *Gasto/receita* — \"gastei 50 no almoço\", \"recebi 300 do João\"",
   "• *Conta* — \"pagar 1.500 aluguel dia 10/11\", \"receber 500 da Maria sexta\"",
-  "• *Tarefa pra equipe* — \"tarefa pro Nilmar: conferir estoque até sexta\"",
+  "• *Tarefa pra equipe* — \"tarefa pro Nilmar: conferir estoque até sexta\" (vai pro WhatsApp dele; ele responde *feito* + foto)",
   "• *Compromisso* — \"reunião com o contador quinta às 14h\"",
   "• *Consultas* — \"meu dia\", \"agenda\", \"lembretes\", \"tarefas\", \"contas\", \"financeiro\"",
   "• *Cliente* — \"o que combinei com o Carlos?\"",
