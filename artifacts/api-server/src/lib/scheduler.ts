@@ -276,6 +276,10 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("./erpOsMessages").then((m) => m.runErpOsMessages()).catch(() => {});
   }, 60_000);
+  // Sorteios do ERP (17/10/2026): avisos aos ganhadores saem pelo WhatsApp daqui.
+  setInterval(() => {
+    void import("./erpRaffleMessages").then((m) => m.runErpRaffleMessages()).catch(() => {});
+  }, 60_000);
   // RH com o ERP (07/10/2026): batidas do WhatsApp, fechamento do mês e
   // documentos da contratação vão para o ERP (dono do cadastro) a cada 5 min.
   setInterval(() => {

@@ -22,6 +22,7 @@ import { blockWhenHrMoved } from "../lib/hrMoved";
 import rhDpRouter, { enforceMandatoryClockIn } from "./rhDp";
 import employeeHiringRouter from "./employeeHiring";
 import rafflesRouter from "./raffles";
+import rafflesExportRouter from "./rafflesExport";
 import botRouter from "./bot";
 import financeRouter from "./finance";
 import financePaymentsRouter from "./financePayments";
@@ -74,6 +75,8 @@ router.use((req, res, next) => { void blockWhenHrMoved(req, res, next); });
 router.use(rhRouter);
 router.use(rhDpRouter);
 router.use(employeeHiringRouter);
+// Antes do rafflesRouter: /raffles/moved e /raffles/export (ERP, 17/10/2026).
+router.use(rafflesExportRouter);
 router.use(rafflesRouter);
 router.use(botRouter);
 router.use(financeRouter);
