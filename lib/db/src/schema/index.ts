@@ -47,3 +47,4 @@ export * from "./broadcast_dispatch_log";
 export * from "./erp_integration";
 export * from "./instagram";
 export * from "./erp_sales";
+export * from "./erp_exchange_logs";

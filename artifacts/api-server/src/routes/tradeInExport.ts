@@ -162,6 +162,11 @@ router.get("/trade-in/export", requireAdmin, async (req, res): Promise<void> => 
       paymentProofPhotos: photos(e.paymentProofPhotos),
     })),
   };
+  // Trocas com o ERP: o arquivo baixado para o ERP entra no histórico (só a contagem).
+  void import("../lib/erpExchanges").then((m) => m.recordErpExchange({
+    tenantId, method: "FILE", path: "/trade-in/export", httpStatus: 200, ok: true, durationMs: Date.now() - now,
+    itemCount: payload.evaluations.length,
+  })).catch(() => {});
   res.setHeader("Content-Disposition", `attachment; filename="avaliacoes-usados-${new Date(now).toISOString().slice(0, 10)}.json"`);
   res.json(payload);
 });

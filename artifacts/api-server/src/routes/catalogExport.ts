@@ -217,6 +217,11 @@ router.get("/catalog/export", requireModuleAccess("vitrine"), requireAdmin, asyn
   };
 
   const filename = `vitrine-${(tenant.catalogSlug || "loja").replace(/[^a-z0-9-]/gi, "")}-${new Date().toISOString().slice(0, 10)}.json`;
+  // Trocas com o ERP: o arquivo baixado para o ERP entra no histórico (só a contagem).
+  void import("../lib/erpExchanges").then((m) => m.recordErpExchange({
+    tenantId, method: "FILE", path: "/catalog/export", httpStatus: 200, ok: true, durationMs: 0,
+    itemCount: payload.products.length,
+  })).catch(() => {});
   res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
   res.json(payload);
 });

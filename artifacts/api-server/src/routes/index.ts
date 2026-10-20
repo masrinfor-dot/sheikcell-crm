@@ -12,6 +12,7 @@ import whatsappProxyRouter from "./whatsapp";
 import internalChatRouter from "./internalChat";
 import tasksRouter from "./tasks";
 import settingsRouter from "./settings";
+import erpExchangesRouter from "./erpExchanges";
 import instagramRouter, { instagramPublicRouter } from "./instagram";
 import partnerLinksRouter from "./partnerLinks";
 import tradeInRouter, { tradeInPublicRouter } from "./tradeIn";
@@ -67,6 +68,8 @@ router.use(whatsappProxyRouter);
 router.use(internalChatRouter);
 router.use(tasksRouter);
 router.use(settingsRouter);
+// Trocas com o ERP (19/10/2026): mapa e histórico do que vai e vem do ERP.
+router.use(erpExchangesRouter);
 router.use(instagramRouter);
 router.use(partnerLinksRouter);
 // Avaliação de usados → ERP (07/10/2026): exportar e desligar aqui.

@@ -295,6 +295,10 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("./erpSalesSync").then((m) => m.runErpSalesSync()).catch(() => {});
   }, 10 * 60_000);
+  // Trocas com o ERP (19/10/2026): o histórico fica 90 dias; limpa a cada 6 h.
+  setInterval(() => {
+    void import("./erpExchanges").then((m) => m.cleanupErpExchanges()).catch(() => {});
+  }, 6 * 60 * 60_000);
   // Lembrete da pesquisa de satisfação: granularidade de minutos basta.
   setInterval(() => { void sendSurveyReminders(); }, 60_000);
   // Preenche vendedores ociosos da fila do Central de Atendimento que os
