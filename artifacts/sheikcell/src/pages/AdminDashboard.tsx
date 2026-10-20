@@ -123,6 +123,8 @@ type WASession = {
   botEnabled: boolean;
   historyImportEnabled: boolean;
   phoneOutboundEnabled: boolean;
+  /** WhatsApp de compras: mensagens de fornecedores vão ao ERP (19/10/2026). */
+  forwardToErp?: boolean;
   directAssigneeId: number | null;
 };
 
@@ -161,6 +163,236 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   excluir_mensagem: "Exclusão de mensagem",
   excluir_atendimento: "Exclusão de atendimento",
 };
+
+// ─── WhatsApp de compras → ERP: fila e conversas anteriores (19/10/2026) ─────
+// Aparece dentro do bloco da conexão só quando "Encaminhar listas de
+// fornecedores ao ERP" está marcado. Mostra a situação da fila (o que já foi,
+// o que falhou) e deixa mandar ao ERP o histórico que já está no CRM
+// (importado ao conectar ou recebido antes de marcar), por contato e período.
+type ErpForwardSummary = {
+  configured: boolean;
+  forwardToErp: boolean;
+  days: number;
+  queue: { pending: number; processing: number; sent: number; failed: number };
+  conversations: Array<{ id: number; phone: string; name: string; messages: number; lastMessageAt: string | null }>;
+};
+const ERP_HISTORY_PERIODS = [7, 15, 30, 60, 90];
+
+function formatPhoneBR(phone: string): string {
+  const d = phone.replace(/\D/g, "");
+  if (d.length === 13 && d.startsWith("55")) return `(${d.slice(2, 4)}) ${d.slice(4, 9)}-${d.slice(9)}`;
+  if (d.length === 12 && d.startsWith("55")) return `(${d.slice(2, 4)}) ${d.slice(4, 8)}-${d.slice(8)}`;
+  return phone;
+}
+
+function ErpForwardPanel({ sessionKey }: { sessionKey: string }) {
+  const { toast } = useToast();
+  const [summary, setSummary] = useState<ErpForwardSummary | null>(null);
+  const [days, setDays] = useState(30);
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState("");
+  // Todos marcados por padrão: guarda só quem foi DESmarcado.
+  const [unchecked, setUnchecked] = useState<Set<number>>(() => new Set());
+  const [sending, setSending] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [result, setResult] = useState<{ queued: number; alreadyQueued: number; skipped: number } | null>(null);
+
+  const load = useCallback(async (d: number) => {
+    try {
+      const r = await fetch(`/api/whatsapp/sessions/${sessionKey}/erp-forward/summary?days=${d}`, { credentials: "include" });
+      if (!r.ok) return;
+      setSummary(await r.json() as ErpForwardSummary);
+    } catch { /* silent */ }
+  }, [sessionKey]);
+
+  // Situação da fila: atualiza sozinha (a fila anda no agendador, 1 min).
+  useEffect(() => {
+    void load(days);
+    const iv = setInterval(() => { void load(days); }, open ? 10_000 : 20_000);
+    return () => clearInterval(iv);
+  }, [load, days, open]);
+
+  const changeDays = async (d: number) => {
+    setDays(d);
+    setLoading(true);
+    await load(d);
+    setLoading(false);
+  };
+
+  const openModal = () => {
+    setUnchecked(new Set());
+    setSearch("");
+    setResult(null);
+    setOpen(true);
+  };
+
+  const convs = summary?.conversations ?? [];
+  const q = search.trim().toLowerCase();
+  const visible = q ? convs.filter((c) => c.name.toLowerCase().includes(q) || c.phone.includes(q)) : convs;
+  const selected = convs.filter((c) => !unchecked.has(c.id));
+  const selectedMessages = selected.reduce((n, c) => n + c.messages, 0);
+
+  const send = async () => {
+    if (!selected.length) return;
+    setSending(true);
+    try {
+      const r = await fetch(`/api/whatsapp/sessions/${sessionKey}/erp-forward/history`, {
+        method: "POST", credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ days, conversationIds: selected.map((c) => c.id) }),
+      });
+      const body = await r.json().catch(() => ({})) as { error?: string; queued?: number; alreadyQueued?: number; skipped?: number };
+      if (!r.ok) {
+        toast({ title: "Não foi possível enviar", description: body.error ?? "Tente de novo.", variant: "destructive" });
+        return;
+      }
+      const res = { queued: body.queued ?? 0, alreadyQueued: body.alreadyQueued ?? 0, skipped: body.skipped ?? 0 };
+      setResult(res);
+      toast({
+        title: `${res.queued} ${res.queued === 1 ? "mensagem entrou" : "mensagens entraram"} na fila`,
+        description: `${res.alreadyQueued} já ${res.alreadyQueued === 1 ? "estava" : "estavam"}. O ERP recebe aos poucos — acompanhe em "Fila para o ERP".`,
+      });
+      void load(days);
+    } catch {
+      toast({ title: "Não foi possível enviar", description: "Falha de rede. Tente de novo.", variant: "destructive" });
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const retryFailed = async () => {
+    setRetrying(true);
+    try {
+      const r = await fetch(`/api/whatsapp/sessions/${sessionKey}/erp-forward/retry-failed`, { method: "POST", credentials: "include" });
+      const body = await r.json().catch(() => ({})) as { error?: string; retried?: number };
+      if (!r.ok) {
+        toast({ title: "Não foi possível tentar de novo", description: body.error ?? "Tente de novo.", variant: "destructive" });
+      } else {
+        toast({ title: `${body.retried ?? 0} ${body.retried === 1 ? "mensagem voltou" : "mensagens voltaram"} para a fila` });
+      }
+      void load(days);
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  const queue = summary?.queue;
+  const pending = queue ? queue.pending + queue.processing : 0;
+
+  return (
+    <div className="pl-6 space-y-2" data-testid={`erp-forward-panel-${sessionKey}`}>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+        <span className="text-muted-foreground">
+          {queue
+            ? <>Fila para o ERP: <span className="font-semibold text-foreground">{pending}</span> pendentes · <span className="font-semibold text-foreground">{queue.sent}</span> enviadas · <span className={`font-semibold ${queue.failed > 0 ? "text-red-600" : "text-foreground"}`}>{queue.failed}</span> falharam</>
+            : "Fila para o ERP: carregando…"}
+        </span>
+        {queue && queue.failed > 0 && (
+          <button type="button" onClick={retryFailed} disabled={retrying}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-border hover:bg-secondary transition font-semibold disabled:opacity-50"
+            data-testid={`button-erp-retry-${sessionKey}`}>
+            <RefreshCw className={`w-3 h-3 ${retrying ? "animate-spin" : ""}`} /> Tentar de novo
+          </button>
+        )}
+      </div>
+      <button type="button" onClick={openModal}
+        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border bg-background hover:bg-secondary transition text-xs font-semibold"
+        data-testid={`button-erp-history-${sessionKey}`}>
+        <History className="w-3.5 h-3.5" /> Enviar conversas anteriores ao ERP…
+      </button>
+      {summary && !summary.configured && (
+        <p className="text-[11px] text-amber-700">
+          O ERP ainda não está ligado (Administração › Integrações). As mensagens ficam esperando na fila até isso.
+        </p>
+      )}
+
+      {open && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => { if (!sending) setOpen(false); }}>
+          <div className="shk-card w-full max-w-md p-5 max-h-[90dvh] flex flex-col" onClick={(e) => e.stopPropagation()}
+            data-testid={`modal-erp-history-${sessionKey}`}>
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="font-bold">Enviar conversas anteriores ao ERP</h3>
+              <button type="button" onClick={() => { if (!sending) setOpen(false); }} aria-label="Fechar">
+                <X className="w-5 h-5 text-muted-foreground" />
+              </button>
+            </div>
+            <p className="text-xs text-muted-foreground mb-3">
+              Manda ao ERP o que estes fornecedores já enviaram por este número (texto, foto, PDF, planilha). O que já foi
+              não duplica. O ERP recebe aos poucos, pela fila.
+            </p>
+            <div className="flex flex-col sm:flex-row gap-2 mb-2">
+              <label className="text-xs sm:w-40 shrink-0">
+                <span className="block text-muted-foreground mb-1">Período</span>
+                <select value={days} onChange={(e) => { void changeDays(Number(e.target.value)); }}
+                  className="w-full h-9 rounded-md border border-input bg-background px-2 text-sm"
+                  data-testid="select-erp-history-days">
+                  {ERP_HISTORY_PERIODS.map((d) => <option key={d} value={d}>Últimos {d} dias</option>)}
+                </select>
+              </label>
+              <label className="text-xs flex-1">
+                <span className="block text-muted-foreground mb-1">Buscar contato</span>
+                <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Nome ou telefone"
+                  className="w-full h-9 rounded-md border border-input bg-background px-2 text-sm"
+                  data-testid="input-erp-history-search" />
+              </label>
+            </div>
+            <div className="flex items-center justify-between text-[11px] text-muted-foreground mb-1">
+              <span>{selected.length} de {convs.length} contatos · {selectedMessages} mensagens</span>
+              <span className="flex gap-2">
+                <button type="button" className="underline" onClick={() => setUnchecked(new Set())}>Marcar todos</button>
+                <button type="button" className="underline" onClick={() => setUnchecked(new Set(convs.map((c) => c.id)))}>Desmarcar todos</button>
+              </span>
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto border border-border rounded-lg divide-y divide-border">
+              {!summary || loading ? (
+                <p className="p-3 text-xs text-muted-foreground">Carregando…</p>
+              ) : convs.length === 0 ? (
+                <p className="p-3 text-xs text-muted-foreground">Nenhuma mensagem de fornecedor neste período (grupos, áudios e vídeos não contam).</p>
+              ) : visible.length === 0 ? (
+                <p className="p-3 text-xs text-muted-foreground">Nenhum contato com "{search}".</p>
+              ) : visible.map((c) => (
+                <label key={c.id} className="flex items-center gap-2.5 px-3 py-2 hover:bg-secondary/50 cursor-pointer text-sm"
+                  data-testid={`erp-history-conv-${c.id}`}>
+                  <input type="checkbox" checked={!unchecked.has(c.id)}
+                    onChange={(e) => setUnchecked((prev) => {
+                      const next = new Set(prev);
+                      if (e.target.checked) next.delete(c.id); else next.add(c.id);
+                      return next;
+                    })}
+                    className="w-4 h-4 accent-[var(--primary)] shrink-0" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-medium truncate">{c.name}</span>
+                    <span className="block text-[11px] text-muted-foreground">{formatPhoneBR(c.phone)}</span>
+                  </span>
+                  <span className="text-xs text-muted-foreground whitespace-nowrap">{c.messages} {c.messages === 1 ? "msg" : "msgs"}</span>
+                </label>
+              ))}
+            </div>
+            {result && (
+              <p className="mt-3 text-xs rounded-lg bg-secondary/60 px-3 py-2" data-testid="erp-history-result">
+                <span className="font-semibold">{result.queued}</span> {result.queued === 1 ? "mensagem entrou" : "mensagens entraram"} na fila
+                {" "}({result.alreadyQueued} já {result.alreadyQueued === 1 ? "estava" : "estavam"}).
+                {result.skipped > 0 && <> {result.skipped} ficaram de fora pelo limite de 5.000 por vez — clique em "Enviar ao ERP" de novo para o restante.</>}
+              </p>
+            )}
+            <div className="flex gap-2 mt-4">
+              <button type="button" onClick={() => setOpen(false)} disabled={sending}
+                className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold border border-border hover:bg-secondary transition disabled:opacity-50">
+                {result ? "Fechar" : "Cancelar"}
+              </button>
+              <button type="button" onClick={send} disabled={sending || !selected.length || !summary}
+                className="flex-1 px-3 py-2 rounded-xl text-xs font-semibold bg-primary text-white hover:bg-primary/90 transition disabled:opacity-50"
+                data-testid="button-erp-history-send">
+                {sending ? "Enviando…" : "Enviar ao ERP"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function AdminDashboard() {
   const { user, logout } = useAuth();
@@ -1531,6 +1763,48 @@ export default function AdminDashboard() {
                       </p>
                     </span>
                   </label>
+                  {/* WhatsApp de compras (19/10/2026): toda mensagem de fornecedor
+                      (texto, foto, PDF, planilha) vai ao ERP (Prumo) para a IA ler
+                      a lista de preço. Fila com nova tentativa — ERP fora do ar não
+                      perde nada. Usa a integração de Administração › Integrações
+                      (ou ERP_API_URL/ERP_API_KEY do servidor). */}
+                  <label className="flex items-start gap-2.5 cursor-pointer text-sm"
+                    data-testid={`checkbox-wa-forward-erp-${s.sessionKey}`}>
+                    <input
+                      type="checkbox"
+                      checked={!!s.forwardToErp}
+                      onChange={async (e) => {
+                        const enabled = e.target.checked;
+                        const r = await fetch(`/api/whatsapp/sessions/${s.sessionKey}/forward-to-erp`, {
+                          method: "POST", credentials: "include",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ enabled }),
+                        });
+                        const body = await r.json().catch(() => ({})) as { error?: string; erpConfigured?: boolean };
+                        if (!r.ok) {
+                          toast({ title: "Não foi possível salvar", description: body.error ?? "Tente de novo.", variant: "destructive" });
+                        } else if (enabled && body.erpConfigured === false) {
+                          toast({
+                            title: "Marcado, mas o ERP ainda não está ligado",
+                            description: "Cole o endereço e a chave do ERP em Administração › Integrações (ou configure ERP_API_URL e ERP_API_KEY no servidor). As listas só vão ao ERP depois disso.",
+                            variant: "destructive",
+                          });
+                        }
+                        fetchWAStatus();
+                      }}
+                      className="w-4 h-4 mt-0.5 accent-[var(--primary)] shrink-0"
+                    />
+                    <span>
+                      <span className="font-medium">Encaminhar listas de fornecedores ao ERP (WhatsApp de compras)</span>
+                      <p className="text-[11px] text-muted-foreground -mt-0.5">
+                        Toda mensagem de fornecedor recebida por este número (texto, foto, PDF, planilha) vai ao ERP, que lê a
+                        lista de preço com IA. Áudios, vídeos, figurinhas e grupos não vão. Se o ERP estiver fora do ar, fica na
+                        fila e é reenviado. Usa a chave do ERP de Administração › Integrações, que precisa do acesso
+                        "Listas de preço dos fornecedores".
+                      </p>
+                    </span>
+                  </label>
+                  {s.forwardToErp && <ErpForwardPanel sessionKey={s.sessionKey} />}
                 </div>
 
                 {/* Robô ligado/desligado POR LINHA (pedido 17/09: "decidir em

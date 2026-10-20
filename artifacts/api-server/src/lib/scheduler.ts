@@ -281,6 +281,12 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("./erpHrSync").then((m) => m.runErpHrSync()).catch(() => {});
   }, 5 * 60_000);
+  // Fila do ERP (listas de preço do WhatsApp de compras, 19/10/2026): reenvia
+  // o que falhou, com espera crescente. Roda uma vez logo no boot também.
+  void import("./erpForward").then((m) => m.runErpForwardQueue()).catch(() => {});
+  setInterval(() => {
+    void import("./erpForward").then((m) => m.runErpForwardQueue()).catch(() => {});
+  }, 60_000);
   // Pedidos de clientes sem estoque (16/10/2026): conversas da linha de
   // atacado vão pra IA do ERP a cada 30 min (ver erpDemandSync.ts).
   setInterval(() => {

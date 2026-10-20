@@ -18,9 +18,9 @@ change), ran the test suite, got a genuine-looking `relation ... does not
 exist` / `column ... does not exist` failure that had nothing to do with the
 code being wrong.
 
-**How to apply:** after adding a new `migrations/NNNN_*.sql` file (and
-registering it in `lib/migrate.ts`'s `MIGRATION_FILES`), apply it to the dev
-DB by hand before trusting any test run against it — e.g. a small inline
+**How to apply:** after adding a new `migrations/NNNN_*.sql` file (the boot
+runner in `lib/migrate.ts` discovers it by directory — nothing to register),
+apply it to the dev DB by hand before trusting any test run against it — e.g. a small inline
 script with `pg`'s `Client` reading and executing the SQL file directly (run
 from `artifacts/api-server` so the `pg` dependency resolves). Don't spend time
 debugging a "missing column" test failure as if it were a logic bug first —
