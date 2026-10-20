@@ -29,14 +29,20 @@ const port = (erp.address() as AddressInfo).port;
 process.env["ERP_API_URL"] = `http://127.0.0.1:${port}/api/v1/`;
 process.env["ERP_API_KEY"] = "erp_teste_chave";
 
-const { db, tenantsTable, whatsappSessionsTable, erpForwardQueueTable } = await import("@workspace/db");
-const { eq, and } = await import("drizzle-orm");
-const { enqueueErpForward, sessionForwardsToErp, erpForwardConfigured, resolveErpCredentials, runErpForwardQueue } = await import("./erpForward.ts");
+const { db, tenantsTable, whatsappSessionsTable, erpForwardQueueTable, conversationsTable, messagesTable } = await import("@workspace/db");
+const { eq, and, inArray } = await import("drizzle-orm");
+const {
+  enqueueErpForward, sessionForwardsToErp, erpForwardConfigured, resolveErpCredentials, runErpForwardQueue,
+  erpForwardSummary, enqueueErpForwardHistory, retryFailedErpForward,
+} = await import("./erpForward.ts");
 
 const MARK = "__TEST_ERP_FORWARD__";
 const rnd = Math.random().toString(36).slice(2, 10);
 const keyCompras = `test-erp-compras-${rnd}`;
+/** Segunda conexão, só para as conversas anteriores (fila própria, contagens exatas). */
+const keyHist = `test-erp-hist-${rnd}`;
 let tenantId: number;
+const convIds: number[] = [];
 
 async function waitFor<T>(fn: () => Promise<T | null | undefined>, ms = 5_000): Promise<T> {
   const until = Date.now() + ms;
@@ -72,10 +78,17 @@ before(async () => {
   await db.delete(tenantsTable).where(eq(tenantsTable.name, MARK));
   const [tenant] = await db.insert(tenantsTable).values({ name: MARK }).returning();
   tenantId = tenant!.id;
-  await db.insert(whatsappSessionsTable).values({ tenantId, sessionKey: keyCompras, displayName: "Compras", status: "connected" });
+  await db.insert(whatsappSessionsTable).values([
+    { tenantId, sessionKey: keyCompras, displayName: "Compras", status: "connected" },
+    { tenantId, sessionKey: keyHist, displayName: "Compras (histórico)", status: "connected", forwardToErp: true },
+  ]);
 });
 
 after(async () => {
+  if (convIds.length) {
+    await db.delete(messagesTable).where(inArray(messagesTable.conversationId, convIds));
+    await db.delete(conversationsTable).where(inArray(conversationsTable.id, convIds));
+  }
   await db.delete(erpForwardQueueTable).where(eq(erpForwardQueueTable.tenantId, tenantId));
   await db.delete(whatsappSessionsTable).where(eq(whatsappSessionsTable.tenantId, tenantId));
   await db.delete(tenantsTable).where(eq(tenantsTable.id, tenantId));
@@ -179,4 +192,160 @@ test("ERP recusou o conteúdo (400): marca 'failed' sem insistir", async () => {
   assert.equal(row.attempts, 1);
   assert.match(row.lastError ?? "", /400/);
   respondWith = { status: 200, body: { lists: [] } };
+});
+
+// ─── Conversas anteriores (histórico já no CRM) ─────────────────────────────
+
+type Conv = typeof conversationsTable.$inferSelect;
+let seq = 0;
+
+async function mkConv(input: { phone: string; name: string; sessionKey?: string; tenant?: number; isCommunity?: boolean }): Promise<Conv> {
+  const [c] = await db.insert(conversationsTable).values({
+    tenantId: input.tenant ?? tenantId, phone: input.phone, name: input.name,
+    sessionKey: input.sessionKey ?? keyHist, isCommunity: input.isCommunity ?? false,
+  }).returning();
+  convIds.push(c!.id);
+  return c!;
+}
+
+async function mkMsg(conv: Conv, input: {
+  direction?: string; type?: string; content?: string; externalId?: string | null; mediaUrl?: string | null;
+  metadata?: { fileName?: string; mimeType?: string } | null; createdAt?: Date; deletedAt?: Date | null;
+}) {
+  const [m] = await db.insert(messagesTable).values({
+    tenantId: conv.tenantId, conversationId: conv.id,
+    content: input.content ?? "", direction: input.direction ?? "inbound", type: input.type ?? "text",
+    externalId: input.externalId === undefined ? `HIST-${rnd}-${++seq}` : input.externalId,
+    mediaUrl: input.mediaUrl ?? null, metadata: input.metadata ?? null,
+    createdAt: input.createdAt ?? new Date(), deletedAt: input.deletedAt ?? null,
+  }).returning();
+  return m!;
+}
+
+const daysAgo = (d: number) => new Date(Date.now() - d * 24 * 60 * 60_000);
+const XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+let convIphone: Conv, convXiaomi: Conv, convGroup: Conv;
+let msgText: Awaited<ReturnType<typeof mkMsg>>, msgFoto: typeof msgText, msgXlsx: typeof msgText, msgAntiga: typeof msgText;
+
+test("resumo: conta só o que iria ao ERP (recebida, texto/foto/documento, não apagada, fora de grupo, da conexão e da loja)", async () => {
+  convIphone = await mkConv({ phone: "5533911112222", name: "Fornecedor iPhone" });
+  msgText = await mkMsg(convIphone, { content: "iPhone 15 128GB R$ 3.900 / iPhone 14 R$ 2.800" });
+  msgFoto = await mkMsg(convIphone, { type: "image", content: "📷 Foto", mediaUrl: "/api/chat/media/foto-lista.jpg" });
+  msgXlsx = await mkMsg(convIphone, { type: "doc", content: "📄 lista.xlsx", mediaUrl: "/api/chat/media/planilha.xlsx", metadata: { fileName: "lista.xlsx", mimeType: XLSX } });
+  msgAntiga = await mkMsg(convIphone, { content: "lista de setembro", createdAt: daysAgo(40) });
+  // Não contam:
+  await mkMsg(convIphone, { type: "audio", content: "🎵 Áudio", mediaUrl: "/api/chat/media/a.ogg" });
+  await mkMsg(convIphone, { type: "sticker", content: "🙂 Figurinha", mediaUrl: "/api/chat/media/s.webp" });
+  await mkMsg(convIphone, { direction: "outbound", content: "pode mandar a lista?", externalId: null });
+  await mkMsg(convIphone, { content: "apagada", deletedAt: new Date() });
+  await mkMsg(convIphone, { content: "sem id do WhatsApp", externalId: null });
+  await mkMsg(convIphone, { type: "image", content: "📷 Foto", mediaUrl: null }); // histórico sem o arquivo: nada para ler
+  await mkMsg(convIphone, { content: "" });
+  convXiaomi = await mkConv({ phone: "5533933334444", name: "Fornecedor Xiaomi" });
+  await mkMsg(convXiaomi, { content: "Redmi Note 13 R$ 1.100" });
+  convGroup = await mkConv({ phone: `1203630000${rnd}@g.us`, name: "Grupo Fornecedores" });
+  await mkMsg(convGroup, { content: "lista no grupo" });
+  const convComunidade = await mkConv({ phone: "5533955556666", name: "Comunidade", isCommunity: true });
+  await mkMsg(convComunidade, { content: "lista na comunidade" });
+  const convOutraConexao = await mkConv({ phone: "5533977778888", name: "Outra conexão", sessionKey: keyCompras });
+  await mkMsg(convOutraConexao, { content: "lista em outra conexão" });
+  const convOutraLoja = await mkConv({ phone: "5533999990000", name: "Outra loja", tenant: tenantId + 1 });
+  await mkMsg(convOutraLoja, { content: "lista de outra loja" });
+
+  const s = await erpForwardSummary(tenantId, keyHist, 30);
+  assert.equal(s.configured, true);
+  assert.equal(s.forwardToErp, true);
+  assert.equal(s.days, 30);
+  assert.deepEqual(s.queue, { pending: 0, processing: 0, sent: 0, failed: 0 });
+  assert.deepEqual(
+    s.conversations.map((c) => ({ id: c.id, phone: c.phone, name: c.name, messages: c.messages })),
+    [
+      { id: convIphone.id, phone: "5533911112222", name: "Fornecedor iPhone", messages: 3 },
+      { id: convXiaomi.id, phone: "5533933334444", name: "Fornecedor Xiaomi", messages: 1 },
+    ],
+  );
+  assert.equal(s.conversations[0]!.lastMessageAt, msgXlsx.createdAt.toISOString());
+  // Período maior pega a mensagem antiga.
+  const s60 = await erpForwardSummary(tenantId, keyHist, 60);
+  assert.equal(s60.conversations.find((c) => c.id === convIphone.id)?.messages, 4);
+  // Outra conexão / outra loja: nada da conexão de histórico vaza.
+  const sCompras = await erpForwardSummary(tenantId, keyCompras, 30);
+  assert.deepEqual(sCompras.conversations.map((c) => c.id), [convOutraConexao.id]);
+  assert.equal(sCompras.queue.sent >= 1, true, "fila da conexão de compras é a dos testes acima");
+  const sOutraLoja = await erpForwardSummary(tenantId + 1, keyHist, 30);
+  assert.equal(sOutraLoja.forwardToErp, false);
+  assert.deepEqual(sOutraLoja.conversations.map((c) => c.id), [convOutraLoja.id]);
+});
+
+test("histórico: enfileira sem mandar na hora, com o conteúdo certo, e é idempotente", async () => {
+  const callsBefore = received.length;
+  const r1 = await enqueueErpForwardHistory(tenantId, keyHist, 30);
+  assert.deepEqual(r1, { queued: 4, alreadyQueued: 0, conversations: 2, skipped: 0 });
+  assert.equal(received.length, callsBefore, "não dispara envio em rajada — quem manda é o tick");
+
+  const rowText = (await rowByExternalId(msgText.externalId!))!;
+  assert.equal(rowText.status, "pending");
+  assert.equal(rowText.attempts, 0);
+  assert.equal(rowText.sessionKey, keyHist);
+  assert.equal(rowText.tenantId, tenantId);
+  assert.equal(rowText.conversationId, convIphone.id);
+  assert.equal(rowText.payload.text, "iPhone 15 128GB R$ 3.900 / iPhone 14 R$ 2.800");
+  assert.equal(rowText.payload.senderPhone, "5533911112222");
+  assert.equal(rowText.payload.senderName, "Fornecedor iPhone");
+  assert.equal(rowText.payload.receivedAt, msgText.createdAt.toISOString());
+  assert.equal(rowText.payload.mediaPath, null);
+  assert.equal(rowText.payload.mediaBase64, null);
+
+  const rowFoto = (await rowByExternalId(msgFoto.externalId!))!;
+  assert.equal(rowFoto.payload.text, null, "placeholder '📷 Foto' não vai como texto");
+  assert.equal(rowFoto.payload.mimeType, "image/jpeg", "tipo inferido pela extensão do arquivo");
+  assert.equal(rowFoto.payload.fileName, null);
+  assert.ok(rowFoto.payload.mediaPath?.endsWith("/foto-lista.jpg"));
+
+  const rowXlsx = (await rowByExternalId(msgXlsx.externalId!))!;
+  assert.equal(rowXlsx.payload.text, null);
+  assert.equal(rowXlsx.payload.fileName, "lista.xlsx");
+  assert.equal(rowXlsx.payload.mimeType, XLSX);
+  assert.ok(rowXlsx.payload.mediaPath?.endsWith("/planilha.xlsx"));
+
+  assert.equal(await rowByExternalId(msgAntiga.externalId!), null, "fora do período não entra");
+
+  // Segunda chamada: nada duplica.
+  const r2 = await enqueueErpForwardHistory(tenantId, keyHist, 30);
+  assert.deepEqual(r2, { queued: 0, alreadyQueued: 4, conversations: 2, skipped: 0 });
+  // Só alguns contatos, período maior: entra só o que faltava daquele contato.
+  const r3 = await enqueueErpForwardHistory(tenantId, keyHist, 60, [convIphone.id]);
+  assert.deepEqual(r3, { queued: 1, alreadyQueued: 3, conversations: 1, skipped: 0 });
+  assert.equal((await rowByExternalId(msgAntiga.externalId!))?.status, "pending");
+  // Grupo escolhido à mão continua fora.
+  const r4 = await enqueueErpForwardHistory(tenantId, keyHist, 30, [convGroup.id]);
+  assert.deepEqual(r4, { queued: 0, alreadyQueued: 0, conversations: 0, skipped: 0 });
+
+  const s = await erpForwardSummary(tenantId, keyHist, 30);
+  assert.deepEqual(s.queue, { pending: 5, processing: 0, sent: 0, failed: 0 });
+});
+
+test("tentar de novo: só as 'failed' desta conexão voltam para a fila", async () => {
+  await db.update(erpForwardQueueTable).set({ status: "failed", attempts: 7, lastError: "ERP respondeu 400: sem anexo legível" })
+    .where(eq(erpForwardQueueTable.externalId, msgText.externalId!));
+  await db.update(erpForwardQueueTable).set({ status: "sent", sentAt: new Date() })
+    .where(eq(erpForwardQueueTable.externalId, msgFoto.externalId!));
+  const before = await erpForwardSummary(tenantId, keyHist, 30);
+  assert.deepEqual(before.queue, { pending: 3, processing: 0, sent: 1, failed: 1 });
+  const falhaCompras = (await rowByExternalId(`MSG-400-${rnd}`))!;
+  assert.equal(falhaCompras.status, "failed", "a falha da outra conexão existe");
+
+  assert.equal(await retryFailedErpForward(tenantId + 1, keyHist), 0, "outra loja não mexe");
+  assert.equal(await retryFailedErpForward(tenantId, keyHist), 1);
+
+  const rowText = (await rowByExternalId(msgText.externalId!))!;
+  assert.equal(rowText.status, "pending");
+  assert.equal(rowText.attempts, 0);
+  assert.ok(rowText.nextAttemptAt.getTime() <= Date.now());
+  assert.equal((await rowByExternalId(msgFoto.externalId!))?.status, "sent");
+  assert.equal((await rowByExternalId(`MSG-400-${rnd}`))?.status, "failed", "falha de outra conexão fica como está");
+  const after = await erpForwardSummary(tenantId, keyHist, 30);
+  assert.deepEqual(after.queue, { pending: 4, processing: 0, sent: 1, failed: 0 });
+  assert.equal(await retryFailedErpForward(tenantId, keyHist), 0);
 });

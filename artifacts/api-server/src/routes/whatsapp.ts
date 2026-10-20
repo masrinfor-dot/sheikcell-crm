@@ -439,6 +439,83 @@ router.post("/whatsapp/sessions/:key/forward-to-erp", requireFeature("whatsapp")
   res.json({ ok: true, forwardToErp: updated.forwardToErp, erpConfigured: await erpForwardConfigured(tenantId) });
 });
 
+// ─── WhatsApp de compras: conversas anteriores + situação da fila ──────────
+// O histórico já gravado no CRM (mensagens recebidas antes de marcar a
+// conexão, ou importadas ao conectar) pode ser mandado ao ERP em lote. Ver
+// enqueueErpForwardHistory em lib/erpForward.ts.
+async function sessionRowForTenant(key: string, tenantId: number) {
+  const [row] = await db
+    .select({ forwardToErp: whatsappSessionsTable.forwardToErp })
+    .from(whatsappSessionsTable)
+    .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId)))
+    .limit(1);
+  return row ?? null;
+}
+
+function parseHistoryDays(raw: unknown, fallback: number, maxDays: number): number | null {
+  if (raw == null || raw === "") return fallback;
+  const n = typeof raw === "number" ? raw : Number(String(raw));
+  if (!Number.isInteger(n) || n < 1 || n > maxDays) return null;
+  return n;
+}
+
+// Resumo para a tela: situação da fila desta conexão e contatos (fora de
+// grupo/comunidade) com mensagens que iriam ao ERP no período.
+router.get("/whatsapp/sessions/:key/erp-forward/summary", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const erp = await import("../lib/erpForward");
+  const days = parseHistoryDays(req.query["days"], erp.HISTORY_DEFAULT_DAYS, erp.HISTORY_MAX_DAYS);
+  if (days == null) { res.status(400).json({ error: `Informe days entre 1 e ${erp.HISTORY_MAX_DAYS}` }); return; }
+  if (!(await sessionRowForTenant(key, tenantId))) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+  res.json(await erp.erpForwardSummary(tenantId, key, days));
+});
+
+// Enfileira as conversas anteriores (todas ou só os contatos escolhidos).
+// Não manda na hora: o agendador esvazia a fila no ritmo dele.
+router.post("/whatsapp/sessions/:key/erp-forward/history", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const erp = await import("../lib/erpForward");
+  const body = (req.body ?? {}) as { days?: unknown; conversationIds?: unknown };
+  const days = parseHistoryDays(body.days, erp.HISTORY_DEFAULT_DAYS, erp.HISTORY_MAX_DAYS);
+  if (days == null) { res.status(400).json({ error: `Informe days entre 1 e ${erp.HISTORY_MAX_DAYS}` }); return; }
+  let conversationIds: number[] | undefined;
+  if (body.conversationIds != null) {
+    if (!Array.isArray(body.conversationIds) || body.conversationIds.length > 1000
+      || !body.conversationIds.every((id) => Number.isInteger(id) && (id as number) > 0)) {
+      res.status(400).json({ error: "conversationIds deve ser uma lista de ids (até 1.000)" }); return;
+    }
+    conversationIds = body.conversationIds as number[];
+    if (!conversationIds.length) { res.status(400).json({ error: "Escolha pelo menos um contato" }); return; }
+  }
+  const session = await sessionRowForTenant(key, tenantId);
+  if (!session) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+  if (!session.forwardToErp) {
+    res.status(400).json({ error: "Marque \"Encaminhar listas de fornecedores ao ERP\" nesta conexão antes de enviar as conversas anteriores." });
+    return;
+  }
+  if (!(await erp.erpForwardConfigured(tenantId))) {
+    res.status(400).json({ error: "ERP não configurado: cole o endereço e a chave do ERP em Administração › Integrações (ou configure ERP_API_URL e ERP_API_KEY no servidor)." });
+    return;
+  }
+  const result = await erp.enqueueErpForwardHistory(tenantId, key, days, conversationIds);
+  // Começa a mandar já (no ritmo do tick), em vez de esperar até 1 min.
+  if (result.queued > 0) void erp.runErpForwardQueue().catch(() => {});
+  res.json({ ...result, limit: erp.HISTORY_MAX_MESSAGES });
+});
+
+// Linhas que o ERP recusou (ou esgotaram as tentativas) voltam para a fila.
+router.post("/whatsapp/sessions/:key/erp-forward/retry-failed", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  if (!(await sessionRowForTenant(key, tenantId))) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+  const erp = await import("../lib/erpForward");
+  const retried = await erp.retryFailedErpForward(tenantId, key);
+  if (retried > 0) void erp.runErpForwardQueue().catch(() => {});
+  res.json({ retried });
+});
+
 // ─── Responsável fixo da linha (mesmo pedido) ─────────────────────────────
 // Conversa nova ou reaberta por este número entra direto em "Ativos" com
 // este usuário. userId null volta ao fluxo normal (Potenciais/fila).
