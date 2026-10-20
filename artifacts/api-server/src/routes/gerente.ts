@@ -6,7 +6,7 @@ import { Router, type IRouter } from "express";
 import {
   db, gerenteSettingsTable, gerenteMessagesTable, gerenteEventsTable, gerenteRemindersTable,
   gerenteEntriesTable, gerenteBillsTable, gerentePendingActionsTable, whatsappSessionsTable,
-  crmContactsTable, conversationsTable, tasksTable, taskAssigneesTable, usersTable, gerenteTaskDispatchesTable,
+  crmContactsTable, conversationsTable, tasksTable, taskAssigneesTable, usersTable, gerenteTaskDispatchesTable, gerenteTeamPhonesTable,
 } from "@workspace/db";
 import { eq, and, desc, asc, gte, lt, ne, inArray, sql } from "drizzle-orm";
 import { phoneVariants } from "../lib/phone";
@@ -71,6 +71,52 @@ router.patch("/gerente/settings", async (req, res): Promise<void> => {
   const [updated] = await db.update(gerenteSettingsTable).set(set).where(eq(gerenteSettingsTable.tenantId, tenantId)).returning();
   invalidateGerenteCache(tenantId);
   res.json({ ...updated, warnings });
+});
+
+// ─── Equipe no WhatsApp ──────────────────────────────────────────────────────
+router.get("/gerente/team", async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const users = await db.select({ id: usersTable.id, name: usersTable.name, role: usersTable.role, storeName: usersTable.storeName })
+    .from(usersTable).where(and(eq(usersTable.tenantId, tenantId), eq(usersTable.isActive, true), ne(usersTable.role, "superadmin"), ne(usersTable.role, "admin")))
+    .orderBy(asc(usersTable.name));
+  const phones = await db.select().from(gerenteTeamPhonesTable).where(eq(gerenteTeamPhonesTable.tenantId, tenantId));
+  const { suggestedPhones } = await import("../lib/gerenteDispatch");
+  const sugg = await suggestedPhones(tenantId);
+  res.json(users.map((u) => {
+    const p = phones.find((x) => x.userId === u.id);
+    return { ...u, name: u.name.trim(), phone: p?.phone ?? null, suggestedPhone: p ? null : sugg.get(u.id) ?? null, lastTestAt: p?.lastTestAt ?? null, lastTestOk: p?.lastTestOk ?? null };
+  }));
+});
+
+router.put("/gerente/team/:userId", async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const userId = idParam(req.params["userId"]!); if (userId == null) { res.status(400).json({ error: "ID inválido" }); return; }
+  const [u] = await db.select({ id: usersTable.id }).from(usersTable).where(and(eq(usersTable.id, userId), eq(usersTable.tenantId, tenantId))).limit(1);
+  if (!u) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
+  const raw = String((req.body as { phone?: unknown })?.phone ?? "").trim();
+  if (!raw) { await db.delete(gerenteTeamPhonesTable).where(and(eq(gerenteTeamPhonesTable.tenantId, tenantId), eq(gerenteTeamPhonesTable.userId, userId))); res.json({ ok: true, phone: null }); return; }
+  const phone = normalizeAuthorizedPhones([raw])[0];
+  if (!phone || phone.length < 12) { res.status(400).json({ error: "Número inválido. Use DDD + número (ex.: 33 99999-0000)." }); return; }
+  await db.insert(gerenteTeamPhonesTable).values({ tenantId, userId, phone })
+    .onConflictDoUpdate({ target: [gerenteTeamPhonesTable.tenantId, gerenteTeamPhonesTable.userId], set: { phone, lastTestAt: null, lastTestOk: null, updatedAt: new Date() } });
+  // Tarefas já enviadas sem telefone passam a ter o número novo.
+  res.json({ ok: true, phone });
+});
+
+router.post("/gerente/team/:userId/test", async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const userId = idParam(req.params["userId"]!); if (userId == null) { res.status(400).json({ error: "ID inválido" }); return; }
+  const [row] = await db.select({ phone: gerenteTeamPhonesTable.phone, name: usersTable.name }).from(gerenteTeamPhonesTable)
+    .innerJoin(usersTable, eq(usersTable.id, gerenteTeamPhonesTable.userId))
+    .where(and(eq(gerenteTeamPhonesTable.tenantId, tenantId), eq(gerenteTeamPhonesTable.userId, userId))).limit(1);
+  if (!row) { res.status(400).json({ error: "Cadastre o WhatsApp desta pessoa primeiro." }); return; }
+  const settings = await getGerenteSettings(tenantId);
+  const { sendTeamTest } = await import("../lib/gerenteDispatch");
+  const used = await sendTeamTest(tenantId, row.phone, row.name, settings.lastSessionKey);
+  await db.update(gerenteTeamPhonesTable).set({ lastTestAt: new Date(), lastTestOk: !!used })
+    .where(and(eq(gerenteTeamPhonesTable.tenantId, tenantId), eq(gerenteTeamPhonesTable.userId, userId)));
+  if (!used) { res.status(502).json({ error: "Nenhuma linha de WhatsApp aceitou o envio. Confira se as linhas estão conectadas." }); return; }
+  res.json({ ok: true, sessionKey: used });
 });
 
 // ─── Meu dia ─────────────────────────────────────────────────────────────────

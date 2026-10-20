@@ -1616,6 +1616,10 @@ export type GerenteBill = {
 export type GerenteMessage = {
   id: number; phone: string; direction: "in" | "out"; source: "whatsapp" | "painel" | "sistema"; content: string; intent: string | null; createdAt: string;
 };
+export type GerenteTeamMember = {
+  id: number; name: string; role: string; storeName: string | null; phone: string | null; suggestedPhone: string | null;
+  lastTestAt: string | null; lastTestOk: boolean | null;
+};
 export type GerenteTaskDispatch = {
   id: number; taskId: number; assigneeName: string; status: "enviada" | "aguardando_prova" | "concluida" | "sem_telefone" | "falhou" | "cancelada";
   sentAt: string | null; doneAt: string | null; proofUrl: string | null; proofNote: string | null; createdAt: string; title: string; dueDate: string | null;
@@ -3224,6 +3228,11 @@ export const api = {
         req<Omit<GerenteSettings, "lines"> & { warnings?: string[] }>("/gerente/settings", { method: "PATCH", body: JSON.stringify(data) }),
     },
     overview: () => req<GerenteOverview>("/gerente/overview"),
+    team: {
+      list: () => req<GerenteTeamMember[]>("/gerente/team"),
+      setPhone: (userId: number, phone: string) => req<{ ok: boolean; phone: string | null }>(`/gerente/team/${userId}`, { method: "PUT", body: JSON.stringify({ phone }) }),
+      test: (userId: number) => req<{ ok: boolean; sessionKey: string }>(`/gerente/team/${userId}/test`, { method: "POST", timeoutMs: 90_000 }),
+    },
     rollover: (data: { reminderIds: number[]; eventIds: number[] }) =>
       req<{ moved: number; to: string }>("/gerente/rollover", { method: "POST", body: JSON.stringify(data) }),
     events: {
