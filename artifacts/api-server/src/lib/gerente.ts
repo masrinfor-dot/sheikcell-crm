@@ -17,7 +17,7 @@ import { and, eq, desc, asc, gte, lte, lt, isNull, isNotNull, inArray, ilike, ne
 import {
   db,
   gerenteSettingsTable, gerenteMessagesTable, gerenteEventsTable, gerenteRemindersTable,
-  gerenteEntriesTable, gerenteBillsTable, gerentePendingActionsTable,
+  gerenteEntriesTable, gerenteBillsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable,
   tasksTable, taskAssigneesTable, usersTable, storesTable, tenantsTable, whatsappSessionsTable,
   crmContactsTable, crmInternalNotesTable, conversationsTable,
   type GerenteSettings,
@@ -186,8 +186,18 @@ async function createTask(tenantId: number, p: {
   }).returning();
   if (assignee) await db.insert(taskAssigneesTable).values({ tenantId, taskId: t!.id, userId: assignee.id });
   const who = assignee ? `para *${assignee.name}*` : p.assigneeName ? `(não achei "${p.assigneeName}" na equipe — ficou sem responsável)` : "(sem responsável)";
+  // Com responsável: a tarefa vai pro WhatsApp dele, que confirma com foto.
+  let dispatchLine = "";
+  if (assignee) {
+    const settings = await getGerenteSettings(tenantId);
+    const { dispatchTaskToSeller } = await import("./gerenteDispatch");
+    dispatchLine = "\n" + await dispatchTaskToSeller(tenantId, {
+      taskId: t!.id, userId: assignee.id, assigneeName: assignee.name, title: t!.title,
+      dueAt: p.dueAt ?? null, priority: p.priority ?? "media", ownerSessionKey: settings.lastSessionKey,
+    });
+  }
   return {
-    text: `📋 Tarefa criada no quadro ${who}: *${t!.title}*${p.dueAt ? ` — prazo ${fmtWhen(p.dueAt)}` : ""}${p.priority === "alta" ? " · prioridade alta" : ""}.`,
+    text: `📋 Tarefa *${t!.id}* criada no quadro ${who}: *${t!.title}*${p.dueAt ? ` — prazo ${fmtWhen(p.dueAt)}` : ""}${p.priority === "alta" ? " · prioridade alta" : ""}.${dispatchLine}`,
     ref: { table: "task", id: t!.id },
   };
 }
@@ -258,7 +268,14 @@ async function undoLast(tenantId: number, phone: string): Promise<string> {
       else if (ref.table === "entry") { await db.delete(gerenteEntriesTable).where(and(eq(gerenteEntriesTable.id, ref.id), eq(gerenteEntriesTable.tenantId, tenantId))); done.push("lançamento"); }
       else if (ref.table === "bill") { await db.delete(gerenteBillsTable).where(and(eq(gerenteBillsTable.id, ref.id), eq(gerenteBillsTable.tenantId, tenantId))); done.push("conta"); }
       else if (ref.table === "event") { await db.delete(gerenteEventsTable).where(and(eq(gerenteEventsTable.id, ref.id), eq(gerenteEventsTable.tenantId, tenantId))); done.push("compromisso"); }
-      else if (ref.table === "task") { await db.update(tasksTable).set({ isArchived: true, updatedAt: new Date() }).where(and(eq(tasksTable.id, ref.id), eq(tasksTable.tenantId, tenantId))); done.push("tarefa (arquivada)"); }
+      else if (ref.table === "task") {
+        await db.update(tasksTable).set({ isArchived: true, updatedAt: new Date() }).where(and(eq(tasksTable.id, ref.id), eq(tasksTable.tenantId, tenantId)));
+        const cancelled = await db.update(gerenteTaskDispatchesTable).set({ status: "cancelada" })
+          .where(and(eq(gerenteTaskDispatchesTable.taskId, ref.id), eq(gerenteTaskDispatchesTable.tenantId, tenantId), inArray(gerenteTaskDispatchesTable.status, ["enviada", "aguardando_prova"])))
+          .returning({ phone: gerenteTaskDispatchesTable.phone, sessionKey: gerenteTaskDispatchesTable.sessionKey });
+        for (const c of cancelled) if (c.phone && c.sessionKey) void sendRawWhatsAppText(c.phone, c.sessionKey, `❌ A tarefa ${ref.id} foi cancelada — pode desconsiderar.`);
+        done.push("tarefa (arquivada)");
+      }
       else if (ref.table === "bill_paid") { await db.update(gerenteBillsTable).set({ status: "aberta", paidAt: null, updatedAt: new Date() }).where(and(eq(gerenteBillsTable.id, ref.id), eq(gerenteBillsTable.tenantId, tenantId))); done.push("baixa da conta (reaberta)"); }
     }
     await db.update(gerenteMessagesTable).set({ payload: { ...(m.payload as object), refs: [], undone: true } }).where(eq(gerenteMessagesTable.id, m.id));
@@ -911,6 +928,13 @@ async function notifyOwner(settings: GerenteSettings, text: string): Promise<boo
   return false;
 }
 
+/** Aviso ao dono a partir só do tenant (usado pelas tarefas da equipe). */
+export async function notifyOwnerByTenant(tenantId: number, text: string): Promise<boolean> {
+  const settings = await getGerenteSettings(tenantId);
+  if (!settings.enabled) return false;
+  return notifyOwner(settings, text);
+}
+
 // Uma rodada por vez: com o bridge lento (timeout de 60 s por envio) a rodada
 // pode passar de 1 min, e a seguinte reenviaria os mesmos lembretes.
 let notificationsRunning = false;
@@ -963,6 +987,13 @@ async function runNotificationsOnce(): Promise<{ sent: number }> {
         const mins = Math.max(0, Math.round((e.startsAt.getTime() - now.getTime()) / 60_000));
         const ok = await notifyOwner(settings, `📅 *${mins > 0 ? `Em ${mins} min` : "Agora"}:* ${e.title}${e.location ? ` — ${e.location}` : ""}${e.participants ? ` (com ${e.participants})` : ""}`);
         if (ok) { await db.update(gerenteEventsTable).set({ remindedAt: now, updatedAt: now }).where(eq(gerenteEventsTable.id, e.id)); sent++; }
+      }
+
+      try {
+        const { runTaskOverdueChecks } = await import("./gerenteDispatch");
+        sent += await runTaskOverdueChecks(settings.tenantId);
+      } catch (err) {
+        logger.warn({ err, tenantId: settings.tenantId }, "Gerente IA: falha ao checar tarefas atrasadas");
       }
 
       if (settings.dailyDigestTime && settings.dailyDigestSentOn !== today && hm >= settings.dailyDigestTime && !quiet) {

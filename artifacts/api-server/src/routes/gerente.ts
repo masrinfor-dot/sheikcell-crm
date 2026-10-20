@@ -6,9 +6,9 @@ import { Router, type IRouter } from "express";
 import {
   db, gerenteSettingsTable, gerenteMessagesTable, gerenteEventsTable, gerenteRemindersTable,
   gerenteEntriesTable, gerenteBillsTable, gerentePendingActionsTable, whatsappSessionsTable,
-  crmContactsTable, conversationsTable,
+  crmContactsTable, conversationsTable, tasksTable, taskAssigneesTable, usersTable, gerenteTaskDispatchesTable,
 } from "@workspace/db";
-import { eq, and, desc, asc, gte, lt, inArray, sql } from "drizzle-orm";
+import { eq, and, desc, asc, gte, lt, ne, inArray, sql } from "drizzle-orm";
 import { phoneVariants } from "../lib/phone";
 import { requireAdmin, requireModule, requireTenant } from "../middlewares/auth";
 import {
@@ -79,7 +79,9 @@ router.get("/gerente/overview", async (req, res): Promise<void> => {
   const today = spDateISO();
   const start = parseSpLocal(`${today}T00:00`)!;
   const end = new Date(start.getTime() + 86_400_000);
-  const [events, reminders, bills, entriesMonth, digest] = await Promise.all([
+  const weekEnd = new Date(start.getTime() + 8 * 86_400_000);
+  const now = new Date();
+  const [events, reminders, bills, entriesMonth, digest, weekEvents, weekReminders, teamTasks] = await Promise.all([
     db.select().from(gerenteEventsTable).where(and(eq(gerenteEventsTable.tenantId, tenantId), eq(gerenteEventsTable.status, "agendado"), gte(gerenteEventsTable.startsAt, start), lt(gerenteEventsTable.startsAt, end))).orderBy(asc(gerenteEventsTable.startsAt)),
     db.select().from(gerenteRemindersTable).where(and(eq(gerenteRemindersTable.tenantId, tenantId), eq(gerenteRemindersTable.status, "pendente"), lt(gerenteRemindersTable.dueAt, end))).orderBy(asc(gerenteRemindersTable.dueAt)),
     db.select().from(gerenteBillsTable).where(and(eq(gerenteBillsTable.tenantId, tenantId), eq(gerenteBillsTable.status, "aberta"))).orderBy(asc(gerenteBillsTable.dueDate)).limit(50),
@@ -87,13 +89,75 @@ router.get("/gerente/overview", async (req, res): Promise<void> => {
       kind: gerenteEntriesTable.kind, scope: gerenteEntriesTable.scope, total: sql<number>`coalesce(sum(${gerenteEntriesTable.amountCents}), 0)::int`,
     }).from(gerenteEntriesTable).where(and(eq(gerenteEntriesTable.tenantId, tenantId), sql`to_char(${gerenteEntriesTable.entryDate}, 'YYYY-MM') = ${today.slice(0, 7)}`)).groupBy(gerenteEntriesTable.kind, gerenteEntriesTable.scope),
     buildDigest(tenantId),
+    db.select({ startsAt: gerenteEventsTable.startsAt }).from(gerenteEventsTable).where(and(eq(gerenteEventsTable.tenantId, tenantId), eq(gerenteEventsTable.status, "agendado"), gte(gerenteEventsTable.startsAt, end), lt(gerenteEventsTable.startsAt, weekEnd))),
+    db.select({ dueAt: gerenteRemindersTable.dueAt }).from(gerenteRemindersTable).where(and(eq(gerenteRemindersTable.tenantId, tenantId), eq(gerenteRemindersTable.status, "pendente"), gte(gerenteRemindersTable.dueAt, end), lt(gerenteRemindersTable.dueAt, weekEnd))),
+    // Tarefas da equipe atrasadas ou vencendo hoje (quadro de Tarefas).
+    db.select({ id: tasksTable.id, title: tasksTable.title, dueDate: tasksTable.dueDate, status: tasksTable.status, priority: tasksTable.priority })
+      .from(tasksTable).where(and(eq(tasksTable.tenantId, tenantId), eq(tasksTable.isArchived, false), ne(tasksTable.status, "done"), lt(tasksTable.dueDate, end)))
+      .orderBy(asc(tasksTable.dueDate)).limit(30),
   ]);
+  // Tarefas enviadas pelo WhatsApp nos últimos 7 dias (status + prova).
+  const dispatches = await db.select({
+    id: gerenteTaskDispatchesTable.id, taskId: gerenteTaskDispatchesTable.taskId, assigneeName: gerenteTaskDispatchesTable.assigneeName,
+    status: gerenteTaskDispatchesTable.status, sentAt: gerenteTaskDispatchesTable.sentAt, doneAt: gerenteTaskDispatchesTable.doneAt,
+    proofUrl: gerenteTaskDispatchesTable.proofUrl, proofNote: gerenteTaskDispatchesTable.proofNote, createdAt: gerenteTaskDispatchesTable.createdAt,
+    title: tasksTable.title, dueDate: tasksTable.dueDate,
+  }).from(gerenteTaskDispatchesTable).innerJoin(tasksTable, eq(tasksTable.id, gerenteTaskDispatchesTable.taskId))
+    .where(and(eq(gerenteTaskDispatchesTable.tenantId, tenantId), gte(gerenteTaskDispatchesTable.createdAt, new Date(start.getTime() - 7 * 86_400_000))))
+    .orderBy(desc(gerenteTaskDispatchesTable.id)).limit(40);
+  const taskIds = teamTasks.map((t) => t.id);
+  const assignees = taskIds.length ? await db.select({ taskId: taskAssigneesTable.taskId, name: usersTable.name })
+    .from(taskAssigneesTable).innerJoin(usersTable, eq(usersTable.id, taskAssigneesTable.userId))
+    .where(inArray(taskAssigneesTable.taskId, taskIds)) : [];
+  const who = new Map<number, string[]>();
+  for (const a of assignees) who.set(a.taskId, [...(who.get(a.taskId) ?? []), a.name.split(" ")[0]!]);
+
+  // Próximos 7 dias: quantos compromissos/lembretes por dia (visão da semana).
+  const week: { date: string; events: number; reminders: number }[] = [];
+  for (let i = 1; i <= 7; i++) {
+    const d = spDateISO(new Date(start.getTime() + i * 86_400_000 + 12 * 3_600_000));
+    week.push({ date: d, events: weekEvents.filter((e) => spDateISO(e.startsAt) === d).length, reminders: weekReminders.filter((r) => spDateISO(r.dueAt) === d).length });
+  }
+  // Carga do dia: minutos de compromissos (sem fim = 1h).
+  const loadMinutes = events.reduce((sum, e) => sum + Math.max(15, Math.round(((e.endsAt?.getTime() ?? e.startsAt.getTime() + 3_600_000) - e.startsAt.getTime()) / 60_000)), 0);
+
   res.json({
-    today, events, reminders,
+    today, now: now.toISOString(), events, reminders,
+    overdueReminders: reminders.filter((r) => r.dueAt.getTime() < now.getTime()),
     billsDueToday: bills.filter((b) => b.dueDate <= today),
     billsUpcoming: bills.filter((b) => b.dueDate > today).slice(0, 10),
+    teamTasks: teamTasks.map((t) => ({ ...t, assignees: who.get(t.id) ?? [], overdue: !!t.dueDate && t.dueDate.getTime() < now.getTime() })),
+    week, loadMinutes, dispatches,
     month: entriesMonth, digest,
   });
+});
+
+// "Fechar o dia": empurra lembretes pendentes de hoje/atrasados e
+// compromissos de hoje que já passaram sem conclusão para amanhã (mesma hora
+// no caso dos compromissos; lembretes às 09:00). Só o que o dono escolheu.
+router.post("/gerente/rollover", async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const b = req.body as { reminderIds?: unknown; eventIds?: unknown };
+  const ids = (v: unknown): number[] => (Array.isArray(v) ? v.map(Number).filter((n) => Number.isInteger(n) && n > 0).slice(0, 200) : []);
+  const reminderIds = ids(b.reminderIds);
+  const eventIds = ids(b.eventIds);
+  const tomorrow = spDateISO(new Date(parseSpLocal(`${spDateISO()}T12:00`)!.getTime() + 86_400_000));
+  const nineAm = parseSpLocal(`${tomorrow}T09:00`)!;
+  let moved = 0;
+  if (reminderIds.length) {
+    const r = await db.update(gerenteRemindersTable).set({ dueAt: nineAm, sentAt: null, updatedAt: new Date() })
+      .where(and(eq(gerenteRemindersTable.tenantId, tenantId), eq(gerenteRemindersTable.status, "pendente"), inArray(gerenteRemindersTable.id, reminderIds))).returning({ id: gerenteRemindersTable.id });
+    moved += r.length;
+  }
+  if (eventIds.length) {
+    const r = await db.update(gerenteEventsTable).set({
+      startsAt: sql`${gerenteEventsTable.startsAt} + interval '1 day'`,
+      endsAt: sql`${gerenteEventsTable.endsAt} + interval '1 day'`,
+      remindedAt: null, updatedAt: new Date(),
+    }).where(and(eq(gerenteEventsTable.tenantId, tenantId), eq(gerenteEventsTable.status, "agendado"), inArray(gerenteEventsTable.id, eventIds))).returning({ id: gerenteEventsTable.id });
+    moved += r.length;
+  }
+  res.json({ moved, to: tomorrow });
 });
 
 // ─── Agenda ──────────────────────────────────────────────────────────────────

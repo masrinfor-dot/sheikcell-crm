@@ -16,10 +16,11 @@ const {
   db, tenantsTable, sectorsTable, usersTable, conversationsTable, messagesTable, whatsappSessionsTable,
   attendanceLogsTable, crmContactsTable, whatsappContactsTable, tasksTable, taskAssigneesTable,
   gerenteSettingsTable, gerenteMessagesTable, gerenteRemindersTable, gerenteEntriesTable, gerenteBillsTable,
-  gerenteEventsTable, gerentePendingActionsTable,
+  gerenteEventsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable, employeesTable, taskCommentsTable,
 } = await import("@workspace/db");
-const { eq, and } = await import("drizzle-orm");
+const { eq, and, desc } = await import("drizzle-orm");
 const { processInboundWA } = await import("./whatsappInbound.ts");
+const { tryConsumeTaskProof } = await import("./gerenteDispatch.ts");
 const { handlePanelMessage, runGerenteNotifications, isAuthorizedPhone, normalizeAuthorizedPhones, invalidateGerenteCache } = await import("./gerente.ts");
 
 const MARK = "__GERENTE_IA_TEST__";
@@ -61,6 +62,9 @@ async function wipe(): Promise<void> {
     await db.delete(gerenteEntriesTable).where(eq(gerenteEntriesTable.tenantId, id));
     await db.delete(gerenteBillsTable).where(eq(gerenteBillsTable.tenantId, id));
     await db.delete(gerenteSettingsTable).where(eq(gerenteSettingsTable.tenantId, id));
+    await db.delete(gerenteTaskDispatchesTable).where(eq(gerenteTaskDispatchesTable.tenantId, id));
+    await db.delete(taskCommentsTable).where(eq(taskCommentsTable.tenantId, id));
+    await db.delete(employeesTable).where(eq(employeesTable.tenantId, id));
     await db.delete(taskAssigneesTable).where(eq(taskAssigneesTable.tenantId, id));
     await db.delete(tasksTable).where(eq(tasksTable.tenantId, id));
     await db.delete(messagesTable).where(eq(messagesTable.tenantId, id));
@@ -98,6 +102,7 @@ before(async () => {
     tenantId, name: "Nilmar Souza", email: `nilmar-${sessionKey}@test.local`, passwordHash: "x", role: "vendedor",
   }).returning();
   userId = u!.id;
+  await db.insert(employeesTable).values({ tenantId, userId, name: "Nilmar Souza", phone: "(33) 98877-6655" });
   await db.insert(gerenteSettingsTable).values({ tenantId, authorizedPhones: [OWNER_PHONE_CANONICAL] });
   invalidateGerenteCache();
 });
@@ -283,4 +288,37 @@ test("Gerente desligado: mensagem do dono volta a ser atendimento comum", async 
   assert.equal(convs.length, 1);
   await db.update(gerenteSettingsTable).set({ enabled: true }).where(eq(gerenteSettingsTable.tenantId, tenantId));
   invalidateGerenteCache(tenantId);
+});
+
+test("tarefa vai pro WhatsApp do vendedor; 'feito' pede foto; foto fecha a tarefa com prova e avisa o dono", async () => {
+  bridgeSends.length = 0;
+  const r = await handlePanelMessage(tenantId, "tarefa pro Nilmar: limpar a vitrine até 18h");
+  assert.match(r.replies[0]!, /Enviada no WhatsApp de Nilmar/);
+  const sellerPhone = "5533988776655";
+  const sent = bridgeSends.find((s) => s.to === sellerPhone);
+  assert.ok(sent, "tarefa não saiu pro vendedor");
+  assert.match(sent.text, /limpar a vitrine/);
+  const [d] = await db.select().from(gerenteTaskDispatchesTable).where(eq(gerenteTaskDispatchesTable.tenantId, tenantId)).orderBy(desc(gerenteTaskDispatchesTable.id)).limit(1);
+  assert.equal(d!.status, "enviada");
+
+  // Mensagem comum do vendedor segue o fluxo normal.
+  assert.equal(await tryConsumeTaskProof({ tenantId, sessionKey, phone: sellerPhone, text: "bom dia", msgType: "text", mediaUrl: null }), false);
+  // Foto sem "feito" antes: não é prova.
+  assert.equal(await tryConsumeTaskProof({ tenantId, sessionKey, phone: sellerPhone, text: "", msgType: "image", mediaUrl: "/api/chat/media/x.jpg" }), false);
+
+  assert.equal(await tryConsumeTaskProof({ tenantId, sessionKey, phone: sellerPhone, text: "feito", msgType: "text", mediaUrl: null }), true);
+  const [d2] = await db.select().from(gerenteTaskDispatchesTable).where(eq(gerenteTaskDispatchesTable.id, d!.id));
+  assert.equal(d2!.status, "aguardando_prova");
+
+  bridgeSends.length = 0;
+  assert.equal(await tryConsumeTaskProof({ tenantId, sessionKey, phone: sellerPhone, text: "", msgType: "image", mediaUrl: "/api/chat/media/11111111-1111-1111-1111-111111111111.jpg" }), true);
+  const [d3] = await db.select().from(gerenteTaskDispatchesTable).where(eq(gerenteTaskDispatchesTable.id, d!.id));
+  assert.equal(d3!.status, "concluida");
+  assert.ok(d3!.proofUrl);
+  const [task] = await db.select().from(tasksTable).where(eq(tasksTable.id, d!.taskId));
+  assert.equal(task!.status, "done");
+  const comments = await db.select().from(taskCommentsTable).where(eq(taskCommentsTable.taskId, d!.taskId));
+  assert.equal(comments.length, 1);
+  assert.equal(comments[0]!.mediaType, "image");
+  await waitFor(async () => bridgeSends.find((s) => s.to === OWNER_PHONE_CANONICAL && /concluiu/.test(s.text)));
 });

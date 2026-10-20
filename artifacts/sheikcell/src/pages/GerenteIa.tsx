@@ -111,54 +111,202 @@ export default function GerenteIa() {
 }
 
 // ─── Meu dia ─────────────────────────────────────────────────────────────────
+// Inspirado em Sunsama/Akiflow: captura rápida no topo (qualquer frase vira
+// registro), "precisa de atenção" com ação em 1 clique, linha do tempo do
+// dia com marcador de agora, aviso de carga, equipe (tarefas enviadas por
+// WhatsApp com prova) e "Fechar o dia" que empurra o que sobrou pra amanhã.
+const WEEKDAY = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"];
+const DISPATCH_META: Record<string, { label: string; color: string }> = {
+  enviada: { label: "Enviada", color: "bg-blue-100 text-blue-700" },
+  aguardando_prova: { label: "Aguardando foto", color: "bg-amber-100 text-amber-700" },
+  concluida: { label: "Concluída", color: "bg-green-100 text-green-700" },
+  sem_telefone: { label: "Sem WhatsApp no RH", color: "bg-slate-100 text-slate-600" },
+  falhou: { label: "Falhou o envio", color: "bg-red-100 text-red-700" },
+  cancelada: { label: "Cancelada", color: "bg-slate-100 text-slate-500" },
+};
+
 function MeuDia({ onGo }: { onGo: (t: SubTab) => void }) {
   const { toast } = useToast();
   const [ov, setOv] = useState<GerenteOverview | null>(null);
+  const [capture, setCapture] = useState("");
+  const [sending, setSending] = useState(false);
+  const [lastReply, setLastReply] = useState<string | null>(null);
+  const [closing, setClosing] = useState(false);
+  const [proof, setProof] = useState<string | null>(null);
   const load = useCallback(async () => {
     try { setOv(await api.gerente.overview()); } catch (err) { toast({ title: "Erro", description: errMsg(err), variant: "destructive" }); }
   }, [toast]);
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); const t = setInterval(() => void load(), 60_000); return () => clearInterval(t); }, [load]);
+
+  const send = async () => {
+    const t = capture.trim();
+    if (!t || sending) return;
+    setSending(true);
+    try { const r = await api.gerente.chat(t); setLastReply(r.replies.join("\n\n")); setCapture(""); await load(); }
+    catch (err) { toast({ title: "Erro", description: errMsg(err), variant: "destructive" }); }
+    finally { setSending(false); }
+  };
+  const act = async (fn: () => Promise<unknown>) => { try { await fn(); await load(); } catch (err) { toast({ title: "Erro", description: errMsg(err), variant: "destructive" }); } };
+  const plusMinutes = (iso: string, m: number) => toLocalInput(new Date(Math.max(Date.now(), new Date(iso).getTime()) + m * 60_000).toISOString());
+  const tomorrow9 = () => { const d = new Date(Date.now() + 86_400_000); return `${d.toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" })}T09:00`; };
+
   if (!ov) return <p className="text-sm text-muted-foreground">Carregando...</p>;
 
+  const now = new Date(ov.now).getTime();
   const sum = (kind: "gasto" | "receita", scope?: GerenteScope) => ov.month.filter((m) => m.kind === kind && (!scope || m.scope === scope)).reduce((s, m) => s + m.total, 0);
   const receitas = sum("receita"), gastos = sum("gasto");
+  const overdueTasks = ov.teamTasks.filter((t) => t.overdue);
+  const attention = ov.overdueReminders.length + ov.billsDueToday.length + overdueTasks.length;
+  const loadH = ov.loadMinutes / 60;
+  const pendingDispatch = ov.dispatches.filter((d) => d.status === "enviada" || d.status === "aguardando_prova");
+  const doneDispatch = ov.dispatches.filter((d) => d.status === "concluida");
+
+  type Item = { at: number; kind: "evento" | "lembrete"; id: number; title: string; sub?: string; urgent?: boolean };
+  const timeline: Item[] = [
+    ...ov.events.map((e) => ({ at: new Date(e.startsAt).getTime(), kind: "evento" as const, id: e.id, title: e.title, sub: [e.location, e.participants && `com ${e.participants}`].filter(Boolean).join(" · ") })),
+    ...ov.reminders.filter((r) => new Date(r.dueAt).getTime() >= now - 0).map((r) => ({ at: new Date(r.dueAt).getTime(), kind: "lembrete" as const, id: r.id, title: r.title, urgent: r.urgent })),
+  ].sort((a, b) => a.at - b.at);
+  const nowIndex = timeline.findIndex((i) => i.at > now);
+
+  const leftovers = { reminderIds: ov.reminders.map((r) => r.id), eventIds: ov.events.filter((e) => new Date(e.startsAt).getTime() < now).map((e) => e.id) };
+  const closeDay = async () => {
+    const r = await api.gerente.rollover(leftovers);
+    toast({ title: `Dia fechado: ${r.moved} item(ns) movido(s) para amanhã` });
+    setClosing(false); await load();
+  };
+
+  const Kpi = ({ label, value, tone, onClick }: { label: string; value: string | number; tone?: string; onClick?: () => void }) => (
+    <button onClick={onClick} className="shk-card p-3 text-left hover:ring-1 hover:ring-primary/30 transition">
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className={`text-xl font-bold ${tone ?? ""}`}>{value}</div>
+    </button>
+  );
 
   return (
-    <div className="grid lg:grid-cols-3 gap-4 items-start">
-      <div className="shk-card p-4 space-y-2">
-        <h3 className="font-bold text-sm flex items-center gap-2"><CalendarDays className="w-4 h-4 text-primary" /> Compromissos de hoje</h3>
-        {ov.events.length === 0 ? <p className="text-xs text-muted-foreground">Nenhum compromisso hoje.</p> : ov.events.map((e) => (
-          <div key={e.id} className="text-xs flex gap-2"><span className="font-mono text-muted-foreground w-12">{fmtT(e.startsAt)}</span><span>{e.title}{e.location ? <span className="text-muted-foreground"> · {e.location}</span> : null}</span></div>
-        ))}
-        <button onClick={() => onGo("agenda")} className="text-[11px] text-primary font-semibold">Ver agenda →</button>
-      </div>
-      <div className="shk-card p-4 space-y-2">
-        <h3 className="font-bold text-sm flex items-center gap-2"><Bell className="w-4 h-4 text-primary" /> Lembretes de hoje</h3>
-        {ov.reminders.length === 0 ? <p className="text-xs text-muted-foreground">Nada pendente pra hoje.</p> : ov.reminders.map((r) => (
-          <div key={r.id} className="text-xs flex gap-2"><span className="font-mono text-muted-foreground w-12">{fmtT(r.dueAt)}</span><span>{r.title}{r.urgent ? " ‼️" : ""}</span></div>
-        ))}
-        <button onClick={() => onGo("lembretes")} className="text-[11px] text-primary font-semibold">Ver lembretes →</button>
-      </div>
-      <div className="shk-card p-4 space-y-2">
-        <h3 className="font-bold text-sm flex items-center gap-2"><Wallet className="w-4 h-4 text-primary" /> Financeiro do mês</h3>
-        <div className="text-xs grid grid-cols-2 gap-x-3 gap-y-1">
-          <span className="text-muted-foreground">Receitas</span><span className="text-green-700 font-semibold text-right">{brl(receitas)}</span>
-          <span className="text-muted-foreground">Gastos</span><span className="text-red-700 font-semibold text-right">{brl(gastos)}</span>
-          <span className="text-muted-foreground">Saldo</span><span className={`font-bold text-right ${receitas - gastos >= 0 ? "text-green-700" : "text-red-700"}`}>{brl(receitas - gastos)}</span>
-          <span className="text-muted-foreground">Gastos pessoais</span><span className="text-right">{brl(sum("gasto", "pessoal"))}</span>
+    <div className="space-y-4">
+      {/* Captura rápida */}
+      <div className="shk-card p-3">
+        <div className="flex gap-2">
+          <input className="flex-1 px-3 py-2.5 rounded-xl border border-border text-sm bg-background" value={capture} onChange={(e) => setCapture(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void send(); } }} disabled={sending} data-testid="gerente-quick-capture"
+            placeholder="Escreva qualquer coisa: “tarefa pro Nilmar conferir estoque até 17h”, “gastei 80 no motoboy”, “reunião sexta 10h”…" />
+          <button onClick={send} disabled={sending || !capture.trim()} className={BTN_PRIMARY}>{sending ? "..." : <Send className="w-3.5 h-3.5" />}</button>
         </div>
-        {ov.billsDueToday.length > 0 && (
-          <div className="text-xs mt-2 space-y-0.5">
-            <p className="font-semibold text-amber-700">Contas vencendo/vencidas:</p>
-            {ov.billsDueToday.map((b) => <div key={b.id}>• {b.kind === "pagar" ? "pagar" : "receber"} {brl(b.amountCents)} — {b.description} ({fmtD(b.dueDate)})</div>)}
-          </div>
-        )}
-        <button onClick={() => onGo("financeiro")} className="text-[11px] text-primary font-semibold">Ver financeiro →</button>
+        {lastReply && <pre className="mt-2 text-xs whitespace-pre-wrap font-sans bg-muted/40 rounded-lg p-2">{lastReply}</pre>}
       </div>
-      <div className="shk-card p-4 lg:col-span-3">
+
+      {/* Números do dia */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+        <Kpi label="Precisa de atenção" value={attention} tone={attention ? "text-red-600" : "text-green-700"} />
+        <Kpi label="Compromissos hoje" value={ov.events.length} onClick={() => onGo("agenda")} />
+        <Kpi label="Lembretes hoje" value={ov.reminders.length} onClick={() => onGo("lembretes")} />
+        <Kpi label="Equipe: aguardando prova" value={pendingDispatch.length} tone={pendingDispatch.length ? "text-amber-600" : ""} />
+        <Kpi label="Saldo do mês" value={brl(receitas - gastos)} tone={receitas - gastos >= 0 ? "text-green-700" : "text-red-700"} onClick={() => onGo("financeiro")} />
+      </div>
+
+      {loadH > 8 && (
+        <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5 flex items-center gap-2">
+          <AlertTriangle className="w-3.5 h-3.5" /> Dia carregado: {loadH.toFixed(1)}h de compromissos. Vale remarcar algo pra outro dia.
+        </p>
+      )}
+
+      <div className="grid lg:grid-cols-3 gap-4 items-start">
+        {/* Precisa de atenção */}
+        <div className="shk-card p-4 space-y-2">
+          <h3 className="font-bold text-sm flex items-center gap-2"><AlertTriangle className="w-4 h-4 text-red-600" /> Precisa de atenção</h3>
+          {attention === 0 && <p className="text-xs text-muted-foreground">Tudo em dia. 👌</p>}
+          {ov.overdueReminders.map((r) => (
+            <div key={`r${r.id}`} className="text-xs border border-border rounded-lg p-2 space-y-1">
+              <div><b>⏰ {r.title}</b> <span className="text-red-600">· venceu {fmtT(r.dueAt)}</span></div>
+              <div className="flex gap-1 flex-wrap">
+                <button onClick={() => act(() => api.gerente.reminders.update(r.id, { status: "concluido" }))} className={BTN_GHOST}><Check className="w-3 h-3 inline" /> Feito</button>
+                <button onClick={() => act(() => api.gerente.reminders.update(r.id, { dueAt: plusMinutes(r.dueAt, 60) }))} className={BTN_GHOST}>+1h</button>
+                <button onClick={() => act(() => api.gerente.reminders.update(r.id, { dueAt: tomorrow9() }))} className={BTN_GHOST}>Amanhã</button>
+              </div>
+            </div>
+          ))}
+          {ov.billsDueToday.map((b) => (
+            <div key={`b${b.id}`} className="text-xs border border-border rounded-lg p-2 space-y-1">
+              <div><b>{b.kind === "pagar" ? "📤" : "📥"} {b.description}</b> · {brl(b.amountCents)} <span className={b.dueDate < ov.today ? "text-red-600" : "text-amber-600"}>· {b.dueDate < ov.today ? `venceu ${fmtD(b.dueDate)}` : "vence hoje"}</span></div>
+              <button onClick={() => act(() => api.gerente.bills.update(b.id, { status: "paga" }))} className={BTN_GHOST}><Check className="w-3 h-3 inline" /> Dar baixa</button>
+            </div>
+          ))}
+          {overdueTasks.map((t) => (
+            <div key={`t${t.id}`} className="text-xs border border-border rounded-lg p-2">
+              <b>📋 {t.title}</b> <span className="text-red-600">· atrasada</span>
+              <div className="text-muted-foreground">{t.assignees.join(", ") || "sem responsável"}{t.dueDate ? ` · prazo ${fmtDT(t.dueDate)}` : ""}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Linha do tempo */}
+        <div className="shk-card p-4 space-y-1">
+          <div className="flex items-center justify-between">
+            <h3 className="font-bold text-sm flex items-center gap-2"><Clock className="w-4 h-4 text-primary" /> Linha do tempo de hoje</h3>
+            <button onClick={() => setClosing((v) => !v)} className={BTN_GHOST} data-testid="gerente-close-day">Fechar o dia</button>
+          </div>
+          {closing && (
+            <div className="text-xs bg-muted/40 rounded-lg p-2 space-y-1">
+              <p>Vou mover para amanhã: <b>{leftovers.reminderIds.length}</b> lembrete(s) pendente(s) e <b>{leftovers.eventIds.length}</b> compromisso(s) que já passaram sem conclusão.</p>
+              <div className="flex gap-2"><button onClick={() => act(closeDay)} className={BTN_PRIMARY}>Mover para amanhã</button><button onClick={() => setClosing(false)} className={BTN_GHOST}>Cancelar</button></div>
+            </div>
+          )}
+          {timeline.length === 0 && <p className="text-xs text-muted-foreground">Nada agendado pro resto do dia.</p>}
+          {timeline.map((i, idx) => (
+            <div key={`${i.kind}${i.id}`}>
+              {idx === nowIndex && <div className="flex items-center gap-2 my-1"><span className="text-[10px] font-bold text-red-600">AGORA</span><div className="flex-1 h-px bg-red-400" /></div>}
+              <div className={`text-xs flex gap-2 py-1 ${i.at < now ? "opacity-50" : ""}`}>
+                <span className="font-mono text-muted-foreground w-12 shrink-0">{fmtT(new Date(i.at).toISOString())}</span>
+                <span>{i.kind === "evento" ? "📅" : "⏰"} {i.title}{i.urgent ? " ‼️" : ""}{i.sub ? <span className="text-muted-foreground"> · {i.sub}</span> : null}</span>
+              </div>
+            </div>
+          ))}
+          {nowIndex === -1 && timeline.length > 0 && <div className="flex items-center gap-2 my-1"><span className="text-[10px] font-bold text-red-600">AGORA</span><div className="flex-1 h-px bg-red-400" /></div>}
+          <div className="pt-2 mt-2 border-t border-border grid grid-cols-7 gap-1 text-center">
+            {ov.week.map((d) => {
+              const dt = new Date(`${d.date}T12:00:00-03:00`);
+              const n = d.events + d.reminders;
+              return (
+                <button key={d.date} onClick={() => onGo("agenda")} className={`rounded-lg py-1 text-[10px] ${n ? "bg-primary/10" : "bg-muted/40"}`} title={`${d.events} compromisso(s), ${d.reminders} lembrete(s)`}>
+                  <div className="text-muted-foreground">{WEEKDAY[dt.getDay()]}</div>
+                  <div className="font-bold">{d.date.slice(8, 10)}</div>
+                  <div>{n || "·"}</div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Equipe pelo WhatsApp */}
+        <div className="shk-card p-4 space-y-2">
+          <h3 className="font-bold text-sm flex items-center gap-2"><Smartphone className="w-4 h-4 text-primary" /> Equipe pelo WhatsApp</h3>
+          <p className="text-[10px] text-muted-foreground">Tarefa com responsável vai pro WhatsApp dele. Ele responde <b>feito + foto</b> e ela fecha aqui com a prova.</p>
+          {ov.dispatches.length === 0 && <p className="text-xs text-muted-foreground">Nenhuma tarefa enviada nos últimos 7 dias.</p>}
+          {[...pendingDispatch, ...doneDispatch, ...ov.dispatches.filter((d) => !pendingDispatch.includes(d) && !doneDispatch.includes(d))].slice(0, 15).map((d) => (
+            <div key={d.id} className="text-xs flex items-center gap-2 border border-border rounded-lg p-2">
+              {d.proofUrl
+                ? <button onClick={() => setProof(d.proofUrl)} className="shrink-0"><img src={d.proofUrl} alt="prova" className="w-10 h-10 rounded object-cover" /></button>
+                : <div className="w-10 h-10 rounded bg-muted/50 shrink-0 flex items-center justify-center text-muted-foreground">📋</div>}
+              <div className="flex-1 min-w-0">
+                <div className="font-semibold truncate">{d.taskId} · {d.title}</div>
+                <div className="text-muted-foreground truncate">{d.assigneeName.split(" ")[0]}{d.dueDate ? ` · prazo ${fmtDT(d.dueDate)}` : ""}{d.doneAt ? ` · feito ${fmtDT(d.doneAt)}` : ""}</div>
+              </div>
+              <span className={`px-1.5 py-0.5 rounded text-[10px] whitespace-nowrap ${DISPATCH_META[d.status]?.color ?? ""}`}>{DISPATCH_META[d.status]?.label ?? d.status}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="shk-card p-4">
         <h3 className="font-bold text-sm mb-2">Resumo como vai no WhatsApp</h3>
         <pre className="text-xs whitespace-pre-wrap font-sans bg-muted/40 rounded-xl p-3">{ov.digest}</pre>
       </div>
+
+      {proof && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={() => setProof(null)}>
+          <img src={proof} alt="prova" className="max-h-[85vh] max-w-full rounded-xl" />
+        </div>
+      )}
     </div>
   );
 }

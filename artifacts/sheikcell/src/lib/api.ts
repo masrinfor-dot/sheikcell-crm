@@ -1616,8 +1616,15 @@ export type GerenteBill = {
 export type GerenteMessage = {
   id: number; phone: string; direction: "in" | "out"; source: "whatsapp" | "painel" | "sistema"; content: string; intent: string | null; createdAt: string;
 };
+export type GerenteTaskDispatch = {
+  id: number; taskId: number; assigneeName: string; status: "enviada" | "aguardando_prova" | "concluida" | "sem_telefone" | "falhou" | "cancelada";
+  sentAt: string | null; doneAt: string | null; proofUrl: string | null; proofNote: string | null; createdAt: string; title: string; dueDate: string | null;
+};
 export type GerenteOverview = {
-  today: string; events: GerenteEvent[]; reminders: GerenteReminder[]; billsDueToday: GerenteBill[]; billsUpcoming: GerenteBill[];
+  today: string; now: string; events: GerenteEvent[]; reminders: GerenteReminder[]; overdueReminders: GerenteReminder[];
+  billsDueToday: GerenteBill[]; billsUpcoming: GerenteBill[];
+  teamTasks: { id: number; title: string; dueDate: string | null; status: string; priority: string; assignees: string[]; overdue: boolean }[];
+  week: { date: string; events: number; reminders: number }[]; loadMinutes: number; dispatches: GerenteTaskDispatch[];
   month: { kind: "gasto" | "receita"; scope: GerenteScope; total: number }[]; digest: string;
 };
 
@@ -3217,6 +3224,8 @@ export const api = {
         req<Omit<GerenteSettings, "lines"> & { warnings?: string[] }>("/gerente/settings", { method: "PATCH", body: JSON.stringify(data) }),
     },
     overview: () => req<GerenteOverview>("/gerente/overview"),
+    rollover: (data: { reminderIds: number[]; eventIds: number[] }) =>
+      req<{ moved: number; to: string }>("/gerente/rollover", { method: "POST", body: JSON.stringify(data) }),
     events: {
       list: (from?: string, days = 30) => req<GerenteEvent[]>(`/gerente/events?days=${days}${from ? `&from=${from}` : ""}`),
       create: (data: { title: string; startsAt: string; endsAt?: string | null; location?: string; participants?: string; scope?: GerenteScope; notes?: string; remindMinutesBefore?: number }) =>

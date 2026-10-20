@@ -144,3 +144,29 @@ export type GerenteEvent = typeof gerenteEventsTable.$inferSelect;
 export type GerenteReminder = typeof gerenteRemindersTable.$inferSelect;
 export type GerenteEntry = typeof gerenteEntriesTable.$inferSelect;
 export type GerenteBill = typeof gerenteBillsTable.$inferSelect;
+
+// Tarefa delegada pelo Gerente IA e enviada pelo WhatsApp ao vendedor
+// (telefone do cadastro do RH). O vendedor responde "feito" + foto: a foto
+// vira prova, a tarefa fecha no quadro e o dono é avisado.
+export const gerenteTaskDispatchesTable = pgTable("gerente_task_dispatches", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull(),
+  taskId: integer("task_id").notNull().references(() => tasksTable.id, { onDelete: "cascade" }),
+  userId: integer("user_id").notNull(),
+  assigneeName: text("assignee_name").notNull(),
+  phone: text("phone"),
+  sessionKey: text("session_key"),
+  // enviada | aguardando_prova | concluida | sem_telefone | falhou
+  status: text("status").notNull().default("enviada"),
+  sentAt: timestamp("sent_at", { withTimezone: true }),
+  awaitingProofAt: timestamp("awaiting_proof_at", { withTimezone: true }),
+  doneAt: timestamp("done_at", { withTimezone: true }),
+  proofUrl: text("proof_url"),
+  proofNote: text("proof_note"),
+  overdueNotifiedAt: timestamp("overdue_notified_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("gerente_task_dispatches_tenant_phone_idx").on(t.tenantId, t.phone),
+  index("gerente_task_dispatches_task_idx").on(t.taskId),
+]);
+export type GerenteTaskDispatch = typeof gerenteTaskDispatchesTable.$inferSelect;

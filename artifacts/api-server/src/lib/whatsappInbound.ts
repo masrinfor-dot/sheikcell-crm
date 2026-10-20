@@ -1303,6 +1303,9 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
     const { tryConsumeGerenteInbound } = await import("./gerente");
     const handled = await tryConsumeGerenteInbound({ tenantId, sessionKey, phone, text, msgType, mediaUrl, externalId });
     if (handled) return;
+    // Vendedor confirmando tarefa enviada pelo Gerente IA ("feito" + foto).
+    const { tryConsumeTaskProof } = await import("./gerenteDispatch");
+    if (await tryConsumeTaskProof({ tenantId, sessionKey, phone, text, msgType, mediaUrl })) return;
   }
 
   // Pesquisa de satisfação: se a resposta consumiu a pesquisa, não reabre a
@@ -1519,6 +1522,8 @@ export async function processMetaInboundWA(body: MetaInboundWAPayload): Promise<
             tenantId, sessionKey: "default", phone, text, msgType, mediaUrl, externalId: externalId ?? null,
           });
           if (gerenteHandled) continue;
+          const { tryConsumeTaskProof } = await import("./gerenteDispatch");
+          if (await tryConsumeTaskProof({ tenantId, sessionKey: "default", phone, text, msgType, mediaUrl })) continue;
         }
         const surveyHandled = await tryConsumeSurveyReply({
           tenantId,
