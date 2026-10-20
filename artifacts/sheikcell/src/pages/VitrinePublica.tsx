@@ -16,6 +16,7 @@ import { Carousel, CarouselContent, CarouselItem, CarouselPrevious, CarouselNext
 
 type PublicData = {
   storeName: string; logoDataUrl: string | null; bannerImage: string | null;
+  redirectTo?: string | null;
   whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
   // Avaliação de usados desligada na vitrine pública (pedido 18/09) — esconde
   // "Avalie seu usado" e "Trocar por este aparelho" quando false.
@@ -1181,7 +1182,11 @@ export default function VitrinePublica() {
   const loadData = (code?: string) => {
     if (!slug) { setError("Link inválido"); return; }
     api.catalog.public(slug, code)
-      .then(setData)
+      .then((d) => {
+        // Vitrine pública no ERP (17/10/2026): opção ligada → vai para o ERP.
+        if (d.redirectTo) { window.location.replace(d.redirectTo); return; }
+        setData(d);
+      })
       .catch((e) => setError(e instanceof Error ? e.message : "Vitrine não encontrada"));
   };
 

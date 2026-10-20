@@ -4,6 +4,7 @@ import { decryptErpSecret } from "./erpCrypto";
 import { normalizePhone, phoneVariants } from "./phone";
 import { sendOutboundText } from "./outbound";
 import { logger } from "./logger";
+import { countErpExchange, currentErpTenant, recordErpExchange, withErpTenant } from "./erpExchanges";
 
 // Mensagens das OS do ERP Prumo (06/10/2026): a cada minuto, para cada loja
 // com a integração ligada, busca no ERP a fila de mensagens das ordens de
@@ -34,16 +35,35 @@ export function erpUrl(baseUrl: string, path: string): string {
 }
 
 export async function erpFetch(baseUrl: string, apiKey: string, path: string, init?: RequestInit, timeoutMs = FETCH_TIMEOUT_MS) {
-  const res = await fetch(erpUrl(baseUrl, path), {
-    ...init,
-    headers: { "Content-Type": "application/json", "X-Api-Key": apiKey, ...(init?.headers ?? {}) },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+  // Trocas com o ERP (19/10/2026): toda chamada entra no histórico da loja
+  // (rota sem query, status, duração e só a contagem — nunca o conteúdo).
+  const tenantId = currentErpTenant();
+  const method = (init?.method ?? "GET").toUpperCase();
+  const startedAt = Date.now();
+  const log = (httpStatus: number | null, ok: boolean, extra: { itemCount?: number | null; error?: string | null }) => {
+    if (tenantId == null) return;
+    void recordErpExchange({ tenantId, method, path, httpStatus, ok, durationMs: Date.now() - startedAt, ...extra });
+  };
+  let res: Response;
+  try {
+    res = await fetch(erpUrl(baseUrl, path), {
+      ...init,
+      headers: { "Content-Type": "application/json", "X-Api-Key": apiKey, ...(init?.headers ?? {}) },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    log(null, false, { error: err instanceof Error && err.name === "TimeoutError" ? "O ERP demorou demais para responder." : `Não conectou no ERP: ${String(err instanceof Error ? err.message : err)}` });
+    throw err;
+  }
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`ERP respondeu ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+    const message = `ERP respondeu ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`;
+    log(res.status, false, { error: message });
+    throw new Error(message);
   }
-  return res.json();
+  const data = await res.json();
+  log(res.status, true, { itemCount: countErpExchange(method, init?.body, data) });
+  return data;
 }
 
 /** Testa a chave no ERP (GET /integrations/ping). */
@@ -99,7 +119,7 @@ export async function runErpOsMessages(): Promise<void> {
   try {
     const rows = await db.select().from(tenantErpIntegrationsTable)
       .where(eq(tenantErpIntegrationsTable.osMessagesEnabled, true));
-    for (const row of rows) {
+    for (const row of rows) await withErpTenant(row.tenantId, async () => {
       let apiKey: string;
       try {
         apiKey = decryptErpSecret({ ciphertext: row.encryptedApiKey, iv: row.iv, authTag: row.authTag, keyVersion: row.keyVersion });
@@ -107,7 +127,7 @@ export async function runErpOsMessages(): Promise<void> {
         await db.update(tenantErpIntegrationsTable).set({ lastError: "Não foi possível ler a chave do ERP (cofre).", lastPollAt: new Date() })
           .where(eq(tenantErpIntegrationsTable.tenantId, row.tenantId));
         logger.warn({ err, tenantId: row.tenantId }, "ERP: chave ilegível");
-        continue;
+        return;
       }
       try {
         const due = await erpFetch(row.baseUrl, apiKey, `/integrations/service-orders/messages/due?limit=${BATCH}`) as { items: ErpDueMessage[] };
@@ -144,7 +164,7 @@ export async function runErpOsMessages(): Promise<void> {
           .where(eq(tenantErpIntegrationsTable.tenantId, row.tenantId));
         logger.warn({ err, tenantId: row.tenantId }, "ERP: falha ao buscar mensagens das OS");
       }
-    }
+    });
   } catch (err) {
     logger.warn({ err }, "ERP: tick das mensagens das OS falhou");
   } finally {

@@ -753,6 +753,20 @@ router.get("/chat/conversations/:id", requireAuth, requireChatAccess(), async (r
   res.json(await enrichConversation(conv));
 });
 
+// ─── Compras do cliente no ERP (19/10/2026) ────────────────────────────────
+// Últimas vendas concluídas do cliente no ERP Prumo, pelo telefone da
+// conversa (chave do ERP com "Vendas do atendimento"). Sem ligação ou sem o
+// acesso: { available: false } e a ficha não mostra nada.
+router.get("/chat/conversations/:id/erp-purchases", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+  const { customerPurchasesFromErp } = await import("../lib/erpSalesSync");
+  res.json(await customerPurchasesFromErp(tenantId, conv.phone));
+});
+
 // ─── Fixar / desafixar conversa (por usuário) ──────────────────────────────
 router.post("/chat/conversations/:id/pin", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
@@ -2852,6 +2866,31 @@ router.post("/chat/conversations/:id/schedules", requireAuth, requireChatAccess(
     }
   }
 
+  // Tarefas no ERP (19/10/2026): a tarefa espelho nasce lá; se o ERP não
+  // responder, o agendamento vale do mesmo jeito (só fica sem a tarefa).
+  const { tasksMoved, createErpMirrorTask } = await import("../lib/erpTasks");
+  if (await tasksMoved(tenantId)) {
+    const erpTaskNumber = await createErpMirrorTask(tenantId, req.session.userId ?? null, {
+      title: cleanKind === "mensagem" ? `📅 Mensagem agendada — ${conv.name}` : `📞 Retorno ao cliente — ${conv.name}`,
+      details: `${text}\n\nCliente: ${conv.name} (${conv.phone})`,
+      dueDate: when,
+      sectorId: conv.sectorId,
+      contactId: crmContactId,
+    }).catch(() => null);
+    const [createdErp] = await db.insert(scheduledMessagesTable).values({
+      tenantId,
+      conversationId: conv.id,
+      kind: cleanKind,
+      content: text.slice(0, 2000),
+      sendAt: when,
+      createdById: req.session.userId ?? null,
+      taskId: null,
+      erpTaskNumber,
+    }).returning();
+    res.status(201).json(createdErp);
+    return;
+  }
+
   // Tarefa espelho no quadro (lembrete visível para a equipe)
   const [task] = await db.insert(tasksTable).values({
     tenantId,
@@ -2907,6 +2946,11 @@ router.delete("/chat/schedules/:schedId", requireAuth, requireChatAccess(), asyn
   // Arquiva a tarefa espelho para não ficar lembrete órfão no quadro.
   if (item.taskId != null) {
     await db.update(tasksTable).set({ isArchived: true, updatedAt: new Date() }).where(and(eq(tasksTable.id, item.taskId), eq(tasksTable.tenantId, tenantId)));
+  }
+  if (item.erpTaskNumber != null) {
+    await import("../lib/erpTasks")
+      .then((m) => m.finishErpMirrorTask(tenantId, item.erpTaskNumber!, req.session.userId ?? null, "archive"))
+      .catch(() => {});
   }
   res.json({ ok: true });
 });

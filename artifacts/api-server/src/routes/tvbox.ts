@@ -1,17 +1,61 @@
-import { Router, type IRouter } from "express";
+import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
 import { db, tvBoxClientsTable, tvBoxInvoicesTable } from "@workspace/db";
 import { eq, and, desc, asc, inArray, sql } from "drizzle-orm";
-import { requireAuth, requireTenant } from "../middlewares/auth";
+import { requireAdmin, requireAuth, requireTenant } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import { normalizePhone } from "../lib/phone";
 import { generateTvBoxInvoicesForMonth } from "../lib/tvBoxBilling";
 import { ensureTvBoxSector } from "../lib/tvBoxMessaging";
 import { getTvBoxSettings, saveTvBoxSettings } from "../lib/tvBoxSettings";
+import { saveTvBoxErpUrl, setTvBoxMovedToErp, tvBoxErpUrl, tvBoxMovedToErp } from "../lib/tvBoxMoved";
+import { buildTvBoxExport } from "../lib/tvBoxExport";
 
 const router: IRouter = Router();
 
 // Módulo "tvbox" contratado pela loja e liberado pro usuário.
 router.use("/tvbox", requireModuleAccess("tvbox"));
+
+// ─── TV Box passada para o ERP (17/10/2026) ──────────────────────────────────
+// "Desligar no CRM": a cobrança automática do CRM para nesta loja e o painel
+// vira só consulta. Toda alteração responde 410 com o aviso (as consultas e a
+// exportação continuam). Ver lib/tvBoxMoved.ts.
+export async function blockTvBoxWritesWhenMoved(req: Request, res: Response, next: NextFunction): Promise<void> {
+  if (req.method === "GET" || req.path === "/moved") return next();
+  const tenantId = req.session?.tenantId;
+  if (typeof tenantId === "number" && (await tvBoxMovedToErp(tenantId))) {
+    res.status(410).json({ error: "A TV Box agora fica no ERP — cadastre, dê baixa e cobre por lá. Aqui é só consulta." });
+    return;
+  }
+  next();
+}
+router.use("/tvbox", blockTvBoxWritesWhenMoved);
+
+router.get("/tvbox/moved", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  res.json({ moved: await tvBoxMovedToErp(tenantId), erpUrl: await tvBoxErpUrl(tenantId) });
+});
+
+router.put("/tvbox/moved", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { moved, erpUrl } = req.body as { moved?: boolean; erpUrl?: string };
+  const url = typeof erpUrl === "string" ? erpUrl.trim().slice(0, 300) : undefined;
+  if (url && !/^https?:\/\/[^\s]+$/i.test(url)) { res.status(400).json({ error: "Endereço do ERP inválido (comece com https://)" }); return; }
+  if (moved !== undefined) await setTvBoxMovedToErp(tenantId, moved === true);
+  if (url !== undefined) await saveTvBoxErpUrl(tenantId, url);
+  res.json({ moved: await tvBoxMovedToErp(tenantId), erpUrl: await tvBoxErpUrl(tenantId) });
+});
+
+router.get("/tvbox/export", requireAdmin, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const payload = await buildTvBoxExport(tenantId);
+  // Trocas com o ERP: o arquivo baixado para o ERP entra no histórico (só a contagem).
+  void import("../lib/erpExchanges").then((m) => m.recordErpExchange({
+    tenantId, method: "FILE", path: "/tvbox/export", httpStatus: 200, ok: true, durationMs: 0,
+    itemCount: payload.clients.length,
+  })).catch(() => {});
+  res.setHeader("Content-Disposition", `attachment; filename="tv-box-${payload.exportedAt.slice(0, 10)}.json"`);
+  res.json(payload);
+});
 
 const CLIENT_STATUSES = ["ativo", "suspenso", "cancelado"];
 const INVOICE_STATUSES = ["pendente", "pago", "cancelado"];

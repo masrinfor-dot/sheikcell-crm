@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import { api, type FinanceSummary, type Sector, type Store } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
-import { BadgeDollarSign, TrendingUp, Search, ShoppingCart, FileText } from "lucide-react";
+import { BadgeDollarSign, TrendingUp, Search, ShoppingCart, FileText, Store as StoreIcon } from "lucide-react";
+import { erpSalesApi, type ErpSalesSummary } from "@/lib/erpSalesApi";
 
 const brl = (v: number) =>
   v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
@@ -16,6 +17,9 @@ export default function Financeiro() {
   const [sectorId, setSectorId] = useState<number | null>(null);
   const [store, setStore] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Vendas do ERP Prumo atribuídas ao atendente (19/10/2026): lado a lado
+  // com o que foi lançado aqui ao finalizar o atendimento.
+  const [erp, setErp] = useState<ErpSalesSummary | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -27,11 +31,19 @@ export default function Financeiro() {
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
+    erpSalesApi.summary(days, store).then(setErp).catch(() => setErp(null));
+  }, [days, store]);
+  useEffect(() => {
     api.sectors.list().then(setSectors).catch(() => {});
     api.stores.list().then(setStores).catch(() => {});
   }, []);
 
   const t = data?.totals;
+  const erpOn = !!erp?.configured && !erp.error;
+  const erpById = new Map((erp?.rows ?? []).filter((r) => r.vendedorId != null).map((r) => [r.vendedorId!, r]));
+  const crmIds = new Set((data?.vendedores ?? []).map((v) => v.vendedorId));
+  // Quem só vendeu no ERP (sem atendimento finalizado no período aqui).
+  const erpOnly = erpOn ? (erp?.rows ?? []).filter((r) => r.vendedorId == null || !crmIds.has(r.vendedorId)) : [];
 
   return (
     <div className="space-y-4">
@@ -65,12 +77,19 @@ export default function Financeiro() {
       </div>
 
       {/* ─── Cards de totais ─── */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className={`grid grid-cols-2 gap-3 ${erpOn ? "md:grid-cols-5" : "md:grid-cols-4"}`}>
         <div className="shk-card p-4">
-          <p className="text-[10px] font-bold text-muted-foreground uppercase flex items-center gap-1"><ShoppingCart className="w-3 h-3" /> Total vendido</p>
+          <p className="text-[10px] font-bold text-muted-foreground uppercase flex items-center gap-1"><ShoppingCart className="w-3 h-3" /> {erpOn ? "Lançado no CRM" : "Total vendido"}</p>
           <p className="text-xl font-extrabold text-primary mt-1" data-testid="text-total-vendido">{t ? brl(t.totalVendido) : "—"}</p>
           <p className="text-[10px] text-muted-foreground">{t?.vendas ?? 0} venda(s) · ticket médio {t ? brl(t.ticketMedio) : "—"}</p>
         </div>
+        {erpOn && (
+          <div className="shk-card p-4" data-testid="card-erp-vendido">
+            <p className="text-[10px] font-bold text-muted-foreground uppercase flex items-center gap-1"><StoreIcon className="w-3 h-3" /> Vendido no ERP</p>
+            <p className="text-xl font-extrabold text-primary mt-1" data-testid="text-total-erp">{brl(erp!.totals.total)}</p>
+            <p className="text-[10px] text-muted-foreground">{erp!.totals.vendas} venda(s) de clientes atendidos aqui</p>
+          </div>
+        )}
         <div className="shk-card p-4">
           <p className="text-[10px] font-bold text-muted-foreground uppercase flex items-center gap-1"><TrendingUp className="w-3 h-3" /> Conversão</p>
           <p className="text-xl font-extrabold mt-1">{t?.conversao ?? 0}%</p>
@@ -91,18 +110,20 @@ export default function Financeiro() {
       {/* ─── Tabela por vendedor ─── */}
       <div className="shk-card p-4 overflow-x-auto">
         <p className="font-bold text-sm mb-3">Por vendedor {loading && <span className="text-[10px] text-muted-foreground font-normal">carregando...</span>}</p>
-        {data && data.vendedores.length === 0 && !loading && (
+        {data && data.vendedores.length === 0 && erpOnly.length === 0 && !loading && (
           <p className="text-xs text-muted-foreground">Nenhum atendimento no período escolhido.</p>
         )}
-        {data && data.vendedores.length > 0 && (
+        {data && (data.vendedores.length > 0 || erpOnly.length > 0) && (
           <table className="w-full text-xs" data-testid="table-finance">
             <thead>
               <tr className="text-left text-[10px] uppercase text-muted-foreground border-b border-border">
                 <th className="py-2 pr-2">#</th>
                 <th className="py-2 pr-2">Vendedor</th>
                 <th className="py-2 pr-2">Loja</th>
-                <th className="py-2 pr-2 text-right">Vendas</th>
-                <th className="py-2 pr-2 text-right">Total vendido</th>
+                <th className="py-2 pr-2 text-right">Vendas{erpOn ? " (CRM)" : ""}</th>
+                <th className="py-2 pr-2 text-right">{erpOn ? "Lançado no CRM" : "Total vendido"}</th>
+                {erpOn && <th className="py-2 pr-2 text-right">Vendas (ERP)</th>}
+                {erpOn && <th className="py-2 pr-2 text-right">Vendido no ERP</th>}
                 <th className="py-2 pr-2 text-right">Ticket médio</th>
                 <th className="py-2 pr-2 text-right">Conversão</th>
                 <th className="py-2 pr-2 text-right">Finalizados</th>
@@ -119,6 +140,8 @@ export default function Financeiro() {
                   <td className="py-2 pr-2 text-muted-foreground">{v.loja ?? "—"}</td>
                   <td className="py-2 pr-2 text-right font-bold">{v.vendas}</td>
                   <td className="py-2 pr-2 text-right font-bold text-primary">{brl(v.totalVendido)}</td>
+                  {erpOn && <td className="py-2 pr-2 text-right font-bold">{erpById.get(v.vendedorId)?.vendas ?? 0}</td>}
+                  {erpOn && <td className="py-2 pr-2 text-right font-bold text-primary">{brl(erpById.get(v.vendedorId)?.total ?? 0)}</td>}
                   <td className="py-2 pr-2 text-right">{v.vendas > 0 ? brl(v.ticketMedio) : "—"}</td>
                   <td className="py-2 pr-2 text-right">{v.conversao}%</td>
                   <td className="py-2 pr-2 text-right">{v.finalizados}</td>
@@ -127,13 +150,34 @@ export default function Financeiro() {
                   <td className="py-2 pr-2 text-right font-semibold">{v.emProspeccao}</td>
                 </tr>
               ))}
+              {erpOnly.map((r, i) => (
+                <tr key={`erp-${r.vendedorId ?? r.nome}-${i}`} className="border-b border-border/50 hover:bg-secondary/40" data-testid="row-erp-only">
+                  <td className="py-2 pr-2 font-bold text-muted-foreground">—</td>
+                  <td className="py-2 pr-2 font-semibold">{r.nome}{r.vendedorId != null && !r.ativo && <span className="text-[9px] text-muted-foreground"> (inativo)</span>}</td>
+                  <td className="py-2 pr-2 text-muted-foreground">{r.loja ?? "—"}</td>
+                  <td className="py-2 pr-2 text-right">0</td>
+                  <td className="py-2 pr-2 text-right">{brl(0)}</td>
+                  <td className="py-2 pr-2 text-right font-bold">{r.vendas}</td>
+                  <td className="py-2 pr-2 text-right font-bold text-primary">{brl(r.total)}</td>
+                  <td className="py-2 pr-2 text-right">—</td>
+                  <td className="py-2 pr-2 text-right">—</td>
+                  <td className="py-2 pr-2 text-right">0</td>
+                  <td className="py-2 pr-2 text-right">0</td>
+                  <td className="py-2 pr-2 text-right">0</td>
+                  <td className="py-2 pr-2 text-right">0</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         )}
         <p className="text-[10px] text-muted-foreground mt-3">
           Vendas e valores vêm do que o vendedor informa ao <b>finalizar</b> o atendimento (teve venda? de quanto?).
           "Em prospecção" são os clientes que estão em atendimento com o vendedor neste momento.
+          {erpOn && <> <b>Vendido no ERP</b> são as vendas concluídas no ERP Prumo de clientes que o atendente atendeu aqui (pelo celular, até alguns dias antes — ou marcadas pelo vendedor no PDV). O filtro de setor não se aplica a elas.</>}
         </p>
+        {erp?.configured && erp.error && (
+          <p className="text-[10px] text-destructive mt-1" data-testid="text-erp-error">{erp.error}</p>
+        )}
       </div>
     </div>
   );

@@ -5,9 +5,12 @@ import { db, rafflesTable, raffleDrawsTable, conversationsTable, usersTable, att
 import { requireAuth, requireTenant, requireModule } from "../middlewares/auth";
 import { logger } from "../lib/logger";
 import { normalizePhone } from "../lib/phone";
+import { blockWhenRafflesMoved, tenantsWithRafflesMoved } from "../lib/rafflesMoved";
 
 const router: IRouter = Router();
 router.use("/raffles", requireModule("sorteios"));
+// Sorteios passados pro ERP (17/10/2026): depois de "Desligar no CRM" só consulta.
+router.use("/raffles", blockWhenRafflesMoved);
 
 // attempts/lastAttemptAt são opcionais pra não quebrar draws antigos já
 // gravados no banco antes desta mudança (trata ausente como "nunca tentou").
@@ -412,7 +415,10 @@ export async function runDueRaffles(): Promise<void> {
     if (p.hour < 10) return; // sorteia a partir das 10h para não madrugar o cliente
     const raffles = await db.select().from(rafflesTable)
       .where(and(eq(rafflesTable.active, true)));
+    // Loja que passou os sorteios pro ERP não sorteia mais aqui.
+    const moved = await tenantsWithRafflesMoved();
     for (const r of raffles) {
+      if (moved.has(r.tenantId)) continue;
       try {
         let key: string | null = null;
         if (r.recurrence === "weekly" && r.dayOfWeek === p.weekday) key = `${p.ymd}`;
@@ -459,7 +465,9 @@ export async function retryFailedRaffleWinners(): Promise<void> {
     const recentSince = new Date(Date.now() - 7 * 86_400_000);
     const candidateDraws = await db.select().from(raffleDrawsTable)
       .where(gte(raffleDrawsTable.createdAt, recentSince));
+    const moved = await tenantsWithRafflesMoved();
     for (const draw of candidateDraws) {
+      if (moved.has(draw.tenantId)) continue;
       const winners = ((draw.winners as Winner[] | null) ?? []).map((w) => ({ ...w }));
       let changed = false;
       for (let i = 0; i < winners.length; i++) {

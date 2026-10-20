@@ -1,6 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
-import { db, tvBoxClientsTable, tvBoxInvoicesTable } from "@workspace/db";
+import { db, appSettingsTable, tvBoxClientsTable, tvBoxInvoicesTable } from "@workspace/db";
 import { logger } from "./logger";
+import { TV_BOX_MOVED_KEY, tenantsWithTvBoxMoved } from "./tvBoxMoved";
 
 // ── Geração de mensalidades dos clientes da TV Box ───────────────────────────
 // Mesmo desenho de lib/saasBilling.ts (que gera as mensalidades das LOJAS na
@@ -8,6 +9,9 @@ import { logger } from "./logger";
 // pula clientes que já têm mensalidade com vencimento no mês (inclui as
 // lançadas manualmente) e o índice único (client_id, billing_month) garante
 // no banco que nunca há duplicata mesmo sob corrida.
+//
+// Loja que passou a TV Box para o ERP ("Desligar no CRM") fica de fora: a
+// cobrança dela passa a ser do ERP e o CRM nunca gera em dobro.
 
 /**
  * Gera as mensalidades do mês `m` ("YYYY-MM") a partir dos clientes ativos de
@@ -20,8 +24,10 @@ export async function generateTvBoxInvoicesForMonth(m: string): Promise<number> 
     .from(tvBoxClientsTable)
     .where(and(eq(tvBoxClientsTable.status, "ativo"), sql`${tvBoxClientsTable.monthlyValueCents} > 0`));
 
+  const moved = await tenantsWithTvBoxMoved();
   let created = 0;
   for (const c of clients) {
+    if (moved.has(c.tenantId)) continue;
     const lastDay = new Date(Number(m.slice(0, 4)), Number(m.slice(5, 7)), 0).getDate();
     const dueDate = `${m}-${String(Math.min(c.dueDay, lastDay)).padStart(2, "0")}`;
     // Trava a linha do cliente (FOR UPDATE) e re-checa o status depois do
@@ -31,6 +37,12 @@ export async function generateTvBoxInvoicesForMonth(m: string): Promise<number> 
     const inserted = await db.transaction(async (tx) => {
       const [client] = await tx.select().from(tvBoxClientsTable).where(eq(tvBoxClientsTable.id, c.id)).for("update");
       if (!client || client.status !== "ativo" || client.monthlyValueCents <= 0) return false;
+      // Re-checa DENTRO da transação: se o admin desligou no CRM no meio do
+      // tick, esta loja não ganha mais nenhuma fatura aqui.
+      const [movedNow] = await tx.select({ value: appSettingsTable.value }).from(appSettingsTable)
+        .where(and(eq(appSettingsTable.tenantId, client.tenantId), eq(appSettingsTable.key, TV_BOX_MOVED_KEY)))
+        .limit(1);
+      if (movedNow?.value === "true") return false;
       const [already] = await tx
         .select({ id: tvBoxInvoicesTable.id })
         .from(tvBoxInvoicesTable)

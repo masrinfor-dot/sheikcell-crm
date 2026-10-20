@@ -9,6 +9,7 @@ import { logger } from "./logger";
 import { decryptErpSecret } from "./erpCrypto";
 import { MEDIA_DIR } from "./whatsappInbound";
 import { normalizePhone } from "./phone";
+import { recordErpExchange } from "./erpExchanges";
 
 /**
  * WhatsApp de compras → ERP (Prumo), 19/10/2026.
@@ -407,6 +408,7 @@ export async function sendOne(id: number, creds?: ErpCredentials | null): Promis
         dataBase64,
       });
     }
+    const startedAt = Date.now();
     const r = await fetch(`${credentials.baseUrl}/integrations/supplier-price-lists`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Api-Key": credentials.apiKey },
@@ -423,6 +425,12 @@ export async function sendOne(id: number, creds?: ErpCredentials | null): Promis
       signal: AbortSignal.timeout(60_000),
     });
     const body = (await r.json().catch(() => ({}))) as ErpResponse;
+    // Trocas com o ERP: só a rota, o status e a contagem (nunca o texto/arquivo).
+    void recordErpExchange({
+      tenantId: row.tenantId, method: "POST", path: "/integrations/supplier-price-lists",
+      httpStatus: r.status, ok: r.ok, durationMs: Date.now() - startedAt,
+      itemCount: r.ok ? 1 : null, error: r.ok ? null : `ERP respondeu ${r.status}: ${body.message ?? ""}`,
+    });
     if (!r.ok) {
       // 400 = o ERP recusou o conteúdo (não vai mudar); 403 = chave sem o
       // acesso "Listas de preço dos fornecedores": não insiste.

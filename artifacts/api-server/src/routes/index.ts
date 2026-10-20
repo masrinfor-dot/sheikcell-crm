@@ -12,6 +12,7 @@ import whatsappProxyRouter from "./whatsapp";
 import internalChatRouter from "./internalChat";
 import tasksRouter from "./tasks";
 import settingsRouter from "./settings";
+import erpExchangesRouter from "./erpExchanges";
 import instagramRouter, { instagramPublicRouter } from "./instagram";
 import partnerLinksRouter from "./partnerLinks";
 import tradeInRouter, { tradeInPublicRouter } from "./tradeIn";
@@ -22,10 +23,13 @@ import { blockWhenHrMoved } from "../lib/hrMoved";
 import rhDpRouter, { enforceMandatoryClockIn } from "./rhDp";
 import employeeHiringRouter from "./employeeHiring";
 import rafflesRouter from "./raffles";
+import rafflesExportRouter from "./rafflesExport";
 import botRouter from "./bot";
 import financeRouter from "./finance";
+import erpSalesRouter from "./erpSales";
 import financePaymentsRouter from "./financePayments";
 import documentsRouter from "./documents";
+import documentsExportRouter, { documentsExportPublicRouter } from "./documentsExport";
 import meetingsRouter from "./meetings";
 import storesRouter from "./stores";
 import resultsRouter from "./results";
@@ -41,6 +45,7 @@ import pdfRouter from "./pdf";
 import rotinasRouter, { enforceMandatoryRoutines } from "./rotinas";
 import catalogRouter, { catalogPublicRouter } from "./catalog";
 import catalogExportRouter from "./catalogExport";
+import vitrineRedirectRouter, { vitrineRedirectPublicRouter } from "./vitrineRedirect";
 import geoRouter from "./geo";
 
 const router: IRouter = Router();
@@ -64,6 +69,8 @@ router.use(whatsappProxyRouter);
 router.use(internalChatRouter);
 router.use(tasksRouter);
 router.use(settingsRouter);
+// Trocas com o ERP (19/10/2026): mapa e histórico do que vai e vem do ERP.
+router.use(erpExchangesRouter);
 router.use(instagramRouter);
 router.use(partnerLinksRouter);
 // Avaliação de usados → ERP (07/10/2026): exportar e desligar aqui.
@@ -75,10 +82,15 @@ router.use((req, res, next) => { void blockWhenHrMoved(req, res, next); });
 router.use(rhRouter);
 router.use(rhDpRouter);
 router.use(employeeHiringRouter);
+// Antes do rafflesRouter: /raffles/moved e /raffles/export (ERP, 17/10/2026).
+router.use(rafflesExportRouter);
 router.use(rafflesRouter);
 router.use(botRouter);
 router.use(financeRouter);
+router.use(erpSalesRouter);
 router.use(financePaymentsRouter);
+// Documentos → ERP (17/10/2026): exportar e desligar aqui.
+router.use(documentsExportRouter);
 router.use(documentsRouter);
 router.use(meetingsRouter);
 router.use(storesRouter);
@@ -93,14 +105,21 @@ router.use(rotinasRouter);
 router.use(catalogRouter);
 // Exportação da Vitrine pro ERP (04/10/2026) — ver routes/catalogExport.ts.
 router.use(catalogExportRouter);
+// "Redirecionar a vitrine pública para o ERP" (17/10/2026) — ver routes/vitrineRedirect.ts.
+router.use(vitrineRedirectRouter);
 // Sem requireAuth: a vitrine pública é vista por clientes sem login.
 router.use(catalogPublicRouter);
+// Sem requireAuth: 302 de /vitrine/<slug> e /avaliar/<slug> para o ERP (via nginx).
+router.use(vitrineRedirectPublicRouter);
 // Sem requireAuth: avaliação de usados pública (cliente avalia o próprio
 // aparelho na vitrine, sem login) — ver tradeInPublicRouter em tradeIn.ts.
 router.use(tradeInPublicRouter);
 // Sem requireAuth: fotos das avaliações por link assinado (72h), só pro ERP
 // baixar na importação — ver routes/tradeInExport.ts.
 router.use(tradeInExportPublicRouter);
+// Sem requireAuth: arquivos dos documentos por link assinado (72h), só pro
+// ERP baixar na importação — ver routes/documentsExport.ts.
+router.use(documentsExportPublicRouter);
 // Sem requireAuth: webhook do Instagram Direct (Meta) e mídia por link
 // assinado — ver routes/instagram.ts.
 router.use(instagramPublicRouter);

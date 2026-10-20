@@ -3,7 +3,26 @@ import { api, type AiCredentialsStatus } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { Plug, KeyRound, Trash2, CheckCircle2 } from "lucide-react";
 import ErpIntegrationCard from "@/components/ErpIntegrationCard";
+import TasksErpCard from "@/components/TasksErpCard";
 import InstagramIntegrationCard from "@/components/InstagramIntegrationCard";
+import ErpTrocasPanel from "@/components/ErpTrocasPanel";
+
+// Abas desta tela (19/10/2026): "Conexões" (chaves) e "Trocas com o ERP".
+type IntegracoesView = "conexoes" | "trocas";
+function IntegracoesTabs({ view, onChange }: { view: IntegracoesView; onChange: (v: IntegracoesView) => void }) {
+  const tabs: [IntegracoesView, string][] = [["conexoes", "Conexões"], ["trocas", "Trocas com o ERP"]];
+  return (
+    <div role="tablist" className="flex gap-1 border-b border-border">
+      {tabs.map(([id, label]) => (
+        <button key={id} type="button" role="tab" aria-selected={view === id} data-testid={`tab-integracoes-${id}`}
+          onClick={() => onChange(id)}
+          className={`-mb-px px-3 py-2 text-sm font-semibold border-b-2 ${view === id ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"}`}>
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 // Chave da OpenAI própria da loja: quando configurada e ligada, substitui a
 // chave global da plataforma em todos os recursos de IA (robô, sugestão de
@@ -16,6 +35,7 @@ export default function ConfiguracoesIntegracoes() {
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState(false);
+  const [view, setView] = useState<IntegracoesView>("conexoes");
 
   const load = () => { api.settings.ai.get().then(setStatus).catch(() => {}); };
   useEffect(load, []);
@@ -52,14 +72,26 @@ export default function ConfiguracoesIntegracoes() {
     } finally { setRemoving(false); }
   };
 
+  if (view === "trocas") {
+    return (
+      <div className="max-w-5xl space-y-6">
+        <IntegracoesTabs view={view} onChange={setView} />
+        <ErpTrocasPanel />
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-lg space-y-6">
+      <IntegracoesTabs view={view} onChange={setView} />
       <div>
         <h2 className="font-bold text-foreground flex items-center gap-2"><Plug className="w-5 h-5" /> Integrações</h2>
         <p className="text-xs text-muted-foreground mt-1">Conecte a própria conta OpenAI pra esta loja usar a sua chave em vez da chave da plataforma.</p>
       </div>
 
       <ErpIntegrationCard />
+
+      <TasksErpCard />
 
       <InstagramIntegrationCard />
 

@@ -2,6 +2,7 @@ import { db, tasksTable, taskAssigneesTable, taskRemindersTable } from "@workspa
 import { eq, and, ne, isNotNull } from "drizzle-orm";
 import { broadcast } from "./sseEmitter";
 import { logger } from "./logger";
+import { movedTenantIds } from "./erpTasks";
 
 // Lembrete DIÁRIO de tarefas pendentes/prazos (pedido 10/09: "informa o
 // setor responsável com alertas automáticos todos os dias lembrando de
@@ -45,7 +46,11 @@ export async function generateDailyTaskDigest(): Promise<number> {
     isNotNull(tasksTable.dueDate),
   ));
 
+  // Tarefas no ERP (19/10/2026): quem mudou o quadro para o ERP recebe os
+  // avisos de lá (sem aviso duplicado daqui).
+  const movedToErp = await movedTenantIds();
   for (const t of candidates) {
+    if (movedToErp.has(t.tenantId)) continue;
     try {
       const dueDate = t.dueDate!;
       // Só entra no lembrete diário quem está atrasado ou vence nas próximas

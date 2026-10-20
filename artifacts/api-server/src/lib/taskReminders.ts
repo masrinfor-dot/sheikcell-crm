@@ -2,6 +2,7 @@ import { db, tasksTable, taskAssigneesTable, taskRemindersTable } from "@workspa
 import { eq, and, ne, isNotNull } from "drizzle-orm";
 import { broadcast } from "./sseEmitter";
 import { logger } from "./logger";
+import { movedTenantIds } from "./erpTasks";
 
 // Agenda (Quadro de Tarefas): lembrete automático de compromisso — dispara
 // quando faltam `alertMinutesBefore` minutos para o dueDate de uma tarefa
@@ -34,7 +35,11 @@ export async function generateTaskReminders(): Promise<number> {
     isNotNull(tasksTable.alertMinutesBefore),
   ));
 
+  // Tarefas no ERP (19/10/2026): quem mudou o quadro para o ERP recebe os
+  // avisos de lá (sem aviso duplicado daqui).
+  const movedToErp = await movedTenantIds();
   for (const t of candidates) {
+    if (movedToErp.has(t.tenantId)) continue;
     try {
       const dueDate = t.dueDate!;
       const triggerAt = new Date(dueDate.getTime() - (t.alertMinutesBefore ?? 0) * 60_000);

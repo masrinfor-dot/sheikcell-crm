@@ -22,7 +22,7 @@ export class ApiError extends Error {
 // (ex.: importação de lista, busca de fotos), onde sem ele um proxy/rede
 // travada deixa o spinner girando pra sempre em vez de mostrar um erro.
 // Chamadas normais (sem timeoutMs) mantêm o comportamento de sempre.
-async function req<T>(path: string, opts?: RequestInit & { timeoutMs?: number }): Promise<T> {
+export async function req<T>(path: string, opts?: RequestInit & { timeoutMs?: number }): Promise<T> {
   const { timeoutMs, ...init } = opts ?? {};
   const controller = timeoutMs ? new AbortController() : null;
   const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
@@ -1017,20 +1017,21 @@ export type Task = {
 };
 
 export type TaskComment = {
-  id: number; taskId: number; authorId: number | null;
+  // Tarefas no ERP (19/10/2026): ids do ERP são texto (uuid).
+  id: number | string; taskId: number; authorId: number | null;
   authorName: string | null; content: string; createdAt: string;
   mediaUrl?: string | null; mediaType?: string | null;
 };
 
 export type TaskSubtask = {
-  id: number; taskId: number; title: string; isDone: boolean; position: number; createdAt: string;
+  id: number | string; taskId: number; title: string; isDone: boolean; position: number; createdAt: string;
 };
 
 // Agenda: lembrete de compromisso (dueDate + alertMinutesBefore), gerado
 // automaticamente pelo servidor e entregue em tempo real via SSE
 // ("task_reminder") + listado aqui pra quem perdeu o evento (offline).
 export type TaskReminder = {
-  id: number; taskId: number; title: string; dueDate: string; read: boolean; createdAt: string;
+  id: number | string; taskId: number; title: string; dueDate: string; read: boolean; createdAt: string;
 };
 
 // ── Quadro de Sistema (Dev) ── problemas/atualizações/implementações do
@@ -1654,6 +1655,52 @@ export interface ErpIntegrationStatus {
   demandPendingCount: number;
 }
 
+// Trocas com o ERP (19/10/2026): mapa do que vai e vem e histórico (90 dias).
+export type ErpFlowStatus = "ON" | "OFF" | "NO_ACCESS" | "MANUAL";
+export type ErpDirection = "CRM_TO_ERP" | "ERP_TO_CRM";
+export interface ErpExchangeFlow {
+  key: string;
+  label: string;
+  what: string;
+  scope: string | null;
+  frequency: string;
+  manual: string | null;
+  directions: ErpDirection[];
+  status: ErpFlowStatus;
+  reason: string;
+  lastExchangeAt: string | null;
+  todayOk: number;
+  todayErrors: number;
+}
+export interface ErpExchangeFlows {
+  configured: boolean;
+  keyScopes: string[] | null;
+  pingError: string | null;
+  flows: ErpExchangeFlow[];
+}
+export interface ErpExchangeRow {
+  id: number;
+  flow: string;
+  direction: ErpDirection;
+  method: string;
+  path: string;
+  httpStatus: number | null;
+  ok: boolean;
+  durationMs: number;
+  itemCount: number | null;
+  summary: string | null;
+  error: string | null;
+  createdAt: string;
+}
+export interface ErpExchangeList {
+  items: ErpExchangeRow[];
+  total: number;
+  page: number;
+  pageSize: number;
+  today: { total: number; ok: number; errors: number; crmToErp: number; erpToCrm: number };
+  retentionDays: number;
+}
+
 export interface InstagramIntegrationStatus {
   configured: boolean;
   enabled: boolean;
@@ -1753,6 +1800,16 @@ export type BroadcastDispatchSummary = {
 export type OutboundUsage = {
   hourly: { used: number; limit: number };
   daily: { used: number; limit: number };
+};
+
+export type TasksErpImportReport = {
+  tasks: number; created: number; existing: number; comments: number; subtasks: number;
+  files: number; fileErrors: number; assigneesLinked: number; peopleWithoutErpUser: string[]; at?: string;
+};
+
+export type TasksErpStatus = {
+  moved: boolean; movedAt: string | null; configured: boolean; erpUrl: string | null;
+  localTasks: number; lastImport: TasksErpImportReport | null;
 };
 
 export type TaskReportBucket = {
@@ -2808,6 +2865,10 @@ export const api = {
   },
   raffles: {
     list: () => req<Raffle[]>("/raffles"),
+    // Sorteios passados pro ERP (17/10/2026).
+    moved: () => req<{ moved: boolean; erpUrl: string }>("/raffles/moved"),
+    setMoved: (data: { moved?: boolean; erpUrl?: string }) =>
+      req<{ moved: boolean; erpUrl: string }>("/raffles/moved", { method: "PUT", body: JSON.stringify(data) }),
     create: (data: Partial<Raffle>) => req<Raffle>("/raffles", { method: "POST", body: JSON.stringify(data) }),
     update: (id: number, data: Partial<Raffle>) => req<Raffle>(`/raffles/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/raffles/${id}`, { method: "DELETE" }),
@@ -3203,6 +3264,10 @@ export const api = {
       generate: () => req<{ created: number }>("/tvbox/invoices/generate", { method: "POST" }),
     },
     overview: () => req<TvBoxOverview>("/tvbox/overview"),
+    // TV Box passada para o ERP (17/10/2026) — ver TvBoxErpCard.
+    moved: () => req<{ moved: boolean; erpUrl: string }>("/tvbox/moved"),
+    setMoved: (data: { moved?: boolean; erpUrl?: string }) =>
+      req<{ moved: boolean; erpUrl: string }>("/tvbox/moved", { method: "PUT", body: JSON.stringify(data) }),
     settings: {
       get: () => req<TvBoxSettings>("/tvbox/settings"),
       update: (data: Partial<TvBoxSettings>) =>
@@ -3236,6 +3301,17 @@ export const api = {
       test: () =>
         req<{ ok: boolean; tenant: string; keyName: string | null; canSendOsMessages: boolean; canSyncHr: boolean }>("/settings/erp/test", { method: "POST" }),
       remove: () => req<ErpIntegrationStatus>("/settings/erp", { method: "DELETE" }),
+      exchangeFlows: () => req<ErpExchangeFlows>("/settings/erp/exchanges/flows"),
+      exchanges: (params: Record<string, string>) =>
+        req<ErpExchangeList>(`/settings/erp/exchanges?${new URLSearchParams(params).toString()}`),
+      // Quadro de tarefas unificado (19/10/2026): mudar as tarefas para o ERP.
+      tasks: {
+        get: () => req<TasksErpStatus>("/settings/erp/tasks"),
+        check: () => req<{ ok: boolean; erpUsers: number; crmUsersWithoutErpUser: string[] }>("/settings/erp/tasks/check", { method: "POST" }),
+        move: () => req<{ ok: boolean; report: TasksErpImportReport; moved: boolean }>("/settings/erp/tasks/move", { method: "POST" }),
+        importAgain: () => req<{ ok: boolean; report: TasksErpImportReport; moved: boolean }>("/settings/erp/tasks/import", { method: "POST" }),
+        back: () => req<{ ok: boolean; moved: boolean }>("/settings/erp/tasks/back", { method: "POST" }),
+      },
     },
     instagram: {
       get: () => req<InstagramIntegrationStatus>("/settings/instagram"),
@@ -3270,9 +3346,9 @@ export const api = {
     subtasks: (id: number) => req<TaskSubtask[]>(`/tasks/${id}/subtasks`),
     addSubtask: (id: number, title: string) =>
       req<TaskSubtask>(`/tasks/${id}/subtasks`, { method: "POST", body: JSON.stringify({ title }) }),
-    updateSubtask: (id: number, subId: number, data: Partial<{ isDone: boolean; title: string; position: number }>) =>
+    updateSubtask: (id: number, subId: number | string, data: Partial<{ isDone: boolean; title: string; position: number }>) =>
       req<TaskSubtask>(`/tasks/${id}/subtasks/${subId}`, { method: "PATCH", body: JSON.stringify(data) }),
-    removeSubtask: (id: number, subId: number) =>
+    removeSubtask: (id: number, subId: number | string) =>
       req<{ ok: boolean }>(`/tasks/${id}/subtasks/${subId}`, { method: "DELETE" }),
     remove: (id: number) => req<{ ok: boolean }>(`/tasks/${id}`, { method: "DELETE" }),
     notifications: {
@@ -3281,8 +3357,10 @@ export const api = {
     },
     reminders: {
       unread: () => req<TaskReminder[]>("/tasks/reminders/unread"),
-      markRead: (id: number) => req<{ ok: boolean }>(`/tasks/reminders/${id}/read`, { method: "POST" }),
+      markRead: (id: number | string) => req<{ ok: boolean }>(`/tasks/reminders/${id}/read`, { method: "POST" }),
     },
+    // Quadro de tarefas unificado (19/10/2026): as tarefas moram no ERP?
+    erpStatus: () => req<{ moved: boolean; erpUrl: string | null }>("/tasks/erp-status"),
   },
   systemBoard: {
     list: () => req<SystemBoardItem[]>("/system-board"),
@@ -3306,6 +3384,10 @@ export const api = {
       req<DocumentItem>("/documents", { method: "POST", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/documents/${id}`, { method: "DELETE" }),
     fileUrl: (id: number) => `/api/documents/${id}/file`,
+    // Documentos passados pro ERP (17/10/2026).
+    moved: () => req<{ moved: boolean; erpUrl: string }>("/documents/moved"),
+    setMoved: (data: { moved?: boolean; erpUrl?: string }) =>
+      req<{ moved: boolean; erpUrl: string }>("/documents/moved", { method: "PUT", body: JSON.stringify(data) }),
   },
   catalog: {
     list: () => req<{ settings: CatalogPricingSettings; products: CatalogProduct[] }>("/catalog/products"),
@@ -3389,8 +3471,16 @@ export const api = {
         storeName: string; logoDataUrl: string | null; bannerImage: string | null;
         whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
         tradeInEnabled: boolean;
+        // Vitrine pública no ERP (17/10/2026): preenchido só com "Redirecionar
+        // a vitrine pública para o ERP" ligado — a página vai para lá.
+        redirectTo?: string | null;
         categories: CatalogCategory[]; products: CatalogPublicProduct[]; trustBadges: CatalogTrustBadge[]; paymentMethods: CatalogPaymentMethod[];
       }>(`/catalog-public/${slug}${code ? `?code=${encodeURIComponent(code)}` : ""}`),
+    erpRedirect: {
+      get: () => req<{ enabled: boolean; erpWebUrl: string | null }>("/catalog/erp-redirect"),
+      set: (enabled: boolean) =>
+        req<{ enabled: boolean; erpWebUrl: string | null }>("/catalog/erp-redirect", { method: "PUT", body: JSON.stringify({ enabled }) }),
+    },
     // Gera a lista de "Principais características" com IA — não salva nada
     // sozinho, o lojista revisa/edita e salva junto do resto do produto.
     generateCharacteristics: (data: { model: string; condition: CatalogCondition; colors: string[]; variants: { storage: string | null }[] }) =>

@@ -186,6 +186,12 @@ export async function deliverScheduledMessages(): Promise<void> {
           await db.update(tasksTable).set({ status: "done", updatedAt: new Date() })
             .where(eq(tasksTable.id, item.taskId));
         }
+        // Tarefas no ERP (19/10/2026): a tarefa espelho mora lá.
+        if (item.erpTaskNumber != null && delivered) {
+          await import("./erpTasks")
+            .then((m) => m.finishErpMirrorTask(item.tenantId, item.erpTaskNumber!, item.createdById, "done"))
+            .catch((err) => logger.warn({ err, scheduledId: item.id }, "ERP: não deu para concluir a tarefa espelho"));
+        }
       } catch (err) {
         logger.warn({ err, scheduledId: item.id }, "Falha ao processar mensagem agendada");
         await db.update(scheduledMessagesTable).set({ status: "failed" })
@@ -276,6 +282,10 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("./erpOsMessages").then((m) => m.runErpOsMessages()).catch(() => {});
   }, 60_000);
+  // Sorteios do ERP (17/10/2026): avisos aos ganhadores saem pelo WhatsApp daqui.
+  setInterval(() => {
+    void import("./erpRaffleMessages").then((m) => m.runErpRaffleMessages()).catch(() => {});
+  }, 60_000);
   // RH com o ERP (07/10/2026): batidas do WhatsApp, fechamento do mês e
   // documentos da contratação vão para o ERP (dono do cadastro) a cada 5 min.
   setInterval(() => {
@@ -292,6 +302,15 @@ export function startScheduler(): void {
   setInterval(() => {
     void import("./erpDemandSync").then((m) => m.runErpDemandSync()).catch(() => {});
   }, 30 * 60_000);
+  // Vendas do atendimento (19/10/2026): atendimentos (telefone, atendente,
+  // setor, loja, último contato) vão para o ERP marcar as vendas, a cada 10 min.
+  setInterval(() => {
+    void import("./erpSalesSync").then((m) => m.runErpSalesSync()).catch(() => {});
+  }, 10 * 60_000);
+  // Trocas com o ERP (19/10/2026): o histórico fica 90 dias; limpa a cada 6 h.
+  setInterval(() => {
+    void import("./erpExchanges").then((m) => m.cleanupErpExchanges()).catch(() => {});
+  }, 6 * 60 * 60_000);
   // Lembrete da pesquisa de satisfação: granularidade de minutos basta.
   setInterval(() => { void sendSurveyReminders(); }, 60_000);
   // Gerente IA (19/10/2026): lembretes, avisos de compromisso e o resumo

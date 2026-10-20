@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { db, tenantErpIntegrationsTable } from "@workspace/db";
 import { decryptErpSecret } from "./erpCrypto";
 import { erpFetch } from "./erpOsMessages";
+import { withErpTenant } from "./erpExchanges";
 import { logger } from "./logger";
 
 // Situação da OS pelo robô (07/10/2026 — pedido do Samuel: o cliente pergunta
@@ -135,7 +136,9 @@ export async function lookupOsStatus(tenantId: number, phone: string, number: st
     const ask = async (n: string | null) => {
       const qs = new URLSearchParams({ phone });
       if (n) qs.set("number", n);
-      return (await erpFetch(row.baseUrl, apiKey, `/integrations/service-orders/status?${qs.toString()}`, undefined, OS_STATUS_TIMEOUT_MS)) as ErpOsStatusAnswer;
+      // Trocas com o ERP: a consulta entra no histórico da loja (sem o celular).
+      return withErpTenant(tenantId, async () =>
+        (await erpFetch(row.baseUrl, apiKey, `/integrations/service-orders/status?${qs.toString()}`, undefined, OS_STATUS_TIMEOUT_MS)) as ErpOsStatusAnswer);
     };
     const first = await ask(number);
     if (first.found || !number) return { kind: "ok", answer: first, askedNumberMissing: null };

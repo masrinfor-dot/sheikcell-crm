@@ -602,6 +602,21 @@ router.get("/crm/:id/tasks", requireAuth, async (req, res): Promise<void> => {
   const contact = await loadContactWithAccess(id, tenantId, req.session, res);
   if (!contact) return;
 
+  // Tarefas no ERP (19/10/2026): as do cliente vêm de lá.
+  const erp = await import("../lib/erpTasks");
+  if (await erp.tasksMoved(tenantId)) {
+    const c = await erp.erpTasksConn(tenantId);
+    if (!c) { res.json([]); return; }
+    try {
+      const list = await erp.erpTasks<import("../lib/erpTasks").ErpTask[]>(c, `?crmContactId=${id}`);
+      const ctx = await erp.loadCrmCtx(tenantId, [id]);
+      res.json(list.map((t) => erp.toCrmTask(t, ctx)));
+    } catch {
+      res.json([]);
+    }
+    return;
+  }
+
   const rows = await db.select().from(tasksTable)
     .where(and(eq(tasksTable.tenantId, tenantId), eq(tasksTable.contactId, id), eq(tasksTable.isArchived, false)))
     .orderBy(desc(tasksTable.dueDate), desc(tasksTable.createdAt));
