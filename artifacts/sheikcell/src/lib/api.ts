@@ -3329,8 +3329,16 @@ export const api = {
         storeName: string; logoDataUrl: string | null; bannerImage: string | null;
         whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
         tradeInEnabled: boolean;
+        // Vitrine pública no ERP (17/10/2026): preenchido só com "Redirecionar
+        // a vitrine pública para o ERP" ligado — a página vai para lá.
+        redirectTo?: string | null;
         categories: CatalogCategory[]; products: CatalogPublicProduct[]; trustBadges: CatalogTrustBadge[]; paymentMethods: CatalogPaymentMethod[];
       }>(`/catalog-public/${slug}${code ? `?code=${encodeURIComponent(code)}` : ""}`),
+    erpRedirect: {
+      get: () => req<{ enabled: boolean; erpWebUrl: string | null }>("/catalog/erp-redirect"),
+      set: (enabled: boolean) =>
+        req<{ enabled: boolean; erpWebUrl: string | null }>("/catalog/erp-redirect", { method: "PUT", body: JSON.stringify({ enabled }) }),
+    },
     // Gera a lista de "Principais características" com IA — não salva nada
     // sozinho, o lojista revisa/edita e salva junto do resto do produto.
     generateCharacteristics: (data: { model: string; condition: CatalogCondition; colors: string[]; variants: { storage: string | null }[] }) =>

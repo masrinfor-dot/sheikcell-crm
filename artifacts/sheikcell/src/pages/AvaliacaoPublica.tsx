@@ -102,7 +102,11 @@ export default function AvaliacaoPublica() {
   useEffect(() => {
     if (!slug) { setError("Link inválido"); return; }
     Promise.all([
-      api.catalog.public(slug).then((d) => { setStoreName(d.storeName); setWhatsapp(d.whatsapp); }).catch(() => {}),
+      api.catalog.public(slug).then((d) => {
+        // Vitrine pública no ERP (17/10/2026): opção ligada → avaliação do ERP.
+        if (d.redirectTo) { window.location.replace(`${d.redirectTo}/avaliar${window.location.search}`); return; }
+        setStoreName(d.storeName); setWhatsapp(d.whatsapp);
+      }).catch(() => {}),
       api.tradeInPublic.questions(slug).then(setQuestions),
     ]).catch((e) => setError(e instanceof Error ? e.message : "Avaliação não disponível"));
   }, [slug]);

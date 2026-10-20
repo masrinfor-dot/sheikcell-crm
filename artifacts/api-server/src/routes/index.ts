@@ -42,6 +42,7 @@ import pdfRouter from "./pdf";
 import rotinasRouter, { enforceMandatoryRoutines } from "./rotinas";
 import catalogRouter, { catalogPublicRouter } from "./catalog";
 import catalogExportRouter from "./catalogExport";
+import vitrineRedirectRouter, { vitrineRedirectPublicRouter } from "./vitrineRedirect";
 import geoRouter from "./geo";
 
 const router: IRouter = Router();
@@ -98,8 +99,12 @@ router.use(rotinasRouter);
 router.use(catalogRouter);
 // Exportação da Vitrine pro ERP (04/10/2026) — ver routes/catalogExport.ts.
 router.use(catalogExportRouter);
+// "Redirecionar a vitrine pública para o ERP" (17/10/2026) — ver routes/vitrineRedirect.ts.
+router.use(vitrineRedirectRouter);
 // Sem requireAuth: a vitrine pública é vista por clientes sem login.
 router.use(catalogPublicRouter);
+// Sem requireAuth: 302 de /vitrine/<slug> e /avaliar/<slug> para o ERP (via nginx).
+router.use(vitrineRedirectPublicRouter);
 // Sem requireAuth: avaliação de usados pública (cliente avalia o próprio
 // aparelho na vitrine, sem login) — ver tradeInPublicRouter em tradeIn.ts.
 router.use(tradeInPublicRouter);
