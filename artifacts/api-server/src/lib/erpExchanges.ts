@@ -25,8 +25,8 @@ const MAX_BODY_TO_COUNT = 1_000_000;
 type IntegrationRow = typeof tenantErpIntegrationsTable.$inferSelect;
 
 export interface ErpFlowRoute {
-  method: "GET" | "POST" | "FILE";
-  /** Caminho a partir de `/integrations` (`:id` onde houver id). */
+  method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE" | "FILE";
+  /** Caminho a partir de `/integrations` (`:id` onde houver id; `/**` no fim = qualquer subcaminho). */
   path: string;
   direction: ErpDirection;
   one: string;
@@ -120,6 +120,90 @@ export const CRM_ERP_FLOWS: readonly ErpFlowDef[] = [
       { method: "FILE", path: "/trade-in/export", direction: "CRM_TO_ERP", one: "avaliação exportada", many: "avaliações exportadas" },
     ],
   },
+  {
+    key: "demand",
+    label: "Pedidos de clientes sem estoque (atacado)",
+    what: "O CRM manda o texto que os clientes escreveram na linha de atacado; a IA do ERP lista o que foi pedido e confere o estoque (Compras › Pedidos de clientes).",
+    scope: "demand.write",
+    frequency: "A cada 30 minutos (ou \"Enviar agora\")",
+    enabled: (r) => r.demandSyncEnabled,
+    enabledHint: "Escolha a linha de atacado e ligue \"Mandar para o ERP\" no cartão do ERP (aba Conexões).",
+    routes: [
+      { method: "POST", path: "/customer-demand/conversations", direction: "CRM_TO_ERP", one: "conversa de atacado enviada", many: "conversas de atacado enviadas" },
+    ],
+  },
+  {
+    key: "attendance",
+    label: "Atendimentos e vendas do atendimento",
+    what: "O CRM manda os atendimentos (celular, atendente, setor, loja, último contato) e a lista de atendentes; o ERP marca as vendas que vieram do atendimento e devolve as vendas por atendente e as compras do cliente.",
+    scope: "attendance.write",
+    frequency: "A cada 10 minutos (atendentes: a cada hora); vendas ao abrir o Financeiro ou a conversa",
+    routes: [
+      { method: "POST", path: "/crm-attendance/attendances", direction: "CRM_TO_ERP", one: "atendimento enviado", many: "atendimentos enviados" },
+      { method: "POST", path: "/crm-attendance/attendants", direction: "CRM_TO_ERP", one: "atendente enviado", many: "atendentes enviados" },
+      { method: "GET", path: "/sales/by-attendant", direction: "ERP_TO_CRM", one: "atendente com vendas", many: "atendentes com vendas" },
+      { method: "GET", path: "/sales/by-phone", direction: "ERP_TO_CRM", one: "compra do cliente", many: "compras do cliente" },
+    ],
+  },
+  {
+    key: "raffles",
+    label: "Sorteios (aviso aos ganhadores)",
+    what: "O ERP faz os sorteios; o CRM busca os avisos aos ganhadores, manda pelo WhatsApp e devolve se foi enviado.",
+    scope: "raffles.send",
+    frequency: "A cada minuto (depois de mudar os sorteios para o ERP)",
+    routes: [
+      { method: "GET", path: "/raffles/messages/due", direction: "ERP_TO_CRM", one: "aviso de sorteio recebido", many: "avisos de sorteio recebidos" },
+      { method: "POST", path: "/raffles/messages/:id/result", direction: "CRM_TO_ERP", one: "resultado de aviso enviado", many: "resultados de aviso enviados" },
+    ],
+  },
+  {
+    key: "tasks",
+    label: "Quadro de tarefas",
+    what: "As tarefas moram no ERP; o quadro do CRM lista, cria, edita, move e comenta as mesmas tarefas (sempre dizendo quem fez).",
+    scope: "tasks.sync",
+    frequency: "Ao usar o quadro de tarefas (avisos a cada 2 minutos)",
+    routes: [
+      { method: "GET", path: "/tasks/**", direction: "ERP_TO_CRM", one: "leitura do quadro", many: "leituras do quadro" },
+      { method: "POST", path: "/tasks/import", direction: "CRM_TO_ERP", one: "tarefa antiga levada ao ERP", many: "tarefas antigas levadas ao ERP" },
+      { method: "POST", path: "/tasks/**", direction: "CRM_TO_ERP", one: "tarefa criada/alterada", many: "tarefas criadas/alteradas" },
+      { method: "PATCH", path: "/tasks/**", direction: "CRM_TO_ERP", one: "tarefa alterada", many: "tarefas alteradas" },
+      { method: "PUT", path: "/tasks/**", direction: "CRM_TO_ERP", one: "tarefa alterada", many: "tarefas alteradas" },
+      { method: "DELETE", path: "/tasks/**", direction: "CRM_TO_ERP", one: "tarefa apagada", many: "tarefas apagadas" },
+    ],
+  },
+  {
+    key: "raffles_export",
+    label: "Sorteios (arquivo)",
+    what: "Arquivo com os sorteios e os resultados do CRM, que o ERP importa.",
+    scope: null,
+    frequency: "Uma vez (na mudança para o ERP)",
+    manual: "Sorteios › Exportar para o ERP",
+    routes: [
+      { method: "FILE", path: "/raffles/export", direction: "CRM_TO_ERP", one: "sorteio exportado", many: "sorteios exportados" },
+    ],
+  },
+  {
+    key: "tvbox_export",
+    label: "TV Box (arquivo)",
+    what: "Arquivo com os assinantes, mensalidades e se a cobrança do CRM foi desligada, que o ERP importa.",
+    scope: null,
+    frequency: "Uma vez (na mudança para o ERP)",
+    manual: "TV Box › Exportar para o ERP",
+    routes: [
+      { method: "FILE", path: "/tvbox/export", direction: "CRM_TO_ERP", one: "assinante exportado", many: "assinantes exportados" },
+    ],
+  },
+  {
+    key: "documents_export",
+    label: "Documentos (arquivo)",
+    what: "Arquivo com os documentos da loja; o ERP baixa cada arquivo do CRM.",
+    scope: null,
+    frequency: "Uma vez (na mudança para o ERP)",
+    manual: "Documentos › Exportar para o ERP",
+    routes: [
+      { method: "FILE", path: "/documents/export", direction: "CRM_TO_ERP", one: "documento exportado", many: "documentos exportados" },
+    ],
+  },
 ];
 
 export const OTHER_FLOW = "other";
@@ -152,6 +236,10 @@ export function erpRoutePath(pathWithQuery: string): string {
 function pathMatches(template: string, path: string): boolean {
   const a = template.split("/").filter(Boolean);
   const b = path.split("/").filter(Boolean);
+  if (a[a.length - 1] === "**") {
+    const head = a.slice(0, -1);
+    return b.length >= head.length && head.every((seg, i) => seg.startsWith(":") || seg === b[i]);
+  }
   return a.length === b.length && a.every((seg, i) => seg.startsWith(":") || seg === b[i]);
 }
 

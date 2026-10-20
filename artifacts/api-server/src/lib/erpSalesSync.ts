@@ -16,6 +16,7 @@ import {
 } from "@workspace/db";
 import { decryptErpSecret } from "./erpCrypto";
 import { erpFetch } from "./erpOsMessages";
+import { withErpTenant } from "./erpExchanges";
 import { logger } from "./logger";
 
 export const SALES_HISTORY_DAYS = 60;
@@ -155,7 +156,12 @@ async function ensureRow(tenantId: number) {
 }
 
 /** Roda o envio de UMA loja (o scheduler chama para todas as ligadas). */
-export async function syncTenantSales(tenantId: number, now = new Date(), maxCalls = CALLS_PER_RUN): Promise<SalesSyncResult> {
+/** Roda dentro do contexto da loja: cada chamada ao ERP entra no histórico de trocas. */
+export function syncTenantSales(tenantId: number, now = new Date(), maxCalls = CALLS_PER_RUN): Promise<SalesSyncResult> {
+  return withErpTenant(tenantId, () => syncTenantSalesInner(tenantId, now, maxCalls));
+}
+
+async function syncTenantSalesInner(tenantId: number, now: Date, maxCalls: number): Promise<SalesSyncResult> {
   const result: SalesSyncResult = { sent: 0, scanned: 0, calls: 0, attendants: null, error: null };
   const [integ] = await db.select().from(tenantErpIntegrationsTable)
     .where(eq(tenantErpIntegrationsTable.tenantId, tenantId)).limit(1);
@@ -260,7 +266,16 @@ export type ErpPurchase = {
 };
 
 /** Últimas compras do cliente no ERP pelo telefone (ficha da conversa). */
-export async function customerPurchasesFromErp(tenantId: number, phone: string): Promise<{
+/** Compras do cliente no ERP (dentro do contexto da loja, para o histórico de trocas). */
+export function customerPurchasesFromErp(tenantId: number, phone: string): Promise<{
+  available: boolean;
+  customerName: string | null;
+  sales: ErpPurchase[];
+}> {
+  return withErpTenant(tenantId, () => customerPurchasesFromErpInner(tenantId, phone));
+}
+
+async function customerPurchasesFromErpInner(tenantId: number, phone: string): Promise<{
   available: boolean;
   customerName: string | null;
   sales: ErpPurchase[];

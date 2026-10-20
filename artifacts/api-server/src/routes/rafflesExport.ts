@@ -121,6 +121,11 @@ router.get("/raffles/export", requireAdmin, async (req, res): Promise<void> => {
     sessionLabels: new Map(sessions.map((s) => [s.sessionKey, s.displayName || s.phoneNumber || s.sessionKey])),
   });
   const day = new Date().toISOString().slice(0, 10);
+  // Trocas com o ERP: o arquivo baixado para o ERP entra no histórico (só a contagem).
+  void import("../lib/erpExchanges").then((m) => m.recordErpExchange({
+    tenantId, method: "FILE", path: "/raffles/export", httpStatus: 200, ok: true, durationMs: 0,
+    itemCount: payload.raffles.length,
+  })).catch(() => {});
   res.setHeader("Content-Disposition", `attachment; filename="sorteios-crm-${day}.json"`);
   res.json(payload);
 });

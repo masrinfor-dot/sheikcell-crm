@@ -2,6 +2,7 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import { db, conversationsTable, tenantErpIntegrationsTable } from "@workspace/db";
 import { decryptErpSecret } from "./erpCrypto";
 import { erpFetch } from "./erpOsMessages";
+import { withErpTenant } from "./erpExchanges";
 import { normalizePhone, phoneVariants } from "./phone";
 import { sendOutboundText } from "./outbound";
 import { tenantsWithRafflesMoved } from "./rafflesMoved";
@@ -72,7 +73,7 @@ export async function runErpRaffleMessages(): Promise<void> {
       } catch {
         continue; // a integração das OS já registra a chave ilegível
       }
-      try {
+      await withErpTenant(row.tenantId, async () => { try {
         const due = await erpFetch(row.baseUrl, apiKey, `/integrations/raffles/messages/due?limit=${BATCH}`) as { items: ErpRaffleMessage[] };
         for (const item of due.items ?? []) {
           let status: "SENT" | "FAILED" = "FAILED";
@@ -99,7 +100,7 @@ export async function runErpRaffleMessages(): Promise<void> {
           lastWarn.set(row.tenantId, Date.now());
           logger.warn({ err, tenantId: row.tenantId }, "ERP: falha ao buscar avisos dos sorteios");
         }
-      }
+      } });
     }
   } catch (err) {
     logger.warn({ err }, "ERP: tick dos avisos de sorteio falhou");

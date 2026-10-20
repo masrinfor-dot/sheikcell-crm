@@ -48,6 +48,11 @@ router.put("/tvbox/moved", requireAdmin, async (req, res): Promise<void> => {
 router.get("/tvbox/export", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const payload = await buildTvBoxExport(tenantId);
+  // Trocas com o ERP: o arquivo baixado para o ERP entra no histórico (só a contagem).
+  void import("../lib/erpExchanges").then((m) => m.recordErpExchange({
+    tenantId, method: "FILE", path: "/tvbox/export", httpStatus: 200, ok: true, durationMs: 0,
+    itemCount: payload.clients.length,
+  })).catch(() => {});
   res.setHeader("Content-Disposition", `attachment; filename="tv-box-${payload.exportedAt.slice(0, 10)}.json"`);
   res.json(payload);
 });

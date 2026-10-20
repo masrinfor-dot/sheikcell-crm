@@ -113,6 +113,11 @@ router.get("/documents/export", requireModuleAccess("documentos"), requireAdmin,
       fileUrl: exportDocumentUrl(base, d.id, now),
     })),
   };
+  // Trocas com o ERP: o arquivo baixado para o ERP entra no histórico (só a contagem).
+  void import("../lib/erpExchanges").then((m) => m.recordErpExchange({
+    tenantId, method: "FILE", path: "/documents/export", httpStatus: 200, ok: true, durationMs: 0,
+    itemCount: payload.documents.length,
+  })).catch(() => {});
   res.setHeader("Content-Disposition", `attachment; filename="documentos-${new Date(now).toISOString().slice(0, 10)}.json"`);
   res.json(payload);
 });

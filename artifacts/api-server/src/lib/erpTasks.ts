@@ -17,6 +17,7 @@ import { decryptErpSecret } from "./erpCrypto";
 import { erpUrl } from "./erpOsMessages";
 import { MEDIA_DIR } from "./whatsappInbound";
 import { appSetting, saveAppSetting } from "./tradeInMoved";
+import { currentErpTenant, recordErpExchange } from "./erpExchanges";
 
 // Quadro de tarefas unificado (19/10/2026): as tarefas MORAM no ERP Prumo e
 // aparecem aqui. Depois de "Mudar tarefas para o ERP" (Configurações ›
@@ -43,6 +44,8 @@ export interface ErpConn {
   baseUrl: string;
   apiKey: string;
   webUrl: string | null;
+  /** Loja dona da chave — para o histórico de trocas com o ERP. */
+  tenantId?: number;
 }
 
 // ─── Ligado ou não ──────────────────────────────────────────────────────────
@@ -75,7 +78,7 @@ export async function erpTasksConn(tenantId: number): Promise<ErpConn | null> {
   if (!row) return null;
   try {
     const apiKey = decryptErpSecret({ ciphertext: row.encryptedApiKey, iv: row.iv, authTag: row.authTag, keyVersion: row.keyVersion });
-    return { baseUrl: row.baseUrl, apiKey, webUrl: row.erpWebUrl ?? null };
+    return { baseUrl: row.baseUrl, apiKey, webUrl: row.erpWebUrl ?? null, tenantId };
   } catch {
     return null;
   }
@@ -106,17 +109,33 @@ async function errorFrom(res: Response): Promise<ErpTasksError> {
 }
 
 export async function erpTasksRaw(conn: ErpConn, pathName: string, init?: RequestInit): Promise<Response> {
+  // Trocas com o ERP: toda chamada entra no histórico da loja (rota sem query,
+  // status e duração — nunca o conteúdo da tarefa).
+  const tenantId = conn.tenantId ?? currentErpTenant();
+  const method = (init?.method ?? "GET").toUpperCase();
+  const path = `/integrations/tasks${pathName}`;
+  const startedAt = Date.now();
+  const log = (httpStatus: number | null, ok: boolean, error?: string) => {
+    if (tenantId == null) return;
+    void recordErpExchange({ tenantId, method, path, httpStatus, ok, durationMs: Date.now() - startedAt, error: error ?? null });
+  };
   let res: Response;
   try {
-    res = await fetch(erpUrl(conn.baseUrl, `/integrations/tasks${pathName}`), {
+    res = await fetch(erpUrl(conn.baseUrl, path), {
       ...init,
       headers: { "Content-Type": "application/json", "X-Api-Key": conn.apiKey, ...(init?.headers ?? {}) },
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
-  } catch {
+  } catch (err) {
+    log(null, false, err instanceof Error ? err.message : String(err));
     throw new ErpTasksError(502, "Não deu para falar com o ERP agora. Tente de novo em instantes.");
   }
-  if (!res.ok) throw await errorFrom(res);
+  if (!res.ok) {
+    const e = await errorFrom(res);
+    log(res.status, false, e.message);
+    throw e;
+  }
+  log(res.status, true);
   return res;
 }
 

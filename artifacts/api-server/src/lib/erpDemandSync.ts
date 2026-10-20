@@ -13,6 +13,7 @@ import {
 } from "@workspace/db";
 import { decryptErpSecret } from "./erpCrypto";
 import { erpFetch } from "./erpOsMessages";
+import { withErpTenant } from "./erpExchanges";
 import { logger } from "./logger";
 
 export const DEMAND_HISTORY_DAYS = 90;
@@ -110,7 +111,12 @@ export async function pendingConversations(tenantId: number, sessionKey: string)
 }
 
 /** Roda a sincronização de UMA loja. Devolve o resumo (o scheduler chama pra todas). */
-export async function syncTenantDemand(tenantId: number, maxCalls = CALLS_PER_RUN): Promise<DemandSyncResult> {
+/** Roda dentro do contexto da loja: cada chamada ao ERP entra no histórico de trocas. */
+export function syncTenantDemand(tenantId: number, maxCalls = CALLS_PER_RUN): Promise<DemandSyncResult> {
+  return withErpTenant(tenantId, () => syncTenantDemandInner(tenantId, maxCalls));
+}
+
+async function syncTenantDemandInner(tenantId: number, maxCalls: number): Promise<DemandSyncResult> {
   const result: DemandSyncResult = { conversations: 0, messages: 0, requests: 0, outOfStock: 0, calls: 0, error: null };
   const [integ] = await db.select().from(tenantErpIntegrationsTable).where(eq(tenantErpIntegrationsTable.tenantId, tenantId)).limit(1);
   if (!integ || !integ.demandSyncEnabled || !integ.demandSessionKey) {

@@ -5,6 +5,7 @@ import { requireAdmin, requireTenant } from "../middlewares/auth";
 import { requireModuleAccess } from "../lib/moduleAccess";
 import { erpCredentials, erpPeriod, syncTenantSales } from "../lib/erpSalesSync";
 import { erpFetch } from "../lib/erpOsMessages";
+import { withErpTenant } from "../lib/erpExchanges";
 
 // Vendas que vieram do atendimento (19/10/2026): o CRM manda os atendimentos
 // ao ERP Prumo (que marca a venda com o atendente) e o Financeiro mostra, lado
@@ -69,7 +70,7 @@ router.get("/finance/erp-sales", requireModuleAccess("financeiro"), async (req, 
   const { from, to } = erpPeriod(days);
   let attendants: ErpAttendantRow[];
   try {
-    const r = await erpFetch(cred.baseUrl, cred.apiKey, `/integrations/sales/by-attendant?from=${from}&to=${to}`, undefined, 15_000) as { attendants: ErpAttendantRow[] };
+    const r = await withErpTenant(tenantId, () => erpFetch(cred.baseUrl, cred.apiKey, `/integrations/sales/by-attendant?from=${from}&to=${to}`, undefined, 15_000)) as { attendants: ErpAttendantRow[] };
     attendants = r.attendants ?? [];
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
