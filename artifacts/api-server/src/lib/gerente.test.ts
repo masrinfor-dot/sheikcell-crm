@@ -421,6 +421,7 @@ test("link seguro: 'link' e 'link da tarefa N' geram token válido e restrito", 
   assert.ok(m, r.replies[0]);
   const l = await resolveLink(m[1]!);
   assert.ok(l && l.scope === "dia" && l.tenantId === tenantId);
+  assert.match(m[1]!, /^[A-Za-z0-9]{32}$/, "token só com letras e números (sem _ que o WhatsApp formata)");
   const [t] = await db.insert(tasksTable).values({ tenantId, title: "tarefa do link" }).returning();
   const r2 = await handlePanelMessage(tenantId, `link da tarefa ${t!.id}`);
   const m2 = r2.replies[0]!.match(/\/g\/([A-Za-z0-9_-]+)/);

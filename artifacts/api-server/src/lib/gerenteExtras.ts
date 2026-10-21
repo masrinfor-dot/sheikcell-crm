@@ -16,11 +16,20 @@ import { logger } from "./logger";
 
 const DEFAULT_BASE = "https://crm.sheikcell.com.br";
 const hash = (t: string) => createHash("sha256").update(t).digest("hex");
+const ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+function randomAlnum(n: number): string {
+  // Rejeita bytes >= 248 pra não enviesar (248 = 62 * 4).
+  let out = "";
+  while (out.length < n) for (const b of randomBytes(n * 2)) { if (b < 248 && out.length < n) out += ALNUM[b % 62]; }
+  return out;
+}
 
 // ─── Links ───────────────────────────────────────────────────────────────────
 
 export async function createLink(settings: GerenteSettings, scope: "dia" | "task", refId: number | null, days: number): Promise<string> {
-  const token = randomBytes(24).toString("base64url");
+  // Só letras e números: "_" e "~" viram formatação no WhatsApp (itálico,
+  // tachado) e quebravam o link quando o código tinha dois deles.
+  const token = randomAlnum(32);
   await db.insert(gerenteLinksTable).values({ tenantId: settings.tenantId, tokenHash: hash(token), scope, refId, expiresAt: new Date(Date.now() + days * 86_400_000) });
   const base = (settings.publicBaseUrl ?? process.env["PUBLIC_WEB_URL"] ?? DEFAULT_BASE).replace(/\/+$/, "");
   return `${base}/g/${token}`;
