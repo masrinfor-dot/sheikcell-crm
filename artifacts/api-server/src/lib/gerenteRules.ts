@@ -398,6 +398,77 @@ export const HELP_TEXT = [
   "• *Consultas* — \"meu dia\", \"agenda\", \"lembretes\", \"tarefas\", \"contas\", \"financeiro\"",
   "• *Cliente* — \"o que combinei com o Carlos?\"",
   "",
+  "• *Rotina* — \"todo dia 10 pagar 1.500 aluguel\", \"toda segunda 9h tarefa pro Alan: limpar a vitrine\" (*rotinas* lista)",
+  "• *Link* — \"link\" (seu dia no celular) ou \"link da tarefa 12\"",
+  "• *Fechamento* — à noite te mando o que foi feito; responda *mover* pra passar o resto pra amanhã",
+  "• *Boleto/comprovante* — mande a foto ou PDF que vai pra aprovação no ERP",
+  "",
   "Quando eu avisar um lembrete, responda *feito* ou *adia 1h*.",
   "Errou algo? Mande *desfazer* ou me corrija em texto.",
 ].join("\n");
+
+// ─── Rotinas recorrentes ─────────────────────────────────────────────────────
+
+export type RecurrenceRule = { freq: "daily" | "weekly" | "monthly"; weekday?: number; monthday?: number; hh: number; mm: number };
+
+/**
+ * "todo dia 8h lembra de abrir o caixa", "toda segunda 9h tarefa pro Alan: …",
+ * "todo dia 10 pagar 1500 aluguel", "toda sexta às 17h lembra de …".
+ * Devolve a regra e o resto da frase (o que fazer), ou null.
+ */
+export function parseRecurrence(raw: string): { rule: RecurrenceRule; rest: string } | null {
+  const text = raw.replace(/\s+/g, " ").trim();
+  const t = norm(text);
+  let m = t.match(/^(?:todo dia|todos os dias|diariamente)(?!\s+\d{1,2}(?:\s|$)(?!\s*h))\b/);
+  let rule: RecurrenceRule | null = null;
+  let consumed = 0;
+  const monthly = t.match(/^todo (?:dia|mes no dia|mês no dia) (\d{1,2})(?=\s|$)(?!\s*(?:h|:|horas))/);
+  const weekly = t.match(/^(?:toda|todo|todas as|todos os) (segunda|terca|quarta|quinta|sexta|sabado|domingo)(?:-feira)?s?\b/);
+  if (monthly) {
+    const d = Number(monthly[1]);
+    if (d < 1 || d > 31) return null;
+    rule = { freq: "monthly", monthday: d, hh: 9, mm: 0 }; consumed = monthly[0].length;
+  } else if (weekly) {
+    const map: Record<string, number> = { domingo: 0, segunda: 1, terca: 2, quarta: 3, quinta: 4, sexta: 5, sabado: 6 };
+    rule = { freq: "weekly", weekday: map[weekly[1]!]!, hh: 9, mm: 0 }; consumed = weekly[0].length;
+  } else if (m) {
+    rule = { freq: "daily", hh: 9, mm: 0 }; consumed = m[0].length;
+  }
+  if (!rule) return null;
+  let rest = text.slice(consumed).trim();
+  const hm = rest.match(/^(?:as|às|a)?\s*(\d{1,2})(?:(?::|h)(\d{2}))?\s*(?:h|hs|horas)?(?=\s|,|:|$)/i);
+  if (hm && (/(h|:)/i.test(hm[0]) || /^(?:as|às)\s/i.test(hm[0]))) {
+    const hh = Number(hm[1]); const mm = hm[2] ? Number(hm[2]) : 0;
+    if (hh <= 23 && mm <= 59) { rule.hh = hh; rule.mm = mm; rest = rest.slice(hm[0].length).trim(); }
+  }
+  rest = rest.replace(/^[,:-]\s*/, "").trim();
+  if (!rest) return null;
+  return { rule, rest };
+}
+
+/** Próxima ocorrência estritamente depois de `after` (fuso de São Paulo). */
+export function nextOccurrence(rule: RecurrenceRule, after: Date = new Date()): Date {
+  const p = spParts(after);
+  for (let i = 0; i <= 400; i++) {
+    const base = spDate(p.y, p.m, p.d, 12, 0);
+    const day = spParts(new Date(base.getTime() + i * 86_400_000));
+    const ok = rule.freq === "daily" || (rule.freq === "weekly" && day.weekday === rule.weekday)
+      || (rule.freq === "monthly" && (day.d === rule.monthday || (rule.monthday! > 28 && day.d === lastDayOfMonth(day.y, day.m) && rule.monthday! > lastDayOfMonth(day.y, day.m))));
+    if (!ok) continue;
+    const at = spDate(day.y, day.m, day.d, rule.hh, rule.mm);
+    if (at.getTime() > after.getTime()) return at;
+  }
+  return new Date(after.getTime() + 86_400_000);
+}
+
+function lastDayOfMonth(y: number, m: number): number {
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+export function describeRule(rule: RecurrenceRule): string {
+  const hm = `${String(rule.hh).padStart(2, "0")}:${String(rule.mm).padStart(2, "0")}`;
+  const days = ["domingo", "segunda", "terça", "quarta", "quinta", "sexta", "sábado"];
+  if (rule.freq === "daily") return `todo dia às ${hm}`;
+  if (rule.freq === "weekly") return `toda ${days[rule.weekday ?? 1]} às ${hm}`;
+  return `todo dia ${rule.monthday} às ${hm}`;
+}

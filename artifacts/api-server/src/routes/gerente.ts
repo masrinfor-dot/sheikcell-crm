@@ -28,6 +28,13 @@ const idParam = (raw: string): number | null => { const n = Number(raw); return 
 router.get("/gerente/settings", async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const full = await getGerenteSettings(tenantId);
+  // Guarda o endereço do CRM pra montar os links que saem no WhatsApp.
+  const origin = (req.headers["x-forwarded-host"] as string | undefined)?.split(",")[0]?.trim() || req.get("host");
+  const proto = (req.headers["x-forwarded-proto"] as string | undefined)?.split(",")[0]?.trim() || req.protocol;
+  if (origin && !/localhost|127\.0\.0\.1/.test(origin)) {
+    const base = `${proto}://${origin}`;
+    if (full.publicBaseUrl !== base) await db.update(gerenteSettingsTable).set({ publicBaseUrl: base }).where(eq(gerenteSettingsTable.tenantId, tenantId));
+  }
   const { erpAgentKeyCiphertext, erpAgentKeyIv, erpAgentKeyAuthTag, erpAgentKeyVersion, ...s } = full;
   void erpAgentKeyIv; void erpAgentKeyAuthTag; void erpAgentKeyVersion;
   const erpAgentKeySet = !!erpAgentKeyCiphertext;

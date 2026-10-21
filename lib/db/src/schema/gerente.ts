@@ -32,6 +32,12 @@ export const gerenteSettingsTable = pgTable("gerente_settings", {
   // Linha ADM: o que o dono manda nela (boleto, conta, "paguei") vai para a
   // fila de aprovação do ERP (Financeiro › Aprovações do agente).
   admSessionKey: text("adm_session_key"),
+  // Endereço do CRM pra montar links (gravado quando o admin abre o painel).
+  publicBaseUrl: text("public_base_url"),
+  // Fechamento do dia (o que foi feito / o que ficou) e relatório semanal.
+  eveningSummaryTime: text("evening_summary_time").default("19:00"),
+  eveningSentOn: date("evening_sent_on"),
+  weeklyReportSentOn: date("weekly_report_sent_on"),
   // Chave do agente do ERP (agk_...), cifrada com o mesmo cofre do ERP.
   erpAgentKeyCiphertext: text("erp_agent_key_ciphertext"),
   erpAgentKeyIv: text("erp_agent_key_iv"),
@@ -209,3 +215,33 @@ export const gerenteErpActionsTable = pgTable("gerente_erp_actions", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [index("gerente_erp_actions_tenant_idx").on(t.tenantId, t.createdAt)]);
 export type GerenteErpAction = typeof gerenteErpActionsTable.$inferSelect;
+
+// Link seguro (sem login) pra abrir no celular: o dia, uma tarefa. Guarda só
+// o hash do token; expira sozinho; só leitura.
+export const gerenteLinksTable = pgTable("gerente_links", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull(),
+  tokenHash: text("token_hash").notNull(),
+  scope: text("scope").notNull(), // dia | task
+  refId: integer("ref_id"),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [uniqueIndex("gerente_links_token_uq").on(t.tokenHash)]);
+
+// Rotina recorrente: "todo dia 10 pagar aluguel", "toda segunda tarefa pro Alan…".
+export const gerenteRecurrencesTable = pgTable("gerente_recurrences", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull(),
+  kind: text("kind").notNull(), // lembrete | tarefa | conta
+  title: text("title").notNull(),
+  // { freq: "daily"|"weekly"|"monthly", weekday?: 0-6, monthday?: 1-31, hh, mm }
+  rule: jsonb("rule").$type<{ freq: "daily" | "weekly" | "monthly"; weekday?: number; monthday?: number; hh: number; mm: number }>().notNull(),
+  assigneeName: text("assignee_name"),
+  amountCents: integer("amount_cents"),
+  billKind: text("bill_kind"),
+  active: boolean("active").notNull().default(true),
+  nextAt: timestamp("next_at", { withTimezone: true }).notNull(),
+  lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index("gerente_recurrences_next_idx").on(t.active, t.nextAt)]);
+export type GerenteRecurrence = typeof gerenteRecurrencesTable.$inferSelect;
