@@ -196,3 +196,23 @@ test("'vendi 2 iphones por 3000': valor é o que vem depois de 'por'", () => {
   const c = parseByRules("comprei 3,50 de bala", NOW);
   assert.ok(c && c.kind === "gasto" && c.amountCents === 350);
 });
+
+test("rotinas: diária, semanal, mensal e próxima ocorrência", async () => {
+  const { parseRecurrence, nextOccurrence } = await import("./gerenteRules.ts");
+  const d = parseRecurrence("todo dia 8h lembra de abrir o caixa");
+  assert.ok(d && d.rule.freq === "daily" && d.rule.hh === 8);
+  assert.equal(d.rest, "lembra de abrir o caixa");
+  const w = parseRecurrence("toda segunda às 9h tarefa pro Alan: limpar a vitrine");
+  assert.ok(w && w.rule.freq === "weekly" && w.rule.weekday === 1 && w.rule.hh === 9);
+  assert.equal(w.rest, "tarefa pro Alan: limpar a vitrine");
+  const m = parseRecurrence("todo dia 10 pagar 1500 aluguel");
+  assert.ok(m && m.rule.freq === "monthly" && m.rule.monthday === 10);
+  assert.equal(m.rest, "pagar 1500 aluguel");
+  assert.equal(parseRecurrence("reunião amanhã"), null);
+  // NOW = seg 19/10/2026 14:00
+  assert.equal(sp(nextOccurrence(d.rule, NOW)), "2026-10-20 08:00");
+  assert.equal(sp(nextOccurrence(w.rule, NOW)), "2026-10-26 09:00");
+  assert.equal(sp(nextOccurrence(m.rule, NOW)), "2026-11-10 09:00");
+  assert.equal(sp(nextOccurrence({ freq: "monthly", monthday: 31, hh: 9, mm: 0 }, NOW)), "2026-10-31 09:00");
+  assert.equal(sp(nextOccurrence({ freq: "monthly", monthday: 31, hh: 9, mm: 0 }, parseSpLocal("2026-11-01T10:00")!)), "2026-11-30 09:00");
+});

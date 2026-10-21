@@ -15,6 +15,7 @@ import ResetPassword from "@/pages/ResetPassword";
 import VitrinePublica from "@/pages/VitrinePublica";
 import AvaliacaoPublica from "@/pages/AvaliacaoPublica";
 import HiringDocumentsUpload from "@/pages/HiringDocumentsUpload";
+import GerenteLink from "@/pages/GerenteLink";
 import { useVisualViewportVar } from "@/hooks/useVisualViewportVar";
 
 const queryClient = new QueryClient();
@@ -37,6 +38,9 @@ function AppRoutes() {
     <Switch>
       <Route path="/candidatura/:token">
         <Candidatura />
+      </Route>
+      <Route path="/g/:token">
+        <GerenteLink />
       </Route>
       <Route path="/vitrine/:slug">
         <VitrinePublica />

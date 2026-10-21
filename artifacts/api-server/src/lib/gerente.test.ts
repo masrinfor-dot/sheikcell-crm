@@ -16,7 +16,7 @@ const {
   db, tenantsTable, sectorsTable, usersTable, conversationsTable, messagesTable, whatsappSessionsTable,
   attendanceLogsTable, crmContactsTable, whatsappContactsTable, tasksTable, taskAssigneesTable,
   gerenteSettingsTable, gerenteMessagesTable, gerenteRemindersTable, gerenteEntriesTable, gerenteBillsTable,
-  gerenteEventsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable, employeesTable, taskCommentsTable, gerenteTeamPhonesTable, gerenteErpActionsTable, tenantErpIntegrationsTable,
+  gerenteEventsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable, employeesTable, taskCommentsTable, gerenteTeamPhonesTable, gerenteErpActionsTable, tenantErpIntegrationsTable, gerenteLinksTable, gerenteRecurrencesTable,
 } = await import("@workspace/db");
 const { eq, and, desc } = await import("drizzle-orm");
 const { processInboundWA } = await import("./whatsappInbound.ts");
@@ -66,6 +66,8 @@ async function wipe(): Promise<void> {
     await db.delete(gerenteTaskDispatchesTable).where(eq(gerenteTaskDispatchesTable.tenantId, id));
     await db.delete(gerenteTeamPhonesTable).where(eq(gerenteTeamPhonesTable.tenantId, id));
     await db.delete(gerenteErpActionsTable).where(eq(gerenteErpActionsTable.tenantId, id));
+    await db.delete(gerenteLinksTable).where(eq(gerenteLinksTable.tenantId, id));
+    await db.delete(gerenteRecurrencesTable).where(eq(gerenteRecurrencesTable.tenantId, id));
     await db.delete(tenantErpIntegrationsTable).where(eq(tenantErpIntegrationsTable.tenantId, id));
     await db.delete(taskCommentsTable).where(eq(taskCommentsTable.tenantId, id));
     await db.delete(employeesTable).where(eq(employeesTable.tenantId, id));
@@ -410,4 +412,58 @@ test("documento sem valor: pergunta, e a resposta completa e manda pro ERP", asy
   assert.match(r.replies[0]!, /aguardando aprovação/);
   assert.equal(erpPosts.length, 1);
   assert.equal(erpPosts[0]!.body.payload.totalAmount, 199.9);
+});
+
+test("link seguro: 'link' e 'link da tarefa N' geram token válido e restrito", async () => {
+  const { resolveLink } = await import("./gerenteExtras.ts");
+  const r = await handlePanelMessage(tenantId, "link");
+  const m = r.replies[0]!.match(/\/g\/([A-Za-z0-9_-]+)/);
+  assert.ok(m, r.replies[0]);
+  const l = await resolveLink(m[1]!);
+  assert.ok(l && l.scope === "dia" && l.tenantId === tenantId);
+  const [t] = await db.insert(tasksTable).values({ tenantId, title: "tarefa do link" }).returning();
+  const r2 = await handlePanelMessage(tenantId, `link da tarefa ${t!.id}`);
+  const m2 = r2.replies[0]!.match(/\/g\/([A-Za-z0-9_-]+)/);
+  const l2 = await resolveLink(m2![1]!);
+  assert.ok(l2 && l2.scope === "task" && l2.refId === t!.id);
+  assert.equal(await resolveLink("token-que-nao-existe-1234567890"), null);
+  const r3 = await handlePanelMessage(tenantId, "link da tarefa 99999999");
+  assert.match(r3.replies[0]!, /Não achei/);
+});
+
+test("rotina: cria, dispara no horário (lembrete) e agenda a próxima; cancelar para", async () => {
+  const { runRecurrences } = await import("./gerenteExtras.ts");
+  const { getGerenteSettings } = await import("./gerente.ts");
+  const r = await handlePanelMessage(tenantId, "todo dia 8h lembra de abrir o caixa");
+  assert.match(r.replies[0]!, /Rotina \*(\d+)\* criada/);
+  const [rec] = await db.select().from(gerenteRecurrencesTable).where(eq(gerenteRecurrencesTable.tenantId, tenantId)).orderBy(desc(gerenteRecurrencesTable.id)).limit(1);
+  assert.equal(rec!.kind, "lembrete");
+  assert.equal(rec!.title, "abrir o caixa");
+  // Força vencer agora.
+  await db.update(gerenteRecurrencesTable).set({ nextAt: new Date(Date.now() - 1000) }).where(eq(gerenteRecurrencesTable.id, rec!.id));
+  const before = (await db.select().from(gerenteRemindersTable).where(eq(gerenteRemindersTable.tenantId, tenantId))).length;
+  assert.equal(await runRecurrences(await getGerenteSettings(tenantId)), 1);
+  assert.equal(await runRecurrences(await getGerenteSettings(tenantId)), 0, "não dispara duas vezes");
+  const after = await db.select().from(gerenteRemindersTable).where(eq(gerenteRemindersTable.tenantId, tenantId));
+  assert.equal(after.length, before + 1);
+  const [rec2] = await db.select().from(gerenteRecurrencesTable).where(eq(gerenteRecurrencesTable.id, rec!.id));
+  assert.ok(rec2!.nextAt.getTime() > Date.now());
+  const list = await handlePanelMessage(tenantId, "rotinas");
+  assert.match(list.replies[0]!, /abrir o caixa/);
+  const c = await handlePanelMessage(tenantId, `cancelar rotina ${rec!.id}`);
+  assert.match(c.replies[0]!, /cancelada/);
+  // tarefa recorrente
+  const t = await handlePanelMessage(tenantId, "toda segunda 9h tarefa pro Nilmar: limpar a vitrine");
+  assert.match(t.replies[0]!, /tarefa pro Nilmar/);
+});
+
+test("fechamento do dia e 'mover'", async () => {
+  await db.insert(gerenteRemindersTable).values({ tenantId, title: "pendência de hoje", dueAt: new Date(Date.now() - 60_000) });
+  const f = await handlePanelMessage(tenantId, "fechamento");
+  assert.match(f.replies[0]!, /Fechamento do dia/);
+  assert.match(f.replies[0]!, /pendência de hoje/);
+  const m = await handlePanelMessage(tenantId, "mover");
+  assert.match(m.replies[0]!, /movido/);
+  const rel = await handlePanelMessage(tenantId, "relatorio");
+  assert.match(rel.replies[0]!, /Semana da equipe/);
 });

@@ -40,6 +40,7 @@ import systemBoardRouter from "./systemBoard";
 import teamDirectoryRouter from "./teamDirectory";
 import ticketsRouter from "./tickets";
 import gerenteRouter from "./gerente";
+import gerentePublicRouter from "./gerentePublic";
 import tvboxRouter from "./tvbox";
 import pdfRouter from "./pdf";
 import rotinasRouter, { enforceMandatoryRoutines } from "./rotinas";
@@ -50,6 +51,8 @@ import geoRouter from "./geo";
 
 const router: IRouter = Router();
 router.use(healthRouter);
+// Link seguro do Gerente IA (sem login, só leitura).
+router.use(gerentePublicRouter);
 router.use(authRouter);
 router.use(superadminRouter);
 router.use(superadminSaasRouter);

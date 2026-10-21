@@ -119,7 +119,7 @@ function matchUser(users: { id: number; name: string }[], name: string | null | 
   return partial.length === 1 ? partial[0]! : null;
 }
 
-async function createReminder(tenantId: number, p: { title: string; dueAt: Date; urgent?: boolean }): Promise<ActionResult> {
+export async function createReminder(tenantId: number, p: { title: string; dueAt: Date; urgent?: boolean }): Promise<ActionResult> {
   const [r] = await db.insert(gerenteRemindersTable)
     .values({ tenantId, title: p.title.slice(0, 200), dueAt: p.dueAt, urgent: !!p.urgent }).returning();
   return { text: `⏰ Lembrete anotado: *${r!.title}* — ${fmtWhen(r!.dueAt)}${r!.urgent ? " (urgente)" : ""}.`, ref: { table: "reminder", id: r!.id } };
@@ -157,7 +157,7 @@ async function createEntry(tenantId: number, p: {
   };
 }
 
-async function createBill(tenantId: number, p: {
+export async function createBill(tenantId: number, p: {
   kind: "pagar" | "receber"; description: string; amountCents: number; dueDate: string;
   counterparty?: string | null; responsible?: string | null; scope?: "pessoal" | "empresa"; storeName?: string | null;
 }): Promise<ActionResult> {
@@ -174,7 +174,7 @@ async function createBill(tenantId: number, p: {
   };
 }
 
-async function createTask(tenantId: number, p: {
+export async function createTask(tenantId: number, p: {
   title: string; assigneeName?: string | null; dueAt?: Date | null; priority?: "baixa" | "media" | "alta"; description?: string | null;
 }): Promise<ActionResult> {
   const users = await teamUsers(tenantId);
@@ -785,6 +785,14 @@ async function processOne(input: GerenteInput): Promise<string[]> {
     return erpFill;
   }
 
+  // Links, rotinas, "mover", fechamento e relatório.
+  const { tryExtraCommand } = await import("./gerenteExtras");
+  const extra = await tryExtraCommand(settings, text);
+  if (extra) {
+    await saveRepliesAndSend(input, [extra], ["extra"], []);
+    return [extra];
+  }
+
   // Confirmação pendente: "sim/não" resolve antes de qualquer outra coisa.
   const rule = parseByRules(text);
 
@@ -1020,7 +1028,7 @@ export async function handlePanelMessage(tenantId: number, text: string): Promis
  * loja. Só grava no histórico quando o envio foi aceito — senão a aba
  * Conversar vira uma parede de avisos que nunca chegaram.
  */
-async function notifyOwner(settings: GerenteSettings, text: string): Promise<boolean> {
+export async function notifyOwner(settings: GerenteSettings, text: string): Promise<boolean> {
   const phone = settings.lastPhone ?? settings.authorizedPhones[0];
   if (!phone || !settings.lastSessionKey) return false;
   const others = await db.select({ sessionKey: whatsappSessionsTable.sessionKey }).from(whatsappSessionsTable)
@@ -1098,6 +1106,14 @@ async function runNotificationsOnce(): Promise<{ sent: number }> {
       }
 
       try {
+        const ex = await import("./gerenteExtras");
+        sent += await ex.runRecurrences(settings);
+        if (!quiet) sent += await ex.runSummaries(settings, (t) => notifyOwner(settings, t));
+      } catch (err) {
+        logger.warn({ err, tenantId: settings.tenantId }, "Gerente IA: falha nas rotinas/resumos");
+      }
+
+      try {
         const { pollErpActions } = await import("./gerenteErp");
         sent += await pollErpActions(settings, (t) => notifyOwner(settings, t));
       } catch (err) {
@@ -1112,7 +1128,8 @@ async function runNotificationsOnce(): Promise<{ sent: number }> {
       }
 
       if (settings.dailyDigestTime && settings.dailyDigestSentOn !== today && hm >= settings.dailyDigestTime && !quiet) {
-        const ok = await notifyOwner(settings, await buildDigest(settings.tenantId));
+        const { createLink } = await import("./gerenteExtras");
+        const ok = await notifyOwner(settings, `${await buildDigest(settings.tenantId)}\n\n🔗 Abrir no celular: ${await createLink(settings, "dia", null, 2)}`);
         if (ok) { await db.update(gerenteSettingsTable).set({ dailyDigestSentOn: today, updatedAt: now }).where(eq(gerenteSettingsTable.id, settings.id)); sent++; }
       }
     } catch (err) {

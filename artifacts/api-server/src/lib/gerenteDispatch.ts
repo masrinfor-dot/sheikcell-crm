@@ -64,6 +64,7 @@ export async function dispatchTaskToSeller(tenantId: number, p: {
       p.dueAt ? `⏰ Prazo: ${fmtWhen(p.dueAt)}` : null,
       "",
       `Quando terminar, responda *feito ${p.taskId}* e mande uma *foto* como prova. 📸`,
+      await taskLink(tenantId, p.taskId),
     ].filter((l) => l !== null).join("\n");
     const used = await sendVia(phone, await pickLine(tenantId, p.ownerSessionKey), text);
     await db.insert(gerenteTaskDispatchesTable).values({
@@ -93,7 +94,8 @@ async function conclude(d: typeof gerenteTaskDispatchesTable.$inferSelect, proof
     content: `✅ Concluída pelo WhatsApp${note ? `: ${note}` : ""} (prova em foto)`, mediaUrl: proofUrl, mediaType: "image",
   });
   const [task] = await db.select({ title: tasksTable.title }).from(tasksTable).where(eq(tasksTable.id, d.taskId)).limit(1);
-  await notifyOwnerText(d.tenantId, `✅ *${d.assigneeName.split(" ")[0]} concluiu:* ${task?.title ?? `tarefa ${d.taskId}`}\n📸 Prova anexada na tarefa (CRM → Tarefas / Gerente IA → Meu dia).`);
+  const link = await taskLink(d.tenantId, d.taskId);
+  await notifyOwnerText(d.tenantId, `✅ *${d.assigneeName.split(" ")[0]} concluiu:* ${task?.title ?? `tarefa ${d.taskId}`}\n📸 Prova anexada${link ? `:\n${link.replace(/^🔗 Ver a tarefa: /, "")}` : " na tarefa (CRM → Tarefas)."}`);
 }
 
 /**
@@ -195,4 +197,15 @@ export async function suggestedPhones(tenantId: number): Promise<Map<number, str
 export async function sendTeamTest(tenantId: number, phone: string, name: string, ownerSessionKey: string | null): Promise<string | null> {
   const text = `👋 Olá, ${name.split(" ")[0]}! Este é um teste do *Gerente IA* da Sheikcell.\nA partir de agora as tarefas da loja chegam por aqui. Quando terminar uma, responda *feito* + o número da tarefa e mande uma *foto* como prova. 📸\n\nResponda *ok* pra confirmar que recebeu.`;
   return sendVia(phone, await pickLine(tenantId, ownerSessionKey), text);
+}
+
+/** Linha "🔗 Ver a tarefa: <link>" (link seguro, sem login). "" se falhar. */
+async function taskLink(tenantId: number, taskId: number): Promise<string> {
+  try {
+    const { getGerenteSettings } = await import("./gerente");
+    const { createLink } = await import("./gerenteExtras");
+    return `🔗 Ver a tarefa: ${await createLink(await getGerenteSettings(tenantId), "task", taskId, 30)}`;
+  } catch {
+    return "";
+  }
 }
