@@ -785,6 +785,14 @@ async function processOne(input: GerenteInput): Promise<string[]> {
     return erpFill;
   }
 
+  // Tarefas da equipe por mensagem: concluir/ativar/reabrir/comentar/avisar.
+  const { tryTaskCommand } = await import("./gerenteTaskOps");
+  const taskCmd = await tryTaskCommand(tenantId, text);
+  if (taskCmd) {
+    await saveRepliesAndSend(input, [taskCmd], ["tarefa_equipe"], []);
+    return [taskCmd];
+  }
+
   // Links, rotinas, "mover", fechamento e relatório.
   const { tryExtraCommand } = await import("./gerenteExtras");
   const extra = await tryExtraCommand(settings, text);

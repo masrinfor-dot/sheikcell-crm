@@ -18,7 +18,7 @@ import { fmtWhen, norm } from "./gerenteRules";
 const OPEN = ["enviada", "aguardando_prova"];
 const PROOF_WINDOW_MS = 2 * 3_600_000;
 
-async function sellerPhone(tenantId: number, userId: number): Promise<string | null> {
+export async function sellerPhone(tenantId: number, userId: number): Promise<string | null> {
   // 1º: número cadastrado no Gerente IA (Configurações → Equipe no WhatsApp).
   const [t] = await db.select({ phone: gerenteTeamPhonesTable.phone }).from(gerenteTeamPhonesTable)
     .where(and(eq(gerenteTeamPhonesTable.tenantId, tenantId), eq(gerenteTeamPhonesTable.userId, userId))).limit(1);
@@ -94,7 +94,7 @@ async function conclude(d: typeof gerenteTaskDispatchesTable.$inferSelect, proof
     content: `✅ Concluída pelo WhatsApp${note ? `: ${note}` : ""} (prova em foto)`, mediaUrl: proofUrl, mediaType: "image",
   });
   const [task] = await db.select({ title: tasksTable.title }).from(tasksTable).where(eq(tasksTable.id, d.taskId)).limit(1);
-  const link = await taskLink(d.tenantId, d.taskId);
+  const link = await taskLink(d.tenantId, d.taskId, true);
   await notifyOwnerText(d.tenantId, `✅ *${d.assigneeName.split(" ")[0]} concluiu:* ${task?.title ?? `tarefa ${d.taskId}`}\n📸 Prova anexada${link ? `:\n${link.replace(/^🔗 Ver a tarefa: /, "")}` : " na tarefa (CRM → Tarefas)."}`);
 }
 
@@ -200,12 +200,21 @@ export async function sendTeamTest(tenantId: number, phone: string, name: string
 }
 
 /** Linha "🔗 Ver a tarefa: <link>" (link seguro, sem login). "" se falhar. */
-async function taskLink(tenantId: number, taskId: number): Promise<string> {
+async function taskLink(tenantId: number, taskId: number, canEdit = false): Promise<string> {
   try {
     const { getGerenteSettings } = await import("./gerente");
     const { createLink } = await import("./gerenteExtras");
-    return `🔗 Ver a tarefa: ${await createLink(await getGerenteSettings(tenantId), "task", taskId, 30)}`;
+    return `🔗 Ver a tarefa: ${await createLink(await getGerenteSettings(tenantId), "task", taskId, 30, canEdit)}`;
   } catch {
     return "";
   }
+}
+
+/** Manda uma mensagem pro WhatsApp de uma pessoa da equipe. Devolve se saiu. */
+export async function sendToTeamMember(tenantId: number, userId: number, text: string): Promise<boolean> {
+  const phone = await sellerPhone(tenantId, userId);
+  if (!phone) return false;
+  const { getGerenteSettings } = await import("./gerente");
+  const settings = await getGerenteSettings(tenantId);
+  return !!(await sendVia(phone, await pickLine(tenantId, settings.lastSessionKey), text));
 }
