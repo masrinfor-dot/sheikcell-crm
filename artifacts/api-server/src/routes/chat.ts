@@ -2337,6 +2337,32 @@ router.get("/chat/wa-sessions", requireAuth, async (req, res): Promise<void> => 
 // explícito do cliente). Ação irreversível: some o histórico de mensagens da
 // conversa, mas NÃO apaga a ficha do cliente no CRM (isso é só a
 // conversa/atendimento em si).
+// Mover GRUPO para outra linha (pedido 22/10/2026). Quando os dois números da
+// loja estão no mesmo grupo, o CRM guarda uma conversa só, na linha que
+// recebeu a primeira mensagem (ver whatsappInbound.ts). Aqui o admin escolhe
+// por qual número o grupo fica — e por onde saem as respostas. Mensagem nova
+// do grupo não troca a linha de volta. Só grupo: conversa individual fica na
+// linha que o cliente chamou.
+router.post("/chat/conversations/:id/move-line", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  const sessionKey = (req.body as { sessionKey?: unknown } | undefined)?.sessionKey;
+  if (!Number.isInteger(id) || typeof sessionKey !== "string" || !/^[a-z0-9][a-z0-9_-]{0,39}$/.test(sessionKey)) {
+    res.status(400).json({ error: "Dados inválidos" }); return;
+  }
+  const [conv] = await db.select().from(conversationsTable)
+    .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!conv.phone.endsWith("@g.us")) { res.status(400).json({ error: "Só grupos podem mudar de linha." }); return; }
+  const [line] = await db.select({ key: whatsappSessionsTable.sessionKey }).from(whatsappSessionsTable)
+    .where(and(eq(whatsappSessionsTable.sessionKey, sessionKey), eq(whatsappSessionsTable.tenantId, tenantId))).limit(1);
+  if (!line && !(sessionKey === "default" && tenantId === 1)) { res.status(404).json({ error: "Linha não encontrada" }); return; }
+  const [updated] = await db.update(conversationsTable).set({ sessionKey, updatedAt: new Date() })
+    .where(eq(conversationsTable.id, id)).returning();
+  broadcast("conversation_updated", updated, { tenantId, sectorId: updated!.sectorId, sessionKey: updated!.sessionKey, isPotential: isPotentialConversation(updated!), restrictedTo: await restrictedRecipients(updated!) });
+  res.json(updated);
+});
+
 router.delete("/chat/conversations/:id", requireAdminOrSupervisor, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
