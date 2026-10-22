@@ -468,3 +468,43 @@ test("fechamento do dia e 'mover'", async () => {
   const rel = await handlePanelMessage(tenantId, "relatorio");
   assert.match(rel.replies[0]!, /Semana da equipe/);
 });
+
+test("WhatsApp: 'tarefa estorno concluída' acha 'EXTORNOS', fecha e avisa o responsável; ativar, comentar e avisar", async () => {
+  const [t] = await db.insert(tasksTable).values({ tenantId, title: "EXTORNOS" }).returning();
+  await db.insert(taskAssigneesTable).values({ tenantId, taskId: t!.id, userId });
+  bridgeSends.length = 0;
+  const r = await handlePanelMessage(tenantId, "tarefa estorno concluída");
+  assert.match(r.replies[0]!, /EXTORNOS/);
+  assert.match(r.replies[0]!, /concluída/);
+  assert.match(r.replies[0]!, /Avisei: Nilmar/);
+  const [after] = await db.select().from(tasksTable).where(eq(tasksTable.id, t!.id));
+  assert.equal(after!.status, "done");
+  assert.ok(bridgeSends.find((s) => /EXTORNOS/.test(s.text) && /concluída/.test(s.text)), "responsável não foi avisado");
+
+  const re = await handlePanelMessage(tenantId, `reabrir tarefa ${t!.id}`);
+  assert.match(re.replies[0]!, /a fazer/);
+  const at = await handlePanelMessage(tenantId, `ativar tarefa ${t!.id}`);
+  assert.match(at.replies[0]!, /em andamento/);
+  bridgeSends.length = 0;
+  const c = await handlePanelMessage(tenantId, `comentar tarefa ${t!.id}: Já falei com o banco`);
+  assert.match(c.replies[0]!, /Comentário/);
+  assert.ok(bridgeSends.find((s) => /Já falei com o banco/.test(s.text)));
+  const comments = await db.select().from(taskCommentsTable).where(eq(taskCommentsTable.taskId, t!.id));
+  assert.ok(comments.some((x) => x.content === "Já falei com o banco"));
+  bridgeSends.length = 0;
+  const a = await handlePanelMessage(tenantId, "avisa o Nilmar: passa no banco antes das 15h");
+  assert.match(a.replies[0]!, /Mandei pro Nilmar/);
+  assert.ok(bridgeSends.find((s) => /passa no banco antes das 15h/.test(s.text)));
+  const none = await handlePanelMessage(tenantId, "concluir tarefa tarefa-que-nao-existe-xyz");
+  assert.match(none.replies[0]!, /Não achei/);
+});
+
+test("link do vendedor é só leitura; link do dono pode editar", async () => {
+  const { createLink, resolveLink } = await import("./gerenteExtras.ts");
+  const { getGerenteSettings } = await import("./gerente.ts");
+  const s = await getGerenteSettings(tenantId);
+  const ro = (await createLink(s, "task", 1, 1, false)).split("/g/")[1]!;
+  const rw = (await createLink(s, "dia", null, 1)).split("/g/")[1]!;
+  assert.equal((await resolveLink(ro))!.canEdit, false);
+  assert.equal((await resolveLink(rw))!.canEdit, true);
+});

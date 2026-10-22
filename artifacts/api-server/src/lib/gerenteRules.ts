@@ -400,6 +400,7 @@ export const HELP_TEXT = [
   "",
   "• *Rotina* — \"todo dia 10 pagar 1.500 aluguel\", \"toda segunda 9h tarefa pro Alan: limpar a vitrine\" (*rotinas* lista)",
   "• *Link* — \"link\" (seu dia no celular) ou \"link da tarefa 12\"",
+  "• *Equipe* — \"tarefa estorno concluída\", \"ativar tarefa 126\", \"comentar tarefa 126: …\", \"avisa o Alan: …\" (o responsável recebe no WhatsApp)",
   "• *Fechamento* — à noite te mando o que foi feito; responda *mover* pra passar o resto pra amanhã",
   "• *Boleto/comprovante* — mande a foto ou PDF que vai pra aprovação no ERP",
   "",

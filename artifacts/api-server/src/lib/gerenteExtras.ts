@@ -26,11 +26,11 @@ function randomAlnum(n: number): string {
 
 // ─── Links ───────────────────────────────────────────────────────────────────
 
-export async function createLink(settings: GerenteSettings, scope: "dia" | "task", refId: number | null, days: number): Promise<string> {
+export async function createLink(settings: GerenteSettings, scope: "dia" | "task", refId: number | null, days: number, canEdit = true): Promise<string> {
   // Só letras e números: "_" e "~" viram formatação no WhatsApp (itálico,
   // tachado) e quebravam o link quando o código tinha dois deles.
   const token = randomAlnum(32);
-  await db.insert(gerenteLinksTable).values({ tenantId: settings.tenantId, tokenHash: hash(token), scope, refId, expiresAt: new Date(Date.now() + days * 86_400_000) });
+  await db.insert(gerenteLinksTable).values({ tenantId: settings.tenantId, tokenHash: hash(token), scope, refId, canEdit, expiresAt: new Date(Date.now() + days * 86_400_000) });
   const base = (settings.publicBaseUrl ?? process.env["PUBLIC_WEB_URL"] ?? DEFAULT_BASE).replace(/\/+$/, "");
   return `${base}/g/${token}`;
 }
@@ -216,10 +216,10 @@ export async function tryExtraCommand(settings: GerenteSettings, text: string): 
     const [task] = await db.select({ id: tasksTable.id, title: tasksTable.title }).from(tasksTable)
       .where(and(eq(tasksTable.id, id), eq(tasksTable.tenantId, settings.tenantId))).limit(1);
     if (!task) return `Não achei a tarefa ${id}.`;
-    return `🔗 Tarefa *${task.id} — ${task.title}*:\n${await createLink(settings, "task", task.id, 30)}\n(abre sem login, só leitura, vale 30 dias)`;
+    return `🔗 Tarefa *${task.id} — ${task.title}*:\n${await createLink(settings, "task", task.id, 30)}\n(abre sem login, vale 30 dias — dá pra comentar, ativar, concluir e avisar o responsável)`;
   }
   if (/^(link|links|link do (meu )?dia|abrir (meu )?dia|painel|meu painel|link do painel|link das tarefas)\??$/.test(t)) {
-    return `🔗 Seu dia, tarefas da equipe e provas:\n${await createLink(settings, "dia", null, 7)}\n(abre sem login, só leitura, vale 7 dias)`;
+    return `🔗 Seu dia, tarefas da equipe e provas:\n${await createLink(settings, "dia", null, 7)}\n(abre sem login, vale 7 dias — toque na tarefa pra comentar, concluir ou avisar a equipe)`;
   }
   if (/^(rotinas|minhas rotinas|recorrentes|lembretes fixos)\??$/.test(t)) return listRecurrences(settings.tenantId);
   const cancel = t.match(/^(?:cancelar|cancela|parar|para|apagar) rotina\s*#?\s*(\d+)$/);

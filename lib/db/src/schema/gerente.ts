@@ -224,6 +224,9 @@ export const gerenteLinksTable = pgTable("gerente_links", {
   tokenHash: text("token_hash").notNull(),
   scope: text("scope").notNull(), // dia | task
   refId: integer("ref_id"),
+  // Link do dono pode comentar/mudar situação/avisar a equipe; o que vai pro
+  // vendedor é só leitura.
+  canEdit: boolean("can_edit").notNull().default(false),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [uniqueIndex("gerente_links_token_uq").on(t.tokenHash)]);

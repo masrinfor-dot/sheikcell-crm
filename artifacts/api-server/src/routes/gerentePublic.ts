@@ -37,7 +37,7 @@ router.get("/gerente-public/:token", async (req, res): Promise<void> => {
   if (link.scope === "task" && link.refId) {
     const task = await taskView(link.tenantId, link.refId);
     if (!task) { res.status(404).json({ error: "Tarefa não encontrada." }); return; }
-    res.json({ scope: "task", expiresAt: link.expiresAt, task });
+    res.json({ scope: "task", canEdit: link.canEdit, expiresAt: link.expiresAt, task });
     return;
   }
   const today = spDateISO();
@@ -61,7 +61,7 @@ router.get("/gerente-public/:token", async (req, res): Promise<void> => {
     .where(and(eq(gerenteTaskDispatchesTable.tenantId, tenantId), eq(gerenteTaskDispatchesTable.status, "concluida"), gte(gerenteTaskDispatchesTable.doneAt, new Date(start.getTime() - 2 * 86_400_000))))
     .orderBy(desc(gerenteTaskDispatchesTable.doneAt)).limit(20);
   res.json({
-    scope: "dia", expiresAt: link.expiresAt, today, events, reminders, bills,
+    scope: "dia", canEdit: link.canEdit, expiresAt: link.expiresAt, today, events, reminders, bills,
     tasks: tasks.map((t) => ({ ...t, assignees: who.filter((w) => w.taskId === t.id).map((w) => w.name.trim().split(" ")[0]) })),
     recentDone,
   });
@@ -75,7 +75,36 @@ router.get("/gerente-public/:token/task/:id", async (req, res): Promise<void> =>
   const task = await taskView(link.tenantId, id);
   if (!task) { res.status(404).json({ error: "Tarefa não encontrada." }); return; }
   res.setHeader("Cache-Control", "no-store");
-  res.json({ scope: "task", expiresAt: link.expiresAt, task });
+  res.json({ scope: "task", canEdit: link.canEdit, expiresAt: link.expiresAt, task });
+});
+
+// ─── Ações pelo link do dono (comentar, situação, avisar) ────────────────────
+async function editableTask(token: string, idRaw: string) {
+  const link = await resolveLink(token);
+  const id = Number(idRaw);
+  if (!link || !link.canEdit || !Number.isInteger(id) || (link.scope === "task" && link.refId !== id)) return null;
+  const [t] = await db.select({ id: tasksTable.id }).from(tasksTable).where(and(eq(tasksTable.id, id), eq(tasksTable.tenantId, link.tenantId))).limit(1);
+  return t ? { tenantId: link.tenantId, taskId: t.id } : null;
+}
+
+router.post("/gerente-public/:token/task/:id/status", async (req, res): Promise<void> => {
+  const ref = await editableTask(String(req.params["token"]), String(req.params["id"]));
+  if (!ref) { res.status(403).json({ error: "Este link não permite alterar a tarefa." }); return; }
+  const status = (req.body as { status?: unknown })?.status;
+  if (status !== "todo" && status !== "doing" && status !== "done") { res.status(400).json({ error: "Situação inválida." }); return; }
+  const notify = (req.body as { notify?: unknown })?.notify !== false;
+  const { setTaskStatus } = await import("../lib/gerenteTaskOps");
+  res.json({ message: await setTaskStatus(ref.tenantId, ref.taskId, status, notify) });
+});
+
+router.post("/gerente-public/:token/task/:id/comment", async (req, res): Promise<void> => {
+  const ref = await editableTask(String(req.params["token"]), String(req.params["id"]));
+  if (!ref) { res.status(403).json({ error: "Este link não permite comentar." }); return; }
+  const text = String((req.body as { text?: unknown })?.text ?? "").trim();
+  if (!text) { res.status(400).json({ error: "Escreva o comentário." }); return; }
+  const notify = (req.body as { notify?: unknown })?.notify === true;
+  const { addTaskComment } = await import("../lib/gerenteTaskOps");
+  res.json({ message: await addTaskComment(ref.tenantId, ref.taskId, text.slice(0, 2000), notify) });
 });
 
 // Foto de prova/comentário: só se o comentário for de uma tarefa coberta pelo link.

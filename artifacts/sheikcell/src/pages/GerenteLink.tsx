@@ -11,14 +11,14 @@ type Task = {
   comments: { id: number; content: string; author: string | null; createdAt: string; image: boolean }[];
 };
 type Dia = {
-  scope: "dia"; today: string;
+  scope: "dia"; canEdit?: boolean; today: string;
   events: { id: number; title: string; startsAt: string; location: string | null }[];
   reminders: { id: number; title: string; dueAt: string; urgent: boolean }[];
   bills: { id: number; kind: string; description: string; amountCents: number; dueDate: string }[];
   tasks: { id: number; title: string; dueDate: string | null; status: string; assignees: string[] }[];
   recentDone: { taskId: number; title: string; who: string; doneAt: string }[];
 };
-type Data = Dia | { scope: "task"; task: Task };
+type Data = Dia | { scope: "task"; canEdit?: boolean; task: Task };
 
 const fmtDT = (iso: string) => new Date(iso).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
 const fmtT = (iso: string) => new Date(iso).toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" });
@@ -32,6 +32,27 @@ export default function GerenteLink() {
   const [error, setError] = useState<string | null>(null);
   const [openTask, setOpenTask] = useState<Task | null>(null);
   const [photo, setPhoto] = useState<string | null>(null);
+  const [comment, setComment] = useState("");
+  const [notifyComment, setNotifyComment] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [flash, setFlash] = useState<string | null>(null);
+  const canEdit = !!data?.canEdit;
+
+  const reload = async (taskId: number) => {
+    const r = await fetch(`/api/gerente-public/${token}/task/${taskId}`);
+    if (!r.ok) return;
+    const t = ((await r.json()) as { task: Task }).task;
+    if (data?.scope === "task") setData({ ...data, task: t }); else setOpenTask(t);
+  };
+  const post = async (taskId: number, path: string, body: Record<string, unknown>) => {
+    setBusy(true); setFlash(null);
+    try {
+      const r = await fetch(`/api/gerente-public/${token}/task/${taskId}/${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const j = (await r.json().catch(() => ({}))) as { message?: string; error?: string };
+      setFlash((j.message ?? j.error ?? "Feito.").replace(/\*/g, ""));
+      if (r.ok) await reload(taskId);
+    } finally { setBusy(false); }
+  };
 
   useEffect(() => {
     fetch(`/api/gerente-public/${token}`).then(async (r) => {
@@ -42,6 +63,7 @@ export default function GerenteLink() {
   }, [token]);
 
   const loadTask = async (id: number) => {
+    setFlash(null); setComment("");
     const r = await fetch(`/api/gerente-public/${token}/task/${id}`);
     if (r.ok) setOpenTask(((await r.json()) as { task: Task }).task);
   };
@@ -65,6 +87,20 @@ export default function GerenteLink() {
           {t.whatsapp && <div>WhatsApp: <b>{t.whatsapp.status === "concluida" ? `concluída ${t.whatsapp.doneAt ? fmtDT(t.whatsapp.doneAt) : ""}` : t.whatsapp.status === "aguardando_prova" ? "aguardando foto" : t.whatsapp.status}</b></div>}
         </div>
       </Card>
+      {canEdit && (
+        <Card title="Ações">
+          <div className="grid grid-cols-3 gap-2">
+            <button disabled={busy || t.status === "doing"} onClick={() => post(t.id, "status", { status: "doing" })} className="rounded-xl py-3 text-sm font-semibold bg-blue-600 text-white disabled:opacity-40">▶️ Ativar</button>
+            <button disabled={busy || t.status === "done"} onClick={() => post(t.id, "status", { status: "done" })} className="rounded-xl py-3 text-sm font-semibold bg-green-600 text-white disabled:opacity-40">✅ Concluir</button>
+            <button disabled={busy || t.status === "todo"} onClick={() => post(t.id, "status", { status: "todo" })} className="rounded-xl py-3 text-sm font-semibold bg-slate-200 text-slate-800 disabled:opacity-40">↩️ Reabrir</button>
+          </div>
+          <p className="text-[11px] text-slate-500">O responsável recebe o aviso no WhatsApp.</p>
+          <textarea value={comment} onChange={(e) => setComment(e.target.value)} rows={3} placeholder="Escreva um comentário ou recado…" className="w-full rounded-xl border border-slate-300 p-2 text-sm" />
+          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={notifyComment} onChange={(e) => setNotifyComment(e.target.checked)} /> Avisar o responsável no WhatsApp</label>
+          <button disabled={busy || !comment.trim()} onClick={async () => { await post(t.id, "comment", { text: comment, notify: notifyComment }); setComment(""); }} className="w-full rounded-xl py-3 text-sm font-semibold bg-slate-900 text-white disabled:opacity-40">{busy ? "Enviando…" : notifyComment ? "💬 Comentar e avisar" : "💬 Comentar"}</button>
+          {flash && <p className="text-sm bg-slate-100 rounded-xl p-2 whitespace-pre-wrap">{flash}</p>}
+        </Card>
+      )}
       <Card title="Comentários e provas">
         {t.comments.length === 0 && <p className="text-xs text-slate-500">Nada ainda.</p>}
         {t.comments.map((c) => (
@@ -129,7 +165,7 @@ export default function GerenteLink() {
             )}
           </>
         )}
-        <p className="text-[10px] text-center text-slate-400">Link só de leitura. Peça um novo no WhatsApp: <b>link</b>.</p>
+        <p className="text-[10px] text-center text-slate-400">{canEdit ? "Toque numa tarefa pra comentar, ativar, concluir ou avisar o responsável." : "Link só de leitura."} Peça um novo no WhatsApp: <b>link</b>.</p>
       </div>
       {photo && (
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4" onClick={() => setPhoto(null)}>
