@@ -8,6 +8,7 @@ import { useInternalChatNotifier } from "@/hooks/useInternalChatNotifier";
 import CrmBoard from "./CrmBoard";
 import ChatCenter from "./ChatCenter";
 import InternalChat from "./InternalChat";
+import { useOpenChatFromUrl } from "@/lib/openChatFromUrl";
 import { useChatExpandListener, setAtendimentoTabVisible } from "@/lib/chatWidgetBus";
 import TaskBoard from "./TaskBoard";
 import Financeiras from "./Financeiras";
@@ -157,6 +158,10 @@ export default function AttendantDashboard() {
       setFocusInternalRequestId(req.requestId);
     }
   }, []));
+  // Link do ERP (22/10/2026): ?telefone=… abre a conversa do cliente direto.
+  useOpenChatFromUrl((message) =>
+    toast({ title: "Não foi possível abrir a conversa", description: message, variant: "destructive" }),
+  );
   const [queue, setQueue] = useState<QueueEntry[]>([]);
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [loading, setLoading] = useState(true);

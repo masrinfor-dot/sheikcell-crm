@@ -17,6 +17,10 @@ import AvaliacaoPublica from "@/pages/AvaliacaoPublica";
 import HiringDocumentsUpload from "@/pages/HiringDocumentsUpload";
 import GerenteLink from "@/pages/GerenteLink";
 import { useVisualViewportVar } from "@/hooks/useVisualViewportVar";
+import { captureOpenChatParam } from "@/lib/openChatFromUrl";
+
+// Link do ERP com ?telefone=… (22/10/2026): guarda antes do login/redirect.
+captureOpenChatParam();
 
 const queryClient = new QueryClient();
 
