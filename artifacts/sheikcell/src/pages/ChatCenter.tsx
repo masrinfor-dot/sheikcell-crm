@@ -4397,6 +4397,39 @@ export default function ChatCenter({
                   {channelIcon(activeConv.channel, isGroupConv(activeConv))}
                   <span className={activeConv.isCommunity || isGroupConv(activeConv) ? "" : "font-mono tabular-nums"}>{activeConv.isCommunity ? "Comunidade do WhatsApp" : isGroupConv(activeConv) ? "Grupo do WhatsApp" : activeConv.channel === "instagram" ? "Instagram Direct" : activeConv.phone}</span>
                 </span>
+                {/* Grupo nos dois números da loja (22/10/2026): admin escolhe por
+                    qual linha o grupo fica e por onde saem as respostas. */}
+                {isGroupConv(activeConv) && waSessions.length > 1 && (user?.role === "admin" || user?.role === "supervisor") && (
+                  <label className="inline-flex items-center gap-1 text-[11px]" title="Por qual número este grupo fica no CRM e por onde saem as respostas">
+                    Linha:
+                    <select
+                      value={activeConv.sessionKey ?? ""}
+                      data-testid="select-group-line"
+                      onChange={async (e) => {
+                        const key = e.target.value;
+                        const id = activeConv.id;
+                        try {
+                          const r = await fetch(`/api/chat/conversations/${id}/move-line`, {
+                            method: "POST", credentials: "include",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ sessionKey: key }),
+                          });
+                          const body = await r.json().catch(() => ({})) as Partial<Conversation> & { error?: string };
+                          if (!r.ok) throw new Error(body.error ?? "Tente de novo.");
+                          setConvs((prev) => prev.map((c) => c.id === id ? { ...c, ...body } : c));
+                          toast({ title: `Grupo movido para ${waSessionLabel(key, waSessions)}`, description: "As respostas deste grupo saem por esse número." });
+                        } catch (err) {
+                          toast({ title: "Não foi possível mover o grupo", description: err instanceof Error ? err.message : "Tente de novo.", variant: "destructive" });
+                        }
+                      }}
+                      className="h-6 rounded border border-border bg-background px-1 text-[11px]"
+                    >
+                      {waSessions.map((s) => (
+                        <option key={s.sessionKey} value={s.sessionKey}>{waSessionLabel(s.sessionKey, waSessions)}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
                 {activeConv.assigneeId != null && (
                   <span
                     className="shk-chip shk-chip-neutral font-mono"
