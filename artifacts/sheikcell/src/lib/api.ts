@@ -2283,6 +2283,9 @@ export const api = {
     broadcastLogsSummary: () => req<BroadcastDispatchSummary>("/chat/broadcast-logs/summary"),
     outboundUsage: (assigneeId?: number) =>
       req<OutboundUsage>(`/chat/outbound-usage${assigneeId ? `?assigneeId=${assigneeId}` : ""}`),
+    // Abrir a conversa pelo link do ERP (22/10/2026): a em andamento do número.
+    conversationByPhone: (phone: string) =>
+      req<{ conversationId: number | null }>(`/chat/conversations/by-phone?phone=${encodeURIComponent(phone)}`),
     createConversation: (data: { phone: string; name: string; channel?: string; sectorId?: number; assigneeId?: number; sessionKey?: string }) =>
       req<Conversation>("/chat/conversations", { method: "POST", body: JSON.stringify(data) }),
     claimConversation: (id: number) =>

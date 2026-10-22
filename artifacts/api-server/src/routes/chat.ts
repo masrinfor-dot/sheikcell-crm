@@ -743,6 +743,34 @@ router.get("/chat/conversations/counts-by-session", requireAuth, requireChatAcce
   })));
 });
 
+// ─── Conversa pelo telefone (22/10/2026) ─────────────────────────────────
+// O ERP (Prumo) abre o CRM direto na conversa do cliente ("abrir conversa no
+// CRM direto", pedido do Samuel na OS): o link chega com ?telefone=…, e o
+// painel pergunta aqui qual é a conversa em andamento desse número nas
+// linhas que o usuário enxerga. null = não há — o painel cria o atendimento.
+router.get("/chat/conversations/by-phone", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const phone = typeof req.query["phone"] === "string" ? req.query["phone"] : "";
+  const candidates = phoneVariants(phone);
+  if (!phone.replace(/\D/g, "") || candidates.length === 0) {
+    res.status(400).json({ error: "Informe o telefone." });
+    return;
+  }
+  const allowedSessionKeys = await getCurrentAllowedSessionKeys(req);
+  const [row] = await db.select({ id: conversationsTable.id })
+    .from(conversationsTable)
+    .where(and(
+      eq(conversationsTable.tenantId, tenantId),
+      eq(conversationsTable.isArchived, false),
+      notInArray(conversationsTable.status, ["resolved", "archived"]),
+      inArray(conversationsTable.phone, candidates),
+      ...(allowedSessionKeys != null ? [inArray(conversationsTable.sessionKey, allowedSessionKeys.length ? allowedSessionKeys : ["__nenhuma__"])] : []),
+    ))
+    .orderBy(desc(conversationsTable.updatedAt))
+    .limit(1);
+  res.json({ conversationId: row?.id ?? null });
+});
+
 // ─── Get single conversation ───────────────────────────────────────────────
 router.get("/chat/conversations/:id", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;

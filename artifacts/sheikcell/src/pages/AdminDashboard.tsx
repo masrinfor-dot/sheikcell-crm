@@ -5,6 +5,7 @@ import { SectorIcon } from "@/components/SectorIcon";
 import { ChannelBadge } from "@/components/ChannelBadge";
 import { useToast } from "@/hooks/use-toast";
 import { useInternalChatNotifier } from "@/hooks/useInternalChatNotifier";
+import { useOpenChatFromUrl } from "@/lib/openChatFromUrl";
 import { useChatExpandListener, setAtendimentoTabVisible } from "@/lib/chatWidgetBus";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
 
@@ -442,6 +443,10 @@ export default function AdminDashboard() {
       setFocusInternalRequestId(req.requestId);
     }
   }, []));
+  // Link do ERP (22/10/2026): ?telefone=… abre a conversa do cliente direto.
+  useOpenChatFromUrl((message) =>
+    toast({ title: "Não foi possível abrir a conversa", description: message, variant: "destructive" }),
+  );
   const [summary, setSummary] = useState<SectorSummary[]>([]);
   const [logs, setLogs] = useState<AttendanceLog[]>([]);
   // Filtros do histórico de atendimentos
