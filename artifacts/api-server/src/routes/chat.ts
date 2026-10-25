@@ -2,11 +2,12 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
-import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, attendanceLogsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, whatsappSessionsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, crmPurchasesTable, appSettingsTable } from "@workspace/db";
+import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, messagePinsTable, attendanceLogsTable, attendanceStartEventsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, chatSavedFiltersTable, whatsappSessionsTable, whatsappContactsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, taskAssigneesTable, crmPurchasesTable, appSettingsTable, tradeInEvaluationsTable, timeClockEntriesTable, sensitiveActionLogTable, broadcastDispatchLogTable } from "@workspace/db";
 import { eq, desc, and, or, lt, gte, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { requireAuth, requireAdmin, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
-import { checkPerm, requirePerm } from "../lib/permissions";
+import { requireAuth, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
+import { checkPerm, requirePerm, getCurrentAllowedSessionKeys } from "../lib/permissions";
+import { requireChatAccess, checkChatAccess, checkModuleAccess } from "../lib/moduleAccess";
 import {
   broadcast,
   sseEmitter,
@@ -16,25 +17,64 @@ import {
   presenceDisconnect,
   type BufferedEvent,
 } from "../lib/sseEmitter";
-import { isPotentialConversation, isRestrictedConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES } from "../lib/conversationScope";
+import { isPotentialConversation, isRestrictedConversation, restrictedRecipients, POTENTIAL_EXCLUDED_STATUSES, countActiveConversations, sectorAllowsResolvedAccess, sectorsAllowingResolvedAccess, nextQueueNumber } from "../lib/conversationScope";
+import { autoAssignOnNewPoolConversation, autoAssignOnVendorFreed } from "../lib/queueAutoAssign";
 import { ensureCrmContactForConversation, syncCrmAttendant } from "../lib/crmSync";
 import { sendOutboundText } from "../lib/outbound";
+import { instagramMediaKind, markSentExternalId, publicApiBaseFromRequest, sendInstagramMedia, sendInstagramText, type InstagramSendResult } from "../lib/instagram";
+import { normalizePhone, phoneVariants } from "../lib/phone";
 import { getSurveySettings, buildSurveyMessage } from "../lib/surveySettings";
+import { maybeGenerateKbSuggestion } from "../lib/knowledgeLearning";
+import { fetchLinkPreview, firstUrlIn } from "../lib/linkPreview";
 
 // Sinaliza que a pesquisa está desligada nas configurações (não é erro).
 class SurveyDisabled extends Error {}
 import {
   processInboundWA,
   processMetaInboundWA,
+  processInboundWAContacts,
   type InboundWAPayload,
   type MetaInboundWAPayload,
+  type InboundWAContactPayload,
   MEDIA_DIR,
 } from "../lib/whatsappInbound";
+import { processWAHistoryArchived, processWAHistoryBatch, type WAHistoryArchivedPayload, type WAHistoryPayload } from "../lib/whatsappHistory";
+import { AVATAR_DIR } from "../lib/waProfile";
 
 const router: IRouter = Router();
 
+// ─── Auditoria de ações sensíveis (item 21 do roadmap "Central de
+// Atendimento") ────────────────────────────────────────────────────────────
+// Registra transferência de atendimento/setor e edição/exclusão de mensagem
+// — nunca atrasa nem pode derrubar a requisição que a originou (mesmo
+// padrão "fire and forget" de autoAssignOnNewPoolConversation/
+// autoAssignOnVendorFreed, chamado com "void" e nunca lança). "Entrar como"
+// (modo espiar) já tem log dedicado — ver impersonationLogTable em admin.ts,
+// não duplicado aqui.
+async function logSensitiveAction(
+  req: Request,
+  tenantId: number,
+  action: string,
+  description: string,
+  opts: { conversationId?: number; metadata?: Record<string, unknown> } = {},
+): Promise<void> {
+  try {
+    await db.insert(sensitiveActionLogTable).values({
+      tenantId,
+      userId: req.session.userId ?? null,
+      userName: req.session.userName ?? "Desconhecido",
+      action,
+      description,
+      conversationId: opts.conversationId ?? null,
+      metadata: opts.metadata ?? null,
+    });
+  } catch (err) {
+    console.error("[auditoria] falha ao registrar ação sensível:", err);
+  }
+}
+
 // ─── SSE real-time stream ──────────────────────────────────────────────────
-router.get("/chat/events", requireAuth, async (req: Request, res: Response): Promise<void> => {
+router.get("/chat/events", requireAuth, requireChatAccess(), async (req: Request, res: Response): Promise<void> => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
@@ -42,7 +82,7 @@ router.get("/chat/events", requireAuth, async (req: Request, res: Response): Pro
   res.flushHeaders();
 
   const userRole = req.session.userRole!;
-  const userSectorId = req.session.userSectorId;
+  const userSectorIds = req.session.userSectorIds ?? [];
   const userId = req.session.userId!;
   // Multi-loja: a loja da sessão. Eventos NUNCA cruzam a fronteira de loja —
   // superadmin (sem loja) e sessões antigas não recebem nada (fail closed).
@@ -50,8 +90,13 @@ router.get("/chat/events", requireAuth, async (req: Request, res: Response): Pro
   // Permissões do vendedor: recarregadas a cada 30s para que uma revogação
   // feita pelo admin pare de vazar eventos de Potenciais sem exigir reconexão.
   let canSeePotenciais = await checkPerm(req, "ver_potenciais");
+  // Mesma lógica pro filtro de linha de WhatsApp: sem isso, um vendedor com
+  // stream já aberto continuava recebendo eventos de linhas que o admin
+  // acabou de revogar (ou não recebia as recém-liberadas) até reconectar.
+  let allowedSessionKeys = await getCurrentAllowedSessionKeys(req);
   const permRefresh = setInterval(() => {
     checkPerm(req, "ver_potenciais").then((v) => { canSeePotenciais = v; }).catch(() => {});
+    getCurrentAllowedSessionKeys(req).then((v) => { allowedSessionKeys = v; }).catch(() => {});
     // Loja suspensa: derruba streams já abertos (a suspensão não pode esperar
     // o usuário reconectar). Fecha a conexão — o EventSource do cliente tenta
     // reconectar e é barrado no requireAuth.
@@ -66,19 +111,27 @@ router.get("/chat/events", requireAuth, async (req: Request, res: Response): Pro
   //   supervisor só se o setor bater (supervisor sem setor = global);
   //   vendedor só se estiver na lista.
   // - Demais eventos: potenciais chegam a todos; o resto é escopado por setor.
-  const allowed = (ev: { tenantId: number; sectorId: number | null; isPotential?: boolean; restrictedTo?: number[] | null }): boolean => {
+  const allowed = (ev: { tenantId: number; sectorId: number | null; isPotential?: boolean; restrictedTo?: number[] | null; sessionKey?: string | null }): boolean => {
     // Fronteira de loja em primeiro lugar: só entrega eventos da MESMA loja.
     // Sem loja na sessão (superadmin / sessão antiga) = não recebe nada.
     if (sessionTenantId == null || ev.tenantId !== sessionTenantId) return false;
     if (userRole === "admin") return true;
-    if (userRole === "supervisor") {
-      // Supervisor com setor: só eventos do próprio setor + potenciais.
-      if (userSectorId == null || ev.sectorId === userSectorId) return true;
-      return ev.restrictedTo == null && ev.isPotential === true;
-    }
+    // Supervisor e vendedor_chefe (pedido 10/09, direciona atendimentos):
+    // enxergam tudo, em qualquer setor, sem restrição — a privacidade entre
+    // vendedores continua valendo só para o papel vendedor.
+    if (userRole === "supervisor" || userRole === "vendedor_chefe") return true;
+    // Conversa RESTRITA (já tem responsável/participante) sempre chega pra
+    // quem é responsável/participante, MESMO fora das linhas de WhatsApp
+    // liberadas — foi transferida de propósito pra esse vendedor. Checar
+    // isso ANTES do filtro de linha evita que um atendimento transferido
+    // pra fora da linha permitida suma de vez (nem pro antigo, nem pro novo
+    // responsável).
     if (ev.restrictedTo != null) return ev.restrictedTo.includes(userId);
+    // Vendedor com restrição de linha de WhatsApp: evento de potencial/setor
+    // fora das linhas liberadas nunca chega.
+    if (allowedSessionKeys != null && ev.sessionKey != null && !allowedSessionKeys.includes(ev.sessionKey)) return false;
     if (ev.isPotential && canSeePotenciais) return true;
-    return ev.sectorId != null && ev.sectorId === userSectorId;
+    return ev.sectorId != null && userSectorIds.includes(ev.sectorId);
   };
 
   const writeEvent = (ev: { id?: number; event: string; data: unknown }) => {
@@ -87,9 +140,22 @@ router.get("/chat/events", requireAuth, async (req: Request, res: Response): Pro
     res.write(`data: ${JSON.stringify(ev.data)}\n\n`);
   };
 
+  // sseEmitter.emit() chama todo stream aberto no processo (o filtro de
+  // escopo roda dentro de allowed()) na mesma call stack de quem disparou o
+  // broadcast — inclusive o POST de mensagem de outro usuário/conversa. Se
+  // ESTE stream estiver numa conexão morta, res.write() pode lançar; sem
+  // try/catch isso derruba o emit inteiro e o erro sobe para o handler alheio
+  // (sem middleware de erro nem express-async-errors, o Express 5 responde
+  // 500 pra ele, mesmo a mensagem dele já salva no banco). Isolado aqui: uma
+  // conexão ruim só se remove a si mesma.
   const send = (payload: BufferedEvent) => {
     if (!allowed(payload)) return;
-    writeEvent(payload);
+    try {
+      writeEvent(payload);
+    } catch {
+      sseEmitter.off("broadcast", send);
+      res.destroy();
+    }
   };
 
   // ── Reconnect recovery ──
@@ -162,19 +228,26 @@ async function enrichConversation(conv: typeof conversationsTable.$inferSelect) 
  *   (leads novos sem dono) visíveis a qualquer vendedor.
  */
 async function canAccessConversation(
-  conv: Pick<typeof conversationsTable.$inferSelect, "id" | "sectorId" | "assigneeId" | "status" | "isArchived">,
+  conv: Pick<typeof conversationsTable.$inferSelect, "id" | "sectorId" | "assigneeId" | "status" | "isArchived" | "sessionKey">,
   req: Request,
 ): Promise<boolean> {
   const userRole = req.session.userRole!;
   if (userRole === "admin") return true;
   const userId = req.session.userId!;
-  const userSectorId = req.session.userSectorId;
-  if (userRole === "supervisor") {
-    // Supervisor com setor: acesso apenas ao próprio setor + potenciais.
-    if (userSectorId == null || conv.sectorId === userSectorId) return true;
-    return isPotentialConversation(conv);
-  }
+  const userSectorIds = req.session.userSectorIds ?? [];
+  // Supervisor e vendedor_chefe (pedido 10/09, direciona atendimentos):
+  // acesso irrestrito a qualquer conversa, em qualquer setor (inclusive já
+  // assumidas/finalizadas por outro vendedor). A privacidade entre
+  // vendedores foi mantida de propósito — só quem pode direcionar tem
+  // visão global.
+  if (userRole === "supervisor" || userRole === "vendedor_chefe") return true;
   if (isRestrictedConversation(conv)) {
+    // Conversa já tem dono (ou foi finalizada): responsável/participante
+    // sempre acessa, MESMO fora das linhas de WhatsApp liberadas — foi
+    // transferida de propósito pra esse vendedor, não é uma "descoberta" de
+    // linha alheia. Checar isso ANTES do filtro de linha evita que um
+    // atendimento transferido pra fora da linha permitida suma de vez (nem
+    // pro antigo, nem pro novo responsável).
     if (conv.assigneeId === userId) return true;
     const [p] = await db.select({ userId: conversationParticipantsTable.userId })
       .from(conversationParticipantsTable)
@@ -183,74 +256,198 @@ async function canAccessConversation(
         eq(conversationParticipantsTable.userId, userId),
       ))
       .limit(1);
-    return !!p;
+    if (p) return true;
+    // Resolvida/arquivada do PRÓPRIO setor do vendedor, com o setor
+    // liberando "todo vendedor vê Resolvidos" (pedido 14/09, Atacado) —
+    // mesmo não sendo o responsável original nem participante. NÃO libera
+    // conversa ativa (só tem dono) de outro vendedor — só resolvida/arquivada.
+    if ((conv.status === "resolved" || conv.status === "archived" || conv.isArchived === true)
+      && conv.sectorId != null && userSectorIds.includes(conv.sectorId)
+      && (await sectorAllowsResolvedAccess(conv.sectorId))) {
+      return true;
+    }
+    return false;
   }
-  if (conv.sectorId != null && conv.sectorId === userSectorId) return true;
+  // Fila restrita (pedido 10/09): só vê o que já é dele (checado acima) —
+  // nunca o pool geral do setor nem potenciais.
+  const [meRestrict] = await db.select({ v: usersTable.queueRestrictToAssigned }).from(usersTable)
+    .where(eq(usersTable.id, userId)).limit(1);
+  if (meRestrict?.v) return false;
+  // Vendedor com restrição de linha de WhatsApp (allowedSessionKeys): fora
+  // das linhas liberadas, nem potencial nem conversa do próprio setor conta.
+  const allowedSessionKeys = await getCurrentAllowedSessionKeys(req);
+  if (allowedSessionKeys != null && !allowedSessionKeys.includes(conv.sessionKey)) return false;
+  if (conv.sectorId != null && userSectorIds.includes(conv.sectorId)) return true;
   return isPotentialConversation(conv) && (await checkPerm(req, "ver_potenciais"));
 }
 
-// ─── List conversations ────────────────────────────────────────────────────
-router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> => {
-  const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { search, label, status, sectorId } = req.query as Record<string, string | undefined>;
-
-  const userRole = req.session.userRole!;
-  const userSectorId = req.session.userSectorId;
-
-  // Multi-loja: base de tudo é a loja do usuário.
-  const conditions = [eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.isArchived, false)];
-
-  // Conversas RESTRITAS (com responsável ou finalizadas) têm visibilidade
-  // reduzida: só o responsável/participantes (vendedor), o admin e o
-  // supervisor do MESMO setor as veem.
+/** Pool de conversas "pegáveis" por um vendedor comum: potenciais (leads
+ * sem dono, span de setor, se tiver a permissão) + pendentes do próprio
+ * setor ainda sem dono. Extraído da visibilidade normal (ver
+ * buildConversationVisibilityConditions) pra ser reusado pela fila do
+ * Central de Atendimento (chatQueueSingleTask, pedido 14/09): tanto pra
+ * decidir a mais antiga do pool (o que aparece pra quem tem 0 atendimento
+ * aberto) quanto pra validar, no /claim, que quem está pegando um novo
+ * está pegando mesmo essa — não uma escolhida a dedo direto pela API,
+ * ainda que a lista já esconda as outras. */
+async function vendorClaimablePoolCondition(req: Request, userSectorIds: number[]) {
+  const userAllowedSessionKeys = await getCurrentAllowedSessionKeys(req);
+  const sessionScope = userAllowedSessionKeys != null
+    ? (userAllowedSessionKeys.length ? inArray(conversationsTable.sessionKey, userAllowedSessionKeys) : sql`FALSE`)
+    : null;
+  let potencial = (await checkPerm(req, "ver_potenciais"))
+    ? and(
+        isNull(conversationsTable.assigneeId),
+        notInArray(conversationsTable.status, [...POTENTIAL_EXCLUDED_STATUSES]),
+      )!
+    : sql`FALSE`;
   const restricted = or(
     sql`${conversationsTable.assigneeId} IS NOT NULL`,
     inArray(conversationsTable.status, ["resolved", "archived"]),
   )!;
+  // Vendedor em mais de um setor (pedido 17/09): pool combinado de TODOS os
+  // setores do vendedor, não só um.
+  let sectorUnrestricted = userSectorIds.length
+    ? and(inArray(conversationsTable.sectorId, userSectorIds), sql`NOT (${restricted})`)!
+    : sql`FALSE`;
+  if (sessionScope) {
+    potencial = and(potencial, sessionScope)!;
+    sectorUnrestricted = and(sectorUnrestricted, sessionScope)!;
+  }
+  return or(potencial, sectorUnrestricted)!;
+}
 
-  if (userRole === "admin") {
-    if (sectorId) conditions.push(eq(conversationsTable.sectorId, Number(sectorId)));
-  } else if (userRole === "supervisor") {
-    // Supervisor com setor: só vê o próprio setor (pendentes, ativas e
-    // resolvidas), além dos potenciais (leads novos, cross-sector).
-    // Supervisor sem setor definido permanece global (não há como escopar).
-    if (userSectorId) {
-      const potencialSup = and(
-        isNull(conversationsTable.assigneeId),
-        notInArray(conversationsTable.status, [...POTENTIAL_EXCLUDED_STATUSES]),
-      )!;
-      conditions.push(or(
-        eq(conversationsTable.sectorId, userSectorId),
-        potencialSup,
-      )!);
-    }
-    if (sectorId) conditions.push(eq(conversationsTable.sectorId, Number(sectorId)));
+// ─── List conversations ────────────────────────────────────────────────────
+// Condições de VISIBILIDADE de conversas, compartilhadas entre a listagem
+// (GET /chat/conversations, paginada em 100) e a contagem real por categoria
+// (GET /chat/conversations/counts, sem paginação) — extraído pra um único
+// lugar depois de achar um bug onde os números das abinhas (Potenciais/
+// Pendentes/Ativos/Resolvidas) na Central de Atendimento eram calculados só
+// em cima do lote já limitado a 100 conversas mais recentes, então uma loja
+// com mais de 100 atendimentos em aberto via a contagem de "Ativos" muito
+// menor que a real (ex.: mostrava 53 quando na verdade eram 201) — sem bater
+// com o total do CRM, que sempre foi calculado sobre a base inteira.
+async function buildConversationVisibilityConditions(
+  req: Request,
+  tenantId: number,
+  opts: { sectorId?: number; assigneeId?: number },
+) {
+  const userRole = req.session.userRole!;
+  const userSectorIds = req.session.userSectorIds ?? [];
+
+  // Multi-loja: base de tudo é a loja do usuário.
+  const conditions = [eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.isArchived, false)];
+
+  if (userRole === "admin" || userRole === "supervisor" || userRole === "vendedor_chefe") {
+    // Admin, supervisor e vendedor_chefe (pedido 10/09) enxergam tudo
+    // (qualquer setor, qualquer status, inclusive já assumidas/resolvidas
+    // por outro vendedor). O filtro de setor abaixo é só o filtro OPCIONAL
+    // escolhido na tela, não uma restrição de visibilidade.
+    if (opts.sectorId) conditions.push(eq(conversationsTable.sectorId, opts.sectorId));
+    // Filtro opcional por vendedor (assignee) na tela do admin/supervisor.
+    // Sem isso, o filtro de vendedor era só client-side em cima do lote já
+    // limitado a 100 (abaixo) — um vendedor com muitas conversas ativas
+    // ficava com a contagem visivelmente menor do que a real.
+    if (opts.assigneeId) conditions.push(eq(conversationsTable.assigneeId, opts.assigneeId));
   } else {
     // Vendedores are ALWAYS sector-scoped and must never see every conversation.
     // - potenciais (leads novos sem dono): visíveis a todos;
     // - conversas do próprio setor NÃO restritas (ex.: pendentes);
     // - conversas restritas apenas quando é o responsável ou participante.
     const userId = req.session.userId!;
-    // Permissão "ver_potenciais" desligada: o vendedor não vê os leads novos
-    // de outros setores (só o escopo do próprio setor).
-    const potencial = (await checkPerm(req, "ver_potenciais"))
+
+    // Setor com "todo vendedor vê Resolvidos" ligado (pedido 14/09, Atacado):
+    // condição extra que libera QUALQUER resolvida/arquivada de um dos
+    // setores do vendedor (pedido 17/09: agora pode ser mais de um), não só a
+    // que esse vendedor finalizou — pra reiniciar contato e prospectar
+    // cliente antigo. null quando NENHUM dos setores dele liga essa opção
+    // (comportamento de sempre).
+    const resolvedAllowedSectorIds = await sectorsAllowingResolvedAccess(userSectorIds);
+    const sectorResolved = resolvedAllowedSectorIds.length
       ? and(
-          isNull(conversationsTable.assigneeId),
-          notInArray(conversationsTable.status, [...POTENTIAL_EXCLUDED_STATUSES]),
-        )!
-      : sql`FALSE`;
+          inArray(conversationsTable.status, ["resolved", "archived"]),
+          inArray(conversationsTable.sectorId, resolvedAllowedSectorIds),
+        )
+      : null;
+
+    // Fila restrita (pedido 10/09): só o que foi direcionado a ele
+    // (assigneeId = ele) — nunca potenciais nem o pool geral do setor.
+    const [meRestrict] = await db.select({ v: usersTable.queueRestrictToAssigned }).from(usersTable)
+      .where(eq(usersTable.id, userId)).limit(1);
+    if (meRestrict?.v) {
+      const mineRestrict = or(
+        eq(conversationsTable.assigneeId, userId),
+        sql`EXISTS (SELECT 1 FROM ${conversationParticipantsTable} WHERE ${conversationParticipantsTable.conversationId} = ${conversationsTable.id} AND ${conversationParticipantsTable.userId} = ${userId})`,
+      )!;
+      conditions.push(sectorResolved ? or(mineRestrict, sectorResolved)! : mineRestrict);
+      return conditions;
+    }
+    // Restrição por linha de WhatsApp (allowedSessionKeys) e potenciais/
+    // pendentes do setor: extraído pra vendorClaimablePoolCondition (acima),
+    // reusado também pela fila do Central de Atendimento logo abaixo.
     const mine = or(
       eq(conversationsTable.assigneeId, userId),
       sql`EXISTS (SELECT 1 FROM ${conversationParticipantsTable} WHERE ${conversationParticipantsTable.conversationId} = ${conversationsTable.id} AND ${conversationParticipantsTable.userId} = ${userId})`,
     )!;
-    const sectorUnrestricted = userSectorId
-      ? and(eq(conversationsTable.sectorId, userSectorId), sql`NOT (${restricted})`)!
-      : sql`FALSE`;
-    conditions.push(or(potencial, mine, sectorUnrestricted)!);
-    // Resolvidas só aparecem para admin/supervisor: vendedor não vê
-    // conversas finalizadas, nem as que ele mesmo finalizou.
-    conditions.push(notInArray(conversationsTable.status, ["resolved", "archived"]));
+
+    // Fila do Central de Atendimento por ordem (pedido 14/09, ver
+    // chatQueueSingleTask em users.ts): quem tem essa opção ligada só
+    // enxerga o pool geral (potenciais/pendentes do setor) quando não tem
+    // NENHUM atendimento aberto — e, mesmo assim, só o mais antigo dele
+    // (a "próxima da fila"), nunca a lista inteira. Quem já tinha vários
+    // atendimentos abertos antes de ligar a opção continua vendo e
+    // trabalhando todos eles normalmente (bloco "mine" abaixo) — só o pool
+    // de NOVOS fica travado.
+    const [meQueue] = await db.select({ v: usersTable.chatQueueSingleTask }).from(usersTable)
+      .where(eq(usersTable.id, userId)).limit(1);
+    if (meQueue?.v) {
+      const activeCount = await countActiveConversations(tenantId, userId);
+      if (activeCount > 0) {
+        conditions.push(sectorResolved ? or(mine, sectorResolved)! : mine);
+      } else {
+        const pool = await vendorClaimablePoolCondition(req, userSectorIds);
+        const [next] = await db.select({ id: conversationsTable.id }).from(conversationsTable)
+          .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.isArchived, false), pool))
+          .orderBy(asc(conversationsTable.createdAt)).limit(1);
+        const base = next ? or(mine, eq(conversationsTable.id, next.id))! : mine;
+        conditions.push(sectorResolved ? or(base, sectorResolved)! : base);
+      }
+      conditions.push(sectorResolved
+        ? or(notInArray(conversationsTable.status, ["resolved", "archived"]), sectorResolved)!
+        : notInArray(conversationsTable.status, ["resolved", "archived"]));
+      return conditions;
+    }
+
+    const pool = await vendorClaimablePoolCondition(req, userSectorIds);
+    conditions.push(sectorResolved ? or(pool, mine, sectorResolved)! : or(pool, mine)!);
+    // Resolvidas só aparecem para admin/supervisor (ou pro setor que ligou
+    // "todo vendedor vê Resolvidos" acima): vendedor comum não vê conversas
+    // finalizadas, nem as que ele mesmo finalizou.
+    conditions.push(sectorResolved
+      ? or(notInArray(conversationsTable.status, ["resolved", "archived"]), sectorResolved)!
+      : notInArray(conversationsTable.status, ["resolved", "archived"]));
   }
+
+  return conditions;
+}
+
+// Mesmo formato aceito para sessionKey nas rotas de conexão (whatsapp-multi-session).
+const SESSION_KEY_FILTER_RE = /^[a-z0-9][a-z0-9_-]{0,39}$/;
+
+router.get("/chat/conversations", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { search, label, status, sectorId, assigneeId, sessionKey } = req.query as Record<string, string | undefined>;
+
+  const conditions = await buildConversationVisibilityConditions(req, tenantId, {
+    sectorId: sectorId ? Number(sectorId) : undefined,
+    assigneeId: assigneeId ? Number(assigneeId) : undefined,
+  });
+
+  // Filtro por CANAL de atendimento (linha de WhatsApp: Varejo Oficial,
+  // Atacado...) — pedido 25/10: cada canal com suas próprias abas
+  // Potenciais/Pendentes/Ativos/Resolvidas. Vai pro servidor (não só
+  // client-side) pra lista e contagem não ficarem presas ao lote carregado.
+  if (sessionKey && SESSION_KEY_FILTER_RE.test(sessionKey)) conditions.push(eq(conversationsTable.sessionKey, sessionKey));
 
   if (status) conditions.push(eq(conversationsTable.status, status));
   if (search) {
@@ -263,12 +460,45 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
     conditions.push(sql`${conversationsTable.labels} ILIKE ${'%' + label + '%'}`);
   }
 
-  const rows = await db
-    .select()
-    .from(conversationsTable)
-    .where(and(...conditions))
-    .orderBy(desc(conversationsTable.lastMessageAt))
-    .limit(100);
+  // Sem filtro de status explícito (uso normal da tela: a Central carrega tudo
+  // de uma vez e o frontend separa em abas client-side por categoria — ver
+  // conversationCategory() em ChatCenter.tsx): antes disso rodava UM único
+  // ORDER BY lastMessageAt LIMIT 100 misturando as 4 categorias (Potenciais/
+  // Pendentes/Ativos/Resolvidas). Numa loja com bastante "Ativos" recentes,
+  // isso empurrava as Pendentes/Potenciais mais paradas pra fora do lote de
+  // 100 inteiro — a contagem real da abinha (endpoint /counts, já corrigido
+  // antes) mostrava certo (ex.: 20 Pendentes), mas a LISTA por trás da aba só
+  // trazia 3, porque as outras 17 nunca entravam nesse top-100 global (bug
+  // reportado: "os atendimentos pendentes não aparecem pro admin"). Corrigido
+  // buscando até CATEGORY_LIST_CAP de CADA categoria separadamente, com as
+  // mesmas condições de categoria usadas em /counts — assim nenhuma categoria
+  // fica escondida atrás de outra mais "barulhenta".
+  const CATEGORY_LIST_CAP = 500;
+  let rows: (typeof conversationsTable.$inferSelect)[];
+  if (status) {
+    rows = await db
+      .select()
+      .from(conversationsTable)
+      .where(and(...conditions))
+      .orderBy(desc(conversationsTable.lastMessageAt))
+      .limit(100);
+  } else {
+    const categoryPredicates = [
+      and(sql`${conversationsTable.assigneeId} IS NOT NULL`, notInArray(conversationsTable.status, ["resolved", "archived"]))!, // ativos
+      and(isNull(conversationsTable.assigneeId), eq(conversationsTable.status, "pending"))!, // pendentes
+      and(isNull(conversationsTable.assigneeId), notInArray(conversationsTable.status, ["pending", "resolved", "archived"]))!, // potenciais
+      inArray(conversationsTable.status, ["resolved", "archived"]), // resolvidas
+    ];
+    const perCategory = await Promise.all(
+      categoryPredicates.map((pred) =>
+        db.select().from(conversationsTable)
+          .where(and(...conditions, pred))
+          .orderBy(desc(conversationsTable.lastMessageAt))
+          .limit(CATEGORY_LIST_CAP)
+      ),
+    );
+    rows = perCategory.flat();
+  }
 
   const sectors = await db.select().from(sectorsTable).where(eq(sectorsTable.tenantId, tenantId));
   const users = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable).where(eq(usersTable.tenantId, tenantId));
@@ -290,19 +520,24 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
   }
 
   // Nível do cliente no CRM (Novo/Regular/VIP) para os filtros da central.
-  const normPhones = [...new Set(rows.map((c) => (c.phone ?? "").replace(/\D/g, "")).filter(Boolean))];
-  const crmRows = normPhones.length > 0
+  // Casa por todas as variações plausíveis do número (com/sem DDI, com/sem o
+  // 9º dígito) — contato do CRM salvo num formato antigo não pode "sumir"
+  // da central só porque a conversa chegou num formato diferente.
+  const normPhones = [...new Set(rows.map((c) => normalizePhone(c.phone)).filter(Boolean))];
+  const phoneVariantSet = [...new Set(normPhones.flatMap((p) => phoneVariants(p)))];
+  const crmRows = phoneVariantSet.length > 0
     ? await db
         .select({ phone: crmContactsTable.phone, sectorId: crmContactsTable.sectorId, profile: crmContactsTable.profile })
         .from(crmContactsTable)
-        .where(and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.isArchived, false), inArray(crmContactsTable.phone, normPhones)))
+        .where(and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.isArchived, false), inArray(crmContactsTable.phone, phoneVariantSet)))
     : [];
   const crmProfileMap: Record<string, string> = {};
   for (const r of crmRows) {
     if (!r.phone) continue;
+    const canonical = normalizePhone(r.phone);
     // Prioriza o contato do mesmo setor; telefone sozinho fica como fallback.
-    crmProfileMap[`${r.phone}|${r.sectorId ?? ""}`] = r.profile;
-    if (!(r.phone in crmProfileMap)) crmProfileMap[r.phone] = r.profile;
+    crmProfileMap[`${canonical}|${r.sectorId ?? ""}`] = r.profile;
+    if (!(canonical in crmProfileMap)) crmProfileMap[canonical] = r.profile;
   }
 
   // Conversas fixadas pelo usuário logado (fixar é individual).
@@ -315,7 +550,7 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
   const pinnedSet = new Set(myPins.map((p) => p.conversationId));
 
   const enriched = rows.map((c) => {
-    const np = (c.phone ?? "").replace(/\D/g, "");
+    const np = normalizePhone(c.phone);
     return {
       ...c,
       sector: c.sectorId ? (sectorMap[c.sectorId] ?? null) : null,
@@ -329,8 +564,199 @@ router.get("/chat/conversations", requireAuth, async (req, res): Promise<void> =
   res.json(enriched);
 });
 
+// ─── Busca global (item 11 do roadmap "Central de Atendimento") ───────────
+// Diferente da busca de /chat/conversations acima (só nome/telefone, usada
+// pelo campo de busca da lista) e de /messages/search acima (só dentro de
+// UMA conversa já aberta): esta cruza TODAS as conversas visíveis pro
+// usuário logado (mesma regra de visibilidade de sempre, via
+// buildConversationVisibilityConditions) e casa por nome, telefone,
+// etiqueta, atendente, protocolo/nº da fila, texto de alguma mensagem, e
+// CPF/CNPJ (ou qualquer outro campo personalizado do CRM), pelo telefone do
+// contato do CRM — a conversa em si não guarda esse dado.
+router.get("/chat/search-global", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const qRaw = Array.isArray(req.query.q) ? String(req.query.q[0]) : String(req.query.q ?? "");
+  const q = qRaw.trim();
+  if (q.length < 2) { res.json([]); return; }
+  const pattern = `%${q.replace(/[%_]/g, "\\$&")}%`; // escapa curinga do LIKE
+  const asNumber = /^\d+$/.test(q) ? Number(q) : null;
+
+  const conditions = await buildConversationVisibilityConditions(req, tenantId, {});
+
+  const users = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable).where(eq(usersTable.tenantId, tenantId));
+  const matchingAssigneeIds = users.filter((u) => u.name.toLowerCase().includes(q.toLowerCase())).map((u) => u.id);
+
+  // Texto de alguma mensagem da conversa (não só a que está aberta na tela).
+  const msgMatches = await db.select({ conversationId: messagesTable.conversationId })
+    .from(messagesTable)
+    .where(and(eq(messagesTable.tenantId, tenantId), isNull(messagesTable.deletedAt), ilike(messagesTable.content, pattern)))
+    .limit(300);
+  const msgMatchIds = [...new Set(msgMatches.map((m) => m.conversationId))];
+
+  // CPF/CNPJ e demais campos personalizados do CRM — casados pelo telefone
+  // do contato (a conversa não guarda CPF/CNPJ diretamente).
+  const crmMatches = await db.select({ phone: crmContactsTable.phone })
+    .from(crmContactsTable)
+    .where(and(eq(crmContactsTable.tenantId, tenantId), sql`${crmContactsTable.customFields}::text ILIKE ${pattern}`))
+    .limit(100);
+  const crmPhoneVariants = [...new Set(crmMatches.flatMap((c) => (c.phone ? phoneVariants(normalizePhone(c.phone)) : [])))];
+
+  const orParts = [
+    ilike(conversationsTable.name, pattern),
+    ilike(conversationsTable.phone, pattern),
+    sql`${conversationsTable.labels} ILIKE ${pattern}`,
+  ];
+  if (asNumber != null) {
+    orParts.push(eq(conversationsTable.id, asNumber));
+    orParts.push(eq(conversationsTable.queueNumber, asNumber));
+  }
+  if (matchingAssigneeIds.length > 0) orParts.push(inArray(conversationsTable.assigneeId, matchingAssigneeIds));
+  if (msgMatchIds.length > 0) orParts.push(inArray(conversationsTable.id, msgMatchIds));
+  if (crmPhoneVariants.length > 0) orParts.push(inArray(conversationsTable.phone, crmPhoneVariants));
+
+  const rows = await db.select().from(conversationsTable)
+    .where(and(...conditions, or(...orParts)))
+    .orderBy(desc(conversationsTable.lastMessageAt))
+    .limit(30);
+
+  const sectors = await db.select().from(sectorsTable).where(eq(sectorsTable.tenantId, tenantId));
+  const sectorMap = Object.fromEntries(sectors.map((s) => [s.id, s]));
+  const userMap = Object.fromEntries(users.map((u) => [u.id, u]));
+
+  const enriched = rows.map((c) => ({
+    ...c,
+    sector: c.sectorId ? (sectorMap[c.sectorId] ?? null) : null,
+    assignee: c.assigneeId ? (userMap[c.assigneeId] ?? null) : null,
+    // Mesmo formato do card em /chat/conversations (participants/pinned):
+    // clicar num resultado injeta este objeto direto em convs (ver
+    // openSearchResult no ChatCenter), então precisa ter o shape completo do
+    // tipo Conversation do frontend — mesmo que participantes reais só sejam
+    // carregados de fato na próxima vez que a lista normal recarregar.
+    participants: [] as { id: number; name: string }[],
+    pinned: false,
+    // Pista pro frontend destacar POR QUE essa conversa apareceu no resultado.
+    matchedBy: asNumber != null && (c.id === asNumber || c.queueNumber === asNumber)
+      ? "protocolo"
+      : msgMatchIds.includes(c.id) && !c.name.toLowerCase().includes(q.toLowerCase()) && !c.phone.includes(q)
+        ? "mensagem"
+        : crmPhoneVariants.includes(c.phone)
+          ? "cpf_cnpj"
+          : matchingAssigneeIds.includes(c.assigneeId ?? -1) && !c.name.toLowerCase().includes(q.toLowerCase())
+            ? "atendente"
+            : null,
+  }));
+
+  res.json(enriched);
+});
+
+// ─── Auditoria de ações sensíveis (item 21) — leitura ─────────────────────
+// Lista as últimas ações registradas por logSensitiveAction acima (só desta
+// loja). Restrito a admin/supervisor — mesmo nível de acesso já usado por
+// DELETE /chat/conversations/:id (a mais sensível das ações aqui logadas).
+router.get("/chat/sensitive-actions-log", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rows = await db.select().from(sensitiveActionLogTable)
+    .where(eq(sensitiveActionLogTable.tenantId, tenantId))
+    .orderBy(desc(sensitiveActionLogTable.createdAt))
+    .limit(200);
+  res.json(rows);
+});
+
+// ─── Contagem real por categoria (Potenciais/Pendentes/Ativos/Resolvidas) ──
+// Usada pelos números das abinhas na Central de Atendimento. Roda sobre a
+// base INTEIRA (mesma visibilidade da listagem acima, sem o limit(100)) —
+// ver o comentário em buildConversationVisibilityConditions pra entender por
+// que isso existe: contar em cima do lote já paginado subestimava "Ativos"
+// numa loja com mais de 100 atendimentos em aberto.
+router.get("/chat/conversations/counts", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { search, label, sectorId, assigneeId, sessionKey } = req.query as Record<string, string | undefined>;
+
+  const conditions = await buildConversationVisibilityConditions(req, tenantId, {
+    sectorId: sectorId ? Number(sectorId) : undefined,
+    assigneeId: assigneeId ? Number(assigneeId) : undefined,
+  });
+  // Mesmo filtro de canal (linha de WhatsApp) da listagem acima.
+  if (sessionKey && SESSION_KEY_FILTER_RE.test(sessionKey)) conditions.push(eq(conversationsTable.sessionKey, sessionKey));
+  if (search) {
+    conditions.push(or(
+      ilike(conversationsTable.name, `%${search}%`),
+      ilike(conversationsTable.phone, `%${search}%`),
+    )!);
+  }
+  if (label) {
+    conditions.push(sql`${conversationsTable.labels} ILIKE ${'%' + label + '%'}`);
+  }
+
+  const userId = req.session.userId!;
+  const [row] = await db
+    .select({
+      // Espelha exatamente conversationCategory() do frontend (ChatCenter.tsx):
+      // isArchived já é sempre false aqui (condição de base), então "resolvidas"
+      // se reduz a checar o status.
+      ativos: sql<string>`count(*) filter (where ${conversationsTable.assigneeId} is not null and ${conversationsTable.status} not in ('resolved', 'archived'))`,
+      pendentes: sql<string>`count(*) filter (where ${conversationsTable.assigneeId} is null and ${conversationsTable.status} = 'pending')`,
+      potenciais: sql<string>`count(*) filter (where ${conversationsTable.assigneeId} is null and ${conversationsTable.status} not in ('pending', 'resolved', 'archived'))`,
+      resolvidas: sql<string>`count(*) filter (where ${conversationsTable.status} in ('resolved', 'archived'))`,
+      favoritos: sql<string>`count(*) filter (where exists (
+        select 1 from ${conversationPinsTable}
+        where ${conversationPinsTable.conversationId} = ${conversationsTable.id}
+          and ${conversationPinsTable.userId} = ${userId}
+      ))`,
+    })
+    .from(conversationsTable)
+    .where(and(...conditions));
+
+  res.json({
+    ativos: Number(row?.ativos ?? 0),
+    pendentes: Number(row?.pendentes ?? 0),
+    potenciais: Number(row?.potenciais ?? 0),
+    resolvidas: Number(row?.resolvidas ?? 0),
+    favoritos: Number(row?.favoritos ?? 0),
+  });
+});
+
+// ─── Contagem de atendimentos abertos por NÚMERO de WhatsApp ──────────────
+// Pedido 17/09: painel rápido perto de "Conversas" mostrando quanto
+// atendimento em aberto tem em cada linha conectada (útil pra loja com mais
+// de um número — ver quando uma linha específica está sobrecarregada). Só
+// conta o que ainda está em aberto (potencial/pendente/ativo — nunca
+// resolvida/arquivada, mesmo pra admin/supervisor que enxergam resolvidas
+// na listagem normal): a ideia aqui é "carga de trabalho atual", não
+// histórico. Mesma visibilidade de sempre (buildConversationVisibilityConditions)
+// — vendedor restrito a setor/linha só vê a contagem do que ele mesmo veria
+// na lista.
+router.get("/chat/conversations/counts-by-session", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { sectorId, assigneeId } = req.query as Record<string, string | undefined>;
+
+  const conditions = await buildConversationVisibilityConditions(req, tenantId, {
+    sectorId: sectorId ? Number(sectorId) : undefined,
+    assigneeId: assigneeId ? Number(assigneeId) : undefined,
+  });
+  conditions.push(notInArray(conversationsTable.status, ["resolved", "archived"]));
+
+  const rows = await db
+    .select({
+      sessionKey: conversationsTable.sessionKey,
+      total: sql<string>`count(*)`,
+      ativos: sql<string>`count(*) filter (where ${conversationsTable.assigneeId} is not null)`,
+      naFila: sql<string>`count(*) filter (where ${conversationsTable.assigneeId} is null)`,
+    })
+    .from(conversationsTable)
+    .where(and(...conditions))
+    .groupBy(conversationsTable.sessionKey);
+
+  res.json(rows.map((r) => ({
+    sessionKey: r.sessionKey,
+    total: Number(r.total),
+    ativos: Number(r.ativos),
+    naFila: Number(r.naFila),
+  })));
+});
+
 // ─── Get single conversation ───────────────────────────────────────────────
-router.get("/chat/conversations/:id", requireAuth, async (req, res): Promise<void> => {
+router.get("/chat/conversations/:id", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
@@ -339,8 +765,22 @@ router.get("/chat/conversations/:id", requireAuth, async (req, res): Promise<voi
   res.json(await enrichConversation(conv));
 });
 
+// ─── Compras do cliente no ERP (19/10/2026) ────────────────────────────────
+// Últimas vendas concluídas do cliente no ERP Prumo, pelo telefone da
+// conversa (chave do ERP com "Vendas do atendimento"). Sem ligação ou sem o
+// acesso: { available: false } e a ficha não mostra nada.
+router.get("/chat/conversations/:id/erp-purchases", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+  const { customerPurchasesFromErp } = await import("../lib/erpSalesSync");
+  res.json(await customerPurchasesFromErp(tenantId, conv.phone));
+});
+
 // ─── Fixar / desafixar conversa (por usuário) ──────────────────────────────
-router.post("/chat/conversations/:id/pin", requireAuth, async (req, res): Promise<void> => {
+router.post("/chat/conversations/:id/pin", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
@@ -352,7 +792,7 @@ router.post("/chat/conversations/:id/pin", requireAuth, async (req, res): Promis
   res.json({ ok: true, pinned: true });
 });
 
-router.delete("/chat/conversations/:id/pin", requireAuth, async (req, res): Promise<void> => {
+router.delete("/chat/conversations/:id/pin", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
@@ -361,6 +801,64 @@ router.delete("/chat/conversations/:id/pin", requireAuth, async (req, res): Prom
   await db.delete(conversationPinsTable)
     .where(and(eq(conversationPinsTable.conversationId, id), eq(conversationPinsTable.userId, req.session.userId!)));
   res.json({ ok: true, pinned: false });
+});
+
+// ─── Fixar / desafixar MENSAGEM (compartilhado, estilo WhatsApp) ───────────
+// Diferente do /pin acima (favoritar a conversa inteira, por usuário): aqui é
+// marcar uma mensagem específica já enviada, visível pra todo mundo que abre
+// a conversa. Suporta várias mensagens fixadas ao mesmo tempo (message_pins é
+// uma tabela de junção, uma linha por mensagem fixada).
+router.get("/chat/conversations/:id/pinned-messages", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+  const rows = await db
+    .select({
+      messageId: messagePinsTable.messageId,
+      pinnedBy: messagePinsTable.pinnedBy,
+      pinnedAt: messagePinsTable.createdAt,
+      content: messagesTable.content,
+      type: messagesTable.type,
+      senderName: messagesTable.senderName,
+      direction: messagesTable.direction,
+    })
+    .from(messagePinsTable)
+    .innerJoin(messagesTable, eq(messagePinsTable.messageId, messagesTable.id))
+    .where(eq(messagePinsTable.conversationId, id))
+    .orderBy(desc(messagePinsTable.createdAt));
+  res.json(rows);
+});
+
+router.post("/chat/messages/:id/pin", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const [msg] = await db.select().from(messagesTable).where(and(eq(messagesTable.id, id), eq(messagesTable.tenantId, tenantId))).limit(1);
+  if (!msg) { res.status(404).json({ error: "Mensagem não encontrada" }); return; }
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, msg.conversationId), eq(conversationsTable.tenantId, tenantId))).limit(1);
+  if (!conv || !(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+  await db.insert(messagePinsTable)
+    .values({ tenantId, conversationId: conv.id, messageId: id, pinnedBy: req.session.userId! })
+    .onConflictDoNothing();
+  const pinned = {
+    messageId: msg.id, pinnedBy: req.session.userId!, pinnedAt: new Date().toISOString(),
+    content: msg.content, type: msg.type, senderName: msg.senderName, direction: msg.direction,
+  };
+  broadcast("message_pinned", { conversationId: conv.id, pinned }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  res.json({ ok: true, pinned });
+});
+
+router.delete("/chat/messages/:id/pin", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const [msg] = await db.select().from(messagesTable).where(and(eq(messagesTable.id, id), eq(messagesTable.tenantId, tenantId))).limit(1);
+  if (!msg) { res.status(404).json({ error: "Mensagem não encontrada" }); return; }
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, msg.conversationId), eq(conversationsTable.tenantId, tenantId))).limit(1);
+  if (!conv || !(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+  await db.delete(messagePinsTable).where(and(eq(messagePinsTable.messageId, id), eq(messagePinsTable.conversationId, conv.id)));
+  broadcast("message_unpinned", { conversationId: conv.id, messageId: id }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  res.json({ ok: true, messageId: id });
 });
 
 // Resolve o preview de "responder mensagem": só aceita citar uma mensagem da
@@ -385,8 +883,19 @@ async function resolveReplyTo(
   return { replyToId: row.id, replyTo: row };
 }
 
+// Item 5 do roadmap: liga/desliga o prefixo "*Nome:*" que o cliente vê no
+// WhatsApp — a identificação em si (senderId/senderName) é sempre gravada,
+// isso só controla se aparece pro cliente. Default "true" preserva o
+// comportamento de sempre mostrar (ver settings.ts DEFAULTS).
+async function isAttendantNameVisibleToCustomer(tenantId: number): Promise<boolean> {
+  const [row] = await db.select().from(appSettingsTable)
+    .where(and(eq(appSettingsTable.tenantId, tenantId), eq(appSettingsTable.key, "attendant_name_visible_to_customer")))
+    .limit(1);
+  return row ? row.value !== "false" : true;
+}
+
 // ─── Get messages ──────────────────────────────────────────────────────────
-router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Promise<void> => {
+router.get("/chat/conversations/:id/messages", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
 
@@ -441,16 +950,20 @@ router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Pr
       type: messagesTable.type,
       status: messagesTable.status,
       senderName: messagesTable.senderName,
+      senderId: messagesTable.senderId,
+      senderPhone: messagesTable.senderPhone,
       mediaUrl: messagesTable.mediaUrl,
       transcript: messagesTable.transcript,
       externalId: messagesTable.externalId,
       createdAt: messagesTable.createdAt,
       editedAt: messagesTable.editedAt,
+      deletedAt: messagesTable.deletedAt,
       reactions: messagesTable.reactions,
       replyToId: messagesTable.replyToId,
       replyToSenderName: repliedMsg.senderName,
       replyToContent: repliedMsg.content,
       replyToType: repliedMsg.type,
+      forwarded: messagesTable.forwarded,
     })
     .from(messagesTable)
     .leftJoin(repliedMsg, eq(messagesTable.replyToId, repliedMsg.id))
@@ -472,8 +985,133 @@ router.get("/chat/conversations/:id/messages", requireAuth, async (req, res): Pr
   res.json(msgs);
 });
 
+// ─── Busca de texto DENTRO de uma conversa ─────────────────────────────────
+// Diferente do campo de busca da lista de conversas (que filtra por
+// nome/número): isso pesquisa dentro do histórico de mensagens de UMA
+// conversa já aberta, incluindo texto de legenda/transcrição de áudio.
+router.get("/chat/conversations/:id/messages/search", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+
+  const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+
+  const qRaw = Array.isArray(req.query.q) ? String(req.query.q[0]) : String(req.query.q ?? "");
+  const q = qRaw.trim();
+  if (q.length < 2) { res.json([]); return; }
+
+  const pattern = `%${q.replace(/[%_]/g, "\\$&")}%`; // escapa curinga do LIKE pra buscar o texto literal
+  const rows = await db.select({
+    id: messagesTable.id,
+    content: messagesTable.content,
+    type: messagesTable.type,
+    senderName: messagesTable.senderName,
+    direction: messagesTable.direction,
+    createdAt: messagesTable.createdAt,
+  })
+    .from(messagesTable)
+    .where(and(
+      eq(messagesTable.conversationId, id),
+      isNull(messagesTable.deletedAt),
+      or(ilike(messagesTable.content, pattern), ilike(messagesTable.transcript, pattern)),
+    ))
+    .orderBy(desc(messagesTable.createdAt), desc(messagesTable.id))
+    .limit(50);
+
+  res.json(rows);
+});
+
+// ─── Editar / apagar mensagem (só quem enviou, ou admin/supervisor) ───────
+// IMPORTANTE: isso edita/apaga só o REGISTRO aqui dentro do sistema — não
+// reenvia uma revogação pro WhatsApp do cliente. Fazer isso de verdade (igual
+// o "apagar para todos" do WhatsApp) exigiria guardar a chave da mensagem do
+// Baileys no envio e chamar a ponte pra revogar/editar do lado do protocolo,
+// o que ainda não existe hoje. Enquanto isso não é construído, "editado" e
+// "mensagem apagada" aparecem só pra quem usa o sistema — o cliente continua
+// vendo o texto original no aparelho dele.
+async function loadOwnMessageForEdit(
+  id: number, tenantId: number, req: import("express").Request, res: import("express").Response,
+): Promise<{ msg: typeof messagesTable.$inferSelect; conv: typeof conversationsTable.$inferSelect } | null> {
+  const [msg] = await db.select().from(messagesTable)
+    .where(and(eq(messagesTable.id, id), eq(messagesTable.tenantId, tenantId))).limit(1);
+  if (!msg) { res.status(404).json({ error: "Mensagem não encontrada" }); return null; }
+  if (msg.direction !== "outbound") {
+    res.status(400).json({ error: "Só é possível editar/apagar mensagens enviadas por nós" });
+    return null;
+  }
+  const isOwner = msg.senderId === req.session.userId;
+  const isModerator = req.session.userRole === "admin" || req.session.userRole === "supervisor";
+  if (!isOwner && !isModerator) {
+    res.status(403).json({ error: "Só quem enviou (ou admin/supervisor) pode editar/apagar" });
+    return null;
+  }
+  const [conv] = await db.select().from(conversationsTable)
+    .where(and(eq(conversationsTable.id, msg.conversationId), eq(conversationsTable.tenantId, tenantId))).limit(1);
+  if (!conv || !(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return null; }
+  return { msg, conv };
+}
+
+router.patch("/chat/messages/:id", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const { content } = req.body as { content?: string };
+  const clean = typeof content === "string" ? content.trim().slice(0, 4096) : "";
+  if (!clean) { res.status(400).json({ error: "Mensagem vazia" }); return; }
+
+  const loaded = await loadOwnMessageForEdit(id, tenantId, req, res);
+  if (!loaded) return;
+  const { msg, conv } = loaded;
+  if (msg.type !== "text") { res.status(400).json({ error: "Só é possível editar mensagens de texto" }); return; }
+  if (msg.deletedAt) { res.status(400).json({ error: "Mensagem apagada não pode ser editada" }); return; }
+
+  const [updated] = await db.update(messagesTable)
+    .set({ content: clean, editedAt: new Date() })
+    .where(eq(messagesTable.id, id))
+    .returning();
+  const { replyTo } = await resolveReplyTo(updated!.replyToId ?? undefined, updated!.conversationId, tenantId);
+  const outMsg = { ...updated!, replyTo };
+  broadcast("message_updated", { conversationId: msg.conversationId, message: outMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  res.json(outMsg);
+
+  // Auditoria (item 21): edição de mensagem já enviada. Não grava o texto
+  // antigo/novo no log (conteúdo da conversa do cliente) — só o fato e o id,
+  // suficiente pra investigar um caso pontual olhando a conversa em si.
+  void logSensitiveAction(req, tenantId, "editar_mensagem",
+    `Mensagem editada no atendimento de "${conv.name}".`,
+    { conversationId: conv.id, metadata: { messageId: id } });
+});
+
+router.delete("/chat/messages/:id", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+
+  const loaded = await loadOwnMessageForEdit(id, tenantId, req, res);
+  if (!loaded) return;
+  const { msg, conv } = loaded;
+  if (msg.deletedAt) {
+    const { replyTo } = await resolveReplyTo(msg.replyToId ?? undefined, msg.conversationId, tenantId);
+    res.json({ ...msg, replyTo });
+    return;
+  }
+
+  const [updated] = await db.update(messagesTable)
+    .set({ deletedAt: new Date() })
+    .where(eq(messagesTable.id, id))
+    .returning();
+  const { replyTo } = await resolveReplyTo(updated!.replyToId ?? undefined, updated!.conversationId, tenantId);
+  const outMsg = { ...updated!, replyTo };
+  broadcast("message_updated", { conversationId: msg.conversationId, message: outMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  res.json(outMsg);
+
+  // Auditoria (item 21): exclusão de mensagem já enviada.
+  void logSensitiveAction(req, tenantId, "excluir_mensagem",
+    `Mensagem excluída no atendimento de "${conv.name}".`,
+    { conversationId: conv.id, metadata: { messageId: id } });
+});
+
 // ─── Send media ────────────────────────────────────────────────────────────
-router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_midia"), async (req, res): Promise<void> => {
+router.post("/chat/conversations/:id/media", requireAuth, requireChatAccess(), requirePerm("enviar_midia"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const { base64, mimetype: rawMimetype, filename, caption, ptt, replyToId: replyToIdRaw } = req.body as {
@@ -485,13 +1123,24 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
     replyToId?: number;
   };
 
-  if (!base64 || !rawMimetype) {
-    res.status(400).json({ error: "base64 e mimetype são obrigatórios" });
+  if (!base64) {
+    res.status(400).json({ error: "Arquivo obrigatório" });
     return;
   }
+
+  // Decodifica ANTES de validar o tipo — precisa dos bytes reais pra checar
+  // a assinatura do arquivo quando mimetype/extensão não bastam (ver sniff
+  // abaixo). O tamanho máximo também é checado aqui, mais cedo que antes.
+  const buf = Buffer.from(base64, "base64");
+  const MAX_BYTES = 20 * 1024 * 1024;
+  if (buf.byteLength > MAX_BYTES) {
+    res.status(400).json({ error: "Arquivo muito grande (máximo 20 MB)" });
+    return;
+  }
+
   // Navegadores mandam tipos com parâmetros, ex. "audio/webm;codecs=opus" —
   // normaliza para o tipo base antes de validar.
-  const mimetype = rawMimetype.split(";")[0].trim().toLowerCase();
+  let mimetype = (rawMimetype ?? "").split(";")[0]!.trim().toLowerCase();
 
   const ALLOWED_MIMES_OUT = new Set([
     "image/jpeg", "image/png", "image/gif", "image/webp",
@@ -503,6 +1152,31 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
     "application/vnd.ms-excel",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   ]);
+  // mimetype ausente, vazio ou genérico ("application/octet-stream", comum
+  // quando o navegador/SO não identifica o arquivo — PDF é o caso mais comum
+  // nesse ponto) — tenta pela extensão do nome antes de recusar, mesmo
+  // fallback aplicado no Chat Interno pro mesmo tipo de bug.
+  if (!ALLOWED_MIMES_OUT.has(mimetype)) {
+    const EXT_FALLBACK_TO_MIME: Record<string, string> = {
+      pdf: "application/pdf", doc: "application/msword",
+      docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      xls: "application/vnd.ms-excel",
+      xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp",
+      mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime",
+    };
+    const fileExt = filename?.split(".").pop()?.toLowerCase();
+    const fallbackMime = fileExt ? EXT_FALLBACK_TO_MIME[fileExt] : undefined;
+    if (fallbackMime) mimetype = fallbackMime;
+  }
+  // Último recurso: assinatura do próprio arquivo ("%PDF" nos 4 primeiros
+  // bytes é o cabeçalho oficial de todo PDF válido). Pedido do lojista
+  // (09/09): mesmo bug do Chat Interno — PDF reenviado/salvo por outro app
+  // (e-mail, WhatsApp Desktop, scanner) chega sem mimetype nem nome que
+  // indiquem ser PDF. Checar o conteúdo em si resolve nesses casos.
+  if (!ALLOWED_MIMES_OUT.has(mimetype) && buf.length >= 4 && buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46) {
+    mimetype = "application/pdf";
+  }
   if (!ALLOWED_MIMES_OUT.has(mimetype)) {
     res.status(400).json({ error: "Tipo de arquivo não suportado" });
     return;
@@ -517,6 +1191,7 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
     isImage ? "image" : isVideo ? "video" : isAudio ? "audio" : "document";
 
   const senderName = req.session.userName ?? "Atendente";
+  const showNameToCustomer = await isAttendantNameVisibleToCustomer(tenantId);
 
   const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
@@ -545,13 +1220,8 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
   };
   const ext = mimeToExt[mimetype] ?? "bin";
   const savedFilename = `${randomUUID()}.${ext}`;
-  const buf = Buffer.from(base64, "base64");
-
-  const MAX_BYTES = 20 * 1024 * 1024;
-  if (buf.byteLength > MAX_BYTES) {
-    res.status(400).json({ error: "Arquivo muito grande (máximo 20 MB)" });
-    return;
-  }
+  // buf e o limite de tamanho já foram checados mais acima (antes da
+  // validação de mimetype, pra poder usar os bytes no sniff de assinatura).
 
   await writeFile(path.join(MEDIA_DIR, savedFilename), buf);
   const mediaUrl = `/api/chat/media/${savedFilename}`;
@@ -562,6 +1232,12 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
 
   const { replyToId, replyTo } = await resolveReplyTo(replyToIdRaw, id, tenantId);
 
+  // Nome/tamanho reais do documento — o mediaUrl salvo usa nome aleatório
+  // (savedFilename), então sem isso o balão só teria o UUID pra mostrar.
+  const metadata = msgType === "doc" && filename
+    ? { fileName: filename, fileSize: buf.byteLength, mimeType: mimetype }
+    : null;
+
   const [inserted] = await db.insert(messagesTable).values({
     tenantId,
     conversationId: id,
@@ -570,19 +1246,33 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
     type: msgType,
     status: "sent",
     senderName,
+    senderId: req.session.userId!,
     mediaUrl,
     replyToId,
+    metadata,
   }).returning();
   const msg = { ...inserted!, replyTo };
 
   await db.update(conversationsTable).set({
     lastMessage: content,
     lastMessageDirection: "outbound",
+    lastMessageSenderName: senderName,
     lastMessageAt: new Date(),
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, id));
 
-  broadcast("message", { conversationId: id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  broadcast("message", { conversationId: id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+
+  if (conv.channel === "instagram" && conv.phone) {
+    const phone = conv.phone;
+    const sent = await deliverInstagram(req, res, conv, msg, async () => {
+      const r = await sendInstagramMedia({ tenantId: conv.tenantId, phone }, savedFilename, instagramMediaKind(msgType), publicApiBaseFromRequest(req));
+      // Instagram não tem legenda em anexo: o texto vai numa mensagem à parte.
+      if (r.ok && caption?.trim()) await sendInstagramText({ tenantId: conv.tenantId, phone }, caption.trim());
+      return r;
+    });
+    if (sent) return;
+  }
 
   // Forward to WhatsApp bridge
   if (conv.channel === "whatsapp" && conv.phone) {
@@ -605,8 +1295,11 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
           base64,
           mimetype,
           filename: filename ?? savedFilename,
-          // Cliente vê quem está atendendo (áudios não têm legenda no WhatsApp)
-          caption: isAudio ? caption : (caption ? `*${senderName}:*\n${caption}` : `*${senderName}:*`),
+          // Cliente vê quem está atendendo (áudios não têm legenda no WhatsApp),
+          // exceto se a loja desligou isso em Configurações (item 5 do roadmap).
+          caption: isAudio ? caption
+            : !showNameToCustomer ? caption
+            : (caption ? `*${senderName}:*\n${caption}` : `*${senderName}:*`),
           ptt: isAudio ? (ptt ?? false) : undefined,
           session: conv.sessionKey,
         }),
@@ -632,7 +1325,7 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
         .returning();
       if (failedRow) {
         const failedMsg = { ...failedRow, replyTo };
-        broadcast("message_updated", { conversationId: id, message: failedMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+        broadcast("message_updated", { conversationId: id, message: failedMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
         res.status(201).json(failedMsg);
         return;
       }
@@ -646,7 +1339,7 @@ router.post("/chat/conversations/:id/media", requireAuth, requirePerm("enviar_mi
 // Visível só para a equipe, nunca enviada ao WhatsApp do cliente. Por isso não
 // atualiza lastMessage/lastMessageDirection da conversa (não conta como
 // resposta ao cliente para a lógica de "aguardando").
-router.post("/chat/conversations/:id/notes", requireAuth, async (req, res): Promise<void> => {
+router.post("/chat/conversations/:id/notes", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const { content } = req.body as { content?: string };
@@ -666,20 +1359,22 @@ router.post("/chat/conversations/:id/notes", requireAuth, async (req, res): Prom
     type: "note",
     status: "sent",
     senderName,
+    senderId: req.session.userId!,
   }).returning();
 
-  broadcast("message", { conversationId: id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  broadcast("message", { conversationId: id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
   res.status(201).json(msg);
 });
 
 // ─── Send message ──────────────────────────────────────────────────────────
-router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): Promise<void> => {
+router.post("/chat/conversations/:id/messages", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const { content, replyToId: replyToIdRaw } = req.body as { content?: string; replyToId?: number };
   if (!content?.trim()) { res.status(400).json({ error: "Mensagem vazia" }); return; }
 
   const senderName = req.session.userName ?? "Atendente";
+  const showNameToCustomer = await isAttendantNameVisibleToCustomer(tenantId);
 
   const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
@@ -699,18 +1394,45 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
     type: "text",
     status: "sent",
     senderName,
+    senderId: req.session.userId!,
     replyToId,
   }).returning();
   const msg = { ...inserted!, replyTo };
 
+  // Preview de link: só pra mensagem que o próprio atendente escreveu (não
+  // pra texto recebido do cliente — ver processInboundWA). Fire-and-forget:
+  // não atrasa a resposta nem o envio pro WhatsApp; quando o preview chega,
+  // atualiza a mensagem e manda o mesmo evento usado pra edição/status.
+  const previewUrl = firstUrlIn(content.trim());
+  if (previewUrl) {
+    fetchLinkPreview(previewUrl, req.session.userId!)
+      .then(async (preview) => {
+        if (!preview) return;
+        const [updated] = await db.update(messagesTable)
+          .set({ metadata: { linkPreview: preview } })
+          .where(eq(messagesTable.id, inserted!.id))
+          .returning();
+        if (!updated) return;
+        broadcast("message_updated", { conversationId: id, message: { ...updated, replyTo } }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+      })
+      .catch((err) => req.log.debug({ err }, "link preview: falhou"));
+  }
+
   await db.update(conversationsTable).set({
     lastMessage: content.trim(),
     lastMessageDirection: "outbound",
+    lastMessageSenderName: senderName,
     lastMessageAt: new Date(),
     updatedAt: new Date(),
   }).where(eq(conversationsTable.id, id));
 
-  broadcast("message", { conversationId: id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  broadcast("message", { conversationId: id, message: msg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+
+  if (conv.channel === "instagram" && conv.phone) {
+    const phone = conv.phone;
+    const text = showNameToCustomer ? `${senderName}:\n${content.trim()}` : content.trim();
+    if (await deliverInstagram(req, res, conv, msg, () => sendInstagramText({ tenantId: conv.tenantId, phone }, text))) return;
+  }
 
   // Forward to WhatsApp bridge (now uses Meta Cloud API) if this is a WhatsApp conversation
   if (conv.channel === "whatsapp" && conv.phone) {
@@ -727,8 +1449,13 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
           "Content-Type": "application/json",
           "X-Bridge-Secret": bridgeSecret,
         },
-        // Cliente vê quem está atendendo: "*Nome:*" antes da mensagem
-        body: JSON.stringify({ to: conv.phone, text: `*${senderName}:*\n${content.trim()}`, session: conv.sessionKey }),
+        // Cliente vê quem está atendendo: "*Nome:*" antes da mensagem, exceto
+        // se a loja desligou isso em Configurações (item 5 do roadmap).
+        body: JSON.stringify({
+          to: conv.phone,
+          text: showNameToCustomer ? `*${senderName}:*\n${content.trim()}` : content.trim(),
+          session: conv.sessionKey,
+        }),
         signal: AbortSignal.timeout(60_000),
       });
       if (!r.ok) {
@@ -751,7 +1478,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
         .returning();
       if (failedRow) {
         const failedMsg = { ...failedRow, replyTo };
-        broadcast("message_updated", { conversationId: id, message: failedMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+        broadcast("message_updated", { conversationId: id, message: failedMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
         res.status(201).json(failedMsg);
         return;
       }
@@ -760,6 +1487,219 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res): P
 
   res.status(201).json(msg);
 });
+
+// Instagram Direct (07/10/2026): entrega pela API da Meta. Sucesso grava o id
+// da Meta (o eco do webhook não duplica); falha marca "failed" e devolve o
+// motivo em sendError (ex.: janela de 24h fechada) pra tela avisar.
+async function deliverInstagram(
+  req: Request, res: Response,
+  conv: typeof conversationsTable.$inferSelect,
+  msg: typeof messagesTable.$inferSelect & { replyTo: unknown },
+  send: () => Promise<InstagramSendResult>,
+): Promise<boolean> {
+  const r = await send();
+  if (r.ok) { await markSentExternalId(msg.id, r.messageId); return false; }
+  req.log.warn({ error: r.error, conversationId: conv.id }, "Instagram: envio falhou — mensagem salva mas não entregue");
+  const [failedRow] = await db.update(messagesTable).set({ status: "failed" }).where(eq(messagesTable.id, msg.id)).returning();
+  if (!failedRow) return false;
+  const failedMsg = { ...failedRow, replyTo: msg.replyTo, sendError: r.error };
+  broadcast("message_updated", { conversationId: conv.id, message: failedMsg }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  res.status(201).json(failedMsg);
+  return true;
+}
+
+// ─── Encaminhar mensagem entre conversas ───────────────────────────────────
+// Estilo WhatsApp: copia uma mensagem (texto ou mídia) de uma conversa pra
+// outra E entrega de verdade pro WhatsApp do novo contato — diferente do
+// "encaminhar" do Chat Interno (internalChat.ts), que é só cópia de banco +
+// broadcast porque lá nunca sai pro WhatsApp. Mídia reusa o ARQUIVO físico já
+// salvo (não pede upload de novo pro atendente), mas grava sob um nome NOVO
+// pra cada mensagem manter seu próprio dono em GET /chat/media/:filename (ver
+// comentário lá — dois registros de mensagem nunca podem apontar pro mesmo
+// mediaUrl, senão o dono resolvido fica ambíguo entre origem e destino).
+const FORWARDABLE_MESSAGE_TYPES = new Set(["text", "image", "audio", "video", "doc"]);
+
+router.post("/chat/messages/:id/forward", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
+  const { conversationId: targetIdRaw } = req.body as { conversationId?: number };
+  const targetId = Number(targetIdRaw);
+  if (!Number.isInteger(targetId)) { res.status(400).json({ error: "Conversa de destino inválida" }); return; }
+
+  const [source] = await db.select().from(messagesTable)
+    .where(and(eq(messagesTable.id, id), eq(messagesTable.tenantId, tenantId))).limit(1);
+  if (!source) { res.status(404).json({ error: "Mensagem não encontrada" }); return; }
+  if (source.deletedAt) { res.status(400).json({ error: "Mensagem apagada não pode ser encaminhada" }); return; }
+  if (!FORWARDABLE_MESSAGE_TYPES.has(source.type)) {
+    res.status(400).json({ error: "Esse tipo de mensagem não pode ser encaminhado" });
+    return;
+  }
+  // Encaminhar mídia é, na prática, enviar mídia de novo (pro destino) —
+  // mesma permissão exigida em POST /chat/conversations/:id/media.
+  if (source.type !== "text" && !(await checkPerm(req, "enviar_midia"))) {
+    res.status(403).json({ error: "Você não tem permissão para enviar mídia. Fale com o administrador." });
+    return;
+  }
+
+  const [sourceConv] = await db.select().from(conversationsTable)
+    .where(and(eq(conversationsTable.id, source.conversationId), eq(conversationsTable.tenantId, tenantId))).limit(1);
+  if (!sourceConv) { res.status(404).json({ error: "Conversa de origem não encontrada" }); return; }
+  if (!(await canAccessConversation(sourceConv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+
+  const [targetConv] = await db.select().from(conversationsTable)
+    .where(and(eq(conversationsTable.id, targetId), eq(conversationsTable.tenantId, tenantId))).limit(1);
+  if (!targetConv) { res.status(404).json({ error: "Conversa de destino não encontrada" }); return; }
+  if (!(await canAccessConversation(targetConv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
+  if (targetConv.assigneeId == null) {
+    res.status(409).json({ error: "Inicie o atendimento na conversa de destino antes de encaminhar" });
+    return;
+  }
+
+  const senderName = req.session.userName ?? "Atendente";
+  const showNameToCustomer = await isAttendantNameVisibleToCustomer(tenantId);
+  const bridgeUrl = process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
+  const bridgeSecret = createHmac("sha256", process.env["SESSION_SECRET"] ?? "sheikcell-dev-only-secret")
+    .update("whatsapp-bridge-v1").digest("hex");
+
+  let newMediaUrl: string | null = null;
+  let mediaBase64: string | null = null;
+  let mediaMimetype: string | null = null;
+  let waType: "image" | "video" | "audio" | "document" | null = null;
+
+  if (source.type !== "text") {
+    if (!source.mediaUrl) { res.status(400).json({ error: "Mídia original não encontrada" }); return; }
+    const origFilename = path.basename(source.mediaUrl);
+    const origPath = path.join(MEDIA_DIR, origFilename);
+    if (!existsSync(origPath)) { res.status(404).json({ error: "Arquivo de mídia original não existe mais" }); return; }
+    const { readFile, writeFile } = await import("fs/promises");
+    const { randomUUID } = await import("crypto");
+    const buf = await readFile(origPath);
+    const ext = origFilename.split(".").pop() ?? "bin";
+    const newFilename = `${randomUUID()}.${ext}`;
+    await writeFile(path.join(MEDIA_DIR, newFilename), buf);
+    newMediaUrl = `/api/chat/media/${newFilename}`;
+    mediaBase64 = buf.toString("base64");
+    const extToMime: Record<string, string> = {
+      jpg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp",
+      mp4: "video/mp4", "3gp": "video/3gpp", webm: "video/webm", mov: "video/quicktime",
+      ogg: "audio/ogg", mp3: "audio/mpeg", m4a: "audio/mp4", weba: "audio/webm", aac: "audio/aac", wav: "audio/wav",
+      pdf: "application/pdf", doc: "application/msword",
+      docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      xls: "application/vnd.ms-excel",
+      xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    };
+    mediaMimetype = extToMime[ext] ?? "application/octet-stream";
+    waType = source.type === "image" ? "image" : source.type === "video" ? "video" : source.type === "audio" ? "audio" : "document";
+  }
+
+  const [inserted] = await db.insert(messagesTable).values({
+    tenantId,
+    conversationId: targetId,
+    content: source.content,
+    direction: "outbound",
+    type: source.type,
+    status: "sent",
+    senderName,
+    senderId: req.session.userId!,
+    mediaUrl: newMediaUrl,
+    metadata: source.metadata ?? null,
+    forwarded: true,
+  }).returning();
+  const msg = { ...inserted!, replyTo: null };
+
+  await db.update(conversationsTable).set({
+    lastMessage: source.content,
+    lastMessageDirection: "outbound",
+    lastMessageSenderName: senderName,
+    lastMessageAt: new Date(),
+    updatedAt: new Date(),
+  }).where(eq(conversationsTable.id, targetId));
+
+  broadcast("message", { conversationId: targetId, message: msg }, { tenantId: targetConv.tenantId, sectorId: targetConv.sectorId, sessionKey: targetConv.sessionKey, isPotential: isPotentialConversation(targetConv), restrictedTo: await restrictedRecipients(targetConv) });
+
+  if (targetConv.channel === "instagram" && targetConv.phone) {
+    const phone = targetConv.phone;
+    const sent = await deliverInstagram(req, res, targetConv, msg, () => source.type === "text"
+      ? sendInstagramText({ tenantId: targetConv.tenantId, phone }, showNameToCustomer ? `${senderName}:\n${source.content}` : source.content)
+      : sendInstagramMedia({ tenantId: targetConv.tenantId, phone }, path.basename(newMediaUrl!), instagramMediaKind(source.type), publicApiBaseFromRequest(req)));
+    if (sent) return;
+  }
+
+  if (targetConv.channel === "whatsapp" && targetConv.phone) {
+    let delivered = true;
+    try {
+      const r = source.type === "text"
+        ? await fetch(`${bridgeUrl}/whatsapp/send`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Bridge-Secret": bridgeSecret },
+            body: JSON.stringify({
+              to: targetConv.phone,
+              text: showNameToCustomer ? `*${senderName}:*\n${source.content}` : source.content,
+              session: targetConv.sessionKey,
+            }),
+            signal: AbortSignal.timeout(60_000),
+          })
+        : await fetch(`${bridgeUrl}/whatsapp/send-media`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Bridge-Secret": bridgeSecret },
+            body: JSON.stringify({
+              to: targetConv.phone,
+              type: waType,
+              base64: mediaBase64,
+              mimetype: mediaMimetype,
+              filename: source.metadata?.fileName ?? path.basename(newMediaUrl!),
+              caption: waType === "audio" ? undefined
+                : !showNameToCustomer ? undefined
+                : `*${senderName}:*`,
+              ptt: false,
+              session: targetConv.sessionKey,
+            }),
+            signal: AbortSignal.timeout(60_000),
+          });
+      if (!r.ok) {
+        const body = await r.text().catch(() => "");
+        req.log.warn({ status: r.status, body }, "WhatsApp bridge delivery failed (forward) — mensagem salva mas não entregue");
+        delivered = false;
+      }
+    } catch (err) {
+      req.log.warn({ err }, "WhatsApp bridge unreachable (forward) — mensagem salva mas não entregue");
+      delivered = false;
+    }
+
+    if (!delivered) {
+      const [failedRow] = await db.update(messagesTable).set({ status: "failed" }).where(eq(messagesTable.id, msg.id)).returning();
+      if (failedRow) {
+        const failedMsg = { ...failedRow, replyTo: null };
+        broadcast("message_updated", { conversationId: targetId, message: failedMsg }, { tenantId: targetConv.tenantId, sectorId: targetConv.sectorId, sessionKey: targetConv.sessionKey, isPotential: isPotentialConversation(targetConv), restrictedTo: await restrictedRecipients(targetConv) });
+        res.status(201).json(failedMsg);
+        return;
+      }
+    }
+  }
+
+  res.status(201).json(msg);
+});
+
+// Registra o evento de INÍCIO de um atendimento (transição real de "sem
+// responsável" -> "com responsável") — append-only, nunca editado depois.
+// Diferente de conversations.attendanceStartedAt (mutável, zerada em
+// unassign/transferência), isto alimenta "iniciados por dia" em Relatórios
+// de forma confiável mesmo que a conversa seja depois transferida/reaberta.
+async function recordAttendanceStart(
+  executor: typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0],
+  p: { tenantId: number; conversationId: number; attendantId: number; sectorId: number | null },
+): Promise<number | null> {
+  const [attendant] = await executor.select({ storeId: usersTable.storeId }).from(usersTable)
+    .where(eq(usersTable.id, p.attendantId)).limit(1);
+  await executor.insert(attendanceStartEventsTable).values({
+    tenantId: p.tenantId,
+    conversationId: p.conversationId,
+    attendantId: p.attendantId,
+    sectorId: p.sectorId,
+    storeId: attendant?.storeId ?? null,
+  });
+  return attendant?.storeId ?? null;
+}
 
 // ─── Sync a finalized conversation into Visão Geral + CRM ───────────────────
 // When a chat attendance is resolved we record it as an attendance log (so the
@@ -796,19 +1736,39 @@ async function syncResolvedConversation(
     // senão conversas reabertas/tempo em espera inflam a média artificialmente.
     const serviceStart = conv.attendanceStartedAt ?? conv.createdAt;
     const serviceSeconds = Math.round((Date.now() - serviceStart.getTime()) / 1000);
+    // Tempo de PRIMEIRA resposta: mede agilidade inicial (até a primeira
+    // mensagem do atendente depois do início), diferente do tempo total
+    // acima. Reaproveita o histórico de mensagens já existente — sem
+    // precisar de tracking novo em tempo real.
+    const [firstReply] = await tx.select({ createdAt: messagesTable.createdAt })
+      .from(messagesTable)
+      .where(and(
+        eq(messagesTable.conversationId, conv.id),
+        eq(messagesTable.direction, "outbound"),
+        gte(messagesTable.createdAt, serviceStart),
+      ))
+      .orderBy(asc(messagesTable.createdAt))
+      .limit(1);
+    const firstResponseSeconds = firstReply
+      ? Math.max(0, Math.round((firstReply.createdAt.getTime() - serviceStart.getTime()) / 1000))
+      : null;
     const [log] = await tx.insert(attendanceLogsTable).values({
       tenantId: conv.tenantId,
       queueEntryId: 0, // chat attendances have no queue entry
+      conversationId: conv.id,
       clientName: conv.name,
       clientContact: conv.phone,
       sectorId: effectiveSectorId,
       sectorName: sector?.name ?? "Desconhecido",
       attendantId: conv.assigneeId,
       attendantName: attendant?.name ?? null,
+      storeId: conv.storeId ?? attendant?.storeId ?? null,
       channel: conv.channel,
+      origin: conv.origin ?? null,
       outcome: "completed",
       resolutionReason: resolutionReason?.trim() || null,
       serviceTimeSeconds: serviceSeconds >= 0 ? serviceSeconds : null,
+      firstResponseSeconds,
       hadSale: sale ? sale.hadSale : null,
       saleAmount: sale?.hadSale ? String(sale.amount) : null,
     }).returning({ id: attendanceLogsTable.id });
@@ -818,20 +1778,24 @@ async function syncResolvedConversation(
   // 2) CRM contact — link the conversation to a CRM record (find-or-create by
   //    phone). The lookup is scoped to the conversation's effective sector so we
   //    never read or mutate a same-phone contact that belongs to another sector.
-  const normalizedPhone = (conv.phone ?? "").replace(/\D/g, "");
+  const normalizedPhone = normalizePhone(conv.phone);
+  const phoneVariantsForFinalize = phoneVariants(conv.phone);
   // Grupos/comunidades não entram no CRM (não são um cliente com telefone).
   if (normalizedPhone && !(conv.phone ?? "").includes("@g.us")) {
     const sectorCondition = effectiveSectorId != null
       ? eq(crmContactsTable.sectorId, effectiveSectorId)
       : isNull(crmContactsTable.sectorId);
     const [existing] = await tx.select().from(crmContactsTable)
-      .where(and(eq(crmContactsTable.tenantId, conv.tenantId), eq(crmContactsTable.isArchived, false), eq(crmContactsTable.phone, normalizedPhone), sectorCondition))
+      .where(and(eq(crmContactsTable.tenantId, conv.tenantId), eq(crmContactsTable.isArchived, false), inArray(crmContactsTable.phone, phoneVariantsForFinalize), sectorCondition))
       .limit(1);
     let contactId: number | null = null;
     if (existing) {
       contactId = existing.id;
       await tx.update(crmContactsTable)
-        .set({ updatedAt: new Date() })
+        .set({
+          updatedAt: new Date(),
+          ...(existing.phone !== normalizedPhone ? { phone: normalizedPhone } : {}),
+        })
         .where(eq(crmContactsTable.id, existing.id));
     } else {
       const [created] = await tx.insert(crmContactsTable).values({
@@ -871,15 +1835,25 @@ async function syncResolvedConversation(
 }
 
 // ─── Update conversation ───────────────────────────────────────────────────
-router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<void> => {
+router.patch("/chat/conversations/:id", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
-  const { status, labels, sectorId, assigneeId, name, isArchived, resolutionReason, hadSale, saleAmount, saleDescription } = req.body as {
+  const { status, labels, sectorId, assigneeId, name, isArchived, resolutionReason, hadSale, saleAmount, saleDescription, priority } = req.body as {
     status?: string; labels?: string; sectorId?: number;
     assigneeId?: number; name?: string; isArchived?: boolean;
     resolutionReason?: string;
     hadSale?: boolean; saleAmount?: number | string; saleDescription?: string;
+    priority?: string | null;
   };
+
+  // Prioridade manual (pedido 11/09): urgente / retorno / pode_esperar, ou
+  // null pra remover. Igual às etiquetas, qualquer usuário com acesso à
+  // conversa pode marcar — não é uma ação sensível como transferir/finalizar.
+  const PRIORITY_VALUES = ["urgente", "retorno", "pode_esperar"];
+  if (priority !== undefined && priority !== null && !PRIORITY_VALUES.includes(priority)) {
+    res.status(400).json({ error: "Prioridade inválida" });
+    return;
+  }
 
   const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
@@ -893,13 +1867,33 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
       res.status(403).json({ error: "Você não tem permissão para finalizar atendimentos. Fale com o administrador." });
       return;
     }
+    // Máquina de estados: só dá pra finalizar um atendimento que já está
+    // "Ativo" (com responsável). Potencial/Pendente precisam ser assumidos
+    // primeiro — evita finalizar direto um lead que ninguém atendeu ainda.
+    if ((status === "resolved" || status === "archived" || isArchived === true) && conv.assigneeId == null) {
+      res.status(400).json({ error: "Esse atendimento ainda não está Ativo. Assuma o atendimento antes de finalizar." });
+      return;
+    }
     if (sectorId !== undefined && sectorId !== conv.sectorId && !(await checkPerm(req, "transferir"))) {
       res.status(403).json({ error: "Você não tem permissão para transferir conversas de setor. Fale com o administrador." });
       return;
     }
     if (assigneeId !== undefined && assigneeId !== conv.assigneeId && !(await checkPerm(req, "transferir"))) {
-      res.status(403).json({ error: "Você não tem permissão para transferir conversas. Fale com o administrador." });
-      return;
+      // Exceção (pedido 14/09, Atacado): reabrir um Resolvido do PRÓPRIO
+      // setor e assumir pra si mesmo (não pra outro vendedor) não é uma
+      // "transferência" no sentido de mexer no trabalho de outro atendente —
+      // é pegar de volta um lead já finalizado pra prospectar de novo, mesmo
+      // espírito de auto-serviço do /claim. Só vale com o setor liberando
+      // "vendedores veem todos os Resolvidos" — sem isso, comportamento de
+      // sempre (precisa de "transferir").
+      const selfClaimResolvedInSector = assigneeId === req.session.userId!
+        && (conv.status === "resolved" || conv.status === "archived" || conv.isArchived === true)
+        && conv.sectorId != null && (req.session.userSectorIds ?? []).includes(conv.sectorId)
+        && (await sectorAllowsResolvedAccess(conv.sectorId));
+      if (!selfClaimResolvedInSector) {
+        res.status(403).json({ error: "Você não tem permissão para transferir conversas. Fale com o administrador." });
+        return;
+      }
     }
   }
 
@@ -920,6 +1914,29 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
         return;
       }
     }
+    // Mesma trava de linha restrita aplicada em POST /participants: vendedor
+    // preso a uma linha específica de WhatsApp não pode virar responsável de
+    // conversa de outra linha (senão fica sem receber os eventos em tempo real).
+    if (target.allowedSessionKeys != null && !target.allowedSessionKeys.includes(conv.sessionKey)) {
+      res.status(400).json({ error: "Esse vendedor só recebe conversas de uma linha específica de WhatsApp e não pode ser responsável por esta conversa." });
+      return;
+    }
+    // Fila restrita (pedido 10/09): vendedor alvo só atende UM cliente por
+    // vez — precisa concluir/finalizar o atual antes de receber outro.
+    if (target.queueRestrictToAssigned) {
+      const [alreadyActive] = await db.select({ id: conversationsTable.id }).from(conversationsTable)
+        .where(and(
+          eq(conversationsTable.tenantId, tenantId),
+          eq(conversationsTable.assigneeId, target.id),
+          notInArray(conversationsTable.status, ["resolved", "archived"]),
+          eq(conversationsTable.isArchived, false),
+        ))
+        .limit(1);
+      if (alreadyActive && alreadyActive.id !== conv.id) {
+        res.status(409).json({ error: `${target.name} já está em atendimento com outro cliente. Conclua o atual antes de direcionar outro.`, code: "QUEUE_SINGLE_TASK_BLOCKED" });
+        return;
+      }
+    }
   } else if (userRole === "vendedor" && assigneeId === null && conv.assigneeId != null) {
     res.status(403).json({ error: "Apenas admin ou supervisor podem remover o responsável" });
     return;
@@ -928,12 +1945,23 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
   const update: Record<string, unknown> = { updatedAt: new Date() };
   if (status !== undefined) update.status = status;
   if (labels !== undefined) update.labels = labels;
+  if (priority !== undefined) update.priority = priority;
   if (name !== undefined) update.name = name;
   if (isArchived !== undefined) update.isArchived = isArchived;
-  // Reatribuir responsável segue exclusivo de admin/supervisor; transferir de
-  // setor também é permitido ao vendedor autorizado (permissão "transferir").
+  // Finalizar/arquivar encerra a pendência — zera o contador de não lidas
+  // aqui mesmo, porque o zeramento normal (ao abrir a conversa) só acontece
+  // pro responsável (assignee); sem isso, uma conversa finalizada por
+  // admin/supervisor (ou finalizada sem a última mensagem ter sido aberta)
+  // ficava com unreadCount preso pra sempre, inflando os badges de contagem.
+  if (update.status === "resolved" || update.status === "archived" || update.isArchived === true) {
+    update.unreadCount = 0;
+  }
+  // Reatribuir responsável segue exclusivo de admin/supervisor/vendedor_chefe
+  // (pedido 10/09: chefe também direciona); transferir de setor também é
+  // permitido ao vendedor autorizado (permissão "transferir").
   let isSectorTransfer = false;
-  if (userRole === "admin" || userRole === "supervisor" || userRole === "vendedor") {
+  let isGenuineStart = false;
+  if (userRole === "admin" || userRole === "supervisor" || userRole === "vendedor_chefe" || userRole === "vendedor") {
     if (sectorId !== undefined && (userRole !== "vendedor" || sectorId !== conv.sectorId)) update.sectorId = sectorId;
     // Vendedor autorizado transfere para outro vendedor (nunca "des-atribui" —
     // já bloqueado acima); a conversa vai direto para os Ativos do destino.
@@ -967,10 +1995,21 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
     }
     // Data/hora de INÍCIO do atendimento: marcada quando a conversa ganha um
     // responsável (estava sem dono) e limpa quando volta para a fila sem dono.
+    // A loja (storeId) acompanha QUALQUER atendente novo (mesmo reatribuição
+    // direta entre dois atendentes já ativos), mas NÃO é zerada ao perder o
+    // responsável — mantém a última loja conhecida, pra "não resolvidos"
+    // ainda conseguir localizar a loja mesmo sem atendente atual.
     if ("assigneeId" in update) {
       const newAssignee = update.assigneeId as number | null;
-      if (newAssignee != null && conv.assigneeId == null) update.attendanceStartedAt = new Date();
-      if (newAssignee == null) update.attendanceStartedAt = null;
+      if (newAssignee != null) {
+        isGenuineStart = conv.assigneeId == null;
+        if (isGenuineStart) update.attendanceStartedAt = new Date();
+        const [na] = await db.select({ storeId: usersTable.storeId }).from(usersTable)
+          .where(eq(usersTable.id, newAssignee)).limit(1);
+        update.storeId = na?.storeId ?? null;
+      } else {
+        update.attendanceStartedAt = null;
+      }
     }
   }
 
@@ -979,6 +2018,9 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
   // "resolved" even under concurrent PATCH requests, and rolls back the status
   // change if the sync fails.
   let resolvedLogId: number | null = null;
+  // Motivo de finalização (quando esta chamada está resolvendo a conversa agora),
+  // lido fora da transação pra alimentar o card do CRM logo abaixo.
+  let resolutionReasonForCrm: string | null | undefined;
   const updated = await db.transaction(async (tx) => {
     const [locked] = await tx.select().from(conversationsTable)
       .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).for("update").limit(1);
@@ -987,9 +2029,14 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
     const [row] = await tx.update(conversationsTable).set(update)
       .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).returning();
 
+    if (isGenuineStart && row?.assigneeId != null) {
+      await recordAttendanceStart(tx, { tenantId, conversationId: id, attendantId: row.assigneeId, sectorId: row.sectorId });
+    }
+
     if (status === "resolved" && !wasResolved) {
       // Sanitize untrusted client input: only accept a string motive, capped.
       const cleanReason = typeof resolutionReason === "string" ? resolutionReason.slice(0, 500) : null;
+      resolutionReasonForCrm = cleanReason;
       // Venda informada no modal: sanitiza valor (número positivo) e descrição.
       const amountNum = Number(saleAmount);
       const sale = typeof hadSale === "boolean"
@@ -1016,6 +2063,13 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
     !updated.phone.includes("@g.us")
   ) {
     try {
+      // Exceção POR LINHA de WhatsApp (pedido 14/09: público do Atacado não
+      // gosta de receber a pesquisa) — checada antes da config tenant-wide.
+      const [session] = await db.select({ surveyDisabled: whatsappSessionsTable.surveyDisabled })
+        .from(whatsappSessionsTable)
+        .where(and(eq(whatsappSessionsTable.sessionKey, updated.sessionKey), eq(whatsappSessionsTable.tenantId, tenantId)))
+        .limit(1);
+      if (session?.surveyDisabled) throw new SurveyDisabled();
       const surveyCfg = await getSurveySettings(tenantId);
       if (!surveyCfg.enabled) throw new SurveyDisabled();
       // Marca a espera ANTES do envio: o cliente pode responder no instante em
@@ -1066,22 +2120,85 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
   // Espelha responsável E coluna no cartão do CRM (transferência, finalização,
   // reabertura etc.): qualquer mudança de dono ou status move o cartão junto.
   if (updated.assigneeId !== conv.assigneeId || updated.status !== conv.status || updated.isArchived !== conv.isArchived) {
-    await syncCrmAttendant(updated);
+    await syncCrmAttendant(updated, resolutionReasonForCrm);
   }
-  broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, isPotential: wasPotential || isPotentialConversation(updated), restrictedTo: recipients });
+  broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey, isPotential: wasPotential || isPotentialConversation(updated), restrictedTo: recipients });
   // Transição para RESTRITA (ganhou responsável ou foi finalizada): quem via a
   // conversa antes (setor/potencial) e não está na lista de autorizados precisa
   // removê-la da tela. O evento leva só o id + quem pode mantê-la (sem conteúdo).
   if (recipients != null && !isRestrictedConversation(conv)) {
-    broadcast("conversation_hidden", { id: updated.id, keepFor: recipients, sectorId: updated.sectorId }, { tenantId: updated.tenantId, sectorId: conv.sectorId, isPotential: wasPotential });
+    broadcast("conversation_hidden", { id: updated.id, keepFor: recipients, sectorId: updated.sectorId }, { tenantId: updated.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: wasPotential });
   }
   // On a sector transfer the broadcast above targets the NEW sector, so the
   // ORIGIN sector's vendedores would otherwise never learn the conversation
   // left. Notify them explicitly so they drop it from their list.
   if (isSectorTransfer && conv.sectorId != null && conv.sectorId !== updated.sectorId) {
-    broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: conv.sectorId, isPotential: false });
+    broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: false });
   }
   res.json(updated);
+
+  // Auditoria (item 21 do roadmap): registra transferência de responsável
+  // e/ou de setor — só quando o valor realmente mudou, pra não logar toda
+  // PATCH trivial (ex.: só marcar etiqueta ou prioridade). "Assumir da fila"
+  // (conv.assigneeId era null) ainda conta como transferência aqui — é uma
+  // mudança de responsabilidade como outra qualquer.
+  if (updated.assigneeId !== conv.assigneeId && updated.assigneeId != null) {
+    void (async () => {
+      try {
+        const [newAssignee] = await db.select({ name: usersTable.name }).from(usersTable)
+          .where(eq(usersTable.id, updated.assigneeId!)).limit(1);
+        await logSensitiveAction(req, tenantId, "transferir_atendimento",
+          `Atendimento de "${updated.name}" transferido para ${newAssignee?.name ?? `vendedor #${updated.assigneeId}`}${conv.assigneeId == null ? " (assumido da fila)" : ""}.`,
+          { conversationId: updated.id, metadata: { fromAssigneeId: conv.assigneeId, toAssigneeId: updated.assigneeId } });
+      } catch (err) {
+        console.error("[auditoria] falha ao registrar transferência de atendimento:", err);
+      }
+    })();
+  }
+  if (updated.sectorId !== conv.sectorId) {
+    void (async () => {
+      try {
+        const [newSector] = updated.sectorId != null
+          ? await db.select({ name: sectorsTable.name }).from(sectorsTable).where(eq(sectorsTable.id, updated.sectorId!)).limit(1)
+          : [];
+        await logSensitiveAction(req, tenantId, "transferir_setor",
+          `Atendimento de "${updated.name}" transferido para o setor ${newSector?.name ?? "—"}.`,
+          { conversationId: updated.id, metadata: { fromSectorId: conv.sectorId, toSectorId: updated.sectorId } });
+      } catch (err) {
+        console.error("[auditoria] falha ao registrar transferência de setor:", err);
+      }
+    })();
+  }
+
+  // Fila do Central de Atendimento com auto-atribuição por linha de WhatsApp
+  // (pedido 14/09): dispara em segundo plano, depois de responder — nunca
+  // atrasa nem pode derrubar esta requisição (as duas funções nunca lançam).
+  // (1) A conversa acabou de ficar sem responsável (transferência de setor,
+  // remoção manual pelo admin/supervisor/vendedor_chefe) — tenta atribuir a
+  // um vendedor ocioso da fila no NOVO setor dela.
+  if ("assigneeId" in update && updated.assigneeId == null) {
+    void autoAssignOnNewPoolConversation(updated);
+  }
+  // (2) O antigo responsável acabou de ficar ocioso — finalizou/arquivou o
+  // único atendimento que tinha, ou perdeu esta conversa pra outra pessoa —
+  // tenta pegar pra ele, na hora, o mais antigo do pool do setor dele.
+  const freedVendorId = conv.assigneeId != null && (
+    updated.assigneeId !== conv.assigneeId ||
+    (updated.status === "resolved" && conv.status !== "resolved") ||
+    (updated.isArchived === true && conv.isArchived !== true)
+  ) ? conv.assigneeId : null;
+  if (freedVendorId != null) {
+    void autoAssignOnVendorFreed(tenantId, freedVendorId);
+  }
+  // Aprendizado do robô (pedido 16/09): atendimento acabou de ser finalizado
+  // AGORA (resolvedLogId só é setado nessa transição) e tinha um responsável
+  // humano — analisa a conversa em segundo plano e, se achar algo que falta
+  // na base de conhecimento, grava uma sugestão pendente pro admin revisar.
+  // Nunca atrasa esta resposta nem pode derrubá-la (maybeGenerateKbSuggestion
+  // nunca lança).
+  if (resolvedLogId != null && updated.assigneeId != null) {
+    void maybeGenerateKbSuggestion(tenantId, updated.id);
+  }
 });
 
 // ─── Claim conversation (self-assign / take from queue) ────────────────────
@@ -1089,7 +2206,7 @@ router.patch("/chat/conversations/:id", requireAuth, async (req, res): Promise<v
 // to themselves, moving it from "Pendentes" (queue) to "Ativos". This is a
 // sector-scoped self-assignment, so it is safe for vendedores who cannot
 // otherwise change assigneeId via the PATCH route.
-router.post("/chat/conversations/:id/claim", requireAuth, async (req, res): Promise<void> => {
+router.post("/chat/conversations/:id/claim", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
 
@@ -1111,15 +2228,60 @@ router.post("/chat/conversations/:id/claim", requireAuth, async (req, res): Prom
   // When a vendedor claims a potencial from another sector, move it into their
   // own sector so it stays properly scoped to them afterwards.
   const userRole = req.session.userRole!;
+  // Setor primário (fallback de roteamento quando precisa de UM só, ex.:
+  // reatribuir o setor da conversa abaixo) e a lista completa (pedido 17/09:
+  // vendedor em mais de um setor) usada pras checagens de "já está no meu
+  // pool" abaixo.
   const userSectorId = req.session.userSectorId;
+  const userSectorIds = req.session.userSectorIds ?? [];
+  const isGenuineStart = conv.assigneeId == null;
+
+  // Fila do Central de Atendimento por ordem (pedido 14/09, ver
+  // chatQueueSingleTask em users.ts): revalida no servidor, não só na
+  // lista — mesmo que a tela já esconda o resto, a API não deve aceitar um
+  // /claim de outra conversa vindo de um estado desatualizado no navegador.
+  // Re-claim da própria conversa (isGenuineStart=false) nunca é bloqueado.
+  if (isGenuineStart && userRole === "vendedor") {
+    const [meQueue] = await db.select({ v: usersTable.chatQueueSingleTask }).from(usersTable)
+      .where(eq(usersTable.id, req.session.userId!)).limit(1);
+    if (meQueue?.v) {
+      const activeCount = await countActiveConversations(tenantId, req.session.userId!);
+      if (activeCount > 0) {
+        res.status(409).json({ error: "Conclua um atendimento em aberto antes de assumir um novo.", code: "QUEUE_SINGLE_TASK_BLOCKED" });
+        return;
+      }
+      const pool = await vendorClaimablePoolCondition(req, userSectorIds);
+      const [next] = await db.select({ id: conversationsTable.id }).from(conversationsTable)
+        .where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.isArchived, false), pool))
+        .orderBy(asc(conversationsTable.createdAt)).limit(1);
+      if (next && next.id !== conv.id) {
+        res.status(409).json({ error: "Siga a ordem da fila — assuma o atendimento mais antigo primeiro.", code: "QUEUE_SINGLE_TASK_BLOCKED" });
+        return;
+      }
+    }
+  }
+
+  const [claimant] = await db.select({ storeId: usersTable.storeId }).from(usersTable)
+    .where(eq(usersTable.id, req.session.userId!)).limit(1);
+  // Origem "fila" (pedido 14/09): /claim é um dos dois jeitos de ganhar
+  // responsável vindo da fila (o outro é o auto-atribuir, atomicAssign em
+  // queueAutoAssign.ts) — só marca na primeira vez que a conversa sai do
+  // pool (isGenuineStart), nunca num re-claim da própria conversa.
+  const claimQueueNumber = isGenuineStart ? await nextQueueNumber(tenantId, claimant?.storeId ?? null) : null;
   const claimSet: Partial<typeof conversationsTable.$inferInsert> = {
     assigneeId: req.session.userId,
     status: "pending",
     updatedAt: new Date(),
+    storeId: claimant?.storeId ?? null,
     // Início do atendimento: só marca na primeira vez (re-claim é idempotente).
-    ...(conv.assigneeId == null ? { attendanceStartedAt: new Date() } : {}),
+    ...(isGenuineStart ? { attendanceStartedAt: new Date(), origin: "fila", queueNumber: claimQueueNumber } : {}),
   };
-  if (userRole !== "admin" && userRole !== "supervisor" && userSectorId && conv.sectorId !== userSectorId) {
+  // Já está em algum dos setores do vendedor (pedido 17/09): deixa como está.
+  // Só reatribui (pro setor primário) quando o setor da conversa não é
+  // nenhum dos dele — mesmo comportamento de sempre, só que checando a
+  // lista inteira em vez de um único setor.
+  if (userRole !== "admin" && userRole !== "supervisor" && userSectorId
+    && (conv.sectorId == null || !userSectorIds.includes(conv.sectorId))) {
     claimSet.sectorId = userSectorId;
   }
 
@@ -1142,14 +2304,17 @@ router.post("/chat/conversations/:id/claim", requireAuth, async (req, res): Prom
     res.status(409).json({ error: "Conversa já está em atendimento por outro vendedor" });
     return;
   }
+  if (isGenuineStart) {
+    await recordAttendanceStart(db, { tenantId, conversationId: id, attendantId: req.session.userId!, sectorId: updated.sectorId });
+  }
 
   const claimRecipients = await restrictedRecipients(updated);
   await syncCrmAttendant(updated);
-  broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, isPotential: wasPotential, restrictedTo: claimRecipients });
+  broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey, isPotential: wasPotential, restrictedTo: claimRecipients });
   // A conversa ficou restrita ao vendedor que assumiu: avisa quem a via antes
   // (potencial cross-sector ou fila do setor) para removê-la da lista.
   if (claimRecipients != null) {
-    broadcast("conversation_hidden", { id: updated.id, keepFor: claimRecipients, sectorId: updated.sectorId }, { tenantId: updated.tenantId, sectorId: conv.sectorId, isPotential: wasPotential });
+    broadcast("conversation_hidden", { id: updated.id, keepFor: claimRecipients, sectorId: updated.sectorId }, { tenantId: updated.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: wasPotential });
   }
   res.json(updated);
 });
@@ -1166,42 +2331,273 @@ router.get("/chat/wa-sessions", requireAuth, async (req, res): Promise<void> => 
       sessionKey: whatsappSessionsTable.sessionKey,
       displayName: whatsappSessionsTable.displayName,
       phoneNumber: whatsappSessionsTable.phoneNumber,
+      color: whatsappSessionsTable.color,
+      icon: whatsappSessionsTable.icon,
     })
     .from(whatsappSessionsTable)
     .where(eq(whatsappSessionsTable.tenantId, tenantId))
     .orderBy(whatsappSessionsTable.id);
-  res.json(rows);
+  // canAccess: se o usuário logado enxerga as conversas dessa linha
+  // (restrição allowedSessionKeys do vendedor). Usado pela barra de canais
+  // da Central de Atendimento pra não mostrar canal que ele não atende.
+  const allowed = await getCurrentAllowedSessionKeys(req);
+  res.json(rows.map((r) => ({ ...r, canAccess: allowed == null || allowed.includes(r.sessionKey) })));
 });
 
-// ─── Excluir atendimento (somente admin) ───────────────────────────────────
-// Remove definitivamente a conversa (mensagens e participantes juntos).
-// Restrito a POTENCIAIS (lead novo sem dono): conversas já assumidas ou
-// finalizadas fazem parte do histórico e não podem ser apagadas por aqui.
-router.delete("/chat/conversations/:id", requireAdmin, async (req, res): Promise<void> => {
+// ─── Excluir atendimento (admin ou supervisor) ─────────────────────────────
+// Remove definitivamente a conversa (mensagens, participantes, agendamentos
+// e histórico de início de atendimento juntos). Antes só era permitido em
+// Potenciais (lead novo sem dono), depois virou admin em qualquer categoria
+// (Pendentes/Ativos/Resolvidas) e agora também libera supervisor (a pedido
+// explícito do cliente). Ação irreversível: some o histórico de mensagens da
+// conversa, mas NÃO apaga a ficha do cliente no CRM (isso é só a
+// conversa/atendimento em si).
+router.delete("/chat/conversations/:id", requireAdminOrSupervisor, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
   if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return; }
-  if (!isPotentialConversation(conv)) {
-    res.status(409).json({ error: "Só é possível excluir atendimentos em Potenciais (sem responsável e não finalizados)" });
+  const wasPotential = isPotentialConversation(conv);
+  const recipients = await restrictedRecipients(conv);
+
+  await db.transaction(async (tx) => {
+    // Pedido 14/09 (revisão): "excluir atendimento" NÃO PODE apagar o
+    // histórico de mensagens de vez — só tirar a conversa das listas
+    // (Favoritos/Ativos/Pendentes/Potenciais, que já filtram isArchived=false
+    // na base). Antes isto DELETAVA messages/participants/pins/agendamentos e
+    // a própria conversa; agora é um arquivamento: mensagens, anexos e a
+    // ficha continuam no banco (recuperáveis), só saem de circulação. Ainda
+    // criamos o log de atendimento de fallback abaixo (mesma lógica de
+    // antes) pra garantir que o CRM tenha o registro mesmo sem finalizar.
+    const [hasMessage] = await tx.select({ id: messagesTable.id }).from(messagesTable).where(eq(messagesTable.conversationId, id)).limit(1);
+    const [existingLog] = await tx.select({ id: attendanceLogsTable.id }).from(attendanceLogsTable).where(eq(attendanceLogsTable.conversationId, id)).limit(1);
+    if (hasMessage && !existingLog) {
+      const [attendant] = conv.assigneeId
+        ? await tx.select().from(usersTable).where(eq(usersTable.id, conv.assigneeId)).limit(1)
+        : [];
+      const effectiveSectorId = conv.sectorId ?? attendant?.sectorId ?? null;
+      if (effectiveSectorId != null) {
+        const [sector] = await tx.select().from(sectorsTable).where(and(eq(sectorsTable.id, effectiveSectorId), eq(sectorsTable.tenantId, tenantId))).limit(1);
+        const serviceStart = conv.attendanceStartedAt ?? conv.createdAt;
+        const serviceSeconds = Math.max(0, Math.round((Date.now() - serviceStart.getTime()) / 1000));
+        await tx.insert(attendanceLogsTable).values({
+          tenantId,
+          queueEntryId: 0,
+          conversationId: id,
+          clientName: conv.name,
+          clientContact: conv.phone,
+          sectorId: effectiveSectorId,
+          sectorName: sector?.name ?? "Desconhecido",
+          attendantId: conv.assigneeId,
+          attendantName: attendant?.name ?? null,
+          storeId: conv.storeId ?? attendant?.storeId ?? null,
+          channel: conv.channel,
+          origin: conv.origin ?? null,
+          outcome: "excluido",
+          notes: "Conversa excluída (arquivada) sem finalizar o atendimento — registro preservado automaticamente.",
+          serviceTimeSeconds: serviceSeconds,
+        });
+      }
+    }
+    // Cancela agendamentos pendentes (mensagem/retorno) — não faz sentido
+    // disparar depois numa conversa que saiu de circulação — mas mantém o
+    // registro (auditoria), só muda o status.
+    await tx.update(scheduledMessagesTable)
+      .set({ status: "cancelled" })
+      .where(and(eq(scheduledMessagesTable.conversationId, id), eq(scheduledMessagesTable.status, "pending")));
+    await tx.update(conversationsTable)
+      .set({ isArchived: true, updatedAt: new Date() })
+      .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
+  });
+
+  // Potenciais são visíveis a todos DA LOJA; conversas já assumidas/resolvidas
+  // são restritas a quem podia vê-las antes (setor/participantes/responsável).
+  broadcast("conversation_deleted", { id }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: wasPotential, restrictedTo: wasPotential ? null : recipients });
+  res.json({ ok: true });
+
+  // Auditoria (item 21): excluir atendimento é a ação mais sensível deste
+  // arquivo (some da tela de todo mundo, mesmo mantendo o histórico no banco).
+  void logSensitiveAction(req, tenantId, "excluir_atendimento",
+    `Atendimento de "${conv.name}" excluído.`,
+    { conversationId: conv.id, metadata: { phone: conv.phone, sectorId: conv.sectorId, assigneeId: conv.assigneeId } });
+});
+
+// ─── Disparo em massa pra Resolvidos (pedido 14/09, Atacado) ─────────────
+// "Lista de transmissão": reabre e manda a MESMA mensagem pra vários
+// atendimentos Resolvidos de uma vez, pra reativar cliente antigo em
+// volume. Reaproveita sendOutboundText — mesmo caminho do envio manual, que
+// passa pela fila anti-ban do bridge (ritmo humano, 1 de cada vez, nunca em
+// paralelo). Só aceita conversas Resolvidas/Arquivadas (nunca uma ativa por
+// engano) e só as que o requisitante já pode acessar (canAccessConversation
+// — respeita a mesma regra de setor/vendorsSeeResolved de sempre). Um teto
+// por chamada (MAX_BATCH) evita uma única requisição virar um disparo
+// gigante de uma vez só — quem precisa de mais repete em outra leva.
+const BROADCAST_MAX_BATCH = 60;
+
+// Roda a leva em segundo plano (não trava a requisição): com o intervalo real
+// entre mensagens (pedido 19/09, ver broadcast_interval_ms em /settings), uma
+// leva de 60 facilmente passa de 1-2 minutos. Atualiza o log a cada envio (dá
+// pra acompanhar o progresso via polling em GET /chat/broadcast-logs/:id) e
+// avisa por SSE só quem disparou.
+async function runBroadcastJob(
+  logId: number, tenantId: number, ids: number[], text: string, senderName: string,
+  userRole: string, userId: number, intervalMs: number, req: Request,
+): Promise<void> {
+  const results: { id: number; ok: boolean; reason?: string }[] = [];
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i]!;
+    try {
+      const [conv] = await db.select().from(conversationsTable)
+        .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
+      if (!conv) {
+        results.push({ id, ok: false, reason: "Não encontrado" });
+      } else if (conv.phone.includes("@g.us")) {
+        results.push({ id, ok: false, reason: "É um grupo — grupo não entra em disparo" });
+      } else if (conv.status !== "resolved" && conv.status !== "archived" && !conv.isArchived) {
+        results.push({ id, ok: false, reason: "Não está Resolvido" });
+      } else if (!(await canAccessConversation(conv, req))) {
+        results.push({ id, ok: false, reason: "Sem acesso" });
+      } else {
+        // Vendedor sempre assume pra si (é ele quem vai prospectar); admin/
+        // supervisor mantém o responsável original quando houver.
+        const targetAssigneeId = userRole === "vendedor" ? userId : (conv.assigneeId ?? userId);
+        const [updated] = await db.update(conversationsTable)
+          .set({
+            assigneeId: targetAssigneeId, status: "open", isArchived: false,
+            attendanceStartedAt: new Date(), updatedAt: new Date(),
+          })
+          .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)))
+          .returning();
+        if (!updated) {
+          results.push({ id, ok: false, reason: "Falha ao reabrir" });
+        } else {
+          const recipients = await restrictedRecipients(updated);
+          broadcast("conversation_updated", updated, {
+            tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey, isPotential: false, restrictedTo: recipients,
+          });
+          const delivered = await sendOutboundText(id, text, senderName);
+          results.push({ id, ok: delivered, reason: delivered ? undefined : "Falha no envio (WhatsApp)" });
+        }
+      }
+    } catch (err) {
+      req.log.error({ err, id }, "disparo em massa: erro inesperado numa conversa");
+      results.push({ id, ok: false, reason: "Erro inesperado" });
+    }
+
+    const sentCount = results.filter((r) => r.ok).length;
+    const failedCount = results.length - sentCount;
+    await db.update(broadcastDispatchLogTable)
+      .set({ sentCount, failedCount, results })
+      .where(eq(broadcastDispatchLogTable.id, logId));
+    broadcast("broadcast_progress", { logId, sentCount, failedCount, total: ids.length, done: false }, { tenantId, restrictedTo: [userId] });
+
+    if (i < ids.length - 1) await new Promise((r) => setTimeout(r, intervalMs));
+  }
+
+  const sentCount = results.filter((r) => r.ok).length;
+  const failedCount = results.length - sentCount;
+  await db.update(broadcastDispatchLogTable)
+    .set({ status: "done", finishedAt: new Date() })
+    .where(eq(broadcastDispatchLogTable.id, logId));
+  broadcast("broadcast_progress", { logId, sentCount, failedCount, total: ids.length, done: true }, { tenantId, restrictedTo: [userId] });
+}
+
+router.post("/chat/conversations/broadcast", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { conversationIds, message } = req.body as { conversationIds?: unknown; message?: string };
+  const text = (message ?? "").trim();
+  if (!text) { res.status(400).json({ error: "Escreva a mensagem." }); return; }
+  const ids = Array.isArray(conversationIds)
+    ? [...new Set(conversationIds.map((v) => Number(v)).filter((n) => Number.isFinite(n)))]
+    : [];
+  if (ids.length === 0) { res.status(400).json({ error: "Selecione ao menos um atendimento." }); return; }
+  if (ids.length > BROADCAST_MAX_BATCH) {
+    res.status(400).json({ error: `No máximo ${BROADCAST_MAX_BATCH} de cada vez — selecione menos e repita em outra leva.` });
     return;
   }
 
-  await db.transaction(async (tx) => {
-    await tx.delete(messagesTable).where(eq(messagesTable.conversationId, id));
-    await tx.delete(conversationParticipantsTable).where(eq(conversationParticipantsTable.conversationId, id));
-    await tx.delete(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId)));
+  const userRole = req.session.userRole!;
+  const userId = req.session.userId!;
+  const senderName = req.session.userName ?? "Atendente";
+
+  const [intervalRow] = await db.select({ value: appSettingsTable.value }).from(appSettingsTable)
+    .where(and(eq(appSettingsTable.tenantId, tenantId), eq(appSettingsTable.key, "broadcast_interval_ms")));
+  const intervalMs = Math.max(1000, Math.min(30000, parseInt(intervalRow?.value ?? "", 10) || 3000));
+
+  const [log] = await db.insert(broadcastDispatchLogTable).values({
+    tenantId, userId, userName: senderName, message: text,
+    totalSelected: ids.length, intervalMs, status: "running",
+  }).returning();
+
+  void runBroadcastJob(log!.id, tenantId, ids, text, senderName, userRole, userId, intervalMs, req).catch((err) => {
+    req.log.error({ err, logId: log!.id }, "disparo em massa: job falhou");
   });
 
-  // Potenciais são visíveis a todos DA LOJA — o evento de remoção também precisa ser.
-  broadcast("conversation_deleted", { id }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: true });
-  res.json({ ok: true });
+  res.json({ ok: true, logId: log!.id, total: ids.length, intervalMs });
+});
+
+// ─── Métricas de disparo (pedido 19/09: "criar métrica para disparo:
+// quantidade, tempo de envio, tempo de intervalo etc") ────────────────────
+// Progresso de UMA leva em andamento — o próprio atendente que disparou pode
+// consultar (faz polling enquanto broadcastSending), além de admin/supervisor.
+router.get("/chat/broadcast-logs/summary", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const since30 = new Date(Date.now() - 30 * 24 * 60 * 60_000);
+  const since14 = new Date(Date.now() - 14 * 24 * 60 * 60_000);
+  const [totals] = await db.select({
+    dispatches: sql<number>`count(*)`,
+    sent: sql<number>`coalesce(sum(${broadcastDispatchLogTable.sentCount}), 0)`,
+    failed: sql<number>`coalesce(sum(${broadcastDispatchLogTable.failedCount}), 0)`,
+  }).from(broadcastDispatchLogTable)
+    .where(and(eq(broadcastDispatchLogTable.tenantId, tenantId), gte(broadcastDispatchLogTable.startedAt, since30)));
+  const daily = await db.select({
+    day: sql<string>`to_char(${broadcastDispatchLogTable.startedAt}, 'YYYY-MM-DD')`,
+    dispatches: sql<number>`count(*)`,
+    sent: sql<number>`coalesce(sum(${broadcastDispatchLogTable.sentCount}), 0)`,
+  }).from(broadcastDispatchLogTable)
+    .where(and(eq(broadcastDispatchLogTable.tenantId, tenantId), gte(broadcastDispatchLogTable.startedAt, since14)))
+    .groupBy(sql`to_char(${broadcastDispatchLogTable.startedAt}, 'YYYY-MM-DD')`)
+    .orderBy(sql`to_char(${broadcastDispatchLogTable.startedAt}, 'YYYY-MM-DD')`);
+  res.json({
+    last30Days: {
+      dispatches: Number(totals?.dispatches ?? 0),
+      sent: Number(totals?.sent ?? 0),
+      failed: Number(totals?.failed ?? 0),
+    },
+    daily: daily.map((d) => ({ day: d.day, dispatches: Number(d.dispatches), sent: Number(d.sent) })),
+  });
+});
+
+router.get("/chat/broadcast-logs", requireAdminOrSupervisor, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const limit = Math.min(200, Math.max(1, parseInt(String(req.query["limit"] ?? "50"), 10) || 50));
+  const rows = await db.select().from(broadcastDispatchLogTable)
+    .where(eq(broadcastDispatchLogTable.tenantId, tenantId))
+    .orderBy(desc(broadcastDispatchLogTable.startedAt))
+    .limit(limit);
+  res.json(rows);
+});
+
+router.get("/chat/broadcast-logs/:id", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(req.params.id as string, 10);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "id inválido" }); return; }
+  const [log] = await db.select().from(broadcastDispatchLogTable)
+    .where(and(eq(broadcastDispatchLogTable.id, id), eq(broadcastDispatchLogTable.tenantId, tenantId))).limit(1);
+  if (!log) { res.status(404).json({ error: "Não encontrado" }); return; }
+  const userRole = req.session.userRole!;
+  const userId = req.session.userId!;
+  if (log.userId !== userId && userRole !== "admin" && userRole !== "supervisor") {
+    res.status(403).json({ error: "Acesso negado" });
+    return;
+  }
+  res.json(log);
 });
 
 // ─── Uso atual da trava anti-disparo em massa (Atendimento ativo) ─────────
 // Deixa o front avisar ANTES de tentar criar ("você já usou 8/10 essa hora"),
 // em vez de só descobrir o limite quando a criação é recusada com 429.
-router.get("/chat/outbound-usage", requireAuth, async (req, res): Promise<void> => {
+router.get("/chat/outbound-usage", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const requested = parseInt(String(req.query["assigneeId"] ?? ""), 10);
   const userRole = req.session.userRole!;
@@ -1234,19 +2630,58 @@ router.get("/chat/outbound-usage", requireAuth, async (req, res): Promise<void> 
 });
 
 // ─── Create conversation manually ─────────────────────────────────────────
-router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento"), async (req, res): Promise<void> => {
+router.post("/chat/conversations", requireAuth, requireChatAccess(), requirePerm("criar_atendimento"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { phone, name, channel, sectorId, assigneeId: requestedAssigneeId } = req.body as {
-    phone?: string; name?: string; channel?: string; sectorId?: number; assigneeId?: number;
+  const { phone, name, channel, sectorId, assigneeId: requestedAssigneeId, sessionKey: requestedSessionKey } = req.body as {
+    phone?: string; name?: string; channel?: string; sectorId?: number; assigneeId?: number; sessionKey?: string;
   };
   if (!phone || !name) { res.status(400).json({ error: "Telefone e nome obrigatórios" }); return; }
 
+  // Linha de WhatsApp (canal) do atendimento manual: antes sempre nascia na
+  // linha "default", então o mesmo número (ex.: atacado vs. varejo, duas
+  // conexões de WhatsApp diferentes) não conseguia ter um segundo atendimento
+  // criado manualmente enquanto o primeiro estivesse em andamento. Agora quem
+  // cria escolhe a linha (quando a loja tem mais de uma conectada); "default"
+  // continua sendo o valor padrão quando não é informado.
+  const tenantSessions = await db.select({ sessionKey: whatsappSessionsTable.sessionKey })
+    .from(whatsappSessionsTable).where(eq(whatsappSessionsTable.tenantId, tenantId));
+  const validSessionKeys = new Set(["default", ...tenantSessions.map((s) => s.sessionKey)]);
+  if (requestedSessionKey != null && !validSessionKeys.has(requestedSessionKey)) {
+    res.status(400).json({ error: "Linha de WhatsApp inválida." });
+    return;
+  }
+  const targetSessionKey = requestedSessionKey ?? "default";
+
+  // Vendedor restrito a outras linhas ficaria trancado fora da conversa que
+  // ele mesmo acabou de criar — barra antes, com uma mensagem clara, em vez
+  // de deixar um atendimento órfão.
+  const allowedSessionKeys = await getCurrentAllowedSessionKeys(req);
+  if (allowedSessionKeys != null && !allowedSessionKeys.includes(targetSessionKey)) {
+    res.status(403).json({ error: "Você não tem acesso a essa linha de WhatsApp para criar atendimentos manuais. Fale com o administrador." });
+    return;
+  }
+
   // Bloqueia atendimento duplicado: se já existe conversa EM ANDAMENTO (não
-  // finalizada/arquivada) para esse número, não cria outra. Compara só os
-  // dígitos e também com/sem DDI 55, pois o número salvo pode ter formato
-  // diferente do digitado.
+  // finalizada/arquivada) para esse número NA MESMA LINHA de WhatsApp, não
+  // cria outra. Duas linhas diferentes (ex.: atacado e varejo) são canais
+  // independentes — o mesmo cliente pode ter um atendimento aberto em cada
+  // uma ao mesmo tempo. Compara contra todas as variações plausíveis do
+  // número (com/sem DDI, com/sem o 9º dígito), pois o valor salvo pode ter
+  // formato diferente do digitado.
+  //
+  // BUG (16/09): "Excluir atendimento" não muda o `status` — ele só marca
+  // `isArchived=true` (arquivamento reversível, ver DELETE /chat/conversations/:id
+  // abaixo). Essa checagem de duplicata só olhava `status`, então uma conversa
+  // excluída (que some das listas, que já filtram isArchived=false) continuava
+  // contando como "em andamento" aqui e travava para sempre a criação de um
+  // novo atendimento pro mesmo número — o vendedor via "Atendimento já
+  // existente" apontando pra uma conversa que não aparece em lugar nenhum.
+  // Mesmo padrão usado no resto do arquivo (linhas 301, 370, 1949 etc.) e no
+  // fluxo de mensagem recebida do WhatsApp (whatsappInbound.ts): também exigir
+  // isArchived=false.
   const digits = phone.replace(/\D/g, "");
-  if (digits) {
+  const dupCandidates = phoneVariants(phone);
+  if (digits && dupCandidates.length > 0) {
     const [dup] = await db.select({
       id: conversationsTable.id,
       name: conversationsTable.name,
@@ -1257,13 +2692,15 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
       .where(and(
         eq(conversationsTable.tenantId, tenantId),
         notInArray(conversationsTable.status, ["resolved", "archived"]),
-        sql`regexp_replace(${conversationsTable.phone}, '\\D', '', 'g') IN (${digits}, ${`55${digits}`}, ${digits.startsWith("55") ? digits.slice(2) : digits})`,
+        eq(conversationsTable.isArchived, false),
+        inArray(conversationsTable.phone, dupCandidates),
+        eq(conversationsTable.sessionKey, targetSessionKey),
       ))
       .limit(1);
     if (dup) {
       const quem = dup.assigneeId != null ? "já está em atendimento" : "já está na fila aguardando atendimento";
       res.status(409).json({
-        error: `Este número ${quem} (${dup.name}). Abra a conversa existente em vez de criar outra.`,
+        error: `Este número ${quem} nesta linha de WhatsApp (${dup.name}). Abra a conversa existente em vez de criar outra.`,
         conversationId: dup.id,
       });
       return;
@@ -1272,7 +2709,12 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
 
   // Número precisa EXISTIR no WhatsApp para abrir atendimento de WhatsApp.
   // Se o bridge estiver fora do ar ou desconectado, libera (não trava a loja).
-  if ((channel ?? "whatsapp") === "whatsapp" && digits) {
+  // Usa o número NORMALIZADO (com o 9º dígito reposto), não os dígitos crus:
+  // contato compartilhado via vCard costuma vir sem o 9, e mandar os dígitos
+  // crus pro bridge fazia ele responder "não existe" pra números válidos,
+  // travando o botão de iniciar atendimento a partir de contato compartilhado.
+  const checkPhone = normalizePhone(phone) || digits;
+  if ((channel ?? "whatsapp") === "whatsapp" && checkPhone) {
     const bridgeUrl = process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
     const bridgeSecret = createHmac(
       "sha256",
@@ -1282,13 +2724,13 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
       const r = await fetch(`${bridgeUrl}/whatsapp/check-number`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Bridge-Secret": bridgeSecret },
-        body: JSON.stringify({ phone: digits }),
+        body: JSON.stringify({ phone: checkPhone }),
         signal: AbortSignal.timeout(15_000),
       });
       if (r.ok) {
         const check = await r.json() as { exists?: boolean };
         if (check.exists === false) {
-          res.status(400).json({ error: `O número ${digits} não existe no WhatsApp. Confira o DDD e o nono dígito antes de criar o atendimento.` });
+          res.status(400).json({ error: `O número ${checkPhone} não existe no WhatsApp. Confira o DDD e o nono dígito antes de criar o atendimento.` });
           return;
         }
       }
@@ -1356,18 +2798,35 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
     }
   }
 
+  let targetStoreId: number | null = null;
+  if (targetAssigneeId != null) {
+    const [ta] = await db.select({ storeId: usersTable.storeId }).from(usersTable)
+      .where(eq(usersTable.id, targetAssigneeId)).limit(1);
+    targetStoreId = ta?.storeId ?? null;
+  }
+
   const [conv] = await db.insert(conversationsTable).values({
     tenantId,
-    phone, name,
+    phone: normalizePhone(phone) || phone, name,
     channel: channel ?? "manual",
+    sessionKey: targetSessionKey,
     sectorId: effectiveSectorId,
     status: "open",
     assigneeId: targetAssigneeId,
     attendanceStartedAt: targetAssigneeId != null ? new Date() : null,
+    storeId: targetStoreId,
     lastMessageAt: new Date(),
+    // Já nasce com dono aqui = "Criar atendimento" manual (pedido 14/09) —
+    // sem dono ainda (admin joga na fila) não é nem manual nem fila até
+    // alguém/a fila assumir de verdade.
+    origin: targetAssigneeId != null ? "manual" : null,
   }).returning();
 
-  broadcast("conversation_new", conv, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  if (targetAssigneeId != null) {
+    await recordAttendanceStart(db, { tenantId, conversationId: conv.id, attendantId: targetAssigneeId, sectorId: conv.sectorId });
+  }
+
+  broadcast("conversation_new", conv, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
   // Keep the CRM in sync with atendimentos: register the customer immediately.
   await ensureCrmContactForConversation(conv);
   res.status(201).json(conv);
@@ -1376,7 +2835,7 @@ router.post("/chat/conversations", requireAuth, requirePerm("criar_atendimento")
 // ─── Etiquetas (chat labels) management ───────────────────────────────────
 // ─── Agendamentos (mensagem agendada / retorno ao cliente) ─────────────────
 // Cria também uma tarefa espelho no quadro de Tarefas com o mesmo prazo.
-router.post("/chat/conversations/:id/schedules", requireAuth, async (req, res): Promise<void> => {
+router.post("/chat/conversations/:id/schedules", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const { kind, content, sendAt } = req.body as { kind?: string; content?: string; sendAt?: string };
@@ -1399,6 +2858,55 @@ router.post("/chat/conversations/:id/schedules", requireAuth, async (req, res): 
   if (!when || isNaN(when.getTime())) { res.status(400).json({ error: "Data/hora inválida" }); return; }
   if (when.getTime() < Date.now() - 60_000) { res.status(400).json({ error: "Escolha um horário no futuro" }); return; }
 
+  // Vincula a tarefa espelho ao contato do CRM desse cliente (mesma
+  // identidade usada em crmSync.ts: variações do número + mesmo setor) — sem
+  // isso a tarefa/agenda ficava sem nenhum jeito de aparecer na ficha do
+  // cliente no CRM, mesmo o campo contactId já existindo há tempo na tabela.
+  const isGroup = (conv.phone ?? "").includes("@g.us");
+  let crmContactId: number | null = null;
+  if (!isGroup) {
+    const variants = phoneVariants(conv.phone);
+    if (variants.length > 0) {
+      const sectorCondition = conv.sectorId != null
+        ? eq(crmContactsTable.sectorId, conv.sectorId)
+        : isNull(crmContactsTable.sectorId);
+      const [match] = await db.select({ id: crmContactsTable.id }).from(crmContactsTable)
+        .where(and(
+          eq(crmContactsTable.tenantId, tenantId),
+          eq(crmContactsTable.isArchived, false),
+          inArray(crmContactsTable.phone, variants),
+          sectorCondition,
+        ))
+        .limit(1);
+      crmContactId = match?.id ?? null;
+    }
+  }
+
+  // Tarefas no ERP (19/10/2026): a tarefa espelho nasce lá; se o ERP não
+  // responder, o agendamento vale do mesmo jeito (só fica sem a tarefa).
+  const { tasksMoved, createErpMirrorTask } = await import("../lib/erpTasks");
+  if (await tasksMoved(tenantId)) {
+    const erpTaskNumber = await createErpMirrorTask(tenantId, req.session.userId ?? null, {
+      title: cleanKind === "mensagem" ? `📅 Mensagem agendada — ${conv.name}` : `📞 Retorno ao cliente — ${conv.name}`,
+      details: `${text}\n\nCliente: ${conv.name} (${conv.phone})`,
+      dueDate: when,
+      sectorId: conv.sectorId,
+      contactId: crmContactId,
+    }).catch(() => null);
+    const [createdErp] = await db.insert(scheduledMessagesTable).values({
+      tenantId,
+      conversationId: conv.id,
+      kind: cleanKind,
+      content: text.slice(0, 2000),
+      sendAt: when,
+      createdById: req.session.userId ?? null,
+      taskId: null,
+      erpTaskNumber,
+    }).returning();
+    res.status(201).json(createdErp);
+    return;
+  }
+
   // Tarefa espelho no quadro (lembrete visível para a equipe)
   const [task] = await db.insert(tasksTable).values({
     tenantId,
@@ -1408,11 +2916,14 @@ router.post("/chat/conversations/:id/schedules", requireAuth, async (req, res): 
     description: `${text}\n\nCliente: ${conv.name} (${conv.phone})`,
     status: "todo",
     priority: "media",
-    assigneeId: req.session.userId ?? null,
     createdById: req.session.userId ?? null,
     sectorId: conv.sectorId,
     dueDate: when,
+    contactId: crmContactId,
   }).returning();
+  if (req.session.userId != null) {
+    await db.insert(taskAssigneesTable).values({ tenantId, taskId: task!.id, userId: req.session.userId });
+  }
 
   const [created] = await db.insert(scheduledMessagesTable).values({
     tenantId,
@@ -1427,7 +2938,7 @@ router.post("/chat/conversations/:id/schedules", requireAuth, async (req, res): 
   res.status(201).json(created);
 });
 
-router.get("/chat/conversations/:id/schedules", requireAuth, async (req, res): Promise<void> => {
+router.get("/chat/conversations/:id/schedules", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const [conv] = await db.select().from(conversationsTable).where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
@@ -1439,7 +2950,7 @@ router.get("/chat/conversations/:id/schedules", requireAuth, async (req, res): P
   res.json(rows);
 });
 
-router.delete("/chat/schedules/:schedId", requireAuth, async (req, res): Promise<void> => {
+router.delete("/chat/schedules/:schedId", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const schedId = parseInt(Array.isArray(req.params.schedId) ? req.params.schedId[0] : req.params.schedId, 10);
   const [item] = await db.select().from(scheduledMessagesTable).where(and(eq(scheduledMessagesTable.id, schedId), eq(scheduledMessagesTable.tenantId, tenantId))).limit(1);
@@ -1452,13 +2963,18 @@ router.delete("/chat/schedules/:schedId", requireAuth, async (req, res): Promise
   if (item.taskId != null) {
     await db.update(tasksTable).set({ isArchived: true, updatedAt: new Date() }).where(and(eq(tasksTable.id, item.taskId), eq(tasksTable.tenantId, tenantId)));
   }
+  if (item.erpTaskNumber != null) {
+    await import("../lib/erpTasks")
+      .then((m) => m.finishErpMirrorTask(tenantId, item.erpTaskNumber!, req.session.userId ?? null, "archive"))
+      .catch(() => {});
+  }
   res.json({ ok: true });
 });
 
 // ─── Notificações persistentes do sino ─────────────────────────────────────
 // Avisos de retorno vencido e de falha em envio agendado, gravados pelo
 // agendador. Cada usuário vê SOMENTE os próprios avisos (fail closed).
-router.get("/chat/notifications", requireAuth, async (req, res): Promise<void> => {
+router.get("/chat/notifications", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const userId = req.session.userId!;
   const rows = await db.select().from(chatNotificationsTable)
@@ -1474,7 +2990,7 @@ router.get("/chat/notifications", requireAuth, async (req, res): Promise<void> =
 
 // Marca como lidos: todos os avisos do usuário, ou só os de uma conversa
 // (quando o vendedor abre a conversa a partir do sino).
-router.post("/chat/notifications/read", requireAuth, async (req, res): Promise<void> => {
+router.post("/chat/notifications/read", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const userId = req.session.userId!;
   const conversationId = typeof req.body?.conversationId === "number" ? req.body.conversationId : null;
@@ -1489,28 +3005,48 @@ router.post("/chat/notifications/read", requireAuth, async (req, res): Promise<v
 });
 
 // ─── Quick replies (mensagens rápidas) ─────────────────────────────────────
-// Leitura: qualquer usuário logado vê as globais + as do próprio setor.
-// Gestão (criar/editar/excluir): admin e supervisor.
+// Leitura: qualquer usuário logado vê as globais + as que batem com ele nas
+// dimensões preenchidas (setor/loja/usuário — todas as preenchidas precisam
+// bater, é E lógico, não OU: ver comentário no schema). Admin/supervisor
+// sempre vê todas (view de gestão). Gestão (criar/editar/excluir): admin e
+// supervisor.
+function sanitizeIdList(raw: unknown): number[] | null {
+  if (!Array.isArray(raw)) return null;
+  const ids = raw.map((v) => Number(v)).filter((n) => Number.isInteger(n) && n > 0);
+  return ids.length > 0 ? Array.from(new Set(ids)) : null;
+}
+
 router.get("/chat/quick-replies", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const role = req.session.userRole!;
-  const sectorId = req.session.userSectorId ?? null;
+  const userId = req.session.userId!;
+  // Vendedor em mais de um setor (pedido 17/09): resposta rápida escopada a
+  // um setor aparece se for QUALQUER um dos setores do vendedor.
+  const sectorIds = req.session.userSectorIds ?? [];
+  const storeId = req.session.userStoreId ?? null;
   const rows = await db.select().from(quickRepliesTable).where(eq(quickRepliesTable.tenantId, tenantId)).orderBy(asc(quickRepliesTable.title));
   const visible = (role === "admin" || role === "supervisor")
     ? rows
-    : rows.filter((r) => r.sectorId == null || r.sectorId === sectorId);
+    : rows.filter((r) => {
+        if (r.sectorId != null && !sectorIds.includes(r.sectorId)) return false;
+        if (Array.isArray(r.storeIds) && r.storeIds.length > 0 && (storeId == null || !r.storeIds.includes(storeId))) return false;
+        if (Array.isArray(r.userIds) && r.userIds.length > 0 && !r.userIds.includes(userId)) return false;
+        return true;
+      });
   res.json(visible);
 });
 
 router.post("/chat/quick-replies", requireAdminOrSupervisor, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { title, content, sectorId } = req.body as { title?: string; content?: string; sectorId?: number | null };
+  const { title, content, sectorId, storeIds, userIds } = req.body as { title?: string; content?: string; sectorId?: number | null; storeIds?: number[] | null; userIds?: number[] | null };
   if (!title?.trim() || !content?.trim()) { res.status(400).json({ error: "Título e mensagem são obrigatórios" }); return; }
   const [created] = await db.insert(quickRepliesTable).values({
     tenantId,
     title: title.trim().slice(0, 80),
     content: content.trim().slice(0, 2000),
     sectorId: sectorId ?? null,
+    storeIds: sanitizeIdList(storeIds),
+    userIds: sanitizeIdList(userIds),
   }).returning();
   res.status(201).json(created);
 });
@@ -1518,11 +3054,13 @@ router.post("/chat/quick-replies", requireAdminOrSupervisor, async (req, res): P
 router.patch("/chat/quick-replies/:qrId", requireAdminOrSupervisor, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const qrId = parseInt(Array.isArray(req.params.qrId) ? req.params.qrId[0] : req.params.qrId, 10);
-  const { title, content, sectorId } = req.body as { title?: string; content?: string; sectorId?: number | null };
+  const { title, content, sectorId, storeIds, userIds } = req.body as { title?: string; content?: string; sectorId?: number | null; storeIds?: number[] | null; userIds?: number[] | null };
   const update: Partial<typeof quickRepliesTable.$inferInsert> = {};
   if (title !== undefined) update.title = title.trim().slice(0, 80);
   if (content !== undefined) update.content = content.trim().slice(0, 2000);
   if (sectorId !== undefined) update.sectorId = sectorId;
+  if (storeIds !== undefined) update.storeIds = sanitizeIdList(storeIds);
+  if (userIds !== undefined) update.userIds = sanitizeIdList(userIds);
   const [updated] = await db.update(quickRepliesTable).set(update).where(and(eq(quickRepliesTable.id, qrId), eq(quickRepliesTable.tenantId, tenantId))).returning();
   if (!updated) { res.status(404).json({ error: "Mensagem rápida não encontrada" }); return; }
   res.json(updated);
@@ -1586,6 +3124,48 @@ router.delete("/chat/labels/:labelId", requireAdminOrSupervisor, async (req, res
   res.json({ ok: true });
 });
 
+// ─── Filtros salvos da lista de Conversas (pedido 10/09) ────────────────────
+// Combinação do painel de filtro avançado (vendedor/setor/nível/linha/
+// etiqueta/"não respondidas") salva com um nome — pessoal por usuário, não
+// compartilhado com o resto da equipe (cada um monta os próprios atalhos).
+const SAVED_FILTER_KEYS = ["onlyUnanswered", "onlyGroups", "vendedor", "setor", "nivel", "sessionKey", "label"] as const;
+function sanitizeSavedFilterValues(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== "object") return {};
+  const out: Record<string, unknown> = {};
+  const obj = raw as Record<string, unknown>;
+  for (const k of SAVED_FILTER_KEYS) if (obj[k] !== undefined && obj[k] !== null && obj[k] !== "") out[k] = obj[k];
+  return out;
+}
+
+router.get("/chat/saved-filters", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const rows = await db.select().from(chatSavedFiltersTable)
+    .where(and(eq(chatSavedFiltersTable.tenantId, tenantId), eq(chatSavedFiltersTable.userId, req.session.userId!)))
+    .orderBy(asc(chatSavedFiltersTable.sortOrder), asc(chatSavedFiltersTable.id));
+  res.json(rows);
+});
+
+router.post("/chat/saved-filters", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { name, filters } = req.body as { name?: string; filters?: unknown };
+  if (!name || !name.trim()) { res.status(400).json({ error: "Dê um nome ao filtro" }); return; }
+  const clean = sanitizeSavedFilterValues(filters);
+  if (Object.keys(clean).length === 0) { res.status(400).json({ error: "Escolha pelo menos um filtro antes de salvar" }); return; }
+  const [created] = await db.insert(chatSavedFiltersTable).values({
+    tenantId, userId: req.session.userId!, name: name.trim().slice(0, 60), filters: clean,
+  }).returning();
+  res.status(201).json(created);
+});
+
+router.delete("/chat/saved-filters/:id", requireAuth, async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  await db.delete(chatSavedFiltersTable)
+    .where(and(eq(chatSavedFiltersTable.id, id), eq(chatSavedFiltersTable.tenantId, tenantId), eq(chatSavedFiltersTable.userId, req.session.userId!)));
+  res.json({ ok: true });
+});
+
 // ─── List users available for participant assignment ──────────────────────
 router.get("/chat/users", requireAuth, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
@@ -1597,7 +3177,7 @@ router.get("/chat/users", requireAuth, async (req, res): Promise<void> => {
 });
 
 // ─── Conversation participants ─────────────────────────────────────────────
-router.post("/chat/conversations/:id/participants", requireAuth, async (req, res): Promise<void> => {
+router.post("/chat/conversations/:id/participants", requireAuth, requireChatAccess(), requirePerm("adicionar_participante"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const { userId } = req.body as { userId?: number };
@@ -1608,9 +3188,19 @@ router.post("/chat/conversations/:id/participants", requireAuth, async (req, res
   if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return; }
 
   // Fail closed: o participante precisa ser da mesma loja.
-  const [memberUser] = await db.select({ id: usersTable.id, role: usersTable.role })
+  const [memberUser] = await db.select({ id: usersTable.id, role: usersTable.role, allowedSessionKeys: usersTable.allowedSessionKeys })
     .from(usersTable).where(and(eq(usersTable.id, userId), eq(usersTable.tenantId, tenantId))).limit(1);
   if (!memberUser) { res.status(400).json({ error: "Usuário inválido" }); return; }
+
+  // Vendedor com linha de WhatsApp restrita não pode ser participante de uma
+  // conversa de outra linha: senão ele fica "preso" na lista de destinatários
+  // (restrictedTo) mas o fan-out de SSE some pra ele — mensagem chega pra
+  // outros vinculados e não pra ele, silenciosamente. Bloqueia aqui em vez de
+  // furar a restrição de linha no broadcast.
+  if (memberUser.allowedSessionKeys != null && !memberUser.allowedSessionKeys.includes(conv.sessionKey)) {
+    res.status(403).json({ error: "Este usuário só recebe conversas de uma linha específica de WhatsApp e não pode ser adicionado a esta conversa." });
+    return;
+  }
 
   await db.insert(conversationParticipantsTable).values({ tenantId, conversationId: convId, userId }).onConflictDoNothing();
 
@@ -1635,17 +3225,22 @@ router.post("/chat/conversations/:id/participants", requireAuth, async (req, res
       .set({ status: "pending", updatedAt: new Date() })
       .where(and(eq(conversationsTable.id, convId), eq(conversationsTable.tenantId, tenantId)))
       .returning();
-    broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, isPotential: wasPotential });
-    broadcast("participants_updated", { conversationId: convId }, { tenantId: updated.tenantId, sectorId: updated.sectorId, isPotential: false });
+    // Espelha no card do CRM — sem isso, o card fica preso no status antigo
+    // (ex.: "Ativo") mesmo com a conversa de volta pra fila, inflando essa
+    // coluna do quadro (mesma classe de bug que o comentário em crmSync.ts
+    // já descreve; ver reconciliação em POST /admin/crm/reconcile-stages).
+    await syncCrmAttendant(updated);
+    broadcast("conversation_updated", updated, { tenantId: updated.tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey, isPotential: wasPotential });
+    broadcast("participants_updated", { conversationId: convId }, { tenantId: updated.tenantId, sectorId: updated.sectorId, sessionKey: updated.sessionKey, isPotential: false });
     res.status(201).json({ ok: true, conversation: updated });
     return;
   }
 
-  broadcast("participants_updated", { conversationId: convId }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+  broadcast("participants_updated", { conversationId: convId }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
   res.status(201).json({ ok: true });
 });
 
-router.delete("/chat/conversations/:id/participants/:userId", requireAuth, async (req, res): Promise<void> => {
+router.delete("/chat/conversations/:id/participants/:userId", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const convId = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
   const userId = parseInt(Array.isArray(req.params.userId) ? req.params.userId[0] : req.params.userId, 10);
@@ -1662,15 +3257,15 @@ router.delete("/chat/conversations/:id/participants/:userId", requireAuth, async
   // O participante removido também precisa receber o evento (para tirar a
   // conversa da tela dele), então entra na lista junto dos que permanecem.
   const removeRecipients = await restrictedRecipients(conv);
-  broadcast("participants_updated", { conversationId: convId }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: removeRecipients ? [...new Set([...removeRecipients, userId])] : null });
+  broadcast("participants_updated", { conversationId: convId }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: removeRecipients ? [...new Set([...removeRecipients, userId])] : null });
   if (removeRecipients != null) {
-    broadcast("conversation_hidden", { id: convId, keepFor: removeRecipients, sectorId: conv.sectorId }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: false, restrictedTo: [...new Set([...removeRecipients, userId])] });
+    broadcast("conversation_hidden", { id: convId, keepFor: removeRecipients, sectorId: conv.sectorId }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: false, restrictedTo: [...new Set([...removeRecipients, userId])] });
   }
   res.json({ ok: true });
 });
 
 // ─── Transcrever áudio (Whisper) ───────────────────────────────────────────
-router.post("/chat/messages/:id/transcribe", requireAuth, async (req: Request, res: Response): Promise<void> => {
+router.post("/chat/messages/:id/transcribe", requireAuth, requireChatAccess(), async (req: Request, res: Response): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const msgId = parseInt(req.params.id as string, 10);
   if (!Number.isFinite(msgId)) { res.status(400).json({ error: "ID inválido" }); return; }
@@ -1685,7 +3280,7 @@ router.post("/chat/messages/:id/transcribe", requireAuth, async (req: Request, r
   try {
     const { transcribeMessage } = await import("../lib/transcribe");
     const transcript = await transcribeMessage(msgId);
-    broadcast("message_updated", { conversationId: conv.id, message: { ...msg, transcript } }, { tenantId: conv.tenantId, sectorId: conv.sectorId, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
+    broadcast("message_updated", { conversationId: conv.id, message: { ...msg, transcript } }, { tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey, isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv) });
     res.json({ transcript });
   } catch (err) {
     res.status(422).json({ error: err instanceof Error ? err.message : "Falha ao transcrever" });
@@ -1693,6 +3288,27 @@ router.post("/chat/messages/:id/transcribe", requireAuth, async (req: Request, r
 });
 
 // ─── Serve saved media files ───────────────────────────────────────────────
+// Foto de perfil guardada no CRM (20/10/2026, ver lib/waProfile.ts). Só a
+// loja dona da conversa vê.
+router.get("/chat/avatars/:id", requireAuth, async (req: Request, res: Response): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ error: "id inválido" }); return; }
+  const [conv] = await db.select({ id: conversationsTable.id }).from(conversationsTable)
+    .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
+  if (!conv) { res.status(404).json({ error: "Foto não encontrada" }); return; }
+  for (const [ext, type] of [["jpg", "image/jpeg"], ["png", "image/png"], ["webp", "image/webp"]] as const) {
+    const file = path.join(AVATAR_DIR, `${id}.${ext}`);
+    if (existsSync(file)) {
+      res.setHeader("Content-Type", type);
+      res.setHeader("Cache-Control", "private, max-age=86400");
+      res.sendFile(file);
+      return;
+    }
+  }
+  res.status(404).json({ error: "Foto não encontrada" });
+});
+
 router.get("/chat/media/:filename", requireAuth, async (req: Request, res: Response): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const filename = path.basename(req.params.filename as string);
@@ -1702,29 +3318,70 @@ router.get("/chat/media/:filename", requireAuth, async (req: Request, res: Respo
     return;
   }
 
-  // Resolve the media file to its owning conversation and enforce sector access.
+  // MEDIA_DIR é compartilhado por 3 fluxos que salvam arquivo com
+  // writeFile/randomUUID direto (chat, avaliação de troca e ponto de RH),
+  // cada um com sua própria regra de "quem pode ver". Resolve o dono pela
+  // ordem: mensagem de chat (regra original, com acesso por conversa) ->
+  // avaliação de troca (Avaliação de Usados) -> comprovante de ponto (RH/DP).
+  // Sem dono reconhecido, nega por segurança (antes disto, TUDO exigia
+  // acesso a Atendimento e "dono = mensagem", o que quebrava as fotos de
+  // avaliação de troca e ia quebrar as de ponto: nenhuma das duas gera
+  // mensagem de chat, então ficavam sempre 403).
   const mediaUrl = `/api/chat/media/${filename}`;
   const [owningMsg] = await db
-    .select({ conversationId: messagesTable.conversationId })
+    .select({ conversationId: messagesTable.conversationId, metadata: messagesTable.metadata })
     .from(messagesTable)
     .where(eq(messagesTable.mediaUrl, mediaUrl))
     .limit(1);
 
-  if (!owningMsg) {
-    // File exists on disk but has no owning message — deny access to be safe.
-    res.status(403).json({ error: "Acesso negado" });
-    return;
-  }
+  let downloadFileName: string | undefined;
 
-  const [conv] = await db
-    .select()
-    .from(conversationsTable)
-    .where(and(eq(conversationsTable.id, owningMsg.conversationId), eq(conversationsTable.tenantId, tenantId)))
-    .limit(1);
+  if (owningMsg) {
+    if ((await checkChatAccess(req)) === "none") {
+      res.status(403).json({ error: "Acesso negado" });
+      return;
+    }
+    const [conv] = await db
+      .select()
+      .from(conversationsTable)
+      .where(and(eq(conversationsTable.id, owningMsg.conversationId), eq(conversationsTable.tenantId, tenantId)))
+      .limit(1);
+    if (!conv || !(await canAccessConversation(conv, req))) {
+      res.status(403).json({ error: "Acesso negado" });
+      return;
+    }
+    downloadFileName = owningMsg.metadata?.fileName;
+  } else {
+    const [tradeInMatch] = await db
+      .select({ id: tradeInEvaluationsTable.id })
+      .from(tradeInEvaluationsTable)
+      .where(and(
+        eq(tradeInEvaluationsTable.tenantId, tenantId),
+        sql`(${tradeInEvaluationsTable.documentPhotos} @> ${JSON.stringify([mediaUrl])}::jsonb OR ${tradeInEvaluationsTable.devicePhotos} @> ${JSON.stringify([mediaUrl])}::jsonb OR ${tradeInEvaluationsTable.paymentProofPhotos} @> ${JSON.stringify([mediaUrl])}::jsonb)`,
+      ))
+      .limit(1);
 
-  if (!conv || !(await canAccessConversation(conv, req))) {
-    res.status(403).json({ error: "Acesso negado" });
-    return;
+    if (tradeInMatch) {
+      if ((await checkModuleAccess(req, "avaliacao")) == null) {
+        res.status(403).json({ error: "Acesso negado" });
+        return;
+      }
+    } else {
+      const [pontoMatch] = await db
+        .select({ id: timeClockEntriesTable.id })
+        .from(timeClockEntriesTable)
+        .where(and(eq(timeClockEntriesTable.tenantId, tenantId), eq(timeClockEntriesTable.proofUrl, mediaUrl)))
+        .limit(1);
+      if (!pontoMatch) {
+        // Arquivo existe no disco mas não pertence a nada que reconhecemos — nega por segurança.
+        res.status(403).json({ error: "Acesso negado" });
+        return;
+      }
+      if ((await checkModuleAccess(req, "rh")) == null) {
+        res.status(403).json({ error: "Acesso negado" });
+        return;
+      }
+    }
   }
 
   const ext = path.extname(filename).slice(1).toLowerCase();
@@ -1744,6 +3401,14 @@ router.get("/chat/media/:filename", requireAuth, async (req: Request, res: Respo
   const contentType = mimeMap[ext] ?? "application/octet-stream";
   res.setHeader("Content-Type", contentType);
   res.setHeader("Cache-Control", "private, max-age=86400");
+
+  // ?download=1: força "salvar como" em vez de abrir inline — usado pelo
+  // botão de baixar de vídeo/áudio/doc na Central (sem isso, o navegador
+  // abre o arquivo na própria aba/visualizador nativo em vez de baixar).
+  if (req.query["download"] === "1") {
+    const downloadName = downloadFileName ?? filename;
+    res.setHeader("Content-Disposition", `attachment; filename="${downloadName.replace(/"/g, "")}"`);
+  }
 
   // Suporte a Range (leitura por partes): obrigatório para <video>/<audio>
   // em Safari/iOS e permite pular para o meio do vídeo em qualquer navegador.
@@ -1849,13 +3514,117 @@ router.post("/chat/webhook/whatsapp", async (req: Request, res: Response): Promi
   }
 });
 
+// POST — Agenda de Contatos do WhatsApp (pedido 25/09, fase 1): a ponte
+// (waConnection.ts → forwardContacts) encaminha os lotes de contatos que o
+// Baileys sincroniza. Mesma autenticação (X-Bridge-Secret) do webhook de
+// mensagens acima — só a linha Baileys manda contato, não existe caminho
+// pela Meta Cloud API.
+router.post("/chat/webhook/whatsapp-contacts", async (req: Request, res: Response): Promise<void> => {
+  if (!verifyLegacyBridgeSecret(req)) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  try {
+    await processInboundWAContacts(req.body as InboundWAContactPayload);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Erro ao processar contatos" });
+  }
+});
+
+// POST — histórico do WhatsApp encaminhado pelo bridge ao parear uma linha
+// com "Puxar histórico ao conectar" (pedido 16/10, Compras e ADM). Lotes de
+// até 1000 mensagens; ver lib/whatsappHistory.ts.
+router.post("/chat/webhook/whatsapp-history", async (req: Request, res: Response): Promise<void> => {
+  if (!verifyLegacyBridgeSecret(req)) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  try {
+    const result = await processWAHistoryBatch(req.body as WAHistoryPayload);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Erro ao importar histórico" });
+  }
+});
+
+// POST — conversas arquivadas no celular depois que o histórico já foi
+// gravado (pedido 17/10): saem de Ativos só as recém-importadas e intocadas.
+router.post("/chat/webhook/whatsapp-history-archived", async (req: Request, res: Response): Promise<void> => {
+  if (!verifyLegacyBridgeSecret(req)) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  try {
+    const result = await processWAHistoryArchived(req.body as WAHistoryArchivedPayload);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Erro ao processar arquivadas" });
+  }
+});
+
+// GET — lista/busca a Agenda de Contatos do WhatsApp (pedido 25/09, fase 1).
+// Busca por nome/pushName/telefone; filtra por linha opcionalmente. Sem
+// busca, os mais recentemente atualizados aparecem primeiro (contato que
+// acabou de mandar mensagem tende a ser o mais relevante).
+router.get("/chat/whatsapp-contacts", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+  const sessionKey = typeof req.query.sessionKey === "string" ? req.query.sessionKey : undefined;
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "60"), 10) || 60, 1), 200);
+  const offset = Math.max(parseInt(String(req.query.offset ?? "0"), 10) || 0, 0);
+
+  const conditions = [eq(whatsappContactsTable.tenantId, tenantId)];
+  if (sessionKey) conditions.push(eq(whatsappContactsTable.sessionKey, sessionKey));
+  if (search) {
+    const digits = search.replace(/\D/g, "");
+    conditions.push(
+      or(
+        ilike(whatsappContactsTable.name, `%${search}%`),
+        ilike(whatsappContactsTable.pushName, `%${search}%`),
+        digits ? ilike(whatsappContactsTable.phone, `%${digits}%`) : ilike(whatsappContactsTable.phone, `%${search}%`),
+      )!,
+    );
+  }
+
+  const [rows, [{ count }]] = await Promise.all([
+    db
+      .select({
+        id: whatsappContactsTable.id,
+        sessionKey: whatsappContactsTable.sessionKey,
+        phone: whatsappContactsTable.phone,
+        name: whatsappContactsTable.name,
+        pushName: whatsappContactsTable.pushName,
+        verifiedName: whatsappContactsTable.verifiedName,
+        avatarUrl: whatsappContactsTable.avatarUrl,
+        isBusiness: whatsappContactsTable.isBusiness,
+        updatedAt: whatsappContactsTable.updatedAt,
+        sessionDisplayName: whatsappSessionsTable.displayName,
+        sessionColor: whatsappSessionsTable.color,
+        sessionIcon: whatsappSessionsTable.icon,
+      })
+      .from(whatsappContactsTable)
+      .leftJoin(
+        whatsappSessionsTable,
+        and(eq(whatsappSessionsTable.tenantId, whatsappContactsTable.tenantId), eq(whatsappSessionsTable.sessionKey, whatsappContactsTable.sessionKey)),
+      )
+      .where(and(...conditions))
+      .orderBy(desc(whatsappContactsTable.updatedAt))
+      .limit(limit)
+      .offset(offset),
+    db.select({ count: sql<number>`count(*)::int` }).from(whatsappContactsTable).where(and(...conditions)),
+  ]);
+
+  res.json({ rows, total: count, limit, offset });
+});
+
 // ─── AI reply suggestion ──────────────────────────────────────────────────
 // Generates a Portuguese reply suggestion for the attendant to review before
 // sending. Context = linked CRM contact info + the last messages of the
 // conversation. Human always reviews/edits; nothing is sent automatically.
 // Fails clearly (503) when the AI provider is unavailable so the rest of the
 // attendance keeps working.
-router.post("/chat/conversations/:id/suggest-reply", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
+router.post("/chat/conversations/:id/suggest-reply", requireAuth, requireChatAccess(), requirePerm("usar_ia"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = parseInt(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id, 10);
 
@@ -1865,14 +3634,14 @@ router.post("/chat/conversations/:id/suggest-reply", requireAuth, requirePerm("u
 
   // Resolve the linked CRM contact (find by normalized phone, scoped to the
   // conversation's sector — same rule used by the CRM sync helpers).
-  const normalizedPhone = (conv.phone ?? "").replace(/\D/g, "");
+  const suggestPhoneVariants = phoneVariants(conv.phone);
   let contact: typeof crmContactsTable.$inferSelect | undefined;
-  if (normalizedPhone && !(conv.phone ?? "").includes("@g.us")) {
+  if (suggestPhoneVariants.length > 0 && !(conv.phone ?? "").includes("@g.us")) {
     const sectorCondition = conv.sectorId != null
       ? eq(crmContactsTable.sectorId, conv.sectorId)
       : isNull(crmContactsTable.sectorId);
     [contact] = await db.select().from(crmContactsTable)
-      .where(and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.isArchived, false), eq(crmContactsTable.phone, normalizedPhone), sectorCondition))
+      .where(and(eq(crmContactsTable.tenantId, tenantId), eq(crmContactsTable.isArchived, false), inArray(crmContactsTable.phone, suggestPhoneVariants), sectorCondition))
       .limit(1);
   }
 
@@ -1933,7 +3702,8 @@ router.post("/chat/conversations/:id/suggest-reply", requireAuth, requirePerm("u
   const userPrompt = `Informações do cliente:\n${infoLines.join("\n")}\n\nHistórico recente da conversa:\n${history}\n\nSugira a próxima resposta do atendente ao cliente.`;
 
   try {
-    const { openai } = await import("@workspace/integrations-openai-ai");
+    const { getOpenAiClientForTenant } = await import("../lib/aiClient");
+    const openai = await getOpenAiClientForTenant(tenantId);
     const completion = await openai.chat.completions.create({
       model: "gpt-4o",
       max_tokens: 8192,
@@ -1956,7 +3726,8 @@ router.post("/chat/conversations/:id/suggest-reply", requireAuth, requirePerm("u
 
 // ── AI text correction ───────────────────────────────────────────────────
 // Corrects spelling/grammar of a drafted message without changing its meaning.
-router.post("/chat/correct-text", requireAuth, requirePerm("usar_ia"), async (req, res): Promise<void> => {
+router.post("/chat/correct-text", requireAuth, requireChatAccess(), requirePerm("usar_ia"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
   if (!text) { res.status(400).json({ error: "Texto vazio" }); return; }
   if (text.length > 4000) { res.status(400).json({ error: "Texto muito longo" }); return; }
@@ -1971,7 +3742,8 @@ router.post("/chat/correct-text", requireAuth, requirePerm("usar_ia"), async (re
   ].join(" ");
 
   try {
-    const { openai } = await import("@workspace/integrations-openai-ai");
+    const { getOpenAiClientForTenant } = await import("../lib/aiClient");
+    const openai = await getOpenAiClientForTenant(tenantId);
     const completion = await openai.chat.completions.create({
       model: "gpt-4o",
       max_tokens: 4096,

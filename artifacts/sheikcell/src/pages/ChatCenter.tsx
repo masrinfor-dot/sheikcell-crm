@@ -1,18 +1,26 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, Fragment, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { api, can, type Conversation, type ChatMessage, type Sector, type ChatLabel, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage } from "@/lib/api";
+import { api, can, ApiError, type Conversation, type ChatMessage, type PinnedMessage, type Sector, type ChatLabel, type ChatSavedFilter, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata, type CatalogCoupon, type BroadcastDispatchLog, type BroadcastDispatchSummary, type CrmPurchase, type AttendanceLog } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { useActivityGuard } from "@/lib/activityGuard";
 import { useToast } from "@/hooks/use-toast";
+import { useClickOutside } from "@/hooks/useClickOutside";
 import {
-  Search, Plus, Send, RefreshCw, X, ChevronDown, SpellCheck,
+  Search, Plus, Send, RefreshCw, X, ChevronDown,
   MessageCircle, CheckCheck, AlertCircle, Tag, Filter,
   Smartphone, Instagram, UserCircle2, Circle,
   ArrowRightLeft, FileText, Volume2, Image, Video, Mic, Users, Paperclip, IdCard,
   Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX, Zap, CalendarClock, AlertTriangle,
-  Pin, PinOff, Reply, StickyNote, Star, StarOff, ChevronLeft
+  Pin, PinOff, Reply, Star, StarOff, ChevronLeft, ChevronRight,
+  MapPin, ShoppingBag, CreditCard, BarChart3, Ban, UserPlus, ExternalLink,
+  FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Download, Maximize2, Pencil,
+  MoreVertical, RotateCcw, Percent, FolderOpen, Flag, Lock, Forward, Clock,
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
+import ErpPurchasesBlock from "@/components/ErpPurchasesBlock";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
+import { MediaLightboxProvider, useMediaLightbox } from "@/components/MediaLightbox";
+import { PdfBubble } from "@/components/PdfPreview";
 
 const CHAT_EVENTS_URL = "/api/chat/events";
 
@@ -25,6 +33,22 @@ const STATUS_COLORS: Record<string, string> = {
 const STATUS_LABELS: Record<string, string> = {
   open: "Aberto", pending: "Pendente", resolved: "Resolvido",
 };
+
+// Prioridade manual do atendimento (pedido 11/09: diferenciar urgente / precisa
+// de retorno / pode aguardar, pra não perder atendimento novo/prioritário no
+// meio de conversas antigas). Sem prioridade definida = null, não entra aqui
+// e não afeta a ordenação (comportamento de sempre). "rank" define a ordem:
+// urgente primeiro, retorno depois, sem prioridade no meio, pode_esperar por
+// último — usado no sort da lista (ver PRIORITY_RANK mais abaixo).
+const PRIORITY_META: Record<string, { label: string; dot: string; border: string; badge: string }> = {
+  urgente: { label: "Urgente", dot: "bg-red-500", border: "border-l-4 border-l-red-500", badge: "bg-red-50 text-red-600 border-red-200" },
+  retorno: { label: "Precisa de retorno", dot: "bg-amber-500", border: "border-l-4 border-l-amber-500", badge: "bg-amber-50 text-amber-700 border-amber-200" },
+  pode_esperar: { label: "Pode aguardar", dot: "bg-slate-400", border: "border-l-4 border-l-slate-300", badge: "bg-slate-50 text-slate-600 border-slate-200" },
+};
+const PRIORITY_RANK: Record<string, number> = { urgente: 0, retorno: 1, pode_esperar: 3 };
+function priorityRank(p?: string | null): number {
+  return p ? (PRIORITY_RANK[p] ?? 2) : 2;
+}
 
 // Motivos pré-definidos para finalizar (resolver) um atendimento. "Outro"
 // libera um campo de texto para o vendedor detalhar.
@@ -73,12 +97,19 @@ function isRestrictedConv(c: Conversation): boolean {
 
 function isVisibleToMe(c: Conversation, user: User | null): boolean {
   if (!user) return false;
-  if (user.role === "admin") return true;
-  if (user.role === "supervisor") {
-    // Supervisor com setor: só o próprio setor + potenciais (sem setor = global).
-    if (user.sectorId == null || c.sectorId === user.sectorId) return true;
-    return conversationCategory(c) === "potenciais";
-  }
+  // Admin, supervisor e vendedor_chefe (direciona atendimentos) enxergam
+  // tudo, em qualquer setor, sem restrição — privacidade entre vendedores
+  // continua valendo só pra quem não pode direcionar.
+  if (user.role === "admin" || user.role === "supervisor" || user.role === "vendedor_chefe") return true;
+  // Fila restrita (pedido 10/09): só o que já é dele — nunca potencial/setor.
+  if (user.queueRestrictToAssigned) return c.assigneeId === user.id || (c.participants ?? []).some((p) => p.id === user.id);
+  // Fila do Central de Atendimento por ordem (pedido 14/09, chatQueueSingleTask):
+  // eventos em tempo real (SSE) de conversas do pool geral (potencial/pendente
+  // do setor, ainda sem dono) nunca entram direto na tela pra quem tem essa
+  // opção ligada — só o que já é dele. A "próxima da fila" (se já concluiu
+  // tudo que tinha) chega pela busca normal (fetchConvs), que já reflete a
+  // regra do servidor; isso só evita que o pool inteiro vaze em tempo real.
+  if (user.chatQueueSingleTask && c.assigneeId !== user.id) return (c.participants ?? []).some((p) => p.id === user.id);
   if (isRestrictedConv(c)) {
     if (c.assigneeId === user.id) return true;
     // Eventos SSE trazem a linha crua (sem participants); nesse caso não dá
@@ -108,10 +139,24 @@ function isGroupConv(c: { phone: string }) {
   return c.phone.includes("@g.us");
 }
 
+// Texto colado de Word/PDF/sites: normaliza aspas curvas, espaço sem quebra,
+// caracteres invisíveis e traços longos pra texto limpo — o WhatsApp não
+// renderiza esses caracteres de forma confiável em todos os aparelhos.
+// Preserva quebras de linha (só normaliza o fim de linha).
+function cleanPastedText(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/[–—]/g, "-")
+    .replace(/ /g, " ")
+    .replace(/[​-‍﻿]/g, "");
+}
+
 function channelIcon(ch: string, group?: boolean) {
-  if (group) return <Users className="w-3 h-3 text-green-600" />;
-  if (ch === "whatsapp") return <Smartphone className="w-3 h-3 text-green-500" />;
-  if (ch === "instagram") return <Instagram className="w-3 h-3 text-pink-500" />;
+  if (group) return <Users className="w-3 h-3 text-[#A1A1AA]" />;
+  if (ch === "whatsapp") return <Smartphone className="w-3 h-3 text-[#A1A1AA]" />;
+  if (ch === "instagram") return <Instagram className="w-3 h-3 text-[#A1A1AA]" />;
   return <MessageCircle className="w-3 h-3 text-muted-foreground" />;
 }
 
@@ -128,12 +173,48 @@ function msgTime(iso: string): string {
   return new Date(iso).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
 }
 
+// ─── Agrupamento de mensagens por dia (Hoje/Ontem) ──────────────────────────
+// Usa o mesmo fuso fixo que o resto do sistema já usa em toda parte (Rotinas,
+// Ponto etc. — ver routinesShared.ts no backend): hoje não existe fuso
+// configurável por loja no schema, então repetir "America/Sao_Paulo" aqui
+// mantém uma única fonte de verdade de "que dia é hoje" em vez de inventar
+// uma segunda regra só pro chat. Calculado no fuso do NEGÓCIO (não no fuso do
+// navegador de quem está vendo), pra que dois atendentes em fusos diferentes
+// vejam sempre a mesma separação de dia na mesma conversa.
+const TENANT_TIMEZONE = "America/Sao_Paulo";
+
+function msgDayKey(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-CA", { timeZone: TENANT_TIMEZONE });
+}
+
+function msgDayLabel(iso: string): string {
+  const key = msgDayKey(iso);
+  const now = new Date();
+  const todayKey = now.toLocaleDateString("en-CA", { timeZone: TENANT_TIMEZONE });
+  const yesterdayKey = new Date(now.getTime() - 86_400_000).toLocaleDateString("en-CA", { timeZone: TENANT_TIMEZONE });
+  if (key === todayKey) return "Hoje";
+  if (key === yesterdayKey) return "Ontem";
+  return new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", timeZone: TENANT_TIMEZONE });
+}
+
+// Quanto tempo a leva de disparo levou do começo ao fim ("tempo de envio" —
+// pedido 19/09). Leva em andamento (sem finishedAt) mostra travessão.
+function broadcastDuration(startIso: string, endIso: string | null): string {
+  if (!endIso) return "—";
+  const ms = new Date(endIso).getTime() - new Date(startIso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const totalSec = Math.round(ms / 1000);
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return min > 0 ? `${min}min ${sec}s` : `${sec}s`;
+}
+
 // ─── Avatar ────────────────────────────────────────────────────────────────
 function Avatar({ name, src, size = "md" }: { name: string; src?: string | null; size?: "sm" | "md" | "lg" }) {
   const [imgError, setImgError] = useState(false);
   const initials = name.split(" ").slice(0, 2).map((w) => w[0]).join("").toUpperCase();
-  const colors = ["bg-blue-500", "bg-purple-500", "bg-green-500", "bg-orange-500", "bg-pink-500", "bg-teal-500"];
-  const color = colors[name.charCodeAt(0) % colors.length];
+  // Neutro (out/2026): iniciais em cinza, sem arco-íris de cores
+  const color = "bg-[#E9E9EC] !text-[#3F3F46]";
   const sz = size === "sm" ? "w-8 h-8 text-xs" : size === "lg" ? "w-12 h-12 text-base" : "w-10 h-10 text-sm";
   if (src && !imgError) {
     return (
@@ -152,9 +233,41 @@ function Avatar({ name, src, size = "md" }: { name: string; src?: string | null;
   );
 }
 
+// Avatar do cabeçalho da conversa, clicável pra ver a foto de perfil em tela
+// cheia — reaproveita o mesmo MediaLightbox das fotos/vídeos de mensagem
+// (useMediaLightbox precisa estar dentro do próprio <MediaLightboxProvider>,
+// por isso vira um sub-componente em vez de só um onClick na função Avatar).
+function HeaderAvatar({ name, src }: { name: string; src?: string | null }) {
+  const openLightbox = useMediaLightbox();
+  if (!src) return <Avatar name={name} src={src} size="md" />;
+  return (
+    <button
+      type="button"
+      onClick={() => openLightbox({ type: "image", src })}
+      title="Ver foto de perfil"
+      data-testid="button-open-profile-photo"
+      className="rounded-full shrink-0 focus:outline-none focus:ring-2 focus:ring-primary/40"
+    >
+      <Avatar name={name} src={src} size="md" />
+    </button>
+  );
+}
+
 // Conexão de WhatsApp (número de atendimento) — usada para etiquetar de qual
 // número a conversa está chegando quando há mais de uma conexão pareada.
-type WaSessionInfo = { sessionKey: string; displayName: string | null; phoneNumber: string | null };
+// color/icon: identidade visual configurada em Administração › WhatsApp,
+// pra distinguir de qual número vem cada atendimento e evitar responder
+// pelo número errado.
+type WaSessionInfo = { sessionKey: string; displayName: string | null; phoneNumber: string | null; color?: string | null; icon?: string | null; canAccess?: boolean };
+
+// Canal de atendimento escolhido na barra acima das abas (pedido 25/10):
+// lembrado por navegador, pra cada pessoa voltar sempre no canal dela.
+const CHANNEL_STORAGE_KEY = "chat.channelFilter";
+function readStoredChannel(): string {
+  try { return localStorage.getItem(CHANNEL_STORAGE_KEY) ?? ""; } catch { return ""; }
+}
+
+const WA_SESSION_DEFAULT_COLOR = "#10b981"; // mesmo verde que era fixo antes, agora só o fallback
 
 function waSessionLabel(key: string, sessions: WaSessionInfo[]): string {
   const s = sessions.find((x) => x.sessionKey === key);
@@ -163,24 +276,77 @@ function waSessionLabel(key: string, sessions: WaSessionInfo[]): string {
   return key === "default" ? "Principal" : key;
 }
 
+function waSessionColor(key: string, sessions: WaSessionInfo[]): string {
+  return sessions.find((x) => x.sessionKey === key)?.color || WA_SESSION_DEFAULT_COLOR;
+}
+
+function waSessionIcon(key: string, sessions: WaSessionInfo[]): string | null {
+  return sessions.find((x) => x.sessionKey === key)?.icon || null;
+}
+
+function fmtBRL(v: string | number | null | undefined): string {
+  const n = typeof v === "number" ? v : parseFloat(v ?? "0");
+  return (Number.isFinite(n) ? n : 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+}
+function fmtShortDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" }).replace(".", "");
+}
+
+// Etapas do atendimento mostradas na faixa abaixo do cabeçalho da conversa
+// (novo design). Espelham as abas da lista — é a jornada real que o sistema
+// já controla (Potencial → fila → atendimento → finalizado).
+const ATTENDANCE_STEPS: { id: Category; label: string }[] = [
+  { id: "potenciais", label: "Potencial" },
+  { id: "pendentes", label: "Na fila" },
+  { id: "ativos", label: "Em atendimento" },
+  { id: "resolvidas", label: "Finalizado" },
+];
+
+// Tempo que o cliente está esperando resposta, em texto curto
+// ("7 min", "2 h", "3 d"). Usado nos chips "aguardando"/"atrasado".
+function waitLabel(minutes: number): string {
+  if (minutes < 1) return "agora";
+  if (minutes < 60) return `${minutes} min`;
+  if (minutes < 1440) return `${Math.floor(minutes / 60)} h`;
+  return `${Math.floor(minutes / 1440)} d`;
+}
+
+// Minutos desde a última mensagem do CLIENTE ainda sem resposta da equipe.
+// null = não está esperando (última mensagem foi nossa, conversa finalizada
+// ou sem data). Mesma regra do alerta de "sem resposta" (isOverdue).
+function waitingMinutes(c: Conversation, now: number): number | null {
+  if (c.status === "resolved" || c.status === "archived" || c.isArchived) return null;
+  if (c.lastMessageDirection !== "inbound" || !c.lastMessageAt) return null;
+  return Math.max(0, Math.floor((now - new Date(c.lastMessageAt).getTime()) / 60000));
+}
+
 // ─── Conversation list item ─────────────────────────────────────────────────
-function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, overdue }: { conv: Conversation; active: boolean; onClick: () => void; onTogglePin: () => void; sessionBadge?: string | null; overdue?: boolean }) {
+function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, sessionColor, sessionIcon, overdue, waitingMin, currentUserId, targetStoreName }: { conv: Conversation; active: boolean; onClick: () => void; onTogglePin: () => void; sessionBadge?: string | null; sessionColor?: string | null; sessionIcon?: string | null; overdue?: boolean; waitingMin?: number | null; currentUserId?: number; targetStoreName?: string | null }) {
+  const prio = conv.priority ? PRIORITY_META[conv.priority] : null;
+  const isGroup = isGroupConv(conv);
+  const kind = conv.isCommunity ? "Comunidade" : isGroup ? "Grupo" : null;
+  const labelsList = conv.labels ? conv.labels.split(",").map((l) => l.trim()).filter(Boolean) : [];
+  const preview = conv.lastMessage ?? "Sem mensagens";
+  const previewWithSender = conv.lastMessage && conv.lastMessageDirection === "outbound" && conv.lastMessageSenderName
+    ? `${conv.lastMessageSenderName.split(" ")[0]}: ${preview}`
+    : preview;
   return (
     <button
       onClick={onClick}
       data-testid={`conv-item-${conv.id}`}
-      className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-secondary/60 transition border-b border-border/50 ${active ? "bg-primary/5 border-l-2 border-l-primary" : ""}`}
+      className={`w-full flex items-start gap-3 px-3 py-3 text-left rounded-xl transition-colors duration-150 ${active ? "bg-[#EFEFF1]" : "hover:bg-[#F7F7F8]"}`}
     >
       <div className="relative shrink-0">
         <Avatar name={conv.name} src={conv.avatarUrl} size="md" />
         <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-white ${STATUS_COLORS[conv.status] ?? "bg-gray-300"}`} />
       </div>
       <div className="flex-1 min-w-0">
-        <div className="flex items-center justify-between gap-1 mb-0.5">
-          <span className="font-semibold text-sm text-foreground truncate flex items-center gap-1">
+        <div className="flex items-center justify-between gap-1.5">
+          <span className="font-bold text-sm text-foreground truncate flex items-center gap-1.5">
+            {prio && <span className={`w-2 h-2 rounded-full shrink-0 ${prio.dot}`} title={prio.label} data-testid={`priority-dot-${conv.id}`} />}
             {conv.name}
           </span>
-          <span className="flex items-center gap-1 shrink-0">
+          <span className="flex items-center gap-1.5 shrink-0">
             <span
               role="button"
               tabIndex={0}
@@ -192,47 +358,65 @@ function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, overdue }:
             >
               {conv.pinned
                 ? <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500" data-testid={`favorite-indicator-${conv.id}`} />
-                : <Star className="w-3.5 h-3.5 text-muted-foreground/50 hover:text-amber-500" />}
+                : <Star className="w-3.5 h-3.5 text-muted-foreground/40 hover:text-amber-500" />}
             </span>
-            <span className="text-xs text-muted-foreground">{timeAgo(conv.lastMessageAt)}</span>
+            <span className="text-[11px] text-muted-foreground font-mono tabular-nums">{timeAgo(conv.lastMessageAt)}</span>
           </span>
         </div>
-        <div className="flex items-center justify-between gap-1">
-          <p className="text-xs text-muted-foreground truncate flex-1">{conv.lastMessage ?? "Sem mensagens"}</p>
+        <div className="flex items-center justify-between gap-1.5 mt-0.5">
+          <p className="text-[13px] text-muted-foreground truncate flex-1">{previewWithSender}</p>
           <div className="flex items-center gap-1 shrink-0">
-            {overdue && (
-              <span className="text-[10px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full font-bold animate-pulse" title="Cliente aguardando resposta há mais tempo que o limite">
-                ⚠ sem resposta
-              </span>
-            )}
-            {sessionBadge && (
-              <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full font-semibold truncate max-w-[90px]" title={`Recebida pelo número: ${sessionBadge}`}>
-                {sessionBadge}
-              </span>
-            )}
-            {channelIcon(conv.channel, isGroupConv(conv))}
+            {channelIcon(conv.channel, isGroup)}
             {conv.unreadCount > 0 && (
-              <span className="bg-green-500 text-white text-xs rounded-full px-1.5 py-0.5 min-w-[18px] text-center font-bold">
+              <span className="bg-foreground text-white text-[11px] rounded-full px-1.5 h-5 min-w-[20px] inline-flex items-center justify-center font-bold">
                 {conv.unreadCount > 99 ? "99+" : conv.unreadCount}
               </span>
             )}
           </div>
         </div>
-        {conv.assignee && (
-          <div className="flex items-center gap-1 mt-1">
-            <UserCircle2 className="w-3 h-3 text-indigo-500 shrink-0" />
-            <span className="text-[10px] text-indigo-600 font-medium truncate" data-testid={`conv-assignee-${conv.id}`} title={`Atendido por ${conv.assignee.name}`}>
-              {conv.assignee.name}
+        <div className="flex gap-1 mt-1.5 flex-wrap">
+          {targetStoreName && (
+            <span className="shk-chip shk-chip-neutral" title="Loja escolhida pelo robô" data-testid={`chip-target-store-${conv.id}`}>
+              <MapPin className="w-3 h-3" />{targetStoreName}
             </span>
-          </div>
-        )}
-        {conv.labels && (
-          <div className="flex gap-1 mt-1 flex-wrap">
-            {conv.labels.split(",").map((l) => l.trim()).filter(Boolean).slice(0, 2).map((label) => (
-              <span key={label} className="text-xs bg-primary/10 text-primary px-1.5 py-0.5 rounded-full">{label}</span>
-            ))}
-          </div>
-        )}
+          )}
+          {kind && (
+            <span className={`shk-chip ${conv.isCommunity ? "shk-chip-community" : "shk-chip-group"}`}>
+              <Users className="w-3 h-3" />{kind}
+            </span>
+          )}
+          {waitingMin != null && (
+            overdue ? (
+              <span className="shk-chip shk-chip-late" title="Cliente aguardando resposta há mais tempo que o limite" data-testid={`chip-overdue-${conv.id}`}>
+                <AlertTriangle className="w-3 h-3" />atrasado {waitLabel(waitingMin)}
+              </span>
+            ) : (
+              <span className="shk-chip shk-chip-wait" title="Cliente aguardando resposta" data-testid={`chip-waiting-${conv.id}`}>
+                <Clock className="w-3 h-3" />aguardando {waitLabel(waitingMin)}
+              </span>
+            )
+          )}
+          {prio && (
+            <span className={`shk-chip border ${prio.badge}`}>{prio.label}</span>
+          )}
+          {/* Responsável: só quando NÃO é você (na sua própria fila seria
+              repetido em todo item) */}
+          {conv.assignee && conv.assignee.id !== currentUserId && (
+            <span className="shk-chip shk-chip-outline max-w-[130px]" data-testid={`conv-assignee-${conv.id}`} title={`Atendido por ${conv.assignee.name}`}>
+              <UserCircle2 className="w-3 h-3 shrink-0" /><span className="truncate">{conv.assignee.name}</span>
+            </span>
+          )}
+          {sessionBadge && (
+            <span className="shk-chip shk-chip-outline max-w-[120px]" title={`Recebida pelo número: ${sessionBadge}`}>
+              <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: sessionColor ?? WA_SESSION_DEFAULT_COLOR }} />
+              {sessionIcon && <span>{sessionIcon}</span>}
+              <span className="truncate">{sessionBadge}</span>
+            </span>
+          )}
+          {labelsList.slice(0, 2).map((label) => (
+            <span key={label} className="shk-chip shk-chip-primary max-w-[110px]"><span className="truncate">{label}</span></span>
+          ))}
+        </div>
       </div>
     </button>
   );
@@ -249,11 +433,58 @@ function MediaContent({ msg }: { msg: ChatMessage }) {
   return <MediaContentRest msg={msg} />;
 }
 
+/** Mensagem de mídia indisponível (arquivo apagado/movido no servidor, ou
+ * formato que o navegador não consegue tocar) — mostra erro em vez de um
+ * player quebrado/mudo, com um jeito de tentar abrir/baixar mesmo assim. */
+function MediaUnavailable({ mediaUrl, label }: { mediaUrl: string; label: string }) {
+  return (
+    <div className="flex items-center gap-2 bg-red-50 rounded-xl px-3 py-2 min-w-[200px]">
+      <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />
+      <div className="min-w-0">
+        <p className="text-xs text-red-700">{label}</p>
+        <a href={`${mediaUrl}?download=1`} download className="text-[11px] font-semibold text-primary underline">
+          Tentar baixar mesmo assim
+        </a>
+      </div>
+    </div>
+  );
+}
+
+// Tenta de novo (1x, depois de uma pausa) antes de marcar a mídia como
+// indisponível pra sempre — cobre uma falha bem real: o áudio/vídeo carrega
+// bem no meio de um redeploy do servidor (o proxy troca de container por
+// alguns segundos) e o navegador dá "onError" nesse instante exato, mesmo o
+// arquivo estando 100% ok no disco. Sem isso, esse blip de alguns segundos
+// marcava a mídia como "indisponível no servidor" até a pessoa dar F5 na
+// tela (ver checklist 09/09: aconteceu 2x seguidas bem na hora de um
+// redeploy). O "key" com o número da tentativa força o <audio>/<video> a
+// recarregar de verdade (só troca a src não recarrega sozinho).
+function useMediaRetry(mediaUrl: string | null | undefined) {
+  const [attempt, setAttempt] = useState(0);
+  const [failed, setFailed] = useState(false);
+  const retryKey = useRef<number | null>(null);
+  const onError = () => {
+    if (attempt < 1) {
+      if (retryKey.current != null) return; // já tem uma retentativa agendada
+      retryKey.current = window.setTimeout(() => {
+        retryKey.current = null;
+        setAttempt((a) => a + 1);
+      }, 1500);
+    } else {
+      setFailed(true);
+    }
+  };
+  useEffect(() => () => { if (retryKey.current != null) window.clearTimeout(retryKey.current); }, []);
+  const src = mediaUrl ? (attempt === 0 ? mediaUrl : `${mediaUrl}${mediaUrl.includes("?") ? "&" : "?"}retry=${attempt}`) : undefined;
+  return { src, elementKey: attempt, onError, failed };
+}
+
 /** Áudio com botão de transcrição (Whisper). */
 function AudioBubble({ msg }: { msg: ChatMessage }) {
   const [local, setLocal] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const { src, elementKey, onError, failed } = useMediaRetry(msg.mediaUrl);
   const transcript = msg.transcript ?? local;
 
   const handleTranscribe = async () => {
@@ -269,13 +500,21 @@ function AudioBubble({ msg }: { msg: ChatMessage }) {
     }
   };
 
+  if (failed && msg.mediaUrl) {
+    return <MediaUnavailable mediaUrl={msg.mediaUrl} label="Áudio indisponível no servidor" />;
+  }
+
   return (
     <div className="mb-1">
       <div className="flex items-center gap-2 bg-black/5 rounded-xl px-3 py-2 min-w-[200px]">
         <Volume2 className="w-4 h-4 text-primary shrink-0" />
-        <audio controls className="flex-1 h-8 max-w-[200px]" style={{ minWidth: 0 }}>
-          <source src={msg.mediaUrl ?? undefined} />
+        <audio key={elementKey} controls className="flex-1 h-8 max-w-[200px]" style={{ minWidth: 0 }} onError={onError}>
+          <source src={src} />
         </audio>
+        <a href={`${msg.mediaUrl}?download=1`} download title="Baixar áudio"
+          className="text-gray-500 hover:text-primary shrink-0">
+          <Download className="w-3.5 h-3.5" />
+        </a>
       </div>
       {transcript ? (
         <p className="text-xs mt-1 bg-black/5 rounded-lg px-2.5 py-1.5 whitespace-pre-wrap" data-testid={`text-transcript-${msg.id}`}>
@@ -292,19 +531,79 @@ function AudioBubble({ msg }: { msg: ChatMessage }) {
   );
 }
 
+/** Vídeo com fallback de erro — cobre tanto arquivo indisponível no servidor
+ * quanto formato que o navegador não consegue tocar (ex.: .mov de iPhone em
+ * alguns navegadores): nesses casos o <video> dispara onError, e mostramos
+ * baixar/abrir em vez de um player preto travado. */
+function VideoBubble({ msg }: { msg: ChatMessage }) {
+  const { src, elementKey, onError, failed } = useMediaRetry(msg.mediaUrl);
+  const openLightbox = useMediaLightbox();
+  if (!msg.mediaUrl) return null;
+  const url = msg.mediaUrl;
+
+  if (failed) {
+    return <MediaUnavailable mediaUrl={url} label="Não foi possível tocar este vídeo no navegador" />;
+  }
+
+  return (
+    <div className="mb-1">
+      <div className="relative w-fit">
+        <video
+          key={elementKey}
+          controls
+          preload="metadata"
+          className="max-w-full rounded-xl max-h-64 bg-black"
+          style={{ minWidth: 200 }}
+          onError={onError}
+        >
+          <source src={src} />
+        </video>
+        <button
+          onClick={() => openLightbox({ type: "video", src: url, mimeType: msg.metadata?.mimeType })}
+          title="Expandir vídeo"
+          data-testid={`button-expand-video-${msg.id}`}
+          className="absolute top-1.5 right-1.5 bg-black/50 hover:bg-black/70 text-white rounded-full p-1"
+        >
+          <Maximize2 className="w-3.5 h-3.5" />
+        </button>
+      </div>
+      <a href={`${url}?download=1`} download
+        className="flex items-center gap-1 text-[11px] font-semibold text-primary underline mt-0.5 w-fit">
+        <Download className="w-3 h-3" /> Baixar vídeo
+      </a>
+    </div>
+  );
+}
+
+// Mensagem type "doc" cujo arquivo é uma foto de verdade (cliente mandou
+// pelo botão "Documento" do WhatsApp em vez de "Foto" — comum em iPhone, e
+// também acontece pela API oficial da Meta). O WhatsApp classifica pela
+// forma de anexar, não pelo conteúdo real — a extensão salva já é a real
+// (.jpg/.png/…, ver saveMedia), então dá pra reconhecer e mostrar como foto
+// em vez do ícone genérico de arquivo. Usado tanto no balão da conversa
+// quanto no banco de arquivos compartilhados, pra não ficar inconsistente
+// (foto certa numa tela, "documento" errado na outra).
+function isImageDocMessage(msg: ChatMessage): boolean {
+  if (msg.type !== "doc" || !msg.mediaUrl) return false;
+  const filename = msg.metadata?.fileName ?? msg.mediaUrl.split("/").pop() ?? "";
+  return (msg.metadata?.mimeType?.startsWith("image/") ?? false) || /\.(jpe?g|png|gif|webp)$/i.test(filename);
+}
+
 function MediaContentRest({ msg }: { msg: ChatMessage }) {
+  const openLightbox = useMediaLightbox();
   if (!msg.mediaUrl) return null;
 
-  if (msg.type === "image") {
+  if (msg.type === "image" || isImageDocMessage(msg)) {
+    const url = msg.mediaUrl;
     return (
-      <a href={msg.mediaUrl} target="_blank" rel="noopener noreferrer" className="block mb-1">
+      <button onClick={() => openLightbox({ type: "image", src: url })} className="block mb-1" data-testid={`button-open-image-${msg.id}`}>
         <img
-          src={msg.mediaUrl}
+          src={url}
           alt="Foto"
           className="max-w-full rounded-xl object-cover max-h-64 cursor-pointer hover:opacity-90 transition"
           onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
         />
-      </a>
+      </button>
     );
   }
 
@@ -320,20 +619,25 @@ function MediaContentRest({ msg }: { msg: ChatMessage }) {
   }
 
   if (msg.type === "video") {
-    return (
-      <video
-        controls
-        preload="metadata"
-        className="max-w-full rounded-xl max-h-64 mb-1 bg-black"
-        style={{ minWidth: 200 }}
-      >
-        <source src={msg.mediaUrl} />
-      </video>
-    );
+    return <VideoBubble msg={msg} />;
   }
 
   if (msg.type === "doc") {
-    const filename = msg.mediaUrl.split("/").pop() ?? "documento";
+    const filename = msg.metadata?.fileName ?? msg.mediaUrl.split("/").pop() ?? "documento";
+    const size = formatFileSize(msg.metadata?.fileSize);
+    // isImageDocMessage já filtrou os "doc" que são foto de verdade (ver
+    // acima) — chegando aqui, é documento mesmo (PDF ou outro).
+    const isPdf = msg.metadata?.mimeType?.includes("pdf") || filename.toLowerCase().endsWith(".pdf");
+    if (isPdf) {
+      return (
+        <PdfBubble
+          src={msg.mediaUrl}
+          fileName={filename}
+          sizeLabel={size || undefined}
+          icon={<DocIcon mimeType={msg.metadata?.mimeType} fileName={filename} />}
+        />
+      );
+    }
     return (
       <a
         href={msg.mediaUrl}
@@ -342,13 +646,138 @@ function MediaContentRest({ msg }: { msg: ChatMessage }) {
         download
         className="flex items-center gap-2 mb-1 bg-black/5 rounded-xl px-3 py-2 hover:bg-black/10 transition"
       >
-        <FileText className="w-5 h-5 text-primary shrink-0" />
-        <span className="text-xs text-gray-700 break-all">{filename}</span>
+        <DocIcon mimeType={msg.metadata?.mimeType} fileName={filename} />
+        <div className="min-w-0">
+          <p className="text-xs text-gray-700 break-all">{filename}</p>
+          {size && <p className="text-[10px] text-gray-500">{size}</p>}
+        </div>
       </a>
     );
   }
 
   return null;
+}
+
+// ─── Ícone/tamanho de documento ──────────────────────────────────────────
+// Nome/tamanho reais vêm de metadata (capturados no envio/recebimento); sem
+// isso (mensagens antigas) cai no nome de arquivo do mediaUrl, como antes.
+function formatFileSize(bytes?: number): string {
+  if (!bytes || bytes <= 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// Miniatura de foto no banco de arquivos compartilhados — precisa do próprio
+// useMediaLightbox() (ver comentário na declaração do hook), por isso é um
+// componente à parte, renderizado dentro do <MediaLightboxProvider> do modal.
+function SharedFileImageThumb({ msg }: { msg: ChatMessage }) {
+  const openLightbox = useMediaLightbox();
+  if (!msg.mediaUrl) return null;
+  return (
+    <button type="button" onClick={() => openLightbox({ type: "image", src: msg.mediaUrl! })}
+      data-testid={`button-shared-file-image-${msg.id}`}
+      className="aspect-square rounded-lg overflow-hidden border border-border hover:opacity-80 transition">
+      <img src={msg.mediaUrl} alt="Foto" className="w-full h-full object-cover" />
+    </button>
+  );
+}
+
+function DocIcon({ mimeType, fileName }: { mimeType?: string; fileName?: string }) {
+  const ext = (fileName?.split(".").pop() || "").toLowerCase();
+  if (mimeType?.includes("pdf") || ext === "pdf") return <FileText className="w-5 h-5 text-red-500 shrink-0" />;
+  if (mimeType?.includes("word") || ["doc", "docx"].includes(ext)) return <FileText className="w-5 h-5 text-blue-600 shrink-0" />;
+  if (mimeType?.includes("sheet") || mimeType?.includes("excel") || ["xls", "xlsx", "csv"].includes(ext)) return <FileSpreadsheet className="w-5 h-5 text-emerald-600 shrink-0" />;
+  if (mimeType?.includes("zip") || mimeType?.includes("compressed") || ["zip", "rar", "7z"].includes(ext)) return <FileArchive className="w-5 h-5 text-amber-600 shrink-0" />;
+  return <FileGeneric className="w-5 h-5 text-primary shrink-0" />;
+}
+
+// ─── Preview de link (OG tags) ───────────────────────────────────────────
+// Buscado sob demanda pelo backend só pra mensagens de texto da própria
+// equipe (não pra mensagens recebidas de clientes — ver linkPreview.ts) e
+// chega de forma assíncrona via SSE, então pode não estar presente ainda
+// mesmo numa mensagem que tem link (sem loading spinner, aparece quando chegar).
+function LinkPreviewCard({ preview }: { preview: NonNullable<MessageMetadata["linkPreview"]> }) {
+  let hostname = "";
+  try { hostname = new URL(preview.url).hostname.replace(/^www\./, ""); } catch { /* URL inválida, ignora */ }
+  return (
+    <a
+      href={preview.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="block mt-1 rounded-xl border border-black/10 overflow-hidden bg-black/5 hover:bg-black/10 transition max-w-xs"
+    >
+      {preview.image && (
+        <img
+          src={preview.image}
+          alt=""
+          className="w-full max-h-40 object-cover"
+          onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+        />
+      )}
+      <div className="px-3 py-2">
+        <div className="flex items-center gap-1 text-[10px] text-gray-500 mb-0.5">
+          <Globe className="w-3 h-3 shrink-0" />
+          <span className="truncate">{preview.siteName || hostname}</span>
+        </div>
+        {preview.title && <p className="text-xs font-semibold text-gray-800 line-clamp-2">{preview.title}</p>}
+        {preview.description && <p className="text-[11px] text-gray-600 line-clamp-2 mt-0.5">{preview.description}</p>}
+      </div>
+    </a>
+  );
+}
+
+// ─── Shared contact card ─────────────────────────────────────────────────
+// O backend grava contato compartilhado do WhatsApp como texto formatado
+// ("👤 Contato compartilhado: Nome — Telefone", ou uma lista com o prefixo
+// "👤 Contatos compartilhados:\n") pra manter busca/prévia/notificação
+// funcionando sem mudar o schema — aqui só reconstituímos os campos pra
+// desenhar o cartão.
+type SharedContact = { name: string; phone: string | null };
+const CONTACT_SINGLE_PREFIX = "👤 Contato compartilhado: ";
+const CONTACT_MULTI_PREFIX = "👤 Contatos compartilhados:\n";
+
+function parseContactLine(line: string): SharedContact {
+  const idx = line.lastIndexOf(" — ");
+  return idx === -1
+    ? { name: line.trim(), phone: null }
+    : { name: line.slice(0, idx).trim(), phone: line.slice(idx + 3).trim() || null };
+}
+
+function parseSharedContacts(content: string): SharedContact[] | null {
+  if (content.startsWith(CONTACT_MULTI_PREFIX)) {
+    const lines = content.slice(CONTACT_MULTI_PREFIX.length).split("\n").map((l) => l.trim()).filter(Boolean);
+    return lines.length ? lines.map(parseContactLine) : null;
+  }
+  if (content.startsWith(CONTACT_SINGLE_PREFIX)) {
+    return [parseContactLine(content.slice(CONTACT_SINGLE_PREFIX.length))];
+  }
+  return null;
+}
+
+function ContactCard({ contact, onStart }: { contact: SharedContact; onStart?: (c: SharedContact) => void }) {
+  return (
+    <div className="flex items-center gap-2.5 bg-black/5 rounded-xl px-3 py-2.5 min-w-[220px] max-w-full mb-1">
+      <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+        <UserCircle2 className="w-6 h-6 text-primary" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold text-gray-800 truncate">{contact.name}</p>
+        {contact.phone && <p className="text-xs text-gray-500 truncate">{contact.phone}</p>}
+      </div>
+      {contact.phone && onStart && (
+        <button
+          type="button"
+          onClick={() => onStart(contact)}
+          title="Iniciar atendimento com este contato"
+          data-testid={`button-start-shared-contact-${contact.phone}`}
+          className="shrink-0 p-2 rounded-full text-primary hover:bg-primary/10 transition"
+        >
+          <MessageCircle className="w-4 h-4" />
+        </button>
+      )}
+    </div>
+  );
 }
 
 // Known placeholder labels that are not captions
@@ -369,17 +798,199 @@ function extractMediaCaption(content: string): string {
   return isMediaPlaceholder(content) ? "" : content.trim();
 }
 
+// ─── Poll card ───────────────────────────────────────────────────────────
+// Backend grava enquete como texto formatado ("📊 Enquete: Pergunta\n•
+// opção 1\n• opção 2") pra manter busca/prévia funcionando — aqui só
+// reconstituímos os campos pra desenhar o cartão.
+const POLL_PREFIX = "📊 Enquete: ";
+function parsePoll(content: string): { question: string; options: string[] } | null {
+  if (!content.startsWith(POLL_PREFIX)) return null;
+  const lines = content.slice(POLL_PREFIX.length).split("\n");
+  const question = lines[0]?.trim() ?? "";
+  const options = lines.slice(1)
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith("• "))
+    .map((l) => l.slice(2).trim());
+  return { question, options };
+}
+
+function PollCard({ content }: { content: string }) {
+  const poll = parsePoll(content);
+  if (!poll) return <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">{content}</p>;
+  return (
+    <div className="min-w-[220px] max-w-full mb-1">
+      <div className="flex items-center gap-1.5 mb-1.5">
+        <BarChart3 className="w-4 h-4 text-primary shrink-0" />
+        <p className="text-sm font-semibold text-gray-800">{poll.question}</p>
+      </div>
+      {poll.options.length > 0 && (
+        <div className="flex flex-col gap-1">
+          {poll.options.map((o, i) => (
+            <div key={i} className="flex items-center gap-2 bg-black/5 rounded-lg px-2.5 py-1.5">
+              <Circle className="w-3 h-3 text-gray-400 shrink-0" />
+              <span className="text-sm text-gray-700">{o}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Location card ───────────────────────────────────────────────────────
+function parseLocation(content: string): { label: string; link: string | null } {
+  const nl = content.indexOf("\n");
+  const firstLine = nl === -1 ? content : content.slice(0, nl);
+  const link = nl === -1 ? null : content.slice(nl + 1).trim() || null;
+  const label = firstLine.replace(/^📍\s*/, "").replace(/^Localização(\s*em tempo real compartilhada)?:?\s*/, "").trim();
+  return { label, link };
+}
+
+function LocationCard({ content }: { content: string }) {
+  const { label, link } = parseLocation(content);
+  return (
+    <a
+      href={link ?? undefined}
+      target={link ? "_blank" : undefined}
+      rel={link ? "noopener noreferrer" : undefined}
+      className={`flex items-center gap-2.5 bg-black/5 rounded-xl px-3 py-2.5 min-w-[220px] max-w-full mb-1 ${link ? "hover:bg-black/10 transition" : ""}`}
+    >
+      <div className="w-9 h-9 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+        <MapPin className="w-5 h-5 text-primary" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold text-gray-800">{label || "Localização compartilhada"}</p>
+        {link && <p className="text-xs text-primary flex items-center gap-0.5">Abrir no mapa <ExternalLink className="w-3 h-3" /></p>}
+      </div>
+    </a>
+  );
+}
+
+// ─── Catalog product card ────────────────────────────────────────────────
+function parseProduct(content: string): { title: string; description: string; url: string | null } {
+  const lines = content.split("\n").filter((l) => l.trim().length > 0);
+  const title = (lines[0] ?? "").replace(/^🛍️\s*/, "").trim();
+  const rest = lines.slice(1);
+  const last = rest[rest.length - 1] ?? "";
+  const hasUrl = /^https?:\/\//.test(last.trim());
+  const url = hasUrl ? last.trim() : null;
+  const description = (hasUrl ? rest.slice(0, -1) : rest).join("\n").trim();
+  return { title, description, url };
+}
+
+function ProductCard({ content }: { content: string }) {
+  const { title, description, url } = parseProduct(content);
+  return (
+    <div className="min-w-[220px] max-w-full mb-1 bg-black/5 rounded-xl px-3 py-2.5">
+      <div className="flex items-center gap-2">
+        <div className="w-9 h-9 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+          <ShoppingBag className="w-5 h-5 text-primary" />
+        </div>
+        <p className="text-sm font-semibold text-gray-800">{title}</p>
+      </div>
+      {description && <p className="text-xs text-gray-600 mt-1.5 whitespace-pre-wrap break-words">{description}</p>}
+      {url && (
+        <a href={url} target="_blank" rel="noopener noreferrer" className="text-xs text-primary flex items-center gap-0.5 mt-1.5">
+          Ver produto <ExternalLink className="w-3 h-3" />
+        </a>
+      )}
+    </div>
+  );
+}
+
+// ─── Simple icon+text cards (pagamento, convite de grupo) ────────────────
+// Conteúdo já vem totalmente descritivo do backend — só precisa de um
+// cartão visual em vez do balão de texto genérico.
+function IconTextCard({ icon: Icon, content }: { icon: typeof CreditCard; content: string }) {
+  return (
+    <div className="flex items-center gap-2.5 bg-black/5 rounded-xl px-3 py-2.5 min-w-[200px] max-w-full mb-1">
+      <div className="w-9 h-9 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+        <Icon className="w-5 h-5 text-primary" />
+      </div>
+      <p className="text-sm text-gray-800 whitespace-pre-wrap break-words flex-1">{content}</p>
+    </div>
+  );
+}
+
+// ─── Linkify: deixa URLs dentro do texto da mensagem clicáveis (pedido 17/09:
+// "abrir link direto nos atendimentos") ─────────────────────────────────────
+// Cobre http(s):// e também "www.algo.com" sem protocolo (comum em mensagem
+// de cliente). Não altera o texto em si, só troca o trecho da URL por <a>;
+// o resto do texto continua igual (mesma quebra de linha, mesmo estilo).
+const URL_REGEX = /(https?:\/\/[^\s<]+[^\s<.,;:!?)"'\]]|www\.[^\s<]+[^\s<.,;:!?)"'\]])/gi;
+function linkifyText(text: string): ReactNode[] {
+  // Regex com grupo de captura: String.split devolve o texto alternado com
+  // os trechos capturados (índice ímpar = URL casada), sem precisar re-testar.
+  const parts = text.split(URL_REGEX);
+  if (parts.length <= 1) return [text];
+  return parts.map((part, i) => {
+    if (i % 2 === 0) return part ? <Fragment key={i}>{part}</Fragment> : null;
+    const href = part.startsWith("http") ? part : `https://${part}`;
+    return (
+      <a
+        key={i}
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="underline text-primary break-all hover:opacity-80"
+      >
+        {part}
+      </a>
+    );
+  });
+}
+
 // ─── Message bubble ─────────────────────────────────────────────────────────
-function MsgBubble({ msg, onReply, highlighted, onJumpTo }: {
+function MsgBubble({ msg, onReply, onForward, highlighted, onJumpTo, isGroup, onStartConversation, onReplyPrivately, currentUserId, isModerator, onEdit, onDelete, isPinned, onPin, onUnpin }: {
   msg: ChatMessage;
   onReply: (m: ChatMessage) => void;
+  onForward: (m: ChatMessage) => void;
   highlighted: boolean;
   onJumpTo: (id: number) => void;
+  isGroup: boolean;
+  onStartConversation?: (c: { name: string; phone: string | null }) => void;
+  // "Responder em particular" (pedido 14/09): igual ao WhatsApp, sai da
+  // mensagem do grupo direto pra conversa individual com quem mandou —
+  // diferente de onReply, que responde (com citação) DENTRO do próprio
+  // grupo. Só aparece pra mensagem recebida (!out) num grupo, com telefone
+  // do participante disponível. Ver comentário em replyPrivately.
+  onReplyPrivately?: (m: ChatMessage) => void;
+  currentUserId?: number;
+  isModerator?: boolean;
+  onEdit: (id: number, content: string) => Promise<void>;
+  onDelete: (id: number) => Promise<void>;
+  isPinned?: boolean;
+  onPin?: (id: number) => void;
+  onUnpin?: (id: number) => void;
 }) {
   const out = msg.direction === "outbound";
+  // Editar/apagar (igual WhatsApp): só quem enviou, ou admin/supervisor —
+  // e só o registro aqui dentro do sistema (ver comentário em chat.ts).
+  const canManage = out && !msg.deletedAt && ((currentUserId != null && msg.senderId === currentUserId) || !!isModerator);
+  const canEditText = canManage && msg.type === "text";
+  const [editing, setEditing] = useState(false);
+  const [editDraft, setEditDraft] = useState(msg.content);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const startEdit = () => { setEditDraft(msg.content); setEditing(true); };
+  const saveEdit = async () => {
+    const trimmed = editDraft.trim();
+    if (!trimmed) return;
+    if (trimmed === msg.content) { setEditing(false); return; }
+    setSavingEdit(true);
+    try {
+      await onEdit(msg.id, trimmed);
+      setEditing(false);
+    } catch { /* toast já disparado pelo pai; mantém aberto pra tentar de novo */ }
+    finally { setSavingEdit(false); }
+  };
+  const confirmDelete = () => {
+    if (!window.confirm("Apagar esta mensagem? Ela some do seu histórico e vira \"mensagem apagada\" pra quem já estiver na conversa.")) return;
+    onDelete(msg.id).catch(() => {});
+  };
   const isMedia = msg.type === "image" || msg.type === "video" || msg.type === "audio" || msg.type === "doc" || msg.type === "sticker";
   const mediaCaption = isMedia ? extractMediaCaption(msg.content) : "";
   const showCaption = isMedia && msg.mediaUrl && mediaCaption.length > 0;
+  const sharedContacts = msg.type === "contact" ? parseSharedContacts(msg.content) : null;
 
   // Nota interna: nunca vai pro cliente — estilo bem diferente das mensagens
   // (centralizada, âmbar) pra nunca confundir uma com a outra.
@@ -387,18 +998,15 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo }: {
     return (
       <div
         id={`chat-msg-${msg.id}`}
-        className={`flex justify-center mb-1 transition-colors duration-500 rounded-lg ${highlighted ? "bg-amber-200/60" : ""}`}
+        className={`flex justify-center my-2 transition-colors duration-500 rounded-lg ${highlighted ? "bg-amber-200/60" : ""}`}
       >
-        <div className="max-w-[85%] rounded-xl px-3 py-2 shadow-sm bg-amber-50 border border-amber-300" data-testid={`note-${msg.id}`}>
-          <div className="flex items-center gap-1.5 mb-1">
-            <StickyNote className="w-3.5 h-3.5 text-amber-700 shrink-0" />
-            <span className="text-xs font-semibold text-amber-800">{msg.senderName ?? "Equipe"}</span>
-            <span className="text-[10px] text-amber-700/70">· nota interna</span>
+        <div className="w-full max-w-[560px] rounded-xl px-3.5 py-2.5 shk-note" data-testid={`note-${msg.id}`}>
+          <div className="flex items-center gap-1.5 mb-1 text-[11.5px] font-extrabold shk-note-title">
+            <Lock className="w-3.5 h-3.5 shrink-0" />
+            <span>Nota interna · só a equipe vê</span>
+            <span className="font-semibold">· {msg.senderName ?? "Equipe"} {msgTime(msg.createdAt)}</span>
           </div>
-          <p className="text-sm text-amber-900 whitespace-pre-wrap break-words">{msg.content}</p>
-          <div className="text-right mt-1">
-            <span className="text-[11px] text-amber-700/70">{msgTime(msg.createdAt)}</span>
-          </div>
+          <p className="text-sm whitespace-pre-wrap break-words shk-note-text">{linkifyText(msg.content)}</p>
         </div>
       </div>
     );
@@ -415,31 +1023,169 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo }: {
     </button>
   );
 
+  // "Responder em particular" (pedido 14/09): só em mensagem recebida DENTRO
+  // de um grupo — abre (ou cria) a conversa individual com quem mandou e já
+  // leva a mensagem do grupo como citação no campo de digitação, pra sair do
+  // grupo direto pra uma resposta privada sem precisar copiar/colar (ver
+  // replyPrivately, mais abaixo no componente pai).
+  const replyPrivatelyButton = isGroup && !out && msg.senderPhone && onReplyPrivately ? (
+    <button
+      onClick={() => onReplyPrivately(msg)}
+      data-testid={`button-reply-private-msg-${msg.id}`}
+      title="Responder em particular"
+      className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-full text-gray-500 hover:text-primary hover:bg-black/5 shrink-0"
+    >
+      <Lock className="w-3.5 h-3.5" />
+    </button>
+  ) : null;
+
+  // Encaminhar mensagem (estilo WhatsApp) pra outra conversa do Atendimento —
+  // só texto e mídia (foto/áudio/vídeo/documento) por enquanto, igual o
+  // backend aceita (ver FORWARDABLE_MESSAGE_TYPES em chat.ts).
+  const canForward = !msg.deletedAt && !editing && ["text", "image", "audio", "video", "doc"].includes(msg.type);
+  const forwardButton = canForward ? (
+    <button
+      onClick={() => onForward(msg)}
+      data-testid={`button-forward-msg-${msg.id}`}
+      title="Encaminhar mensagem"
+      className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-full text-gray-500 hover:text-primary hover:bg-black/5 shrink-0"
+    >
+      <Forward className="w-3.5 h-3.5" />
+    </button>
+  ) : null;
+
+  // "Marcar mensagem" (igual WhatsApp): fixa/desafixa essa mensagem no topo da
+  // conversa, visível pra todo mundo que atende. Só aparece com hover, junto
+  // do botão de responder — exceto quando já fixada, aí fica sempre visível.
+  const pinButton = (onPin || onUnpin) && !msg.deletedAt ? (
+    <button
+      onClick={() => (isPinned ? onUnpin?.(msg.id) : onPin?.(msg.id))}
+      data-testid={`button-${isPinned ? "unpin" : "pin"}-msg-${msg.id}`}
+      title={isPinned ? "Desafixar mensagem" : "Fixar mensagem"}
+      className={`transition-opacity p-1.5 rounded-full hover:bg-black/5 shrink-0 ${
+        isPinned ? "opacity-100 text-amber-600" : "opacity-0 group-hover:opacity-100 text-gray-500 hover:text-amber-600"
+      }`}
+    >
+      {isPinned ? <PinOff className="w-3.5 h-3.5" /> : <Pin className="w-3.5 h-3.5" />}
+    </button>
+  ) : null;
+
+  // Editar/apagar (igual WhatsApp) — só aparece com hover, do lado da
+  // conversa igual ao botão de responder; some enquanto está editando.
+  const manageButtons = canManage && !editing ? (
+    <>
+      {canEditText && (
+        <button
+          onClick={startEdit}
+          data-testid={`button-edit-msg-${msg.id}`}
+          title="Editar mensagem"
+          className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-full text-gray-500 hover:text-primary hover:bg-black/5 shrink-0"
+        >
+          <Pencil className="w-3.5 h-3.5" />
+        </button>
+      )}
+      <button
+        onClick={confirmDelete}
+        data-testid={`button-delete-msg-${msg.id}`}
+        title="Apagar mensagem"
+        className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-full text-gray-500 hover:text-red-600 hover:bg-red-50 shrink-0"
+      >
+        <Trash2 className="w-3.5 h-3.5" />
+      </button>
+    </>
+  ) : null;
+
   return (
     <div
       id={`chat-msg-${msg.id}`}
-      className={`group flex items-center gap-1 mb-1 transition-colors duration-500 rounded-lg ${out ? "justify-end" : "justify-start"} ${highlighted ? "bg-amber-200/60" : ""}`}
+      className={`group flex items-center gap-1 mb-1.5 transition-colors duration-500 rounded-lg ${out ? "justify-end" : "justify-start"} ${highlighted ? "bg-amber-200/60" : ""}`}
     >
-      {out && replyButton}
-      <div className={`max-w-[75%] rounded-2xl px-3 py-2 shadow-sm ${out ? "bg-[#dcf8c6] rounded-br-sm" : "bg-white rounded-bl-sm border border-border"}`}>
-        {!out && msg.senderName && (
-          <p className="text-xs font-semibold text-primary mb-1">{msg.senderName}</p>
+      {out && <>{manageButtons}{pinButton}{forwardButton}{replyButton}</>}
+      <div className={`max-w-[75%] rounded-2xl px-3.5 py-2.5 ${out ? "shk-bubble-out rounded-br-md" : "bg-white rounded-bl-md shadow-[0_1px_2px_rgba(16,16,20,0.05)] ring-1 ring-black/[0.05]"}`}>
+        {!out && msg.senderName && isGroup && (
+          msg.senderPhone && onStartConversation ? (
+            <button
+              onClick={() => onStartConversation({ name: msg.senderName!, phone: msg.senderPhone! })}
+              data-testid={`button-start-participant-${msg.id}`}
+              title="Iniciar conversa individual com este participante"
+              className="text-xs font-semibold text-primary mb-1 hover:underline"
+            >
+              {msg.senderName}
+            </button>
+          ) : (
+            <p className="text-xs font-semibold text-primary mb-1">{msg.senderName}</p>
+          )
         )}
+        {/* Quem da equipe enviou — visível pra qualquer vendedor que abra esta
+            conversa depois (ex.: após transferência), não só quem respondeu.
+            Data/hora já aparece sempre, junto ao status de entrega, mais abaixo. */}
+
         {msg.replyTo && (
           <button
             onClick={() => onJumpTo(msg.replyTo!.id)}
             data-testid={`button-jump-reply-${msg.id}`}
-            className="block w-full text-left mb-1 rounded-lg px-2 py-1 border-l-4 border-primary/50 bg-black/5 truncate"
+            className="block w-full text-left mb-1.5 rounded-lg px-2.5 py-1.5 border-l-2 border-[#A1A1AA] bg-black/[0.04] truncate"
           >
-            <div className="text-[11px] font-semibold text-primary">{msg.replyTo.senderName ?? "Cliente"}</div>
+            <div className="text-[11px] font-semibold text-foreground">{msg.replyTo.senderName ?? "Cliente"}</div>
             <div className="text-xs text-gray-600 truncate">{msg.replyTo.content}</div>
           </button>
         )}
-        {isMedia && msg.mediaUrl ? (
+        {msg.forwarded && !msg.deletedAt && (
+          <div className="flex items-center gap-1 text-[11px] text-gray-400 italic mb-0.5">
+            <Forward className="w-3 h-3" /> Encaminhada
+          </div>
+        )}
+        {editing ? (
+          <div className="space-y-1.5">
+            <textarea
+              value={editDraft}
+              onChange={(e) => setEditDraft(e.target.value)}
+              autoFocus
+              rows={2}
+              data-testid={`textarea-edit-${msg.id}`}
+              className="w-full text-sm border border-border rounded-lg px-2 py-1.5 outline-none focus:ring-2 focus:ring-primary/30 resize-none bg-white"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveEdit(); }
+                if (e.key === "Escape") { e.preventDefault(); setEditing(false); }
+              }}
+            />
+            <div className="flex items-center justify-end gap-1.5">
+              <button type="button" onClick={() => setEditing(false)} disabled={savingEdit} data-testid={`button-cancel-edit-${msg.id}`}
+                className="p-1.5 rounded-full text-gray-500 hover:bg-black/5 transition disabled:opacity-40">
+                <X className="w-3.5 h-3.5" />
+              </button>
+              <button type="button" onClick={saveEdit} disabled={savingEdit || !editDraft.trim()} data-testid={`button-save-edit-${msg.id}`}
+                className="p-1.5 rounded-full text-primary hover:bg-primary/10 transition disabled:opacity-40">
+                {savingEdit ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+              </button>
+            </div>
+          </div>
+        ) : msg.deletedAt ? (
+          <div className="flex items-center gap-1.5 text-sm text-gray-400 italic">
+            <Ban className="w-3.5 h-3.5 shrink-0" />
+            <span>Esta mensagem foi apagada</span>
+          </div>
+        ) : sharedContacts ? (
+          <>
+            {sharedContacts.map((c, i) => (
+              <ContactCard key={i} contact={c} onStart={onStartConversation} />
+            ))}
+          </>
+        ) : msg.type === "poll" ? (
+          <PollCard content={msg.content} />
+        ) : msg.type === "location" ? (
+          <LocationCard content={msg.content} />
+        ) : msg.type === "product" ? (
+          <ProductCard content={msg.content} />
+        ) : msg.type === "payment" ? (
+          <IconTextCard icon={CreditCard} content={msg.content} />
+        ) : msg.type === "group_invite" ? (
+          <IconTextCard icon={UserPlus} content={msg.content} />
+        ) : isMedia && msg.mediaUrl ? (
           <>
             <MediaContent msg={msg} />
             {showCaption && (
-              <p className="text-sm text-gray-800 whitespace-pre-wrap break-words mt-1">{mediaCaption}</p>
+              <p className="text-sm text-gray-800 whitespace-pre-wrap break-words mt-1">{linkifyText(mediaCaption)}</p>
             )}
           </>
         ) : isMedia && !msg.mediaUrl ? (
@@ -452,7 +1198,10 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo }: {
             <span>{msg.content}</span>
           </div>
         ) : (
-          <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">{msg.content}</p>
+          <>
+            <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">{linkifyText(msg.content)}</p>
+            {msg.metadata?.linkPreview && <LinkPreviewCard preview={msg.metadata.linkPreview} />}
+          </>
         )}
         {!!msg.reactions?.length && (
           <div className={`flex flex-wrap gap-1 mt-1 ${out ? "justify-end" : "justify-start"}`}>
@@ -464,8 +1213,13 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo }: {
           </div>
         )}
         <div className={`flex items-center gap-1 mt-1 ${out ? "justify-end" : "justify-start"}`}>
-          {msg.editedAt && <span className="text-[11px] text-gray-400 italic">editado</span>}
-          <span className="text-xs text-gray-500">{msgTime(msg.createdAt)}</span>
+          {msg.editedAt && <span className="text-[11px] text-gray-500 italic">editado</span>}
+          {/* Assinatura de quem da equipe enviou — visível pra qualquer
+              vendedor que abra a conversa depois (ex.: após transferência). */}
+          {out && msg.senderName && (
+            <span className="text-[11px] font-bold text-[#3F3F46]" data-testid={`text-sender-${msg.id}`}>{msg.senderName.split(" ")[0]} ·</span>
+          )}
+          <span className="text-[11px] text-gray-500 font-mono tabular-nums">{msgTime(msg.createdAt)}</span>
           {out && (
             msg.status === "failed" ? (
               <span className="flex items-center gap-0.5 text-[11px] text-red-500" title="Falha no envio — WhatsApp não conectado ou número inválido">
@@ -478,7 +1232,7 @@ function MsgBubble({ msg, onReply, highlighted, onJumpTo }: {
           )}
         </div>
       </div>
-      {!out && replyButton}
+      {!out && <>{pinButton}{forwardButton}{replyButton}{replyPrivatelyButton}</>}
     </div>
   );
 }
@@ -496,7 +1250,53 @@ type ChatCenterProps = {
   // cada pedido (garante reabrir mesmo pedindo a mesma conversa de novo).
   focusConversationId?: number | null;
   focusRequestId?: number;
+  // Presente quando a conversa foi aberta pelo botão "ir para o atendimento"
+  // do CRM (ver CrmBoard.tsx) — mostra um botão "Voltar ao CRM" no
+  // cabeçalho da conversa que troca de aba de volta pro Quadro do CRM.
+  onBackToCrm?: () => void;
 };
+
+type FilePreviewItem = { file: File; previewUrl: string | null; kind: "image" | "video" | "other" };
+
+/** Frame do vídeo (por padrão perto do início) capturado num <canvas>, pra
+ * mostrar uma miniatura de verdade no preview de envio — igual ao WhatsApp,
+ * em vez de só um ícone genérico de arquivo. Resolve null se o navegador não
+ * conseguir decodificar o vídeo (preview cai pro ícone genérico nesse caso). */
+function captureVideoFrame(file: File): Promise<string | null> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.muted = true;
+    video.playsInline = true;
+    const cleanup = () => URL.revokeObjectURL(url);
+    video.onloadeddata = () => {
+      try {
+        video.currentTime = Math.min(0.1, video.duration || 0);
+      } catch {
+        resolve(null);
+        cleanup();
+      }
+    };
+    video.onseeked = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = video.videoWidth || 320;
+        canvas.height = video.videoHeight || 240;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) { resolve(null); return; }
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", 0.7));
+      } catch {
+        resolve(null);
+      } finally {
+        cleanup();
+      }
+    };
+    video.onerror = () => { resolve(null); cleanup(); };
+    video.src = url;
+  });
+}
 
 export default function ChatCenter({
   docked = false,
@@ -504,40 +1304,143 @@ export default function ChatCenter({
   onActiveConversationChange,
   focusConversationId,
   focusRequestId,
+  onBackToCrm,
 }: ChatCenterProps = {}) {
   const { user } = useAuth();
   const { toast } = useToast();
 
   const [convs, setConvs] = useState<Conversation[]>([]);
+  // Contagem REAL por categoria (servidor, sem o teto de 100 conversas mais
+  // recentes que a lista abaixo tem) — evita as abinhas mostrarem um número
+  // de "Ativos" bem menor que o real numa loja com mais de 100 atendimentos
+  // em aberto (foi assim que o Quadro do CRM ficou divergente do Atendimento).
+  const [serverCounts, setServerCounts] = useState<{ ativos: number; pendentes: number; potenciais: number; resolvidas: number; favoritos: number } | null>(null);
+  // Quantidade de atendimento em aberto por NÚMERO de WhatsApp (pedido
+  // 17/09: painel perto de "Conversas" pra ver a carga de cada linha
+  // conectada) — atualiza junto com fetchConvs, sempre em sincronia com a
+  // lista/abinhas de cima.
+  const [sessionCounts, setSessionCounts] = useState<{ sessionKey: string; total: number; ativos: number; naFila: number }[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState<Category>("pendentes");
   const [labelFilter, setLabelFilter] = useState("");
   const [msgText, setMsgText] = useState("");
+  // Rascunho por conversa: cada conversationId guarda seu próprio texto não
+  // enviado, pra nunca vazar o que foi digitado pro cliente errado ao trocar
+  // de conversa (ver draftsRef/prevActiveIdRef mais abaixo).
+  const msgTextRef = useRef("");
+  const draftsRef = useRef<Map<number, string>>(new Map());
+  const prevActiveIdRef = useRef<number | null>(null);
+  useEffect(() => { msgTextRef.current = msgText; }, [msgText]);
   const [replyTarget, setReplyTarget] = useState<ChatMessage | null>(null);
+  // Encaminhar mensagem entre atendimentos (estilo WhatsApp, v1: 1 conversa
+  // de destino por vez). Busca própria — INDEPENDENTE do filtro/busca da
+  // barra lateral — porque o destino pode ser qualquer conversa acessível,
+  // não só as que já estão na lista filtrada aberta no momento.
+  const [forwardMsg, setForwardMsg] = useState<ChatMessage | null>(null);
+  const [forwardQuery, setForwardQuery] = useState("");
+  const [forwardResults, setForwardResults] = useState<Conversation[]>([]);
+  const [forwardLoading, setForwardLoading] = useState(false);
+  const [forwardTargetId, setForwardTargetId] = useState<number | null>(null);
+  const [forwarding, setForwarding] = useState(false);
   const [composerMode, setComposerMode] = useState<"message" | "note">("message");
   const [highlightedMsgId, setHighlightedMsgId] = useState<number | null>(null);
+  // "Marcar mensagem" — mensagens fixadas na conversa aberta (compartilhado).
+  const [pinnedMessages, setPinnedMessages] = useState<PinnedMessage[]>([]);
+  const pinnedMessageIdSet = useMemo(() => new Set(pinnedMessages.map((p) => p.messageId)), [pinnedMessages]);
   const [loadingConvs, setLoadingConvs] = useState(true);
   const [loadingMsgs, setLoadingMsgs] = useState(false);
   const [hasMoreOlder, setHasMoreOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  // Busca de texto DENTRO da conversa aberta (diferente da busca da lista de
+  // conversas, que só filtra por nome/número).
+  const [showMsgSearch, setShowMsgSearch] = useState(false);
+  const [msgSearchQuery, setMsgSearchQuery] = useState("");
+  const [msgSearchResults, setMsgSearchResults] = useState<{ id: number; content: string; type: string; senderName: string | null; direction: string; createdAt: string }[]>([]);
+  const [msgSearchLoading, setMsgSearchLoading] = useState(false);
+  // Banco de arquivos compartilhados desta conversa (fotos/documentos/áudios
+  // já trocados) — pedido do lojista (08/09). Filtra em cima das mensagens já
+  // carregadas na tela (mesmas que a busca dentro da conversa usa); pra achar
+  // mídia de bem no início da conversa, role pra cima primeiro pra carregar
+  // páginas mais antigas, do mesmo jeito que a busca dentro da conversa já
+  // funciona.
+  const [showSharedFiles, setShowSharedFiles] = useState(false);
+  // Cupom de desconto aplicado manualmente pelo vendedor durante uma
+  // negociação — sem entidade de pedido/orçamento no sistema, então só
+  // insere o texto do desconto na mensagem e registra o uso (estatística por
+  // vendedor). Pedido do lojista (08/09).
+  const [showCouponPicker, setShowCouponPicker] = useState(false);
+  const [couponPickerList, setCouponPickerList] = useState<CatalogCoupon[]>([]);
+  const [couponPickerSearch, setCouponPickerSearch] = useState("");
   const [sending, setSending] = useState(false);
+  // Trava obrigatória de Rotinas e Produtividade (Fase 3) só aparece quando
+  // isBusy() está livre — registra aqui os mesmos momentos em que liga/
+  // desliga `sending`/`recording`, pra nunca interromper um envio em curso.
+  const guard = useActivityGuard();
   const [showNewConv, setShowNewConv] = useState(false);
   const [showLabelPicker, setShowLabelPicker] = useState(false);
   const [labels, setLabels] = useState<ChatLabel[]>([]);
+  // Filtros salvos da lista de Conversas (combinação de vendedor/setor/
+  // nível/linha/etiqueta/"não respondidas" salva com um nome, pra aplicar
+  // com 1 clique depois em vez de escolher tudo de novo toda vez).
+  const [savedFilters, setSavedFilters] = useState<ChatSavedFilter[]>([]);
+  const [savingFilter, setSavingFilter] = useState(false);
   const [showLabelManager, setShowLabelManager] = useState(false);
   const [labelForm, setLabelForm] = useState<{ name: string; color: string }>({ name: "", color: LABEL_COLOR_PRESETS[0] });
   const [savingLabel, setSavingLabel] = useState(false);
   const [showTransferPicker, setShowTransferPicker] = useState(false);
   const [showParticipantPicker, setShowParticipantPicker] = useState(false);
   const [showStatusPicker, setShowStatusPicker] = useState(false);
+  // Prioridade manual do atendimento (urgente/retorno/pode aguardar) — mesmo
+  // padrão de dropdown do Status/Etiqueta logo abaixo.
+  const [showPriorityPicker, setShowPriorityPicker] = useState(false);
+  // Fecha os dropdowns de Status/Prioridade/Etiqueta/Transferir/Vendedores do
+  // cabeçalho da conversa ao clicar em qualquer lugar fora deles (antes só
+  // fechavam clicando explicitamente num item, ou abrindo outro — ficavam
+  // abertos pra sempre se você clicasse em outra parte da tela).
+  const headerPickersOpen = showStatusPicker || showPriorityPicker || showLabelPicker || showTransferPicker || showParticipantPicker;
+  const headerPickersRef = useClickOutside<HTMLDivElement>(() => {
+    setShowStatusPicker(false);
+    setShowPriorityPicker(false);
+    setShowLabelPicker(false);
+    setShowTransferPicker(false);
+    setShowParticipantPicker(false);
+  }, headerPickersOpen);
+  // Menu "mais ações" — só aparece no celular, agrupa os botões menos usados
+  // do cabeçalho da conversa (favoritar, excluir, transferir, participantes,
+  // CRM) pra não estourar a largura da tela.
+  const [showMobileMore, setShowMobileMore] = useState(false);
+  const mobileMoreRef = useClickOutside<HTMLDivElement>(() => setShowMobileMore(false), showMobileMore);
+  // Editar o nome do contato direto no cabeçalho da conversa (o nome que o
+  // WhatsApp mandou nem sempre é o real — dá pra corrigir aqui sem precisar
+  // ir no CRM). Reaproveita o mesmo PATCH /chat/conversations/:id que já
+  // existia pra outros campos (labels, setor etc.).
+  const [editingConvName, setEditingConvName] = useState(false);
+  const [convNameDraft, setConvNameDraft] = useState("");
+  const [savingConvName, setSavingConvName] = useState(false);
   const [showFilter, setShowFilter] = useState(false);
   const [onlyUnanswered, setOnlyUnanswered] = useState(false);
+  // Pedido 14/09: filtro pra achar rápido só os grupos do WhatsApp na lista
+  // de Conversas (ex.: grupo de compras com vários fornecedores misturado
+  // com atendimentos individuais).
+  const [onlyGroups, setOnlyGroups] = useState(false);
   // Filtros avançados da lista: vendedor, setor e nível do cliente no CRM.
   const [filterVendedor, setFilterVendedor] = useState("");
   const [filterSetor, setFilterSetor] = useState("");
   const [filterNivel, setFilterNivel] = useState("");
+  // Filtro por número de WhatsApp (linha Varejo/Oficial/Atacado/Adm etc.) —
+  // usa o sessionKey já gravado em cada conversa (ver waSessions abaixo).
+  // Pedido 25/10: virou o "canal de atendimento" (barra Varejo Oficial /
+  // Atacado acima das abas) — cada canal tem suas próprias Potenciais/
+  // Pendentes/Ativos/Resolvidas. Vai pro servidor (lista + contagem).
+  const [filterSessionKey, setFilterSessionKey] = useState(readStoredChannel);
+  useEffect(() => {
+    try {
+      if (filterSessionKey) localStorage.setItem(CHANNEL_STORAGE_KEY, filterSessionKey);
+      else localStorage.removeItem(CHANNEL_STORAGE_KEY);
+    } catch { /* storage indisponível: só não lembra */ }
+  }, [filterSessionKey]);
   // Alerta de atendimento sem resposta (configurável por admin/supervisor).
   const [alertEnabled, setAlertEnabled] = useState(true);
   const [alertMinutes, setAlertMinutes] = useState(5);
@@ -552,9 +1455,15 @@ export default function ChatCenter({
   // Trava anti-disparo em massa do Atendimento ativo (mesmo modal de config).
   const [cfgOutboundHourly, setCfgOutboundHourly] = useState(10);
   const [cfgOutboundDaily, setCfgOutboundDaily] = useState(40);
+  // Intervalo entre mensagens do disparo em massa (segundos na UI, ms na API
+  // — pedido 19/09, mesmo modal de config).
+  const [cfgBroadcastInterval, setCfgBroadcastInterval] = useState(3);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const alertedRef = useRef<Set<number>>(new Set());
   // Finalizar atendimento: modal para capturar o motivo da finalização.
+  // Opções editáveis pelo admin em Configurações → Aparência (api.settings) —
+  // começa com o padrão embutido e é substituída assim que /settings carrega.
+  const [finalizeReasonOptions, setFinalizeReasonOptions] = useState<string[]>([...FINALIZE_REASONS]);
   const [finalizeTarget, setFinalizeTarget] = useState<number | null>(null);
   const [finalizeReason, setFinalizeReason] = useState<string>(FINALIZE_REASONS[0]);
   const [finalizeDetail, setFinalizeDetail] = useState("");
@@ -564,6 +1473,31 @@ export default function ChatCenter({
   const [finalizeSaleAmount, setFinalizeSaleAmount] = useState("");
   const [finalizeSaleDesc, setFinalizeSaleDesc] = useState("");
   const [sectors, setSectors] = useState<Sector[]>([]);
+  // Resolvidas: sempre visível pra admin/supervisor; vendedor comum só
+  // quando o PRÓPRIO setor liga "vendedores veem todos os Resolvidos"
+  // (pedido 14/09, Atacado — reiniciar contato/prospectar cliente antigo).
+  const canSeeResolved = user?.role === "admin" || user?.role === "supervisor"
+    || user?.sector?.vendorsSeeResolved === true;
+  // Métricas de disparo (pedido 19/09): mesma trava do backend
+  // (GET /chat/broadcast-logs é admin/supervisor).
+  const canSeeBroadcastMetrics = user?.role === "admin" || user?.role === "supervisor";
+  // Disparo em massa pra Resolvidos (pedido 14/09, Atacado): "lista de
+  // transmissão" — seleciona vários atendimentos finalizados e manda a
+  // mesma mensagem pra todos de uma vez (reabre + envia, ver
+  // POST /chat/conversations/broadcast no backend).
+  const [broadcastMode, setBroadcastMode] = useState(false);
+  const [broadcastSelected, setBroadcastSelected] = useState<Set<number>>(new Set());
+  const [broadcastMessage, setBroadcastMessage] = useState("");
+  const [broadcastSending, setBroadcastSending] = useState(false);
+  // Progresso ao vivo da leva em andamento (polling em GET /chat/broadcast-logs/:id
+  // — o job roda em segundo plano no servidor, com intervalo real entre envios).
+  const [broadcastProgress, setBroadcastProgress] = useState<{ sentCount: number; failedCount: number; total: number } | null>(null);
+  // Métricas de disparo (pedido 19/09: "quantidade, tempo de envio, tempo de
+  // intervalo etc") — histórico + resumo, admin/supervisor (mesma trava do backend).
+  const [showBroadcastMetrics, setShowBroadcastMetrics] = useState(false);
+  const [broadcastLogs, setBroadcastLogs] = useState<BroadcastDispatchLog[]>([]);
+  const [broadcastSummary, setBroadcastSummary] = useState<BroadcastDispatchSummary | null>(null);
+  const [loadingBroadcastMetrics, setLoadingBroadcastMetrics] = useState(false);
   const [chatUsers, setChatUsers] = useState<{ id: number; name: string; role: string; sectorId?: number | null }[]>([]);
   const [quickReplies, setQuickReplies] = useState<QuickReply[]>([]);
   const [showQuickReplies, setShowQuickReplies] = useState(false);
@@ -581,20 +1515,54 @@ export default function ChatCenter({
   const [schedForm, setSchedForm] = useState<{ kind: "mensagem" | "retorno"; content: string; sendAt: string }>({ kind: "mensagem", content: "", sendAt: "" });
   const [schedSaving, setSchedSaving] = useState(false);
   const [waSessions, setWaSessions] = useState<WaSessionInfo[]>([]);
-  const [newForm, setNewForm] = useState({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "" });
+  // Nome das lojas pra etiqueta "loja escolhida pelo robô" (07/10/2026).
+  const [storeNames, setStoreNames] = useState<Record<number, string>>({});
+  useEffect(() => {
+    api.stores.list(true).then((list) => setStoreNames(Object.fromEntries(list.map((st) => [st.id, st.name])))).catch(() => {});
+  }, []);
+  const [newForm, setNewForm] = useState({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "", sessionKey: "default" });
   // Uso atual da trava anti-disparo em massa (Atendimento ativo), consultado
   // ao abrir o modal de Nova Conversa — mostra o risco ANTES de tentar criar.
   const [outboundUsage, setOutboundUsage] = useState<OutboundUsage | null>(null);
 
-  const [filePreview, setFilePreview] = useState<{ file: File; previewUrl: string | null } | null>(null);
+  const [filePreview, setFilePreview] = useState<FilePreviewItem[] | null>(null);
   const [caption, setCaption] = useState("");
+  // Arrastar arquivo da área de trabalho direto pra janela do Atendimento.
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const dragCounter = useRef(0);
+  // { current, total } enquanto envia um lote de vários arquivos em sequência
+  // (a API só manda uma mídia por mensagem — não existe "álbum" de verdade
+  // no envio, cada foto vira uma mensagem própria, uma atrás da outra).
+  const [sendProgress, setSendProgress] = useState<{ current: number; total: number } | null>(null);
 
   // CRM connection: contact opened from the active conversation
   const [crmContactId, setCrmContactId] = useState<number | null>(null);
   const [crmLoading, setCrmLoading] = useState(false);
 
-  // Informações side panel: view/edit the linked CRM contact next to the chat
-  const [showInfo, setShowInfo] = useState(false);
+  // Informações side panel: view/edit the linked CRM contact next to the chat.
+  // Fase 3a do redesign: painel colapsável fixo (nunca desmonta no desktop,
+  // vira um trilho estreito quando fechado) — estado persistido por
+  // atendente via localStorage. No celular continua sendo overlay
+  // fullscreen só quando expandido (ver classes no <aside> abaixo).
+  // Novo layout (out/2026): ficha do cliente aberta por padrão em telas
+  // largas (3 colunas, como no protótipo). Chave nova pra não herdar o
+  // "fechado" que todo mundo tinha salvo antes.
+  const [infoCollapsed, setInfoCollapsed] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem("shk_chat_info_collapsed_v2");
+      if (saved !== null) return saved === "1";
+      return typeof window !== "undefined" ? window.innerWidth < 1280 : true;
+    } catch {
+      return true;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("shk_chat_info_collapsed_v2", infoCollapsed ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }, [infoCollapsed]);
   const [infoContact, setInfoContact] = useState<CrmContact | null>(null);
   const [infoLoading, setInfoLoading] = useState(false);
   const [infoSaving, setInfoSaving] = useState(false);
@@ -607,7 +1575,13 @@ export default function ChatCenter({
 
   // AI reply suggestion in the composer
   const [suggesting, setSuggesting] = useState(false);
-  const [correcting, setCorrecting] = useState(false);
+  // Sugestão da IA mostrada num cartão acima do campo (novo design): o
+  // vendedor decide se usa — nada vai pro campo/cliente sem clique.
+  const [aiSuggestion, setAiSuggestion] = useState<string | null>(null);
+  // Ficha do cliente (novo design): compras e atendimentos anteriores do CRM
+  const [fichaPurchases, setFichaPurchases] = useState<CrmPurchase[]>([]);
+  const [fichaHistory, setFichaHistory] = useState<AttendanceLog[]>([]);
+  const [showEditInfo, setShowEditInfo] = useState(false);
 
   // Notification bell: inbound messages accumulated in arrival order
   const [showNotifications, setShowNotifications] = useState(false);
@@ -617,6 +1591,7 @@ export default function ChatCenter({
   useEffect(() => { notificationsRef.current = notifications; }, [notifications]);
   // Posição do painel de notificações (portal): ancora no sino no desktop.
   const bellBtnRef = useRef<HTMLButtonElement | null>(null);
+  const notifPanelRef = useRef<HTMLDivElement | null>(null);
   const [notifPanelPos, setNotifPanelPos] = useState<{ left: number; top: number } | null>(null);
   useEffect(() => {
     if (!showNotifications) { setNotifPanelPos(null); return; }
@@ -633,6 +1608,101 @@ export default function ChatCenter({
     return () => window.removeEventListener("resize", place);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showNotifications]);
+  // Bug reportado (18/09): o painel não fechava sozinho — como ele é
+  // renderizado num portal (document.body), fica fora da árvore DOM do
+  // botão/container, então um <div className="relative"> com onBlur ou um
+  // useClickOutside de ref único não pega clique fora. Fecha explicitamente
+  // ao clicar/tocar fora do botão E fora do painel (os dois refs juntos).
+  useEffect(() => {
+    if (!showNotifications) return;
+    const handler = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as Node;
+      if (bellBtnRef.current?.contains(target)) return;
+      if (notifPanelRef.current?.contains(target)) return;
+      setShowNotifications(false);
+    };
+    document.addEventListener("mousedown", handler);
+    document.addEventListener("touchstart", handler);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("touchstart", handler);
+    };
+  }, [showNotifications]);
+
+  // Painel "atendimento por número" (pedido 17/09) — mesmo padrão de posição
+  // do painel de notificações acima (portal ancorado no botão, só desktop).
+  const [showNumberPanel, setShowNumberPanel] = useState(false);
+  const numberBtnRef = useRef<HTMLButtonElement | null>(null);
+  const numberPanelRef = useRef<HTMLDivElement | null>(null);
+  const [numberPanelPos, setNumberPanelPos] = useState<{ left: number; top: number } | null>(null);
+  useEffect(() => {
+    if (!showNumberPanel) { setNumberPanelPos(null); return; }
+    const place = () => {
+      if (window.innerWidth < 768 || !numberBtnRef.current) { setNumberPanelPos(null); return; }
+      const r = numberBtnRef.current.getBoundingClientRect();
+      const width = 300;
+      const left = Math.max(8, Math.min(r.left, window.innerWidth - width - 8));
+      setNumberPanelPos({ left, top: r.bottom + 8 });
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showNumberPanel]);
+  // Mesmo bug do painel de notificações acima (portal fora da árvore do
+  // botão) — fecha ao clicar/tocar fora do botão e fora do painel.
+  useEffect(() => {
+    if (!showNumberPanel) return;
+    const handler = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as Node;
+      if (numberBtnRef.current?.contains(target)) return;
+      if (numberPanelRef.current?.contains(target)) return;
+      setShowNumberPanel(false);
+    };
+    document.addEventListener("mousedown", handler);
+    document.addEventListener("touchstart", handler);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("touchstart", handler);
+    };
+  }, [showNumberPanel]);
+
+  // Busca global (item 11 do roadmap; unificada com o campo "Pesquisar
+  // conversa..." em 26/09 — pedido "criar um campo de pesquisa único:
+  // conversa, palavras, número etc"): o MESMO campo que já filtra a lista
+  // carregada por nome/telefone (client-side, instantâneo — ver `search` e
+  // `visibleConvs` mais abaixo) também dispara, com debounce, uma busca no
+  // servidor cruzando TODAS as conversas (nome, telefone, etiqueta,
+  // atendente, protocolo/nº da fila, texto de mensagem, CPF/CNPJ) — não só
+  // a lista já carregada. Os dois resultados convivem: o filtro local
+  // continua respondendo na hora, e os achados extras do servidor aparecem
+  // como uma seção "Encontrado em outros atendimentos" embaixo da lista
+  // (ver uso de globalSearchResults mais abaixo, perto de filteredConvs).
+  const [globalSearchResults, setGlobalSearchResults] = useState<
+    (Conversation & { matchedBy: "protocolo" | "mensagem" | "cpf_cnpj" | "atendente" | null })[]
+  >([]);
+  const [globalSearchLoading, setGlobalSearchLoading] = useState(false);
+  // Debounce (mesmo padrão de msgSearchQuery acima): evita 1 request por tecla.
+  useEffect(() => {
+    const q = search.trim();
+    if (q.length < 2) { setGlobalSearchResults([]); setGlobalSearchLoading(false); return; }
+    setGlobalSearchLoading(true);
+    const t = setTimeout(() => {
+      api.chat.searchGlobal(q)
+        .then((rows) => setGlobalSearchResults(rows))
+        .catch(() => setGlobalSearchResults([]))
+        .finally(() => setGlobalSearchLoading(false));
+    }, 350);
+    return () => clearTimeout(t);
+  }, [search]);
+  // Abre um resultado: injeta o objeto (já vem completo do endpoint) em convs
+  // caso ainda não esteja na lista carregada — mesmo padrão usado ao criar/
+  // reatribuir conversa (ver setConvs mais abaixo) — pra não depender do
+  // filtro/paginação atual da lista pra conseguir abrir o resultado.
+  const openSearchResult = (c: Conversation) => {
+    setConvs((prev) => (prev.some((x) => x.id === c.id) ? prev : [c, ...prev]));
+    setActiveId(c.id);
+  };
 
   // Alert preferences: play a sound and/or show a native browser notification for
   // inbound messages even when the attendant is on another tab. Persisted locally.
@@ -725,7 +1795,17 @@ export default function ChatCenter({
   const activeIdRef = useRef<number | null>(null);
   // Ao prependar mensagens antigas, NÃO rolar para o fim — preservar a posição.
   const skipAutoScrollRef = useRef(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  // HTMLInputElement no modo docked (linha compacta), HTMLTextAreaElement no
+  // composer principal (precisa crescer com quebras de linha — ver item 3).
+  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
+  // Campo de mensagem multi-linha: cresce junto com o texto (até max-h-32,
+  // quando passa a rolar) — mesmo padrão do InternalChat.tsx.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [msgText]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Latest conversations, read from inside the SSE handler without re-subscribing.
   const convsRef = useRef<Conversation[]>([]);
@@ -742,22 +1822,43 @@ export default function ChatCenter({
   // ── Gravação de áudio (nota de voz, igual WhatsApp) ──
   const [recording, setRecording] = useState(false);
   const [recordSecs, setRecordSecs] = useState(0);
+  // Enquanto aguarda o navegador liberar o microfone (getUserMedia) — em
+  // alguns celulares/navegadores essa promessa pode nunca resolver nem dar
+  // erro (trava em silêncio, ex.: app voltou do segundo plano). Sem esse
+  // estado o toque no microfone parecia não fazer nada; com ele, o botão
+  // mostra "carregando" e, se travar mesmo, um watchdog (ver
+  // MIC_REQUEST_TIMEOUT_MS abaixo) cancela e avisa em vez de ficar preso.
+  const [requestingMic, setRequestingMic] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordChunksRef = useRef<Blob[]>([]);
   const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Decide no stop se a gravação vira envio ou é descartada.
   const recordSendRef = useRef(false);
+  // Trava de corrida: se o watchdog já desistiu (ou o componente trocou de
+  // conversa/desmontou) enquanto getUserMedia ainda não respondeu, o stream
+  // que chegar depois é encerrado na hora — nunca vira uma gravação "fantasma".
+  const micRequestIdRef = useRef(0);
 
   const activeConv = convs.find((c) => c.id === activeId) ?? null;
   const unreadNotifications = notifications.reduce((n, x) => n + (x.read ? 0 : 1), 0);
 
   // ── Ganchos pro widget flutuante global (bolha estilo Messenger) ──
+  // Resolvidas/arquivadas não contam pro badge — pra admin/supervisor elas
+  // continuam na lista (podem ver o histórico), mas não representam mais
+  // pendência nenhuma. Sem esse filtro, um unreadCount residual que nunca
+  // foi zerado no servidor (ex.: conversa finalizada por quem não era o
+  // responsável) infla o contador pra sempre.
   useEffect(() => {
-    onUnreadChange?.(convs.reduce((sum, c) => sum + (c.unreadCount ?? 0), 0));
+    onUnreadChange?.(
+      convs.reduce((sum, c) => sum + (conversationCategory(c) === "resolvidas" ? 0 : (c.unreadCount ?? 0)), 0),
+    );
   }, [convs, onUnreadChange]);
   useEffect(() => {
     onActiveConversationChange?.(activeId);
   }, [activeId, onActiveConversationChange]);
+  // Troca de conversa fecha a edição de nome pendente da conversa anterior
+  // (sem salvar) — evita mostrar um rascunho de outra conversa por engano.
+  useEffect(() => { setEditingConvName(false); setConvNameDraft(""); }, [activeId]);
   useEffect(() => {
     if (focusConversationId != null) setActiveId(focusConversationId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -830,6 +1931,15 @@ export default function ChatCenter({
     persistScheduleReads(notifications);
     setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
   };
+  // Apaga tudo da lista (não só marca como lida) — pedido explícito do
+  // cliente, a lista ficava lotada de avisos antigos. Persiste a leitura no
+  // servidor primeiro (retorno/falha de envio agendados são recarregados do
+  // backend a cada abertura da Central se continuarem "não lidos" lá — sem
+  // isso, eles voltariam a aparecer depois de limpos aqui).
+  const clearAllNotifications = () => {
+    persistScheduleReads(notifications);
+    setNotifications([]);
+  };
 
   // ── Fetch conversations ──
   const fetchConvs = useCallback(async () => {
@@ -837,10 +1947,28 @@ export default function ChatCenter({
       const params: Parameters<typeof api.chat.conversations>[0] = {};
       if (search) params.search = search;
       if (labelFilter) params.label = labelFilter;
-      const data = await api.chat.conversations(params);
+      // Filtros avançados (vendedor/setor) agora vão pro servidor: antes eram
+      // só client-side em cima do lote já limitado a 100 conversas mais
+      // recentes do tenant inteiro, então um vendedor com muitas conversas
+      // ativas ficava com a contagem menor do que a real (ex.: 47 vs 14).
+      if (filterVendedor) params.assigneeId = Number(filterVendedor);
+      if (filterSetor) params.sectorId = Number(filterSetor);
+      if (filterSessionKey) params.sessionKey = filterSessionKey;
+      const sessionParams: Parameters<typeof api.chat.conversationCountsBySession>[0] = {};
+      if (filterVendedor) sessionParams.assigneeId = Number(filterVendedor);
+      if (filterSetor) sessionParams.sectorId = Number(filterSetor);
+      const [data, counts, bySession] = await Promise.all([
+        api.chat.conversations(params),
+        // Best-effort: se a contagem real falhar por qualquer motivo, cai
+        // pro cálculo local (sobre a lista já carregada) — nunca trava a tela.
+        api.chat.conversationCounts(params).catch(() => null),
+        api.chat.conversationCountsBySession(sessionParams).catch(() => null),
+      ]);
       setConvs(data);
+      if (counts) setServerCounts(counts);
+      if (bySession) setSessionCounts(bySession);
     } catch { /* silent */ } finally { setLoadingConvs(false); }
-  }, [search, labelFilter]);
+  }, [search, labelFilter, filterVendedor, filterSetor, filterSessionKey]);
 
   // ── Fetch messages ──
   const fetchMsgs = useCallback(async (id: number) => {
@@ -852,6 +1980,15 @@ export default function ChatCenter({
       setHasMoreOlder(hasMore);
       setConvs((prev) => prev.map((c) => c.id === id ? { ...c, unreadCount: 0 } : c));
     } catch { /* silent */ } finally { setLoadingMsgs(false); }
+  }, []);
+
+  // ── Fetch pinned messages ("marcar mensagem") ──
+  const fetchPinnedMessages = useCallback(async (id: number) => {
+    try {
+      const data = await api.chat.pinnedMessages(id);
+      if (activeIdRef.current !== id) return; // trocou de conversa no meio
+      setPinnedMessages(data);
+    } catch { /* silent */ }
   }, []);
 
   // ── Load older messages (cursor pagination) ──
@@ -890,8 +2027,14 @@ export default function ChatCenter({
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
 
   useEffect(() => {
-    if (activeId) { fetchMsgs(activeId); inputRef.current?.focus(); }
-  }, [activeId, fetchMsgs]);
+    if (activeId) {
+      fetchMsgs(activeId);
+      fetchPinnedMessages(activeId);
+      inputRef.current?.focus();
+    } else {
+      setPinnedMessages([]);
+    }
+  }, [activeId, fetchMsgs, fetchPinnedMessages]);
 
   // Opening a conversation clears its notification notices.
   useEffect(() => {
@@ -912,6 +2055,29 @@ export default function ChatCenter({
     msgsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // Resync ao voltar pra tela (pedido 11/09: "a digitação voltou ficar
+  // atrasada, dificulta acompanhar pelo celular"). No celular, o navegador
+  // suspende/atrasa a conexão SSE assim que o app vai pra segundo plano
+  // (troca de app, tela apagada) — o heartbeat do servidor eventualmente
+  // percebe e reconecta sozinho, mas isso pode demorar bem mais no celular
+  // do que no computador, dando a impressão de mensagem "atrasada" até
+  // reabrir. Buscando de novo assim que a aba/app volta a ficar visível,
+  // a lista e a conversa aberta já chegam atualizadas na hora, sem esperar
+  // a reconexão da stream se resolver sozinha.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      void fetchConvs();
+      if (activeIdRef.current != null) void fetchMsgs(activeIdRef.current);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, [fetchConvs, fetchMsgs]);
+
   // ── SSE real-time ──
   useEffect(() => {
     const es = acquireSharedEventSource(CHAT_EVENTS_URL);
@@ -929,7 +2095,7 @@ export default function ChatCenter({
       if (initialSyncedRef.current) return;
       initialSyncedRef.current = true;
       fetchConvs();
-      if (activeId != null) fetchMsgs(activeId);
+      if (activeId != null) { fetchMsgs(activeId); fetchPinnedMessages(activeId); }
     };
     if (es.readyState === EventSource.OPEN) onOpen();
     es.addEventListener("open", onOpen);
@@ -964,7 +2130,11 @@ export default function ChatCenter({
         }
         setConvs((prev) => prev.map((c) =>
           c.id === conversationId
-            ? { ...c, lastMessage: message.content, lastMessageDirection: message.direction, lastMessageAt: message.createdAt, unreadCount: conversationId === activeId ? 0 : c.unreadCount + 1 }
+            ? {
+                ...c, lastMessage: message.content, lastMessageDirection: message.direction,
+                lastMessageSenderName: message.direction === "outbound" ? message.senderName : null,
+                lastMessageAt: message.createdAt, unreadCount: conversationId === activeId ? 0 : c.unreadCount + 1,
+              }
             : c
         ));
         // Surface received (inbound) messages in the notification bell, in arrival
@@ -1104,13 +2274,11 @@ export default function ChatCenter({
     // de quem não está na lista de autorizados. Evento leve: só id + keepFor.
     const onConversationHidden = (e: Event) => {
       try {
-        const { id, keepFor, sectorId } = JSON.parse((e as MessageEvent).data) as { id: number; keepFor: number[]; sectorId: number | null };
+        const { id, keepFor } = JSON.parse((e as MessageEvent).data) as { id: number; keepFor: number[]; sectorId: number | null };
         if (!user) return;
-        if (user.role === "admin") return;
-        if (user.role === "supervisor") {
-          // Supervisor com setor: só mantém conversas restritas do próprio setor.
-          if (user.sectorId == null || sectorId === user.sectorId) return;
-        } else if (keepFor.includes(user.id)) {
+        // Admin e supervisor sempre mantêm — visão global, sem restrição por setor.
+        if (user.role === "admin" || user.role === "supervisor") return;
+        if (keepFor.includes(user.id)) {
           return;
         }
         setConvs((prev) => prev.filter((c) => c.id !== id));
@@ -1128,6 +2296,24 @@ export default function ChatCenter({
       } catch { /* silent */ }
     };
     es.addEventListener("conversation_deleted", onConversationDeleted);
+    // "Marcar mensagem": fixar/desafixar é compartilhado — qualquer atendente
+    // vê a mudança na hora, sem precisar reabrir a conversa.
+    const onMessagePinned = (e: Event) => {
+      try {
+        const { conversationId, pinned } = JSON.parse((e as MessageEvent).data) as { conversationId: number; pinned: PinnedMessage };
+        if (conversationId !== activeIdRef.current) return;
+        setPinnedMessages((prev) => [pinned, ...prev.filter((p) => p.messageId !== pinned.messageId)]);
+      } catch { /* silent */ }
+    };
+    const onMessageUnpinned = (e: Event) => {
+      try {
+        const { conversationId, messageId } = JSON.parse((e as MessageEvent).data) as { conversationId: number; messageId: number };
+        if (conversationId !== activeIdRef.current) return;
+        setPinnedMessages((prev) => prev.filter((p) => p.messageId !== messageId));
+      } catch { /* silent */ }
+    };
+    es.addEventListener("message_pinned", onMessagePinned);
+    es.addEventListener("message_unpinned", onMessageUnpinned);
     // Participantes mudaram (fui adicionado/removido de uma conversa restrita):
     // a lista do servidor é a fonte da verdade — refetch.
     const onParticipantsUpdated = () => { fetchConvs(); };
@@ -1140,7 +2326,7 @@ export default function ChatCenter({
     // and lists stay correct without any extra work here.
     const onResync = () => {
       fetchConvs();
-      if (activeId != null) fetchMsgs(activeId);
+      if (activeId != null) { fetchMsgs(activeId); fetchPinnedMessages(activeId); }
     };
     es.addEventListener("resync", onResync);
     return () => {
@@ -1153,11 +2339,21 @@ export default function ChatCenter({
       es.removeEventListener("conversation_updated", onConversationUpdated);
       es.removeEventListener("conversation_hidden", onConversationHidden);
       es.removeEventListener("conversation_deleted", onConversationDeleted);
+      es.removeEventListener("message_pinned", onMessagePinned);
+      es.removeEventListener("message_unpinned", onMessageUnpinned);
       es.removeEventListener("participants_updated", onParticipantsUpdated);
       es.removeEventListener("resync", onResync);
       releaseSharedEventSource(CHAT_EVENTS_URL);
     };
-  }, [activeId, user, fetchConvs, fetchMsgs]);
+  }, [activeId, user, fetchConvs, fetchMsgs, fetchPinnedMessages]);
+
+  // Setores novos (ou reativados) aparecem nos filtros sem recarregar a página.
+  useEffect(() => {
+    const reload = () => { api.sectors.list().then(setSectors).catch(() => {}); };
+    const t = setInterval(reload, 60_000);
+    window.addEventListener("focus", reload);
+    return () => { clearInterval(t); window.removeEventListener("focus", reload); };
+  }, []);
 
   useEffect(() => {
     api.sectors.list().then(setSectors).catch(() => {});
@@ -1165,16 +2361,76 @@ export default function ChatCenter({
     api.settings.get().then((s) => {
       setAlertEnabled(s.alertUnansweredEnabled); setAlertMinutes(s.alertUnansweredMinutes);
       setCfgOutboundHourly(s.outboundHourlyLimit); setCfgOutboundDaily(s.outboundDailyLimit);
+      setCfgBroadcastInterval(Math.round(s.broadcastIntervalMs / 1000));
+      // "Outro" nunca vem do backend — é sempre a última opção fixa aqui,
+      // porque a UI depende dela pra abrir o campo de descrição livre.
+      setFinalizeReasonOptions([...s.finalizeReasons, "Outro"]);
     }).catch(() => {});
     api.chat.quickReplies.list().then(setQuickReplies).catch(() => {});
     api.chat.labels.list().then(setLabels).catch(() => {});
-    api.chat.waSessions().then(setWaSessions).catch(() => {});
+    api.chat.savedFilters.list().then(setSavedFilters).catch(() => {});
+    api.chat.waSessions().then((list) => {
+      setWaSessions(list);
+      // Canal lembrado que não existe mais (linha removida) ou que o usuário
+      // não atende: volta pra "Todos" em vez de mostrar lista vazia.
+      setFilterSessionKey((cur) => (cur && !list.some((s) => s.sessionKey === cur && s.canAccess !== false) ? "" : cur));
+    }).catch(() => {});
   }, []);
 
   // ── Etiquetas (labels) management ──
   const fetchLabels = useCallback(async () => {
     try { setLabels(await api.chat.labels.list()); } catch { /* silent */ }
   }, []);
+
+  // ── Filtros salvos ──
+  const fetchSavedFilters = useCallback(async () => {
+    try { setSavedFilters(await api.chat.savedFilters.list()); } catch { /* silent */ }
+  }, []);
+
+  const handleSaveCurrentFilter = async () => {
+    const name = window.prompt("Nome para este filtro (ex: \"Vendedor João + linha SAFIRA\"):");
+    if (!name || !name.trim()) return;
+    setSavingFilter(true);
+    try {
+      await api.chat.savedFilters.create({
+        name: name.trim(),
+        filters: {
+          onlyUnanswered: onlyUnanswered || undefined,
+          onlyGroups: onlyGroups || undefined,
+          vendedor: filterVendedor || undefined,
+          setor: filterSetor || undefined,
+          nivel: filterNivel || undefined,
+          sessionKey: filterSessionKey || undefined,
+          label: labelFilter || undefined,
+        },
+      });
+      await fetchSavedFilters();
+      toast({ title: "Filtro salvo" });
+    } catch (e) {
+      toast({ title: e instanceof ApiError ? e.message : "Não foi possível salvar o filtro", variant: "destructive" });
+    } finally {
+      setSavingFilter(false);
+    }
+  };
+
+  const handleApplySavedFilter = (f: ChatSavedFilter) => {
+    setOnlyUnanswered(!!f.filters.onlyUnanswered);
+    setOnlyGroups(!!f.filters.onlyGroups);
+    setFilterVendedor(f.filters.vendedor ?? "");
+    setFilterSetor(f.filters.setor ?? "");
+    setFilterNivel(f.filters.nivel ?? "");
+    setFilterSessionKey(f.filters.sessionKey ?? "");
+    setLabelFilter(f.filters.label ?? "");
+  };
+
+  const handleDeleteSavedFilter = async (id: number) => {
+    try {
+      await api.chat.savedFilters.remove(id);
+      setSavedFilters((prev) => prev.filter((f) => f.id !== id));
+    } catch (e) {
+      toast({ title: e instanceof ApiError ? e.message : "Não foi possível remover o filtro", variant: "destructive" });
+    }
+  };
 
   const handleCreateLabel = async () => {
     const name = labelForm.name.trim();
@@ -1196,7 +2452,54 @@ export default function ChatCenter({
     } catch { toast({ title: "Erro ao excluir etiqueta", variant: "destructive" }); }
   };
 
-  useEffect(() => { setShowParticipantPicker(false); setShowStatusPicker(false); setCrmContactId(null); }, [activeId]);
+  useEffect(() => { setShowParticipantPicker(false); setShowStatusPicker(false); setCrmContactId(null); setShowMobileMore(false); }, [activeId]);
+
+  // Salva o rascunho da conversa que está sendo deixada e restaura o
+  // rascunho (ou vazio) da conversa que está sendo aberta.
+  useEffect(() => {
+    const prev = prevActiveIdRef.current;
+    if (prev != null) {
+      const draft = msgTextRef.current;
+      if (draft.trim()) draftsRef.current.set(prev, draft);
+      else draftsRef.current.delete(prev);
+    }
+    setMsgText(activeId != null ? (draftsRef.current.get(activeId) ?? "") : "");
+    prevActiveIdRef.current = activeId;
+  }, [activeId]);
+
+  // ── Encaminhar mensagem ──
+  const openForward = (m: ChatMessage) => {
+    setForwardMsg(m);
+    setForwardQuery("");
+    setForwardResults([]);
+    setForwardTargetId(null);
+  };
+  const closeForward = () => { if (!forwarding) setForwardMsg(null); };
+  useEffect(() => {
+    if (!forwardMsg) return;
+    let cancelled = false;
+    setForwardLoading(true);
+    const t = setTimeout(() => {
+      api.chat.conversations({ search: forwardQuery || undefined })
+        .then((list) => { if (!cancelled) setForwardResults(list.filter((c) => c.id !== forwardMsg.conversationId)); })
+        .catch(() => { if (!cancelled) setForwardResults([]); })
+        .finally(() => { if (!cancelled) setForwardLoading(false); });
+    }, 300);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [forwardMsg, forwardQuery]);
+  const submitForward = async () => {
+    if (!forwardMsg || forwardTargetId == null || forwarding) return;
+    setForwarding(true);
+    try {
+      await api.chat.forward(forwardMsg.id, forwardTargetId);
+      toast({ title: "Mensagem encaminhada! ↪️" });
+      setForwardMsg(null);
+    } catch (err) {
+      toast({ title: "Erro ao encaminhar", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    } finally {
+      setForwarding(false);
+    }
+  };
 
   // ── Send message ──
   const cancelReply = () => setReplyTarget(null);
@@ -1207,6 +2510,80 @@ export default function ChatCenter({
     setTimeout(() => setHighlightedMsgId((cur) => (cur === id ? null : cur)), 1500);
   };
 
+  // Fecha a conversa e limpa a busca dentro dela ao trocar de conversa —
+  // sem isso o resultado antigo (de outra conversa) ficaria visível.
+  useEffect(() => {
+    setShowMsgSearch(false);
+    setMsgSearchQuery("");
+    setMsgSearchResults([]);
+  }, [activeId]);
+
+  // Busca dentro da conversa, com debounce — evita uma request por tecla.
+  useEffect(() => {
+    const q = msgSearchQuery.trim();
+    if (activeId == null || q.length < 2) { setMsgSearchResults([]); return; }
+    setMsgSearchLoading(true);
+    const t = setTimeout(() => {
+      api.chat.searchMessages(activeId, q)
+        .then((rows) => { if (activeIdRef.current === activeId) setMsgSearchResults(rows); })
+        .catch(() => { setMsgSearchResults([]); })
+        .finally(() => setMsgSearchLoading(false));
+    }, 350);
+    return () => clearTimeout(t);
+  }, [msgSearchQuery, activeId]);
+
+  // Pula pra uma mensagem de um resultado de busca — se ela ainda não estiver
+  // carregada na tela (conversa longa, além da página inicial de 500), busca
+  // blocos mais antigos (mesma paginação por cursor do "carregar mais
+  // antigas") até achar, com um teto de segurança pra não entrar em loop.
+  const jumpToMessage = useCallback(async (id: number) => {
+    const convId = activeId;
+    if (convId == null) return;
+    if (document.getElementById(`chat-msg-${id}`)) {
+      scrollToMessage(id);
+      return;
+    }
+    setLoadingOlder(true);
+    try {
+      let cursor = messages[0]?.id;
+      for (let i = 0; i < 12 && cursor != null; i++) {
+        const { messages: older, hasMore } = await api.chat.messagesPage(convId, cursor);
+        if (activeIdRef.current !== convId) return;
+        if (older.length === 0) break;
+        setMessages((prev) => {
+          const seen = new Set(prev.map((m) => m.id));
+          return [...older.filter((m) => !seen.has(m.id)), ...prev];
+        });
+        setHasMoreOlder(hasMore);
+        if (older.some((m) => m.id === id)) break;
+        cursor = older[0]?.id;
+        if (!hasMore) break;
+      }
+    } catch { /* silent */ } finally {
+      setLoadingOlder(false);
+    }
+    requestAnimationFrame(() => requestAnimationFrame(() => scrollToMessage(id)));
+  }, [activeId, messages]);
+
+  // "Marcar mensagem" — fixar/desafixar (otimista; o SSE acima confirma pros
+  // outros atendentes vendo a mesma conversa).
+  const handlePinMessage = async (messageId: number) => {
+    try {
+      const { pinned } = await api.chat.pinMessage(messageId);
+      setPinnedMessages((prev) => [pinned, ...prev.filter((p) => p.messageId !== pinned.messageId)]);
+    } catch (err) {
+      toast({ title: "Erro ao fixar mensagem", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
+  };
+  const handleUnpinMessage = async (messageId: number) => {
+    try {
+      await api.chat.unpinMessage(messageId);
+      setPinnedMessages((prev) => prev.filter((p) => p.messageId !== messageId));
+    } catch (err) {
+      toast({ title: "Erro ao desafixar mensagem", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
+  };
+
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeId || !msgText.trim() || sending) return;
@@ -1215,7 +2592,11 @@ export default function ChatCenter({
     const replyingTo = isNote ? null : replyTarget;
     setMsgText("");
     setReplyTarget(null);
+    // Mantém o foco no campo pra continuar digitando na hora — sem isso, quem
+    // envia clicando no botão (em vez de Enter) perde o foco pro botão.
+    inputRef.current?.focus();
     setSending(true);
+    guard.register("send-text");
     const optimistic: ChatMessage = {
       id: -Date.now(), conversationId: activeId, content: text,
       direction: "outbound", type: isNote ? "note" : "text", status: "sent",
@@ -1232,30 +2613,47 @@ export default function ChatCenter({
       setMessages((prev) => prev.some((m) => m.id === msg.id)
         ? prev.filter((m) => m.id !== optimistic.id)
         : prev.map((m) => m.id === optimistic.id ? msg : m));
+      if (msg.sendError) toast({ title: "Mensagem não entregue", description: msg.sendError, variant: "destructive" });
     } catch {
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
       setMsgText(text);
       setReplyTarget(replyingTo);
       toast({ title: isNote ? "Erro ao salvar nota" : "Erro ao enviar mensagem", variant: "destructive" });
-    } finally { setSending(false); }
+    } finally { setSending(false); guard.unregister("send-text"); }
   };
 
-  // ── Send file (image or document) ──
-  const handleSendFile = async (file: File, fileCaption?: string) => {
-    if (!activeId || sending) return;
-    const previewUrl = filePreview?.previewUrl ?? null;
-    const replyingTo = replyTarget;
-    setFilePreview(null);
-    setCaption("");
-    setReplyTarget(null);
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
-    setSending(true);
+  // Editar/apagar mensagem própria — só o registro aqui dentro do sistema
+  // (ver comentário em chat.ts sobre não revogar no WhatsApp do cliente).
+  // setMessages aqui é só um fallback imediato: o SSE message_updated já
+  // aplica a mesma atualização pra qualquer aba/dispositivo aberto.
+  const handleEditMessage = async (messageId: number, content: string) => {
+    try {
+      const updated = await api.chat.editMessage(messageId, content);
+      setMessages((prev) => prev.map((m) => (m.id === messageId ? updated : m)));
+    } catch (err) {
+      toast({ title: "Erro ao editar mensagem", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+      throw err;
+    }
+  };
+  const handleDeleteMessage = async (messageId: number) => {
+    try {
+      const updated = await api.chat.deleteMessage(messageId);
+      setMessages((prev) => prev.map((m) => (m.id === messageId ? updated : m)));
+    } catch (err) {
+      toast({ title: "Erro ao apagar mensagem", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    }
+  };
+
+  // ── Send one file (image, video, audio ou documento) — usado tanto pra um
+  // arquivo avulso quanto por handleSendFiles em loop pra um lote. ──
+  const sendOneFile = async (file: File, fileCaption: string | undefined, replyingTo: ChatMessage | null) => {
+    if (!activeId) return;
     const isImage = file.type.startsWith("image/");
     const isVideo = file.type.startsWith("video/");
     const isAudio = file.type.startsWith("audio/");
     const baseContent = isImage ? "📷 Foto" : isVideo ? "🎥 Vídeo" : isAudio ? "🎤 Áudio" : `📄 ${file.name}`;
     const optimistic: ChatMessage = {
-      id: -Date.now(), conversationId: activeId,
+      id: -(Date.now() * 1000 + Math.floor(Math.random() * 1000)), conversationId: activeId,
       content: fileCaption ? `${baseContent}\n${fileCaption}` : baseContent,
       direction: "outbound", type: isImage ? "image" : isVideo ? "video" : isAudio ? "audio" : "doc", status: "sent",
       senderName: user?.name ?? null, mediaUrl: null, transcript: null, externalId: null,
@@ -1269,10 +2667,35 @@ export default function ChatCenter({
       setMessages((prev) => prev.some((m) => m.id === msg.id)
         ? prev.filter((m) => m.id !== optimistic.id)
         : prev.map((m) => m.id === optimistic.id ? msg : m));
+      if (msg.sendError) toast({ title: `${file.name} não foi entregue`, description: msg.sendError, variant: "destructive" });
     } catch {
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
-      toast({ title: "Erro ao enviar arquivo", variant: "destructive" });
-    } finally { setSending(false); }
+      toast({ title: `Erro ao enviar ${file.name}`, variant: "destructive" });
+    }
+  };
+
+
+  // ── Send file(s) — lote enviado em sequência (a API só aceita uma mídia
+  // por mensagem). Legenda só vai anexada à última mensagem do lote, igual
+  // ao WhatsApp mostra a legenda embaixo da última foto de um álbum. ──
+  const handleSendFiles = async (items: FilePreviewItem[], fileCaption?: string) => {
+    if (!activeId || sending || items.length === 0) return;
+    const replyingTo = replyTarget;
+    setFilePreview(null);
+    setCaption("");
+    setReplyTarget(null);
+    items.forEach((it) => { if (it.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(it.previewUrl); });
+    setSending(true);
+    guard.register("send-files");
+    setSendProgress(items.length > 1 ? { current: 0, total: items.length } : null);
+    for (let i = 0; i < items.length; i++) {
+      const isLast = i === items.length - 1;
+      await sendOneFile(items[i].file, isLast ? fileCaption : undefined, replyingTo);
+      setSendProgress(items.length > 1 ? { current: i + 1, total: items.length } : null);
+    }
+    setSendProgress(null);
+    setSending(false);
+    guard.unregister("send-files");
   };
 
   // ── Gravação de nota de voz (microfone) ──
@@ -1280,8 +2703,15 @@ export default function ChatCenter({
     if (recordTimerRef.current) { clearInterval(recordTimerRef.current); recordTimerRef.current = null; }
   };
 
+  // Alguns celulares/navegadores (ex.: Safari/Chrome depois de o app voltar
+  // do segundo plano) deixam a promessa de getUserMedia presa — nunca resolve
+  // nem rejeita. Sem um limite de tempo, o toque no microfone parece travar
+  // pra sempre, sem nenhum aviso. Esse valor é só o prazo de espera pelo
+  // navegador liberar o microfone, não da gravação em si.
+  const MIC_REQUEST_TIMEOUT_MS = 12000;
+
   const handleStartRecording = async () => {
-    if (!activeId || recording || sending) return;
+    if (!activeId || recording || sending || requestingMic) return;
     // Navegadores só liberam o microfone em página segura (https). Sem isso,
     // navigator.mediaDevices nem existe — avisa o motivo real em vez de um
     // erro genérico.
@@ -1297,8 +2727,29 @@ export default function ChatCenter({
       toast({ title: "Gravação de áudio não suportada neste navegador", variant: "destructive" });
       return;
     }
+    const requestId = ++micRequestIdRef.current;
+    setRequestingMic(true);
+    let timedOut = false;
+    const watchdog = setTimeout(() => {
+      timedOut = true;
+      setRequestingMic(false);
+      toast({
+        title: "Não consegui acessar o microfone a tempo",
+        description: "Se o navegador mostrou um aviso pedindo permissão, toque em \"Permitir\". Se não mostrou nada, recarregue a página e tente de novo.",
+        variant: "destructive",
+      });
+    }, MIC_REQUEST_TIMEOUT_MS);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      clearTimeout(watchdog);
+      // O watchdog já desistiu (ou o usuário trocou de conversa/saiu enquanto
+      // o navegador ainda não tinha respondido) — o stream chegou tarde
+      // demais. Libera o microfone na hora, nunca inicia gravação "fantasma".
+      if (timedOut || requestId !== micRequestIdRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      setRequestingMic(false);
       const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
         ? "audio/webm;codecs=opus"
         : MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm"
@@ -1312,6 +2763,7 @@ export default function ChatCenter({
         stream.getTracks().forEach((t) => t.stop());
         stopRecordTimer();
         setRecording(false);
+        guard.unregister("recording");
         setRecordSecs(0);
         const chunks = recordChunksRef.current;
         recordChunksRef.current = [];
@@ -1320,6 +2772,7 @@ export default function ChatCenter({
         const ext = type === "audio/mp4" ? "m4a" : "weba";
         const file = new File([new Blob(chunks, { type })], `nota-de-voz.${ext}`, { type: rec.mimeType || "audio/webm" });
         setSending(true);
+        guard.register("send-voice-note");
         const optimistic: ChatMessage = {
           id: -Date.now(), conversationId: convId,
           content: "🎤 Áudio",
@@ -1336,14 +2789,18 @@ export default function ChatCenter({
         } catch (err) {
           setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
           toast({ title: "Erro ao enviar áudio", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
-        } finally { setSending(false); }
+        } finally { setSending(false); guard.unregister("send-voice-note"); }
       };
       recorderRef.current = rec;
       rec.start();
       setRecording(true);
+      guard.register("recording");
       setRecordSecs(0);
       recordTimerRef.current = setInterval(() => setRecordSecs((s) => s + 1), 1000);
     } catch (err) {
+      clearTimeout(watchdog);
+      setRequestingMic(false);
+      if (timedOut) return; // watchdog já mostrou o próprio aviso — evita toast duplicado
       const name = err instanceof DOMException ? err.name : "";
       toast({
         title: name === "NotFoundError" || name === "DevicesNotFoundError"
@@ -1363,9 +2820,14 @@ export default function ChatCenter({
     recorderRef.current = null;
   };
 
-  // Cancela gravação ao trocar de conversa ou sair da tela.
+  // Cancela gravação ao trocar de conversa ou sair da tela. Também invalida
+  // qualquer pedido de microfone ainda em andamento (getUserMedia pendente) —
+  // se ele responder depois de trocar de conversa, o stream é descartado em
+  // vez de virar uma gravação na conversa errada.
   useEffect(() => {
     return () => {
+      micRequestIdRef.current++;
+      setRequestingMic(false);
       recordSendRef.current = false;
       recorderRef.current?.stop();
       recorderRef.current = null;
@@ -1373,20 +2835,73 @@ export default function ChatCenter({
     };
   }, [activeId]);
 
-  // ── Open file preview modal ──
-  const handleFileSelected = (file: File) => {
-    const isImage = file.type.startsWith("image/");
-    if (isImage) {
-      const url = URL.createObjectURL(file);
-      setFilePreview({ file, previewUrl: url });
-    } else {
-      setFilePreview({ file, previewUrl: null });
-    }
+  // ── Open file preview modal (um ou vários arquivos de uma vez) ──
+  const handleFilesSelected = (files: File[]) => {
+    const items: FilePreviewItem[] = files.map((file) => {
+      const isImage = file.type.startsWith("image/");
+      const isVideo = file.type.startsWith("video/");
+      return {
+        file,
+        previewUrl: isImage ? URL.createObjectURL(file) : null,
+        kind: isImage ? "image" : isVideo ? "video" : "other",
+      };
+    });
+    setFilePreview((prev) => (prev ? [...prev, ...items] : items));
     setCaption("");
+    // Miniatura de vídeo é assíncrona (precisa carregar o arquivo pra tirar
+    // o frame) — atualiza o item pelo file quando (se) resolver.
+    for (const item of items) {
+      if (item.kind !== "video") continue;
+      captureVideoFrame(item.file).then((thumb) => {
+        if (!thumb) return;
+        setFilePreview((prev) => prev?.map((p) => (p.file === item.file ? { ...p, previewUrl: thumb } : p)) ?? prev);
+      });
+    }
+  };
+
+  // ── Arrastar arquivo da área de trabalho pra dentro da janela do chat ──
+  // Usa um contador (em vez de um booleano simples) porque o navegador
+  // dispara dragEnter/dragLeave pra cada elemento filho sobrevoado — sem
+  // contar, a barrinha de "solte aqui" pisca ao passar por cima dos filhos.
+  const handleDragEnter = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault();
+    dragCounter.current += 1;
+    setIsDraggingFile(true);
+  };
+  const handleDragOver = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault();
+  };
+  const handleDragLeave = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault();
+    dragCounter.current = Math.max(0, dragCounter.current - 1);
+    if (dragCounter.current === 0) setIsDraggingFile(false);
+  };
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounter.current = 0;
+    setIsDraggingFile(false);
+    if (!can(user, "enviar_midia")) {
+      toast({ title: "Você não tem permissão para enviar arquivos", variant: "destructive" });
+      return;
+    }
+    const files = Array.from(e.dataTransfer.files ?? []);
+    if (files.length > 0) handleFilesSelected(files);
+  };
+
+  const handleRemoveFilePreview = (file: File) => {
+    setFilePreview((prev) => {
+      const target = prev?.find((p) => p.file === file);
+      if (target?.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(target.previewUrl);
+      const next = prev?.filter((p) => p.file !== file) ?? null;
+      return next && next.length > 0 ? next : null;
+    });
   };
 
   const handleCancelPreview = () => {
-    if (filePreview?.previewUrl) URL.revokeObjectURL(filePreview.previewUrl);
+    filePreview?.forEach((p) => { if (p.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(p.previewUrl); });
     setFilePreview(null);
     setCaption("");
   };
@@ -1422,6 +2937,19 @@ export default function ChatCenter({
     }
   };
 
+  // Definir/remover a prioridade manual do atendimento (urgente/retorno/pode
+  // aguardar, ver PRIORITY_META) — mesmo padrão otimista do favoritar acima.
+  const handleSetPriority = async (conv: Conversation, priority: string | null) => {
+    const prev = conv.priority ?? null;
+    setConvs((cs) => cs.map((c) => (c.id === conv.id ? { ...c, priority } : c)));
+    try {
+      await api.chat.updateConversation(conv.id, { priority });
+    } catch {
+      setConvs((cs) => cs.map((c) => (c.id === conv.id ? { ...c, priority: prev } : c)));
+      toast({ title: "Não foi possível alterar a prioridade", variant: "destructive" });
+    }
+  };
+
   // ── Pendente → Ativo (iniciar atendimento: assume a conversa) ──
   const handleClaim = async (id: number) => {
     try {
@@ -1435,13 +2963,20 @@ export default function ChatCenter({
       // 409 se outro vendedor já assumiu) em vez de um erro genérico.
       const msg = e instanceof Error ? e.message : "";
       toast({ title: "Erro ao iniciar atendimento", description: msg || undefined, variant: "destructive" });
+      // "Atendimento fantasma": a lista local ainda mostrava a conversa como
+      // livre (Pendente), mas o servidor já tinha outro responsável — geralmente
+      // porque um evento em tempo real (SSE) se perdeu numa reconexão. Sem isto,
+      // a conversa fica "presa" na fila de quem não consegue mais assumi-la,
+      // dando o mesmo erro 409 pra sempre. Resincroniza com o servidor (fonte
+      // da verdade) pra ela sumir da fila de quem não pode mais assumi-la.
+      fetchConvs();
     }
   };
 
   // ── Ativo → Resolvida (finalizar atendimento) ──
   // Abre o modal para o vendedor escolher o motivo antes de finalizar.
   const handleDeleteConv = async (id: number, name: string) => {
-    if (!window.confirm(`Excluir o atendimento de "${name}"? As mensagens serão apagadas de vez.`)) return;
+    if (!window.confirm(`Excluir o atendimento de "${name}"? Ele some da sua lista (Favoritos/Ativos/Pendentes/Potenciais) e libera a vaga da fila, mas o histórico de mensagens NÃO é apagado — fica arquivado (a ficha do cliente no CRM também não é afetada).`)) return;
     try {
       await api.chat.deleteConversation(id);
       setConvs((prev) => prev.filter((c) => c.id !== id));
@@ -1452,8 +2987,8 @@ export default function ChatCenter({
     }
   };
 
-  const openSchedule = async (convId: number) => {
-    setSchedForm({ kind: "mensagem", content: "", sendAt: "" });
+  const openSchedule = async (convId: number, kind: "mensagem" | "retorno" = "mensagem") => {
+    setSchedForm({ kind, content: "", sendAt: "" });
     setShowSchedule(true);
     try { setSchedules(await api.chat.schedules.list(convId)); } catch { setSchedules([]); }
   };
@@ -1491,16 +3026,54 @@ export default function ChatCenter({
 
   const handleFinalize = (id: number) => {
     setFinalizeTarget(id);
-    setFinalizeReason(FINALIZE_REASONS[0]);
+    // Pedido 17/09: motivo passou a exigir escolha ativa (antes pré-marcava
+    // o primeiro da lista e dava pra finalizar sem nem olhar pro campo) —
+    // começa vazio, com placeholder no <select>, e submitFinalize bloqueia
+    // enquanto continuar vazio.
+    setFinalizeReason("");
     setFinalizeDetail("");
     setFinalizeHadSale(null);
     setFinalizeSaleAmount("");
     setFinalizeSaleDesc("");
   };
 
+  // ── Resolvida → Ativos/Pendentes (reabrir/reiniciar o atendimento) ──
+  // Se ainda tem vendedor responsável, volta pra "Ativos" com ele (continua
+  // de onde parou); sem responsável (ex.: conversa arquivada antiga), volta
+  // pra fila em "Pendentes". isArchived: false garante que sai de fato da
+  // categoria "Resolvidas" mesmo que tenha sido arquivada por outro caminho.
+  const handleReopenConv = async (id: number, assigneeId: number | null | undefined) => {
+    // Vendedor comum reabrindo um Resolvido que NÃO é dele (setor libera
+    // "veem todos os Resolvidos", pedido 14/09 Atacado) assume o
+    // atendimento pra si — é ele quem vai reiniciar o contato.
+    // Admin/supervisor mantém o de sempre: devolve pro responsável original.
+    const takeOver = user?.role === "vendedor" && assigneeId !== user.id;
+    const targetAssignee = takeOver ? user!.id : assigneeId;
+    const status = targetAssignee != null ? "open" : "pending";
+    try {
+      const updated = await api.chat.updateConversation(id, {
+        status, isArchived: false, ...(takeOver ? { assigneeId: user!.id } : {}),
+      });
+      setConvs((prev) => prev.map((c) => c.id === id ? { ...c, ...updated, status, isArchived: false } : c));
+      toast({ title: "Atendimento reaberto" });
+      // Fila do Central de Atendimento por ordem (chatQueueSingleTask):
+      // reabrir volta a contar como atendimento aberto — reconsulta pra
+      // esconder de novo a "próxima da fila" que só era exibida por causa
+      // dos 0 abertos de antes (ver isVisibleToMe/buildConversationVisibilityConditions).
+      if (user?.chatQueueSingleTask) void fetchConvs();
+    } catch { toast({ title: "Erro ao reabrir atendimento", variant: "destructive" }); }
+  };
+
   const submitFinalize = async () => {
     if (finalizeTarget == null) return;
     const id = finalizeTarget;
+    // Pedido 17/09: escolher um motivo passou a ser obrigatório (antes vinha
+    // pré-marcado no primeiro da lista, então dava pra finalizar sem escolher
+    // nada de verdade) — handleFinalize já não pré-seleciona mais nada.
+    if (!finalizeReason) {
+      toast({ title: "Selecione o motivo da finalização", variant: "destructive" });
+      return;
+    }
     // Motivo enviado ao servidor: para "Outro" usa o texto livre, senão o rótulo.
     const isOutro = finalizeReason === "Outro";
     const resolutionReason = (isOutro ? finalizeDetail.trim() : finalizeReason) || null;
@@ -1508,6 +3081,9 @@ export default function ChatCenter({
       toast({ title: "Descreva o motivo da finalização", variant: "destructive" });
       return;
     }
+    // Pedido 17/09: "Teve venda?" voltou a ser obrigatório pra finalizar
+    // (revertendo a decisão de 14/09) — precisa responder Sim ou Não antes
+    // de liberar o botão Finalizar.
     if (finalizeHadSale == null) {
       toast({ title: "Informe se teve venda neste atendimento", variant: "destructive" });
       return;
@@ -1527,6 +3103,12 @@ export default function ChatCenter({
       setConvs((prev) => prev.map((c) => c.id === id ? { ...c, ...updated, status: "resolved" } : c));
       toast({ title: "Atendimento finalizado" });
       setFinalizeTarget(null);
+      // Fila do Central de Atendimento por ordem (chatQueueSingleTask):
+      // finalizar pode zerar os atendimentos abertos e liberar a "próxima
+      // da fila" — sem reconsultar, ela só apareceria depois de um refresh
+      // manual, já que eventos SSE do pool ficam de propósito escondidos
+      // pra quem tem essa opção (ver isVisibleToMe).
+      if (user?.chatQueueSingleTask) void fetchConvs();
     } catch { toast({ title: "Erro ao finalizar atendimento", variant: "destructive" }); }
     finally { setFinalizing(false); }
   };
@@ -1535,9 +3117,21 @@ export default function ChatCenter({
   const handleTransferToUser = async (targetUserId: number, targetName: string) => {
     if (!activeConv) return;
     try {
-      await api.chat.sendMessage(activeConv.id, `🔀 Conversa transferida para ${targetName}`);
+      // Atribui o responsável PRIMEIRO (igual handleTransfer, abaixo). Antes
+      // mandava a mensagem de sistema antes de atribuir — e o backend recusa
+      // qualquer mensagem em conversa sem responsável ("Inicie o atendimento
+      // antes de enviar mensagens"), então transferir da fila (Pendentes/
+      // Potenciais, sem responsável ainda) pro admin/supervisor sempre falhava
+      // com "Erro ao transferir", obrigando a "iniciar" a conversa primeiro
+      // pra depois transferir — o que não devia ser necessário pra quem tem
+      // permissão de admin/supervisor.
       const updated = await api.chat.updateConversation(activeConv.id, { assigneeId: targetUserId });
       setConvs((prev) => prev.map((c) => c.id === activeConv.id ? { ...c, ...updated } : c));
+      // Mensagem de sistema no histórico é só um registro — best-effort: se
+      // falhar por qualquer motivo, a transferência acima já valeu.
+      try {
+        await api.chat.sendMessage(activeConv.id, `🔀 Conversa transferida para ${targetName}`);
+      } catch { /* não bloqueia a transferência, que já foi feita acima */ }
       setShowTransferPicker(false);
       toast({ title: `Transferido para ${targetName}`, description: "A conversa agora está nos Ativos desse vendedor." });
     } catch (err) {
@@ -1549,19 +3143,35 @@ export default function ChatCenter({
     if (!activeConv) return;
     const targetSector = sectors.find((s) => s.id === targetSectorId);
     try {
+      // Transferir pra outro SETOR sempre limpa o responsável no backend (vira
+      // handoff: a conversa cai em Pendentes do setor novo pra alguém de lá
+      // assumir — ver comentário "isSectorTransfer" em PATCH /chat/conversations
+      // no backend). Ou seja, DEPOIS desta chamada a conversa NUNCA tem
+      // responsável — nem quando já tinha um antes. O endpoint de mensagem
+      // exige responsável ("Inicie o atendimento antes de enviar mensagens"),
+      // então o "insere mensagem de sistema" abaixo SEMPRE ia dar 409 aqui —
+      // e, sem try/catch próprio, isso derrubava a função inteira, mostrando
+      // "Erro ao transferir" mesmo quando a transferência de setor (a parte
+      // que importa) já tinha funcionado 100%. Mesma causa raiz já corrigida
+      // em handleTransferToUser (ver comentário lá em cima) — best-effort
+      // aqui também: registra a mensagem quando dá, mas nunca bloqueia nem
+      // finge que a transferência falhou.
       const updated = await api.chat.updateConversation(activeConv.id, { sectorId: targetSectorId });
       setConvs((prev) => prev.map((c) => c.id === activeConv.id ? { ...c, ...updated } : c));
-      // Insert system message locally to show the transfer in chat history
-      await api.chat.sendMessage(activeConv.id, `🔀 Conversa transferida para ${targetSector?.name ?? "outro setor"}`);
-      setMessages((prev: ChatMessage[]) => [...prev, {
-        id: Date.now(), conversationId: activeConv.id,
-        content: `🔀 Conversa transferida para ${targetSector?.name ?? "outro setor"}`,
-        direction: "outbound" as const, type: "system", status: "sent",
-        senderName: "Sistema", mediaUrl: null, transcript: null, externalId: null,
-        createdAt: new Date().toISOString(),
-      }]);
+      try {
+        await api.chat.sendMessage(activeConv.id, `🔀 Conversa transferida para ${targetSector?.name ?? "outro setor"}`);
+        setMessages((prev: ChatMessage[]) => [...prev, {
+          id: Date.now(), conversationId: activeConv.id,
+          content: `🔀 Conversa transferida para ${targetSector?.name ?? "outro setor"}`,
+          direction: "outbound" as const, type: "system", status: "sent",
+          senderName: "Sistema", mediaUrl: null, transcript: null, externalId: null,
+          createdAt: new Date().toISOString(),
+        }]);
+      } catch { /* best-effort — a transferência acima já valeu */ }
       toast({ title: `Transferido para ${targetSector?.name ?? "setor"}`, description: "Conversa enviada para Pendentes para aprovar o atendimento." });
-    } catch { toast({ title: "Erro ao transferir", variant: "destructive" }); }
+    } catch (err) {
+      toast({ title: "Erro ao transferir", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
     setShowTransferPicker(false);
   };
 
@@ -1580,7 +3190,9 @@ export default function ChatCenter({
       if (newStatus === "pending") {
         toast({ title: "Vendedor adicionado", description: "Conversa enviada para Pendentes para aprovar o atendimento." });
       }
-    } catch { toast({ title: "Erro ao adicionar vendedor", variant: "destructive" }); }
+    } catch (err) {
+      toast({ title: "Erro ao adicionar vendedor", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+    }
   };
 
   const handleRemoveParticipant = async (userId: number) => {
@@ -1642,11 +3254,35 @@ export default function ChatCenter({
     api.crm.customFields.list().then((f) => setCustomDefs(f.filter((d) => d.isActive))).catch(() => {});
   }, []);
 
-  // (Re)load contact whenever the panel opens or the active conversation changes
+  // (Re)load contact whenever the panel is expanded or the active conversation changes
   useEffect(() => {
-    if (showInfo && activeConv) void loadInfoContact();
+    if (!infoCollapsed && activeConv) void loadInfoContact();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showInfo, activeId]);
+  }, [infoCollapsed, activeId]);
+
+  // Ficha do cliente (novo design): próxima ação = agendamentos pendentes
+  // desta conversa (mesma lista do modal "Agendar"); compras e atendimentos
+  // anteriores vêm do CRM do contato.
+  useEffect(() => {
+    setAiSuggestion(null);
+    setShowEditInfo(false);
+  }, [activeId]);
+  useEffect(() => {
+    if (infoCollapsed || activeId == null) return;
+    let cancelled = false;
+    api.chat.schedules.list(activeId).then((r) => { if (!cancelled) setSchedules(r); }).catch(() => { if (!cancelled) setSchedules([]); });
+    return () => { cancelled = true; };
+  }, [infoCollapsed, activeId]);
+  useEffect(() => {
+    setFichaPurchases([]);
+    setFichaHistory([]);
+    const cid = infoContact?.id;
+    if (cid == null) return;
+    let cancelled = false;
+    api.crm.purchases.list(cid).then((r) => { if (!cancelled) setFichaPurchases(r); }).catch(() => {});
+    api.crm.serviceHistory(cid).then((r) => { if (!cancelled) setFichaHistory(r); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [infoContact?.id]);
 
   const handleSaveInfo = async () => {
     if (!infoContact) return;
@@ -1674,29 +3310,78 @@ export default function ChatCenter({
     setSuggesting(true);
     try {
       const { suggestion } = await api.chat.suggestReply(activeConv.id);
-      setMsgText(suggestion);
-      inputRef.current?.focus();
-      toast({ title: "Sugestão gerada — revise antes de enviar" });
+      setAiSuggestion(suggestion);
     } catch (err: unknown) {
       toast({ title: "IA indisponível", description: err instanceof Error ? err.message : "Erro ao gerar sugestão", variant: "destructive" });
     } finally { setSuggesting(false); }
   };
 
-  // ── AI: fix spelling/grammar of the drafted message ──
-  const handleCorrectText = async () => {
-    const text = msgText.trim();
-    if (!text || correcting || sending) return;
-    setCorrecting(true);
+
+  // Abre (ou cria, se não existir) uma conversa individual com um número —
+  // usado pelo cartão de contato compartilhado, pelo nome clicável de quem
+  // mandou uma mensagem dentro de um grupo, e pelo botão "Responder em
+  // particular" (replyPrivately, abaixo). Se já existe uma conversa aberta
+  // com esse número, o backend responde 409 com o id dela — só abre.
+  // Devolve o id da conversa (nova ou já existente) pra quem chamou poder
+  // continuar (ex.: preencher o campo de digitação já com uma citação).
+  const startConversationWith = async ({ name, phone }: { name: string; phone: string | null }): Promise<number | undefined> => {
+    if (!phone) { toast({ title: "Número não disponível para este contato", variant: "destructive" }); return undefined; }
     try {
-      const { corrected } = await api.chat.correctText(text);
-      // Só aplica se o atendente não editou o texto enquanto a IA respondia.
-      setMsgText((prev) => (prev.trim() === text ? corrected : prev));
-      inputRef.current?.focus();
-      if (corrected === text) toast({ title: "Nenhum erro encontrado" });
-      else toast({ title: "Texto corrigido — revise antes de enviar" });
+      // Bug (10/09): nunca mandava sessionKey — o backend sempre criava na
+      // linha literal "default", mesmo clicando num contato compartilhado
+      // ou num nome de grupo DENTRO de uma conversa que estava rolando
+      // numa linha de verdade (ex. "SAFIRA"). Vendedor restrito às linhas
+      // reais (allowedSessionKeys) tomava 403 "sem acesso a essa linha"
+      // mesmo tendo acesso à própria linha que estava vendo na hora.
+      // Agora usa a linha da conversa ativa (o contexto óbvio) e, sem
+      // conversa ativa, a única linha da loja quando só existe uma.
+      const sessionKey = activeConv?.sessionKey ?? (waSessions.length > 0 ? waSessions[0]!.sessionKey : undefined);
+      const conv = await api.chat.createConversation({ phone, name, channel: "whatsapp", sessionKey });
+      // O insert no backend não devolve o objeto assignee (só assigneeId) —
+      // preenche localmente com o que já temos em chatUsers pra não ficar
+      // preso na tela de "Iniciar atendimento" quando já tem responsável.
+      const assignee = conv.assigneeId != null
+        ? (conv.assigneeId === user?.id ? { id: user.id, name: user.name } : chatUsers.find((u) => u.id === conv.assigneeId))
+        : null;
+      const convWithAssignee = { ...conv, assignee: assignee ?? conv.assignee ?? null };
+      setConvs((prev) => prev.some((c) => c.id === convWithAssignee.id)
+        ? prev.map((c) => c.id === convWithAssignee.id ? convWithAssignee : c)
+        : [convWithAssignee, ...prev]);
+      setActiveId(conv.id);
+      setCategory(conversationCategory(conv));
+      return conv.id;
     } catch (err: unknown) {
-      toast({ title: "Correção indisponível", description: err instanceof Error ? err.message : "Erro ao corrigir texto", variant: "destructive" });
-    } finally { setCorrecting(false); }
+      if (err instanceof ApiError && err.conversationId != null) {
+        // Já existe uma conversa aberta com esse número — só abre ela.
+        setActiveId(err.conversationId);
+        const existing = convs.find((c) => c.id === err.conversationId);
+        if (existing) setCategory(conversationCategory(existing));
+        return err.conversationId;
+      }
+      toast({ title: "Erro ao iniciar conversa", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
+      return undefined;
+    }
+  };
+
+  // "Responder em particular" (pedido 14/09: "cria opção de responder
+  // conversa no grupo em particular, seleciona a conversa e ir para
+  // particular") — igual ao recurso nativo do WhatsApp: sai de uma mensagem
+  // recebida dentro de um grupo direto pra uma conversa individual com quem
+  // mandou. Reusa o mesmo startConversationWith do nome clicável (abre a
+  // conversa se já existir, cria se não existir) e, além disso, já deixa a
+  // mensagem original do grupo citada no campo de digitação — assim quem
+  // responde não perde o contexto do que estava sendo respondido, mesmo sem
+  // dar pra citar de verdade (replyToId) entre conversas diferentes.
+  const replyPrivately = async (msg: ChatMessage) => {
+    if (!msg.senderName || !msg.senderPhone) return;
+    const convId = await startConversationWith({ name: msg.senderName, phone: msg.senderPhone });
+    if (convId == null) return;
+    const snippet = (msg.content ?? "").trim();
+    if (snippet) {
+      const truncated = snippet.length > 160 ? `${snippet.slice(0, 160)}…` : snippet;
+      setMsgText(`_Sobre a mensagem de ${msg.senderName} no grupo:_ "${truncated}"\n\n`);
+    }
+    inputRef.current?.focus();
   };
 
   // ── Toggle label ──
@@ -1709,6 +3394,30 @@ export default function ChatCenter({
       await api.chat.updateConversation(activeConv.id, { labels });
       setConvs((prev) => prev.map((c) => c.id === activeConv.id ? { ...c, labels } : c));
     } catch { toast({ title: "Erro ao salvar etiqueta", variant: "destructive" }); }
+  };
+
+  // ── Editar nome do contato (cabeçalho da conversa) ──
+  const startEditConvName = () => {
+    if (!activeConv) return;
+    setConvNameDraft(activeConv.name);
+    setEditingConvName(true);
+  };
+  const cancelEditConvName = () => { setEditingConvName(false); setConvNameDraft(""); };
+  const saveConvName = async () => {
+    if (!activeConv) return;
+    const name = convNameDraft.trim();
+    if (!name || name === activeConv.name) { cancelEditConvName(); return; }
+    setSavingConvName(true);
+    try {
+      await api.chat.updateConversation(activeConv.id, { name });
+      setConvs((prev) => prev.map((c) => c.id === activeConv.id ? { ...c, name } : c));
+      setEditingConvName(false);
+      toast({ title: "Nome atualizado" });
+    } catch (err) {
+      toast({ title: "Erro ao salvar nome", description: err instanceof Error ? err.message : undefined, variant: "destructive" });
+    } finally {
+      setSavingConvName(false);
+    }
   };
 
   // Mostra o uso da trava anti-disparo em massa assim que dá pra saber quem
@@ -1730,6 +3439,11 @@ export default function ChatCenter({
         phone: newForm.phone, name: newForm.name, channel: newForm.channel,
         sectorId: newForm.sectorId ? Number(newForm.sectorId) : undefined,
         assigneeId: newForm.assigneeId ? Number(newForm.assigneeId) : undefined,
+        // Linha de WhatsApp (canal): só faz sentido quando o canal é WhatsApp e
+        // a loja tem mais de uma conexão — permite abrir atendimento numa linha
+        // (ex.: varejo) mesmo com o mesmo número já em atendimento em outra
+        // (ex.: atacado), já que são canais independentes.
+        sessionKey: newForm.channel === "whatsapp" ? newForm.sessionKey : undefined,
       });
       // O insert no backend não devolve o objeto assignee (só assigneeId) —
       // preenche localmente com o que já temos em chatUsers pra não ficar
@@ -1748,8 +3462,21 @@ export default function ChatCenter({
       // Abre a aba onde a conversa realmente caiu (vendedor: já sai em Ativos).
       setCategory(conversationCategory(conv));
       setShowNewConv(false);
-      setNewForm({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "" });
+      setNewForm({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "", sessionKey: "default" });
     } catch (err: unknown) {
+      // Já existe atendimento em andamento pra esse número nessa linha —
+      // em vez de só mostrar o erro, já abre a conversa existente direto
+      // (mesmo tratamento que o cartão de contato compartilhado já tinha
+      // em startConversationWith, só que esse formulário nunca tinha).
+      if (err instanceof ApiError && err.conversationId != null) {
+        setActiveId(err.conversationId);
+        const existing = convs.find((c) => c.id === err.conversationId);
+        if (existing) setCategory(conversationCategory(existing));
+        setShowNewConv(false);
+        setNewForm({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "", sessionKey: "default" });
+        toast({ title: "Atendimento já existente", description: "Esse número já estava em atendimento — abri a conversa existente." });
+        return;
+      }
       toast({ title: "Erro", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     }
   };
@@ -1825,29 +3552,74 @@ export default function ChatCenter({
 
   const overdueCount = alertEnabled ? convs.filter(isOverdue).length : 0;
 
+  // Filtros avançados (Vendedor/Setor) mostravam TODO o tenant pra qualquer
+  // papel — um vendedor restrito ao próprio setor (ex.: só "Administrativo")
+  // via essas opções de outros setores no dropdown, mesmo nunca conseguindo
+  // ver uma conversa de lá (a visibilidade real já é escopada no servidor).
+  // Pra admin/supervisor (que realmente gerenciam o tenant inteiro) as
+  // opções continuam completas; pro vendedor, só o próprio setor e os
+  // colegas do próprio setor aparecem como opção.
+  // 19/10/2026 ("nem todos os setores aparecem nos filtros"): superadmin
+  // também gerencia tudo; vendedor em mais de um setor vê todos os SEUS
+  // setores (antes só o principal); e setor que aparece nas conversas da
+  // lista entra como opção mesmo inativo, pra nunca existir conversa que o
+  // filtro não alcança.
+  const isManager = user?.role === "admin" || user?.role === "supervisor" || user?.role === "superadmin";
+  const mySectorIds = new Set<number>(
+    [user?.sectorId, ...(user?.sectors ?? []).map((s) => s.id)].filter((id): id is number => id != null),
+  );
+  const sectorOptions = (() => {
+    const byId = new Map<number, Sector>(sectors.map((s) => [s.id, s]));
+    for (const c of convs) if (c.sector && !byId.has(c.sector.id)) byId.set(c.sector.id, c.sector);
+    return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+  })();
+  const filterableSectors = isManager ? sectorOptions : sectorOptions.filter((s) => mySectorIds.has(s.id));
+  const filterableChatUsers = isManager ? chatUsers : chatUsers.filter((u) => u.sectorId != null && mySectorIds.has(u.sectorId));
+
+  // Canais que este usuário atende (vendedor restrito a uma linha só vê a dele).
+  const channelSessions = waSessions.filter((s) => s.canAccess !== false);
+  const channelTotal = (key: string) => sessionCounts.find((x) => x.sessionKey === key)?.total ?? 0;
+
   const visibleConvs = convs.filter((c) =>
     // Busca por nome ou número (aceita número digitado com espaços/traços).
     (!search || c.name.toLowerCase().includes(search.toLowerCase()) || c.phone.includes(search) || c.phone.replace(/\D/g, "").includes(search.replace(/\D/g, "") || "\u0000")) &&
     // Filtro "não respondidas": o cliente falou por último (ou há não lidas).
     (!onlyUnanswered || c.lastMessageDirection === "inbound" || c.unreadCount > 0) &&
+    (!onlyGroups || isGroupConv(c)) &&
     (!filterVendedor || String(c.assigneeId ?? "") === filterVendedor) &&
     (!filterSetor || String(c.sectorId ?? "") === filterSetor) &&
-    (!filterNivel || (c.crmProfile ?? "") === filterNivel)
+    (!filterNivel || (c.crmProfile ?? "") === filterNivel) &&
+    (!filterSessionKey || (c.sessionKey ?? "default") === filterSessionKey)
   );
-  const hasAdvancedFilter = !!(filterVendedor || filterSetor || filterNivel);
+  const hasAdvancedFilter = !!(filterVendedor || filterSetor || filterNivel || filterSessionKey);
 
-  const counts: Record<Category, number> = { potenciais: 0, pendentes: 0, ativos: 0, resolvidas: 0, favoritos: 0 };
+  const clientCounts: Record<Category, number> = { potenciais: 0, pendentes: 0, ativos: 0, resolvidas: 0, favoritos: 0 };
   for (const c of visibleConvs) {
-    counts[conversationCategory(c)]++;
-    if (c.pinned) counts.favoritos++;
+    clientCounts[conversationCategory(c)]++;
+    if (c.pinned) clientCounts.favoritos++;
   }
+  // "Nível CRM" e "Número" (linha de WhatsApp) e "não respondidas" só existem
+  // como filtro client-side hoje (não vão pro servidor) — com um deles ativo,
+  // a contagem real do servidor não reflete o filtro, então cai pro cálculo
+  // local (sobre o lote carregado), igual sempre foi. Sem esses filtros, usa
+  // a contagem real do servidor — não fica presa ao teto de 100 mais recentes.
+  // Canal (sessionKey) já vai pro servidor — não força mais a contagem local.
+  const hasClientOnlyFilter = onlyUnanswered || !!filterNivel;
+  const counts: Record<Category, number> = (serverCounts && !hasClientOnlyFilter)
+    ? { potenciais: serverCounts.potenciais, pendentes: serverCounts.pendentes, ativos: serverCounts.ativos, resolvidas: serverCounts.resolvidas, favoritos: serverCounts.favoritos }
+    : clientCounts;
 
   // Favoritos é ortogonal às outras categorias: mostra qualquer conversa
   // marcada, não importa o status. Fixadas (favoritas) sempre no topo dentro
   // do grupo; dentro de cada grupo mantém a ordem por última mensagem.
+  // Prioridade (pedido 11/09): dentro de cada grupo de favoritos, urgente vem
+  // primeiro, depois "precisa de retorno", depois sem prioridade, e por
+  // último "pode aguardar" — pra atendimento novo/prioritário não se perder
+  // no meio de conversas antigas. Favoritar continua sendo o critério mais
+  // forte (intenção manual do próprio vendedor), prioridade decide o resto.
   const filteredConvs = visibleConvs
     .filter((c) => category === "favoritos" ? !!c.pinned : conversationCategory(c) === category)
-    .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned));
+    .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || priorityRank(a.priority) - priorityRank(b.priority));
   const activeCategory = activeConv ? conversationCategory(activeConv) : null;
 
   const currentLabels = activeConv?.labels ? activeConv.labels.split(",").map((l) => l.trim()).filter(Boolean) : [];
@@ -1887,7 +3659,7 @@ export default function ChatCenter({
               <div ref={msgsEndRef} />
             </div>
             <form onSubmit={handleSend} className="flex items-center gap-2 px-3 py-2 border-t border-border shrink-0">
-              <input value={msgText} onChange={(e) => setMsgText(e.target.value)} placeholder="Mensagem..."
+              <input ref={inputRef as React.RefObject<HTMLInputElement>} value={msgText} onChange={(e) => setMsgText(e.target.value)} placeholder="Mensagem..."
                 data-testid="input-docked-message"
                 className="flex-1 text-sm bg-secondary/50 rounded-full px-3 py-1.5 outline-none" />
               <button type="submit" disabled={!msgText.trim() || sending} data-testid="button-docked-send"
@@ -1919,6 +3691,14 @@ export default function ChatCenter({
                       <span className="text-[10px] font-bold bg-primary text-primary-foreground rounded-full min-w-[16px] h-4 px-1 flex items-center justify-center shrink-0">{c.unreadCount}</span>
                     )}
                   </div>
+                  {c.lastMessageSenderName && (
+                    <div className="flex items-center gap-1 mt-0.5">
+                      <UserCircle2 className="w-3 h-3 text-indigo-500 shrink-0" />
+                      <span className="text-[10px] text-indigo-600 font-medium truncate" title={`Última mensagem enviada por ${c.lastMessageSenderName}`}>
+                        {c.lastMessageSenderName}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </button>
             ))}
@@ -1929,13 +3709,13 @@ export default function ChatCenter({
   }
 
   return (
-    <div className="flex h-[calc(100dvh-7rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-88px)] bg-[#f0f2f5] overflow-hidden rounded-none md:rounded-2xl border-0 md:border border-border shadow-none md:shadow-sm">
+    <div className="flex h-[calc(var(--vvh,100dvh)-7rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-88px-var(--shk-topbar-extra,0px))] bg-[#F7F7F8] overflow-hidden rounded-none md:rounded-2xl border-0 md:border border-border shadow-none md:shadow-sm">
 
       {/* ── LEFT PANEL: conversation list ──────────────────────────────── */}
       <div className={`${activeConv ? "hidden md:flex" : "flex"} w-full md:w-80 lg:w-96 bg-white flex-col md:border-r border-border shrink-0`}>
         {/* Header */}
-        <div className="px-4 py-3 border-b border-border bg-[#ededed] flex items-center justify-between">
-          <span className="font-bold text-foreground">Conversas</span>
+        <div className="px-4 pt-4 pb-2 bg-white flex items-center justify-between">
+          <span className="font-extrabold text-lg tracking-tight text-foreground">Atendimento</span>
           <div className="flex items-center gap-1">
             <div className="relative">
               <button
@@ -1959,11 +3739,12 @@ export default function ChatCenter({
                   overflow-hidden do container do chat e não dava para ver. */}
               {showNotifications && createPortal(
                 <div
+                  ref={notifPanelRef}
                   data-testid="panel-notifications"
                   className="fixed inset-x-2 top-14 md:inset-x-auto md:w-96 z-[70] bg-white border border-border rounded-xl shadow-xl overflow-hidden"
                   style={notifPanelPos ?? undefined}
                 >
-                  <div className="border-b border-border bg-[#ededed]">
+                  <div className="border-b border-border bg-[#F7F7F8]">
                     <div className="flex items-center justify-between px-3 py-2">
                       <span className="text-sm font-bold text-foreground">Notificações</span>
                       <div className="flex items-center gap-1">
@@ -1989,10 +3770,15 @@ export default function ChatCenter({
                         </button>
                       </div>
                     </div>
-                    {unreadNotifications > 0 && (
-                      <div className="px-3 pb-2 -mt-0.5">
-                        <button onClick={markAllNotificationsRead} className="text-xs text-primary hover:underline">
-                          Marcar todas como lidas
+                    {notifications.length > 0 && (
+                      <div className="px-3 pb-2 -mt-0.5 flex items-center gap-3">
+                        {unreadNotifications > 0 && (
+                          <button onClick={markAllNotificationsRead} className="text-xs text-primary hover:underline">
+                            Marcar todas como lidas
+                          </button>
+                        )}
+                        <button onClick={clearAllNotifications} data-testid="button-clear-notifications" className="text-xs text-muted-foreground hover:text-red-600 hover:underline">
+                          Limpar tudo
                         </button>
                       </div>
                     )}
@@ -2038,11 +3824,85 @@ export default function ChatCenter({
                 document.body
               )}
             </div>
+            {waSessions.length > 1 && (
+              <div className="relative">
+                <button
+                  ref={numberBtnRef}
+                  onClick={() => setShowNumberPanel((v) => !v)}
+                  data-testid="button-numbers-panel"
+                  title="Atendimento por número"
+                  className={`relative p-2 md:p-1.5 rounded-lg hover:bg-secondary transition ${showNumberPanel ? "bg-secondary" : ""}`}
+                >
+                  <BarChart3 className="w-5 h-5 md:w-4 md:h-4 text-muted-foreground" />
+                </button>
+                {/* Portal (body): mesmo motivo do painel de notificações —
+                    o container da lista tem overflow-hidden e cortaria o painel. */}
+                {showNumberPanel && createPortal(
+                  <div
+                    ref={numberPanelRef}
+                    data-testid="panel-numbers"
+                    className="fixed inset-x-2 top-14 md:inset-x-auto md:w-[300px] z-[70] bg-white border border-border rounded-xl shadow-xl overflow-hidden"
+                    style={numberPanelPos ?? undefined}
+                  >
+                    <div className="border-b border-border bg-[#F7F7F8] px-3 py-2">
+                      <span className="text-sm font-bold text-foreground">Atendimento por número</span>
+                    </div>
+                    <div className="max-h-[60vh] md:max-h-96 overflow-y-auto overscroll-contain divide-y divide-border/50">
+                      {sessionCounts.length === 0 ? (
+                        <div className="flex flex-col items-center gap-2 py-8">
+                          <BarChart3 className="w-8 h-8 text-muted-foreground/40" />
+                          <p className="text-xs text-muted-foreground">Nenhum atendimento em aberto</p>
+                        </div>
+                      ) : (
+                        [...sessionCounts].sort((a, b) => b.total - a.total).map((s) => (
+                          <div key={s.sessionKey} className="flex items-center gap-2.5 px-3 py-2.5">
+                            <span
+                              className="w-7 h-7 rounded-full shrink-0 flex items-center justify-center text-xs font-bold"
+                              style={{ backgroundColor: `${waSessionColor(s.sessionKey, waSessions)}26`, color: waSessionColor(s.sessionKey, waSessions) }}
+                            >
+                              {waSessionIcon(s.sessionKey, waSessions) ?? <Smartphone className="w-3.5 h-3.5" />}
+                            </span>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-semibold text-foreground truncate">{waSessionLabel(s.sessionKey, waSessions)}</p>
+                              <p className="text-[11px] text-muted-foreground">{s.ativos} em atendimento · {s.naFila} na fila</p>
+                            </div>
+                            <span className="text-base font-bold text-foreground shrink-0">{s.total}</span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>,
+                  document.body,
+                )}
+              </div>
+            )}
             <button onClick={() => setShowFilter(!showFilter)} className={`p-1.5 rounded-lg hover:bg-secondary transition ${showFilter ? "bg-secondary" : ""}`}>
               <Filter className="w-4 h-4 text-muted-foreground" />
             </button>
             {can(user, "criar_atendimento") && (
-              <button onClick={() => setShowNewConv(true)} data-testid="button-new-conv"
+              <button onClick={() => {
+                // Bug (10/09): o formulário sempre nascia com sessionKey
+                // "default" — em loja com uma única linha de WhatsApp
+                // conectada (nome real, ex. "SAFIRA"), o seletor de linha
+                // fica escondido (só aparece com mais de uma linha) e o
+                // atendimento manual saía sempre pela linha literal
+                // "default", que não existe de verdade. Vendedor restrito
+                // às linhas reais (allowedSessionKeys) tomava 403 "sem
+                // acesso a essa linha" mesmo tendo acesso à única linha da
+                // loja. Com mais de uma linha o seletor até aparecia, mas o
+                // <select> controlado nascia com um value ("default") que
+                // não batia com nenhuma <option> real — visualmente parecia
+                // a primeira linha selecionada, mas o valor enviado
+                // continuava sendo "default" até o usuário mexer no
+                // dropdown. Agora, ao abrir o formulário, já pré-seleciona
+                // uma linha de verdade: a que está filtrada na lista de
+                // conversas, ou a primeira linha da loja quando existe
+                // alguma — só cai no literal "default" quando a loja não
+                // tem nenhuma linha de WhatsApp configurada.
+                const defaultSessionKey = filterSessionKey || (waSessions.length > 0 ? waSessions[0]!.sessionKey : "default");
+                setNewForm((f) => ({ ...f, sessionKey: defaultSessionKey }));
+                setShowNewConv(true);
+              }} data-testid="button-new-conv"
                 className="p-1.5 rounded-lg hover:bg-secondary transition">
                 <Plus className="w-4 h-4 text-muted-foreground" />
               </button>
@@ -2054,13 +3914,13 @@ export default function ChatCenter({
         </div>
 
         {/* Search */}
-        <div className="px-3 py-2 bg-[#ededed]">
-          <div className="flex items-center gap-2 bg-white rounded-full px-3 py-1.5 border border-border">
-            <Search className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+        <div className="px-3 pb-2.5 bg-white">
+          <div className="flex items-center gap-2 bg-[#F7F7F8] rounded-xl px-3 h-10 border border-border focus-within:ring-2 focus-within:ring-black/5 focus-within:bg-white transition-colors">
+            <Search className="w-4 h-4 text-muted-foreground shrink-0" />
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Pesquisar conversa..."
+              placeholder="Pesquisar conversa, nome, telefone, protocolo, mensagem..."
               data-testid="input-search-conv"
               className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground"
             />
@@ -2068,12 +3928,55 @@ export default function ChatCenter({
           </div>
         </div>
 
-        {/* Category tabs: Favoritos / Potenciais / Pendentes / Ativos / Resolvidas */}
-        <div className="flex border-b border-border bg-white">
+        {/* Canais de atendimento (pedido 25/10): Todos / Varejo Oficial /
+            Atacado... — escolhe o canal e as abas abaixo (Potenciais,
+            Pendentes, Ativos...) passam a contar e listar só aquele canal.
+            Número ao lado = atendimentos em aberto naquele canal. */}
+        {channelSessions.length > 1 && (
+          <div data-testid="channel-bar" className="flex gap-1.5 px-3 pb-2 bg-white overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&>*]:shrink-0">
+            {[{ key: "", label: "Todos", color: "#18181b", icon: null as string | null, total: sessionCounts.reduce((a, x) => a + (channelSessions.some((s) => s.sessionKey === x.sessionKey) ? x.total : 0), 0) },
+              ...channelSessions.map((s) => ({
+                key: s.sessionKey,
+                label: waSessionLabel(s.sessionKey, waSessions),
+                color: waSessionColor(s.sessionKey, waSessions),
+                icon: waSessionIcon(s.sessionKey, waSessions),
+                total: channelTotal(s.sessionKey),
+              }))].map((ch) => {
+              const isActive = filterSessionKey === ch.key;
+              return (
+                <button
+                  key={ch.key || "todos"}
+                  onClick={() => setFilterSessionKey(ch.key)}
+                  aria-pressed={isActive}
+                  title={ch.key ? `Mostrar só o canal ${ch.label}` : "Mostrar todos os canais"}
+                  data-testid={`channel-${ch.key || "todos"}`}
+                  className="inline-flex items-center gap-1.5 h-8 pl-2.5 pr-1.5 rounded-lg text-xs font-bold border-2 transition-colors duration-150"
+                  style={isActive
+                    ? { borderColor: ch.color, backgroundColor: `${ch.color}14`, color: ch.color }
+                    : { borderColor: "#e5e7eb", backgroundColor: "#fff", color: "#52525b" }}
+                >
+                  {ch.icon ? <span className="text-sm leading-none">{ch.icon}</span> : <span className="w-2 h-2 rounded-full" style={{ backgroundColor: ch.color }} />}
+                  <span className="max-w-[140px] truncate">{ch.label}</span>
+                  <span
+                    className="text-[11px] font-bold px-1.5 h-5 rounded-md min-w-[20px] inline-flex items-center justify-center"
+                    style={isActive ? { backgroundColor: ch.color, color: "#fff" } : { backgroundColor: "#F1F1F3", color: "#3F3F46" }}
+                  >
+                    {ch.total}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Category tabs: Favoritos / Potenciais / Pendentes / Ativos / Resolvidas
+            (novo design: pílulas com contagem; a ativa fica escura) */}
+        <div className="flex gap-1.5 px-3 pb-3 border-b border-border bg-white overflow-x-auto md:flex-wrap md:overflow-visible [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&>*]:shrink-0">
           {CATEGORIES.filter((cat) =>
             (cat.id !== "potenciais" || can(user, "ver_potenciais")) &&
-            // Resolvidas só para admin/supervisor
-            (cat.id !== "resolvidas" || user?.role === "admin" || user?.role === "supervisor")
+            // Resolvidas: admin/supervisor sempre; vendedor comum só se o
+            // setor liga "vendedores veem todos os Resolvidos" (Atacado).
+            (cat.id !== "resolvidas" || canSeeResolved)
           ).map((cat) => {
             const isActive = category === cat.id;
             return (
@@ -2081,17 +3984,13 @@ export default function ChatCenter({
                 key={cat.id}
                 onClick={() => setCategory(cat.id)}
                 title={cat.help}
+                aria-pressed={isActive}
                 data-testid={`tab-category-${cat.id}`}
-                className={`flex-1 flex flex-col items-center justify-center gap-0.5 py-2 px-1 text-xs font-semibold transition border-b-2 ${isActive ? "text-foreground" : "text-muted-foreground hover:bg-secondary/40 border-transparent"}`}
-                style={isActive ? { borderBottomColor: cat.color } : undefined}
+                className={`inline-flex items-center gap-1.5 h-8 pl-3 pr-1.5 rounded-full text-xs font-semibold border transition-colors duration-150 ${isActive ? "bg-foreground text-white border-foreground" : "bg-white text-[#3F3F46] border-border hover:bg-[#F7F7F8]"}`}
               >
-                <span className="flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: cat.color }} />
-                  {cat.label}
-                </span>
+                {cat.label}
                 <span
-                  className="text-[11px] font-bold px-1.5 rounded-full min-w-[20px] text-center"
-                  style={{ backgroundColor: `${cat.color}1a`, color: cat.color }}
+                  className={`text-[11px] font-bold px-1.5 h-5 rounded-full min-w-[20px] inline-flex items-center justify-center ${isActive ? "bg-white/20 text-white" : "bg-[#F1F1F3] text-[#3F3F46]"}`}
                 >
                   {counts[cat.id]}
                 </span>
@@ -2100,9 +3999,131 @@ export default function ChatCenter({
           })}
         </div>
 
+        {/* Disparo em massa pra Resolvidos (pedido 14/09, Atacado): "lista de
+            transmissão" — seleciona vários e manda a mesma mensagem. Só
+            aparece pra quem já pode ver Resolvidos (canSeeResolved). */}
+        {category === "resolvidas" && canSeeResolved && (
+          <div className="px-3 py-2 bg-[#F7F7F8] border-b border-border">
+            {!broadcastMode ? (
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => { setBroadcastMode(true); setBroadcastSelected(new Set()); }}
+                  data-testid="button-broadcast-mode-start"
+                  className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-primary/30 bg-white text-primary text-xs font-semibold hover:bg-primary/5 transition"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  Disparar mensagem para vários (lista de transmissão)
+                </button>
+                {canSeeBroadcastMetrics && (
+                  <button
+                    onClick={async () => {
+                      setShowBroadcastMetrics(true);
+                      setLoadingBroadcastMetrics(true);
+                      try {
+                        const [logs, summary] = await Promise.all([api.chat.broadcastLogs(30), api.chat.broadcastLogsSummary()]);
+                        setBroadcastLogs(logs);
+                        setBroadcastSummary(summary);
+                      } catch (e) {
+                        toast({ title: e instanceof Error ? e.message : "Erro ao carregar métricas", variant: "destructive" });
+                      } finally {
+                        setLoadingBroadcastMetrics(false);
+                      }
+                    }}
+                    title="Métricas de disparo"
+                    data-testid="button-broadcast-metrics"
+                    className="shrink-0 flex items-center justify-center p-1.5 rounded-lg border border-border bg-white text-muted-foreground hover:bg-secondary/50 transition"
+                  >
+                    <BarChart3 className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold">{broadcastSelected.size} selecionado(s)</span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setBroadcastSelected(new Set(filteredConvs.map((c) => c.id)))}
+                      className="text-primary hover:underline"
+                    >
+                      Selecionar todos ({filteredConvs.length})
+                    </button>
+                    <button
+                      onClick={() => { setBroadcastMode(false); setBroadcastSelected(new Set()); setBroadcastMessage(""); }}
+                      className="text-muted-foreground hover:underline"
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                </div>
+                <textarea
+                  value={broadcastMessage}
+                  onChange={(e) => setBroadcastMessage(e.target.value)}
+                  placeholder="Mensagem que vai ser enviada pra todos os selecionados..."
+                  rows={2}
+                  data-testid="input-broadcast-message"
+                  className="w-full text-sm rounded-lg border border-border px-2.5 py-1.5 outline-none focus:ring-2 focus:ring-primary/20 resize-none"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  Reabre cada atendimento selecionado e manda essa mensagem — atenção ao volume: disparo grande pro mesmo tipo
+                  de contato repetido pode fazer o WhatsApp banir o número. No máximo 60 por leva.
+                </p>
+                <button
+                  onClick={async () => {
+                    const ids = [...broadcastSelected];
+                    const text = broadcastMessage.trim();
+                    if (ids.length === 0) { toast({ title: "Selecione ao menos um atendimento", variant: "destructive" }); return; }
+                    if (!text) { toast({ title: "Escreva a mensagem", variant: "destructive" }); return; }
+                    if (!window.confirm(`Mandar essa mensagem para ${ids.length} atendimento(s) resolvido(s)?`)) return;
+                    setBroadcastSending(true);
+                    setBroadcastProgress({ sentCount: 0, failedCount: 0, total: ids.length });
+                    try {
+                      const started = await api.chat.broadcast(ids, text);
+                      // O disparo roda em segundo plano no servidor, com um
+                      // intervalo real entre cada mensagem (pedido 19/09) —
+                      // uma leva grande pode levar alguns minutos. Acompanha
+                      // por polling em vez de segurar a resposta original.
+                      let done = false;
+                      while (!done) {
+                        await new Promise((r) => setTimeout(r, 1500));
+                        const log = await api.chat.broadcastLog(started.logId);
+                        setBroadcastProgress({ sentCount: log.sentCount, failedCount: log.failedCount, total: log.totalSelected });
+                        done = log.status === "done";
+                        if (done) {
+                          toast({
+                            title: `${log.sentCount}/${log.totalSelected} enviado(s)`,
+                            description: log.failedCount > 0 ? "Alguns não foram enviados — confira o motivo em Métricas de disparo." : undefined,
+                          });
+                        }
+                      }
+                      setBroadcastMode(false);
+                      setBroadcastSelected(new Set());
+                      setBroadcastMessage("");
+                      void fetchConvs();
+                    } catch (e) {
+                      toast({ title: e instanceof Error ? e.message : "Erro ao disparar", variant: "destructive" });
+                    } finally {
+                      setBroadcastSending(false);
+                      setBroadcastProgress(null);
+                    }
+                  }}
+                  disabled={broadcastSending || broadcastSelected.size === 0 || !broadcastMessage.trim()}
+                  data-testid="button-broadcast-send"
+                  className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary/90 transition disabled:opacity-50"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  {broadcastSending
+                    ? (broadcastProgress ? `Enviando ${broadcastProgress.sentCount}/${broadcastProgress.total}...` : "Enviando...")
+                    : `Enviar para ${broadcastSelected.size}`}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Filters */}
         {showFilter && (
-          <div className="px-3 py-2 bg-[#ededed] border-b border-border space-y-2">
+          <div className="px-3 py-2 bg-[#F7F7F8] border-b border-border space-y-2">
             <button
               onClick={() => setOnlyUnanswered((v) => !v)}
               data-testid="button-filter-unanswered"
@@ -2111,6 +4132,15 @@ export default function ChatCenter({
                 : "bg-white text-muted-foreground border-border"}`}
             >
               ● Não respondidas
+            </button>
+            <button
+              onClick={() => setOnlyGroups((v) => !v)}
+              data-testid="button-filter-only-groups"
+              className={`text-xs px-2.5 py-1 rounded-full transition border font-semibold ${onlyGroups
+                ? "bg-indigo-50 text-indigo-600 border-indigo-200"
+                : "bg-white text-muted-foreground border-border"}`}
+            >
+              👥 Só grupos
             </button>
             {/* Alerta de sem resposta: só admin/supervisor liga/desliga */}
             {(user?.role === "admin" || user?.role === "supervisor") && (
@@ -2136,13 +4166,13 @@ export default function ChatCenter({
                 data-testid="filter-conv-vendedor"
                 className="text-xs px-2 py-1 rounded-lg border border-border bg-white max-w-[140px]">
                 <option value="">Vendedor: todos</option>
-                {chatUsers.map((u) => <option key={u.id} value={String(u.id)}>{u.name}</option>)}
+                {filterableChatUsers.map((u) => <option key={u.id} value={String(u.id)}>{u.name}</option>)}
               </select>
               <select value={filterSetor} onChange={(e) => setFilterSetor(e.target.value)}
                 data-testid="filter-conv-setor"
                 className="text-xs px-2 py-1 rounded-lg border border-border bg-white max-w-[140px]">
                 <option value="">Setor: todos</option>
-                {sectors.map((s) => <option key={s.id} value={String(s.id)}>{s.name}</option>)}
+                {filterableSectors.map((s) => <option key={s.id} value={String(s.id)}>{s.name}</option>)}
               </select>
               <select value={filterNivel} onChange={(e) => setFilterNivel(e.target.value)}
                 data-testid="filter-conv-nivel"
@@ -2152,14 +4182,52 @@ export default function ChatCenter({
                 <option value="Regular">Regular</option>
                 <option value="VIP">VIP</option>
               </select>
+              {/* Número de WhatsApp (Varejo/Oficial/Atacado/Adm etc.) — só faz
+                  sentido mostrar quando existe mais de uma linha cadastrada. */}
+              {waSessions.length > 1 && (
+                <select value={filterSessionKey} onChange={(e) => setFilterSessionKey(e.target.value)}
+                  data-testid="filter-conv-numero"
+                  className="text-xs px-2 py-1 rounded-lg border border-border bg-white max-w-[140px]">
+                  <option value="">Número: todos</option>
+                  {waSessions.map((s) => (
+                    <option key={s.sessionKey} value={s.sessionKey}>{waSessionLabel(s.sessionKey, waSessions)}</option>
+                  ))}
+                </select>
+              )}
               {hasAdvancedFilter && (
-                <button onClick={() => { setFilterVendedor(""); setFilterSetor(""); setFilterNivel(""); }}
+                <button onClick={() => { setFilterVendedor(""); setFilterSetor(""); setFilterNivel(""); setFilterSessionKey(""); }}
                   data-testid="button-clear-conv-filters"
                   className="text-xs px-2 py-1 rounded-lg border border-red-200 bg-red-50 text-red-600 font-semibold">
                   Limpar
                 </button>
               )}
+              {(hasAdvancedFilter || onlyUnanswered || onlyGroups || labelFilter) && (
+                <button onClick={handleSaveCurrentFilter} disabled={savingFilter}
+                  data-testid="button-save-current-filter"
+                  className="text-xs px-2 py-1 rounded-lg border border-border bg-white text-muted-foreground font-semibold disabled:opacity-50">
+                  💾 Salvar filtro
+                </button>
+              )}
             </div>
+            {/* Filtros salvos: combinação de filtros salva com nome, pra
+                aplicar com 1 clique em vez de escolher tudo de novo. */}
+            {savedFilters.length > 0 && (
+              <div className="flex gap-1.5 flex-wrap">
+                {savedFilters.map((f) => (
+                  <span key={f.id} className="inline-flex items-center gap-1 text-xs pl-2.5 pr-1 py-1 rounded-full border border-border bg-white">
+                    <button onClick={() => handleApplySavedFilter(f)} data-testid={`button-apply-saved-filter-${f.id}`}
+                      className="font-semibold text-foreground">
+                      ⭐ {f.name}
+                    </button>
+                    <button onClick={() => handleDeleteSavedFilter(f.id)} title="Remover filtro salvo"
+                      data-testid={`button-delete-saved-filter-${f.id}`}
+                      className="w-4 h-4 flex items-center justify-center rounded-full text-muted-foreground hover:bg-red-50 hover:text-red-600">
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             {labels.length === 0 ? (
               <p className="text-xs text-muted-foreground">Nenhuma etiqueta criada.</p>
             ) : (
@@ -2179,7 +4247,7 @@ export default function ChatCenter({
         )}
 
         {/* List */}
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto px-2 py-1.5 space-y-0.5">
           {loadingConvs ? (
             Array.from({ length: 5 }).map((_, i) => (
               <div key={i} className="flex items-center gap-3 px-4 py-3 border-b border-border/50">
@@ -2191,46 +4259,145 @@ export default function ChatCenter({
               </div>
             ))
           ) : filteredConvs.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-40 text-muted-foreground">
+            <div className="flex flex-col items-center justify-center h-40 text-muted-foreground px-6 text-center">
               <MessageCircle className="w-8 h-8 mb-2 opacity-30" />
-              <p className="text-sm">Nenhuma conversa</p>
+              {/* Fila do Central de Atendimento por ordem (pedido 14/09): quando
+                  a lista de Potenciais/Pendentes vem vazia por causa dessa
+                  opção (não porque não tem ninguém esperando), explica o
+                  motivo em vez de parecer que a fila real está zerada. */}
+              {user?.chatQueueSingleTask && (category === "pendentes" || category === "potenciais") ? (
+                <p className="text-sm">Conclua seu atendimento em aberto para ver o próximo da fila</p>
+              ) : (
+                <p className="text-sm">Nenhuma conversa</p>
+              )}
             </div>
           ) : (
             filteredConvs.map((conv) => (
-              <ConvItem
-                key={conv.id}
-                conv={conv}
-                active={conv.id === activeId}
-                onClick={() => setActiveId(conv.id)}
-                onTogglePin={() => void handleTogglePin(conv)}
-                overdue={isOverdue(conv)}
-                sessionBadge={
-                  // Só etiqueta quando há mais de um número de atendimento
-                  // pareado (ou a conversa vem de uma conexão secundária).
-                  conv.channel === "whatsapp" && (waSessions.length > 1 || conv.sessionKey !== "default")
-                    ? waSessionLabel(conv.sessionKey, waSessions)
-                    : null
-                }
-              />
+              <div key={conv.id} className="relative">
+                {broadcastMode && (
+                  <label
+                    className="absolute top-1/2 -translate-y-1/2 left-2 z-10 w-5 h-5 flex items-center justify-center"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={broadcastSelected.has(conv.id)}
+                      onChange={(e) => {
+                        setBroadcastSelected((prev) => {
+                          const next = new Set(prev);
+                          if (e.target.checked) next.add(conv.id); else next.delete(conv.id);
+                          return next;
+                        });
+                      }}
+                      data-testid={`checkbox-broadcast-${conv.id}`}
+                      className="w-4 h-4 rounded accent-[var(--primary)]"
+                    />
+                  </label>
+                )}
+                <div className={broadcastMode ? "pl-6" : undefined}>
+                  <ConvItem
+                    conv={conv}
+                    active={conv.id === activeId}
+                    onClick={() => {
+                      if (broadcastMode) {
+                        setBroadcastSelected((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(conv.id)) next.delete(conv.id); else next.add(conv.id);
+                          return next;
+                        });
+                      } else {
+                        setActiveId(conv.id);
+                      }
+                    }}
+                    onTogglePin={() => void handleTogglePin(conv)}
+                    overdue={isOverdue(conv)}
+                    waitingMin={isGroupConv(conv) && !isOverdue(conv) ? null : waitingMinutes(conv, nowTick)}
+                    currentUserId={user?.id}
+                    targetStoreName={conv.targetStoreId ? storeNames[conv.targetStoreId] ?? null : null}
+                    sessionBadge={
+                      // Só etiqueta quando há mais de um número de atendimento
+                      // pareado (ou a conversa vem de uma conexão secundária).
+                      conv.channel === "whatsapp" && (waSessions.length > 1 || conv.sessionKey !== "default")
+                        ? waSessionLabel(conv.sessionKey, waSessions)
+                        : null
+                    }
+                    sessionColor={conv.channel === "whatsapp" ? waSessionColor(conv.sessionKey, waSessions) : null}
+                    sessionIcon={conv.channel === "whatsapp" ? waSessionIcon(conv.sessionKey, waSessions) : null}
+                  />
+                </div>
+              </div>
             ))
+          )}
+          {/* Resultados extras da busca no servidor (ver comentário perto de
+              globalSearchResults, mais acima): só aparece com >=2 caracteres
+              digitados no MESMO campo "Pesquisar conversa...", e só lista o
+              que ainda não está em filteredConvs (evita duplicar quem já
+              apareceu no filtro local por nome/telefone). */}
+          {search.trim().length >= 2 && (globalSearchLoading || globalSearchResults.filter((c) => !filteredConvs.some((x) => x.id === c.id)).length > 0) && (
+            <div className="border-t border-border">
+              <p className="px-4 py-2 text-[11px] font-semibold text-muted-foreground uppercase tracking-wide bg-secondary/30">
+                {globalSearchLoading ? "Buscando em outros atendimentos..." : "Encontrado em outros atendimentos"}
+              </p>
+              {globalSearchResults
+                .filter((c) => !filteredConvs.some((x) => x.id === c.id))
+                .map((c) => (
+                  <button key={`gs-${c.id}`} onClick={() => openSearchResult(c)} data-testid={`search-result-${c.id}`}
+                    className="w-full flex gap-2.5 items-start px-4 py-2.5 text-left hover:bg-secondary/60 active:bg-secondary transition border-b border-border/50">
+                    <span className="mt-1 w-9 h-9 rounded-full shrink-0 flex items-center justify-center bg-secondary text-muted-foreground">
+                      <UserCircle2 className="w-5 h-5" />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-semibold text-foreground truncate">{c.name || c.phone}</span>
+                        {c.lastMessageAt && <span className="text-[11px] text-muted-foreground shrink-0">{msgTime(c.lastMessageAt)}</span>}
+                      </div>
+                      <p className="text-xs text-muted-foreground truncate">
+                        {c.sector?.name ?? "Sem setor"}{c.assignee ? ` · ${c.assignee.name}` : ""}
+                        {c.origin === "fila" && c.queueNumber ? ` · Fila #${c.queueNumber}` : ` · Protocolo #${c.id}`}
+                      </p>
+                      {c.matchedBy && (
+                        <span className="inline-block mt-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-primary/10 text-primary">
+                          {c.matchedBy === "protocolo" ? "Protocolo/fila" :
+                            c.matchedBy === "mensagem" ? "Achado numa mensagem" :
+                            c.matchedBy === "cpf_cnpj" ? "CPF/CNPJ" : "Atendente"}
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                ))}
+            </div>
           )}
         </div>
       </div>
 
       {/* ── RIGHT PANEL: chat window ────────────────────────────────────── */}
       {!activeConv ? (
-        <div className="hidden md:flex flex-1 flex-col items-center justify-center text-muted-foreground bg-[#f0f2f5]">
-          <div className="w-20 h-20 rounded-full bg-secondary flex items-center justify-center mb-4">
-            <MessageCircle className="w-10 h-10 opacity-30" />
+        <div className="hidden md:flex flex-1 flex-col items-center justify-center text-muted-foreground bg-[#F7F7F8]">
+          <div className="w-20 h-20 rounded-2xl bg-white border border-border flex items-center justify-center mb-4">
+            <MessageCircle className="w-10 h-10 text-primary/40" />
           </div>
-          <p className="font-semibold text-lg">Central de Atendimento</p>
+          <p className="font-bold text-lg text-foreground">Central de Atendimento</p>
           <p className="text-sm mt-1">Selecione uma conversa para começar</p>
         </div>
       ) : (
         <div className="flex-1 flex min-w-0">
-        <div className="flex-1 flex flex-col min-w-0">
+        <div
+          className="flex-1 flex flex-col min-w-0 relative"
+          onDragEnter={handleDragEnter}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+        >
+          {isDraggingFile && (
+            <div className="absolute inset-0 z-50 flex items-center justify-center bg-primary/10 border-4 border-dashed border-primary/50 pointer-events-none">
+              <div className="bg-white rounded-2xl shadow-lg px-6 py-4 flex items-center gap-3">
+                <Paperclip className="w-6 h-6 text-primary" />
+                <span className="font-semibold text-sm text-foreground">Solte o arquivo aqui para enviar</span>
+              </div>
+            </div>
+          )}
           {/* Chat header */}
-          <div className="bg-[#ededed] border-b border-border px-2 md:px-4 py-2.5 flex items-center gap-2 md:gap-3 flex-wrap md:flex-nowrap">
+          <div className="bg-white border-b border-border px-2 md:px-5 py-3 flex items-center gap-x-2 gap-y-2.5 md:gap-x-3 flex-wrap">
             <button
               onClick={() => setActiveId(null)}
               data-testid="button-back-conv-list"
@@ -2239,54 +4406,209 @@ export default function ChatCenter({
             >
               <ChevronDown className="w-5 h-5 rotate-90" />
             </button>
-            <Avatar name={activeConv.name} src={activeConv.avatarUrl} size="md" />
-            <div className="flex-1 min-w-0">
-              <p className="font-bold text-sm text-foreground truncate">{activeConv.name}</p>
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                {channelIcon(activeConv.channel, isGroupConv(activeConv))}
-                <span>{isGroupConv(activeConv) ? "Grupo do WhatsApp" : activeConv.phone}</span>
+            {onBackToCrm && (
+              <button
+                type="button"
+                onClick={onBackToCrm}
+                data-testid="button-back-to-crm"
+                title="Voltar ao CRM"
+                className="flex items-center gap-1 pl-1.5 pr-2.5 py-1.5 -ml-0.5 rounded-lg text-xs font-semibold text-primary bg-primary/10 hover:bg-primary/20 transition shrink-0"
+              >
+                <ChevronLeft className="w-4 h-4" />
+                CRM
+              </button>
+            )}
+            <MediaLightboxProvider>
+              <HeaderAvatar name={activeConv.name} src={activeConv.avatarUrl} />
+            </MediaLightboxProvider>
+            <div className="flex-1 min-w-0 md:min-w-[300px]">
+              {editingConvName ? (
+                <div className="flex items-center gap-1 max-w-xs">
+                  <input
+                    autoFocus
+                    value={convNameDraft}
+                    onChange={(e) => setConvNameDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") { e.preventDefault(); void saveConvName(); }
+                      if (e.key === "Escape") { e.preventDefault(); cancelEditConvName(); }
+                    }}
+                    disabled={savingConvName}
+                    data-testid="input-conv-name"
+                    className="font-bold text-sm text-foreground bg-white border border-primary/40 rounded-md px-1.5 py-0.5 flex-1 min-w-0 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  />
+                  <button type="button" onClick={saveConvName} disabled={savingConvName} title="Salvar" data-testid="button-save-conv-name"
+                    className="p-1 rounded-md text-primary hover:bg-primary/10 transition shrink-0">
+                    <Check className="w-4 h-4" />
+                  </button>
+                  <button type="button" onClick={cancelEditConvName} disabled={savingConvName} title="Cancelar" data-testid="button-cancel-conv-name"
+                    className="p-1 rounded-md text-muted-foreground hover:bg-secondary transition shrink-0">
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              ) : (
+                <button type="button" onClick={startEditConvName} title="Editar nome do contato" data-testid="button-edit-conv-name"
+                  className="group flex items-center gap-1.5 max-w-full text-left">
+                  <p className="font-extrabold text-base tracking-tight text-foreground truncate">{activeConv.name}</p>
+                  <Pencil className="w-3 h-3 text-muted-foreground opacity-0 group-hover:opacity-100 transition shrink-0" />
+                </button>
+              )}
+              {/* No celular: uma linha só, arrastável pro lado (não empurra a conversa pra baixo) */}
+              <div className="flex items-center gap-1.5 mt-1 text-xs text-muted-foreground overflow-x-auto sm:overflow-visible sm:flex-wrap [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&>*]:shrink-0">
+                {(() => {
+                  const w = waitingMinutes(activeConv, nowTick);
+                  if (w == null || (isGroupConv(activeConv) && !isOverdue(activeConv))) return null;
+                  return isOverdue(activeConv)
+                    ? <span className="shk-chip shk-chip-late" data-testid="chip-header-overdue"><AlertTriangle className="w-3 h-3" />atrasado {waitLabel(w)}</span>
+                    : <span className="shk-chip shk-chip-wait" data-testid="chip-header-waiting"><Clock className="w-3 h-3" />aguardando {waitLabel(w)}</span>;
+                })()}
+                <span className="inline-flex items-center gap-1">
+                  {channelIcon(activeConv.channel, isGroupConv(activeConv))}
+                  <span className={activeConv.isCommunity || isGroupConv(activeConv) ? "" : "font-mono tabular-nums"}>{activeConv.isCommunity ? "Comunidade do WhatsApp" : isGroupConv(activeConv) ? "Grupo do WhatsApp" : activeConv.channel === "instagram" ? "Instagram Direct" : activeConv.phone}</span>
+                </span>
+                {activeConv.assigneeId != null && (
+                  <span
+                    className="shk-chip shk-chip-neutral font-mono"
+                    title="Protocolo deste atendimento, gerado desde o início"
+                  >
+                    #{activeConv.id}
+                  </span>
+                )}
+                {activeConv.targetStoreId && storeNames[activeConv.targetStoreId] && (
+                  <span className="shk-chip shk-chip-neutral" title="Loja escolhida pelo robô" data-testid="chip-active-target-store">
+                    <MapPin className="w-3 h-3" />{storeNames[activeConv.targetStoreId]}
+                  </span>
+                )}
+                {activeConv.origin === "fila" && (
+                  <span
+                    className="shk-chip shk-chip-neutral"
+                    title="Veio da fila do Central de Atendimento (auto-atribuído ou assumido)"
+                  >
+                    Fila #{activeConv.queueNumber}
+                  </span>
+                )}
+                {activeConv.origin === "manual" && (
+                  <span
+                    className="shk-chip shk-chip-neutral"
+                    title="Atendimento criado manualmente (Criar atendimento)"
+                  >
+                    Manual
+                  </span>
+                )}
                 {activeConv.channel === "whatsapp" && (waSessions.length > 1 || activeConv.sessionKey !== "default") && (
-                  <span className="px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-semibold truncate max-w-[140px]" style={{ fontSize: "10px" }} title="Número de atendimento pelo qual esta conversa chega">
+                  <span
+                    className="shk-chip shk-chip-outline truncate max-w-[160px]"
+                    title="Número de atendimento pelo qual esta conversa chega"
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: waSessionColor(activeConv.sessionKey, waSessions) }} />
+                    {waSessionIcon(activeConv.sessionKey, waSessions) && <span className="mr-0.5">{waSessionIcon(activeConv.sessionKey, waSessions)}</span>}
                     via {waSessionLabel(activeConv.sessionKey, waSessions)}
                   </span>
                 )}
                 {activeConv.sector && (
-                  <span className="px-1.5 py-0.5 rounded-full text-white font-medium" style={{ backgroundColor: activeConv.sector.color, fontSize: "10px" }}>
+                  <span className="shk-chip shk-chip-outline">
+                    <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: activeConv.sector.color }} />
                     {activeConv.sector.name}
                   </span>
                 )}
                 {/* Quem está atendendo esta conversa */}
                 {activeConv.assignee && (
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-semibold truncate max-w-[160px]" style={{ fontSize: "10px" }} title="Vendedor responsável pelo atendimento" data-testid="text-conv-assignee">
+                  <span className="shk-chip shk-chip-outline truncate max-w-[180px]" title="Vendedor responsável pelo atendimento" data-testid="text-conv-assignee">
                     <UserCircle2 className="w-3 h-3" />
-                    {activeConv.assignee.name}
+                    Resp. {activeConv.assignee.name}
                   </span>
                 )}
                 {/* Data e hora de início do atendimento (quando foi assumido) */}
                 {activeConv.attendanceStartedAt && (
-                  <span className="hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 font-medium" style={{ fontSize: "10px" }} title="Início do atendimento" data-testid="text-attendance-started">
+                  <span className="hidden sm:inline-flex items-center gap-1 h-[22px] px-2 rounded-md text-[11px] font-bold whitespace-nowrap bg-transparent text-muted-foreground font-semibold" title="Início do atendimento" data-testid="text-attendance-started">
                     <CalendarClock className="w-3 h-3" />
                     Início: {new Date(activeConv.attendanceStartedAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" })}
                   </span>
                 )}
               </div>
             </div>
-            <div className="flex items-center gap-1 shrink-0">
-              {/* Favoritar/desfavoritar contato — fica marcado só para você, some no topo e na aba Favoritos */}
+            <div className="flex items-center gap-1.5 flex-wrap justify-end max-w-full shrink-0" ref={headerPickersRef}>
+              {/* Busca de texto DENTRO desta conversa — diferente da busca da
+                  lista de conversas (que filtra por nome/número). */}
+              <button
+                type="button"
+                onClick={() => setShowMsgSearch((v) => !v)}
+                data-testid="button-search-in-conv"
+                title="Buscar nesta conversa"
+                className={`inline-flex shk-icon-btn ${showMsgSearch ? "!bg-secondary" : ""}`}
+              >
+                <Search className="w-4 h-4" />
+              </button>
+              {/* Banco de arquivos compartilhados desta conversa (fotos,
+                  documentos, áudios já trocados). */}
+              <button
+                type="button"
+                onClick={() => setShowSharedFiles(true)}
+                data-testid="button-shared-files"
+                title="Arquivos compartilhados"
+                className="inline-flex shk-icon-btn"
+              >
+                <FolderOpen className="w-4 h-4" />
+              </button>
+              {/* Menu "mais ações" — só no celular. Agrupa favoritar/excluir/CRM
+                  (as ações menos usadas) pra não estourar a largura da tela.
+                  No desktop esse botão some e as ações voltam a aparecer soltas. */}
+              <div className="relative md:hidden" ref={mobileMoreRef}>
+                <button
+                  onClick={() => setShowMobileMore((v) => !v)}
+                  data-testid="button-mobile-more-actions"
+                  title="Mais ações"
+                  className={`inline-flex shk-icon-btn ${showMobileMore ? "!bg-secondary" : ""}`}
+                >
+                  <MoreVertical className="w-3.5 h-3.5 text-muted-foreground" />
+                </button>
+                {showMobileMore && (
+                  <div className="absolute right-0 top-11 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden min-w-[200px]">
+                    <button
+                      onClick={() => { handleTogglePin(activeConv); setShowMobileMore(false); }}
+                      data-testid="button-pin-conv-mobile"
+                      className="w-full text-left flex items-center gap-2 text-xs px-3 py-2.5 hover:bg-secondary transition"
+                    >
+                      {activeConv.pinned ? <Star className="w-3.5 h-3.5 fill-amber-500 text-amber-500" /> : <StarOff className="w-3.5 h-3.5 text-muted-foreground" />}
+                      {activeConv.pinned ? "Remover dos favoritos" : "Favoritar este contato"}
+                    </button>
+                    <button
+                      onClick={() => { handleOpenCrm(); setShowMobileMore(false); }}
+                      disabled={crmLoading}
+                      data-testid="button-open-crm-mobile"
+                      className="w-full text-left flex items-center gap-2 text-xs px-3 py-2.5 hover:bg-secondary transition disabled:opacity-50"
+                    >
+                      {crmLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <IdCard className="w-3.5 h-3.5 text-muted-foreground" />}
+                      Abrir ficha do cliente no CRM
+                    </button>
+                    {(user?.role === "admin" || user?.role === "supervisor") && (
+                      <button
+                        onClick={() => { handleDeleteConv(activeConv.id, activeConv.name); setShowMobileMore(false); }}
+                        data-testid="button-delete-conv-mobile"
+                        className="w-full text-left flex items-center gap-2 text-xs px-3 py-2.5 hover:bg-red-50 text-red-600 transition border-t border-border"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        Excluir atendimento
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+              {/* Favoritar/desfavoritar contato — fica marcado só para você, some no topo e na aba Favoritos.
+                  No celular esta ação mora no menu "⋮" acima; aqui só aparece a partir do md. */}
               <button
                 onClick={() => handleTogglePin(activeConv)}
                 data-testid="button-pin-conv"
-                className={`p-2 rounded-lg border transition ${activeConv.pinned ? "text-amber-500 bg-amber-50 border-amber-300 hover:bg-amber-100" : "text-muted-foreground bg-white border-border hover:bg-secondary"}`}
+                className={`hidden md:inline-flex shk-icon-btn ${activeConv.pinned ? "!text-amber-500" : ""}`}
                 title={activeConv.pinned ? "Remover dos favoritos" : "Favoritar este contato"}
               >
                 {activeConv.pinned ? <Star className="w-3.5 h-3.5 fill-amber-500" /> : <StarOff className="w-3.5 h-3.5" />}
               </button>
-              {/* Excluir atendimento — só admin e só em Potenciais */}
-              {user?.role === "admin" && activeCategory === "potenciais" && (
+              {/* Excluir atendimento — admin ou supervisor, em qualquer categoria/status. No celular mora no menu "⋮". */}
+              {(user?.role === "admin" || user?.role === "supervisor") && (
                 <button
                   onClick={() => handleDeleteConv(activeConv.id, activeConv.name)}
                   data-testid="button-delete-conv"
-                  className="p-2 rounded-lg text-red-600 bg-white border border-border hover:bg-red-50 transition"
+                  className="hidden md:inline-flex shk-icon-btn hover:!text-red-600 hover:!bg-red-50"
                   title="Excluir atendimento"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
@@ -2297,8 +4619,7 @@ export default function ChatCenter({
                 <button
                   onClick={() => handleClaim(activeConv.id)}
                   data-testid="button-claim-conv"
-                  className="p-2 rounded-lg text-white transition hover:opacity-90"
-                  style={{ backgroundColor: "#16a34a" }}
+                  className="inline-flex items-center justify-center w-9 h-9 rounded-lg bg-foreground text-white transition hover:bg-black shrink-0"
                   title="Iniciar atendimento"
                 >
                   <UserCircle2 className="w-3.5 h-3.5" />
@@ -2309,7 +4630,7 @@ export default function ChatCenter({
                 <button
                   onClick={() => openSchedule(activeConv.id)}
                   data-testid="button-schedule"
-                  className="p-2 rounded-lg bg-white border border-border hover:bg-secondary transition text-indigo-600"
+                  className="inline-flex shk-icon-btn"
                   title="Agendar mensagem ou retorno"
                 >
                   <CalendarClock className="w-3.5 h-3.5" />
@@ -2320,19 +4641,34 @@ export default function ChatCenter({
                 <button
                   onClick={() => handleFinalize(activeConv.id)}
                   data-testid="button-finalize-conv"
-                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-white text-xs font-semibold transition hover:opacity-90"
-                  style={{ backgroundColor: "#6b7280" }}
+                  className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-lg bg-foreground text-white text-xs font-bold transition-colors hover:bg-black shrink-0 ml-1"
                   title="Finalizar atendimento"
                 >
                   <CheckCheck className="w-3.5 h-3.5" />
                   <span className="hidden lg:inline">Finalizar</span>
                 </button>
               )}
+              {/* Reabrir atendimento — só na aba Resolvidas, e só quem pode vê-la
+                  (admin/supervisor sempre; vendedor comum só com o setor
+                  liberando "veem todos os Resolvidos", pedido 14/09 Atacado).
+                  Volta com o mesmo vendedor pra Ativos, ou pra fila em
+                  Pendentes se não tiver mais responsável. */}
+              {activeCategory === "resolvidas" && canSeeResolved && (
+                <button
+                  onClick={() => handleReopenConv(activeConv.id, activeConv.assigneeId)}
+                  data-testid="button-reopen-conv"
+                  className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-lg bg-foreground text-white text-xs font-bold transition-colors hover:bg-black shrink-0 ml-1"
+                  title="Reabrir atendimento"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span className="hidden lg:inline">Reabrir</span>
+                </button>
+              )}
               {/* Status quick-set */}
               <div className="relative">
                 <button
-                  onClick={() => { setShowStatusPicker((v) => !v); setShowLabelPicker(false); setShowTransferPicker(false); setShowParticipantPicker(false); }}
-                  className="flex items-center gap-1 p-2 rounded-lg bg-white border border-border hover:bg-secondary transition"
+                  onClick={() => { setShowStatusPicker((v) => !v); setShowPriorityPicker(false); setShowLabelPicker(false); setShowTransferPicker(false); setShowParticipantPicker(false); }}
+                  className="inline-flex shk-icon-btn !w-auto px-2 gap-1"
                   title={`Status: ${STATUS_LABELS[activeConv.status] ?? activeConv.status}`}
                 >
                   <Circle className={`w-3 h-3 fill-current ${activeConv.status === "open" ? "text-green-500" : activeConv.status === "pending" ? "text-amber-500" : "text-gray-400"}`} />
@@ -2361,15 +4697,47 @@ export default function ChatCenter({
                   </div>
                 )}
               </div>
+              {/* Prioridade manual (pedido 11/09): urgente / precisa de retorno /
+                  pode aguardar — pra organizar a fila e não perder atendimento
+                  novo/prioritário no meio de conversas antigas (ver PRIORITY_META
+                  e o sort de filteredConvs mais acima). */}
+              <div className="relative">
+                <button
+                  onClick={() => { setShowPriorityPicker((v) => !v); setShowStatusPicker(false); setShowLabelPicker(false); setShowTransferPicker(false); setShowParticipantPicker(false); }}
+                  className={`inline-flex items-center justify-center gap-1 h-9 px-2 rounded-lg border transition shrink-0 ${activeConv.priority ? PRIORITY_META[activeConv.priority]?.badge ?? "bg-white border-border" : "bg-transparent border-transparent text-[#52525B] hover:bg-[#F1F1F3]"}`}
+                  title={activeConv.priority ? `Prioridade: ${PRIORITY_META[activeConv.priority]?.label}` : "Definir prioridade"}
+                >
+                  <Flag className={`w-3.5 h-3.5 ${activeConv.priority ? "fill-current" : ""}`} />
+                  <ChevronDown className="w-3 h-3" />
+                </button>
+                {showPriorityPicker && (
+                  <div className="absolute right-0 top-11 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden w-48">
+                    <button
+                      onClick={() => { handleSetPriority(activeConv, null); setShowPriorityPicker(false); }}
+                      className={`w-full text-left flex items-center gap-2 text-xs px-3 py-2.5 hover:bg-secondary transition ${!activeConv.priority ? "font-semibold text-primary" : ""}`}>
+                      <Circle className="w-2 h-2 fill-current text-gray-300" />
+                      Sem prioridade
+                    </button>
+                    {(["urgente", "retorno", "pode_esperar"] as const).map((p) => (
+                      <button key={p}
+                        onClick={() => { handleSetPriority(activeConv, p); setShowPriorityPicker(false); }}
+                        className={`w-full text-left flex items-center gap-2 text-xs px-3 py-2.5 hover:bg-secondary transition ${activeConv.priority === p ? "font-semibold text-primary" : ""}`}>
+                        <Circle className={`w-2 h-2 fill-current ${PRIORITY_META[p].dot.replace("bg-", "text-")}`} />
+                        {PRIORITY_META[p].label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               {/* Labels */}
               <div className="relative">
-                <button onClick={() => { setShowLabelPicker((v) => !v); setShowTransferPicker(false); setShowParticipantPicker(false); setShowStatusPicker(false); }}
-                  className="p-2 rounded-lg bg-white border border-border hover:bg-secondary transition"
+                <button onClick={() => { setShowLabelPicker((v) => !v); setShowTransferPicker(false); setShowParticipantPicker(false); setShowStatusPicker(false); setShowPriorityPicker(false); }}
+                  className="inline-flex shk-icon-btn"
                   title="Etiquetas">
                   <Tag className="w-3.5 h-3.5" />
                 </button>
                 {showLabelPicker && (
-                  <div className="absolute right-0 top-9 bg-white border border-border rounded-xl shadow-lg z-20 p-2 min-w-[180px]">
+                  <div className="absolute right-0 top-11 bg-white border border-border rounded-xl shadow-lg z-20 p-2 min-w-[180px]">
                     {labels.length === 0 ? (
                       <p className="text-xs text-muted-foreground px-3 py-2">Nenhuma etiqueta criada.</p>
                     ) : (
@@ -2394,14 +4762,14 @@ export default function ChatCenter({
               {can(user, "transferir") && (
               <div className="relative">
                 <button
-                  onClick={() => { setShowTransferPicker((v) => !v); setShowLabelPicker(false); setShowParticipantPicker(false); setShowStatusPicker(false); }}
-                  className="p-2 rounded-lg bg-white border border-border hover:bg-secondary transition"
+                  onClick={() => { setShowTransferPicker((v) => !v); setShowLabelPicker(false); setShowParticipantPicker(false); setShowStatusPicker(false); setShowPriorityPicker(false); }}
+                  className="inline-flex shk-icon-btn"
                   title="Transferir para outro setor"
                 >
                   <ArrowRightLeft className="w-3.5 h-3.5" />
                 </button>
                 {showTransferPicker && (
-                  <div className="absolute right-0 top-9 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden min-w-[220px] max-h-[60vh] overflow-y-auto">
+                  <div className="absolute right-0 top-11 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden min-w-[220px] max-h-[60vh] overflow-y-auto">
                     <div className="px-3 py-2 border-b border-border text-xs font-semibold text-muted-foreground">
                       Transferir para outro setor:
                     </div>
@@ -2443,8 +4811,8 @@ export default function ChatCenter({
               {/* Participants / Vendedores */}
               <div className="relative">
                 <button
-                  onClick={() => { setShowParticipantPicker((v) => !v); setShowLabelPicker(false); setShowTransferPicker(false); setShowStatusPicker(false); }}
-                  className="relative p-2 rounded-lg bg-white border border-border hover:bg-secondary transition"
+                  onClick={() => { setShowParticipantPicker((v) => !v); setShowLabelPicker(false); setShowTransferPicker(false); setShowStatusPicker(false); setShowPriorityPicker(false); }}
+                  className="relative inline-flex shk-icon-btn"
                   title="Vendedores nesta conversa"
                 >
                   <Users className="w-3.5 h-3.5" />
@@ -2455,7 +4823,7 @@ export default function ChatCenter({
                   )}
                 </button>
                 {showParticipantPicker && (
-                  <div className="absolute right-0 top-9 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden min-w-[220px]">
+                  <div className="absolute right-0 top-11 bg-white border border-border rounded-xl shadow-lg z-20 overflow-hidden min-w-[220px]">
                     <div className="px-3 py-2 border-b border-border text-xs font-semibold text-muted-foreground">
                       Nesta conversa
                     </div>
@@ -2497,18 +4865,18 @@ export default function ChatCenter({
                 onClick={handleOpenCrm}
                 disabled={crmLoading}
                 data-testid="button-open-crm"
-                className="p-2 rounded-lg bg-white border border-border hover:bg-secondary transition disabled:opacity-50"
+                className="hidden md:inline-flex shk-icon-btn disabled:opacity-50"
                 title="Abrir ficha do cliente no CRM"
               >
                 {crmLoading
                   ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                   : <IdCard className="w-3.5 h-3.5" />}
               </button>
-              {/* Informações — toggle the customer info side panel */}
+              {/* Informações — expande/recolhe o painel do cliente */}
               <button
-                onClick={() => setShowInfo((v) => !v)}
+                onClick={() => setInfoCollapsed((v) => !v)}
                 data-testid="button-toggle-info"
-                className={`p-2 rounded-lg border transition ${showInfo ? "bg-primary text-white border-primary" : "bg-white border-border hover:bg-secondary"}`}
+                className={`inline-flex shk-icon-btn ${!infoCollapsed ? "!bg-[#EDEDF0] !text-foreground" : ""}`}
                 title="Informações do cliente"
               >
                 <Info className="w-3.5 h-3.5" />
@@ -2516,11 +4884,44 @@ export default function ChatCenter({
             </div>
           </div>
 
+          {/* Etapa do atendimento (novo design): faixa só de leitura com a
+              jornada real da conversa — as ações continuam nos botões acima. */}
+          {(() => {
+            const cur = conversationCategory(activeConv);
+            const idx = ATTENDANCE_STEPS.findIndex((st) => st.id === cur);
+            return (
+              <div className="bg-white border-b border-border px-3 md:px-5 py-2 hidden md:flex items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&>*]:shrink-0" data-testid="attendance-steps">
+                <span className="text-[11px] font-extrabold uppercase tracking-wider text-muted-foreground mr-1.5">Etapa</span>
+                {ATTENDANCE_STEPS.map((st, i) => (
+                  <Fragment key={st.id}>
+                    {i > 0 && <span className={`w-5 h-px ${i <= idx ? "bg-[#A1A1AA]" : "bg-[#E4E4E7]"}`} />}
+                    <span
+                      aria-current={i === idx ? "step" : undefined}
+                      className={`inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-xs font-semibold ${
+                        i === idx ? "bg-foreground text-white"
+                          : i < idx ? "text-[#52525B]"
+                          : "text-[#A1A1AA]"
+                      }`}
+                    >
+                      {i < idx && <Check className="w-3 h-3" />}
+                      {st.label}
+                    </span>
+                  </Fragment>
+                ))}
+                {infoContact?.profile && !isGroupConv(activeConv) && (
+                  <span className="ml-auto pl-3 inline-flex items-center gap-1 text-xs text-muted-foreground">
+                    Cliente <span className="shk-chip shk-chip-primary">{infoContact.profile}</span>
+                  </span>
+                )}
+              </div>
+            );
+          })()}
+
           {/* Label chips */}
           {currentLabels.length > 0 && (
-            <div className="bg-white border-b border-border px-4 py-1.5 flex items-center gap-2 flex-wrap">
+            <div className="bg-white border-b border-border px-5 py-2 flex items-center gap-1.5 flex-wrap">
               {currentLabels.map((label) => (
-                <span key={label} className="flex items-center gap-1 text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-full">
+                <span key={label} className="shk-chip shk-chip-primary !h-6">
                   <Tag className="w-2.5 h-2.5" />{label}
                   <button onClick={() => handleLabel(label)} className="ml-0.5 opacity-60 hover:opacity-100"><X className="w-2.5 h-2.5" /></button>
                 </span>
@@ -2528,18 +4929,100 @@ export default function ChatCenter({
             </div>
           )}
 
+          {/* Busca de texto dentro da conversa aberta */}
+          {showMsgSearch && (
+            <div className="bg-white border-b border-border px-3 py-2" data-testid="bar-search-in-conv">
+              <div className="flex items-center gap-2 bg-secondary rounded-full px-3 py-1.5">
+                <Search className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                <input
+                  autoFocus
+                  value={msgSearchQuery}
+                  onChange={(e) => setMsgSearchQuery(e.target.value)}
+                  placeholder="Buscar nesta conversa..."
+                  data-testid="input-search-in-conv"
+                  className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground"
+                />
+                {msgSearchLoading && <div className="w-3.5 h-3.5 border-2 border-primary border-t-transparent rounded-full animate-spin shrink-0" />}
+                <button
+                  type="button"
+                  onClick={() => { setShowMsgSearch(false); setMsgSearchQuery(""); setMsgSearchResults([]); }}
+                  data-testid="button-close-search-in-conv"
+                >
+                  <X className="w-3.5 h-3.5 text-muted-foreground" />
+                </button>
+              </div>
+              {msgSearchQuery.trim().length >= 2 && (
+                <div className="mt-1 max-h-48 overflow-y-auto rounded-lg border border-border bg-white shadow-sm">
+                  {msgSearchResults.length === 0 && !msgSearchLoading ? (
+                    <p className="text-xs text-muted-foreground px-3 py-2">Nada encontrado com esse termo nesta conversa.</p>
+                  ) : (
+                    msgSearchResults.map((r) => (
+                      <button
+                        key={r.id}
+                        type="button"
+                        onClick={() => jumpToMessage(r.id)}
+                        data-testid={`button-search-result-${r.id}`}
+                        className="w-full text-left px-3 py-2 border-b border-border last:border-b-0 hover:bg-secondary transition"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[11px] font-semibold text-muted-foreground truncate">
+                            {r.direction === "outbound" ? (r.senderName ?? "Equipe") : (r.senderName ?? activeConv.name)}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground shrink-0">
+                            {new Date(r.createdAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                          </span>
+                        </div>
+                        <div className="text-xs text-foreground truncate">{r.content}</div>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Mensagens fixadas ("marcar mensagem", estilo WhatsApp) */}
+          {pinnedMessages.length > 0 && (
+            <div className="bg-amber-50 border-b border-amber-200 max-h-32 overflow-y-auto" data-testid="pinned-messages-bar">
+              {pinnedMessages.map((p) => (
+                <div key={p.messageId} className="group/pin flex items-center gap-2 px-4 py-1.5 border-b border-amber-100 last:border-b-0">
+                  <Pin className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                  <button
+                    onClick={() => scrollToMessage(p.messageId)}
+                    data-testid={`button-jump-pinned-${p.messageId}`}
+                    className="flex-1 min-w-0 text-left"
+                  >
+                    <div className="text-[11px] font-semibold text-amber-800">
+                      {p.direction === "outbound" ? (p.senderName ?? "Equipe") : (p.senderName ?? "Cliente")}
+                    </div>
+                    <div className="text-xs text-amber-900/80 truncate">{p.content}</div>
+                  </button>
+                  <button
+                    onClick={() => handleUnpinMessage(p.messageId)}
+                    data-testid={`button-unpin-bar-${p.messageId}`}
+                    title="Desafixar mensagem"
+                    className="opacity-0 group-hover/pin:opacity-100 transition-opacity p-1 rounded-full text-amber-600 hover:bg-amber-100 shrink-0"
+                  >
+                    <PinOff className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
           {/* Messages area — WhatsApp wallpaper */}
           <div
             ref={msgsContainerRef}
-            className="flex-1 overflow-y-auto px-4 py-4"
-            style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400'%3E%3Crect width='400' height='400' fill='%23e5ddd5'/%3E%3C/svg%3E\")", backgroundColor: "#e5ddd5" }}
+            className="flex-1 overflow-y-auto px-3 md:px-8 py-6 bg-[#F7F7F8]"
           >
+            <MediaLightboxProvider>
+            <div className="max-w-[880px] mx-auto">
             {loadingMsgs ? (
               <div className="flex justify-center items-center h-20">
                 <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
               </div>
             ) : messages.length === 0 ? (
-              <div className="text-center text-xs text-muted-foreground py-8 bg-white/50 rounded-xl px-4">
+              <div className="text-center text-xs text-muted-foreground py-8 bg-white border border-border rounded-xl px-4">
                 Nenhuma mensagem ainda. Inicie a conversa!
               </div>
             ) : (
@@ -2550,30 +5033,55 @@ export default function ChatCenter({
                       onClick={loadOlderMsgs}
                       disabled={loadingOlder}
                       data-testid="button-load-older"
-                      className="text-xs bg-white/90 hover:bg-white text-primary font-medium px-4 py-1.5 rounded-full shadow-sm border border-border transition disabled:opacity-60"
+                      className="text-xs bg-white hover:bg-[#F1F1F3] text-foreground font-semibold px-4 py-1.5 rounded-full border border-border transition-colors disabled:opacity-60"
                     >
                       {loadingOlder ? "Carregando..." : "Carregar mensagens antigas"}
                     </button>
                   </div>
                 )}
-                {messages.map((msg) => (
-                  <MsgBubble
-                    key={msg.id}
-                    msg={msg}
-                    onReply={setReplyTarget}
-                    highlighted={highlightedMsgId === msg.id}
-                    onJumpTo={scrollToMessage}
-                  />
-                ))}
+                {messages.map((msg, msgIdx) => {
+                  const prevMsg = messages[msgIdx - 1];
+                  const showDaySeparator = !prevMsg || msgDayKey(msg.createdAt) !== msgDayKey(prevMsg.createdAt);
+                  return (
+                    <Fragment key={msg.id}>
+                      {showDaySeparator && (
+                        <div className="flex justify-center my-2" data-testid={`day-separator-${msgDayKey(msg.createdAt)}`}>
+                          <span className="text-[11px] font-semibold text-muted-foreground bg-[#EDEDF0] px-3 py-1 rounded-full">
+                            {msgDayLabel(msg.createdAt)}
+                          </span>
+                        </div>
+                      )}
+                      <MsgBubble
+                        msg={msg}
+                        onReply={setReplyTarget}
+                        onForward={openForward}
+                        highlighted={highlightedMsgId === msg.id}
+                        onJumpTo={scrollToMessage}
+                        isGroup={!!activeConv && isGroupConv(activeConv)}
+                        onStartConversation={can(user, "criar_atendimento") ? startConversationWith : undefined}
+                        onReplyPrivately={can(user, "criar_atendimento") ? replyPrivately : undefined}
+                        currentUserId={user?.id}
+                        isModerator={user?.role === "admin" || user?.role === "supervisor"}
+                        onEdit={handleEditMessage}
+                        onDelete={handleDeleteMessage}
+                        isPinned={pinnedMessageIdSet.has(msg.id)}
+                        onPin={handlePinMessage}
+                        onUnpin={handleUnpinMessage}
+                      />
+                    </Fragment>
+                  );
+                })}
                 <div ref={msgsEndRef} />
               </>
             )}
+            </div>
+            </MediaLightboxProvider>
           </div>
 
           {/* Barra "respondendo a": some ao enviar/cancelar, vale pro próximo texto ou anexo. */}
           {replyTarget && (
-            <div className="flex items-center gap-2 bg-[#f0f2f5] border-t border-border px-3 pt-2" data-testid="reply-preview-bar">
-              <div className="flex-1 min-w-0 bg-white border-l-4 border-primary/60 rounded-lg px-2.5 py-1.5">
+            <div className="flex items-center gap-2 bg-white border-t border-border px-3 md:px-5 pt-2.5" data-testid="reply-preview-bar">
+              <div className="flex-1 min-w-0 bg-[#F2F2F4] rounded-lg px-3 py-1.5">
                 <div className="text-[11px] font-semibold text-primary">Respondendo a {replyTarget.senderName ?? "Cliente"}</div>
                 <div className="text-xs text-muted-foreground truncate">{replyTarget.content}</div>
               </div>
@@ -2586,7 +5094,7 @@ export default function ChatCenter({
 
           {/* Input — bloqueado até alguém iniciar o atendimento (assumir a conversa) */}
           {!activeConv.assignee && activeCategory !== "resolvidas" ? (
-            <div className="bg-[#f0f2f5] border-t border-border px-3 py-3 flex flex-col items-center gap-1.5">
+            <div className="bg-white border-t border-border px-3 py-3.5 flex flex-col items-center gap-1.5">
               <button
                 onClick={() => {
                   if (activeCategory === "potenciais") {
@@ -2596,8 +5104,7 @@ export default function ChatCenter({
                   }
                 }}
                 data-testid="button-start-attendance"
-                className="flex items-center gap-2 px-6 py-2.5 rounded-full text-white text-sm font-semibold transition hover:opacity-90"
-                style={{ backgroundColor: "#16a34a" }}
+                className="flex items-center gap-2 px-6 h-11 rounded-xl bg-foreground text-white text-sm font-bold transition-colors hover:bg-black"
               >
                 <UserCircle2 className="w-4 h-4" />
                 Iniciar atendimento
@@ -2608,7 +5115,7 @@ export default function ChatCenter({
             </div>
           ) : (
           recording ? (
-            <div className="bg-[#f0f2f5] border-t border-border px-3 py-2.5 flex items-center gap-3" data-testid="bar-recording">
+            <div className="bg-white border-t border-border px-3 md:px-5 py-3 flex items-center gap-3" data-testid="bar-recording">
               <button
                 type="button"
                 onClick={() => handleFinishRecording(false)}
@@ -2627,34 +5134,82 @@ export default function ChatCenter({
                 onClick={() => handleFinishRecording(true)}
                 title="Enviar áudio"
                 data-testid="button-send-recording"
-                className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white hover:bg-primary/90 transition shrink-0"
+                className="w-10 h-10 rounded-full bg-foreground flex items-center justify-center text-white hover:bg-black transition-colors shrink-0"
               >
                 <Send className="w-4 h-4" />
               </button>
             </div>
           ) : (
           <>
+          {/* Sugestão da IA (novo design): cartão acima do campo — só entra no
+              campo se o vendedor clicar em "Usar"; nada é enviado sozinho. */}
+          {aiSuggestion && composerMode === "message" && (
+            <div className={`bg-white px-3 md:px-5 pt-3 animate-in fade-in-0 slide-in-from-bottom-1 duration-200 ${replyTarget ? "" : "border-t border-border"}`} data-testid="ai-suggestion-card">
+              <div className="rounded-xl border border-border bg-[#FAFAFB] p-3 flex gap-3 items-start flex-wrap">
+                <Sparkles className="w-5 h-5 text-foreground shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-[200px]">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">Sugestão da IA · você decide</p>
+                  <p className="text-sm mt-0.5 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">{aiSuggestion}</p>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => { setMsgText(aiSuggestion); setAiSuggestion(null); requestAnimationFrame(() => inputRef.current?.focus()); }}
+                    data-testid="button-use-ai-suggestion"
+                    className="h-9 px-3.5 rounded-lg bg-foreground text-white text-xs font-bold hover:bg-black transition-colors"
+                  >
+                    Usar no campo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAiSuggestion(null)}
+                    aria-label="Dispensar sugestão"
+                    title="Dispensar sugestão"
+                    data-testid="button-dismiss-ai-suggestion"
+                    className="w-9 h-9 rounded-lg inline-flex items-center justify-center text-muted-foreground hover:bg-secondary transition"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
           {/* Mensagem (vai pro cliente) x Nota interna (só a equipe vê) */}
-          <div className="flex items-center gap-1 bg-[#f0f2f5] border-t border-border px-3 pt-2">
-            <button type="button" onClick={() => setComposerMode("message")} data-testid="button-composer-mode-message"
-              className={`text-xs font-medium px-2.5 py-1 rounded-full transition ${composerMode === "message" ? "bg-primary text-white" : "bg-white text-muted-foreground border border-border hover:bg-secondary"}`}>
-              Mensagem
-            </button>
-            <button type="button" onClick={() => { setComposerMode("note"); cancelReply(); }} data-testid="button-composer-mode-note"
-              className={`flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-full transition ${composerMode === "note" ? "bg-amber-500 text-white" : "bg-white text-muted-foreground border border-border hover:bg-secondary"}`}>
-              <StickyNote className="w-3 h-3" />
-              Nota interna
-            </button>
+          <div className={`flex items-center gap-2 px-3 md:px-5 pt-2.5 bg-white ${replyTarget || (aiSuggestion && composerMode === "message") ? "" : "border-t border-border"}`}>
+            <div className="inline-flex p-[3px] rounded-[10px] bg-[#F2F2F4] gap-0.5">
+              <button type="button" onClick={() => setComposerMode("message")} data-testid="button-composer-mode-message"
+                aria-pressed={composerMode === "message"}
+                className={`text-xs font-bold h-[30px] px-3 rounded-lg transition ${composerMode === "message" ? "bg-foreground text-white" : "text-[#3F3F46] hover:bg-white"}`}>
+                Responder
+              </button>
+              <button type="button" onClick={() => { setComposerMode("note"); cancelReply(); }} data-testid="button-composer-mode-note"
+                aria-pressed={composerMode === "note"}
+                className={`flex items-center gap-1 text-xs font-bold h-[30px] px-3 rounded-lg transition ${composerMode === "note" ? "bg-[#6B4E00] text-white" : "text-[#3F3F46] hover:bg-white"}`}>
+                <Lock className="w-3 h-3" />
+                Nota interna
+              </button>
+            </div>
+            {composerMode === "note" && (
+              <span className="text-[11px] font-semibold shk-note-title hidden sm:inline">Não vai para o WhatsApp</span>
+            )}
           </div>
-          <form onSubmit={handleSend} className={`border-t border-border px-3 py-2.5 flex items-center gap-2 ${composerMode === "note" ? "bg-amber-50" : "bg-[#f0f2f5]"}`}>
+          {/* flex-wrap (só até sm): em celulares estreitos, os 4 botões de
+              ação (anexo, respostas rápidas, cupom, IA) já somam quase 180px
+              — sobrava pouco espaço pro campo de digitar, que ficava
+              espremido numa "pílula" minúscula quebrando em 2 linhas mesmo
+              pra mensagens curtas. O grupo campo+enviar abaixo força
+              w-full nesse breakpoint, then joga pra própria linha; a partir
+              de sm (tablet/desktop) volta tudo numa linha só, como sempre foi. */}
+          <form onSubmit={handleSend} className="bg-white px-3 md:px-5 pt-2 pb-3 flex items-center flex-wrap sm:flex-nowrap gap-1.5">
             <input
               ref={fileInputRef}
               type="file"
+              multiple
               accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/3gpp,video/webm,video/quicktime,audio/ogg,audio/mpeg,audio/mp4,audio/webm,audio/aac,audio/wav,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
               className="hidden"
               onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) { handleFileSelected(file); }
+                const files = Array.from(e.target.files ?? []);
+                if (files.length > 0) { handleFilesSelected(files); }
                 e.target.value = "";
               }}
             />
@@ -2665,9 +5220,9 @@ export default function ChatCenter({
               disabled={sending}
               title="Enviar foto ou documento"
               data-testid="button-attach-file"
-              className="w-9 h-9 rounded-full flex items-center justify-center text-muted-foreground hover:bg-secondary transition shrink-0 disabled:opacity-40"
+              className="w-9 h-9 rounded-lg flex items-center justify-center text-[#3F3F46] hover:bg-secondary transition shrink-0 disabled:opacity-40"
             >
-              <Paperclip className="w-4 h-4" />
+              <Paperclip className="w-[18px] h-[18px]" />
             </button>
             )}
             {quickReplies.length > 0 && (
@@ -2678,12 +5233,12 @@ export default function ChatCenter({
                 disabled={sending}
                 title="Mensagens rápidas"
                 data-testid="button-quick-replies"
-                className="w-9 h-9 rounded-full flex items-center justify-center text-amber-600 bg-amber-100 hover:bg-amber-200 transition disabled:opacity-40"
+                className="w-9 h-9 rounded-lg flex items-center justify-center text-[#3F3F46] hover:bg-secondary transition disabled:opacity-40"
               >
-                <Zap className="w-4 h-4" />
+                <Zap className="w-[18px] h-[18px]" />
               </button>
               {showQuickReplies && (
-                <div className="absolute bottom-11 left-0 bg-white border border-border rounded-xl shadow-lg z-30 w-80 max-h-80 overflow-y-auto">
+                <div className="absolute bottom-11 left-0 bg-white border border-border rounded-xl shadow-lg z-30 w-80 max-w-[90vw] max-h-80 overflow-y-auto">
                   <div className="px-3 py-2 border-b border-border sticky top-0 bg-white">
                     <p className="text-xs font-semibold text-muted-foreground mb-1.5">Mensagens rápidas</p>
                     <input autoFocus value={quickSearch} onChange={(e) => setQuickSearch(e.target.value)}
@@ -2714,86 +5269,339 @@ export default function ChatCenter({
               )}
             </div>
             )}
+            {/* Cupom de desconto aplicado manualmente — sem entidade de pedido
+                no sistema, então só insere o texto do desconto na mensagem
+                (o vendedor edita/completa como quiser antes de enviar) e
+                registra o uso pra estatística por vendedor. */}
+            <div className="relative shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  const opening = !showCouponPicker;
+                  setShowCouponPicker(opening);
+                  if (opening && couponPickerList.length === 0) {
+                    api.catalog.listCoupons().then((r) => setCouponPickerList(r.coupons)).catch(() => {});
+                  }
+                }}
+                disabled={sending}
+                title="Cupom de desconto"
+                data-testid="button-coupon-picker"
+                className="w-9 h-9 rounded-lg flex items-center justify-center text-[#3F3F46] hover:bg-secondary transition disabled:opacity-40"
+              >
+                <Percent className="w-[18px] h-[18px]" />
+              </button>
+              {showCouponPicker && (
+                <div className="absolute bottom-11 left-0 bg-white border border-border rounded-xl shadow-lg z-30 w-80 max-w-[90vw] max-h-80 overflow-y-auto">
+                  <div className="px-3 py-2 border-b border-border sticky top-0 bg-white">
+                    <p className="text-xs font-semibold text-muted-foreground mb-1.5">Cupom de desconto</p>
+                    <input autoFocus value={couponPickerSearch} onChange={(e) => setCouponPickerSearch(e.target.value)}
+                      placeholder="Buscar código ou vendedor..." data-testid="input-coupon-picker-search"
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-border text-xs focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                  </div>
+                  {couponPickerList
+                    .filter((c) => c.active)
+                    .filter((c) => !couponPickerSearch.trim() || `${c.code} ${c.vendorName ?? ""}`.toLowerCase().includes(couponPickerSearch.toLowerCase()))
+                    .map((c) => (
+                    <button key={c.id} type="button" data-testid={`button-coupon-picker-${c.id}`}
+                      onClick={() => {
+                        const label = c.discountType === "percent" ? `${c.discountValue}% de desconto` : `R$ ${Number(c.discountValue).toFixed(2).replace(".", ",")} de desconto`;
+                        const text = `Cupom aplicado: ${c.code} (${label})`;
+                        setMsgText((prev) => (prev ? `${prev}\n${text}` : text));
+                        api.catalog.redeemCoupon(c.id).then((updated) => {
+                          setCouponPickerList((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
+                        }).catch(() => {});
+                        setShowCouponPicker(false);
+                        setCouponPickerSearch("");
+                      }}
+                      className="w-full text-left px-3 py-2.5 hover:bg-secondary transition">
+                      <p className="text-xs font-semibold font-mono">{c.code} <span className="font-normal text-muted-foreground">{c.discountType === "percent" ? `${c.discountValue}%` : `R$ ${Number(c.discountValue).toFixed(2).replace(".", ",")}`}</span></p>
+                      {c.vendorName && <p className="text-[11px] text-muted-foreground">Vendedor: {c.vendorName}</p>}
+                    </button>
+                  ))}
+                  {couponPickerList.filter((c) => c.active).length === 0 && (
+                    <p className="px-3 py-4 text-center text-[11px] text-muted-foreground">Nenhum cupom ativo cadastrado</p>
+                  )}
+                </div>
+              )}
+            </div>
             {can(user, "usar_ia") && (<>
+            {/* Ícone só (sem texto) -- com o painel de Informações e/ou o Chat
+                Interno abertos ao lado, a coluna do meio fica estreita e o
+                rótulo "Sugerir (IA)" espremia a área de digitar. Botão de
+                "Corrigir ortografia com IA" removido (pedido 11/09): a
+                correção automática já roda no navegador (spellCheck+lang
+                pt-BR no textarea abaixo), sem precisar de IA sob demanda. */}
             <button
               type="button"
               onClick={handleSuggestReply}
               disabled={sending || suggesting}
               title="Sugerir resposta com IA (revise antes de enviar)"
               data-testid="button-suggest-reply"
-              className="h-9 px-3 rounded-full flex items-center gap-1.5 text-xs font-semibold text-primary bg-primary/10 hover:bg-primary/20 transition shrink-0 disabled:opacity-40"
+              className="w-9 h-9 rounded-lg flex items-center justify-center text-[#3F3F46] hover:bg-secondary transition shrink-0 disabled:opacity-40"
             >
               {suggesting
-                ? <RefreshCw className="w-4 h-4 animate-spin" />
-                : <Sparkles className="w-4 h-4" />}
-              <span className="hidden sm:inline">Sugerir (IA)</span>
-            </button>
-            <button
-              type="button"
-              onClick={handleCorrectText}
-              disabled={!msgText.trim() || correcting || sending}
-              title="Corrigir ortografia com IA"
-              data-testid="button-correct-text"
-              className="h-9 px-3 rounded-full flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-100 hover:bg-emerald-200 transition shrink-0 disabled:opacity-40"
-            >
-              {correcting
-                ? <RefreshCw className="w-4 h-4 animate-spin" />
-                : <SpellCheck className="w-4 h-4" />}
-              <span className="hidden sm:inline">Corrigir</span>
+                ? <RefreshCw className="w-[18px] h-[18px] animate-spin" />
+                : <Sparkles className="w-[18px] h-[18px]" />}
             </button>
             </>)}
-            <input
-              ref={inputRef}
-              value={msgText}
-              onChange={(e) => setMsgText(e.target.value)}
-              placeholder={composerMode === "note" ? "Escreva uma nota interna (só a equipe vê)..." : "Digite uma mensagem..."}
-              spellCheck
-              lang="pt-BR"
-              data-testid="input-message"
-              className="flex-1 bg-white rounded-full px-4 py-2 text-sm border border-border outline-none focus:ring-2 focus:ring-primary/20"
-              disabled={sending}
-              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(e); } }}
-            />
-            {msgText.trim() ? (
-              <button type="submit" disabled={sending} data-testid="button-send-message"
-                className={`w-10 h-10 rounded-full flex items-center justify-center text-white disabled:opacity-40 transition shrink-0 ${composerMode === "note" ? "bg-amber-500 hover:bg-amber-600" : "bg-primary hover:bg-primary/90"}`}>
-                <Send className="w-4 h-4" />
-              </button>
-            ) : composerMode === "message" && can(user, "enviar_midia") ? (
-              <button type="button" onClick={handleStartRecording} disabled={sending}
-                title="Gravar nota de voz" data-testid="button-record-audio"
-                className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white hover:bg-primary/90 disabled:opacity-40 transition shrink-0">
-                <Mic className="w-4 h-4" />
-              </button>
-            ) : (
-              <button type="submit" disabled data-testid="button-send-message-disabled"
-                className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white opacity-40 transition shrink-0">
-                <Send className="w-4 h-4" />
-              </button>
-            )}
+            {/* Campo + botão de enviar sempre juntos — em telas estreitas
+                (abaixo de sm) esse grupo ocupa a linha inteira sozinho (ver
+                comentário no <form> acima); a partir de sm volta a dividir a
+                linha com os ícones de ação, como sempre foi. */}
+            <div className="flex items-center gap-2 w-full sm:w-auto sm:flex-1 sm:min-w-0">
+              <textarea
+                ref={inputRef as React.RefObject<HTMLTextAreaElement>}
+                value={msgText}
+                onChange={(e) => setMsgText(e.target.value)}
+                placeholder={composerMode === "note" ? "Nota interna: só a equipe vê. Não vai para o WhatsApp." : "Digite uma mensagem..."}
+                spellCheck
+                lang="pt-BR"
+                rows={1}
+                data-testid="input-message"
+                className={`flex-1 min-w-0 resize-none rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 max-h-40 overflow-y-auto ${composerMode === "note" ? "shk-note shk-note-text placeholder:text-[#8A6D1F] focus:ring-[#C9A227]/30" : "bg-[#F7F7F8] border border-[#E4E4E7] focus:ring-black/5 focus:bg-white focus:border-[#D4D4D8]"}`}
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(e); } }}
+                onPaste={(e) => {
+                  if (can(user, "enviar_midia")) {
+                    const images = Array.from(e.clipboardData.items)
+                      .filter((item) => item.type.startsWith("image/"))
+                      .map((item) => item.getAsFile())
+                      .filter((f): f is File => f != null);
+                    if (images.length > 0) {
+                      e.preventDefault();
+                      handleFilesSelected(images);
+                      return;
+                    }
+                  }
+                  // Texto colado de Word/sites vem com aspas curvas, espaço
+                  // sem quebra e caracteres invisíveis — normaliza pra texto
+                  // limpo antes de ir pro WhatsApp (item 3 do roadmap).
+                  const text = e.clipboardData.getData("text/plain");
+                  if (!text) return;
+                  e.preventDefault();
+                  const clean = cleanPastedText(text);
+                  const el = e.currentTarget;
+                  const start = el.selectionStart;
+                  const end = el.selectionEnd;
+                  const next = msgText.slice(0, start) + clean + msgText.slice(end);
+                  setMsgText(next);
+                  requestAnimationFrame(() => {
+                    const pos = start + clean.length;
+                    el.setSelectionRange(pos, pos);
+                  });
+                }}
+              />
+              {msgText.trim() ? (
+                <button type="submit" disabled={sending} data-testid="button-send-message"
+                  className={`w-11 h-11 rounded-xl flex items-center justify-center text-white disabled:opacity-40 transition shrink-0 ${composerMode === "note" ? "bg-[#6B4E00] hover:bg-[#574000]" : "bg-foreground hover:bg-black"}`}>
+                  <Send className="w-4 h-4" />
+                </button>
+              ) : composerMode === "message" && can(user, "enviar_midia") ? (
+                <button type="button" onClick={handleStartRecording} disabled={sending || requestingMic}
+                  title={requestingMic ? "Aguardando o navegador liberar o microfone..." : "Gravar nota de voz"} data-testid="button-record-audio"
+                  className="w-11 h-11 rounded-xl bg-foreground flex items-center justify-center text-white hover:bg-black disabled:opacity-40 transition-colors shrink-0">
+                  {requestingMic ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Mic className="w-4 h-4" />}
+                </button>
+              ) : (
+                <button type="submit" disabled data-testid="button-send-message-disabled"
+                  className="w-11 h-11 rounded-xl bg-foreground flex items-center justify-center text-white opacity-30 transition shrink-0">
+                  <Send className="w-4 h-4" />
+                </button>
+              )}
+            </div>
           </form>
           </>
           ))}
         </div>
 
-        {/* ── Informações side panel ─────────────────────────────────────── */}
-        {showInfo && (
-          <aside className="fixed inset-0 z-40 w-full md:static md:z-auto md:w-80 shrink-0 md:border-l border-border bg-white flex flex-col overflow-hidden" data-testid="panel-info">
-            <div className="bg-primary px-4 py-3 text-white flex items-center justify-between shrink-0">
-              <div className="flex items-center gap-2">
-                <Info className="w-4 h-4" />
-                <span className="font-semibold text-sm">Informações do cliente</span>
+        {/* ── Informações side panel — colapsável fixo (Fase 3a) ───────────── */}
+        <aside
+          className={`shrink-0 md:border-l border-border bg-white flex-col overflow-hidden ${
+            infoCollapsed
+              ? "hidden md:flex md:w-12"
+              : "fixed inset-0 z-40 md:static md:z-auto flex w-full md:w-80 xl:w-[340px]"
+          }`}
+          data-testid="panel-info"
+        >
+          {infoCollapsed ? (
+            <button
+              onClick={() => setInfoCollapsed(false)}
+              className="flex flex-col items-center gap-2 py-4 w-full h-full text-muted-foreground hover:text-foreground hover:bg-[#F7F7F8] transition-colors"
+              title="Mostrar informações do cliente"
+              data-testid="button-expand-info"
+            >
+              <ChevronRight className="w-4 h-4" />
+              <Info className="w-4 h-4" />
+            </button>
+          ) : (
+          <>
+            <div className="bg-white border-b border-border px-4 h-[52px] flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2 text-foreground">
+                <IdCard className="w-4 h-4 text-muted-foreground" />
+                <span className="font-bold text-sm">Ficha do cliente</span>
               </div>
-              <button onClick={() => setShowInfo(false)} className="p-1 rounded-lg hover:bg-white/20 transition" title="Fechar">
-                <X className="w-4 h-4" />
+              <button onClick={() => setInfoCollapsed(true)} className="p-1.5 rounded-lg text-muted-foreground hover:bg-secondary transition" title="Recolher">
+                <ChevronLeft className="w-4 h-4" />
               </button>
             </div>
-            {infoLoading || !infoContact ? (
+            {infoLoading ? (
               <div className="flex-1 flex items-center justify-center">
                 <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
               </div>
+            ) : !infoContact ? (
+              <div className="flex-1 flex items-center justify-center p-6 text-center">
+                <p className="text-xs text-muted-foreground">
+                  {activeConv && isGroupConv(activeConv)
+                    ? "Grupos do WhatsApp não têm ficha de cliente no CRM."
+                    : "Não foi possível carregar as informações do cliente."}
+                </p>
+              </div>
             ) : (
-              <div className="flex-1 overflow-y-auto p-4 space-y-3">
+              <div className="flex-1 overflow-y-auto p-4 space-y-5 animate-in fade-in-0 duration-200" data-testid="ficha-cliente">
+                {/* Identidade */}
+                <div className="flex items-center gap-3">
+                  <Avatar name={infoContact.name} src={activeConv?.avatarUrl} size="lg" />
+                  <div className="min-w-0">
+                    <p className="font-extrabold text-base tracking-tight truncate">{infoContact.name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      Cliente desde {new Date(infoContact.createdAt).toLocaleDateString("pt-BR", { month: "short", year: "numeric" }).replace(".", "")}
+                      {fichaHistory.length > 0 ? ` · ${fichaHistory.length} atendimento${fichaHistory.length > 1 ? "s" : ""}` : ""}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  <span className="shk-chip shk-chip-primary">{infoContact.profile}</span>
+                  {parseFloat(infoContact.totalPurchases ?? "0") > 0 && (
+                    <span className="shk-chip shk-chip-neutral">Compras: {fmtBRL(infoContact.totalPurchases)}</span>
+                  )}
+                  {infoContact.isBlocked && <span className="shk-chip shk-chip-late">Bloqueado</span>}
+                  {currentLabels.map((label) => (
+                    <span key={label} className="shk-chip shk-chip-outline">{label}</span>
+                  ))}
+                </div>
+
+                {/* Dados principais */}
+                <div className="grid grid-cols-2 gap-x-3 gap-y-3">
+                  {([
+                    ["Telefone", infoContact.phone ?? activeConv?.phone ?? "—", true],
+                    ["Cidade", infoContact.city || "—", false],
+                    ["Loja", infoContact.serviceStore || "—", false],
+                    ["Origem", infoContact.attendanceSource || "—", false],
+                  ] as const).map(([label, value, mono]) => (
+                    <div key={label} className="min-w-0">
+                      <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">{label}</p>
+                      <p className={`text-[13px] font-semibold truncate ${mono ? "font-mono tabular-nums font-medium" : ""}`} title={value}>{value}</p>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Próxima ação = próximo agendamento pendente desta conversa */}
+                {(() => {
+                  const next = [...schedules].sort((x, y) => new Date(x.sendAt).getTime() - new Date(y.sendAt).getTime())[0];
+                  return (
+                    <div className="rounded-xl border border-border bg-[#F7F7F8] p-3.5 space-y-2.5" data-testid="ficha-proxima-acao">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-extrabold uppercase tracking-wider text-foreground">Próxima ação</span>
+                        {schedules.length > 1 && <span className="text-[11px] font-bold text-[#3F3F46]">+{schedules.length - 1} agendada{schedules.length > 2 ? "s" : ""}</span>}
+                      </div>
+                      {next ? (
+                        <div className="flex gap-2.5 items-start">
+                          <CalendarClock className="w-4 h-4 mt-0.5 shrink-0 text-foreground" />
+                          <div className="min-w-0">
+                            <p className="font-extrabold text-sm">
+                              {new Date(next.sendAt).toLocaleString("pt-BR", { weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                              <span className={`ml-1.5 align-middle shk-chip ${next.kind === "mensagem" ? "shk-chip-neutral" : "shk-chip-wait"}`}>{next.kind === "mensagem" ? "Mensagem" : "Retorno"}</span>
+                            </p>
+                            <p className="text-[13px] text-[#3F3F46] line-clamp-2">{next.content}</p>
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="text-[13px] text-[#3F3F46]">Nenhum retorno agendado para este cliente.</p>
+                      )}
+                      {activeConv && activeCategory !== "resolvidas" && (
+                        <div className="flex gap-1.5">
+                          <button type="button" onClick={() => openSchedule(activeConv.id, "retorno")} data-testid="button-ficha-agendar-retorno"
+                            className="flex-1 h-9 rounded-lg bg-foreground text-white text-xs font-bold hover:opacity-90 transition">
+                            Agendar retorno
+                          </button>
+                          {schedules.length > 0 && (
+                            <button type="button" onClick={() => openSchedule(activeConv.id)} data-testid="button-ficha-ver-agendamentos"
+                              className="flex-1 h-9 rounded-lg border border-[#D4D4D8] bg-white text-xs font-bold hover:bg-secondary transition">
+                              Ver agendamentos
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {/* Compras registradas no CRM */}
+                <div className="space-y-2">
+                  <div className="flex items-baseline justify-between">
+                    <p className="text-[11px] font-extrabold uppercase tracking-wider text-muted-foreground">Compras</p>
+                    {fichaPurchases.length > 0 && <span className="text-xs font-bold">{fmtBRL(infoContact.totalPurchases)}</span>}
+                  </div>
+                  {fichaPurchases.length === 0 ? (
+                    <p className="text-[13px] text-muted-foreground">Nenhuma compra registrada.</p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {fichaPurchases.slice(0, 3).map((pu) => (
+                        <div key={pu.id} className="flex items-center gap-2.5 rounded-xl border border-border px-3 py-2">
+                          <div className="min-w-0 flex-1">
+                            <p className="text-[13px] font-semibold truncate" title={pu.description}>{pu.description}</p>
+                            <p className="text-[11px] text-muted-foreground">{fmtShortDate(pu.purchaseDate)}{pu.category ? ` · ${pu.category}` : ""}</p>
+                          </div>
+                          <span className="text-[13px] font-extrabold shrink-0">{fmtBRL(pu.amount)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Atendimentos anteriores (histórico do CRM) */}
+                <div className="space-y-2">
+                  <p className="text-[11px] font-extrabold uppercase tracking-wider text-muted-foreground">Atendimentos anteriores</p>
+                  {fichaHistory.length === 0 ? (
+                    <p className="text-[13px] text-muted-foreground">Primeiro atendimento deste cliente.</p>
+                  ) : (
+                    <div className="divide-y divide-border/70">
+                      {fichaHistory.slice(0, 4).map((h) => (
+                        <div key={h.id} className="py-2 flex gap-2.5">
+                          <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-[#A1A1AA] shrink-0" />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex justify-between gap-2">
+                              <span className="text-[11px] font-extrabold uppercase tracking-wider text-[#3F3F46] truncate">{h.sectorName}</span>
+                              <span className="text-[11px] text-muted-foreground font-mono shrink-0">{fmtShortDate(h.createdAt)}</span>
+                            </div>
+                            <p className="text-[13px] font-semibold">{h.resolutionReason || h.outcome || "Atendimento"}</p>
+                            {h.attendantName && <p className="text-[11px] text-muted-foreground">{h.attendantName}</p>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Compras do cliente no ERP (19/10/2026). */}
+                {activeConv && <ErpPurchasesBlock conversationId={activeConv.id} />}
+
+                {infoContact.notes && !showEditInfo && (
+                  <div className="space-y-1">
+                    <p className="text-[11px] font-extrabold uppercase tracking-wider text-muted-foreground">Observações</p>
+                    <p className="text-[13px] whitespace-pre-wrap">{infoContact.notes}</p>
+                  </div>
+                )}
+
+                {/* Editar dados — o formulário de sempre, recolhido */}
+                <div className="border-t border-border pt-3 space-y-3">
+                  <button type="button" onClick={() => setShowEditInfo((v) => !v)} data-testid="button-toggle-edit-info"
+                    aria-expanded={showEditInfo}
+                    className="w-full flex items-center justify-between text-sm font-bold text-foreground hover:text-[#52525B] transition-colors">
+                    <span className="inline-flex items-center gap-2"><Pencil className="w-3.5 h-3.5" />Editar dados do cliente</span>
+                    <ChevronDown className={`w-4 h-4 transition-transform ${showEditInfo ? "rotate-180" : ""}`} />
+                  </button>
+                  {showEditInfo && (
+                    <div className="space-y-3">
                 <div>
                   <label className="text-xs text-muted-foreground mb-1 block">Nome</label>
                   <input value={infoForm.name} onChange={(e) => setInfoForm({ ...infoForm, name: e.target.value })}
@@ -2866,60 +5674,105 @@ export default function ChatCenter({
                   {infoSaving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
                   Salvar informações
                 </button>
+                    </div>
+                  )}
+                  <button type="button" onClick={handleOpenCrm} disabled={crmLoading} data-testid="button-ficha-open-crm"
+                    className="w-full h-9 rounded-lg border border-border text-xs font-bold text-[#3F3F46] hover:bg-secondary transition inline-flex items-center justify-center gap-1.5 disabled:opacity-50">
+                    <IdCard className="w-3.5 h-3.5" />Abrir ficha completa no CRM
+                  </button>
+                </div>
               </div>
             )}
-          </aside>
-        )}
+          </>
+          )}
+        </aside>
         </div>
       )}
 
-      {/* ── File preview modal ─────────────────────────────────────────── */}
+      {/* ── File preview modal (um ou vários arquivos) ────────────────────── */}
       {filePreview && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl w-full max-w-sm shadow-xl flex flex-col overflow-hidden">
             <div className="flex items-center justify-between px-5 pt-5 pb-3">
               <h3 className="font-bold text-base">
-                {filePreview.previewUrl ? "Prévia da foto" : "Enviar documento"}
+                {filePreview.length > 1
+                  ? `Prévia (${filePreview.length})`
+                  : filePreview[0].kind === "image" ? "Prévia da foto"
+                  : filePreview[0].kind === "video" ? "Prévia do vídeo"
+                  : "Enviar documento"}
               </h3>
               <button onClick={handleCancelPreview} className="text-muted-foreground hover:text-foreground transition">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="px-5 pb-3">
-              {filePreview.previewUrl ? (
-                <img
-                  src={filePreview.previewUrl}
-                  alt="Prévia"
-                  className="w-full max-h-64 object-contain rounded-xl bg-secondary/30"
-                />
-              ) : (
-                <div className="flex items-center gap-3 p-4 bg-secondary/30 rounded-xl">
-                  <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center shrink-0">
-                    <FileText className="w-6 h-6 text-primary" />
+            {filePreview.length === 1 ? (
+              <div className="px-5 pb-3">
+                {filePreview[0].previewUrl ? (
+                  <img
+                    src={filePreview[0].previewUrl}
+                    alt="Prévia"
+                    className="w-full max-h-64 object-contain rounded-xl bg-secondary/30"
+                  />
+                ) : (
+                  <div className="flex items-center gap-3 p-4 bg-secondary/30 rounded-xl">
+                    <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center shrink-0">
+                      <FileText className="w-6 h-6 text-primary" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium truncate">{filePreview[0].file.name}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        {(filePreview[0].file.size / 1024).toFixed(0)} KB
+                      </p>
+                    </div>
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium truncate">{filePreview.file.name}</p>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      {(filePreview.file.size / 1024).toFixed(0)} KB
-                    </p>
+                )}
+              </div>
+            ) : (
+              <div className="px-5 pb-3 flex flex-wrap gap-2">
+                {filePreview.map((item, i) => (
+                  <div key={i} className="relative w-16 h-16 rounded-lg overflow-hidden bg-secondary/30 border border-border shrink-0">
+                    {item.previewUrl ? (
+                      <img src={item.previewUrl} alt="" className="w-full h-full object-cover" />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center">
+                        <FileText className="w-5 h-5 text-primary" />
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveFilePreview(item.file)}
+                      title="Remover"
+                      className="absolute top-0.5 right-0.5 bg-black/60 hover:bg-black/80 text-white rounded-full p-0.5"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
                   </div>
-                </div>
-              )}
-            </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  title="Adicionar mais arquivos"
+                  data-testid="button-add-more-files"
+                  className="w-16 h-16 rounded-lg border-2 border-dashed border-border flex items-center justify-center text-muted-foreground hover:bg-secondary/50 transition shrink-0"
+                >
+                  <Paperclip className="w-5 h-5" />
+                </button>
+              </div>
+            )}
 
             <div className="px-5 pb-4">
               <input
                 autoFocus
                 value={caption}
                 onChange={(e) => setCaption(e.target.value)}
-                placeholder="Adicionar legenda (opcional)"
+                placeholder={filePreview.length > 1 ? "Legenda na última mensagem (opcional)" : "Adicionar legenda (opcional)"}
                 data-testid="input-file-caption"
                 className="w-full px-3 py-2 rounded-xl border border-border text-sm outline-none focus:ring-2 focus:ring-primary/20"
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
-                    void handleSendFile(filePreview.file, caption.trim() || undefined);
+                    void handleSendFiles(filePreview, caption.trim() || undefined);
                   }
                 }}
               />
@@ -2929,24 +5782,124 @@ export default function ChatCenter({
               <button
                 type="button"
                 onClick={handleCancelPreview}
+                disabled={sending}
                 data-testid="button-cancel-file-preview"
-                className="flex-1 py-2 rounded-xl border border-border text-sm font-medium text-muted-foreground hover:bg-secondary transition"
+                className="flex-1 py-2 rounded-xl border border-border text-sm font-medium text-muted-foreground hover:bg-secondary transition disabled:opacity-50"
               >
                 Cancelar
               </button>
               <button
                 type="button"
+                disabled={sending}
                 data-testid="button-confirm-file-send"
-                onClick={() => void handleSendFile(filePreview.file, caption.trim() || undefined)}
-                className="flex-1 py-2 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition flex items-center justify-center gap-1.5"
+                onClick={() => void handleSendFiles(filePreview, caption.trim() || undefined)}
+                className="flex-1 py-2 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition flex items-center justify-center gap-1.5 disabled:opacity-60"
               >
-                <Send className="w-3.5 h-3.5" />
-                Enviar
+                {sendProgress ? (
+                  <>
+                    <div className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                    Enviando {sendProgress.current}/{sendProgress.total}
+                  </>
+                ) : (
+                  <>
+                    <Send className="w-3.5 h-3.5" />
+                    Enviar
+                  </>
+                )}
               </button>
             </div>
           </div>
         </div>
       )}
+
+      {/* ── Banco de arquivos compartilhados desta conversa ──────────────── */}
+      {showSharedFiles && activeConv && (() => {
+        const media = messages.filter((m) => m.mediaUrl && (m.type === "image" || m.type === "doc" || m.type === "audio" || m.type === "video"));
+        // isImageDocMessage: "doc" que na verdade é foto (mandada pelo botão
+        // "Documento" do WhatsApp) entra em Fotos, não em Documentos — mesma
+        // regra do balão da conversa, pra não ficar inconsistente entre as
+        // duas telas.
+        const images = media.filter((m) => m.type === "image" || isImageDocMessage(m));
+        const docs = media.filter((m) => m.type === "doc" && !isImageDocMessage(m));
+        const audios = media.filter((m) => m.type === "audio");
+        const videos = media.filter((m) => m.type === "video");
+        return (
+          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={() => setShowSharedFiles(false)}>
+            <div className="bg-white rounded-2xl w-full max-w-lg max-h-[85vh] shadow-xl flex flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-border">
+                <h3 className="font-bold text-base flex items-center gap-2"><FolderOpen className="w-4 h-4 text-primary" /> Arquivos compartilhados</h3>
+                <button onClick={() => setShowSharedFiles(false)} data-testid="button-close-shared-files" className="text-muted-foreground hover:text-foreground transition"><X className="w-4 h-4" /></button>
+              </div>
+              <div className="p-4 space-y-4 overflow-y-auto">
+                {media.length === 0 && (
+                  <p className="text-xs text-muted-foreground text-center py-6">
+                    Nenhuma foto, documento ou áudio nas mensagens carregadas nesta conversa. Role pra cima na conversa pra carregar histórico mais antigo e tentar de novo.
+                  </p>
+                )}
+                {images.length > 0 && (
+                  <div>
+                    <p className="text-[11px] font-semibold text-muted-foreground mb-1.5">Fotos ({images.length})</p>
+                    <MediaLightboxProvider>
+                      <div className="grid grid-cols-4 gap-1.5">
+                        {images.map((m) => <SharedFileImageThumb key={m.id} msg={m} />)}
+                      </div>
+                    </MediaLightboxProvider>
+                  </div>
+                )}
+                {docs.length > 0 && (
+                  <div>
+                    <p className="text-[11px] font-semibold text-muted-foreground mb-1.5">Documentos ({docs.length})</p>
+                    <div className="space-y-1.5">
+                      {docs.map((m) => {
+                        const filename = m.metadata?.fileName ?? m.mediaUrl!.split("/").pop() ?? "documento";
+                        const size = formatFileSize(m.metadata?.fileSize);
+                        return (
+                          <a key={m.id} href={m.mediaUrl!} target="_blank" rel="noopener noreferrer" download
+                            data-testid={`link-shared-file-doc-${m.id}`}
+                            className="flex items-center gap-2 bg-secondary/60 rounded-xl px-3 py-2 hover:bg-secondary transition">
+                            <DocIcon mimeType={m.metadata?.mimeType} fileName={filename} />
+                            <div className="min-w-0 flex-1">
+                              <p className="text-xs text-foreground break-all">{filename}</p>
+                              <p className="text-[10px] text-muted-foreground">{size} {size && "·"} {new Date(m.createdAt).toLocaleDateString("pt-BR")}</p>
+                            </div>
+                          </a>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                {videos.length > 0 && (
+                  <div>
+                    <p className="text-[11px] font-semibold text-muted-foreground mb-1.5">Vídeos ({videos.length})</p>
+                    <div className="space-y-1.5">
+                      {videos.map((m) => (
+                        <a key={m.id} href={m.mediaUrl!} target="_blank" rel="noopener noreferrer" data-testid={`link-shared-file-video-${m.id}`}
+                          className="flex items-center gap-2 bg-secondary/60 rounded-xl px-3 py-2 hover:bg-secondary transition">
+                          <Video className="w-5 h-5 text-primary shrink-0" />
+                          <p className="text-xs text-foreground">{new Date(m.createdAt).toLocaleString("pt-BR")}</p>
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {audios.length > 0 && (
+                  <div>
+                    <p className="text-[11px] font-semibold text-muted-foreground mb-1.5">Áudios ({audios.length})</p>
+                    <div className="space-y-1.5">
+                      {audios.map((m) => (
+                        <div key={m.id} className="flex items-center gap-2 bg-secondary/60 rounded-xl px-3 py-2" data-testid={`row-shared-file-audio-${m.id}`}>
+                          <audio controls src={m.mediaUrl!} className="h-8 flex-1 min-w-0" />
+                          <p className="text-[10px] text-muted-foreground shrink-0">{new Date(m.createdAt).toLocaleDateString("pt-BR")}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── Quick reply preview modal: variáveis já substituídas ─────────── */}
       {quickReplyPreview !== null && (
@@ -3145,6 +6098,72 @@ export default function ChatCenter({
         document.body
       )}
 
+      {/* ── Encaminhar mensagem (estilo WhatsApp, v1: 1 conversa por vez) ── */}
+      {forwardMsg && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={closeForward}>
+          <div className="bg-white rounded-2xl w-full max-w-sm shadow-xl border overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <span className="font-semibold text-sm flex items-center gap-2"><Forward className="w-4 h-4 text-primary" /> Encaminhar mensagem</span>
+              <button onClick={closeForward} data-testid="button-close-forward-modal" className="p-1 rounded hover:bg-muted/60"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="px-4 pt-3">
+              <div className="text-xs bg-muted/40 border rounded-lg px-3 py-2 text-muted-foreground line-clamp-3">
+                {forwardMsg.type === "text" ? `"${forwardMsg.content}"` : forwardMsg.content.split("\n")[0]}
+              </div>
+            </div>
+            <div className="px-4 pt-3">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  autoFocus
+                  value={forwardQuery}
+                  onChange={(e) => { setForwardQuery(e.target.value); setForwardTargetId(null); }}
+                  placeholder="Buscar conversa de destino..."
+                  data-testid="input-forward-search"
+                  className="w-full pl-8 pr-3 py-2 rounded-lg border border-border text-sm outline-none focus:ring-2 focus:ring-primary/30"
+                />
+              </div>
+            </div>
+            <div className="max-h-72 overflow-y-auto mt-2">
+              {forwardLoading ? (
+                <div className="px-4 py-6 text-center text-xs text-muted-foreground">Buscando...</div>
+              ) : forwardResults.length === 0 ? (
+                <div className="px-4 py-6 text-center text-xs text-muted-foreground">
+                  {forwardQuery ? "Nenhuma conversa encontrada" : "Digite pra buscar uma conversa"}
+                </div>
+              ) : forwardResults.map((c) => {
+                const selected = forwardTargetId === c.id;
+                return (
+                  <button
+                    key={c.id}
+                    onClick={() => setForwardTargetId(c.id)}
+                    data-testid={`forward-target-${c.id}`}
+                    className={`w-full text-left px-4 py-2.5 flex items-center gap-3 border-b border-border/50 transition ${selected ? "bg-primary/10" : "hover:bg-muted/50"}`}
+                  >
+                    <div className="w-8 h-8 rounded-full bg-primary text-white flex items-center justify-center text-xs font-semibold shrink-0">
+                      {c.name?.slice(0, 2).toUpperCase() ?? "??"}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium truncate">{c.name}</div>
+                      {c.phone && <div className="text-[11px] text-muted-foreground truncate">{c.phone}</div>}
+                    </div>
+                    <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 ${selected ? "bg-primary border-primary" : "border-border"}`}>
+                      {selected && <span className="text-white text-[10px] leading-none">✓</span>}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="p-3 border-t">
+              <button onClick={submitForward} disabled={forwardTargetId == null || forwarding} data-testid="button-submit-forward"
+                className="w-full py-2.5 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition disabled:opacity-50">
+                {forwarding ? "Encaminhando..." : "Encaminhar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Configuração do alerta de sem resposta ──────────────────────── */}
       {showAlertCfg && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowAlertCfg(false)}>
@@ -3176,18 +6195,34 @@ export default function ChatCenter({
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="text-xs text-muted-foreground">Por hora</label>
-                  <input type="number" min={1} max={200} value={cfgOutboundHourly}
+                  <input type="number" min={1} max={1000} value={cfgOutboundHourly}
                     onChange={(e) => setCfgOutboundHourly(Number(e.target.value))}
                     data-testid="input-outbound-hourly-limit"
                     className="w-full px-3 py-2 rounded-xl border border-border text-sm mt-1" />
                 </div>
                 <div>
                   <label className="text-xs text-muted-foreground">Por dia</label>
-                  <input type="number" min={1} max={1000} value={cfgOutboundDaily}
+                  <input type="number" min={1} max={20000} value={cfgOutboundDaily}
                     onChange={(e) => setCfgOutboundDaily(Number(e.target.value))}
                     data-testid="input-outbound-daily-limit"
                     className="w-full px-3 py-2 rounded-xl border border-border text-sm mt-1" />
                 </div>
+              </div>
+            </div>
+            <div className="pt-2 border-t border-border">
+              <label className="text-sm font-semibold flex items-center gap-1.5">
+                <Send className="w-3.5 h-3.5 text-primary" />
+                Intervalo do disparo em massa
+              </label>
+              <p className="text-xs text-muted-foreground mt-0.5 mb-2">
+                Pausa entre uma mensagem e a próxima dentro da mesma leva (Resolvidas → "Disparar mensagem para vários") — reduz o risco de o WhatsApp banir o número.
+              </p>
+              <div>
+                <label className="text-xs text-muted-foreground">Segundos entre mensagens</label>
+                <input type="number" min={1} max={30} value={cfgBroadcastInterval}
+                  onChange={(e) => setCfgBroadcastInterval(Number(e.target.value))}
+                  data-testid="input-broadcast-interval"
+                  className="w-full px-3 py-2 rounded-xl border border-border text-sm mt-1" />
               </div>
             </div>
             <button
@@ -3207,16 +6242,23 @@ export default function ChatCenter({
                   toast({ title: "Limite por dia inválido", description: "Use entre 1 e 1000.", variant: "destructive" });
                   return;
                 }
+                const intervalSec = Math.round(cfgBroadcastInterval);
+                if (!Number.isFinite(intervalSec) || intervalSec < 1 || intervalSec > 30) {
+                  toast({ title: "Intervalo inválido", description: "Use entre 1 e 30 segundos.", variant: "destructive" });
+                  return;
+                }
                 setSavingAlertCfg(true);
                 try {
                   const s = await api.settings.update({
                     alertUnansweredEnabled: cfgEnabled, alertUnansweredMinutes: mins,
                     outboundHourlyLimit: hourly, outboundDailyLimit: daily,
+                    broadcastIntervalMs: intervalSec * 1000,
                   });
                   setAlertEnabled(s.alertUnansweredEnabled);
                   setAlertMinutes(s.alertUnansweredMinutes);
                   setCfgOutboundHourly(s.outboundHourlyLimit);
                   setCfgOutboundDaily(s.outboundDailyLimit);
+                  setCfgBroadcastInterval(Math.round(s.broadcastIntervalMs / 1000));
                   setShowAlertCfg(false);
                   toast({ title: "Configurações salvas! ✅", description: s.alertUnansweredEnabled ? `Avisa após ${s.alertUnansweredMinutes} min sem resposta.` : "Alerta desligado para toda a equipe." });
                 } catch (err) {
@@ -3230,6 +6272,129 @@ export default function ChatCenter({
               className="w-full py-2.5 rounded-xl bg-primary text-white font-semibold text-sm disabled:opacity-50">
               {savingAlertCfg ? "Salvando..." : "Salvar"}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Métricas de disparo (pedido 19/09) ──────────────────────────── */}
+      {showBroadcastMetrics && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setShowBroadcastMetrics(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 pt-5 pb-3 shrink-0">
+              <h3 className="font-bold flex items-center gap-2">
+                <BarChart3 className="w-4 h-4 text-primary" />
+                Métricas de disparo
+              </h3>
+              <button onClick={() => setShowBroadcastMetrics(false)} data-testid="button-close-broadcast-metrics">
+                <X className="w-5 h-5 text-muted-foreground" />
+              </button>
+            </div>
+
+            {loadingBroadcastMetrics ? (
+              <div className="px-5 pb-8 pt-4 text-center text-sm text-muted-foreground">Carregando...</div>
+            ) : (
+              <div className="flex-1 overflow-y-auto px-5 pb-5 space-y-5">
+                {/* Números do período — hero numbers, sem gráfico (são totais,
+                    não série temporal). */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {[
+                    { label: "Disparos", value: broadcastSummary?.last30Days.dispatches ?? 0, hint: "levas em 30 dias" },
+                    { label: "Enviadas", value: broadcastSummary?.last30Days.sent ?? 0, hint: "mensagens entregues" },
+                    { label: "Falhas", value: broadcastSummary?.last30Days.failed ?? 0, hint: "não entregues" },
+                    {
+                      label: "Taxa de sucesso",
+                      value: (() => {
+                        const s = broadcastSummary?.last30Days.sent ?? 0;
+                        const f = broadcastSummary?.last30Days.failed ?? 0;
+                        return s + f === 0 ? "—" : `${Math.round((s / (s + f)) * 100)}%`;
+                      })(),
+                      hint: "entregues / total",
+                    },
+                  ].map((tile) => (
+                    <div key={tile.label} className="rounded-xl border border-border bg-secondary/30 px-3 py-2.5">
+                      <div className="text-[11px] text-muted-foreground">{tile.label}</div>
+                      <div className="text-xl font-bold text-foreground leading-tight">{tile.value}</div>
+                      <div className="text-[10px] text-muted-foreground">{tile.hint}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Volume diário (14 dias) — uma série só, então o título já
+                    identifica: sem legenda. Rótulo direto só no maior dia. */}
+                <div>
+                  <div className="text-xs font-semibold mb-2">Mensagens enviadas por dia (14 dias)</div>
+                  {(() => {
+                    const daily = broadcastSummary?.daily ?? [];
+                    if (daily.length === 0) {
+                      return <div className="text-xs text-muted-foreground py-4">Nenhum disparo nos últimos 14 dias.</div>;
+                    }
+                    const max = Math.max(...daily.map((d) => d.sent), 1);
+                    return (
+                      <div className="flex items-end gap-[2px] h-28 border-b border-border/70 pb-0">
+                        {daily.map((d) => {
+                          const pct = Math.max(4, Math.round((d.sent / max) * 100));
+                          const isMax = d.sent === max;
+                          const [, mm, dd] = d.day.split("-");
+                          return (
+                            <div key={d.day} className="group relative flex-1 flex flex-col items-center justify-end h-full min-w-0">
+                              {isMax && (
+                                <span className="text-[10px] font-semibold text-foreground mb-0.5">{d.sent}</span>
+                              )}
+                              <div
+                                className="w-full bg-primary rounded-t transition group-hover:brightness-110"
+                                style={{ height: `${pct}%` }}
+                              />
+                              <span className="text-[9px] text-muted-foreground mt-1 truncate w-full text-center">{dd}/{mm}</span>
+                              {/* Tooltip por marca */}
+                              <div className="pointer-events-none absolute bottom-full mb-1 left-1/2 -translate-x-1/2 z-10 hidden group-hover:block whitespace-nowrap rounded-lg bg-foreground text-white text-[10px] px-2 py-1 shadow-lg">
+                                {dd}/{mm} · {d.sent} enviada(s) · {d.dispatches} leva(s)
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Histórico leva a leva — é também a "table view" dos números
+                    acima (quantidade, tempo de envio, intervalo usado). */}
+                <div>
+                  <div className="text-xs font-semibold mb-2">Últimos disparos</div>
+                  {broadcastLogs.length === 0 ? (
+                    <div className="text-xs text-muted-foreground py-4">Nenhum disparo registrado ainda.</div>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {broadcastLogs.map((log) => (
+                        <div key={log.id} className="rounded-xl border border-border px-3 py-2">
+                          <div className="flex items-center justify-between gap-2 text-xs">
+                            <span className="font-semibold truncate">
+                              {new Date(log.startedAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                              <span className="text-muted-foreground font-normal"> · {log.userName}</span>
+                            </span>
+                            {log.status === "running" ? (
+                              <span className="shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">em andamento</span>
+                            ) : (
+                              <span className="shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-secondary text-muted-foreground">
+                                {log.sentCount}/{log.totalSelected}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-muted-foreground mt-1 line-clamp-2">{log.message}</p>
+                          <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-muted-foreground mt-1.5">
+                            <span>Quantidade: <strong className="text-foreground">{log.totalSelected}</strong></span>
+                            <span>Enviadas: <strong className="text-foreground">{log.sentCount}</strong></span>
+                            {log.failedCount > 0 && <span>Falhas: <strong className="text-foreground">{log.failedCount}</strong></span>}
+                            <span>Intervalo: <strong className="text-foreground">{Math.round(log.intervalMs / 1000)}s</strong></span>
+                            <span>Tempo de envio: <strong className="text-foreground">{broadcastDuration(log.startedAt, log.finishedAt)}</strong></span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -3264,6 +6429,21 @@ export default function ChatCenter({
                   <option value="manual">Manual</option>
                 </select>
               </div>
+              {newForm.channel === "whatsapp" && waSessions.length > 1 && (
+                <div>
+                  <label className="text-xs font-medium mb-1 block">Linha de WhatsApp</label>
+                  <select value={newForm.sessionKey} onChange={(e) => setNewForm({ ...newForm, sessionKey: e.target.value })}
+                    data-testid="select-new-conv-session"
+                    className="w-full px-3 py-2 rounded-xl border border-border text-sm">
+                    {waSessions.map((s) => (
+                      <option key={s.sessionKey} value={s.sessionKey}>{waSessionLabel(s.sessionKey, waSessions)}</option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    Cada linha é um canal independente — o mesmo número pode ter um atendimento aberto em cada uma ao mesmo tempo (ex.: atacado e varejo).
+                  </p>
+                </div>
+              )}
               <div>
                 <label className="text-xs font-medium mb-1 block">Setor</label>
                 <select value={newForm.sectorId} onChange={(e) => setNewForm({ ...newForm, sectorId: e.target.value })}
@@ -3406,7 +6586,8 @@ export default function ChatCenter({
               <select value={finalizeReason} onChange={(e) => setFinalizeReason(e.target.value)}
                 data-testid="select-finalize-reason"
                 className="w-full px-3 py-2 rounded-xl border border-border text-sm">
-                {FINALIZE_REASONS.map((r) => <option key={r} value={r}>{r}</option>)}
+                <option value="" disabled>Selecione um motivo…</option>
+                {finalizeReasonOptions.map((r) => <option key={r} value={r}>{r}</option>)}
               </select>
             </div>
             {finalizeReason === "Outro" && (

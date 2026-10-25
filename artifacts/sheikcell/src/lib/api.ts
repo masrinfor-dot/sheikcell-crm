@@ -6,22 +6,61 @@ export const API_BASE = BASE;
 // modal de confirmação de senha em vez de tratar como erro genérico.
 export class ApiError extends Error {
   code?: string;
-  constructor(message: string, code?: string) {
+  // Presente quando POST /chat/conversations responde 409 (já existe uma
+  // conversa aberta com esse número) — deixa quem chamou abrir a conversa
+  // existente em vez de só mostrar o erro.
+  conversationId?: number;
+  constructor(message: string, code?: string, conversationId?: number) {
     super(message);
     this.name = "ApiError";
     this.code = code;
+    this.conversationId = conversationId;
   }
 }
 
-async function req<T>(path: string, opts?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    credentials: "include",
-    headers: { "Content-Type": "application/json", ...opts?.headers },
-    ...opts,
-  });
+// timeoutMs é opcional — usado só por chamadas que dependem de uma IA externa
+// (ex.: importação de lista, busca de fotos), onde sem ele um proxy/rede
+// travada deixa o spinner girando pra sempre em vez de mostrar um erro.
+// Chamadas normais (sem timeoutMs) mantêm o comportamento de sempre.
+export async function req<T>(path: string, opts?: RequestInit & { timeoutMs?: number }): Promise<T> {
+  const { timeoutMs, ...init } = opts ?? {};
+  const controller = timeoutMs ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      credentials: "include",
+      headers: { "Content-Type": "application/json", ...init.headers },
+      ...init,
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+  } catch (err) {
+    if (controller?.signal.aborted) throw new ApiError("Tempo esgotado — tente novamente.");
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new ApiError((err as { error?: string }).error ?? res.statusText, (err as { code?: string }).code);
+    const code = (err as { code?: string }).code;
+    // Sessão expirada ou encerrada no servidor (cookie venceu — 24h desde o
+    // login — ou o limite de 2 sessões simultâneas por usuário derrubou esta
+    // aba) enquanto a página ficava aberta: sem isso, a tela continuava
+    // mostrando os dados já carregados (parecendo logado) e só a próxima
+    // ação (ex.: "Iniciar atendimento") revelava o problema com um erro cru
+    // "Unauthorized", sem explicar nada nem levar de volta pro login. Não
+    // dispara pra /auth/login (senha errada é 401 normal ali) nem /auth/me
+    // (checagem silenciosa no carregamento inicial, visitante deslogado é
+    // esperado) nem REAUTH_REQUIRED (fluxo separado de confirmar senha de
+    // novo pra ação sensível — RoutineChecklistGate.tsx já trata via `code`).
+    if (res.status === 401 && code !== "REAUTH_REQUIRED" && path !== "/auth/login" && path !== "/auth/me") {
+      window.dispatchEvent(new CustomEvent("sheikcell:unauthorized"));
+    }
+    throw new ApiError(
+      (err as { error?: string }).error ?? res.statusText,
+      code,
+      (err as { conversationId?: number }).conversationId,
+    );
   }
   if (res.status === 204) return undefined as unknown as T;
   return res.json() as Promise<T>;
@@ -44,22 +83,17 @@ function readAsAttachment(file?: File): Promise<{ base64: string; mimetype: stri
 
 export type VendedorPermissions = Record<string, boolean> | null;
 
-// Chaves de permissão individuais do vendedor (null/ausente = liberado).
+// Chaves de permissão de AÇÃO do vendedor (null/ausente = liberado).
+// Visibilidade de módulo/aba não entra mais aqui — ver moduleAccess no User.
 export const PERMISSION_KEYS = [
   "ver_potenciais",
   "transferir",
   "finalizar",
   "criar_atendimento",
   "usar_ia",
-  "crm",
-  "tarefas",
+  "usar_ia_avaliacao",
   "enviar_midia",
-  "equipe",
-  "financeiras",
-  "peliculas",
-  "avaliacao",
-  "treinamentos",
-  "planilhas",
+  "adicionar_participante",
 ] as const;
 
 export const PERMISSION_LABELS: Record<string, string> = {
@@ -67,16 +101,10 @@ export const PERMISSION_LABELS: Record<string, string> = {
   transferir: "Transferir conversa para outro setor",
   finalizar: "Finalizar atendimentos",
   criar_atendimento: "Criar novo atendimento manualmente",
-  usar_ia: "Usar sugestão de resposta com IA",
-  crm: "Acessar o CRM",
-  tarefas: "Acessar o quadro de Tarefas",
+  usar_ia: "Usar sugestão de resposta com IA (Atendimento)",
+  usar_ia_avaliacao: "Usar avaliação de aparelho com IA (Avaliação)",
   enviar_midia: "Enviar fotos, áudios e arquivos",
-  equipe: "Aba Equipe (chat interno)",
-  financeiras: "Aba Financeiras (bancos)",
-  peliculas: "Aba Películas",
-  avaliacao: "Aba Avaliação (aparelho usado)",
-  treinamentos: "Aba Treinamentos",
-  planilhas: "Aba Planilhas",
+  adicionar_participante: "Adicionar outro vendedor numa conversa",
 };
 
 export type User = {
@@ -85,42 +113,136 @@ export type User = {
   email: string;
   role: string;
   sectorId: number | null;
+  // Vendedor em mais de um setor (pedido 17/09): lista completa (objetos
+  // resumidos, pra exibir nome/cor de cada um) — sectorId acima continua
+  // existindo como o setor primário (compatibilidade).
+  sectors?: Sector[];
   storeName?: string | null;
   extension?: string | null;
   mustChangePassword?: boolean;
   adminAccess?: string[] | null;
+  // Módulos da loja que este vendedor/supervisor pode ver (e em que nível —
+  // "view"/"edit" dão o mesmo acesso completo por enquanto). Ausência de
+  // chave = sem acesso àquele módulo — EXCETO "chat" (Atendimento), que tem
+  // regra invertida: ausência = liberado, só bloqueia com "none" explícito
+  // (ver chatAccessLevel abaixo). Só um admin pode gravar essa chave.
+  moduleAccess?: UserModuleAccess | null;
   accessHours?: { start: string; end: string; days: number[] } | null;
   sector: Sector | null;
   permissions?: VendedorPermissions;
+  // Fila de atendimento do Chat Interno: restringe este usuário a "assumir"
+  // só uma conversa em modo fila por vez em toda a loja (ver assume/release
+  // em internalChat.ts). Default false — sem restrição.
+  internalChatSingleTask?: boolean;
+  // Fila de atendimento REAL (Atendimento + Fila legada), pedido 10/09:
+  // quando true, este usuário só vê o que foi direcionado especificamente a
+  // ele por um vendedor_chefe/supervisor/admin — nunca o pool geral do
+  // setor/fila livre. Default false — sem restrição.
+  queueRestrictToAssigned?: boolean;
+  // Fila do Central de Atendimento por ordem (pedido 14/09): quando true,
+  // este vendedor só assume um atendimento por vez, se auto-servindo em
+  // ordem (sempre o mais antigo do pool) — sem precisar que alguém
+  // direcione na mão, diferente de queueRestrictToAssigned acima. Default
+  // false — sem restrição. Ver isVisibleToMe/STATUS em ChatCenter.tsx.
+  chatQueueSingleTask?: boolean;
   // Módulos opcionais contratados pela loja (teto do tenant — null pro
   // superadmin, que não pertence a loja nenhuma).
   enabledModules?: string[] | null;
-  // Presente quando o superadmin está "entrando como" este usuário.
-  impersonatedBy?: { name: string } | null;
+  // Presente quando o superadmin está "entrando como" este usuário, ou um
+  // admin de loja está no "modo espiar" um vendedor — role diferencia os
+  // dois casos pro front mostrar o texto/botão de volta certo.
+  impersonatedBy?: { name: string; role: string } | null;
+  // Sub-perfil do superadmin (Fase 1 - gaps): null = acesso completo (todo
+  // superadmin de sempre); um array restringe às abas/ações cobertas por
+  // esses escopos — ver SUPERADMIN_SCOPE_OPTIONS em SuperAdminDashboard.tsx.
+  // Só é relevante quando role="superadmin".
+  superadminScopes?: string[] | null;
+};
+
+// Um membro da equipe do superadmin (Painel do Sistema → aba Equipe).
+export type TeamMember = {
+  id: number;
+  name: string;
+  email: string;
+  isActive: boolean;
+  superadminScopes: string[] | null;
+  createdAt: string;
+};
+
+// "Modo espiar" — 1 linha do log de acesso (quem entrou, em quem, quando).
+export type EspiarLogEntry = {
+  id: number;
+  startedAt: string;
+  endedAt: string | null;
+  adminName: string;
+  vendedorName: string;
+};
+
+// Auditoria de ações sensíveis (item 21 do roadmap "Central de Atendimento")
+// — 1 linha do log: transferência de atendimento/setor, edição/exclusão de
+// mensagem, exclusão de atendimento. "Entrar como"/modo espiar continua no
+// log próprio (EspiarLogEntry acima).
+export type SensitiveActionLogEntry = {
+  id: number;
+  action: string;
+  description: string;
+  userName: string;
+  conversationId: number | null;
+  createdAt: string;
 };
 
 // Módulos opcionais que uma loja pode ou não ter contratado — mesma lista
 // de OPTIONAL_MODULES em lib/db/src/schema/tenants.ts (mantenha em sincronia).
 export const OPTIONAL_MODULES = [
-  "peliculas", "avaliacao", "financeiras", "financeiro_bancario", "rh",
-  "treinamentos", "questionarios", "sorteios", "planilhas", "documentos", "robo",
+  "chat", "crm", "equipe", "financeiro", "diretorio", "tarefas", "resultados", "history",
+  "avaliacao", "financeiras", "rh", "treinamentos", "questionarios", "sorteios", "documentos", "robo",
+  "relatorios", "tvbox", "rotinas", "vitrine", "pagamentos", "gerente",
 ] as const;
 export type OptionalModule = typeof OPTIONAL_MODULES[number];
+
+// Módulos que dá pra restringir por USUÁRIO (vendedor/supervisor) — todos
+// menos "chat": Atendimento tem regra própria (ver ChatAccessLevel logo
+// abaixo), com UI e sanitização à parte, porque o padrão dela é o oposto
+// dos demais módulos (ausência = liberado, não sem acesso).
+export type UserGrantableModule = Exclude<OptionalModule, "chat">;
+export const USER_GRANTABLE_MODULES = OPTIONAL_MODULES.filter((m): m is UserGrantableModule => m !== "chat");
+export type ModuleAccessLevel = "view" | "edit";
+// Atendimento (chat): "none" bloqueia de verdade; "view"/"edit" iguais aos
+// demais; ausência da chave = liberado (compatibilidade com toda conta já
+// existente). Só um admin (nunca supervisor) pode gravar essa chave — ver
+// a checagem `isAdmin` no formulário de permissões em AdminDashboard.tsx.
+export type ChatAccessLevel = "none" | "view" | "edit";
+export type UserModuleAccess = Partial<Record<UserGrantableModule, ModuleAccessLevel>> & { chat?: ChatAccessLevel };
+
 export const MODULE_LABELS: Record<OptionalModule, string> = {
-  peliculas: "Películas",
+  chat: "Atendimento",
+  crm: "CRM",
+  equipe: "Chat Interno",
+  financeiro: "Financeiro",
+  diretorio: "Diretório da Equipe",
+  tarefas: "Tarefas",
+  resultados: "Resultados",
+  history: "Histórico",
   avaliacao: "Avaliação de Usados",
   financeiras: "Financeiras",
-  financeiro_bancario: "Financeiro Bancário",
   rh: "RH",
   treinamentos: "Treinamentos",
   questionarios: "Questionários",
   sorteios: "Sorteios",
-  planilhas: "Planilhas",
   documentos: "Documentos",
   robo: "Robô",
+  relatorios: "Relatórios",
+  tvbox: "TV Box",
+  rotinas: "Rotinas e Produtividade",
+  vitrine: "Vitrine Aparelhos",
+  pagamentos: "Pagamentos entre Filiais",
+  gerente: "Gerente IA",
 };
+// "Básico" = o conjunto padrão do CRM (o que antes era núcleo sempre ligado);
+// "Completo" = básico + todos os módulos de negócio adicionais.
+const BASIC_MODULES: OptionalModule[] = ["chat", "crm", "equipe", "financeiro", "diretorio", "tarefas", "resultados", "history"];
 export const MODULE_PACKAGES: Record<"basico" | "completo", OptionalModule[]> = {
-  basico: [],
+  basico: BASIC_MODULES,
   completo: [...OPTIONAL_MODULES],
 };
 
@@ -129,6 +251,37 @@ export function can(user: User | null, key: string): boolean {
   if (!user) return false;
   if (user.role === "admin") return true;
   return user.permissions?.[key] !== false;
+}
+
+// Nível de acesso do usuário a um módulo — admin sempre "edit"; loja sem o
+// módulo contratado ou usuário sem grant explícito = null (sem acesso).
+// Mesma regra do backend (checkModuleAccess em lib/moduleAccess.ts).
+export function moduleLevel(user: User | null, m: UserGrantableModule): ModuleAccessLevel | null {
+  if (!user) return null;
+  if (user.role === "admin") return "edit";
+  if (user.enabledModules != null && !user.enabledModules.includes(m)) return null;
+  return user.moduleAccess?.[m] ?? null;
+}
+
+// Atalho pra gatear botão de criar/editar/excluir: só "edit" pode escrever,
+// "view" (ou sem acesso) só navega e lê. Mesma regra do backend
+// (requireModuleAccess bloqueia POST/PATCH/PUT/DELETE sem nível "edit").
+export function canEditModule(user: User | null, m: UserGrantableModule): boolean {
+  return moduleLevel(user, m) === "edit";
+}
+
+// Nível de acesso do usuário ao Atendimento — admin sempre "edit"; demais
+// papéis usam o que um admin configurou (moduleAccess.chat), com default
+// "edit" (liberado) se nunca foi configurado, pra não quebrar conta
+// existente. Mesma regra do backend (checkChatAccess em lib/moduleAccess.ts).
+export function chatAccessLevel(user: User | null): ChatAccessLevel {
+  if (!user) return "none";
+  if (user.role === "admin") return "edit";
+  if (user.enabledModules != null && !user.enabledModules.includes("chat")) return "none";
+  return user.moduleAccess?.chat ?? "edit";
+}
+export function canUseChat(user: User | null): boolean {
+  return chatAccessLevel(user) !== "none";
 }
 
 export type InternalConversation = {
@@ -140,6 +293,13 @@ export type InternalConversation = {
   lastMessage: string | null;
   lastMessageAt: string | null;
   unreadCount: number;
+  pinnedMessage: { id: number; senderName: string; content: string; type: "text" | "image" | "audio" | "doc" } | null;
+  // Fila de atendimento (grupos usados como canal de pedidos): ver
+  // POST .../assume e .../release em internalChat.ts.
+  queueMode?: boolean;
+  activeHandlerId?: number | null;
+  activeHandlerName?: string | null;
+  activeHandlerSince?: string | null;
 };
 
 export type Store = {
@@ -147,6 +307,69 @@ export type Store = {
   name: string;
   isActive: boolean;
   createdAt: string;
+  // Geofence do Ponto — null (qualquer um) = geofence não configurado.
+  geofenceLat?: number | null;
+  geofenceLng?: number | null;
+  geofenceRadiusMeters?: number | null;
+  // "Pular fila" por palavra-chave (pedido 18/09) — se esta loja participa
+  // como candidata a receber conversa auto-atribuída por uma regra com
+  // skipQueue=true (ex.: xerox). Ver routingRules abaixo e skipQueueAssign.ts.
+  skipQueueEnabled?: boolean;
+};
+
+// Regras de roteamento automático por palavra-chave (pedido 18/09) — CRUD em
+// routes/routingRules.ts, motor de classificação em autoRouter.ts (backend).
+export type RoutingRule = {
+  id: number;
+  sectorId: number;
+  name: string;
+  keywords: string;
+  priority: number;
+  isActive: boolean;
+  // "Pular a fila" — quando true e a palavra-chave bate, tenta atribuir na
+  // hora a um vendedor ocioso do setor (das lojas com skipQueueEnabled),
+  // sem esperar assumir manualmente.
+  skipQueue: boolean;
+};
+
+// ─── Pagamentos entre Filiais ────────────────────────────────────────────────
+// Cadastro manual de banco/maquininha por filial — sem integração bancária
+// nenhuma (ver comentário em lib/db/src/schema/finance_payments.ts).
+export type FinanceBankAccount = {
+  id: number;
+  storeId: number;
+  bankName: string;
+  label: string | null;
+  isActive: boolean;
+  createdAt: string;
+};
+
+export type FinancePaymentAllocation = {
+  storeId: number;
+  percent: string | null;
+  amount: string;
+};
+
+export type FinancePayment = {
+  id: number;
+  paymentDate: string;
+  description: string;
+  supplier: string | null;
+  payingBankAccountId: number;
+  payingStoreId: number;
+  splitType: "rateada" | "direta";
+  splitMode: "percent" | "value";
+  totalAmount: string;
+  status: "aberto" | "pago";
+  paidAt: string | null;
+  createdBy: number | null;
+  createdAt: string;
+  updatedAt: string;
+  allocations: FinancePaymentAllocation[];
+};
+
+export type FinancePaymentSummary = {
+  stores: { storeId: number; storeName: string; pago: number; aberto: number }[];
 };
 
 export type TeamStatusRow = {
@@ -172,6 +395,313 @@ export type DocumentItem = {
   uploaderName: string | null;
 };
 
+// ─── Vitrine Aparelhos ───────────────────────────────────────────────────────
+// Selo de qualidade padrão SheikCell — mesma lista/critério de
+// CATALOG_CONDITION_CRITERIA em lib/db/src/schema/catalog.ts (mantenha em sincronia).
+export type CatalogCondition = "novo" | "excelente" | "muito_bom" | "bom" | "outlet";
+export const CATALOG_CONDITIONS: { value: CatalogCondition; label: string }[] = [
+  { value: "novo", label: "Novo" },
+  { value: "excelente", label: "Excelente" },
+  { value: "muito_bom", label: "Muito Bom" },
+  { value: "bom", label: "Bom" },
+  { value: "outlet", label: "Outlet" },
+];
+
+export const CATALOG_CONDITION_CRITERIA: Record<
+  CatalogCondition,
+  { label: string; criteria: { label: string; text: string }[] }
+> = {
+  novo: {
+    label: "Novo",
+    criteria: [
+      { label: "Tela", text: "Lacrado de fábrica, nunca utilizado — sem nenhum sinal de uso" },
+      { label: "Lateral", text: "Lacrado de fábrica, sem nenhum sinal de uso" },
+      { label: "Traseira", text: "Lacrado de fábrica, sem nenhum sinal de uso" },
+      { label: "Bateria", text: "100% da capacidade da bateria" },
+      { label: "Acessórios", text: "Acompanha todos os acessórios originais de fábrica, lacrados" },
+    ],
+  },
+  excelente: {
+    label: "Excelente",
+    criteria: [
+      { label: "Tela", text: "Poucos ou nenhum sinal de uso, como pequenos riscos" },
+      { label: "Lateral", text: "Pode apresentar arranhões imperceptíveis" },
+      { label: "Traseira", text: "Pode apresentar pequeno desgaste ou arranhão, mas nada aparente" },
+      { label: "Bateria", text: "Os aparelhos possuem no mínimo 80% da capacidade da bateria" },
+      { label: "Acessórios", text: "Não acompanha acessórios" },
+    ],
+  },
+  muito_bom: {
+    label: "Muito Bom",
+    criteria: [
+      { label: "Tela", text: "Alguns sinais de uso, como pequenos riscos" },
+      { label: "Lateral", text: "Pode apresentar pequenos amassados" },
+      { label: "Traseira", text: "Pode apresentar arranhões leves" },
+      { label: "Bateria", text: "Os aparelhos possuem no mínimo 80% da capacidade da bateria" },
+      { label: "Acessórios", text: "Não acompanha acessórios" },
+    ],
+  },
+  bom: {
+    label: "Bom",
+    criteria: [
+      { label: "Tela", text: "Sinais de uso mais nítidos, como riscos" },
+      { label: "Lateral", text: "Pode apresentar amassados, partes descascadas ou arranhões" },
+      { label: "Traseira", text: "Pode apresentar riscos e arranhões nítidos" },
+      { label: "Bateria", text: "Os aparelhos possuem no mínimo 80% da capacidade da bateria" },
+      { label: "Acessórios", text: "Não acompanha acessórios" },
+    ],
+  },
+  outlet: {
+    label: "Outlet",
+    criteria: [
+      { label: "Tela", text: "Pode apresentar manchas fortes, sombras (efeito fantasma) e/ou riscos na tela" },
+      { label: "Lateral", text: "Pode apresentar pequenos amassados, partes descascadas ou arranhões" },
+      { label: "Traseira", text: "Pode apresentar riscos e arranhões nítidos" },
+      { label: "Bateria", text: "Os aparelhos possuem no mínimo 80% da capacidade da bateria" },
+      { label: "Leitor de Digital/Facial", text: "Pode não funcionar" },
+      { label: "Acessórios", text: "Não acompanha acessórios" },
+    ],
+  },
+};
+
+export type CatalogPhoto = { id: number; storedName: string; sourceUrl?: string | null; sortOrder: number; isBoxPhoto: boolean; color: string | null };
+
+// Categoria/aba personalizável (Celulares > Samsung/Apple, Peças de
+// celular...) — a loja cria/edita/apaga livremente. parentId null = aba
+// principal; parentId preenchido = subcategoria.
+export type CatalogCategory = { id: number; name: string; parentId: number | null; sortOrder: number };
+
+// Ficha técnica curta gerada por IA, mostrada em grade de ícones na vitrine
+// pública (pedido do lojista: seguir o estilo de site de comparação de
+// preços) — todo campo opcional/curto, null quando a IA não teve confiança
+// nesse dado pra esse modelo. "Memória" não entra aqui de propósito: é
+// calculada a partir do armazenamento das variantes (ver productMemoryLabel
+// em VitrinePublica.tsx), pra nunca destoar do que o lojista cadastrou.
+export type CatalogAiSpecs = {
+  network?: string | null;
+  processor?: string | null;
+  gps?: string | null;
+  os?: string | null;
+  display?: string | null;
+  camera?: string | null;
+  video?: string | null;
+};
+
+// Variante de armazenamento/memória — cada família de produto (modelo +
+// condição + cores) pode ter várias, com preço/estoque próprios.
+export type CatalogProductVariant = {
+  id: number;
+  productId: number;
+  storage: string | null;
+  // Memória RAM e tecnologia de rede dessa variante (ex.: "4GB"/"8GB",
+  // "4G"/"5G") — alguns modelos têm o MESMO armazenamento em versões
+  // diferentes de RAM/rede, com custo/preço diferente pra cada uma.
+  ram: string | null;
+  network: string | null;
+  // Cor específica dessa combinação (null = variante não distingue cor —
+  // usa as cores do produto só como informação, ver CatalogProduct.colors).
+  color: string | null;
+  costPrice: string | null;
+  costIncludesInvoice: boolean;
+  marginPercentOverride: string | null;
+  salePrice: string | null;
+  // Preço de atacado — calculado a partir do custo (margem de atacado
+  // própria ou padrão da loja), com opção de digitar um valor exato pra
+  // sobrescrever. Só sai na vitrine pública pra quem desbloqueou com o
+  // código de acesso (ver api.catalog.getWholesaleCode).
+  wholesalePrice: string | null;
+  wholesaleMarginPercentOverride: string | null;
+  // Preço "de" (comparação), digitado à mão — quando maior que o preço à
+  // vista atual, a vitrine pública mostra riscado + selo de desconto.
+  compareAtPrice: string | null;
+  stockQty: number;
+  sortOrder: number;
+  // Calculados na hora pelo backend a partir do custo/margem (não são
+  // colunas próprias) — preço à vista (Pix/dinheiro, sem taxa de cartão) e o
+  // valor de cada parcela pagando em até 12x no cartão.
+  priceCash?: number | null;
+  installment12Value?: number | null;
+  installmentOptions?: CatalogInstallmentOption[];
+  // Mesma ideia, só que pro preço de atacado — o wholesalePrice já É o valor
+  // à vista (sem taxa de cartão); isso aqui é só o valor da parcela em 12x.
+  wholesaleInstallment12Value?: number | null;
+  wholesaleInstallmentOptions?: CatalogInstallmentOption[];
+};
+
+// Input de variante enviado pro backend (form de cadastro/edição) — id
+// presente = atualiza a variante existente; ausente = cria uma nova.
+export type CatalogVariantInput = {
+  id?: number;
+  storage: string | null;
+  ram: string | null;
+  network: string | null;
+  color: string | null;
+  costPrice: number | null;
+  costIncludesInvoice: boolean;
+  marginPercentOverride: number | null;
+  salePrice?: number | null;
+  wholesalePrice?: number | null;
+  wholesaleMarginPercentOverride?: number | null;
+  compareAtPrice?: number | null;
+  stockQty: number;
+};
+
+export type CatalogProduct = {
+  id: number;
+  model: string;
+  condition: CatalogCondition;
+  colors: string[];
+  description: string | null;
+  status: "active" | "inactive" | "sold";
+  categoryId: number | null;
+  sortOrder: number;
+  // Aproximação de popularidade (clique em "Finalizar pedido" na vitrine
+  // pública) — usada só pro filtro de ordenação "Mais comprado".
+  purchaseCount: number;
+  // Selo "Promoção" (vermelho) na vitrine pública — marcado manualmente
+  // pelo lojista (botão "Oferta" na Vitrine Aparelhos), independente do
+  // preço "de/por" de cada variante.
+  featured: boolean;
+  // DEPRECATED — lista de características livre gerada por IA em produtos
+  // antigos; produto novo usa aiSpecs (grade de ícones) abaixo.
+  aiCharacteristics: string[] | null;
+  aiSpecs: CatalogAiSpecs | null;
+  createdAt: string;
+  updatedAt: string;
+  photos: CatalogPhoto[];
+  variants: CatalogProductVariant[];
+};
+
+export type CatalogTrustBadge = { title: string; description: string };
+export type CatalogPaymentMethod = { title: string; description: string };
+// Cupom de desconto da Vitrine — desconto real (carrinho público ou vendedor
+// no Atendimento) + identificação de quem trouxe a venda (vendorName é texto
+// livre, cobre vendedor interno OU externo/afiliado sem login no sistema).
+export type CatalogCoupon = {
+  id: number;
+  code: string;
+  discountType: "percent" | "fixed";
+  discountValue: number;
+  vendorName: string | null;
+  active: boolean;
+  usageLimit: number | null;
+  usedCount: number;
+  expiresAt: string | null;
+  createdAt: string;
+};
+export type CatalogCouponValidation =
+  | { valid: true; discountType: "percent" | "fixed"; discountValue: number; discountAmount: number; label: string }
+  | { valid: false; error: string };
+
+export type CatalogProductReview = {
+  id: number;
+  productId: number;
+  model: string;
+  variant: { id: number; storage: string | null; color: string | null } | null;
+  rating: number;
+  customerName: string;
+  customerPhone: string;
+  customerCity: string;
+  comment: string | null;
+  createdAt: string;
+};
+
+export type CatalogStockNotification = {
+  id: number;
+  productId: number;
+  model: string;
+  variant: { id: number; storage: string | null; color: string | null } | null;
+  customerName: string;
+  customerContact: string;
+  notified: boolean;
+  createdAt: string;
+};
+
+export type CatalogPricingSettings = {
+  defaultMarginPercent: number;
+  invoiceCostPercent: number;
+  cardFeeTable: Record<string, number>;
+  wholesaleMarginPercent: number;
+  roundPricesUp: boolean;
+  // Margem de venda por categoria (chave = id da categoria, como string) —
+  // usada como fallback antes da margem padrão da loja quando o produto (ou
+  // uma variante importada) não tem margem própria definida. Ver
+  // categoryMarginForId em VitrineAparelhos.tsx.
+  categoryMarginOverrides: Record<string, number>;
+};
+
+export type CatalogMarketCheckVerdict = "compativel" | "acima" | "abaixo" | "sem_dados";
+
+// Uma opção de parcelamento (1x-12x) — "parcelas" é o número de parcelas,
+// "total" o valor total pagando dessa forma, "parcela" o valor de CADA
+// parcela (total / parcelas). Usado no popover "ver opções de parcelamento"
+// (pedido do lojista em 09/09: cliente clica e vê o valor de cada parcela).
+export type CatalogInstallmentOption = { parcelas: number; total: number; parcela: number };
+
+export type CatalogPublicVariant = {
+  id: number; storage: string | null; ram: string | null; network: string | null; color: string | null; salePrice: string | null; inStock: boolean;
+  wholesalePrice: string | null;
+  // Preço "de" (comparação) — quando maior que o preço à vista atual, mostra
+  // riscado + selo "X% OFF" (ver discountInfo em VitrinePublica.tsx).
+  compareAtPrice: string | null;
+  priceCash?: number | null;
+  installment12Value?: number | null;
+  installmentOptions?: CatalogInstallmentOption[];
+  // Só vem preenchido junto com wholesalePrice, ou seja, só pra quem já
+  // desbloqueou com o código de acesso de atacado.
+  wholesaleInstallment12Value?: number | null;
+  wholesaleInstallmentOptions?: CatalogInstallmentOption[];
+};
+
+export type CatalogPublicProduct = {
+  id: number;
+  model: string;
+  condition: CatalogCondition;
+  colors: string[];
+  description: string | null;
+  categoryId: number | null;
+  aiCharacteristics: string[] | null;
+  aiSpecs: CatalogAiSpecs | null;
+  // Aproximação de popularidade (clique em "Finalizar pedido") — usada só
+  // pro filtro de ordenação "Mais comprado" na listagem.
+  purchaseCount: number;
+  // Selo "Promoção" (vermelho) — marcado manualmente pelo lojista.
+  featured: boolean;
+  // Resumo de avaliação (estrelas) — null se o produto ainda não tem
+  // nenhuma avaliação.
+  reviewsSummary: { average: number; count: number } | null;
+  // color: cor que essa foto representa (null = foto "geral", mostrada em
+  // qualquer cor selecionada) — ver publicPhotoIds no backend.
+  photos: { id: number; color: string | null }[];
+  variants: CatalogPublicVariant[];
+};
+
+export type CatalogImportVariant = { storage: string | null; ram: string | null; network: string | null; color: string | null; costPrice: number | null; marginPercentOverride: number | null };
+
+export type CatalogImportItem = {
+  model: string;
+  condition: CatalogCondition;
+  colors: string[];
+  variants: CatalogImportVariant[];
+  status: "approved" | "pending";
+  issue: string | null;
+  rawLine: string;
+  // Categoria sugerida pela IA. categoryId = já existe, aplicada direto.
+  // categoryPath = sugestão nova (ex.: ["Celulares","Samsung"]), sem id
+  // ainda — precisa de autorização do lojista antes de criar (ver o banner
+  // "categorias novas sugeridas" na tela de importação).
+  categoryId: number | null;
+  categoryPath: string[] | null;
+  // Descrição e "principais características" já geradas pela IA junto com o
+  // resto da importação (tela/câmera/bateria/RAM etc.) — o lojista revisa/
+  // edita aqui antes de confirmar, mesmo padrão do formulário manual.
+  description: string | null;
+  characteristics: string[];
+  specs: CatalogAiSpecs | null;
+};
+
+export type CatalogPhotoSearchResult = { title: string; imageUrl: string; thumbnailUrl: string; sourceUrl: string };
+
 export type MeetingItem = {
   id: number;
   title: string;
@@ -184,42 +714,20 @@ export type MeetingItem = {
   creatorName: string | null;
 };
 
-// ─── Financeiro bancário (conciliação — ver plano da Fase 1) ────────────────
-export type FinanceBankProviderInfo = {
-  provider: string; isBank: boolean; isAcquirer: boolean; configured: boolean;
-  authMethod: "oauth" | "certificate" | "api_key"; note: string | null;
-};
-export type FinanceBankAccount = {
-  id: number; storeId: number; storeName: string; provider: string; kind: "conta" | "maquininha";
-  label: string; status: "nao_configurado" | "conectado" | "erro" | "desconectado";
-  lastSyncAt: string | null; isActive: boolean; createdAt: string;
-};
-export type FinanceBankTransaction = {
-  id: number; bankAccountId: number; accountLabel: string; storeId: number;
-  postedAt: string; amountCents: number; type: "credit" | "debit"; description: string | null;
-  reconciliationStatus: "pending" | "matched" | "ignored";
-};
-export type FinanceBankSale = {
-  id: number; bankAccountId: number; storeId: number; externalSaleId: string; soldAt: string;
-  grossAmountCents: number; feeAmountCents: number; netAmountCents: number; installments: number;
-  cardBrand: string | null; paymentMethod: "credito" | "debito" | "pix";
-  authorizationCode: string | null; nsu: string | null; repasseStatus: "pending" | "repassado";
-};
-export type ReconciliationMatchRow = {
-  id: number; bankTransactionId: number; matchedType: "acquirer_sale" | "acquirer_repasse" | "manual";
-  matchedRecordId: number | null; ruleId: number | null; matchedBy: string;
-  status: "auto" | "manual_confirmed" | "rejected"; createdAt: string;
-};
-export type FinanceBankDashboard = {
-  accounts: { accountId: number; label: string; provider: string; storeId: number; storeName: string; lastSyncAt: string | null; balanceCents: number }[];
-  totalCents: number;
-};
-export type FinanceBankMetrics = {
-  totals: { creditCents: number; debitCents: number; netCents: number; pendingCount: number; matchedCount: number; reconciliationRatePct: number };
-  cashFlowByDay: { date: string; creditCents: number; debitCents: number }[];
-  byStore: { storeId: number; storeName: string; netCents: number }[];
-  byProvider: { provider: string; netCents: number }[];
-  salesByPaymentMethod: { paymentMethod: "credito" | "debito" | "pix"; count: number; grossCents: number }[];
+// Extras fora das colunas fixas: nome/tamanho real de documento (o mediaUrl
+// salvo usa nome aleatório) e preview de link (OG tags), buscado sob demanda
+// só pra mensagens de texto que a própria equipe escreve.
+export type MessageMetadata = {
+  fileName?: string;
+  fileSize?: number;
+  mimeType?: string;
+  linkPreview?: {
+    url: string;
+    title?: string;
+    description?: string;
+    image?: string;
+    siteName?: string;
+  } | null;
 };
 
 export interface InternalChatSearchHit {
@@ -238,13 +746,16 @@ export type InternalMessage = {
   senderId: number;
   senderName: string;
   content: string;
-  type: "text" | "image" | "audio" | "doc";
+  type: "text" | "image" | "video" | "audio" | "doc";
   mediaUrl: string | null;
   transcript: string | null;
   forwarded: boolean;
   replyToId: number | null;
-  replyTo: { id: number; senderName: string; content: string; type: "text" | "image" | "audio" | "doc" } | null;
+  replyTo: { id: number; senderName: string; content: string; type: "text" | "image" | "video" | "audio" | "doc" } | null;
+  metadata?: MessageMetadata | null;
   createdAt: string;
+  editedAt?: string | null;
+  deletedAt?: string | null;
 };
 
 export type FinanceVendedorRow = {
@@ -270,11 +781,30 @@ export type BotQuestion = { question: string; options?: string[] };
 
 export type BotSettings = {
   id: number; enabled: boolean; botName: string; greeting: string;
-  questions: BotQuestion[]; knowledgeBase: string;
+  questions: BotQuestion[]; knowledgeBase: string; routingGuide: string;
   doneMessage: string; handoffMessage: string;
   mode: "always" | "off_hours"; hoursStart: string; hoursEnd: string;
   urgencyWords: string; maxPerConversation: number; maxPerDay: number;
+  typingDelaySeconds: number;
+  // "Aprender com atendimentos" (pedido 16/09): liga/desliga a geração
+  // automática de sugestões de conhecimento a partir de atendimentos humanos
+  // finalizados.
+  learningEnabled: boolean;
+  // "Avaliação de usados por conversa" (pedido 17/09): liga/desliga a
+  // ferramenta que deixa o robô do WhatsApp conduzir a avaliação de troca
+  // (marca/modelo/questionário) e dar uma estimativa, direto na conversa.
+  tradeInEnabled: boolean;
   usageToday: number;
+};
+
+// Sugestão de melhoria da base de conhecimento (aprendizado da IA ou caixa
+// manual) — o admin aprova (mescla na base) ou rejeita.
+export type KbSuggestion = {
+  id: number; conversationId: number | null;
+  suggestion: string; reasoning: string | null;
+  status: "pending" | "approved" | "rejected";
+  reviewedBy: number | null; reviewedAt: string | null;
+  createdAt: string;
 };
 
 export type Raffle = {
@@ -301,7 +831,10 @@ export type SurveySettings = {
   reminderHours: number;
 };
 
-export type RaffleWinner = { phone: string; name: string; conversationId: number; sent: boolean; error?: string };
+export type RaffleWinner = {
+  phone: string; name: string; conversationId: number; sent: boolean; error?: string;
+  attempts?: number; lastAttemptAt?: string;
+};
 
 export type RaffleDraw = {
   id: number; raffleId: number; periodKey: string; eligibleCount: number;
@@ -315,6 +848,14 @@ export type Sector = {
   icon: string;
   color: string;
   isActive: boolean;
+  // Módulos opcionais que este setor pode ver (por cima do que a loja
+  // contratou). null = sem restrição (padrão, todo setor de sempre). Array
+  // explícito (mesmo [] de propósito) = só esses módulos aparecem pra quem
+  // é "vendedor" nesse setor — admin e supervisor não são afetados.
+  enabledModules?: OptionalModule[] | null;
+  // Todo vendedor deste setor vê/reabre QUALQUER atendimento Resolvido do
+  // setor, não só o que ele mesmo finalizou (pedido 14/09, Atacado).
+  vendorsSeeResolved: boolean;
 };
 
 export type QueueEntry = {
@@ -325,6 +866,11 @@ export type QueueEntry = {
   channel: string;
   status: string;
   attendantId: number | null;
+  // Direcionamento manual (pedido 10/09): vendedor_chefe/supervisor/admin
+  // escolhe pra qual vendedor esta entrada vai — targetUserId. routedBy
+  // guarda quem direcionou (auditoria/exibição).
+  targetUserId: number | null;
+  routedBy: number | null;
   notes: string | null;
   position: number;
   calledAt: string | null;
@@ -350,6 +896,10 @@ export type AttendanceLog = {
   waitTimeSeconds: number | null;
   serviceTimeSeconds: number | null;
   createdAt: string;
+  // Presentes só no retorno de /admin/logs (Histórico) — nulos em outros usos
+  // deste tipo (ex.: histórico de atendimento dentro do CRM).
+  conversationId?: number | null;
+  labels?: string | null;
 };
 
 export type SectorSummary = {
@@ -364,6 +914,9 @@ export type SectorSummary = {
 export type DashboardAttention = {
   waitingTooLong: Array<{ id: number; name: string; sectorName: string | null; waitingMinutes: number | null }>;
   overdueTasks: Array<{ id: number; title: string; assigneeName: string | null; daysOverdue: number | null }>;
+  // Check-ins de ponto via WhatsApp sinalizados (duas fotos em pouco tempo do
+  // mesmo colaborador) — precisam de revisão manual do admin.
+  pontoFlagged: Array<{ id: number; employeeName: string; kind: string; at: string; flagReason: string | null }>;
   avgServiceSeconds: number | null;
   funnel: { potential: number; active: number };
 };
@@ -376,7 +929,9 @@ export type CrmContact = {
   email: string | null;
   sectorId: number | null;
   attendantId: number | null;
-  status: "potential" | "pending" | "active";
+  status: "potential" | "pending" | "active" | "finalized";
+  lastResolutionReason: string | null;
+  finalizedAt: string | null;
   profile: "Novo" | "Regular" | "VIP" | "Inativo";
   isNew: boolean;
   city: string | null;
@@ -387,6 +942,9 @@ export type CrmContact = {
   totalPurchases: string;
   customFields: Record<string, string>;
   isArchived: boolean;
+  isBlocked: boolean;
+  blockedReason: string | null;
+  blockedAt: string | null;
   createdAt: string;
   updatedAt: string;
   sector: Sector | null;
@@ -434,30 +992,46 @@ export type Task = {
   description: string | null;
   status: TaskStatus;
   priority: TaskPriority;
-  assigneeId: number | null;
   createdById: number | null;
   sectorId: number | null;
   dueDate: string | null;
+  // Agenda: cliente vinculado ao compromisso, duração e alerta prévio.
+  contactId: number | null;
+  durationMinutes: number | null;
+  alertMinutesBefore: number | null;
   position: number;
   isArchived: boolean;
   createdAt: string;
   updatedAt: string;
   sector: Sector | null;
-  assignee: { id: number; name: string } | null;
+  assignees: { id: number; name: string }[];
   createdBy: { id: number; name: string } | null;
+  contact: { id: number; name: string; contact: string | null } | null;
   subtaskTotal?: number;
   subtaskDone?: number;
   commentCount?: number;
+  // Presente só na resposta de create/update quando `clientMessage` foi
+  // enviado mas não deu pra agendar (sem cliente/prazo, cliente sem
+  // conversa etc.) — a tarefa é salva normalmente mesmo assim.
+  clientMessageWarning?: string;
 };
 
 export type TaskComment = {
-  id: number; taskId: number; authorId: number | null;
+  // Tarefas no ERP (19/10/2026): ids do ERP são texto (uuid).
+  id: number | string; taskId: number; authorId: number | null;
   authorName: string | null; content: string; createdAt: string;
   mediaUrl?: string | null; mediaType?: string | null;
 };
 
 export type TaskSubtask = {
-  id: number; taskId: number; title: string; isDone: boolean; position: number; createdAt: string;
+  id: number | string; taskId: number; title: string; isDone: boolean; position: number; createdAt: string;
+};
+
+// Agenda: lembrete de compromisso (dueDate + alertMinutesBefore), gerado
+// automaticamente pelo servidor e entregue em tempo real via SSE
+// ("task_reminder") + listado aqui pra quem perdeu o evento (offline).
+export type TaskReminder = {
+  id: number | string; taskId: number; title: string; dueDate: string; read: boolean; createdAt: string;
 };
 
 // ── Quadro de Sistema (Dev) ── problemas/atualizações/implementações do
@@ -490,74 +1064,576 @@ export type SystemBoardComment = {
 };
 
 export type QuizQuestion = { id: string; label: string; options: string[]; correct?: number };
+// Perguntas do tipo "checklist" (ex-Questionários, fundido em Treinamentos —
+// ver migration 0071_trainings_checklist_merge.sql). Sem "resposta certa":
+// texto livre, opções ou nota de 1 a 5.
+export type ChecklistQuestion = { id: string; label: string; type: "text" | "options" | "rating"; options?: string[] };
 export type Training = {
   id: number; title: string; description: string | null;
-  type: "text" | "video" | "quiz"; content: string | null;
+  type: "text" | "video" | "quiz" | "checklist"; content: string | null;
   quiz: QuizQuestion[] | null; mandatory: boolean;
   targetRoles?: string[]; active?: boolean; createdAt?: string;
   completed?: boolean; myScore?: number | null;
+  // Repetir treinamento: nada disso apaga tentativa anterior — são agregados
+  // sobre o histórico inteiro do usuário nesse treinamento.
+  attemptCount?: number; bestScore?: number | null;
+  firstCompletedAt?: string | null; lastCompletedAt?: string | null;
+  // Rascunho de respostas do quiz em andamento ("Continuar de onde parou").
+  draftAnswers?: Record<string, number> | null;
+  // Prazo pra concluir (opcional, só informativo).
+  dueDate?: string | null;
+  // Exclusivos do tipo "checklist".
+  questions?: ChecklistQuestion[] | null;
+  recurrence?: "daily" | "weekly" | "once" | null;
+  dayOfWeek?: number | null;
+  startDate?: string | null;
+  // Presente nos itens retornados por /trainings/pending quando type="checklist" —
+  // período (dia/semana) que está devido agora.
+  periodKey?: string;
 };
 export type TrainingCompletion = {
   id: number; userId: number; userName: string | null;
-  quizScore: number | null; createdAt: string;
+  attemptNumber?: number; quizScore: number | null; createdAt: string;
+  // Presente em conclusões de checklist: respostas por pergunta e o período.
+  answers?: Record<string, string> | Record<string, number> | null;
+  periodKey?: string | null;
+  // Presente quando um admin/supervisor usou "Destravar sistema" em vez da
+  // pessoa concluir de verdade — id de quem liberou.
+  forcedByAdminId?: number | null;
+};
+export type TrainingPendingUser = { id: number; name: string; role: string };
+// Histórico de tentativas do PRÓPRIO usuário num treinamento (Ver progresso/resultado).
+export type TrainingAttempt = {
+  id: number; attemptNumber: number; quizScore: number | null; createdAt: string;
 };
 
-export type ChecklistQuestion = { id: string; label: string; type: "text" | "options" | "rating"; options?: string[] };
-export type Checklist = {
-  id: number; title: string; description: string | null;
-  questions: ChecklistQuestion[]; targetRoles: string[];
-  recurrence: "daily" | "weekly" | "once"; dayOfWeek: number | null;
-  startDate: string | null; mandatory: boolean; active: boolean; createdAt: string;
+// Rotinas e Produtividade (RH) — checklists operacionais agendados,
+// separado de Checklist/Questionários acima (ver lib/db/src/schema/rotinas.ts).
+export type RoutineQuestionType = "yes_no" | "done_not_done" | "text" | "number" | "value" | "photo" | "document" | "observation";
+// Fase 3.5: lista fixa de motivo quando a resposta é negativa numa pergunta
+// requiresJustificationOnNo (mesmos códigos validados no backend, rotinas.ts).
+export const ROUTINE_NO_REASONS: { value: string; label: string }[] = [
+  { value: "falta_tempo", label: "Falta de tempo" },
+  { value: "dependencia_colega", label: "Dependência de outro colaborador" },
+  { value: "dependencia_gerente", label: "Dependência do gerente" },
+  { value: "falta_produto_peca", label: "Falta de produto/peça" },
+  { value: "problema_sistema", label: "Problema no sistema" },
+  { value: "problema_equipamento", label: "Problema em equipamento" },
+  { value: "cliente_nao_respondeu", label: "Cliente não respondeu" },
+  { value: "nao_foi_possivel_executar", label: "Não foi possível executar" },
+  { value: "outro", label: "Outro" },
+];
+export type RoutineAlertLevel = "critico" | "atencao";
+export type RoutineChecklistQuestion = {
+  id: number; checklistId: number; orderIndex: number; label: string;
+  type: RoutineQuestionType; required: boolean; requiresEvidence: boolean; evidenceType: "photo" | "document" | null;
+  requiresJustificationOnNo: boolean; alertLevel: RoutineAlertLevel | null;
 };
-export type PendingChecklist = {
-  id: number; title: string; description: string | null;
-  questions: ChecklistQuestion[]; mandatory: boolean; periodKey: string;
+export type RoutineChecklistScope = {
+  id: number; checklistId: number;
+  storeId: number | null; sectorId: number | null; jobFunction: string | null; userId: number | null;
 };
-export type ChecklistResponse = {
-  id: number; userId: number; userName: string | null;
-  periodKey: string; answers: Record<string, string>; createdAt: string;
+// "continuous" = devido o expediente inteiro, sem horário fixo (Fase 3.5).
+export type RoutineRecurrence = "daily" | "weekdays" | "specific_days" | "weekly" | "monthly" | "specific_date" | "continuous";
+export type RoutineChecklist = {
+  id: number; name: string; message: string | null; scheduledTime: string | null;
+  // Rotinas com mais de um horário por dia (ex.: conferência de caixa
+  // 3x/dia) — null/vazio pro caso normal de horário único (scheduledTime
+  // sozinho já resolve). Preenchido com 2+ horários quando o admin
+  // configura múltiplos horários pro mesmo checklist.
+  scheduledTimes: string[] | null;
+  recurrence: RoutineRecurrence; recurrenceDays: number[] | null; specificDate: string | null;
+  toleranceMinutes: number; mandatory: boolean; active: boolean; version: number;
+  createdByUserId: number | null; createdAt: string; updatedAt: string;
+  questionCount?: number; scopeCount?: number;
 };
+export type RoutineChecklistFull = RoutineChecklist & { questions: RoutineChecklistQuestion[]; scopes: RoutineChecklistScope[] };
+export type RoutineScopeOptions = {
+  stores: { id: number; name: string }[]; sectors: { id: number; name: string }[]; users: { id: number; name: string }[];
+  employees: { id: number; name: string }[];
+};
+// Fechamento mensal (Fase 5) — snapshot congelado, mesmo padrão de
+// TimeBankClosure (rh_dp.ts). Fase 6: enriquecido com loja/setor (relatório
+// por loja) e aprovação do supervisor (approvedAt/approvedByUserId).
+export type RoutineClosure = {
+  id: number; employeeId: number; employeeName: string; periodMonth: string;
+  totalDue: number; totalAnswered: number; totalOnTime: number; totalWithPendency: number; totalUrgentBypass: number;
+  pontoBeforeEntry: number; pontoAfterEntry: number; pontoNoRecord: number;
+  closedAt: string;
+  storeId: number | null; storeName: string | null; sectorId: number | null; sectorName: string | null;
+  approvedAt: string | null; approvedByUserId: number | null;
+};
+// Fase 6: pesos do score de produtividade — configurável, ver
+// computeRoutineScore no backend (rotinas.ts) pra fórmula documentada.
+export type RoutineScoreWeights = { weightOnTime: number; weightNoPendency: number; weightNoUrgentAbuse: number };
+export type RoutineRankingRow = {
+  employeeId: number; employeeName: string; storeId: number | null; storeName: string | null; sectorName: string | null; jobFunction: string | null;
+  totalDue: number; totalAnswered: number; approved: boolean;
+  score: number; onTimeRate: number; noPendencyRate: number; noUrgentAbuseRate: number;
+};
+export type RoutineRanking = { periodMonth: string; weights: RoutineScoreWeights; ranking: RoutineRankingRow[] };
+export type RoutinePendingPendency = { id: number; userId: number; userName: string | null; periodKey: string; answers: Record<string, RoutineAnswerValue> };
+export type RoutinePendingBypass = { id: number; userId: number; userName: string | null; createdAt: string };
+export type RoutineReviewPending = { periodMonth: string; pendencies: RoutinePendingPendency[]; urgentBypasses: RoutinePendingBypass[] };
+// Painel consolidado (Fase 7) — não recalcula nada, junta fechamento (Fase
+// 5) + review de pendência (Fase 6) sob filtro comum.
+export type RoutineDashboardStatus = "pendente" | "em_dia" | "pendencia_nao_justificada";
+export type RoutineDashboardRow = {
+  employeeId: number; employeeName: string; periodMonth: string;
+  storeId: number | null; storeName: string | null; sectorId: number | null; sectorName: string | null; jobFunction: string | null;
+  totalDue: number; totalAnswered: number; totalOnTime: number; totalWithPendency: number; totalUrgentBypass: number;
+  approved: boolean; status: RoutineDashboardStatus; score: number | null;
+};
+// Alerta automático (Fase 7) — checklist obrigatório atrasado, ou resposta
+// negativa em pergunta alertLevel="critico".
+export type RoutineAlert = {
+  id: number; recipientUserId: number; employeeUserId: number; employeeName: string;
+  checklistId: number | null; checklistName: string; kind: "atraso" | "critico"; message: string; read: boolean; createdAt: string;
+};
+// Checklist "devido agora" pro usuário logado (Fase 2) — versão enxuta de
+// RoutineChecklistQuestion, só o que o modal de resposta precisa mostrar.
+export type PendingRoutineQuestion = {
+  id: number; label: string; type: RoutineQuestionType; required: boolean; requiresEvidence: boolean; evidenceType: "photo" | "document" | null;
+  requiresJustificationOnNo: boolean; alertLevel: RoutineAlertLevel | null;
+};
+export type PendingRoutine = {
+  id: number; name: string; message: string | null; mandatory: boolean; periodKey: string;
+  // "" pro checklist de horário único (comportamento de sempre); quando o
+  // checklist tem múltiplos horários (Rotinas com mais de um horário por
+  // dia), vira o "HH:MM" da ocorrência específica pendente — precisa ser
+  // reenviado em respond() pra identificar qual ocorrência está sendo
+  // respondida (um mesmo checklist pode aparecer mais de uma vez na lista
+  // de pendentes, uma por horário ainda não respondido).
+  occurrenceTime: string;
+  questions: PendingRoutineQuestion[];
+};
+// Justificativa estruturada (Fase 3.5) gravada quando a resposta é negativa
+// numa pergunta requiresJustificationOnNo — senão o valor é uma string simples.
+export type RoutineNoJustification = { value: string; motivo: string; pendencia: string | null; comunicarA: string | null };
+export type RoutineAnswerValue = string | RoutineNoJustification;
+// Evidência anexada a uma pergunta de uma resposta (Fase 4) — o arquivo em
+// si sai por GET /rotinas/evidence/:id/file.
+export type RoutineEvidence = {
+  id: number; responseId: number; questionId: number; fileName: string; mimeType: string; sizeBytes: number; createdAt: string;
+};
+export type RoutineResponse = {
+  id: number; userId: number; userName: string | null; periodKey: string;
+  userStoreId: number | null; storeName: string | null; sectorName: string | null;
+  answers: Record<string, RoutineAnswerValue>; questionsSnapshot: PendingRoutineQuestion[];
+  evidence: RoutineEvidence[];
+  reauthAt: string; createdAt: string;
+};
+// Upload de evidência (Fase 4) — base64, mesmo padrão de documents.ts.
+export type RoutineEvidenceUpload = { fileName: string; mimeType: string; data: string };
 
 export type TradeInEvaluation = {
   id: number; userId: number | null; userName?: string | null;
+  // "staff" (padrão, feito por atendente), "public_lead" (cliente avaliou
+  // sozinho na vitrine pública e deixou contato — ver tradeInPublicRouter) ou
+  // "whatsapp_bot" (assistente de IA conduziu a avaliação na conversa do
+  // WhatsApp — ver evaluateUsedDeviceTool em lib/bot.ts).
+  source?: "staff" | "public_lead" | "whatsapp_bot";
+  // Nome do cliente informado já na simulação (etapas 1-3), opcional — não
+  // confundir com sellerCustomerName, preenchido só ao fechar o negócio.
+  customerName?: string | null;
   device: string; answers: Record<string, string>;
   brand: string | null; model: string | null; memory: string | null; color: string | null;
   marketPrice: string | null; suggestedPrice: string | null;
   aiSummary: string | null; createdAt: string;
+  // Preenchidos só ao fechar o negócio (etapa 4).
+  sellerCustomerName?: string | null; sellerCpf?: string | null;
+  imei?: string | null; finalAgreedPrice?: string | null; closedAt?: string | null;
+  // Nota de compra completa: dados extras + fotos de documento/aparelho.
+  sellerRg?: string | null; sellerAddress?: string | null; sellerNeighborhood?: string | null; sellerPhone?: string | null;
+  // Aparelho que o cliente deixou no carrinho da vitrine pública ao avaliar
+  // no fluxo "Trocar por este aparelho" — null fora desse fluxo.
+  wantedProduct?: string | null;
+  // Loja da rede que comprou o aparelho — preenchida ao fechar o negócio
+  // (etapa 4), com a loja do vendedor que fechou como padrão (editável).
+  storeId?: number | null; storeName?: string | null;
+  documentPhotos?: string[]; devicePhotos?: string[];
+  // Forma de pagamento + dados do Pix (chave/titular) + foto do comprovante.
+  paymentMethod?: string | null; pixKey?: string | null; pixKeyHolder?: string | null;
+  paymentProofPhotos?: string[];
 };
 
 // Tabelas de margem da avaliação: 1 = maior, 2 = média, 3 = menor (em %).
 export type TradeInMargins = { t1: number; t2: number; t3: number };
 
 // Perguntas do questionário de condições (editáveis pelo admin, por marca).
-export type TradeInQuestionOption = { label: string; blocks: boolean };
+// deductionPercent: só usado no cálculo determinístico da avaliação pública
+// (tabela de valores base) — quanto essa resposta desconta do valor base.
+export type TradeInQuestionOption = { label: string; blocks: boolean; deductionPercent?: number };
 export type TradeInQuestion = { key: string; label: string; options: TradeInQuestionOption[] };
 export type TradeInQuestionsConfig = { apple: TradeInQuestion[]; android: TradeInQuestion[] };
 
-export type FilmCompat = {
-  id: number; film: string; models: string; notes: string | null;
-  createdAt: string; updatedAt: string;
+// Tabela de valores base (lista fixa) — pra modelo cadastrado aqui, a
+// avaliação pública calcula o valor na hora (fórmula), sem depender de IA.
+export type TradeInBaseValue = {
+  id: number; brand: string; model: string; storage: string | null;
+  baseValue: string; notes: string | null; createdAt: string; updatedAt: string;
 };
 
-export type RhQuestion = { id: string; label: string; type: "text" | "longtext" | "options"; options?: string[] };
-export type RhStage = { id: string; title: string; description: string; type: "form" | "video"; enabled: boolean; questions: RhQuestion[] };
+// Perfil comportamental (estilo DISC simplificado, 4 tipos) — ver
+// optionProfiles em RhQuestion e computeProfileResult no backend (rh.ts).
+export type RhProfileType = "analitico" | "dominante" | "apoiador" | "inovador";
+export type RhQuestion = {
+  id: string; label: string; type: "text" | "longtext" | "options"; options?: string[];
+  optionProfiles?: (RhProfileType | null)[];
+};
+export type RhStage = { id: string; title: string; description: string; type: "form" | "video"; enabled: boolean; questions: RhQuestion[]; maxVideoSeconds?: number | null };
+export type RhPosition = {
+  id: number; name: string; active: boolean; sortOrder: number; stages: RhStage[];
+  createdAt: string; updatedAt: string;
+};
 export type RhCandidate = {
   id: number; name: string; phone: string; email: string | null;
-  status: "novo" | "aprovado" | "reprovado";
+  city: string | null; neighborhood: string | null;
+  cpf: string | null; positionId: number | null; positionName: string | null;
+  status: "novo" | "pre_aprovado" | "entrevista_online" | "entrevista_presencial" | "teste_loja" | "aprovado" | "banco_talentos" | "reprovado" | "contratado";
+  statusReason: string | null;
   answers: Record<string, Record<string, string>>;
   stagesSnapshot: RhStage[] | null;
   notes: string | null; hasVideo: boolean; createdAt: string;
+  profileResult: RhProfileType | null;
+  profileScores: Record<RhProfileType, number> | null;
+  interviewNotes: Record<string, string> | null;
+  // Checklist do teste na loja — { [itemId]: "bom" | "regular" | "fraco" }.
+  storeTestChecklist: Record<string, "bom" | "regular" | "fraco"> | null;
+  storeTestNotes: string | null;
+  storeTestAt: string | null;
+  storeTestEvaluatorName: string | null;
 };
 
-export type SheetLink = {
-  id: number; name: string; url: string; position: number; createdAt: string;
-  // null nas duas = liberada para toda a equipe
-  allowedSectorIds: number[] | null;
-  allowedUserIds: number[] | null;
+// ── RH: Departamento Pessoal ────────────────────────────────────────────────
+export type Employee = {
+  id: number;
+  userId: number | null;
+  name: string;
+  birthDate: string | null;
+  phone: string | null;
+  email: string | null;
+  cpf: string | null;
+  rg: string | null;
+  role: string | null;
+  jobFunction: string | null;
+  admissionDate: string | null;
+  contractType: "clt" | "pj" | "estagio" | null;
+  salaryCents: number | null;
+  storeId: number | null;
+  shiftId: number | null;
+  isActive: boolean;
+  // Contratação: candidateId liga esse colaborador a uma candidatura do
+  // recrutamento (rh_candidates) — null pra cadastro direto, sem processo
+  // seletivo. hiringStatus fica "em_contratacao" enquanto documentos/
+  // contrato ainda estão sendo reunidos; "ativo" quando finalizado (padrão
+  // de sempre, pra colaborador cadastrado direto).
+  candidateId: number | null;
+  hiringStatus: "em_contratacao" | "ativo";
+  // Link público de upload de documentos (candidato sobe os próprios
+  // arquivos sem login) — null = nenhum link ativo agora.
+  documentsUploadToken: string | null;
+  // Ficha cadastral (endereço completo, estado civil, escolaridade, dias do
+  // contrato de experiência) — pedido 10/09, comparado ao modelo de ficha de
+  // admissão da contabilidade. Todos opcionais.
+  address: string | null;
+  addressNumber: string | null;
+  neighborhood: string | null;
+  city: string | null;
+  state: string | null;
+  zipCode: string | null;
+  maritalStatus: string | null;
+  educationLevel: string | null;
+  experienceDays: number | null;
+  createdAt: string;
+  userName?: string | null;
+  storeName?: string | null;
+  shiftName?: string | null;
+};
+
+// Banco de arquivos do colaborador (RH > Recrutamento > Contratação):
+// documentos pessoais/CLT (arquivo em disco) OU o contrato de trabalho
+// gerado/editado (textContent, sem arquivo).
+export type EmployeeDocument = {
+  id: number;
+  employeeId: number;
+  docType: string;
+  label: string | null;
+  fileName: string | null;
+  mimeType: string | null;
+  sizeBytes: number | null;
+  textContent: string | null;
+  uploadedByUserId: number | null;
+  expiresAt: string | null;
+  createdAt: string;
+};
+
+export type ExpiringDocument = {
+  id: number;
+  employeeId: number;
+  employeeName: string;
+  docType: string;
+  label: string | null;
+  expiresAt: string;
+};
+
+export type EmployeeContractTemplate = {
+  id: number;
+  name: string;
+  contractType: "clt" | "pj" | "estagio" | null;
+  bodyText: string;
+  isDefault: boolean;
+  // "contrato" (padrão) | "regimento" — Regimento interno usa o mesmo
+  // mecanismo de modelo+placeholder+geração do Contrato de trabalho.
+  kind: "contrato" | "regimento";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkShift = {
+  id: number;
+  name: string;
+  type: "fixed" | "flexible";
+  startTime: string | null;
+  endTime: string | null;
+  breakStart: string | null;
+  breakEnd: string | null;
+  weekdays: number[];
+  expectedMinutesPerDay: number | null;
+  toleranceMinutes: number;
+};
+
+export type Holiday = {
+  id: number;
+  date: string; // "YYYY-MM-DD"
+  name: string;
+  excusesExpected: boolean;
+};
+
+export type TimeBankClosure = {
+  id: number;
+  employeeId: number;
+  employeeName: string;
+  periodMonth: string; // "YYYY-MM"
+  workedMinutes: number;
+  expectedMinutes: number;
+  adjustmentMinutes: number;
+  balanceMinutes: number;
+  closedAt: string;
+  signedAt?: string | null;
+};
+
+export type TimeClockEntry = {
+  id: number;
+  employeeId: number;
+  employeeName?: string | null;
+  kind: "in" | "break_start" | "break_end" | "out";
+  at: string;
+  source: "self" | "admin" | "whatsapp";
+  proofUrl?: string | null;
+  lat?: number | null;
+  lng?: number | null;
+  accuracyMeters?: number | null;
+  flagged?: boolean;
+  flagReason?: string | null;
+};
+
+export type TimeBankDay = {
+  date: string;
+  workedMinutes: number;
+  expectedMinutes: number;
+  complete: boolean;
+  leaveKind: "ferias" | "atestado" | "falta_justificada" | null;
+  holidayName?: string | null;
+  inconsistencies?: ("excesso_2h_diarias" | "interjornada_curta")[];
+  entries: { kind: string; at: string }[];
+};
+
+export type TimeBankResult = {
+  workedMinutes: number;
+  expectedMinutes: number;
+  adjustmentMinutes: number;
+  balanceMinutes: number;
+  days: TimeBankDay[];
+};
+
+export type TimeBankSummaryRow = {
+  employeeId: number;
+  employeeName: string;
+  workedMinutes: number;
+  expectedMinutes: number;
+  adjustmentMinutes: number;
+  balanceMinutes: number;
+};
+
+export type LeaveRecord = {
+  id: number;
+  employeeId: number;
+  employeeName?: string | null;
+  kind: "ferias" | "atestado" | "falta_justificada" | "falta_injustificada" | "outro";
+  startDate: string;
+  endDate: string;
+  notes: string | null;
+  createdAt?: string;
+};
+
+export type VacationDeadline = {
+  cycleStart: string;
+  acquisitionDue: string;
+  dueDate: string;
+  daysUntilDue: number;
+  overdue: boolean;
+};
+
+export type VacationRequest = {
+  id: number;
+  employeeId: number;
+  employeeName?: string | null;
+  startDate: string;
+  endDate: string;
+  daysCount: number;
+  status: "pendente" | "aprovado" | "rejeitado";
+  reviewedByUserId: number | null;
+  reviewedAt: string | null;
+  reviewNote: string | null;
+  createdAt: string;
+};
+
+// Processo de desligamento/demissão — acompanha o processo (nunca calcula
+// nem paga verba, só sinaliza status/checklist pra decisão humana).
+export type TerminationProcess = {
+  id: number;
+  employeeId: number;
+  employeeName?: string | null;
+  dismissalType: "sem_justa_causa" | "com_justa_causa" | "pedido_demissao" | "acordo_mutuo" | "termino_experiencia" | "aposentadoria" | "outro";
+  reason: string | null;
+  noticeType: "trabalhado" | "indenizado" | "dispensado" | null;
+  noticeStartDate: string | null;
+  noticeEndDate: string | null;
+  lastWorkDate: string | null;
+  terminationDate: string | null;
+  examDate: string | null;
+  examResult: string | null;
+  homologationDate: string | null;
+  fgtsMultaPaid: boolean;
+  trctSigned: boolean;
+  seguroDesempregoGuided: boolean;
+  status: "iniciado" | "aviso_previo" | "exame_demissional" | "documentacao" | "concluido" | "cancelado";
+  notes: string | null;
+  concludedAt: string | null;
+  cancelledAt: string | null;
+  createdAt: string;
+};
+
+export type TimesheetMonth = {
+  closureId: number;
+  periodMonth: string;
+  workedMinutes: number;
+  expectedMinutes: number;
+  adjustmentMinutes: number;
+  balanceMinutes: number;
+  signedAt: string | null;
 };
 
 export type PartnerLink = {
   id: number; name: string; url: string; position: number; createdAt: string;
+};
+
+export type TvBoxClientStatus = "ativo" | "suspenso" | "cancelado";
+export type TvBoxInvoiceStatus = "pendente" | "pago" | "cancelado";
+
+export type TvBoxInvoice = {
+  id: number;
+  clientId: number;
+  description: string;
+  amountCents: number;
+  dueDate: string;
+  billingMonth: string | null;
+  status: TvBoxInvoiceStatus;
+  paidAt: string | null;
+  reminderSentAt: string | null;
+  lastChargeSentAt: string | null;
+  createdAt: string;
+  overdue: boolean;
+};
+
+export type TvBoxClient = {
+  id: number;
+  name: string;
+  phone: string;
+  monthlyValueCents: number;
+  dueDay: number;
+  status: TvBoxClientStatus;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+  pendingInvoice: TvBoxInvoice | null;
+  overdue: boolean;
+  daysLate: number;
+};
+
+export type TvBoxOverview = {
+  activeClients: number;
+  pendingCents: number;
+  pendingCount: number;
+  overdueCents: number;
+  overdueCount: number;
+};
+
+export type TvBoxSettings = {
+  enabled: boolean;
+  reminderDaysBefore: number;
+  overdueMessageIntervalDays: number;
+  reminderMessageTemplate: string;
+  chargeMessageTemplate: string;
+};
+
+// ─── Gerente IA ──────────────────────────────────────────────────────────────
+export type GerenteScope = "pessoal" | "empresa";
+export type GerenteSettings = {
+  id: number; tenantId: number; enabled: boolean; assistantName: string; authorizedPhones: string[];
+  quietStart: string; quietEnd: string; dailyDigestTime: string | null; dailyDigestSentOn: string | null;
+  lastSessionKey: string | null; lastPhone: string | null; createdAt: string; updatedAt: string;
+  admSessionKey: string | null; erpAgentKeySet: boolean;
+  lines: { sessionKey: string; displayName: string | null; phoneNumber: string | null; status: string }[];
+};
+export type GerenteEvent = {
+  id: number; title: string; startsAt: string; endsAt: string | null; location: string | null; participants: string | null;
+  scope: GerenteScope; storeName: string | null; notes: string | null; status: "agendado" | "concluido" | "cancelado";
+  remindMinutesBefore: number; remindedAt: string | null; createdAt: string;
+};
+export type GerenteReminder = {
+  id: number; title: string; dueAt: string; urgent: boolean; status: "pendente" | "concluido" | "cancelado";
+  sentAt: string | null; snoozeCount: number; taskId: number | null; createdAt: string;
+};
+export type GerenteEntry = {
+  id: number; kind: "gasto" | "receita"; amountCents: number; description: string; category: string | null; scope: GerenteScope;
+  storeName: string | null; paymentMethod: string | null; installments: number; reimbursementPending: boolean; entryDate: string; createdAt: string;
+};
+export type GerenteBill = {
+  id: number; kind: "pagar" | "receber"; description: string; amountCents: number; dueDate: string; counterparty: string | null;
+  responsible: string | null; scope: GerenteScope; storeName: string | null; status: "aberta" | "paga" | "cancelada"; paidAt: string | null; createdAt: string;
+};
+export type GerenteMessage = {
+  id: number; phone: string; direction: "in" | "out"; source: "whatsapp" | "painel" | "sistema"; content: string; intent: string | null; createdAt: string;
+};
+export type GerenteErpAction = {
+  id: number; type: string; summary: string; status: "PENDENTE" | "APROVADA" | "RECUSADA" | "ERRO" | "FALHA_ENVIO"; message: string | null; createdAt: string; updatedAt: string;
+};
+export type GerenteTeamMember = {
+  id: number; name: string; role: string; storeName: string | null; phone: string | null; suggestedPhone: string | null;
+  lastTestAt: string | null; lastTestOk: boolean | null;
+};
+export type GerenteTaskDispatch = {
+  id: number; taskId: number; assigneeName: string; status: "enviada" | "aguardando_prova" | "concluida" | "sem_telefone" | "falhou" | "cancelada";
+  sentAt: string | null; doneAt: string | null; proofUrl: string | null; proofNote: string | null; createdAt: string; title: string; dueDate: string | null;
+};
+export type GerenteOverview = {
+  today: string; now: string; events: GerenteEvent[]; reminders: GerenteReminder[]; overdueReminders: GerenteReminder[];
+  billsDueToday: GerenteBill[]; billsUpcoming: GerenteBill[];
+  teamTasks: { id: number; title: string; dueDate: string | null; status: string; priority: string; assignees: string[]; overdue: boolean }[];
+  week: { date: string; events: number; reminders: number }[]; loadMinutes: number; dispatches: GerenteTaskDispatch[];
+  month: { kind: "gasto" | "receita"; scope: GerenteScope; total: number }[]; digest: string;
 };
 
 export type Branding = {
@@ -566,17 +1642,189 @@ export type Branding = {
   primaryColor: string | null;
 };
 
+// Nunca inclui a chave em si — só o suficiente pra loja reconhecer qual
+// chave está salva (últimos 4 caracteres) e se está em uso.
+export interface ErpIntegrationStatus {
+  configured: boolean;
+  baseUrl: string;
+  last4: string | null;
+  osMessagesEnabled: boolean;
+  lastPollAt: string | null;
+  lastError: string | null;
+  sentCount: number;
+  hrSyncEnabled: boolean;
+  hrImportedAt: string | null;
+  hrLastSyncAt: string | null;
+  hrLastError: string | null;
+  hrMovedToErp: boolean;
+  hrMovedAt: string | null;
+  hrHistoryDoneAt: string | null;
+  hrHistoryCursors: Record<string, number>;
+  erpWebUrl: string | null;
+  // Pedidos de clientes sem estoque (16/10/2026): linha de atacado → IA do ERP.
+  demandSessionKey: string | null;
+  demandSyncEnabled: boolean;
+  demandLastSyncAt: string | null;
+  demandLastError: string | null;
+  demandSentCount: number;
+  demandPendingCount: number;
+}
+
+// Trocas com o ERP (19/10/2026): mapa do que vai e vem e histórico (90 dias).
+export type ErpFlowStatus = "ON" | "OFF" | "NO_ACCESS" | "MANUAL";
+export type ErpDirection = "CRM_TO_ERP" | "ERP_TO_CRM";
+export interface ErpExchangeFlow {
+  key: string;
+  label: string;
+  what: string;
+  scope: string | null;
+  frequency: string;
+  manual: string | null;
+  directions: ErpDirection[];
+  status: ErpFlowStatus;
+  reason: string;
+  lastExchangeAt: string | null;
+  todayOk: number;
+  todayErrors: number;
+}
+export interface ErpExchangeFlows {
+  configured: boolean;
+  keyScopes: string[] | null;
+  pingError: string | null;
+  flows: ErpExchangeFlow[];
+}
+export interface ErpExchangeRow {
+  id: number;
+  flow: string;
+  direction: ErpDirection;
+  method: string;
+  path: string;
+  httpStatus: number | null;
+  ok: boolean;
+  durationMs: number;
+  itemCount: number | null;
+  summary: string | null;
+  error: string | null;
+  createdAt: string;
+}
+export interface ErpExchangeList {
+  items: ErpExchangeRow[];
+  total: number;
+  page: number;
+  pageSize: number;
+  today: { total: number; ok: number; errors: number; crmToErp: number; erpToCrm: number };
+  retentionDays: number;
+}
+
+export interface InstagramIntegrationStatus {
+  configured: boolean;
+  enabled: boolean;
+  igUserId: string | null;
+  username: string | null;
+  tokenLast4: string | null;
+  tokenExpiresAt: string | null;
+  hasAppSecret: boolean;
+  sectorId: number | null;
+  lastWebhookAt: string | null;
+  lastError: string | null;
+  webhookUrl: string;
+  verifyToken: string | null;
+}
+
+export type AiCredentialsStatus = {
+  hasKey: boolean;
+  last4: string | null;
+  useOwnKey: boolean;
+};
+
+export type MySession = {
+  sid: string;
+  isCurrent: boolean;
+  device: string;
+  browser: string;
+  ip: string | null;
+  loginAt: string | null;
+  expiresAt: string;
+};
+
+export type AuditedSession = MySession & {
+  userId: number | null;
+  userName: string;
+  role: string | null;
+  tenantName: string | null;
+};
+
+// Auditoria global do Painel do Sistema (Fase 2) — uma linha por ação do
+// superadmin (entrar como, suspender/reativar loja, criar admin, etc.).
+export type SuperadminAuditEntry = {
+  id: number;
+  action: string;
+  description: string;
+  reason: string | null;
+  createdAt: string;
+  tenantId: number | null;
+  tenantName: string | null;
+  superadminName: string | null;
+};
+
 export type AppSettings = {
   alertUnansweredEnabled: boolean;
   alertUnansweredMinutes: number;
   outboundHourlyLimit: number;
   outboundDailyLimit: number;
+  broadcastIntervalMs: number;
+  attendantNameVisibleToCustomer: boolean;
+  finalizeReasons: string[];
   branding: Branding;
+};
+
+// Cota de avaliações de usados por pessoa da equipe (pedido 19/09).
+export type TradeInEvalPeriod = "day" | "week" | "month";
+
+export type TradeInEvalLimit = {
+  enabled: boolean;
+  limit: number;
+  period: TradeInEvalPeriod;
+  periodStart: string;
+  myUsed: number;
+  exemptMe: boolean;
+  usage: { userId: number; userName: string; role: string; used: number }[];
+};
+
+// Métricas do "Disparar mensagem para vários" (pedido 19/09).
+export type BroadcastDispatchLog = {
+  id: number;
+  userId: number | null;
+  userName: string;
+  message: string;
+  totalSelected: number;
+  sentCount: number;
+  failedCount: number;
+  intervalMs: number;
+  status: "running" | "done";
+  results: { id: number; ok: boolean; reason?: string }[] | null;
+  startedAt: string;
+  finishedAt: string | null;
+};
+
+export type BroadcastDispatchSummary = {
+  last30Days: { dispatches: number; sent: number; failed: number };
+  daily: { day: string; dispatches: number; sent: number }[];
 };
 
 export type OutboundUsage = {
   hourly: { used: number; limit: number };
   daily: { used: number; limit: number };
+};
+
+export type TasksErpImportReport = {
+  tasks: number; created: number; existing: number; comments: number; subtasks: number;
+  files: number; fileErrors: number; assigneesLinked: number; peopleWithoutErpUser: string[]; at?: string;
+};
+
+export type TasksErpStatus = {
+  moved: boolean; movedAt: string | null; configured: boolean; erpUrl: string | null;
+  localTasks: number; lastImport: TasksErpImportReport | null;
 };
 
 export type TaskReportBucket = {
@@ -586,9 +1834,14 @@ export type TaskReportBucket = {
 export type Conversation = {
   id: number;
   phone: string;
+  // Loja escolhida pelo robô (07/10/2026) — só etiqueta.
+  targetStoreId?: number | null;
   name: string;
   avatarUrl: string | null;
   channel: string;
+  // Comunidade do WhatsApp (ou canal de avisos dela) — diferente de grupo
+  // comum, embora ambos usem @g.us; resolvido pela ponte do WhatsApp.
+  isCommunity?: boolean;
   sessionKey: string;
   sectorId: number | null;
   assigneeId: number | null;
@@ -597,6 +1850,7 @@ export type Conversation = {
   unreadCount: number;
   lastMessage: string | null;
   lastMessageDirection: string | null;
+  lastMessageSenderName: string | null;
   attendanceStartedAt: string | null;
   lastMessageAt: string | null;
   isArchived: boolean;
@@ -607,6 +1861,15 @@ export type Conversation = {
   participants: { id: number; name: string }[];
   crmProfile?: string | null;
   pinned?: boolean;
+  // Prioridade manual do atendimento (pedido 11/09): "urgente" | "retorno" |
+  // "pode_esperar", ou null/undefined quando não definida (padrão).
+  priority?: string | null;
+  // Como ganhou responsável (pedido 14/09): "manual" (Criar atendimento) |
+  // "fila" (auto-atribuído ou assumido via fila) | null/undefined (nenhum
+  // dos dois ainda, ex. potencial no pool, ou transferência manual).
+  origin?: string | null;
+  // Só presente com origin="fila": número sequencial da fila ("Fila #N").
+  queueNumber?: number | null;
 };
 
 export type ScheduledMessage = {
@@ -635,6 +1898,8 @@ export type QuickReply = {
   title: string;
   content: string;
   sectorId: number | null;
+  storeIds: number[] | null;
+  userIds: number[] | null;
   createdAt: string;
 };
 
@@ -647,20 +1912,24 @@ export type ChatLabel = {
   createdAt: string;
 };
 
-export type RoutingRule = {
-  id: number;
-  sectorId: number;
-  name: string;
-  keywords: string;
-  priority: number;
-  isActive: boolean;
-  createdAt: string;
+// Filtro salvo da lista de Conversas — combinação do painel de filtro
+// avançado (vendedor/setor/nível/linha/etiqueta/"não respondidas") salva
+// com um nome, pessoal por usuário.
+export type ChatSavedFilterValues = {
+  onlyUnanswered?: boolean;
+  onlyGroups?: boolean;
+  vendedor?: string;
+  setor?: string;
+  nivel?: string;
+  sessionKey?: string;
+  label?: string;
 };
-
-export type ClassifyResult = {
-  sectorId: number | null;
-  ruleName: string | null;
-  matchedKeyword: string | null;
+export type ChatSavedFilter = {
+  id: number;
+  name: string;
+  filters: ChatSavedFilterValues;
+  sortOrder: number;
+  createdAt: string;
 };
 
 export type ChatMessage = {
@@ -671,14 +1940,39 @@ export type ChatMessage = {
   type: string;
   status: string;
   senderName: string | null;
+  // Id do usuário do sistema que enviou (só preenchido em mensagens outbound) —
+  // usado só pra decidir quem pode editar/apagar a mensagem.
+  senderId?: number | null;
+  // Telefone de quem enviou DENTRO de uma conversa de grupo (participante),
+  // diferente do "phone" da conversa (que é o JID do grupo em si). Só
+  // preenchido pra mensagens de grupo — permite abrir uma conversa 1:1 com
+  // aquele participante direto a partir do balão.
+  senderPhone?: string | null;
   mediaUrl: string | null;
   transcript: string | null;
   externalId: string | null;
   createdAt: string;
   editedAt?: string | null;
+  deletedAt?: string | null;
   reactions?: Array<{ emoji: string; senderName: string | null }>;
   replyToId?: number | null;
   replyTo?: { id: number; senderName: string | null; content: string; type: string } | null;
+  metadata?: MessageMetadata | null;
+  forwarded?: boolean;
+  // Só na resposta do envio que falhou (ex.: Instagram fora da janela de 24h).
+  sendError?: string;
+};
+
+// "Marcar mensagem" no Atendimento (igual WhatsApp): compartilhado entre
+// quem atende, suporta várias mensagens fixadas por conversa.
+export type PinnedMessage = {
+  messageId: number;
+  pinnedBy: number;
+  pinnedAt: string;
+  content: string;
+  type: string;
+  senderName: string | null;
+  direction: "inbound" | "outbound";
 };
 
 export type SaasContract = {
@@ -689,10 +1983,45 @@ export type SaasContract = {
   startDate: string | null;
   renewalDate: string | null;
   notes: string | null;
+  // Plano de limites (Fase 3 — Planos & Limites), separado do campo "plan"
+  // acima (que é só o texto livre de cobrança, ex.: "Mensal").
+  planId: number | null;
+  usesCustomLimits: boolean;
+  customLimits: Partial<Record<LimitField, number | null>> | null;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
   tenantName?: string;
+};
+
+// Planos & Limites (Fase 3 do Painel do Sistema) — teto configurável por
+// recurso, cadastrado pelo superadmin (Start/Pro/Premium/...). null num
+// campo = ilimitado nesse recurso.
+export const LIMIT_FIELDS = [
+  "maxAdmins", "maxSupervisors", "maxAttendants", "maxUsersTotal",
+  "maxWhatsapps", "maxBranches", "maxSectors",
+  "maxStorageGb", "maxConversationsMonthly", "maxAiBots",
+] as const;
+export type LimitField = typeof LIMIT_FIELDS[number];
+export const LIMIT_LABELS: Record<LimitField, string> = {
+  maxAdmins: "Administradores",
+  maxSupervisors: "Supervisores",
+  maxAttendants: "Atendentes",
+  maxUsersTotal: "Usuários totais",
+  maxWhatsapps: "WhatsApps conectados",
+  maxBranches: "Lojas/filiais",
+  maxSectors: "Setores",
+  maxStorageGb: "Armazenamento (GB)",
+  maxConversationsMonthly: "Conversas mensais",
+  maxAiBots: "Robôs/IA",
+};
+
+export type Plan = { id: number; name: string; isActive: boolean; createdAt: string; updatedAt: string } & Record<LimitField, number | null>;
+
+export type PlanUsage = {
+  planName: string | null;
+  isCustom: boolean;
+  items: { field: LimitField; label: string; limit: number | null; used: number; enforced: boolean }[];
 };
 
 export type SaasInvoice = {
@@ -722,10 +2051,16 @@ export type SaasTicket = {
   priority: TicketPriority;
   category: TicketCategory;
   openedByUserId: number | null;
+  // Nome de quem abriu o chamado — só vem preenchido na listagem do
+  // superadmin (join com users); a tela do lojista não usa este campo.
+  openedByUserName?: string | null;
   storeName: string | null;
   firstRespondedAt: string | null;
   createdAt: string;
   resolvedAt: string | null;
+  // Explicação da solução aplicada — preenchida ao marcar como "resolvido",
+  // fica visível permanentemente (não é limpa se o status mudar depois).
+  resolutionNote: string | null;
 };
 
 export type TicketMessage = {
@@ -758,7 +2093,7 @@ export type TenantSummary = {
   id: number;
   name: string;
   isActive: boolean;
-  saasStatus: "ativo" | "inadimplente" | "cancelado";
+  saasStatus: "ativo" | "inadimplente" | "cancelado" | "em_implantacao";
   contactName: string | null;
   contactPhone: string | null;
   contactEmail: string | null;
@@ -766,11 +2101,30 @@ export type TenantSummary = {
   enabledModules: OptionalModule[];
   overdueCount: number;
   contract: SaasContract | null;
+  planUsage: PlanUsage;
   createdAt: string;
   userCount: number;
   conversationCount: number;
   whatsappCount: number;
+  whatsappConnectedCount: number;
+  openTicketCount: number;
   admins: { id: number; name: string; email: string; isActive: boolean }[];
+};
+
+// "Visão Geral": contagens de lojas por situação + itens que precisam de
+// atenção do superadmin (WhatsApp caído, mensalidade atrasada, contrato
+// vencendo, chamado urgente parado) — tudo pronto pra montar a home do painel.
+export type AttentionItem =
+  | { type: "whatsapp_disconnected"; tenantId: number; tenantName: string; sessionLabel: string; hoursOffline: number }
+  | { type: "invoice_overdue"; tenantId: number; tenantName: string; amountCents: number; daysOverdue: number }
+  | { type: "contract_renewing"; tenantId: number; tenantName: string; renewalDate: string; daysUntil: number }
+  | { type: "ticket_urgent"; tenantId: number; tenantName: string; ticketId: number; title: string; hoursOpen: number; responded: boolean };
+
+export type SaasAttention = {
+  counts: { total: number; ativo: number; suspensas: number; emImplantacao: number; cancelado: number; inadimplente: number };
+  whatsapp: { connected: number; total: number };
+  criticalTickets: number;
+  items: AttentionItem[];
 };
 export const api = {
   superadmin: {
@@ -781,16 +2135,28 @@ export const api = {
       cpfCnpj?: string; enabledModules?: OptionalModule[];
     }) =>
       req<{ tenant: TenantSummary }>("/superadmin/tenants", { method: "POST", body: JSON.stringify(data) }),
-    impersonate: (tenantId: number, userId: number) =>
-      req<{ ok: boolean }>(`/superadmin/tenants/${tenantId}/impersonate/${userId}`, { method: "POST" }),
+    impersonate: (tenantId: number, userId: number, reason: string, reasonDetail?: string) =>
+      req<{ ok: boolean }>(`/superadmin/tenants/${tenantId}/impersonate/${userId}`, { method: "POST", body: JSON.stringify({ reason, reasonDetail }) }),
+    sessions: () => req<{ sessions: AuditedSession[] }>("/superadmin/sessions"),
+    auditLog: () => req<{ entries: SuperadminAuditEntry[] }>("/superadmin/audit-log"),
     updateTenant: (id: number, data: {
-      name?: string; isActive?: boolean; saasStatus?: "ativo" | "cancelado";
+      name?: string; isActive?: boolean; saasStatus?: "ativo" | "cancelado" | "em_implantacao";
       contactName?: string | null; contactPhone?: string | null; contactEmail?: string | null;
+      enabledModules?: OptionalModule[];
     }) =>
       req<{ tenant: TenantSummary }>(`/superadmin/tenants/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     upsertTenantAdmin: (id: number, data: { name?: string; email: string; password: string }) =>
       req<{ admin: { id: number; name: string; email: string } | null }>(`/superadmin/tenants/${id}/admin`, { method: "POST", body: JSON.stringify(data) }),
+    // Planos & Limites (Fase 3): catálogo de planos + plano/limites de uma loja específica.
+    listPlans: () => req<{ plans: Plan[] }>("/superadmin/plans"),
+    createPlan: (data: { name: string; isActive?: boolean } & Partial<Record<LimitField, number | null>>) =>
+      req<{ plan: Plan }>("/superadmin/plans", { method: "POST", body: JSON.stringify(data) }),
+    updatePlan: (id: number, data: { name?: string; isActive?: boolean } & Partial<Record<LimitField, number | null>>) =>
+      req<{ plan: Plan }>(`/superadmin/plans/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    updateTenantPlan: (tenantId: number, data: { planId?: number | null; usesCustomLimits?: boolean; customLimits?: Partial<Record<LimitField, number | null>> }) =>
+      req<{ ok: boolean; usage: PlanUsage }>(`/superadmin/tenants/${tenantId}/plan`, { method: "PATCH", body: JSON.stringify(data) }),
     saasOverview: () => req<SaasOverview>("/superadmin/saas/overview"),
+    saasAttention: () => req<SaasAttention>("/superadmin/saas/attention"),
     listContracts: () => req<{ contracts: SaasContract[] }>("/superadmin/saas/contracts"),
     saveContract: (tenantId: number, data: {
       plan?: string; monthlyValueCents?: number; startDate?: string | null;
@@ -819,11 +2185,20 @@ export const api = {
     },
     createTicket: (data: { tenantId: number; title: string; description?: string }) =>
       req<{ ticket: SaasTicket }>("/superadmin/saas/tickets", { method: "POST", body: JSON.stringify(data) }),
-    updateTicket: (id: number, data: { status?: TicketStatus; priority?: TicketPriority; category?: TicketCategory; title?: string; description?: string }) =>
+    updateTicket: (id: number, data: { status?: TicketStatus; priority?: TicketPriority; category?: TicketCategory; title?: string; description?: string; resolutionNote?: string }) =>
       req<{ ticket: SaasTicket }>(`/superadmin/saas/tickets/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     ticketMessages: (id: number) => req<{ messages: TicketMessage[] }>(`/superadmin/saas/tickets/${id}/messages`),
     replyTicket: (id: number, content: string) =>
       req<{ message: TicketMessage }>(`/superadmin/saas/tickets/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
+    // Equipe do superadmin (Fase 1 - gaps): só quem tem acesso completo
+    // enxerga/mexe nisso (ver requireFullSuperadmin no backend).
+    team: {
+      list: () => req<{ team: TeamMember[]; scopes: string[] }>("/superadmin/team"),
+      create: (data: { name: string; email: string; password: string; superadminScopes: string[] | null }) =>
+        req<{ member: TeamMember }>("/superadmin/team", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: { name?: string; isActive?: boolean; superadminScopes?: string[] | null; newPassword?: string }) =>
+        req<{ member: TeamMember }>(`/superadmin/team/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    },
   },
   tickets: {
     list: () => req<{ tickets: SaasTicket[] }>("/tickets"),
@@ -840,19 +2215,34 @@ export const api = {
       req<{ user: User }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
     logout: () => req<{ ok: boolean }>("/auth/logout", { method: "POST" }),
     me: () => req<{ user: User }>("/auth/me"),
+    // Auto-edição de nome/e-mail do próprio usuário logado — sempre a
+    // própria conta (o servidor nunca aceita id vindo daqui).
+    updateProfile: (data: Partial<{ name: string; email: string }>) =>
+      req<{ user: User }>("/auth/me", { method: "PATCH", body: JSON.stringify(data) }),
     changePassword: (currentPassword: string, newPassword: string) =>
       req<{ ok: boolean }>("/auth/change-password", { method: "POST", body: JSON.stringify({ currentPassword, newPassword }) }),
+    verifyPassword: (password: string) =>
+      req<{ ok: boolean; verifiedForSeconds: number }>("/auth/verify-password", { method: "POST", body: JSON.stringify({ password }) }),
     stopImpersonation: () => req<{ ok: boolean }>("/auth/stop-impersonation", { method: "POST" }),
     forgotPassword: (email: string) =>
       req<{ ok: boolean; message: string }>("/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) }),
     resetPassword: (token: string, newPassword: string, confirmNewPassword: string) =>
       req<{ ok: boolean }>("/auth/reset-password", { method: "POST", body: JSON.stringify({ token, newPassword, confirmNewPassword }) }),
+    sessions: {
+      list: () => req<{ sessions: MySession[] }>("/auth/sessions"),
+      end: (sid: string) => req<{ ok: boolean }>(`/auth/sessions/${encodeURIComponent(sid)}`, { method: "DELETE" }),
+      endOthers: () => req<{ ok: boolean }>("/auth/sessions/end-others", { method: "POST" }),
+    },
   },
   sectors: {
     list: () => req<Sector[]>("/sectors"),
     listAll: () => req<Sector[]>("/sectors/all"),
     create: (data: Partial<Sector>) => req<Sector>("/sectors", { method: "POST", body: JSON.stringify(data) }),
     update: (id: number, data: Partial<Sector>) => req<Sector>(`/sectors/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    // Exclui de vez (diferente de update({isActive:false}), que só desativa
+    // e mantém o setor na lista). O servidor recusa se ainda houver usuário
+    // vinculado — pede pra mudar o setor deles antes.
+    remove: (id: number) => req<{ ok: boolean }>(`/sectors/${id}`, { method: "DELETE" }),
   },
   queue: {
     list: (params?: { sectorId?: number; status?: string }) => {
@@ -867,22 +2257,75 @@ export const api = {
     complete: (id: number) => req<QueueEntry>(`/queue/${id}/complete`, { method: "PATCH" }),
     transfer: (id: number, targetSectorId: number) =>
       req<QueueEntry>(`/queue/${id}/transfer`, { method: "PATCH", body: JSON.stringify({ targetSectorId }) }),
+    // Direcionar pra um vendedor específico (pedido 10/09) — targetUserId
+    // null remove o direcionamento, voltando pro pool geral do setor.
+    route: (id: number, targetUserId: number | null) =>
+      req<QueueEntry>(`/queue/${id}/route`, { method: "PATCH", body: JSON.stringify({ targetUserId }) }),
     remove: (id: number) => req<{ ok: boolean }>(`/queue/${id}`, { method: "DELETE" }),
   },
   chat: {
     // Conexões de WhatsApp (números de atendimento) — para etiquetar conversas.
-    waSessions: () => req<{ sessionKey: string; displayName: string | null; phoneNumber: string | null }[]>("/chat/wa-sessions"),
-    conversations: (params?: { search?: string; status?: string; label?: string; sectorId?: number }) => {
+    waSessions: () => req<{ sessionKey: string; displayName: string | null; phoneNumber: string | null; color: string; icon: string | null; canAccess?: boolean }[]>("/chat/wa-sessions"),
+    conversations: (params?: { search?: string; status?: string; label?: string; sectorId?: number; assigneeId?: number; sessionKey?: string }) => {
       const qs = new URLSearchParams();
       if (params?.search) qs.set("search", params.search);
       if (params?.status) qs.set("status", params.status);
       if (params?.label) qs.set("label", params.label);
       if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      if (params?.assigneeId) qs.set("assigneeId", String(params.assigneeId));
+      if (params?.sessionKey) qs.set("sessionKey", params.sessionKey);
       return req<Conversation[]>(`/chat/conversations?${qs.toString()}`);
+    },
+    // Contagem REAL por categoria (não fica presa ao lote de 100 mais recentes
+    // que a listagem acima retorna) — usada pelos números das abinhas
+    // (Potenciais/Pendentes/Ativos/Resolvidas) na Central de Atendimento.
+    conversationCounts: (params?: { search?: string; label?: string; sectorId?: number; assigneeId?: number; sessionKey?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.search) qs.set("search", params.search);
+      if (params?.label) qs.set("label", params.label);
+      if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      if (params?.assigneeId) qs.set("assigneeId", String(params.assigneeId));
+      if (params?.sessionKey) qs.set("sessionKey", params.sessionKey);
+      return req<{ ativos: number; pendentes: number; potenciais: number; resolvidas: number; favoritos: number }>(
+        `/chat/conversations/counts?${qs.toString()}`,
+      );
+    },
+    // Quantidade de atendimento em ABERTO por número de WhatsApp conectado
+    // (pedido 17/09: painel perto de "Conversas" pra ver a carga de cada
+    // linha). Mesma visibilidade de conversationCounts acima, só agrupada
+    // por sessionKey em vez de categoria.
+    conversationCountsBySession: (params?: { sectorId?: number; assigneeId?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      if (params?.assigneeId) qs.set("assigneeId", String(params.assigneeId));
+      return req<{ sessionKey: string; total: number; ativos: number; naFila: number }[]>(
+        `/chat/conversations/counts-by-session?${qs.toString()}`,
+      );
     },
     pinConversation: (id: number) => req<{ ok: boolean }>(`/chat/conversations/${id}/pin`, { method: "POST" }),
     unpinConversation: (id: number) => req<{ ok: boolean }>(`/chat/conversations/${id}/pin`, { method: "DELETE" }),
+    // "Marcar mensagem" (fixar uma mensagem já enviada, estilo WhatsApp) —
+    // diferente do pin/unpin de conversa acima.
+    pinnedMessages: (conversationId: number) => req<PinnedMessage[]>(`/chat/conversations/${conversationId}/pinned-messages`),
+    pinMessage: (messageId: number) => req<{ ok: boolean; pinned: PinnedMessage }>(`/chat/messages/${messageId}/pin`, { method: "POST" }),
+    unpinMessage: (messageId: number) => req<{ ok: boolean; messageId: number }>(`/chat/messages/${messageId}/pin`, { method: "DELETE" }),
     messages: (id: number) => req<ChatMessage[]>(`/chat/conversations/${id}/messages`),
+    // Busca de texto DENTRO de uma conversa aberta (diferente da busca da
+    // lista de conversas, que filtra por nome/número).
+    searchMessages: (id: number, q: string) =>
+      req<{ id: number; content: string; type: string; senderName: string | null; direction: string; createdAt: string }[]>(
+        `/chat/conversations/${id}/messages/search?q=${encodeURIComponent(q)}`,
+      ),
+    // Busca global (item 11 do roadmap "Central de Atendimento") — cruza
+    // TODAS as conversas visíveis (nome, telefone, etiqueta, atendente,
+    // protocolo/nº da fila, texto de mensagem, CPF/CNPJ via CRM), diferente
+    // da busca acima (só dentro de uma conversa já aberta).
+    searchGlobal: (q: string) =>
+      req<(Conversation & { matchedBy: "protocolo" | "mensagem" | "cpf_cnpj" | "atendente" | null })[]>(
+        `/chat/search-global?q=${encodeURIComponent(q)}`,
+      ),
+    // Auditoria de ações sensíveis (item 21 do roadmap) — admin/supervisor.
+    sensitiveActionsLog: () => req<SensitiveActionLogEntry[]>("/chat/sensitive-actions-log"),
     // Paginação por cursor: devolve o bloco de mensagens + flag de "tem mais
     // antigas" (cabeçalho X-Has-More). Sem `before`, é o bloco mais recente.
     messagesPage: async (id: number, before?: number): Promise<{ messages: ChatMessage[]; hasMore: boolean }> => {
@@ -900,8 +2343,14 @@ export const api = {
     },
     sendMessage: (id: number, content: string, replyToId?: number) =>
       req<ChatMessage>(`/chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content, replyToId }) }),
+    forward: (messageId: number, conversationId: number) =>
+      req<ChatMessage>(`/chat/messages/${messageId}/forward`, { method: "POST", body: JSON.stringify({ conversationId }) }),
     sendNote: (id: number, content: string) =>
       req<ChatMessage>(`/chat/conversations/${id}/notes`, { method: "POST", body: JSON.stringify({ content }) }),
+    editMessage: (messageId: number, content: string) =>
+      req<ChatMessage>(`/chat/messages/${messageId}`, { method: "PATCH", body: JSON.stringify({ content }) }),
+    deleteMessage: (messageId: number) =>
+      req<ChatMessage>(`/chat/messages/${messageId}`, { method: "DELETE" }),
     suggestReply: (id: number) =>
       req<{ suggestion: string }>(`/chat/conversations/${id}/suggest-reply`, { method: "POST" }),
     transcribe: (messageId: number) =>
@@ -923,13 +2372,26 @@ export const api = {
         reader.readAsDataURL(file);
       });
     },
-    updateConversation: (id: number, data: Partial<{ status: string; labels: string; sectorId: number; assigneeId: number; name: string; isArchived: boolean; resolutionReason: string | null; hadSale: boolean; saleAmount: number; saleDescription: string }>) =>
+    updateConversation: (id: number, data: Partial<{ status: string; labels: string; sectorId: number; assigneeId: number; name: string; isArchived: boolean; resolutionReason: string | null; hadSale: boolean; saleAmount: number; saleDescription: string; priority: string | null }>) =>
       req<Conversation>(`/chat/conversations/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     deleteConversation: (id: number) =>
       req<{ ok: boolean }>(`/chat/conversations/${id}`, { method: "DELETE" }),
+    // Disparo em massa pra Resolvidos (pedido 14/09, Atacado): reabre +
+    // manda a mesma mensagem pra vários atendimentos de uma vez. Roda em
+    // segundo plano no servidor (pedido 19/09: intervalo real entre envios) —
+    // esta chamada só inicia a leva; acompanhe com broadcastLog(logId).
+    broadcast: (conversationIds: number[], message: string) =>
+      req<{ ok: boolean; logId: number; total: number; intervalMs: number }>(
+        "/chat/conversations/broadcast",
+        { method: "POST", body: JSON.stringify({ conversationIds, message }) },
+      ),
+    broadcastLog: (logId: number) => req<BroadcastDispatchLog>(`/chat/broadcast-logs/${logId}`),
+    broadcastLogs: (limit?: number) =>
+      req<BroadcastDispatchLog[]>(`/chat/broadcast-logs${limit ? `?limit=${limit}` : ""}`),
+    broadcastLogsSummary: () => req<BroadcastDispatchSummary>("/chat/broadcast-logs/summary"),
     outboundUsage: (assigneeId?: number) =>
       req<OutboundUsage>(`/chat/outbound-usage${assigneeId ? `?assigneeId=${assigneeId}` : ""}`),
-    createConversation: (data: { phone: string; name: string; channel?: string; sectorId?: number; assigneeId?: number }) =>
+    createConversation: (data: { phone: string; name: string; channel?: string; sectorId?: number; assigneeId?: number; sessionKey?: string }) =>
       req<Conversation>("/chat/conversations", { method: "POST", body: JSON.stringify(data) }),
     claimConversation: (id: number) =>
       req<Conversation>(`/chat/conversations/${id}/claim`, { method: "POST" }),
@@ -957,9 +2419,9 @@ export const api = {
     },
     quickReplies: {
       list: () => req<QuickReply[]>("/chat/quick-replies"),
-      create: (data: { title: string; content: string; sectorId?: number | null }) =>
+      create: (data: { title: string; content: string; sectorId?: number | null; storeIds?: number[] | null; userIds?: number[] | null }) =>
         req<QuickReply>("/chat/quick-replies", { method: "POST", body: JSON.stringify(data) }),
-      update: (id: number, data: Partial<{ title: string; content: string; sectorId: number | null }>) =>
+      update: (id: number, data: Partial<{ title: string; content: string; sectorId: number | null; storeIds: number[] | null; userIds: number[] | null }>) =>
         req<QuickReply>(`/chat/quick-replies/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number) => req<{ ok: boolean }>(`/chat/quick-replies/${id}`, { method: "DELETE" }),
     },
@@ -970,6 +2432,12 @@ export const api = {
       update: (id: number, data: Partial<{ name: string; color: string; sortOrder: number; isActive: boolean }>) =>
         req<ChatLabel>(`/chat/labels/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number) => req<{ ok: boolean }>(`/chat/labels/${id}`, { method: "DELETE" }),
+    },
+    savedFilters: {
+      list: () => req<ChatSavedFilter[]>("/chat/saved-filters"),
+      create: (data: { name: string; filters: ChatSavedFilterValues }) =>
+        req<ChatSavedFilter>("/chat/saved-filters", { method: "POST", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/chat/saved-filters/${id}`, { method: "DELETE" }),
     },
   },
   chatUsers: () => req<{ id: number; name: string; role: string; sectorId: number | null }[]>("/chat/users"),
@@ -985,12 +2453,31 @@ export const api = {
       req<InternalChatSearchHit[]>(`/internal-chat/search?q=${encodeURIComponent(q)}`),
     send: (id: number, content: string, replyToId?: number) =>
       req<InternalMessage>(`/internal-chat/conversations/${id}/messages`, { method: "POST", body: JSON.stringify({ content, replyToId }) }),
+    editMessage: (messageId: number, content: string) =>
+      req<InternalMessage>(`/internal-chat/messages/${messageId}`, { method: "PATCH", body: JSON.stringify({ content }) }),
+    deleteMessage: (messageId: number) =>
+      req<InternalMessage>(`/internal-chat/messages/${messageId}`, { method: "DELETE" }),
     markRead: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}/read`, { method: "POST" }),
     deleteGroup: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}`, { method: "DELETE" }),
+    // Mesma rota do deleteGroup acima (o backend agora aceita grupo OU
+    // direta) — nome próprio só pra deixar claro no call-site do 1:1.
+    deleteConversation: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}`, { method: "DELETE" }),
+    // Apaga de uma vez TODAS as conversas diretas (1:1) da loja — pedido do
+    // lojista pra limpar conversas antigas de vendedores sem precisar abrir
+    // uma por uma. Grupos e a sala geral não são afetados.
+    deleteAllDirect: () => req<{ ok: boolean; count: number }>("/internal-chat/conversations/direct/all", { method: "DELETE" }),
+    deleteGeneral: () => req<{ ok: boolean }>("/internal-chat/general", { method: "DELETE" }),
     groupMembers: (id: number) => req<{ id: number; name: string; role: string }[]>(`/internal-chat/conversations/${id}/members`),
-    updateGroup: (id: number, data: { name?: string; memberIds?: number[] }) =>
+    updateGroup: (id: number, data: { name?: string; memberIds?: number[]; queueMode?: boolean }) =>
       req<InternalConversation & { members?: { id: number; name: string }[] }>(
         `/internal-chat/conversations/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    // Fila de atendimento: "assumir" fica em evidência pra todo mundo do
+    // grupo quem está cuidando agora; "concluir" libera pro próximo. 409 com
+    // code "SINGLE_TASK_BLOCKED" quando quem tenta assumir tem a restrição
+    // "1 atendimento por vez" ligada e já está com outra conversa em aberto.
+    assume: (id: number) => req<{ ok: boolean; activeHandlerId?: number; activeHandlerName?: string | null; activeHandlerSince?: string }>(
+      `/internal-chat/conversations/${id}/assume`, { method: "POST" }),
+    release: (id: number) => req<{ ok: boolean }>(`/internal-chat/conversations/${id}/release`, { method: "POST" }),
     sendMedia: (id: number, file: File, caption?: string, replyToId?: number): Promise<InternalMessage> => {
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -1011,15 +2498,11 @@ export const api = {
     forward: (messageId: number, conversationIds: number[]) =>
       req<{ ok: boolean; sent: { conversationId: number; message: InternalMessage }[] }>(
         `/internal-chat/messages/${messageId}/forward`, { method: "POST", body: JSON.stringify({ conversationIds }) }),
-  },
-  routing: {
-    rules: () => req<RoutingRule[]>("/routing/rules"),
-    create: (data: { sectorId: number; name: string; keywords: string; priority?: number }) =>
-      req<RoutingRule>("/routing/rules", { method: "POST", body: JSON.stringify(data) }),
-    update: (id: number, data: Partial<{ name: string; keywords: string; priority: number; isActive: boolean; sectorId: number }>) =>
-      req<RoutingRule>(`/routing/rules/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
-    remove: (id: number) => req<{ ok: boolean }>(`/routing/rules/${id}`, { method: "DELETE" }),
-    classify: (text: string) => req<ClassifyResult>("/routing/classify", { method: "POST", body: JSON.stringify({ text }) }),
+    pin: (conversationId: number, messageId: number) =>
+      req<{ ok: boolean; pinnedMessage: InternalConversation["pinnedMessage"] }>(
+        `/internal-chat/conversations/${conversationId}/pin`, { method: "POST", body: JSON.stringify({ messageId }) }),
+    unpin: (conversationId: number) =>
+      req<{ ok: boolean }>(`/internal-chat/conversations/${conversationId}/pin`, { method: "DELETE" }),
   },
   crm: {
     list: (params?: { profile?: string; status?: string; search?: string }) => {
@@ -1037,6 +2520,9 @@ export const api = {
     remove: (id: number) => req<{ ok: boolean }>(`/crm/${id}`, { method: "DELETE" }),
     autoRegister: (data: { name: string; phone?: string; contact?: string; sectorId?: number }) =>
       req<CrmContact & { created: boolean }>("/crm/auto-register", { method: "POST", body: JSON.stringify(data) }),
+    // Recalcula o status (coluna do quadro) de todo contato a partir do
+    // estado atual da conversa mais recente dele (ver reconcileCrmStages).
+    reconcileStages: () => req<{ checked: number; updated: number }>("/crm/reconcile-stages", { method: "POST" }),
     purchases: {
       list: (contactId: number) => req<CrmPurchase[]>(`/crm/${contactId}/purchases`),
       create: (contactId: number, data: { description: string; amount?: string | number; purchaseDate?: string; category?: string; notes?: string }) =>
@@ -1050,6 +2536,9 @@ export const api = {
       remove: (noteId: number) => req<{ ok: boolean }>(`/crm/notes/${noteId}`, { method: "DELETE" }),
     },
     serviceHistory: (contactId: number) => req<AttendanceLog[]>(`/crm/${contactId}/service-history`),
+    // Tarefas/compromissos vinculados a este cliente (quadro de Tarefas) —
+    // inclui os "retorno agendado" criados a partir do Atendimento.
+    tasks: (contactId: number) => req<Task[]>(`/crm/${contactId}/tasks`),
     customFields: {
       list: () => req<CrmCustomField[]>("/crm/custom-fields"),
       create: (data: { name: string; type?: CrmCustomFieldType; options?: string; sortOrder?: number }) =>
@@ -1062,31 +2551,104 @@ export const api = {
   trainings: {
     pending: () => req<Training[]>("/trainings/pending"),
     list: () => req<Training[]>("/trainings"),
-    complete: (id: number, answers?: Record<string, number>) =>
-      req<{ ok: boolean; score: number | null }>(`/trainings/${id}/complete`, { method: "POST", body: JSON.stringify({ answers }) }),
+    complete: (id: number, answers?: Record<string, number> | Record<string, string>) =>
+      req<{ ok: boolean; score: number | null; attemptNumber: number }>(`/trainings/${id}/complete`, { method: "POST", body: JSON.stringify({ answers }) }),
     create: (data: Partial<Training>) => req<Training>("/trainings", { method: "POST", body: JSON.stringify(data) }),
     update: (id: number, data: Partial<Training>) => req<Training>(`/trainings/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/trainings/${id}`, { method: "DELETE" }),
     completions: (id: number) => req<TrainingCompletion[]>(`/trainings/${id}/completions`),
+    pendingUsers: (id: number) => req<TrainingPendingUser[]>(`/trainings/${id}/pending-users`),
+    // "Destravar sistema": libera um usuário travado sem ele ter concluído.
+    forceUnlock: (id: number, userId: number) =>
+      req<{ ok: boolean }>(`/trainings/${id}/force-unlock`, { method: "POST", body: JSON.stringify({ userId }) }),
+    // Histórico de tentativas do usuário logado nesse treinamento ("Ver progresso").
+    attempts: (id: number) => req<TrainingAttempt[]>(`/trainings/${id}/attempts`),
+    // "Continuar de onde parou": salva/descarta o rascunho do quiz em andamento.
+    saveProgress: (id: number, answers: Record<string, number>) =>
+      req<{ ok: boolean }>(`/trainings/${id}/progress`, { method: "POST", body: JSON.stringify({ answers }) }),
+    clearProgress: (id: number) => req<{ ok: boolean }>(`/trainings/${id}/progress`, { method: "DELETE" }),
   },
-  checklists: {
-    pending: () => req<PendingChecklist[]>("/checklists/pending"),
-    respond: (id: number, answers: Record<string, string>) =>
-      req<{ id: number }>(`/checklists/${id}/respond`, { method: "POST", body: JSON.stringify({ answers }) }),
-    list: () => req<Checklist[]>("/checklists"),
-    create: (data: Partial<Checklist>) => req<Checklist>("/checklists", { method: "POST", body: JSON.stringify(data) }),
-    update: (id: number, data: Partial<Checklist>) => req<Checklist>(`/checklists/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
-    remove: (id: number) => req<{ ok: boolean }>(`/checklists/${id}`, { method: "DELETE" }),
-    responses: (id: number) => req<ChecklistResponse[]>(`/checklists/${id}/responses`),
+  rotinas: {
+    list: () => req<RoutineChecklist[]>("/rotinas/checklists"),
+    get: (id: number) => req<RoutineChecklistFull>(`/rotinas/checklists/${id}`),
+    create: (data: Partial<RoutineChecklistFull>) => req<RoutineChecklistFull>("/rotinas/checklists", { method: "POST", body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<RoutineChecklistFull>) => req<RoutineChecklistFull>(`/rotinas/checklists/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/rotinas/checklists/${id}`, { method: "DELETE" }),
+    jobFunctions: () => req<string[]>("/rotinas/job-functions"),
+    scopeOptions: () => req<RoutineScopeOptions>("/rotinas/scope-options"),
+    pending: () => req<PendingRoutine[]>("/rotinas/pending"),
+    // occurrenceTime: "" (padrão) pro checklist de horário único; pra quem
+    // tem múltiplos horários, passe o mesmo occurrenceTime que veio no item
+    // de pending() (senão o backend responde 404 — não está pendente pra
+    // aquela ocorrência).
+    respond: (id: number, answers: Record<string, RoutineAnswerValue>, evidence?: Record<string, RoutineEvidenceUpload>, occurrenceTime?: string) =>
+      req<{ id: number }>(`/rotinas/checklists/${id}/respond`, { method: "POST", body: JSON.stringify({ answers, evidence, occurrenceTime }) }),
+    responses: (id: number) => req<RoutineResponse[]>(`/rotinas/checklists/${id}/responses`),
+    evidenceFileUrl: (evidenceId: number) => `${API_BASE}/rotinas/evidence/${evidenceId}/file`,
+    closures: (params?: { employeeId?: number; periodMonth?: string }) => {
+      const q = new URLSearchParams();
+      if (params?.employeeId) q.set("employeeId", String(params.employeeId));
+      if (params?.periodMonth) q.set("periodMonth", params.periodMonth);
+      const qs = q.toString();
+      return req<RoutineClosure[]>(`/rotinas/closures${qs ? `?${qs}` : ""}`);
+    },
+    runClosure: (month?: string) => req<{ ok: boolean; month: string; created: number }>("/rotinas/closures/run", { method: "POST", body: JSON.stringify({ month }) }),
+    removeClosure: (id: number) => req<{ ok: boolean }>(`/rotinas/closures/${id}`, { method: "DELETE" }),
+    scoreWeights: () => req<RoutineScoreWeights>("/rotinas/score-weights"),
+    updateScoreWeights: (w: Partial<RoutineScoreWeights>) => req<RoutineScoreWeights>("/rotinas/score-weights", { method: "PATCH", body: JSON.stringify(w) }),
+    ranking: (params?: { periodMonth?: string; storeId?: number }) => {
+      const q = new URLSearchParams();
+      if (params?.periodMonth) q.set("periodMonth", params.periodMonth);
+      if (params?.storeId) q.set("storeId", String(params.storeId));
+      const qs = q.toString();
+      return req<RoutineRanking>(`/rotinas/ranking${qs ? `?${qs}` : ""}`);
+    },
+    reviewPending: (periodMonth?: string) => req<RoutineReviewPending>(`/rotinas/review/pending${periodMonth ? `?periodMonth=${periodMonth}` : ""}`),
+    reviewResponse: (id: number, status: "approved" | "contested", note?: string) =>
+      req(`/rotinas/responses/${id}/review`, { method: "POST", body: JSON.stringify({ status, note }) }),
+    reviewUrgentBypass: (id: number, status: "approved" | "contested", note?: string) =>
+      req(`/rotinas/urgent-bypasses/${id}/review`, { method: "POST", body: JSON.stringify({ status, note }) }),
+    approveClosure: (id: number) => req<RoutineClosure>(`/rotinas/closures/${id}/approve`, { method: "POST" }),
+    dashboard: (params?: { periodMonth?: string; storeId?: number; sectorId?: number; jobFunction?: string; status?: RoutineDashboardStatus }) => {
+      const q = new URLSearchParams();
+      if (params?.periodMonth) q.set("periodMonth", params.periodMonth);
+      if (params?.storeId) q.set("storeId", String(params.storeId));
+      if (params?.sectorId) q.set("sectorId", String(params.sectorId));
+      if (params?.jobFunction) q.set("jobFunction", params.jobFunction);
+      if (params?.status) q.set("status", params.status);
+      const qs = q.toString();
+      return req<{ periodMonth: string; rows: RoutineDashboardRow[] }>(`/rotinas/dashboard${qs ? `?${qs}` : ""}`);
+    },
+    alerts: () => req<RoutineAlert[]>("/rotinas/alerts"),
+    markAlertRead: (id: number) => req<RoutineAlert>(`/rotinas/alerts/${id}/read`, { method: "POST" }),
+    runAlerts: () => req<{ ok: boolean; created: number }>("/rotinas/alerts/run", { method: "POST" }),
+    urgentBypass: (id: number) => req<{ ok: boolean; bypassUntil: string }>(`/rotinas/checklists/${id}/urgent-bypass`, { method: "POST" }),
   },
   tradeIn: {
     list: () => req<TradeInEvaluation[]>("/trade-in"),
+    // Avaliação passada pro ERP (07/10/2026).
+    moved: () => req<{ moved: boolean; erpUrl: string }>("/trade-in/moved"),
+    setMoved: (data: { moved?: boolean; erpUrl?: string }) =>
+      req<{ moved: boolean; erpUrl: string }>("/trade-in/moved", { method: "PUT", body: JSON.stringify(data) }),
     basePrice: (data: { brand: string; model: string; memory?: string; color?: string; marginTable?: 1 | 2 | 3 }) =>
       req<{ device: string; marketPrice: string; basePrice: string }>(
         "/trade-in/base-price", { method: "POST", body: JSON.stringify(data) }),
-    evaluate: (data: { device?: string; brand?: string; model?: string; memory?: string; color?: string; marginTable?: 1 | 2 | 3; basePrice?: string; answers: Record<string, string> }) =>
-      req<{ id: number; device: string; marketPrice: string; suggestedPrice: string; summary: string; createdAt: string }>(
+    evaluate: (data: { device?: string; brand?: string; model?: string; memory?: string; color?: string; customerName?: string; marginTable?: 1 | 2 | 3; basePrice?: string; answers: Record<string, string> }) =>
+      req<{ id: number; device: string; marketPrice: string; suggestedPrice: string; summary: string; createdAt: string; customerName?: string | null }>(
         "/trade-in/evaluate", { method: "POST", body: JSON.stringify(data) }),
+    close: (id: number, data: {
+      sellerCustomerName: string; sellerCpf: string; imei: string; finalAgreedPrice: string;
+      sellerRg?: string; sellerAddress?: string; sellerNeighborhood?: string; sellerPhone?: string;
+      paymentMethod?: string; pixKey?: string; pixKeyHolder?: string; storeId?: number | null;
+    }) =>
+      req<TradeInEvaluation>(`/trade-in/${id}/close`, { method: "PATCH", body: JSON.stringify(data) }),
+    uploadPhoto: (id: number, kind: "document" | "device" | "payment", base64: string, mimetype: string) =>
+      req<{ documentPhotos: string[]; devicePhotos: string[]; paymentProofPhotos: string[] }>(
+        `/trade-in/${id}/photos`, { method: "POST", body: JSON.stringify({ kind, base64, mimetype }) }),
+    deletePhoto: (id: number, kind: "document" | "device" | "payment", url: string) =>
+      req<{ documentPhotos: string[]; devicePhotos: string[]; paymentProofPhotos: string[] }>(
+        `/trade-in/${id}/photos`, { method: "DELETE", body: JSON.stringify({ kind, url }) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/trade-in/${id}`, { method: "DELETE" }),
     margins: () => req<TradeInMargins>("/trade-in/margins"),
     saveMargins: (data: Partial<TradeInMargins>) =>
       req<TradeInMargins>("/trade-in/margins", { method: "PATCH", body: JSON.stringify(data) }),
@@ -1094,6 +2656,53 @@ export const api = {
     saveQuestions: (data: TradeInQuestionsConfig) =>
       req<TradeInQuestionsConfig>("/trade-in/questions", { method: "PUT", body: JSON.stringify(data) }),
     resetQuestions: () => req<TradeInQuestionsConfig>("/trade-in/questions", { method: "DELETE" }),
+    paymentMethods: () => req<string[]>("/trade-in/payment-methods"),
+    savePaymentMethods: (data: string[]) =>
+      req<string[]>("/trade-in/payment-methods", { method: "PUT", body: JSON.stringify(data) }),
+    resetPaymentMethods: () => req<string[]>("/trade-in/payment-methods", { method: "DELETE" }),
+    baseValues: () => req<TradeInBaseValue[]>("/trade-in/base-values"),
+    createBaseValue: (data: { brand: string; model: string; storage?: string | null; baseValue: number; notes?: string | null }) =>
+      req<TradeInBaseValue>("/trade-in/base-values", { method: "POST", body: JSON.stringify(data) }),
+    updateBaseValue: (id: number, data: { brand: string; model: string; storage?: string | null; baseValue: number; notes?: string | null }) =>
+      req<TradeInBaseValue>(`/trade-in/base-values/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    removeBaseValue: (id: number) => req<{ ok: boolean }>(`/trade-in/base-values/${id}`, { method: "DELETE" }),
+    importBaseValues: (rawText: string) =>
+      req<{ imported: number; skipped: string[]; rows: TradeInBaseValue[] }>(
+        "/trade-in/base-values/import", { method: "POST", body: JSON.stringify({ rawText }) }),
+    // Avaliação na vitrine pública: liga/desliga + limite de avaliações por
+    // IA (pedido 18/09) + margem própria (pedido 19/09, separada da Tabela 2
+    // do CRM interno) — só afeta a porta de entrada pública, a Avaliação de
+    // Usados dentro do CRM não depende disso. publicTradeInMarginPct vem null
+    // até a loja configurar um valor próprio; effectiveMarginPct nunca é
+    // null (cai pra Tabela 2 nesse caso) — use pra pré-preencher o campo.
+    publicSettings: () => req<{
+      publicTradeInEnabled: boolean; publicTradeInAiLimit: number | null;
+      publicTradeInMarginPct: number | null; effectiveMarginPct: number;
+    }>("/trade-in/settings"),
+    savePublicSettings: (data: { publicTradeInEnabled?: boolean; publicTradeInAiLimit?: number | null; publicTradeInMarginPct?: number | null }) =>
+      req<{
+        publicTradeInEnabled: boolean; publicTradeInAiLimit: number | null;
+        publicTradeInMarginPct: number | null; effectiveMarginPct: number;
+      }>("/trade-in/settings", { method: "PATCH", body: JSON.stringify(data) }),
+    // Cota de avaliações por pessoa da equipe (pedido 19/09). `usage` só vem
+    // preenchido pro admin; vendedor recebe só o próprio `myUsed`.
+    evalLimit: () => req<TradeInEvalLimit>("/trade-in/eval-limit"),
+    saveEvalLimit: (data: { enabled?: boolean; limit?: number; period?: TradeInEvalPeriod }) =>
+      req<TradeInEvalLimit>("/trade-in/eval-limit", { method: "PATCH", body: JSON.stringify(data) }),
+  },
+  // Avaliação de usados PÚBLICA (vitrine, sem login) — ver tradeInPublicRouter.
+  tradeInPublic: {
+    questions: (slug: string) =>
+      req<{ apple: { key: string; label: string; options: { label: string }[] }[]; android: { key: string; label: string; options: { label: string }[] }[] }>(
+        `/trade-in-public/${slug}/questions`),
+    // Aparelhos da tabela de valores base (sem valor) — pro cliente SELECIONAR o usado na Vitrine.
+    models: (slug: string) =>
+      req<{ models: { brand: string; model: string; storages: string[] }[] }>(`/trade-in-public/${slug}/models`),
+    estimate: (slug: string, data: { brand: string; model: string; memory?: string; color?: string; answers: Record<string, string> }) =>
+      req<{ method: "table" | "ai"; device: string; estimatedPrice: string; estimatedPriceValue?: number | null } | { blocked: true; message: string }>(
+        `/trade-in-public/${slug}/estimate`, { method: "POST", body: JSON.stringify(data) }),
+    lead: (slug: string, data: { name: string; phone: string; brand: string; model: string; memory?: string; color?: string; answers?: Record<string, string>; estimatedPrice?: string; wantedProduct?: string }) =>
+      req<{ ok: boolean; id: number; updated?: boolean }>(`/trade-in-public/${slug}/lead`, { method: "POST", body: JSON.stringify(data) }),
   },
   results: {
     summary: (params?: { from?: string; to?: string; sectorId?: number; attendantId?: number; store?: string }) => {
@@ -1112,15 +2721,138 @@ export const api = {
       if (params?.attendantId) qs.set("attendantId", String(params.attendantId));
       return req<{ reviews: SurveyReview[] }>(`/results/reviews?${qs.toString()}`);
     },
+    activity: (params?: { from?: string; to?: string; sectorId?: number; attendantId?: number; store?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.from) qs.set("from", params.from);
+      if (params?.to) qs.set("to", params.to);
+      if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      if (params?.attendantId) qs.set("attendantId", String(params.attendantId));
+      if (params?.store) qs.set("store", params.store);
+      return req<DailyActivity>(`/results/activity?${qs.toString()}`);
+    },
+    unresolved: (params?: { sectorId?: number; attendantId?: number; store?: string; thresholdHours?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      if (params?.attendantId) qs.set("attendantId", String(params.attendantId));
+      if (params?.store) qs.set("store", params.store);
+      if (params?.thresholdHours) qs.set("thresholdHours", String(params.thresholdHours));
+      return req<UnresolvedSummary>(`/results/unresolved?${qs.toString()}`);
+    },
+    satisfactionBreakdown: (params?: { from?: string; to?: string; sectorId?: number; attendantId?: number; store?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.from) qs.set("from", params.from);
+      if (params?.to) qs.set("to", params.to);
+      if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      if (params?.attendantId) qs.set("attendantId", String(params.attendantId));
+      if (params?.store) qs.set("store", params.store);
+      return req<SatisfactionBreakdown>(`/results/satisfaction-breakdown?${qs.toString()}`);
+    },
+  },
+  relatorios: {
+    vendedores: (params?: { from?: string; to?: string; sectorId?: number; store?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.from) qs.set("from", params.from);
+      if (params?.to) qs.set("to", params.to);
+      if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      if (params?.store) qs.set("store", params.store);
+      return req<{ from: string; to: string; rows: VendorConsolidatedRow[] }>(`/relatorios/vendedores?${qs.toString()}`);
+    },
+    lojas: (params?: { from?: string; to?: string; sectorId?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.from) qs.set("from", params.from);
+      if (params?.to) qs.set("to", params.to);
+      if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      return req<{ from: string; to: string; rows: StoreConsolidatedRow[] }>(`/relatorios/lojas?${qs.toString()}`);
+    },
+    atendimentos: (params?: {
+      from?: string; to?: string; sectorId?: number; attendantId?: number; store?: string;
+      resolutionReason?: string; hadSale?: boolean; origin?: "manual" | "fila"; outcome?: string;
+      limit?: number; offset?: number;
+    }) => {
+      const qs = new URLSearchParams();
+      if (params?.from) qs.set("from", params.from);
+      if (params?.to) qs.set("to", params.to);
+      if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
+      if (params?.attendantId) qs.set("attendantId", String(params.attendantId));
+      if (params?.store) qs.set("store", params.store);
+      if (params?.resolutionReason) qs.set("resolutionReason", params.resolutionReason);
+      if (params?.hadSale != null) qs.set("hadSale", String(params.hadSale));
+      if (params?.origin) qs.set("origin", params.origin);
+      if (params?.outcome) qs.set("outcome", params.outcome);
+      if (params?.limit) qs.set("limit", String(params.limit));
+      if (params?.offset) qs.set("offset", String(params.offset));
+      return req<{ from: string; to: string; total: number; limit: number; offset: number; motivos: string[]; rows: AtendimentoRow[] }>(
+        `/relatorios/atendimentos?${qs.toString()}`,
+      );
+    },
   },
   teamDirectory: {
     list: () => req<TeamContact[]>("/team-directory"),
     favorite: (userId: number) => req<{ ok: boolean }>(`/team-directory/${userId}/favorite`, { method: "POST" }),
     unfavorite: (userId: number) => req<{ ok: boolean }>(`/team-directory/${userId}/favorite`, { method: "DELETE" }),
   },
+  // Agenda de Contatos do WhatsApp (pedido 25/09, fase 1): contatos
+  // sincronizados via Baileys de cada linha — ver processInboundWAContacts.
+  whatsappContacts: {
+    list: (params?: { search?: string; sessionKey?: string; limit?: number; offset?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.search) qs.set("search", params.search);
+      if (params?.sessionKey) qs.set("sessionKey", params.sessionKey);
+      if (params?.limit) qs.set("limit", String(params.limit));
+      if (params?.offset) qs.set("offset", String(params.offset));
+      return req<{ rows: WhatsappContactRow[]; total: number; limit: number; offset: number }>(
+        `/chat/whatsapp-contacts?${qs.toString()}`,
+      );
+    },
+  },
   finance: {
     summary: (days: number, sectorId?: number | null, store?: string | null) =>
       req<FinanceSummary>(`/finance/summary?days=${days}${sectorId ? `&sectorId=${sectorId}` : ""}${store ? `&store=${encodeURIComponent(store)}` : ""}`),
+  },
+  financePayments: {
+    bankAccounts: {
+      list: (storeId?: number | null) => req<FinanceBankAccount[]>(`/finance/bank-accounts${storeId ? `?storeId=${storeId}` : ""}`),
+      create: (data: { storeId: number; bankName: string; label?: string }) =>
+        req<FinanceBankAccount>("/finance/bank-accounts", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<{ bankName: string; label: string; isActive: boolean; storeId: number }>) =>
+        req<FinanceBankAccount>(`/finance/bank-accounts/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+      remove: (id: number) => req<void>(`/finance/bank-accounts/${id}`, { method: "DELETE" }),
+    },
+    list: (params?: { storeId?: number | null; bankAccountId?: number | null; status?: "aberto" | "pago" | null; from?: string | null; to?: string | null }) => {
+      const qs = new URLSearchParams();
+      if (params?.storeId) qs.set("storeId", String(params.storeId));
+      if (params?.bankAccountId) qs.set("bankAccountId", String(params.bankAccountId));
+      if (params?.status) qs.set("status", params.status);
+      if (params?.from) qs.set("from", params.from);
+      if (params?.to) qs.set("to", params.to);
+      const qsStr = qs.toString();
+      return req<FinancePayment[]>(`/finance/payments${qsStr ? `?${qsStr}` : ""}`);
+    },
+    summary: (from?: string | null, to?: string | null) => {
+      const qs = new URLSearchParams();
+      if (from) qs.set("from", from);
+      if (to) qs.set("to", to);
+      const qsStr = qs.toString();
+      return req<FinancePaymentSummary>(`/finance/payments/summary${qsStr ? `?${qsStr}` : ""}`);
+    },
+    create: (data: {
+      paymentDate: string; description: string; supplier?: string;
+      payingBankAccountId: number; payingStoreId: number;
+      splitType: "rateada" | "direta"; splitMode: "percent" | "value"; totalAmount: number;
+      allocations: { storeId: number; percent?: number | null; amount?: number | null }[];
+    }) => req<FinancePayment>("/finance/payments", { method: "POST", body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<{ description: string; supplier: string; status: "aberto" | "pago" }>) =>
+      req<FinancePayment>(`/finance/payments/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/finance/payments/${id}`, { method: "DELETE" }),
+    // Exporta os lançamentos filtrados pra Excel — a tela só monta a URL e usa
+    // um <a download>, igual ao download de documentos (sessão via cookie).
+    exportUrl: (params?: { storeId?: number | null; status?: "aberto" | "pago" | null }) => {
+      const qs = new URLSearchParams();
+      if (params?.storeId) qs.set("storeId", String(params.storeId));
+      if (params?.status) qs.set("status", params.status);
+      const qsStr = qs.toString();
+      return `${API_BASE}/finance/payments/export${qsStr ? `?${qsStr}` : ""}`;
+    },
   },
   bot: {
     settings: () => req<BotSettings>("/bot/settings"),
@@ -1128,6 +2860,21 @@ export const api = {
     stats: () => req<{ conversations: number; activeFlows: number; usageToday: number }>("/bot/stats"),
     test: (message: string, reset?: boolean) =>
       req<{ replies: string[]; ended?: boolean; reset?: boolean }>("/bot/test", { method: "POST", body: JSON.stringify({ message, reset }) }),
+    // Só GERA A PRÉVIA de como a base vai ficar — nunca salva sozinho (pedido
+    // 17/09). Salvar de fato é bot.save() normal, chamado depois que o admin
+    // aprova (e pode corrigir) o texto devolvido aqui.
+    knowledgeMerge: (text: string) => req<{ knowledgeBase: string }>("/bot/knowledge/merge", { method: "POST", body: JSON.stringify({ text }) }),
+    suggestions: (status: "pending" | "approved" | "rejected" = "pending") =>
+      req<KbSuggestion[]>(`/bot/knowledge/suggestions?status=${status}`),
+    previewSuggestion: (id: number) =>
+      req<{ knowledgeBase: string }>(`/bot/knowledge/suggestions/${id}/preview`, { method: "POST" }),
+    // knowledgeBase opcional: manda o texto da prévia (possivelmente
+    // corrigido pelo admin) pra salvar exatamente o que foi revisado — sem
+    // isso, o backend recalcula a fusão na hora (aprovar direto, sem prévia).
+    approveSuggestion: (id: number, knowledgeBase?: string) =>
+      req<{ suggestion: KbSuggestion; knowledgeBase: string }>(`/bot/knowledge/suggestions/${id}/approve`, { method: "POST", body: JSON.stringify({ knowledgeBase }) }),
+    rejectSuggestion: (id: number) =>
+      req<{ suggestion: KbSuggestion }>(`/bot/knowledge/suggestions/${id}/reject`, { method: "POST" }),
   },
   surveySettings: {
     get: () => req<SurveySettings>("/settings/survey"),
@@ -1135,53 +2882,342 @@ export const api = {
   },
   raffles: {
     list: () => req<Raffle[]>("/raffles"),
+    // Sorteios passados pro ERP (17/10/2026).
+    moved: () => req<{ moved: boolean; erpUrl: string }>("/raffles/moved"),
+    setMoved: (data: { moved?: boolean; erpUrl?: string }) =>
+      req<{ moved: boolean; erpUrl: string }>("/raffles/moved", { method: "PUT", body: JSON.stringify(data) }),
     create: (data: Partial<Raffle>) => req<Raffle>("/raffles", { method: "POST", body: JSON.stringify(data) }),
     update: (id: number, data: Partial<Raffle>) => req<Raffle>(`/raffles/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/raffles/${id}`, { method: "DELETE" }),
     eligible: (id: number) => req<{ count: number }>(`/raffles/${id}/eligible`),
-    run: (id: number) => req<{ draw: RaffleDraw; eligible: number }>(`/raffles/${id}/run`, { method: "POST" }),
+    run: (id: number, autoSend?: boolean) =>
+      req<{ draw: RaffleDraw; eligible: number }>(`/raffles/${id}/run`, { method: "POST", body: JSON.stringify({ autoSend }) }),
     draws: (id: number) => req<RaffleDraw[]>(`/raffles/${id}/draws`),
     resend: (id: number, drawId: number, phone: string) =>
       req<{ draw: RaffleDraw; sent: boolean }>(`/raffles/${id}/draws/${drawId}/resend`, { method: "POST", body: JSON.stringify({ phone }) }),
-  },
-  filmCompat: {
-    import: (fileData: string, mode: "replace" | "append") =>
-      req<{ ok: boolean; imported: number; skipped: number; errors: string[]; mode: string }>(
-        "/film-compat/import", { method: "POST", body: JSON.stringify({ fileData, mode }) }),
-    list: () => req<FilmCompat[]>("/film-compat"),
-    getSheet: () => req<{ url: string }>("/film-compat/sheet"),
-    saveSheet: (url: string) => req<{ url: string }>("/film-compat/sheet", { method: "PUT", body: JSON.stringify({ url }) }),
-    syncSheet: () => req<{ ok: boolean; imported: number }>("/film-compat/sheet/sync", { method: "POST" }),
-    create: (data: { film: string; models: string; notes?: string }) =>
-      req<FilmCompat>("/film-compat", { method: "POST", body: JSON.stringify(data) }),
-    update: (id: number, data: Partial<{ film: string; models: string; notes: string }>) =>
-      req<FilmCompat>(`/film-compat/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
-    remove: (id: number) => req<{ ok: boolean }>(`/film-compat/${id}`, { method: "DELETE" }),
+    sendAll: (id: number, drawId: number) =>
+      req<{ draw: RaffleDraw; sentCount: number; totalPending: number }>(`/raffles/${id}/draws/${drawId}/send-all`, { method: "POST" }),
   },
   rh: {
-    publicProcess: (token: string) => req<{ stages: RhStage[] }>(`/rh/public/${token}`),
+    // positions === null → loja sem cargo configurado, `stages` já vem pronto
+    // (processo único, comportamento de sempre). positions !== null → o
+    // candidato precisa escolher 1 vaga antes (ver publicPositionStages).
+    publicProcess: (token: string) => req<{ positions: { id: number; name: string }[] | null; stages: RhStage[] | null; movedTo?: string }>(`/rh/public/${token}`),
+    moved: () => req<{ moved: boolean; webUrl: string | null }>("/rh/moved"),
+    publicPositionStages: (token: string, positionId: number) =>
+      req<{ stages: RhStage[] }>(`/rh/public/${token}/position/${positionId}`),
     publicApply: (token: string, data: {
-      name: string; phone: string; email?: string;
+      name: string; phone: string; email?: string; cpf: string; positionId?: number;
+      city?: string; neighborhood?: string;
       answers: Record<string, Record<string, string>>;
       videoData?: string; videoMime?: string;
     }) => req<{ ok: boolean; id: number }>(`/rh/public/${token}/apply`, { method: "POST", body: JSON.stringify(data) }),
     settings: () => req<{ publicToken: string; stages: RhStage[] }>("/rh/settings"),
     saveSettings: (stages: RhStage[]) => req<{ ok: boolean }>("/rh/settings", { method: "PUT", body: JSON.stringify({ stages }) }),
     regenerateToken: () => req<{ publicToken: string }>("/rh/settings/regenerate-token", { method: "POST" }),
+    // Organiza uma lista crua de perguntas (colada pelo admin) em etapas
+    // estruturadas via IA, já com o perfil comportamental sugerido nas
+    // perguntas de teste de perfil — o admin revisa/ajusta antes de salvar.
+    aiOrganize: (data: { rawText: string; positionName?: string }) =>
+      req<{ stages: RhStage[] }>("/rh/ai-organize", { method: "POST", body: JSON.stringify(data) }),
+    positions: {
+      list: () => req<RhPosition[]>("/rh/positions"),
+      create: (data: { name: string; stages?: RhStage[] }) => req<RhPosition>("/rh/positions", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: { name?: string; active?: boolean; stages?: RhStage[] }) =>
+        req<RhPosition>(`/rh/positions/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/rh/positions/${id}`, { method: "DELETE" }),
+    },
     candidates: () => req<RhCandidate[]>("/rh/candidates"),
-    updateCandidate: (id: number, data: { status?: string; notes?: string }) =>
-      req<Pick<RhCandidate, "id" | "status" | "notes">>(`/rh/candidates/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    updateCandidate: (id: number, data: {
+      status?: string; notes?: string; statusReason?: string | null; interviewNotes?: Record<string, string> | null;
+      storeTestChecklist?: Record<string, string> | null; storeTestNotes?: string | null;
+      storeTestAt?: string | null; storeTestEvaluatorName?: string | null;
+    }) =>
+      req<Pick<RhCandidate, "id" | "status" | "notes" | "statusReason" | "interviewNotes" | "storeTestChecklist" | "storeTestNotes" | "storeTestAt" | "storeTestEvaluatorName">>(`/rh/candidates/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     removeCandidate: (id: number) => req<{ ok: boolean }>(`/rh/candidates/${id}`, { method: "DELETE" }),
   },
-  sheetLinks: {
-    list: () => req<SheetLink[]>("/sheet-links"),
-    create: (data: { name: string; url: string; allowedSectorIds?: number[] | null; allowedUserIds?: number[] | null }) =>
-      req<SheetLink>("/sheet-links", { method: "POST", body: JSON.stringify(data) }),
-    update: (id: number, data: Partial<{ name: string; url: string; allowedSectorIds: number[] | null; allowedUserIds: number[] | null }>) =>
-      req<SheetLink>(`/sheet-links/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
-    remove: (id: number) => req<{ ok: boolean }>(`/sheet-links/${id}`, { method: "DELETE" }),
-    reorder: (ids: number[]) =>
-      req<{ ok: boolean }>("/sheet-links/reorder", { method: "POST", body: JSON.stringify({ ids }) }),
+  rhDp: {
+    me: {
+      get: () => req<Employee>("/rh-dp/me"),
+      punch: (data?:
+        // lat/lng ausentes (sem noLocationReason) só é aceito pelo backend
+        // quando a loja desligou "localização obrigatória" (pedido 17/09,
+        // ver pontoLocationRequired) — com a exigência ligada (padrão), ou
+        // manda os dois ou usa noLocationReason abaixo.
+        | { photoBase64: string; mimetype: string; lat?: number; lng?: number; accuracyMeters?: number | null }
+        // Entrada sem foto (câmera indisponível) — backend marca a batida
+        // como `flagged` pra revisão do RH. Ver captureWithoutPhoto em
+        // use-punch-capture.ts.
+        | { lat?: number; lng?: number; accuracyMeters?: number | null; noPhotoReason: string }
+        // Entrada sem localização (GPS/localização indisponível, exigência
+        // ligada) — mesma ideia, ver captureWithoutLocation.
+        | { photoBase64: string; mimetype: string; noLocationReason: string }
+        // Entrada sem foto E sem localização — ver captureWithoutBoth.
+        | { noPhotoReason: string; noLocationReason: string }
+      ) =>
+        req<TimeClockEntry>("/rh-dp/me/punch", { method: "POST", body: data ? JSON.stringify(data) : undefined }),
+      timeBank: (from?: string, to?: string) =>
+        req<TimeBankResult>(`/rh-dp/me/time-bank?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+      // locationRequired (pedido 17/09): tenant-wide, sempre devolvido —
+      // PontoGate.tsx/MeuPonto.tsx usam pra saber se devem exigir/bloquear
+      // por falta de localização antes mesmo de bater o ponto.
+      clockStatus: () => req<{ needsClockIn: boolean; locationRequired: boolean }>("/rh-dp/me/clock-status"),
+      vacation: () => req<{ deadline: VacationDeadline | null; requests: VacationRequest[] }>("/rh-dp/me/vacation"),
+      requestVacation: (data: { startDate: string; endDate: string }) =>
+        req<VacationRequest>("/rh-dp/me/vacation-requests", { method: "POST", body: JSON.stringify(data) }),
+      timesheetMonths: () => req<TimesheetMonth[]>("/rh-dp/me/timesheet"),
+      signTimesheet: (periodMonth: string) =>
+        req<{ id: number }>("/rh-dp/me/timesheet-signatures", { method: "POST", body: JSON.stringify({ periodMonth }) }),
+    },
+    // Painel DP — indicadores agregados (colaboradores/presença hoje,
+    // atestados e afastamentos, inconsistências de ponto, horas excedentes,
+    // e os novos alertas de conformidade CLT — análise Tangerino 15/09).
+    dashboardSummary: () => req<{
+      activeEmployees: number; noPresenceToday: number;
+      pendingVacationRequests: number; recentLeaveRecords: number;
+      flaggedPunches: number; overtimeEmployeesCount: number; overtimeMinutesTotal: number;
+      clockAlerts: {
+        overtimeAbove2hEmployees: number; restBelow11hEmployees: number;
+        suspiciousManualPatternEmployees: number;
+        timeBankExpiredEmployees: number; timeBankExpiredMinutesTotal: number;
+      };
+    }>("/rh-dp/dashboard-summary"),
+    // Ações em lote (pedido 17/09, análise Tangerino): exporta planilha
+    // filtrada, importa de volta em 2 passos (preview → apply).
+    bulk: {
+      exportUrl: (params?: { role?: string | null; storeId?: number | null; shiftId?: number | null; isActive?: boolean }) => {
+        const qs = new URLSearchParams();
+        if (params?.role) qs.set("role", params.role);
+        if (params?.storeId) qs.set("storeId", String(params.storeId));
+        if (params?.shiftId) qs.set("shiftId", String(params.shiftId));
+        if (params?.isActive === false) qs.set("isActive", "false");
+        const qsStr = qs.toString();
+        return `${API_BASE}/rh-dp/bulk/employees/export${qsStr ? `?${qsStr}` : ""}`;
+      },
+      preview: (fileBase64: string) => req<{
+        rows: Array<{ row: number; id: number | null; employeeName: string; changes: Array<{ field: string; from: string; to: string }>; errors: string[] }>;
+        totalRows: number; withChanges: number; withErrors: number;
+      }>("/rh-dp/bulk/employees/preview", { method: "POST", body: JSON.stringify({ fileBase64 }) }),
+      apply: (fileBase64: string) => req<{ applied: number; skipped: number; totalRows: number }>(
+        "/rh-dp/bulk/employees/apply", { method: "POST", body: JSON.stringify({ fileBase64 }) },
+      ),
+    },
+    employees: {
+      list: () => req<Employee[]>("/rh-dp/employees"),
+      create: (data: Partial<Employee>) => req<Employee>("/rh-dp/employees", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<Employee>) => req<Employee>(`/rh-dp/employees/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/employees/${id}`, { method: "DELETE" }),
+      punch: (id: number, data: { kind: TimeClockEntry["kind"]; at?: string }) =>
+        req<TimeClockEntry>(`/rh-dp/employees/${id}/punch`, { method: "POST", body: JSON.stringify(data) }),
+      // Lança/edita/limpa o dia inteiro (até 4 seções) numa chamada só —
+      // cada seção omitida/vazia remove a batida existente daquele tipo.
+      // reason (pedido 17/09, auditoria de ajustes): obrigatório só quando a
+      // chamada vai editar ou apagar uma batida JÁ EXISTENTE — o servidor
+      // recusa com 400 se faltar nesse caso; ignorado ao só criar batida nova.
+      setDay: (id: number, data: { date: string; in?: string | null; break_start?: string | null; break_end?: string | null; out?: string | null; reason?: string }) =>
+        req<{ ok: boolean; date: string } & Partial<Record<"in" | "break_start" | "break_end" | "out", string>>>(
+          `/rh-dp/employees/${id}/day`, { method: "PUT", body: JSON.stringify(data) },
+        ),
+      timeBank: (id: number, from?: string, to?: string) =>
+        req<TimeBankResult>(`/rh-dp/employees/${id}/time-bank?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+      addAdjustment: (id: number, data: { minutes: number; reason: string }) =>
+        req<{ id: number }>(`/rh-dp/employees/${id}/time-bank/adjustments`, { method: "POST", body: JSON.stringify(data) }),
+      finalizeHiring: (id: number) => req<Employee>(`/rh-dp/employees/${id}/finalize-hiring`, { method: "POST" }),
+      reopenHiring: (id: number) => req<Employee>(`/rh-dp/employees/${id}/reopen-hiring`, { method: "POST" }),
+      contractPreview: (id: number, templateId: number) =>
+        req<{ text: string }>(`/rh-dp/employees/${id}/contract-preview?${new URLSearchParams({ templateId: String(templateId) })}`),
+    },
+    // Iniciar contratação: a partir de um candidato aprovado (candidateId) ou
+    // avulso (name) — cria o colaborador com hiringStatus "em_contratacao".
+    hiring: {
+      start: (data: { candidateId?: number; name?: string }) =>
+        req<Employee>("/rh-dp/hiring/start", { method: "POST", body: JSON.stringify(data) }),
+    },
+    // Link público (sem login) pro candidato/colaborador subir os próprios
+    // documentos de contratação.
+    documentsUploadLink: {
+      generate: (employeeId: number) => req<{ token: string }>(`/rh-dp/employees/${employeeId}/documents-upload-link`, { method: "POST" }),
+      revoke: (employeeId: number) => req<{ ok: boolean }>(`/rh-dp/employees/${employeeId}/documents-upload-link`, { method: "DELETE" }),
+    },
+    // Página pública (sem login) de upload de documentos pelo próprio
+    // candidato/colaborador — ver HiringDocumentsUpload.tsx.
+    public: {
+      get: (token: string) => req<{ employeeName: string; uploadedDocTypes: string[] }>(`/rh-dp/public/${token}`),
+      uploadDocument: (token: string, data: { docType: string; label?: string; fileName: string; mimeType: string; data: string }) =>
+        req<{ ok: boolean; docType: string }>(`/rh-dp/public/${token}/documents`, { method: "POST", body: JSON.stringify(data) }),
+    },
+    // Banco de arquivos do colaborador — documentos pessoais/CLT (arquivo) ou
+    // o contrato de trabalho gerado/editado (texto).
+    employeeDocuments: {
+      list: (employeeId: number) => req<EmployeeDocument[]>(`/rh-dp/employees/${employeeId}/documents`),
+      uploadFile: (employeeId: number, data: { docType: string; label?: string; fileName: string; mimeType: string; data: string; expiresAt?: string | null }) =>
+        req<EmployeeDocument>(`/rh-dp/employees/${employeeId}/documents`, { method: "POST", body: JSON.stringify(data) }),
+      saveText: (employeeId: number, data: { docType: string; label?: string; textContent: string; expiresAt?: string | null }) =>
+        req<EmployeeDocument>(`/rh-dp/employees/${employeeId}/documents`, { method: "POST", body: JSON.stringify(data) }),
+      update: (employeeId: number, docId: number, data: { label?: string; textContent?: string; expiresAt?: string | null }) =>
+        req<EmployeeDocument>(`/rh-dp/employees/${employeeId}/documents/${docId}`, { method: "PATCH", body: JSON.stringify(data) }),
+      remove: (employeeId: number, docId: number) =>
+        req<{ ok: boolean }>(`/rh-dp/employees/${employeeId}/documents/${docId}`, { method: "DELETE" }),
+      fileUrl: (employeeId: number, docId: number) => `/api/rh-dp/employees/${employeeId}/documents/${docId}/file`,
+      expiring: () => req<ExpiringDocument[]>("/rh-dp/documents-expiring"),
+    },
+    contractTemplates: {
+      list: () => req<EmployeeContractTemplate[]>("/rh-dp/contract-templates"),
+      create: (data: { name: string; contractType?: string | null; bodyText: string; isDefault?: boolean; kind?: "contrato" | "regimento" }) =>
+        req<EmployeeContractTemplate>("/rh-dp/contract-templates", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<{ name: string; contractType: string | null; bodyText: string; isDefault: boolean; kind: "contrato" | "regimento" }>) =>
+        req<EmployeeContractTemplate>(`/rh-dp/contract-templates/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/contract-templates/${id}`, { method: "DELETE" }),
+    },
+    timeClockEntries: {
+      // reason obrigatório (pedido 17/09, auditoria de ajustes) — vai na
+      // query string porque DELETE não costuma levar corpo.
+      remove: (id: number, reason: string) =>
+        req<{ ok: boolean }>(`/rh-dp/time-clock-entries/${id}?${new URLSearchParams({ reason })}`, { method: "DELETE" }),
+      // Admin conferiu uma batida sinalizada (duas fotos em pouco tempo via
+      // WhatsApp) e decidiu manter como está — some da lista de pendências.
+      review: (id: number) => req<TimeClockEntry>(`/rh-dp/time-clock-entries/${id}/review`, { method: "POST" }),
+    },
+    // Linha oficial de check-in de ponto por WhatsApp (uma por tenant).
+    settings: {
+      get: () => req<{
+        pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean;
+        companyMission: string | null; companyVision: string | null; companyValues: string | null;
+        timeBankValidityMonths: number | null;
+        // Lembretes automáticos de ponto (pedido 17/09) — toggle à parte da
+        // linha de check-in, tolerância em minutos (null = padrão de 15) e
+        // mensagens customizadas (null = texto padrão).
+        pontoRemindersEnabled: boolean; pontoReminderGraceMinutes: number | null;
+        pontoReminderMessageEntrada: string | null; pontoReminderMessageSaida: string | null;
+        // Localização obrigatória na batida de entrada (pedido 17/09).
+        pontoLocationRequired: boolean;
+        // Ponto obrigatório inteiro (pedido 17/09: "criar botão de
+        // obrigatoriedade no ponto") — liga/desliga a trava de tela até
+        // bater a entrada, só pra esta loja.
+        pontoObrigatorioEnabled: boolean;
+      }>("/rh-dp/settings"),
+      update: (data: Partial<{
+        pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean;
+        companyMission: string | null; companyVision: string | null; companyValues: string | null;
+        timeBankValidityMonths: number | null;
+        pontoRemindersEnabled: boolean; pontoReminderGraceMinutes: number | null;
+        pontoReminderMessageEntrada: string | null; pontoReminderMessageSaida: string | null;
+        pontoLocationRequired: boolean;
+        pontoObrigatorioEnabled: boolean;
+      }>) =>
+        req<{
+          pontoCheckInSessionKey: string | null; facialRecognitionEnabled: boolean;
+          companyMission: string | null; companyVision: string | null; companyValues: string | null;
+          timeBankValidityMonths: number | null;
+          pontoRemindersEnabled: boolean; pontoReminderGraceMinutes: number | null;
+          pontoReminderMessageEntrada: string | null; pontoReminderMessageSaida: string | null;
+          pontoLocationRequired: boolean;
+          pontoObrigatorioEnabled: boolean;
+        }>("/rh-dp/settings", { method: "PATCH", body: JSON.stringify(data) }),
+    },
+    // Calendário de feriados (pedido 15/09, análise Tangerino) — abate o
+    // expediente esperado do banco de horas.
+    holidays: {
+      list: (year?: number) => req<Holiday[]>(`/rh-dp/holidays${year ? `?year=${year}` : ""}`),
+      create: (data: { date: string; name: string; excusesExpected?: boolean }) =>
+        req<Holiday>("/rh-dp/holidays", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<{ date: string; name: string; excusesExpected: boolean }>) =>
+        req<Holiday>(`/rh-dp/holidays/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/holidays/${id}`, { method: "DELETE" }),
+      // Carrega o calendário nacional padrão de um ano de uma vez.
+      seedDefault: (year: number) => req<{ ok: boolean; inserted: number; total: number }>("/rh-dp/holidays/seed-default", { method: "POST", body: JSON.stringify({ year }) }),
+    },
+    shifts: {
+      list: () => req<WorkShift[]>("/rh-dp/shifts"),
+      create: (data: Partial<WorkShift>) => req<WorkShift>("/rh-dp/shifts", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<WorkShift>) => req<WorkShift>(`/rh-dp/shifts/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/shifts/${id}`, { method: "DELETE" }),
+    },
+    leaves: {
+      list: () => req<LeaveRecord[]>("/rh-dp/leave-records"),
+      create: (data: { employeeId: number; kind: LeaveRecord["kind"]; startDate: string; endDate: string; notes?: string }) =>
+        req<LeaveRecord>("/rh-dp/leave-records", { method: "POST", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/leave-records/${id}`, { method: "DELETE" }),
+    },
+    vacation: {
+      deadlines: () => req<{ employeeId: number; employeeName: string; deadline: VacationDeadline }[]>("/rh-dp/vacation-deadlines"),
+      requests: {
+        list: () => req<VacationRequest[]>("/rh-dp/vacation-requests"),
+        review: (id: number, action: "aprovar" | "rejeitar", reviewNote?: string) =>
+          req<VacationRequest>(`/rh-dp/vacation-requests/${id}`, { method: "PATCH", body: JSON.stringify({ action, reviewNote }) }),
+      },
+    },
+    // Processo de desligamento/demissão — acompanhamento do início à
+    // conclusão, nunca calcula/paga verba (ver comentário no schema).
+    terminations: {
+      list: () => req<TerminationProcess[]>("/rh-dp/termination-processes"),
+      create: (data: { employeeId: number; dismissalType: TerminationProcess["dismissalType"]; reason?: string; noticeType?: TerminationProcess["noticeType"]; lastWorkDate?: string }) =>
+        req<TerminationProcess>("/rh-dp/termination-processes", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<Pick<TerminationProcess,
+        "dismissalType" | "status" | "reason" | "noticeType" | "noticeStartDate" | "noticeEndDate" | "lastWorkDate" |
+        "terminationDate" | "examDate" | "examResult" | "homologationDate" | "fgtsMultaPaid" | "trctSigned" | "seguroDesempregoGuided" | "notes"
+      >>) => req<TerminationProcess>(`/rh-dp/termination-processes/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+      conclude: (id: number, terminationDate?: string) =>
+        req<TerminationProcess>(`/rh-dp/termination-processes/${id}/conclude`, { method: "POST", body: JSON.stringify({ terminationDate }) }),
+      cancel: (id: number) => req<TerminationProcess>(`/rh-dp/termination-processes/${id}/cancel`, { method: "POST" }),
+      reopen: (id: number) => req<TerminationProcess>(`/rh-dp/termination-processes/${id}/reopen`, { method: "POST" }),
+      remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/termination-processes/${id}`, { method: "DELETE" }),
+    },
+    reports: {
+      timesheet: (from?: string, to?: string, employeeId?: number) =>
+        req<TimeClockEntry[]>(`/rh-dp/reports/timesheet?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}), ...(employeeId ? { employeeId: String(employeeId) } : {}) })}`),
+      timeBankSummary: (from?: string, to?: string) =>
+        req<TimeBankSummaryRow[]>(`/rh-dp/reports/time-bank-summary?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+      leaves: (from?: string, to?: string) =>
+        req<LeaveRecord[]>(`/rh-dp/reports/leaves?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+      // 5 relatórios novos (pedido 17/09, análise Tangerino).
+      entryEdits: (from?: string, to?: string) =>
+        req<Array<{
+          id: number; employeeId: number; employeeName: string | null; kind: string; action: "edit" | "delete";
+          previousAt: string; newAt: string | null; reason: string;
+          editedByUserId: number; editedByName: string | null; editedAt: string;
+        }>>(`/rh-dp/reports/entry-edits?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+      synthetic: (from?: string, to?: string) =>
+        req<Array<{
+          employeeId: number; employeeName: string; workedMinutes: number; expectedMinutes: number;
+          balanceMinutes: number; diasFalta: number; diasAtestado: number; diasFerias: number; diasIncompletos: number;
+        }>>(`/rh-dp/reports/synthetic?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+      attendanceIssues: (from?: string, to?: string) =>
+        req<Array<{
+          employeeId: number; employeeName: string; date: string;
+          kind: "falta_justificada" | "falta_injustificada" | "atestado" | "atraso" | "ausencia_nao_registrada";
+          lateMinutes?: number;
+        }>>(`/rh-dp/reports/attendance-issues?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+      hoursByStore: (from?: string, to?: string) =>
+        req<Array<{ storeId: number | null; storeName: string; workedMinutes: number; expectedMinutes: number; employeeCount: number }>>(
+          `/rh-dp/reports/hours-by-store?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`,
+        ),
+      employeesWithPhoto: () =>
+        req<Array<{ employeeId: number; employeeName: string; storeId: number | null; hasPhoto: boolean }>>("/rh-dp/reports/employees-with-photo"),
+      facialRecognitionFailures: (from?: string, to?: string) =>
+        req<Array<{
+          id: number; employeeId: number; employeeName: string | null; kind: string; at: string;
+          flagReason: string | null; proofUrl: string | null;
+        }>>(`/rh-dp/reports/facial-recognition-failures?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+      // Farol de risco NR-1 (pedido 17/09, análise Tangerino).
+      nr1Risk: (from?: string, to?: string) =>
+        req<{
+          periodFrom: string; periodTo: string;
+          overall: { score: number; status: "alerta" | "controlado"; employeesEvaluated: number; employeesInAlert: number };
+          byStore: Array<{ storeId: number | null; storeName: string; score: number; status: "alerta" | "controlado"; employeesEvaluated: number; employeesInAlert: number }>;
+          employees: Array<{
+            employeeId: number; employeeName: string; storeId: number | null; storeName: string;
+            score: number; status: "alerta" | "controlado";
+            factors: { diasExcesso2h: number; diasInterjornadaCurta: number; suspiciousPattern: boolean; bancoHorasVencidoMinutes: number; diasAtraso: number; diasFaltaInjustificada: number };
+          }>;
+          quickActions: string[];
+        }>(`/rh-dp/reports/nr1-risk?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`),
+    },
+    closures: {
+      list: (month?: string) => req<TimeBankClosure[]>(`/rh-dp/closures?${new URLSearchParams({ ...(month ? { month } : {}) })}`),
+      run: (month?: string) => req<{ ok: boolean; month: string; created: number }>("/rh-dp/closures/run", { method: "POST", body: JSON.stringify({ month }) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/rh-dp/closures/${id}`, { method: "DELETE" }),
+    },
   },
   partnerLinks: {
     list: () => req<PartnerLink[]>("/partner-links"),
@@ -1191,6 +3227,83 @@ export const api = {
       req<PartnerLink>(`/partner-links/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/partner-links/${id}`, { method: "DELETE" }),
   },
+  gerente: {
+    settings: {
+      get: () => req<GerenteSettings>("/gerente/settings"),
+      update: (data: Partial<Pick<GerenteSettings, "enabled" | "assistantName" | "authorizedPhones" | "quietStart" | "quietEnd" | "dailyDigestTime" | "admSessionKey">>) =>
+        req<Omit<GerenteSettings, "lines"> & { warnings?: string[] }>("/gerente/settings", { method: "PATCH", body: JSON.stringify(data) }),
+    },
+    overview: () => req<GerenteOverview>("/gerente/overview"),
+    erp: {
+      setKey: (key: string) => req<{ ok: boolean; message: string }>("/gerente/erp-key", { method: "PUT", body: JSON.stringify({ key }) }),
+      test: () => req<{ ok: boolean; message: string }>("/gerente/erp-key/test", { method: "POST" }),
+      actions: () => req<GerenteErpAction[]>("/gerente/erp-actions"),
+      resend: (id: number) => req<{ message: string }>(`/gerente/erp-actions/${id}/resend`, { method: "POST", timeoutMs: 90_000 }),
+    },
+    team: {
+      list: () => req<GerenteTeamMember[]>("/gerente/team"),
+      setPhone: (userId: number, phone: string) => req<{ ok: boolean; phone: string | null }>(`/gerente/team/${userId}`, { method: "PUT", body: JSON.stringify({ phone }) }),
+      test: (userId: number) => req<{ ok: boolean; sessionKey: string }>(`/gerente/team/${userId}/test`, { method: "POST", timeoutMs: 90_000 }),
+    },
+    rollover: (data: { reminderIds: number[]; eventIds: number[] }) =>
+      req<{ moved: number; to: string }>("/gerente/rollover", { method: "POST", body: JSON.stringify(data) }),
+    events: {
+      list: (from?: string, days = 30) => req<GerenteEvent[]>(`/gerente/events?days=${days}${from ? `&from=${from}` : ""}`),
+      create: (data: { title: string; startsAt: string; endsAt?: string | null; location?: string; participants?: string; scope?: GerenteScope; notes?: string; remindMinutesBefore?: number }) =>
+        req<GerenteEvent>("/gerente/events", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<{ title: string; startsAt: string; endsAt: string | null; location: string; participants: string; scope: GerenteScope; notes: string; status: GerenteEvent["status"]; remindMinutesBefore: number }>) =>
+        req<GerenteEvent>(`/gerente/events/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    },
+    reminders: {
+      list: (all = false) => req<GerenteReminder[]>(`/gerente/reminders${all ? "?all=1" : ""}`),
+      create: (data: { title: string; dueAt: string; urgent?: boolean }) =>
+        req<GerenteReminder>("/gerente/reminders", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<{ title: string; dueAt: string; urgent: boolean; status: GerenteReminder["status"] }>) =>
+        req<GerenteReminder>(`/gerente/reminders/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    },
+    entries: {
+      list: (month?: string) => req<{ month: string; rows: GerenteEntry[] }>(`/gerente/entries${month ? `?month=${month}` : ""}`),
+      create: (data: { kind: "gasto" | "receita"; amountCents: number; description: string; category?: string; scope?: GerenteScope; storeName?: string; paymentMethod?: string; installments?: number; reimbursementPending?: boolean; entryDate?: string }) =>
+        req<GerenteEntry>("/gerente/entries", { method: "POST", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/gerente/entries/${id}`, { method: "DELETE" }),
+    },
+    bills: {
+      list: (all = false) => req<GerenteBill[]>(`/gerente/bills${all ? "?all=1" : ""}`),
+      create: (data: { kind: "pagar" | "receber"; description: string; amountCents: number; dueDate: string; counterparty?: string; responsible?: string; scope?: GerenteScope; storeName?: string }) =>
+        req<GerenteBill>("/gerente/bills", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<{ description: string; amountCents: number; dueDate: string; counterparty: string; responsible: string; status: GerenteBill["status"] }>) =>
+        req<GerenteBill>(`/gerente/bills/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    },
+    messages: (limit = 80) => req<GerenteMessage[]>(`/gerente/messages?limit=${limit}`),
+    chat: (text: string) => req<{ replies: string[] }>("/gerente/chat", { method: "POST", body: JSON.stringify({ text }), timeoutMs: 60_000 }),
+    wipe: () => req<{ ok: boolean }>("/gerente/data", { method: "DELETE", body: JSON.stringify({ confirm: "APAGAR" }) }),
+  },
+  tvbox: {
+    clients: {
+      list: () => req<TvBoxClient[]>("/tvbox/clients"),
+      create: (data: { name: string; phone: string; monthlyValueCents: number; dueDay: number; notes?: string }) =>
+        req<TvBoxClient>("/tvbox/clients", { method: "POST", body: JSON.stringify(data) }),
+      update: (id: number, data: Partial<{
+        name: string; phone: string; monthlyValueCents: number; dueDay: number; status: TvBoxClientStatus; notes: string;
+      }>) => req<TvBoxClient>(`/tvbox/clients/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    },
+    invoices: {
+      list: (clientId?: number) => req<TvBoxInvoice[]>(`/tvbox/invoices${clientId ? `?clientId=${clientId}` : ""}`),
+      update: (id: number, status: TvBoxInvoiceStatus) =>
+        req<TvBoxInvoice>(`/tvbox/invoices/${id}`, { method: "PATCH", body: JSON.stringify({ status }) }),
+      generate: () => req<{ created: number }>("/tvbox/invoices/generate", { method: "POST" }),
+    },
+    overview: () => req<TvBoxOverview>("/tvbox/overview"),
+    // TV Box passada para o ERP (17/10/2026) — ver TvBoxErpCard.
+    moved: () => req<{ moved: boolean; erpUrl: string }>("/tvbox/moved"),
+    setMoved: (data: { moved?: boolean; erpUrl?: string }) =>
+      req<{ moved: boolean; erpUrl: string }>("/tvbox/moved", { method: "PUT", body: JSON.stringify(data) }),
+    settings: {
+      get: () => req<TvBoxSettings>("/tvbox/settings"),
+      update: (data: Partial<TvBoxSettings>) =>
+        req<TvBoxSettings>("/tvbox/settings", { method: "PATCH", body: JSON.stringify(data) }),
+    },
+  },
   settings: {
     get: () => req<AppSettings>("/settings"),
     update: (data: Partial<AppSettings>) =>
@@ -1199,17 +3312,62 @@ export const api = {
       update: (data: Partial<Branding>) =>
         req<Branding>("/settings/branding", { method: "PATCH", body: JSON.stringify(data) }),
     },
+    finalizeReasons: {
+      update: (reasons: string[]) =>
+        req<{ finalizeReasons: string[] }>("/settings/finalize-reasons", { method: "PATCH", body: JSON.stringify({ reasons }) }),
+    },
+    ai: {
+      get: () => req<AiCredentialsStatus>("/settings/ai"),
+      save: (data: { apiKey?: string; useOwnKey?: boolean }) =>
+        req<AiCredentialsStatus>("/settings/ai", { method: "PATCH", body: JSON.stringify(data) }),
+      remove: () => req<AiCredentialsStatus>("/settings/ai", { method: "DELETE" }),
+    },
+    erp: {
+      get: () => req<ErpIntegrationStatus>("/settings/erp"),
+      save: (data: { baseUrl?: string; apiKey?: string; osMessagesEnabled?: boolean; hrSyncEnabled?: boolean; hrMovedToErp?: boolean; demandSessionKey?: string | null; demandSyncEnabled?: boolean }) =>
+        req<ErpIntegrationStatus>("/settings/erp", { method: "PATCH", body: JSON.stringify(data) }),
+      demandRun: () =>
+        req<{ ok: boolean; conversations: number; messages: number; requests: number; outOfStock: number; status: ErpIntegrationStatus }>("/settings/erp/demand/run", { method: "POST" }),
+      test: () =>
+        req<{ ok: boolean; tenant: string; keyName: string | null; canSendOsMessages: boolean; canSyncHr: boolean }>("/settings/erp/test", { method: "POST" }),
+      remove: () => req<ErpIntegrationStatus>("/settings/erp", { method: "DELETE" }),
+      exchangeFlows: () => req<ErpExchangeFlows>("/settings/erp/exchanges/flows"),
+      exchanges: (params: Record<string, string>) =>
+        req<ErpExchangeList>(`/settings/erp/exchanges?${new URLSearchParams(params).toString()}`),
+      // Quadro de tarefas unificado (19/10/2026): mudar as tarefas para o ERP.
+      tasks: {
+        get: () => req<TasksErpStatus>("/settings/erp/tasks"),
+        check: () => req<{ ok: boolean; erpUsers: number; crmUsersWithoutErpUser: string[] }>("/settings/erp/tasks/check", { method: "POST" }),
+        move: () => req<{ ok: boolean; report: TasksErpImportReport; moved: boolean }>("/settings/erp/tasks/move", { method: "POST" }),
+        importAgain: () => req<{ ok: boolean; report: TasksErpImportReport; moved: boolean }>("/settings/erp/tasks/import", { method: "POST" }),
+        back: () => req<{ ok: boolean; moved: boolean }>("/settings/erp/tasks/back", { method: "POST" }),
+      },
+    },
+    instagram: {
+      get: () => req<InstagramIntegrationStatus>("/settings/instagram"),
+      save: (data: { accessToken?: string; appSecret?: string; sectorId?: number | null; enabled?: boolean }) =>
+        req<InstagramIntegrationStatus>("/settings/instagram", { method: "PATCH", body: JSON.stringify(data) }),
+      test: () =>
+        req<{ ok: boolean; username: string | null; igUserId: string; webhookSubscribed: boolean; webhookError: string | null }>("/settings/instagram/test", { method: "POST" }),
+      remove: () => req<InstagramIntegrationStatus>("/settings/instagram", { method: "DELETE" }),
+    },
   },
   tasks: {
     list: () => req<Task[]>("/tasks"),
     create: (data: {
       title: string; description?: string; status?: TaskStatus; priority?: TaskPriority;
-      assigneeId?: number | null; sectorId?: number | null; dueDate?: string | null;
+      assigneeIds?: number[]; sectorId?: number | null; dueDate?: string | null;
+      contactId?: number | null; durationMinutes?: number | null; alertMinutesBefore?: number | null;
+      // Mensagem automática pro cliente (Cliente + prazo já preenchidos) —
+      // agenda um envio de WhatsApp no horário do prazo.
+      clientMessage?: string;
     }) => req<Task>("/tasks", { method: "POST", body: JSON.stringify(data) }),
     update: (id: number, data: Partial<{
       title: string; description: string; status: TaskStatus; priority: TaskPriority;
-      assigneeId: number | null; sectorId: number | null; dueDate: string | null;
+      assigneeIds: number[]; sectorId: number | null; dueDate: string | null;
       position: number; isArchived: boolean;
+      contactId: number | null; durationMinutes: number | null; alertMinutesBefore: number | null;
+      clientMessage: string;
     }>) => req<Task>(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     report: () => req<{ bySector: TaskReportBucket[]; byUser: TaskReportBucket[] }>("/tasks/report"),
     comments: (id: number) => req<TaskComment[]>(`/tasks/${id}/comments`),
@@ -1218,15 +3376,21 @@ export const api = {
     subtasks: (id: number) => req<TaskSubtask[]>(`/tasks/${id}/subtasks`),
     addSubtask: (id: number, title: string) =>
       req<TaskSubtask>(`/tasks/${id}/subtasks`, { method: "POST", body: JSON.stringify({ title }) }),
-    updateSubtask: (id: number, subId: number, data: Partial<{ isDone: boolean; title: string; position: number }>) =>
+    updateSubtask: (id: number, subId: number | string, data: Partial<{ isDone: boolean; title: string; position: number }>) =>
       req<TaskSubtask>(`/tasks/${id}/subtasks/${subId}`, { method: "PATCH", body: JSON.stringify(data) }),
-    removeSubtask: (id: number, subId: number) =>
+    removeSubtask: (id: number, subId: number | string) =>
       req<{ ok: boolean }>(`/tasks/${id}/subtasks/${subId}`, { method: "DELETE" }),
     remove: (id: number) => req<{ ok: boolean }>(`/tasks/${id}`, { method: "DELETE" }),
     notifications: {
       unread: () => req<{ taskIds: number[] }>("/tasks/notifications/unread"),
       markRead: (id: number) => req<{ ok: boolean }>(`/tasks/${id}/notifications/read`, { method: "POST" }),
     },
+    reminders: {
+      unread: () => req<TaskReminder[]>("/tasks/reminders/unread"),
+      markRead: (id: number | string) => req<{ ok: boolean }>(`/tasks/reminders/${id}/read`, { method: "POST" }),
+    },
+    // Quadro de tarefas unificado (19/10/2026): as tarefas moram no ERP?
+    erpStatus: () => req<{ moved: boolean; erpUrl: string | null }>("/tasks/erp-status"),
   },
   systemBoard: {
     list: () => req<SystemBoardItem[]>("/system-board"),
@@ -1250,51 +3414,154 @@ export const api = {
       req<DocumentItem>("/documents", { method: "POST", body: JSON.stringify(data) }),
     remove: (id: number) => req<{ ok: boolean }>(`/documents/${id}`, { method: "DELETE" }),
     fileUrl: (id: number) => `/api/documents/${id}/file`,
+    // Documentos passados pro ERP (17/10/2026).
+    moved: () => req<{ moved: boolean; erpUrl: string }>("/documents/moved"),
+    setMoved: (data: { moved?: boolean; erpUrl?: string }) =>
+      req<{ moved: boolean; erpUrl: string }>("/documents/moved", { method: "PUT", body: JSON.stringify(data) }),
   },
-  financeBank: {
-    providers: () => req<FinanceBankProviderInfo[]>("/finance-bank/providers"),
-    accounts: () => req<FinanceBankAccount[]>("/finance-bank/accounts"),
-    createAccount: (data: { storeId: number; provider: string; kind: "conta" | "maquininha"; label: string }) =>
-      req<FinanceBankAccount>("/finance-bank/accounts", { method: "POST", body: JSON.stringify(data) }),
-    updateAccount: (id: number, data: Partial<{ label: string; isActive: boolean }>) =>
-      req<FinanceBankAccount>(`/finance-bank/accounts/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
-    removeAccount: (id: number, confirmPassword?: string) =>
-      req<{ ok: boolean }>(`/finance-bank/accounts/${id}`, { method: "DELETE", body: JSON.stringify({ confirmPassword }) }),
-    saveCredentials: (id: number, secret: string, confirmPassword?: string) =>
-      req<{ ok: boolean }>(`/finance-bank/accounts/${id}/credentials`, { method: "POST", body: JSON.stringify({ secret, confirmPassword }) }),
-    saveCertificate: (id: number, data: { fileName: string; mimeType: string; data: string; certPassword?: string; clientId: string; clientSecret: string; confirmPassword?: string }) =>
-      req<{ ok: boolean }>(`/finance-bank/accounts/${id}/certificate`, { method: "POST", body: JSON.stringify(data) }),
-    oauthStart: (provider: string, accountId: number, confirmPassword?: string) =>
-      req<{ url: string }>(`/finance-bank/oauth/${provider}/start`, { method: "POST", body: JSON.stringify({ accountId, confirmPassword }) }),
-    transactions: (params?: { accountId?: number; storeId?: number; status?: string }) => {
-      const qs = new URLSearchParams();
-      if (params?.accountId) qs.set("accountId", String(params.accountId));
-      if (params?.storeId) qs.set("storeId", String(params.storeId));
-      if (params?.status) qs.set("status", params.status);
-      return req<FinanceBankTransaction[]>(`/finance-bank/transactions?${qs.toString()}`);
+  catalog: {
+    list: () => req<{ settings: CatalogPricingSettings; products: CatalogProduct[] }>("/catalog/products"),
+    create: (data: Record<string, unknown>) => req<CatalogProduct>("/catalog/products", { method: "POST", body: JSON.stringify(data) }),
+    update: (id: number, data: Record<string, unknown>) => req<CatalogProduct>(`/catalog/products/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/catalog/products/${id}`, { method: "DELETE" }),
+    bulkRemove: (ids: number[]) => req<{ ok: boolean; deleted: number }>("/catalog/products/bulk-delete", { method: "POST", body: JSON.stringify({ ids }) }),
+    bulkFeatured: (ids: number[], featured: boolean) => req<{ ok: boolean; updated: number; featured: boolean }>("/catalog/products/bulk-featured", { method: "POST", body: JSON.stringify({ ids, featured }) }),
+    addPhoto: (productId: number, file: File, color?: string | null) => readAsAttachment(file).then((att) =>
+      req<CatalogPhoto>(`/catalog/products/${productId}/photos`, { method: "POST", body: JSON.stringify({ mimeType: att?.mimetype, data: att?.base64, color }) })),
+    removePhoto: (productId: number, photoId: number) => req<{ ok: boolean }>(`/catalog/products/${productId}/photos/${photoId}`, { method: "DELETE" }),
+    setBoxPhoto: (productId: number, photoId: number, isBoxPhoto: boolean) =>
+      req<CatalogPhoto>(`/catalog/products/${productId}/photos/${photoId}`, { method: "PATCH", body: JSON.stringify({ isBoxPhoto }) }),
+    // color = null volta a foto pra "geral" (mostrada em qualquer cor
+    // selecionada na vitrine pública, e usada de fallback quando a cor
+    // escolhida não tem foto própria).
+    setPhotoColor: (productId: number, photoId: number, color: string | null) =>
+      req<CatalogPhoto>(`/catalog/products/${productId}/photos/${photoId}`, { method: "PATCH", body: JSON.stringify({ color }) }),
+    photoUrl: (photoId: number) => `/api/catalog-public/photos/${photoId}/file`,
+    photoSearch: (q: string) => req<{ results: CatalogPhotoSearchResult[] }>(`/catalog/photo-search?q=${encodeURIComponent(q)}`),
+    fetchMissingPhotos: () =>
+      req<{ checked: number; attached: number; remaining: number; photoSearchConfigured: boolean }>(
+        "/catalog/products/photos/fetch-missing", { method: "POST", timeoutMs: 60_000 }
+      ),
+    addPhotoFromUrl: (productId: number, url: string, color?: string | null) =>
+      req<CatalogPhoto>(`/catalog/products/${productId}/photos/from-url`, { method: "POST", body: JSON.stringify({ url, color }) }),
+    pricingSettings: () => req<CatalogPricingSettings>("/catalog/pricing-settings"),
+    savePricingSettings: (data: CatalogPricingSettings) => req<CatalogPricingSettings>("/catalog/pricing-settings", { method: "PUT", body: JSON.stringify(data) }),
+    simulatePrice: (data: { costPrice: number; costIncludesInvoice?: boolean; marginPercentOverride?: number | null; wholesaleMarginPercentOverride?: number | null; categoryId?: number | null }) =>
+      req<{
+        salePrice: number | null; wholesalePrice: number | null;
+        // priceCash = à vista (Pix/dinheiro, sem taxa de cartão); installment12
+        // = total e valor de cada parcela pagando em até 12x no cartão.
+        priceCash: number | null; installment12: { total: number; parcela: number } | null;
+        // Mesma ideia pro atacado — wholesalePrice já é o valor à vista;
+        // wholesaleInstallment12 traz o total e a parcela em 12x de atacado.
+        wholesaleInstallment12: { total: number; parcela: number } | null;
+        settings: CatalogPricingSettings;
+      }>("/catalog/pricing-settings/simulate", { method: "POST", body: JSON.stringify(data), timeoutMs: 12_000 }),
+    getSlug: () => req<{ slug: string | null }>("/catalog/slug"),
+    setSlug: (slug: string) => req<{ slug: string | null }>("/catalog/slug", { method: "PUT", body: JSON.stringify({ slug }) }),
+    getWhatsapp: () => req<{ whatsapp: string | null }>("/catalog/whatsapp"),
+    setWhatsapp: (whatsapp: string) => req<{ whatsapp: string | null }>("/catalog/whatsapp", { method: "PUT", body: JSON.stringify({ whatsapp }) }),
+    getWhatsappWholesale: () => req<{ whatsapp: string | null }>("/catalog/whatsapp-wholesale"),
+    setWhatsappWholesale: (whatsapp: string) => req<{ whatsapp: string | null }>("/catalog/whatsapp-wholesale", { method: "PUT", body: JSON.stringify({ whatsapp }) }),
+    getWholesaleCode: () => req<{ hasCode: boolean; code: string | null }>("/catalog/wholesale-code"),
+    setWholesaleCode: (code: string) => req<{ hasCode: boolean; code: string | null }>("/catalog/wholesale-code", { method: "PUT", body: JSON.stringify({ code }) }),
+    categories: () => req<{ categories: CatalogCategory[] }>("/catalog/categories"),
+    createCategory: (data: { name: string; parentId?: number | null }) => req<CatalogCategory>("/catalog/categories", { method: "POST", body: JSON.stringify(data) }),
+    updateCategory: (id: number, data: { name?: string; parentId?: number | null; sortOrder?: number }) =>
+      req<CatalogCategory>(`/catalog/categories/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    removeCategory: (id: number) => req<{ ok: boolean }>(`/catalog/categories/${id}`, { method: "DELETE" }),
+    // timeoutMs um pouco acima do pior caso do backend (25s da chamada à IA
+    // + 1 retry ≈ até 50s) — sem isso, uma rede/proxy travados deixavam o
+    // botão "Analisar" girando pra sempre sem nunca mostrar erro.
+    // truncated: true = a lista era grande demais e a resposta da IA veio
+    // cortada no meio — o back já recupera os itens que vieram completos
+    // antes do corte (ver extractJsonArrayLenient no backend), mas o(s)
+    // último(s) aparelho(s) da lista original pode(m) estar faltando.
+    importParse: (rawText: string) => req<{ items: CatalogImportItem[]; newCategoryPaths: string[][]; truncated?: boolean }>("/catalog/import/parse", { method: "POST", body: JSON.stringify({ rawText }), timeoutMs: 55_000 }),
+    // timeoutMs maior que importParse: além de gravar os produtos, agora
+    // também tenta buscar 1 foto por produto na internet (melhor esforço,
+    // com timeout próprio por produto — ver autoAttachPhotosOnImport no backend).
+    // existingProductId: quando o item bate com um modelo já cadastrado na
+    // mesma categoria (checagem no front, ver handleConfirmImport), evita
+    // criar anúncio duplicado — o backend só atualiza custo/margem das
+    // variantes do produto que já existe em vez de criar um novo.
+    importConfirm: (items: (CatalogImportItem & { existingProductId?: number | null })[]) =>
+      req<{ imported: number; updated: number; products: CatalogProduct[]; updatedProducts: CatalogProduct[]; photosAttached?: number; photoSearchConfigured?: boolean }>(
+        "/catalog/import/confirm", { method: "POST", body: JSON.stringify({ items }), timeoutMs: 90_000 },
+      ),
+    // Checagem de preço de mercado sob demanda (botão por item na revisão da
+    // importação) — pesquisa na web com IA se o preço calculado está
+    // compatível com o que o mercado brasileiro cobra por aquele aparelho.
+    marketCheck: (data: { model: string; condition: CatalogCondition; storage: string | null; salePrice: number | null }) =>
+      req<{ marketRange: string | null; verdict: CatalogMarketCheckVerdict; note: string | null }>(
+        "/catalog/import/market-check", { method: "POST", body: JSON.stringify(data), timeoutMs: 30_000 },
+      ),
+    public: (slug: string, code?: string) =>
+      req<{
+        storeName: string; logoDataUrl: string | null; bannerImage: string | null;
+        whatsapp: string | null; whatsappWholesale: string | null; hasWholesale: boolean; wholesaleUnlocked: boolean;
+        tradeInEnabled: boolean;
+        // Vitrine pública no ERP (17/10/2026): preenchido só com "Redirecionar
+        // a vitrine pública para o ERP" ligado — a página vai para lá.
+        redirectTo?: string | null;
+        categories: CatalogCategory[]; products: CatalogPublicProduct[]; trustBadges: CatalogTrustBadge[]; paymentMethods: CatalogPaymentMethod[];
+      }>(`/catalog-public/${slug}${code ? `?code=${encodeURIComponent(code)}` : ""}`),
+    erpRedirect: {
+      get: () => req<{ enabled: boolean; erpWebUrl: string | null }>("/catalog/erp-redirect"),
+      set: (enabled: boolean) =>
+        req<{ enabled: boolean; erpWebUrl: string | null }>("/catalog/erp-redirect", { method: "PUT", body: JSON.stringify({ enabled }) }),
     },
-    sales: (params?: { accountId?: number; storeId?: number }) => {
-      const qs = new URLSearchParams();
-      if (params?.accountId) qs.set("accountId", String(params.accountId));
-      if (params?.storeId) qs.set("storeId", String(params.storeId));
-      return req<FinanceBankSale[]>(`/finance-bank/sales?${qs.toString()}`);
-    },
-    reconcile: (storeId?: number) =>
-      req<{ evaluated: number; matched: number; pending: number }>("/finance-bank/reconcile", { method: "POST", body: JSON.stringify({ storeId }) }),
-    matches: (status?: string) =>
-      req<ReconciliationMatchRow[]>(`/finance-bank/reconciliation-matches${status ? `?status=${status}` : ""}`),
-    confirmMatch: (id: number, confirmPassword?: string) =>
-      req<ReconciliationMatchRow>(`/finance-bank/reconciliation-matches/${id}/confirm`, { method: "POST", body: JSON.stringify({ confirmPassword }) }),
-    rejectMatch: (id: number) => req<{ ok: boolean }>(`/finance-bank/reconciliation-matches/${id}/reject`, { method: "POST" }),
-    dashboard: (storeId?: number) => req<FinanceBankDashboard>(`/finance-bank/dashboard${storeId ? `?storeId=${storeId}` : ""}`),
-    metrics: (params?: { storeId?: number; provider?: string; from?: string; to?: string }) => {
-      const qs = new URLSearchParams();
-      if (params?.storeId) qs.set("storeId", String(params.storeId));
-      if (params?.provider) qs.set("provider", params.provider);
-      if (params?.from) qs.set("from", params.from);
-      if (params?.to) qs.set("to", params.to);
-      return req<FinanceBankMetrics>(`/finance-bank/metrics?${qs.toString()}`);
-    },
+    // Gera a lista de "Principais características" com IA — não salva nada
+    // sozinho, o lojista revisa/edita e salva junto do resto do produto.
+    generateCharacteristics: (data: { model: string; condition: CatalogCondition; colors: string[]; variants: { storage: string | null }[] }) =>
+      req<{ description: string | null; characteristics: string[]; specs: CatalogAiSpecs | null }>("/catalog/characteristics/generate", { method: "POST", body: JSON.stringify(data), timeoutMs: 30_000 }),
+    getTrustBadges: () => req<{ badges: CatalogTrustBadge[] }>("/catalog/trust-badges"),
+    saveTrustBadges: (badges: CatalogTrustBadge[]) => req<{ badges: CatalogTrustBadge[] }>("/catalog/trust-badges", { method: "PUT", body: JSON.stringify({ badges }) }),
+    // Imagem de fundo (banner) da vitrine pública — a logo reaproveita a de
+    // Configurações → Aparência, sem endpoint próprio (ver catalog.public acima).
+    getBannerImage: () => req<{ bannerImage: string | null }>("/catalog/banner-image"),
+    saveBannerImage: (bannerImage: string | null) => req<{ bannerImage: string | null }>("/catalog/banner-image", { method: "PUT", body: JSON.stringify({ bannerImage }) }),
+    stockNotifications: () => req<{ notifications: CatalogStockNotification[] }>("/catalog/stock-notifications"),
+    setStockNotificationNotified: (id: number, notified: boolean) =>
+      req<{ ok: boolean }>(`/catalog/stock-notifications/${id}`, { method: "PATCH", body: JSON.stringify({ notified }) }),
+    removeStockNotification: (id: number) => req<{ ok: boolean }>(`/catalog/stock-notifications/${id}`, { method: "DELETE" }),
+    // Pedido de "avise-me quando chegar" — vitrine pública, sem login.
+    notifyMe: (slug: string, data: { productId: number; variantId?: number | null; customerName: string; customerContact: string }) =>
+      req<{ ok: boolean }>(`/catalog-public/${slug}/notify-me`, { method: "POST", body: JSON.stringify(data) }),
+    getPaymentMethods: () => req<{ methods: CatalogPaymentMethod[] }>("/catalog/payment-methods"),
+    savePaymentMethods: (methods: CatalogPaymentMethod[]) => req<{ methods: CatalogPaymentMethod[] }>("/catalog/payment-methods", { method: "PUT", body: JSON.stringify({ methods }) }),
+    reviews: () => req<{ reviews: CatalogProductReview[] }>("/catalog/reviews"),
+    removeReview: (id: number) => req<{ ok: boolean }>(`/catalog/reviews/${id}`, { method: "DELETE" }),
+    // Avaliação de cliente (estrelas + comentário) — vitrine pública, sem login.
+    submitReview: (slug: string, data: { productId: number; variantId?: number | null; rating: number; customerName: string; customerPhone: string; customerCity: string; comment?: string }) =>
+      req<{ ok: boolean }>(`/catalog-public/${slug}/reviews`, { method: "POST", body: JSON.stringify(data) }),
+    // Clique em "Finalizar pedido no WhatsApp" — best-effort, só pra
+    // alimentar o filtro de ordenação "Mais comprado" (ver comentário no
+    // schema/rota). Nunca deve travar o checkout se falhar.
+    trackCheckoutClick: (slug: string, items: { productId: number; qty: number }[]) =>
+      req<{ ok: boolean }>(`/catalog-public/${slug}/checkout-click`, { method: "POST", body: JSON.stringify({ items }) }),
+    // Cupons de desconto — admin (Vitrine Aparelhos) e uso manual pelo
+    // vendedor dentro de uma conversa do Atendimento.
+    listCoupons: () => req<{ coupons: CatalogCoupon[] }>("/catalog/coupons"),
+    createCoupon: (data: { code: string; discountType: "percent" | "fixed"; discountValue: number; vendorName?: string | null; usageLimit?: number | null; expiresAt?: string | null; active?: boolean }) =>
+      req<CatalogCoupon>("/catalog/coupons", { method: "POST", body: JSON.stringify(data) }),
+    updateCoupon: (id: number, data: Partial<{ code: string; discountType: "percent" | "fixed"; discountValue: number; vendorName: string | null; usageLimit: number | null; expiresAt: string | null; active: boolean }>) =>
+      req<CatalogCoupon>(`/catalog/coupons/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    deleteCoupon: (id: number) => req<{ ok: boolean }>(`/catalog/coupons/${id}`, { method: "DELETE" }),
+    // Vendedor aplicando manualmente dentro de uma conversa do Atendimento —
+    // registra o uso (estatística por vendedor), sem entidade de pedido.
+    redeemCoupon: (id: number) => req<CatalogCoupon>(`/catalog/coupons/${id}/redeem`, { method: "POST" }),
+    // Cupom no carrinho da vitrine pública — validar (sem efeito colateral,
+    // pode chamar de novo a cada edição do código) e resgatar (uma vez, ao
+    // clicar em "Finalizar pedido no WhatsApp" — best-effort).
+    // Simulação de troca: abate o usado do preço à vista da variante e parcela o saldo (taxa de cartão da loja).
+    tradeInQuotePublic: (slug: string, variantId: number, tradeInValue: number) =>
+      req<{ priceCash: number; tradeInValue: number; exceedsPrice: boolean; cashAfter: number; installmentOptions: CatalogInstallmentOption[] }>(
+        `/catalog-public/${slug}/trade-in-quote`, { method: "POST", body: JSON.stringify({ variantId, tradeInValue }) }),
+    validateCouponPublic: (slug: string, code: string, subtotal: number) =>
+      req<CatalogCouponValidation>(`/catalog-public/${slug}/coupon/validate`, { method: "POST", body: JSON.stringify({ code, subtotal }) }),
+    redeemCouponPublic: (slug: string, code: string) =>
+      req<{ ok: boolean }>(`/catalog-public/${slug}/coupon/redeem`, { method: "POST", body: JSON.stringify({ code }) }),
   },
   meetings: {
     list: () => req<MeetingItem[]>("/meetings"),
@@ -1305,11 +3572,27 @@ export const api = {
       req<DocumentItem>(`/meetings/${id}/generate`, { method: "POST", body: JSON.stringify({ kind }) }),
     remove: (id: number) => req<{ ok: boolean }>(`/meetings/${id}`, { method: "DELETE" }),
   },
+  geo: {
+    // kind "city" = campo Cidade (CRM); "address" (default) = campo Bairro
+    // (Avaliação/nota de compra de usado). Ver routes/geo.ts no backend.
+    autocomplete: (q: string, kind?: "city" | "address") =>
+      req<{ results: { description: string; mainText: string; secondaryText: string }[] }>(
+        `/geo/autocomplete?q=${encodeURIComponent(q)}&kind=${kind ?? "address"}`
+      ),
+  },
   stores: {
     list: (all?: boolean) => req<Store[]>(`/stores${all ? "?all=1" : ""}`),
     create: (name: string) => req<Store>("/stores", { method: "POST", body: JSON.stringify({ name }) }),
-    update: (id: number, data: Partial<{ name: string; isActive: boolean }>) =>
+    update: (id: number, data: Partial<{ name: string; isActive: boolean; geofenceLat: number | null; geofenceLng: number | null; geofenceRadiusMeters: number | null; skipQueueEnabled: boolean }>) =>
       req<Store>(`/stores/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  },
+  routingRules: {
+    list: () => req<RoutingRule[]>("/routing-rules"),
+    create: (data: { sectorId: number; name: string; keywords: string; priority?: number; isActive?: boolean; skipQueue?: boolean }) =>
+      req<RoutingRule>("/routing-rules", { method: "POST", body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<{ sectorId: number; name: string; keywords: string; priority: number; isActive: boolean; skipQueue: boolean }>) =>
+      req<RoutingRule>(`/routing-rules/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+    remove: (id: number) => req<{ ok: boolean }>(`/routing-rules/${id}`, { method: "DELETE" }),
   },
   teamStatus: {
     list: () => req<TeamStatusRow[]>("/admin/team-status"),
@@ -1318,7 +3601,15 @@ export const api = {
   admin: {
     summary: () => req<SectorSummary[]>("/admin/summary"),
     dashboardAttention: () => req<DashboardAttention>("/admin/dashboard-attention"),
-    logs: (params?: { limit?: number; sectorId?: number; attendantId?: number; days?: number; outcome?: string; reason?: string; search?: string }) => {
+    // Uso do plano da própria loja (Fase 3 — Planos & Limites): mesmo dado
+    // que o backend usa pra bloquear, pra avisar a loja antes de bater no limite.
+    planUsage: () => req<PlanUsage>("/admin/plan-usage"),
+    // "Modo espiar" — admin entra na tela de um vendedor da própria loja
+    // (pode interagir, não só observar); tudo fica registrado no log abaixo.
+    // Sair usa o mesmo api.auth.stopImpersonation() do "Entrar como".
+    espiarVendedor: (userId: number) => req<{ ok: boolean }>(`/admin/vendedores/${userId}/espiar`, { method: "POST" }),
+    espiarLog: () => req<EspiarLogEntry[]>("/admin/espiar/log"),
+    logs: (params?: { limit?: number; sectorId?: number; attendantId?: number; days?: number; outcome?: string; reason?: string; label?: string; search?: string }) => {
       const qs = new URLSearchParams();
       if (params?.limit) qs.set("limit", String(params.limit));
       if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
@@ -1326,14 +3617,15 @@ export const api = {
       if (params?.days) qs.set("days", String(params.days));
       if (params?.outcome) qs.set("outcome", params.outcome);
       if (params?.reason) qs.set("reason", params.reason);
+      if (params?.label) qs.set("label", params.label);
       if (params?.search) qs.set("search", params.search);
       return req<AttendanceLog[]>(`/admin/logs?${qs.toString()}`);
     },
     users: {
       list: () => req<(User & { isActive: boolean; createdAt: string })[]>("/admin/users"),
-      create: (data: { name: string; email: string; password: string; role: string; sectorId: number; storeName?: string; extension?: string; adminAccess?: string[] | null; accessHours?: { start: string; end: string; days: number[] } | null }) =>
+      create: (data: { name: string; email: string; password: string; role: string; sectorIds: number[]; storeName?: string; extension?: string; adminAccess?: string[] | null; moduleAccess?: UserModuleAccess | null; accessHours?: { start: string; end: string; days: number[] } | null; allowedSessionKeys?: string[] | null }) =>
         req<User>("/admin/users", { method: "POST", body: JSON.stringify(data) }),
-      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorId: number; storeName: string; extension: string; isActive: boolean; permissions: Record<string, boolean>; adminAccess: string[] | null; accessHours: { start: string; end: string; days: number[] } | null }>) =>
+      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorIds: number[]; storeName: string; extension: string; isActive: boolean; permissions: Record<string, boolean>; adminAccess: string[] | null; moduleAccess: UserModuleAccess | null; accessHours: { start: string; end: string; days: number[] } | null; allowedSessionKeys: string[] | null; internalChatSingleTask: boolean; queueRestrictToAssigned: boolean; chatQueueSingleTask: boolean }>) =>
         req<User>(`/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number, transferToId: number | null) =>
         req<{ ok: boolean; transferredConversations: number }>(`/admin/users/${id}`, { method: "DELETE", body: JSON.stringify({ transferToId }) }),
@@ -1346,7 +3638,9 @@ export const api = {
 export type ResultsSummary = {
   from: string; to: string; sectorId: number | null; attendantId: number | null;
   totals: {
-    atendimentos: number; avgServiceSeconds: number; avgWaitSeconds: number;
+    atendimentos: number; avgServiceSeconds: number; avgWaitSeconds: number; avgFirstResponseSeconds: number;
+    // Abandono (item 3 do roadmap): atendimento finalizado sem nenhuma resposta do atendente.
+    abandonedCount: number; abandonmentRate: number;
     vendas: number; totalVendido: number;
     newLeads: number; recurringLeads: number; repurchaseClients: number;
     avgRating: number; ratings: number;
@@ -1354,6 +3648,54 @@ export type ResultsSummary = {
   ranking: ResultsRankingRow[];
   leadsPorMes: { mes: string; novos: number }[];
   satisfacaoPorSetor: { sectorId: number; sectorName: string; avgRating: number; ratings: number }[];
+};
+
+export type DailyActivity = {
+  from: string; to: string;
+  series: { dia: string; iniciados: number; finalizados: number }[];
+};
+
+export type UnresolvedSummary = {
+  thresholdHours: number;
+  count: number;
+  items: {
+    conversationId: number; clientName: string; sectorName: string | null;
+    attendantName: string | null; status: string; ageHours: number;
+  }[];
+};
+
+export type SatisfactionBreakdown = {
+  avgPercent: number;
+  ratings: number;
+  buckets: { faixa: string; count: number }[];
+};
+
+export type VendorConsolidatedRow = {
+  attendantId: number; name: string; ativo: boolean;
+  atendimentos: number; iniciados: number; finalizados: number; naoResolvidos: number;
+  vendas: number; totalVendido: number; conversao: number; avgSatisfactionPercent: number;
+};
+
+export type StoreConsolidatedRow = {
+  storeId: number | null; name: string;
+  atendimentos: number; iniciados: number; finalizados: number; naoResolvidos: number;
+  vendas: number; totalVendido: number; conversao: number; avgSatisfactionPercent: number;
+};
+
+export type AtendimentoRow = {
+  id: number;
+  createdAt: string;
+  clientName: string;
+  clientContact: string | null;
+  sectorName: string;
+  attendantId: number | null;
+  attendantName: string | null;
+  outcome: string | null;
+  resolutionReason: string | null;
+  origin: string | null; // "manual" | "fila" | null
+  hadSale: boolean | null;
+  saleAmount: number | null;
+  conversationId: number | null;
 };
 
 export type TeamContact = {
@@ -1366,6 +3708,21 @@ export type TeamContact = {
   sectorId: number | null;
   sectorName: string | null;
   favorited: boolean;
+};
+
+export type WhatsappContactRow = {
+  id: number;
+  sessionKey: string;
+  phone: string;
+  name: string | null;
+  pushName: string | null;
+  verifiedName: string | null;
+  avatarUrl: string | null;
+  isBusiness: boolean;
+  updatedAt: string;
+  sessionDisplayName: string | null;
+  sessionColor: string | null;
+  sessionIcon: string | null;
 };
 
 export type SurveyReview = {
