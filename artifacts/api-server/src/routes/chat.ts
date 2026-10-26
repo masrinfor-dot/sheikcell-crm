@@ -508,6 +508,11 @@ router.get("/chat/conversations", requireAuth, requireChatAccess(), async (req, 
       and(isNull(conversationsTable.assigneeId), eq(conversationsTable.status, "pending"))!, // pendentes
       and(isNull(conversationsTable.assigneeId), notInArray(conversationsTable.status, ["pending", "resolved", "archived"]))!, // potenciais
       inArray(conversationsTable.status, ["resolved", "archived"]), // resolvidas
+      // Favoritos (26/10/2026): as conversas com estrela DESTE usuário vêm
+      // sempre, de qualquer status — uma favorita resolvida há tempo ficava
+      // fora dos 500 mais recentes de Resolvidas e a aba aparecia vazia com
+      // o contador mostrando o número certo.
+      sql`exists (select 1 from ${conversationPinsTable} where ${conversationPinsTable.conversationId} = ${conversationsTable.id} and ${conversationPinsTable.userId} = ${req.session.userId!})`,
     ];
     const perCategory = await Promise.all(
       categoryPredicates.map((pred) =>
@@ -517,7 +522,9 @@ router.get("/chat/conversations", requireAuth, requireChatAccess(), async (req, 
           .limit(CATEGORY_LIST_CAP)
       ),
     );
-    rows = perCategory.flat();
+    // A favorita também aparece na própria categoria: tira a repetida.
+    const seenIds = new Set<number>();
+    rows = perCategory.flat().filter((c) => (seenIds.has(c.id) ? false : (seenIds.add(c.id), true)));
   }
 
   const sectors = await db.select().from(sectorsTable).where(eq(sectorsTable.tenantId, tenantId));
