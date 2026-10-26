@@ -10,6 +10,7 @@ import { getPresence } from "../lib/sseEmitter";
 import { isValidStoreName } from "./stores";
 import { syncCrmAttendant } from "../lib/crmSync";
 import { assertWithinLimit, getLimitsAndUsage, type LimitField } from "../lib/planLimits";
+import { parseChannelId } from "../lib/attendanceState";
 
 const router: IRouter = Router();
 
@@ -346,6 +347,7 @@ router.get("/admin/users", requireAdmin, async (req, res): Promise<void> => {
       internalChatSingleTask: usersTable.internalChatSingleTask,
       queueRestrictToAssigned: usersTable.queueRestrictToAssigned,
       chatQueueSingleTask: usersTable.chatQueueSingleTask,
+      defaultChannel: usersTable.defaultChannel,
       createdAt: usersTable.createdAt,
     })
     .from(usersTable)
@@ -473,7 +475,8 @@ async function sanitizeSectorIds(raw: unknown, tenantId: number): Promise<number
 
 router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  const { name, email, password, role, sectorId, sectorIds, storeName, extension, adminAccess, accessHours, allowedSessionKeys, moduleAccess } = req.body as {
+  const { name, email, password, role, sectorId, sectorIds, storeName, extension, adminAccess, accessHours, allowedSessionKeys, moduleAccess, defaultChannel } = req.body as {
+    defaultChannel?: unknown;
     name?: string;
     email?: string;
     password?: string;
@@ -564,6 +567,8 @@ router.post("/admin/users", requireAdmin, async (req, res): Promise<void> => {
       moduleAccess: resolvedRole !== "admin"
         ? intersectModuleAccess(sanitizeModuleAccess(moduleAccess), await tenantEnabledModules(tenantId))
         : null,
+      // Canal em que a Central abre para a pessoa (atendimento por canais).
+      defaultChannel: parseChannelId(defaultChannel),
     })
     .returning();
 
@@ -585,7 +590,8 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   // que ela carregue este tenant_id (coluna NOT NULL sem valor "sem loja").
   if (existingUser.role === "superadmin") { res.status(403).json({ error: "Operação não permitida" }); return; }
 
-  const { name, email, password, role, sectorId, sectorIds, isActive, permissions, storeName, extension, adminAccess, accessHours, allowedSessionKeys, moduleAccess, internalChatSingleTask, queueRestrictToAssigned, chatQueueSingleTask } = req.body as {
+  const { name, email, password, role, sectorId, sectorIds, isActive, permissions, storeName, extension, adminAccess, accessHours, allowedSessionKeys, moduleAccess, internalChatSingleTask, queueRestrictToAssigned, chatQueueSingleTask, defaultChannel } = req.body as {
+    defaultChannel?: unknown;
     adminAccess?: unknown;
     accessHours?: unknown;
     allowedSessionKeys?: unknown;
@@ -674,6 +680,18 @@ router.patch("/admin/users/:id", requireAdmin, async (req, res): Promise<void> =
   if (internalChatSingleTask !== undefined) updateData.internalChatSingleTask = !!internalChatSingleTask;
   if (queueRestrictToAssigned !== undefined) updateData.queueRestrictToAssigned = !!queueRestrictToAssigned;
   if (chatQueueSingleTask !== undefined) updateData.chatQueueSingleTask = !!chatQueueSingleTask;
+  // Canal padrão da Central (atendimento por canais, 26/10/2026). Quando o
+  // admin muda o padrão, a última escolha da pessoa é esquecida — senão a
+  // mudança não apareceria pra quem já tinha trocado de canal na barra.
+  if (defaultChannel !== undefined) {
+    const next = parseChannelId(defaultChannel);
+    const [cur] = await db.select({ defaultChannel: usersTable.defaultChannel }).from(usersTable)
+      .where(and(eq(usersTable.id, id), eq(usersTable.tenantId, tenantId))).limit(1);
+    if ((cur?.defaultChannel ?? null) !== next) {
+      updateData.defaultChannel = next;
+      updateData.preferredChannel = null;
+    }
+  }
   if (password) {
     updateData.passwordHash = await bcrypt.hash(password, 10);
     // Senha resetada pelo admin (recuperação): usuário troca no próximo login

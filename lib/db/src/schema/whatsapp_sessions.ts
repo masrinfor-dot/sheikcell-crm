@@ -70,6 +70,13 @@ export const whatsappSessionsTable = pgTable("whatsapp_sessions", {
   // que lê a lista de preço com IA. Default false: nenhuma linha muda até o
   // admin marcar em Administração → WhatsApp. Ver lib/erpForward.ts.
   forwardToErp: boolean("forward_to_erp").notNull().default(false),
+  // Atendimento por canais (26/10/2026): tipo da linha. "interna" (Compras,
+  // ADM, fornecedores) fica fora do "Todos" da Central, do alarme/som de
+  // atraso e dos indicadores do painel do admin. Ver lib/attendanceState.ts.
+  lineType: text("line_type").$type<"varejo" | "atacado" | "interna">().notNull().default("varejo"),
+  // Som e alarme de atraso desta linha na Central (linha interna nasce
+  // desligada — trocar o tipo para interna desliga, voltar para cliente liga).
+  alertsEnabled: boolean("alerts_enabled").notNull().default(true),
   directAssigneeId: integer("direct_assignee_id").references(() => usersTable.id, { onDelete: "set null" }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

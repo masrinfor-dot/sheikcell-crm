@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo, Fragment, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { api, can, ApiError, type Conversation, type ChatMessage, type PinnedMessage, type Sector, type ChatLabel, type ChatSavedFilter, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata, type CatalogCoupon, type BroadcastDispatchLog, type BroadcastDispatchSummary, type CrmPurchase, type AttendanceLog } from "@/lib/api";
+import { api, can, ApiError, type Conversation, type ChatMessage, type PinnedMessage, type Sector, type ChatLabel, type ChatSavedFilter, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata, type CatalogCoupon, type BroadcastDispatchLog, type BroadcastDispatchSummary, type CrmPurchase, type AttendanceLog, type ChannelsOverview, type ChannelQuery } from "@/lib/api";
+import { needsReply, waitingSince as replyWaitingSince, snoozePending, channelOfConv, snoozeLabel, snoozeOptions } from "@/lib/conversationReplyState";
 import { useAuth } from "@/lib/auth";
 import { useActivityGuard } from "@/lib/activityGuard";
 import { useToast } from "@/hooks/use-toast";
@@ -68,15 +69,27 @@ const FINALIZE_REASONS = [
 // PENDENTES: já filtrados, aguardando na fila de atendimento
 // ATIVOS: já em atendimento por um vendedor (possuem responsável)
 type Category = "potenciais" | "pendentes" | "ativos" | "resolvidas" | "favoritos";
-// "favoritos" é ortogonal às outras 4 (uma conversa favoritada pode estar em
-// qualquer uma delas) — tratado à parte em conversationCategory()/filteredConvs.
-const CATEGORIES: { id: Category; label: string; help: string; color: string }[] = [
-  { id: "favoritos", label: "Favoritos", help: "Contatos marcados com estrela, de qualquer status", color: "#eab308" },
-  { id: "resolvidas", label: "Resolvidas", help: "Atendimentos finalizados", color: "#6b7280" },
-  { id: "ativos", label: "Ativos", help: "Em atendimento pelos vendedores", color: "#16a34a" },
-  { id: "pendentes", label: "Pendentes", help: "Já filtrados, na fila de atendimento", color: "#f59e0b" },
-  { id: "potenciais", label: "Potenciais", help: "Números novos — serão triados pela IA", color: "#8b5cf6" },
+// Abas da lista (atendimento por canais, 26/10/2026): "Ativos" virou duas —
+// "Responder agora" (o cliente espera a gente) e "Aguardando cliente" (a
+// gente respondeu, ou marcou "Não precisa responder"/"Retomar depois").
+// "favoritos" é ortogonal (uma conversa favoritada pode estar em qualquer
+// uma) — tratado à parte em filteredConvs.
+type Tab = Exclude<Category, "ativos"> | "responder" | "aguardando";
+const CATEGORIES: { id: Tab; label: string; help: string; color: string; hot?: boolean }[] = [
+  { id: "responder", label: "Responder agora", help: "Cliente mandou mensagem e espera a gente. Quem espera há mais tempo fica no topo.", color: "#dc2626", hot: true },
+  { id: "aguardando", label: "Aguardando cliente", help: "A gente respondeu e espera o cliente. Se ele mandar mensagem, a conversa sobe sozinha para \"Responder agora\".", color: "#16a34a" },
+  { id: "pendentes", label: "Fila", help: "Ainda sem vendedor — na fila de atendimento.", color: "#f59e0b" },
+  { id: "potenciais", label: "Potenciais", help: "Números novos, antes da triagem.", color: "#8b5cf6" },
+  { id: "resolvidas", label: "Resolvidas", help: "Atendimentos finalizados.", color: "#6b7280" },
+  { id: "favoritos", label: "Favoritos", help: "Contatos marcados com estrela, de qualquer status.", color: "#eab308" },
 ];
+
+// Aba onde a conversa aparece agora (ativos se divide pela vez de responder).
+function conversationTab(c: Conversation, now: number): Tab {
+  const cat = conversationCategory(c);
+  if (cat === "ativos") return needsReply(c, now) ? "responder" : "aguardando";
+  return cat;
+}
 
 function conversationCategory(c: Conversation): Category {
   if (c.isArchived || c.status === "resolved" || c.status === "archived") return "resolvidas";
@@ -258,7 +271,12 @@ function HeaderAvatar({ name, src }: { name: string; src?: string | null }) {
 // color/icon: identidade visual configurada em Administração › WhatsApp,
 // pra distinguir de qual número vem cada atendimento e evitar responder
 // pelo número errado.
-type WaSessionInfo = { sessionKey: string; displayName: string | null; phoneNumber: string | null; color?: string | null; icon?: string | null };
+type WaSessionInfo = {
+  sessionKey: string; displayName: string | null; phoneNumber: string | null; color?: string | null; icon?: string | null;
+  // Atendimento por canais (26/10/2026): tipo da linha, som/alarme e se a
+  // pessoa pode abrir este canal (vendedor restrito a linhas).
+  lineType?: "varejo" | "atacado" | "interna"; alertsEnabled?: boolean; allowed?: boolean;
+};
 
 const WA_SESSION_DEFAULT_COLOR = "#10b981"; // mesmo verde que era fixo antes, agora só o fallback
 
@@ -307,14 +325,17 @@ function waitLabel(minutes: number): string {
 // Minutos desde a última mensagem do CLIENTE ainda sem resposta da equipe.
 // null = não está esperando (última mensagem foi nossa, conversa finalizada
 // ou sem data). Mesma regra do alerta de "sem resposta" (isOverdue).
+// Atendimento por canais (26/10/2026): "Não precisa responder" e "Retomar
+// depois" tiram a conversa da espera; no horário do retomar ela volta a
+// contar a partir do horário combinado.
 function waitingMinutes(c: Conversation, now: number): number | null {
-  if (c.status === "resolved" || c.status === "archived" || c.isArchived) return null;
-  if (c.lastMessageDirection !== "inbound" || !c.lastMessageAt) return null;
-  return Math.max(0, Math.floor((now - new Date(c.lastMessageAt).getTime()) / 60000));
+  const since = replyWaitingSince(c, now);
+  if (since == null) return null;
+  return Math.max(0, Math.floor((now - since) / 60000));
 }
 
 // ─── Conversation list item ─────────────────────────────────────────────────
-function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, sessionColor, sessionIcon, overdue, waitingMin, currentUserId, targetStoreName }: { conv: Conversation; active: boolean; onClick: () => void; onTogglePin: () => void; sessionBadge?: string | null; sessionColor?: string | null; sessionIcon?: string | null; overdue?: boolean; waitingMin?: number | null; currentUserId?: number; targetStoreName?: string | null }) {
+function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, sessionColor, sessionIcon, overdue, waitingMin, currentUserId, targetStoreName, stripeColor, snoozeText }: { conv: Conversation; active: boolean; onClick: () => void; onTogglePin: () => void; sessionBadge?: string | null; sessionColor?: string | null; sessionIcon?: string | null; overdue?: boolean; waitingMin?: number | null; currentUserId?: number; targetStoreName?: string | null; stripeColor?: string | null; snoozeText?: string | null }) {
   const prio = conv.priority ? PRIORITY_META[conv.priority] : null;
   const isGroup = isGroupConv(conv);
   const kind = conv.isCommunity ? "Comunidade" : isGroup ? "Grupo" : null;
@@ -327,6 +348,9 @@ function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, sessionCol
     <button
       onClick={onClick}
       data-testid={`conv-item-${conv.id}`}
+      // Faixa colorida da linha (atendimento por canais): a cor da linha de
+      // WhatsApp/Instagram na lateral, pra bater o olho e saber o canal.
+      style={stripeColor ? { borderLeft: `4px solid ${stripeColor}` } : undefined}
       className={`w-full flex items-start gap-3 px-3 py-3 text-left rounded-xl transition-colors duration-150 ${active ? "bg-[#EFEFF1]" : "hover:bg-[#F7F7F8]"}`}
     >
       <div className="relative shrink-0">
@@ -388,6 +412,11 @@ function ConvItem({ conv, active, onClick, onTogglePin, sessionBadge, sessionCol
                 <Clock className="w-3 h-3" />aguardando {waitLabel(waitingMin)}
               </span>
             )
+          )}
+          {snoozeText && (
+            <span className="shk-chip bg-blue-50 text-blue-900 border border-blue-200" title="Retomar depois: volta para Responder agora nesse horário" data-testid={`chip-snooze-${conv.id}`}>
+              <CalendarClock className="w-3 h-3" />retomar {snoozeText}
+            </span>
           )}
           {prio && (
             <span className={`shk-chip border ${prio.badge}`}>{prio.label}</span>
@@ -1307,7 +1336,7 @@ export default function ChatCenter({
   // recentes que a lista abaixo tem) — evita as abinhas mostrarem um número
   // de "Ativos" bem menor que o real numa loja com mais de 100 atendimentos
   // em aberto (foi assim que o Quadro do CRM ficou divergente do Atendimento).
-  const [serverCounts, setServerCounts] = useState<{ ativos: number; pendentes: number; potenciais: number; resolvidas: number; favoritos: number } | null>(null);
+  const [serverCounts, setServerCounts] = useState<{ ativos: number; responder?: number; aguardando?: number; pendentes: number; potenciais: number; resolvidas: number; favoritos: number } | null>(null);
   // Quantidade de atendimento em aberto por NÚMERO de WhatsApp (pedido
   // 17/09: painel perto de "Conversas" pra ver a carga de cada linha
   // conectada) — atualiza junto com fetchConvs, sempre em sincronia com a
@@ -1316,7 +1345,7 @@ export default function ChatCenter({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
   const [search, setSearch] = useState("");
-  const [category, setCategory] = useState<Category>("pendentes");
+  const [category, setCategory] = useState<Tab>("responder");
   const [labelFilter, setLabelFilter] = useState("");
   const [msgText, setMsgText] = useState("");
   // Rascunho por conversa: cada conversationId guarda seu próprio texto não
@@ -1422,9 +1451,54 @@ export default function ChatCenter({
   const [filterVendedor, setFilterVendedor] = useState("");
   const [filterSetor, setFilterSetor] = useState("");
   const [filterNivel, setFilterNivel] = useState("");
-  // Filtro por número de WhatsApp (linha Varejo/Oficial/Atacado/Adm etc.) —
-  // usa o sessionKey já gravado em cada conversa (ver waSessions abaixo).
-  const [filterSessionKey, setFilterSessionKey] = useState("");
+  // ── Atendimento por canais (pedido do Samuel, 26/10/2026) ──────────────
+  // "preciso separar os atendimentos por canais de atendimento diferentes,
+  // pois mistura todos os números conectados". Canal escolhido na barra do
+  // topo: "todos" | "instagram" | "wa:<linha>". Filtra no SERVIDOR (lista,
+  // abas e contadores) e na tela (alarme/som). Lembrado por pessoa no
+  // servidor (/chat/channel-preference); sem escolha salva, vale o canal
+  // padrão do cadastro (Administração › Usuários). O widget flutuante
+  // (docked) sempre mostra tudo.
+  const [channel, setChannel] = useState<string>("todos");
+  const [channelReady, setChannelReady] = useState<boolean>(docked);
+  // "Mostrar linhas internas em Todos" (Compras, ADM…): preferência da tela.
+  const [showInternal, setShowInternal] = useState<boolean>(() => {
+    try { return localStorage.getItem("chat.showInternalInTodos") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("chat.showInternalInTodos", showInternal ? "1" : "0"); } catch { /* ignore */ }
+  }, [showInternal]);
+  // Números de cada canal (barra) e painel do administrador por canal.
+  const [overview, setOverview] = useState<ChannelsOverview | null>(null);
+  const [showChannelPanel, setShowChannelPanel] = useState(false);
+  // "Retomar depois": painel de opções aberto na conversa ativa.
+  const [showSnooze, setShowSnooze] = useState(false);
+  const [snoozeCustom, setSnoozeCustom] = useState("");
+  const [replyActionBusy, setReplyActionBusy] = useState(false);
+  // Filtro "Número" do funil (compatibilidade): é o mesmo estado da barra.
+  const filterSessionKey = !docked && channel.startsWith("wa:") ? channel.slice(3) : "";
+  const selectChannel = useCallback((next: string) => {
+    setChannel(next);
+    setShowSnooze(false);
+    // Lembra a escolha (vale nas próximas aberturas, em qualquer aparelho).
+    api.chat.saveChannelPreference(next).catch(() => {});
+  }, []);
+  const setFilterSessionKey = (key: string) => selectChannel(key ? `wa:${key}` : "todos");
+  // Parâmetros de canal mandados ao servidor (lista e contagens).
+  const channelQuery: ChannelQuery = docked ? {}
+    : channel === "instagram" ? { channel: "instagram" }
+    : channel.startsWith("wa:") ? { sessionKey: channel.slice(3) }
+    : (showInternal ? {} : { excludeInternal: true });
+  const channelQueryKey = JSON.stringify(channelQuery);
+  useEffect(() => {
+    if (docked) return;
+    let cancelled = false;
+    api.chat.channelPreference()
+      .then((p) => { if (!cancelled && p.channel) setChannel(p.channel); })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setChannelReady(true); });
+    return () => { cancelled = true; };
+  }, [docked]);
   // Alerta de atendimento sem resposta (configurável por admin/supervisor).
   const [alertEnabled, setAlertEnabled] = useState(true);
   const [alertMinutes, setAlertMinutes] = useState(5);
@@ -1697,6 +1771,9 @@ export default function ChatCenter({
     try { return localStorage.getItem("chat.alertDesktop") === "on"; } catch { return false; }
   });
   const soundEnabledRef = useRef(soundEnabled);
+  // Se a conversa pode tocar som (linha com som ligado + canal escolhido) —
+  // atualizado a cada render (ver isAlarmable), lido dentro do SSE.
+  const convAlertsAllowedRef = useRef<(c: Conversation) => boolean>(() => true);
   const desktopEnabledRef = useRef(desktopEnabled);
   const audioCtxRef = useRef<AudioContext | null>(null);
 
@@ -1927,8 +2004,10 @@ export default function ChatCenter({
 
   // ── Fetch conversations ──
   const fetchConvs = useCallback(async () => {
+    // Espera saber o canal lembrado da pessoa antes da primeira busca.
+    if (!channelReady) return;
     try {
-      const params: Parameters<typeof api.chat.conversations>[0] = {};
+      const params: Parameters<typeof api.chat.conversations>[0] = { ...(JSON.parse(channelQueryKey) as ChannelQuery) };
       if (search) params.search = search;
       if (labelFilter) params.label = labelFilter;
       // Filtros avançados (vendedor/setor) agora vão pro servidor: antes eram
@@ -1940,18 +2019,44 @@ export default function ChatCenter({
       const sessionParams: Parameters<typeof api.chat.conversationCountsBySession>[0] = {};
       if (filterVendedor) sessionParams.assigneeId = Number(filterVendedor);
       if (filterSetor) sessionParams.sectorId = Number(filterSetor);
-      const [data, counts, bySession] = await Promise.all([
+      const [data, counts, bySession, ov] = await Promise.all([
         api.chat.conversations(params),
         // Best-effort: se a contagem real falhar por qualquer motivo, cai
         // pro cálculo local (sobre a lista já carregada) — nunca trava a tela.
         api.chat.conversationCounts(params).catch(() => null),
         api.chat.conversationCountsBySession(sessionParams).catch(() => null),
+        docked ? Promise.resolve(null) : api.chat.channelsOverview().catch(() => null),
       ]);
       setConvs(data);
       if (counts) setServerCounts(counts);
       if (bySession) setSessionCounts(bySession);
+      if (ov) setOverview(ov);
     } catch { /* silent */ } finally { setLoadingConvs(false); }
-  }, [search, labelFilter, filterVendedor, filterSetor]);
+  }, [search, labelFilter, filterVendedor, filterSetor, channelReady, channelQueryKey, docked]);
+
+  // Só os números (abas + barra de canais), sem recarregar a lista: depois de
+  // mensagem nova/conversa atualizada em tempo real (com espera de 2,5 s pra
+  // juntar várias) e a cada minuto (o "retomar depois" vence sozinho).
+  const countsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshCountsSoon = useCallback(() => {
+    if (docked || !channelReady) return;
+    if (countsTimerRef.current) clearTimeout(countsTimerRef.current);
+    countsTimerRef.current = setTimeout(() => {
+      const params: Parameters<typeof api.chat.conversationCounts>[0] = { ...(JSON.parse(channelQueryKey) as ChannelQuery) };
+      if (search) params.search = search;
+      if (labelFilter) params.label = labelFilter;
+      if (filterVendedor) params.assigneeId = Number(filterVendedor);
+      if (filterSetor) params.sectorId = Number(filterSetor);
+      api.chat.conversationCounts(params).then(setServerCounts).catch(() => {});
+      api.chat.channelsOverview().then(setOverview).catch(() => {});
+    }, 2500);
+  }, [docked, channelReady, channelQueryKey, search, labelFilter, filterVendedor, filterSetor]);
+  const refreshCountsSoonRef = useRef(refreshCountsSoon);
+  refreshCountsSoonRef.current = refreshCountsSoon;
+  useEffect(() => {
+    const t = setInterval(() => refreshCountsSoonRef.current(), 60_000);
+    return () => { clearInterval(t); if (countsTimerRef.current) clearTimeout(countsTimerRef.current); };
+  }, []);
 
   // ── Fetch messages ──
   const fetchMsgs = useCallback(async (id: number) => {
@@ -2007,7 +2112,7 @@ export default function ChatCenter({
 
   useEffect(() => { convsRef.current = convs; }, [convs]);
 
-  useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
+  useEffect(() => { activeIdRef.current = activeId; setShowSnooze(false); }, [activeId]);
 
   useEffect(() => {
     if (activeId) {
@@ -2098,6 +2203,7 @@ export default function ChatCenter({
     es.addEventListener("message_updated", onMessageUpdated);
 
     const onMessage = (e: Event) => {
+      refreshCountsSoonRef.current();
       try {
         const { conversationId, message } = JSON.parse((e as MessageEvent).data) as { conversationId: number; message: ChatMessage };
         if (conversationId === activeId) {
@@ -2152,7 +2258,9 @@ export default function ChatCenter({
             // browser tab is in the background: short sound and/or native notification.
             const notLooking = document.hidden || conversationId !== activeId;
             if (notLooking) {
-              if (soundEnabledRef.current) playAlertSound();
+              // Som por canal (26/10/2026): só toca para linha com som ligado
+              // (Administração › WhatsApp) e dentro do canal escolhido.
+              if (soundEnabledRef.current && convAlertsAllowedRef.current(conv)) playAlertSound();
               if (desktopEnabledRef.current && document.hidden) {
                 showDesktopNotification(conv.name, message.content, conversationId);
               }
@@ -2167,9 +2275,11 @@ export default function ChatCenter({
     // nativa, sem depender de olhar o quadro de Tarefas.
     const onSchedule = (e: Event, kind: "retorno" | "failed") => {
       try {
-        const p = JSON.parse((e as MessageEvent).data) as { scheduledId: number; conversationId: number; convName: string; content: string; sendAt: string };
+        const p = JSON.parse((e as MessageEvent).data) as { scheduledId: number | null; notificationId?: number | null; conversationId: number; convName: string; content: string; sendAt: string };
         const notif: MsgNotification = {
-          id: `sched-${kind}-${p.scheduledId}`,
+          // "Retomar depois" (26/10/2026) chega sem agendamento: usa o id do
+          // aviso gravado, no mesmo formato da carga inicial do sino.
+          id: p.scheduledId == null && p.notificationId != null ? `sched-db-${p.notificationId}` : `sched-${kind}-${p.scheduledId}`,
           conversationId: p.conversationId,
           convName: p.convName || "Cliente",
           preview: p.content,
@@ -2233,6 +2343,7 @@ export default function ChatCenter({
     };
     es.addEventListener("conversation_new", onConversationNew);
     const onConversationUpdated = (e: Event) => {
+      refreshCountsSoonRef.current();
       try {
         const conv = JSON.parse((e as MessageEvent).data) as Conversation;
         setConvs((prev) => {
@@ -2397,7 +2508,8 @@ export default function ChatCenter({
     setFilterVendedor(f.filters.vendedor ?? "");
     setFilterSetor(f.filters.setor ?? "");
     setFilterNivel(f.filters.nivel ?? "");
-    setFilterSessionKey(f.filters.sessionKey ?? "");
+    // Linha salva no filtro vira o canal da barra (mesmo estado).
+    if (f.filters.sessionKey) setFilterSessionKey(f.filters.sessionKey);
     setLabelFilter(f.filters.label ?? "");
   };
 
@@ -3326,14 +3438,14 @@ export default function ChatCenter({
         ? prev.map((c) => c.id === convWithAssignee.id ? convWithAssignee : c)
         : [convWithAssignee, ...prev]);
       setActiveId(conv.id);
-      setCategory(conversationCategory(conv));
+      setCategory(conversationTab(conv, Date.now()));
       return conv.id;
     } catch (err: unknown) {
       if (err instanceof ApiError && err.conversationId != null) {
         // Já existe uma conversa aberta com esse número — só abre ela.
         setActiveId(err.conversationId);
         const existing = convs.find((c) => c.id === err.conversationId);
-        if (existing) setCategory(conversationCategory(existing));
+        if (existing) setCategory(conversationTab(existing, Date.now()));
         return err.conversationId;
       }
       toast({ title: "Erro ao iniciar conversa", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
@@ -3438,7 +3550,7 @@ export default function ChatCenter({
         : [convWithAssignee, ...prev]);
       setActiveId(conv.id);
       // Abre a aba onde a conversa realmente caiu (vendedor: já sai em Ativos).
-      setCategory(conversationCategory(conv));
+      setCategory(conversationTab(conv, Date.now()));
       setShowNewConv(false);
       setNewForm({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "", sessionKey: "default" });
     } catch (err: unknown) {
@@ -3449,7 +3561,7 @@ export default function ChatCenter({
       if (err instanceof ApiError && err.conversationId != null) {
         setActiveId(err.conversationId);
         const existing = convs.find((c) => c.id === err.conversationId);
-        if (existing) setCategory(conversationCategory(existing));
+        if (existing) setCategory(conversationTab(existing, Date.now()));
         setShowNewConv(false);
         setNewForm({ name: "", phone: "", channel: "whatsapp", sectorId: "", assigneeId: "", sessionKey: "default" });
         toast({ title: "Atendimento já existente", description: "Esse número já estava em atendimento — abri a conversa existente." });
@@ -3467,19 +3579,36 @@ export default function ChatCenter({
 
   // Conversa "estourada": cliente falou por último e ninguém respondeu dentro
   // do limite (padrão 5 min). Não vale para resolvidas/arquivadas.
+  // "Não precisa responder"/"Retomar depois" (26/10/2026) tiram da espera;
+  // retomar vencido conta a partir do horário combinado.
   const isOverdue = useCallback((c: Conversation): boolean => {
     if (!alertEnabled) return false;
-    if (c.status === "resolved" || c.status === "archived") return false;
-    if (c.lastMessageDirection !== "inbound") return false;
-    if (!c.lastMessageAt) return false;
-    return nowTick - new Date(c.lastMessageAt).getTime() >= alertMinutes * 60000;
+    const since = replyWaitingSince(c, nowTick);
+    if (since == null) return false;
+    return nowTick - since >= alertMinutes * 60000;
   }, [alertEnabled, alertMinutes, nowTick]);
+
+  // Atendimento por canais: em que canal a conversa está e se a linha toca
+  // som/alarme (linha interna nasce desligada — Administração › WhatsApp).
+  const internalKeys = useMemo(() => new Set(waSessions.filter((w) => w.lineType === "interna").map((w) => w.sessionKey)), [waSessions]);
+  const inChannel = useCallback((c: Conversation): boolean => {
+    if (docked) return true;
+    if (channel === "instagram") return c.channel === "instagram";
+    if (channel.startsWith("wa:")) return c.channel !== "instagram" && (c.sessionKey ?? "default") === channel.slice(3);
+    return showInternal || c.channel === "instagram" || !internalKeys.has(c.sessionKey ?? "default");
+  }, [docked, channel, showInternal, internalKeys]);
+  const lineAlertsOn = useCallback((c: Conversation): boolean => {
+    if (c.channel === "instagram") return true;
+    return waSessions.find((w) => w.sessionKey === (c.sessionKey ?? "default"))?.alertsEnabled ?? true;
+  }, [waSessions]);
+  const isAlarmable = useCallback((c: Conversation) => isOverdue(c) && lineAlertsOn(c) && inChannel(c), [isOverdue, lineAlertsOn, inChannel]);
+  convAlertsAllowedRef.current = (c: Conversation) => lineAlertsOn(c) && inChannel(c);
 
   // Alerta sonoro + aviso quando uma conversa estoura o limite (1x por estouro).
   // O toque muda conforme a área da conversa (Potenciais/Pendentes/Ativos).
   useEffect(() => {
     if (!alertEnabled) return;
-    const overdueNow = convs.filter(isOverdue);
+    const overdueNow = convs.filter(isAlarmable);
     for (const c of overdueNow) {
       if (!alertedRef.current.has(c.id)) {
         alertedRef.current.add(c.id);
@@ -3496,7 +3625,7 @@ export default function ChatCenter({
     // e sai do alarme fixo (inclusive se estava silenciada).
     for (const id of [...alertedRef.current]) {
       const c = convs.find((x) => x.id === id);
-      if (!c || !isOverdue(c)) {
+      if (!c || !isAlarmable(c)) {
         alertedRef.current.delete(id);
         setAlarmMuted((prev) => {
           if (!prev.has(id)) return prev;
@@ -3506,14 +3635,14 @@ export default function ChatCenter({
         });
       }
     }
-  }, [convs, isOverdue, alertEnabled, alertMinutes]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [convs, isAlarmable, alertEnabled, alertMinutes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Alarme fixo (tipo despertador) ─────────────────────────────────────────
   // Enquanto houver conversa estourada não silenciada, um aviso grande fica na
   // tela e o toque repete a cada 20s até alguém responder ou silenciar.
   // Admin não recebe o alarme fixo (banner + som repetido) — só a equipe.
   const alarmForRole = user?.role !== "admin";
-  const overdueConvs = alertEnabled && alarmForRole ? convs.filter(isOverdue) : [];
+  const overdueConvs = alertEnabled && alarmForRole ? convs.filter(isAlarmable) : [];
   const alarmConvs = overdueConvs.filter((c) => !alarmMuted.has(c.id));
   const alarmByCat = { potenciais: 0, pendentes: 0, ativos: 0 } as Record<string, number>;
   for (const c of alarmConvs) alarmByCat[conversationCategory(c)] = (alarmByCat[conversationCategory(c)] ?? 0) + 1;
@@ -3528,7 +3657,7 @@ export default function ChatCenter({
     return () => clearInterval(t);
   }, [playAlertSound]);
 
-  const overdueCount = alertEnabled ? convs.filter(isOverdue).length : 0;
+  const overdueCount = alertEnabled ? convs.filter((c) => isOverdue(c) && inChannel(c)).length : 0;
 
   // Filtros avançados (Vendedor/Setor) mostravam TODO o tenant pra qualquer
   // papel — um vendedor restrito ao próprio setor (ex.: só "Administrativo")
@@ -3563,13 +3692,15 @@ export default function ChatCenter({
     (!filterVendedor || String(c.assigneeId ?? "") === filterVendedor) &&
     (!filterSetor || String(c.sectorId ?? "") === filterSetor) &&
     (!filterNivel || (c.crmProfile ?? "") === filterNivel) &&
-    (!filterSessionKey || (c.sessionKey ?? "default") === filterSessionKey)
+    // Canal escolhido na barra (o servidor já filtra; isto cobre conversa que
+    // chegou em tempo real de outro canal).
+    inChannel(c)
   );
   const hasAdvancedFilter = !!(filterVendedor || filterSetor || filterNivel || filterSessionKey);
 
-  const clientCounts: Record<Category, number> = { potenciais: 0, pendentes: 0, ativos: 0, resolvidas: 0, favoritos: 0 };
+  const clientCounts: Record<Tab, number> = { potenciais: 0, pendentes: 0, responder: 0, aguardando: 0, resolvidas: 0, favoritos: 0 };
   for (const c of visibleConvs) {
-    clientCounts[conversationCategory(c)]++;
+    clientCounts[conversationTab(c, nowTick)]++;
     if (c.pinned) clientCounts.favoritos++;
   }
   // "Nível CRM" e "Número" (linha de WhatsApp) e "não respondidas" só existem
@@ -3577,9 +3708,15 @@ export default function ChatCenter({
   // a contagem real do servidor não reflete o filtro, então cai pro cálculo
   // local (sobre o lote carregado), igual sempre foi. Sem esses filtros, usa
   // a contagem real do servidor — não fica presa ao teto de 100 mais recentes.
-  const hasClientOnlyFilter = onlyUnanswered || !!filterNivel || !!filterSessionKey;
-  const counts: Record<Category, number> = (serverCounts && !hasClientOnlyFilter)
-    ? { potenciais: serverCounts.potenciais, pendentes: serverCounts.pendentes, ativos: serverCounts.ativos, resolvidas: serverCounts.resolvidas, favoritos: serverCounts.favoritos }
+  // O canal (barra/"Número") agora vai pro servidor (26/10/2026), então não
+  // derruba mais a contagem real.
+  const hasClientOnlyFilter = onlyUnanswered || !!filterNivel;
+  const counts: Record<Tab, number> = (serverCounts && !hasClientOnlyFilter && serverCounts.responder != null)
+    ? {
+        potenciais: serverCounts.potenciais, pendentes: serverCounts.pendentes,
+        responder: serverCounts.responder, aguardando: serverCounts.aguardando ?? 0,
+        resolvidas: serverCounts.resolvidas, favoritos: serverCounts.favoritos,
+      }
     : clientCounts;
 
   // Favoritos é ortogonal às outras categorias: mostra qualquer conversa
@@ -3590,10 +3727,96 @@ export default function ChatCenter({
   // último "pode aguardar" — pra atendimento novo/prioritário não se perder
   // no meio de conversas antigas. Favoritar continua sendo o critério mais
   // forte (intenção manual do próprio vendedor), prioridade decide o resto.
+  // "Responder agora" (26/10/2026): quem espera há mais tempo no topo (os
+  // atrasados ficam naturalmente em cima).
   const filteredConvs = visibleConvs
-    .filter((c) => category === "favoritos" ? !!c.pinned : conversationCategory(c) === category)
-    .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || priorityRank(a.priority) - priorityRank(b.priority));
+    .filter((c) => category === "favoritos" ? !!c.pinned : conversationTab(c, nowTick) === category)
+    .sort(category === "responder"
+      ? (a, b) => (replyWaitingSince(a, nowTick) ?? 0) - (replyWaitingSince(b, nowTick) ?? 0)
+      : (a, b) => Number(!!b.pinned) - Number(!!a.pinned) || priorityRank(a.priority) - priorityRank(b.priority));
   const activeCategory = activeConv ? conversationCategory(activeConv) : null;
+
+  // ── Barra de canais (atendimento por canais, 26/10/2026) ───────────────
+  // Todos + uma por linha de WhatsApp (cor/nome de Administração › WhatsApp)
+  // + Instagram. O número em cada botão = clientes em "Responder agora"
+  // naquele canal (vem do servidor, já respeitando as linhas do vendedor).
+  type BarChannel = { id: string; label: string; color: string; internal: boolean; waiting: number | null };
+  const barChannels: BarChannel[] = (() => {
+    const list: BarChannel[] = overview
+      ? overview.channels.map((ch) => ({ id: ch.id, label: ch.label, color: ch.color, internal: ch.internal, waiting: ch.responder }))
+      : waSessions.filter((w) => w.allowed !== false).map((w) => ({
+          id: `wa:${w.sessionKey}`, label: waSessionLabel(w.sessionKey, waSessions), color: w.color || WA_SESSION_DEFAULT_COLOR,
+          internal: w.lineType === "interna", waiting: null,
+        }));
+    const todosWaiting = overview ? list.filter((ch) => showInternal || !ch.internal).reduce((n, ch) => n + (ch.waiting ?? 0), 0) : null;
+    return [{ id: "todos", label: "Todos", color: "#71717a", internal: false, waiting: todosWaiting }, ...list];
+  })();
+  const showChannelBar = !docked && barChannels.length > 2;
+  const hasInternalLines = barChannels.some((ch) => ch.internal);
+  const currentChannel = barChannels.find((ch) => ch.id === channel) ?? barChannels[0]!;
+  const channelColorOf = (c: Conversation): string | null => {
+    if (!showChannelBar) return null;
+    if (c.channel === "instagram") return barChannels.find((ch) => ch.id === "instagram")?.color ?? "#c026d3";
+    return waSessionColor(c.sessionKey ?? "default", waSessions);
+  };
+  // Canal salvo que não existe mais (linha excluída ou tirada do vendedor):
+  // volta para "Todos" sem apagar a escolha salva.
+  useEffect(() => {
+    if (docked || !overview || channel === "todos") return;
+    if (!overview.channels.some((ch) => ch.id === channel)) setChannel("todos");
+  }, [docked, overview, channel]);
+
+  const isManagerRole = user?.role === "admin" || user?.role === "supervisor" || user?.role === "vendedor_chefe" || user?.role === "superadmin";
+
+  // "Passar conversas para outro vendedor" (painel do admin): mostra as
+  // conversas paradas do vendedor e abre a transferência na mais antiga.
+  const [pendingTransferFor, setPendingTransferFor] = useState<number | null>(null);
+  useEffect(() => {
+    if (pendingTransferFor == null) return;
+    const mine = convs
+      .filter((c) => c.assigneeId === pendingTransferFor && conversationTab(c, Date.now()) === "responder" && inChannel(c))
+      .sort((a, b) => (replyWaitingSince(a, Date.now()) ?? 0) - (replyWaitingSince(b, Date.now()) ?? 0));
+    if (!mine.length) return;
+    setActiveId(mine[0]!.id);
+    setShowTransferPicker(true);
+    setPendingTransferFor(null);
+  }, [pendingTransferFor, convs, inChannel]);
+
+  const applyConvUpdate = (updated: Conversation) =>
+    setConvs((prev) => prev.map((c) => c.id === updated.id ? { ...c, ...updated, sector: c.sector, assignee: c.assignee, participants: c.participants } : c));
+  const handleNoReply = async (conv: Conversation) => {
+    setReplyActionBusy(true);
+    try {
+      applyConvUpdate(await api.chat.noReply(conv.id));
+      setShowSnooze(false);
+      toast({ title: "Movida para \"Aguardando cliente\"", description: "Sem mandar mensagem. Se o cliente escrever, volta para \"Responder agora\"." });
+      refreshCountsSoon();
+    } catch (e) {
+      toast({ title: e instanceof ApiError ? e.message : "Não foi possível marcar", variant: "destructive" });
+    } finally { setReplyActionBusy(false); }
+  };
+  const handleSnooze = async (conv: Conversation, until: Date, label: string) => {
+    setReplyActionBusy(true);
+    try {
+      applyConvUpdate(await api.chat.snooze(conv.id, until.toISOString()));
+      setShowSnooze(false);
+      setSnoozeCustom("");
+      toast({ title: `Combinado: volta para "Responder agora" ${label}.`, description: "No horário você recebe um aviso. Se o cliente escrever antes, ela sobe na hora." });
+      refreshCountsSoon();
+    } catch (e) {
+      toast({ title: e instanceof ApiError ? e.message : "Não foi possível marcar", variant: "destructive" });
+    } finally { setReplyActionBusy(false); }
+  };
+  const handleCancelSnooze = async (conv: Conversation) => {
+    setReplyActionBusy(true);
+    try {
+      applyConvUpdate(await api.chat.cancelSnooze(conv.id));
+      toast({ title: "Lembrete de retomar cancelado" });
+      refreshCountsSoon();
+    } catch (e) {
+      toast({ title: e instanceof ApiError ? e.message : "Não foi possível cancelar", variant: "destructive" });
+    } finally { setReplyActionBusy(false); }
+  };
 
   const currentLabels = activeConv?.labels ? activeConv.labels.split(",").map((l) => l.trim()).filter(Boolean) : [];
 
@@ -3682,7 +3905,172 @@ export default function ChatCenter({
   }
 
   return (
-    <div className="flex h-[calc(var(--vvh,100dvh)-7rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-88px-var(--shk-topbar-extra,0px))] bg-[#F7F7F8] overflow-hidden rounded-none md:rounded-2xl border-0 md:border border-border shadow-none md:shadow-sm">
+    <div className="flex flex-col h-[calc(var(--vvh,100dvh)-7rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-88px-var(--shk-topbar-extra,0px))] bg-[#F7F7F8] overflow-hidden rounded-none md:rounded-2xl border-0 md:border border-border shadow-none md:shadow-sm">
+      {/* ── BARRA DE CANAIS (atendimento por canais, 26/10/2026) ──────────
+          Todos + uma por linha de WhatsApp + Instagram, cada uma com quantos
+          clientes esperam resposta. O canal escolhido fica lembrado. */}
+      {showChannelBar && (
+        <div className={`${activeConv ? "hidden md:flex" : "flex"} items-center gap-2 bg-white border-b border-border px-3 md:px-4 py-2 shrink-0 overflow-x-auto md:flex-wrap md:overflow-visible [scrollbar-width:none] [&::-webkit-scrollbar]:hidden`} data-testid="channel-bar">
+          <span className="hidden md:inline text-sm font-extrabold tracking-tight text-foreground mr-1 shrink-0">Canais</span>
+          {barChannels.map((ch) => {
+            const on = currentChannel.id === ch.id;
+            return (
+              <button
+                key={ch.id}
+                type="button"
+                onClick={() => { selectChannel(ch.id); if (activeConv && ch.id !== "todos" && channelOfConv(activeConv) !== ch.id) setActiveId(null); }}
+                aria-pressed={on}
+                data-testid={`channel-${ch.id}`}
+                title={ch.internal ? "Linha interna: fica fora do \"Todos\", do alarme de atraso e dos indicadores" : undefined}
+                className={`inline-flex items-center gap-2 shrink-0 h-10 md:h-9 px-3 rounded-full text-[13px] font-semibold transition-colors ${on ? "bg-white text-foreground" : "bg-[#FAFAFA] text-[#3F3F46] border border-border hover:bg-[#F1F1F3]"}`}
+                style={on ? { border: `2px solid ${ch.color}` } : undefined}
+              >
+                <span aria-hidden="true" className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: ch.color }} />
+                {ch.label}
+                {ch.internal && (
+                  <span className="text-[10px] font-medium text-[#52525B] border border-[#D4D4D8] rounded-md px-1.5">interna</span>
+                )}
+                {ch.waiting != null && ch.waiting > 0 && (
+                  <span title="Clientes esperando resposta (Responder agora)" data-testid={`channel-waiting-${ch.id}`}
+                    className="min-w-[22px] h-[22px] px-1.5 rounded-full bg-red-600 text-white text-xs font-bold inline-flex items-center justify-center">
+                    {ch.waiting > 99 ? "99+" : ch.waiting}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+          {hasInternalLines && (
+            <label className="md:ml-auto inline-flex items-center gap-2 shrink-0 text-xs text-[#3F3F46] min-h-[40px] cursor-pointer" data-testid="toggle-show-internal">
+              <input type="checkbox" checked={showInternal} onChange={(e) => setShowInternal(e.target.checked)} className="w-4 h-4 accent-[var(--primary)]" />
+              Mostrar linhas internas em "Todos"
+            </label>
+          )}
+        </div>
+      )}
+      {/* ── PAINEL DO ADMINISTRADOR POR CANAL (26/10/2026) ─────────────────
+          Abre pelo ícone de gráfico da lista (admin/supervisor/chefe). */}
+      {showChannelPanel && overview && (
+        <div className="fixed inset-0 z-[80] bg-black/40 flex items-start md:items-center justify-center p-0 md:p-6" onClick={() => setShowChannelPanel(false)}>
+          <div role="dialog" aria-modal="true" aria-labelledby="channel-panel-title" data-testid="panel-channels"
+            className="bg-[#F4F4F5] w-full max-w-5xl h-full md:h-auto md:max-h-[90vh] overflow-y-auto md:rounded-2xl shadow-xl p-4 md:p-6 flex flex-col gap-4"
+            onClick={(e) => e.stopPropagation()}>
+            <div className="flex flex-wrap items-end gap-3">
+              <div className="flex flex-col gap-1">
+                <h2 id="channel-panel-title" className="text-xl font-extrabold tracking-tight">Atendimento por canal</h2>
+                <p className="text-sm text-[#52525B]">Agora, em todas as lojas. Clique num canal para abrir a Central já filtrada.</p>
+              </div>
+              <span className="ml-auto text-xs text-[#52525B]">
+                Atualizado às {new Date(overview.updatedAt).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}
+              </span>
+              <button type="button" onClick={() => void api.chat.channelsOverview().then(setOverview).catch(() => {})}
+                className="h-10 px-3 rounded-lg border border-[#D4D4D8] bg-white text-xs font-semibold inline-flex items-center gap-1.5">
+                <RefreshCw className="w-3.5 h-3.5" />Atualizar
+              </button>
+              <button type="button" onClick={() => setShowChannelPanel(false)} aria-label="Fechar"
+                className="h-10 w-10 rounded-lg border border-[#D4D4D8] bg-white inline-flex items-center justify-center">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {[
+                { label: "Esperando resposta", value: String(overview.totals.responder), red: overview.totals.responder > 0 },
+                { label: `Atrasados (mais de ${overview.alertMinutes} min)`, value: String(overview.totals.atrasados), red: overview.totals.atrasados > 0 },
+                { label: "Na fila (sem vendedor)", value: String(overview.totals.fila), red: false },
+                {
+                  label: "1ª resposta (média hoje)",
+                  value: overview.firstResponse?.avgSeconds != null ? waitLabel(Math.round(overview.firstResponse.avgSeconds / 60)) : "—",
+                  red: false,
+                  hint: overview.firstResponse?.count ? `${overview.firstResponse.count} atendimento(s) finalizado(s) hoje` : "Ainda nenhum atendimento finalizado hoje",
+                },
+              ].map((t) => (
+                <div key={t.label} className="bg-white border border-[#E4E4E7] rounded-2xl p-4 flex flex-col gap-1.5">
+                  <span className="text-xs text-[#52525B]">{t.label}</span>
+                  <strong className={`text-2xl font-extrabold ${t.red ? "text-red-700" : "text-foreground"}`}>{t.value}</strong>
+                  {"hint" in t && t.hint && <span className="text-[11px] text-[#71717A]">{t.hint}</span>}
+                </div>
+              ))}
+            </div>
+
+            <div className="bg-white border border-[#E4E4E7] rounded-2xl overflow-x-auto">
+              <table className="w-full border-collapse text-sm min-w-[820px]" data-testid="table-channels">
+                <thead>
+                  <tr className="text-left text-[#52525B] text-xs">
+                    <th scope="col" className="px-4 py-3 font-semibold">Canal</th>
+                    <th scope="col" className="px-4 py-3 font-semibold">Esperando resposta</th>
+                    <th scope="col" className="px-4 py-3 font-semibold">Atrasados</th>
+                    <th scope="col" className="px-4 py-3 font-semibold">Maior espera</th>
+                    <th scope="col" className="px-4 py-3 font-semibold">Fila</th>
+                    <th scope="col" className="px-4 py-3 font-semibold">Aguardando cliente</th>
+                    <th scope="col" className="px-4 py-3 font-semibold">Vendedores atendendo</th>
+                    <th scope="col" className="px-4 py-3"><span className="sr-only">Abrir</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {overview.channels.map((ch) => (
+                    <tr key={ch.id} className={`border-t border-[#F4F4F5] ${ch.internal ? "bg-[#FAFAFA]" : ""}`}>
+                      <th scope="row" className="px-4 py-3 text-left font-semibold">
+                        <span className="inline-flex items-center gap-2"><span aria-hidden="true" className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: ch.color }} />{ch.label}</span>
+                        {ch.internal && <span className="ml-2 text-[10px] font-medium text-[#52525B] border border-[#D4D4D8] rounded-md px-1.5">interna</span>}
+                      </th>
+                      <td className="px-4 py-3"><span className={`font-bold ${ch.responder > 0 && !ch.internal ? "text-red-700" : ""}`}>{ch.responder}</span></td>
+                      <td className="px-4 py-3">
+                        <span className={`font-bold ${ch.atrasados > 0 ? "text-white bg-red-600 rounded-full px-2 py-0.5" : ""}`}>{ch.atrasados}</span>
+                      </td>
+                      <td className="px-4 py-3">{ch.maiorEsperaMin != null ? waitLabel(ch.maiorEsperaMin) : "—"}</td>
+                      <td className="px-4 py-3">{ch.fila}</td>
+                      <td className="px-4 py-3">{ch.aguardando}</td>
+                      <td className="px-4 py-3 text-[#3F3F46]">{ch.sellers.length ? ch.sellers.join(", ") : "—"}</td>
+                      <td className="px-4 py-2 text-right">
+                        <button type="button" data-testid={`button-open-channel-${ch.id}`}
+                          onClick={() => { selectChannel(ch.id); setCategory("responder"); setActiveId(null); setShowChannelPanel(false); }}
+                          className="inline-flex items-center h-10 px-3.5 rounded-lg border border-[#D4D4D8] text-xs font-semibold hover:bg-[#F7F7F8]">
+                          Abrir canal
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="bg-white border border-[#E4E4E7] rounded-2xl p-4 md:p-5 flex flex-col gap-3" data-testid="stuck-sellers">
+              <h3 className="text-base font-bold">Vendedores com conversas paradas</h3>
+              {overview.stuck.length === 0 ? (
+                <p className="text-sm text-[#52525B]">Ninguém com cliente esperando há mais de {overview.alertMinutes} min. 👍</p>
+              ) : overview.stuck.map((v) => (
+                <div key={v.userId} className="flex flex-wrap gap-3 items-center text-sm">
+                  <strong className="min-w-[120px]">{v.name}</strong>
+                  <span className="text-[#3F3F46]">
+                    {v.count} {v.count === 1 ? "cliente esperando" : "clientes esperando"} há mais de {overview.alertMinutes} min (maior: {waitLabel(v.maiorEsperaMin)})
+                  </span>
+                  {v.channels.map((id) => {
+                    const ch = overview.channels.find((c) => c.id === id);
+                    return (
+                      <span key={id} className="inline-flex items-center gap-1.5 text-xs border border-[#E4E4E7] rounded-md px-2 py-0.5">
+                        <span aria-hidden="true" className="w-2 h-2 rounded-full" style={{ backgroundColor: ch?.color ?? "#71717a" }} />{ch?.label ?? id}
+                      </span>
+                    );
+                  })}
+                  <button type="button" data-testid={`button-transfer-stuck-${v.userId}`}
+                    onClick={() => {
+                      selectChannel("todos");
+                      setFilterVendedor(String(v.userId));
+                      setCategory("responder");
+                      setShowChannelPanel(false);
+                      setPendingTransferFor(v.userId);
+                      toast({ title: `Conversas paradas de ${v.name}`, description: "Abrimos a mais antiga com a transferência. Escolha para quem passar." });
+                    }}
+                    className="ml-auto h-10 px-3.5 rounded-lg bg-foreground text-white text-xs font-semibold">
+                    Passar conversas para outro vendedor
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+      <div className="flex flex-1 min-h-0">
 
       {/* ── LEFT PANEL: conversation list ──────────────────────────────── */}
       <div className={`${activeConv ? "hidden md:flex" : "flex"} w-full md:w-80 lg:w-96 bg-white flex-col md:border-r border-border shrink-0`}>
@@ -3797,13 +4185,17 @@ export default function ChatCenter({
                 document.body
               )}
             </div>
-            {waSessions.length > 1 && (
+            {(waSessions.length > 1 || (isManagerRole && showChannelBar)) && (
               <div className="relative">
                 <button
                   ref={numberBtnRef}
-                  onClick={() => setShowNumberPanel((v) => !v)}
+                  onClick={() => {
+                    // Gestor (admin/supervisor/chefe): painel completo por canal.
+                    if (isManagerRole) { setShowChannelPanel(true); void api.chat.channelsOverview().then(setOverview).catch(() => {}); return; }
+                    setShowNumberPanel((v) => !v);
+                  }}
                   data-testid="button-numbers-panel"
-                  title="Atendimento por número"
+                  title={isManagerRole ? "Atendimento por canal" : "Atendimento por número"}
                   className={`relative p-2 md:p-1.5 rounded-lg hover:bg-secondary transition ${showNumberPanel ? "bg-secondary" : ""}`}
                 >
                   <BarChart3 className="w-5 h-5 md:w-4 md:h-4 text-muted-foreground" />
@@ -3903,7 +4295,7 @@ export default function ChatCenter({
 
         {/* Category tabs: Favoritos / Potenciais / Pendentes / Ativos / Resolvidas
             (novo design: pílulas com contagem; a ativa fica escura) */}
-        <div className="flex gap-1.5 px-3 pb-3 border-b border-border bg-white overflow-x-auto md:flex-wrap md:overflow-visible [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&>*]:shrink-0">
+        <div className="flex gap-1.5 px-3 pb-2 bg-white overflow-x-auto md:flex-wrap md:overflow-visible [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&>*]:shrink-0">
           {CATEGORIES.filter((cat) =>
             (cat.id !== "potenciais" || can(user, "ver_potenciais")) &&
             // Resolvidas: admin/supervisor sempre; vendedor comum só se o
@@ -3922,13 +4314,22 @@ export default function ChatCenter({
               >
                 {cat.label}
                 <span
-                  className={`text-[11px] font-bold px-1.5 h-5 rounded-full min-w-[20px] inline-flex items-center justify-center ${isActive ? "bg-white/20 text-white" : "bg-[#F1F1F3] text-[#3F3F46]"}`}
+                  className={`text-[11px] font-bold px-1.5 h-5 rounded-full min-w-[20px] inline-flex items-center justify-center ${cat.hot && counts[cat.id] > 0 ? "bg-red-600 text-white" : isActive ? "bg-white/20 text-white" : "bg-[#F1F1F3] text-[#3F3F46]"}`}
                 >
                   {counts[cat.id]}
                 </span>
               </button>
             );
           })}
+        </div>
+        {/* Explicação curta da aba + canal escolhido (lembrado para você). */}
+        <div className="px-3 py-1.5 bg-white border-b border-border text-[11px] text-muted-foreground flex items-center gap-2 flex-wrap" data-testid="tab-help">
+          <span className="flex-1 min-w-[180px]">{CATEGORIES.find((c) => c.id === category)?.help}</span>
+          {showChannelBar && (
+            <span className="shrink-0">
+              Canal: <strong style={{ color: currentChannel.id === "todos" ? undefined : currentChannel.color }}>{currentChannel.label}{currentChannel.id === "todos" && hasInternalLines && !showInternal ? " (sem linhas internas)" : ""}</strong>
+            </span>
+          )}
         </div>
 
         {/* Disparo em massa pra Resolvidos (pedido 14/09, Atacado): "lista de
@@ -4121,7 +4522,7 @@ export default function ChatCenter({
                   data-testid="filter-conv-numero"
                   className="text-xs px-2 py-1 rounded-lg border border-border bg-white max-w-[140px]">
                   <option value="">Número: todos</option>
-                  {waSessions.map((s) => (
+                  {waSessions.filter((s) => s.allowed !== false).map((s) => (
                     <option key={s.sessionKey} value={s.sessionKey}>{waSessionLabel(s.sessionKey, waSessions)}</option>
                   ))}
                 </select>
@@ -4255,6 +4656,8 @@ export default function ChatCenter({
                     }
                     sessionColor={conv.channel === "whatsapp" ? waSessionColor(conv.sessionKey, waSessions) : null}
                     sessionIcon={conv.channel === "whatsapp" ? waSessionIcon(conv.sessionKey, waSessions) : null}
+                    stripeColor={channelColorOf(conv)}
+                    snoozeText={snoozePending(conv, nowTick) ? snoozeLabel(conv.snoozeUntil, nowTick) : null}
                   />
                 </div>
               </div>
@@ -4848,6 +5251,75 @@ export default function ChatCenter({
               </button>
             </div>
           </div>
+
+          {/* Responder agora x Aguardando cliente (atendimento por canais,
+              26/10/2026): "Não precisa responder" e "Retomar depois" — só em
+              atendimento com responsável. */}
+          {activeCategory === "ativos" && (
+            <div className="bg-white border-b border-border px-3 md:px-5 py-2" data-testid="reply-actions">
+              <div className="flex flex-wrap items-center gap-2">
+                {showChannelBar && (
+                  <span className="shk-chip shk-chip-outline" title="Linha por onde saem as respostas">
+                    <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: channelColorOf(activeConv) ?? WA_SESSION_DEFAULT_COLOR }} />
+                    Linha: {activeConv.channel === "instagram" ? "Instagram" : waSessionLabel(activeConv.sessionKey, waSessions)}
+                  </span>
+                )}
+                <span className={`text-xs font-semibold ${needsReply(activeConv, nowTick) ? "text-red-700" : "text-green-700"}`} data-testid="reply-state">
+                  {needsReply(activeConv, nowTick) ? "Responder agora" : "Aguardando cliente"}
+                </span>
+                {snoozePending(activeConv, nowTick) && (
+                  <span className="shk-chip bg-blue-50 text-blue-900 border border-blue-200" data-testid="chip-header-snooze">
+                    <CalendarClock className="w-3 h-3" />retomar {snoozeLabel(activeConv.snoozeUntil, nowTick)}
+                    <button type="button" onClick={() => void handleCancelSnooze(activeConv)} disabled={replyActionBusy}
+                      className="ml-1 underline font-semibold" data-testid="button-cancel-snooze">cancelar</button>
+                  </span>
+                )}
+                <span className="flex-1" />
+                {needsReply(activeConv, nowTick) && (
+                  <button type="button" onClick={() => void handleNoReply(activeConv)} disabled={replyActionBusy}
+                    data-testid="button-no-reply"
+                    title="Move para Aguardando cliente sem mandar mensagem. Se o cliente escrever, volta sozinha."
+                    className="inline-flex items-center h-9 px-3 rounded-lg border border-[#D4D4D8] bg-white text-xs font-semibold text-[#27272A] hover:bg-[#F7F7F8] disabled:opacity-50">
+                    Não precisa responder
+                  </button>
+                )}
+                <button type="button" onClick={() => setShowSnooze((v) => !v)} aria-expanded={showSnooze}
+                  data-testid="button-snooze"
+                  className={`inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border text-xs font-semibold ${showSnooze ? "border-blue-300 bg-blue-50 text-blue-900" : "border-[#D4D4D8] bg-white text-[#27272A] hover:bg-[#F7F7F8]"}`}>
+                  <Clock className="w-3.5 h-3.5" />Retomar depois
+                </button>
+              </div>
+              {showSnooze && (
+                <div className="mt-2 p-3 rounded-xl border border-border bg-[#FAFAFA] flex flex-wrap items-center gap-2" data-testid="snooze-panel">
+                  <span className="text-xs text-[#3F3F46] mr-1">Voltar a falar com o cliente:</span>
+                  {snoozeOptions(nowTick).map((o) => (
+                    <button key={o.label} type="button" disabled={replyActionBusy}
+                      onClick={() => void handleSnooze(activeConv, o.until, o.label)}
+                      data-testid={`snooze-option-${o.label.replace(/\s+/g, "-")}`}
+                      className="h-9 px-3 rounded-full border border-blue-200 bg-blue-50 text-blue-900 text-xs font-semibold hover:bg-blue-100 disabled:opacity-50">
+                      {o.label}
+                    </button>
+                  ))}
+                  <span className="inline-flex items-center gap-1.5">
+                    <input type="datetime-local" value={snoozeCustom} onChange={(e) => setSnoozeCustom(e.target.value)}
+                      aria-label="Escolher data e hora" data-testid="input-snooze-custom"
+                      className="h-9 px-2 rounded-lg border border-border bg-white text-xs" />
+                    <button type="button" disabled={replyActionBusy || !snoozeCustom}
+                      onClick={() => {
+                        const d = new Date(snoozeCustom);
+                        if (Number.isNaN(d.getTime())) return;
+                        void handleSnooze(activeConv, d, snoozeLabel(d.toISOString()));
+                      }}
+                      data-testid="button-snooze-custom"
+                      className="h-9 px-3 rounded-lg bg-foreground text-white text-xs font-semibold disabled:opacity-40">
+                      Marcar
+                    </button>
+                  </span>
+                  <span className="basis-full text-[11px] text-muted-foreground">No horário, a conversa volta sozinha para "Responder agora" com um aviso. Se o cliente escrever antes, ela sobe na hora.</span>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Etapa do atendimento (novo design): faixa só de leitura com a
               jornada real da conversa — as ações continuam nos botões acima. */}
@@ -6047,7 +6519,7 @@ export default function ChatCenter({
               {alarmConvs.slice(0, 4).map((c) => (
                 <button key={c.id}
                   onClick={() => {
-                    setCategory(conversationCategory(c)); setActiveId(c.id);
+                    setCategory(conversationTab(c, Date.now())); setActiveId(c.id);
                     // Se o usuário estiver em outra aba, pede para o painel voltar ao chat.
                     window.dispatchEvent(new CustomEvent("sheikcell:open-chat"));
                   }}
@@ -6608,6 +7080,7 @@ export default function ChatCenter({
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }

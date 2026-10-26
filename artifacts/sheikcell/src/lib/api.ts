@@ -1870,7 +1870,43 @@ export type Conversation = {
   origin?: string | null;
   // Só presente com origin="fila": número sequencial da fila ("Fila #N").
   queueNumber?: number | null;
+  // Atendimento por canais (26/10/2026): "Não precisa responder" e "Retomar
+  // depois" — ver conversationReplyState.ts.
+  replyDismissedAt?: string | null;
+  replyDismissedBy?: number | null;
+  snoozeUntil?: string | null;
+  snoozeSetAt?: string | null;
+  snoozedBy?: number | null;
 };
+
+// Barra de canais / painel do administrador por canal (26/10/2026).
+export type ChannelOverviewItem = {
+  id: string; // "instagram" | "wa:<linha>"
+  sessionKey: string | null;
+  label: string;
+  color: string;
+  icon: string | null;
+  lineType: "varejo" | "atacado" | "interna";
+  internal: boolean;
+  alertsEnabled: boolean;
+  responder: number;
+  atrasados: number;
+  maiorEsperaMin: number | null;
+  fila: number;
+  filaEsperando: number;
+  aguardando: number;
+  sellers: string[];
+};
+export type ChannelsOverview = {
+  alertEnabled: boolean;
+  alertMinutes: number;
+  channels: ChannelOverviewItem[];
+  totals: { responder: number; atrasados: number; fila: number };
+  stuck: { userId: number; name: string; count: number; maiorEsperaMin: number; channels: string[] }[];
+  firstResponse: { avgSeconds: number | null; count: number } | null;
+  updatedAt: string;
+};
+export type ChannelQuery = { sessionKey?: string; channel?: "instagram"; excludeInternal?: boolean };
 
 export type ScheduledMessage = {
   id: number;
@@ -2126,6 +2162,13 @@ export type SaasAttention = {
   criticalTickets: number;
   items: AttentionItem[];
 };
+function setChannelQuery(qs: URLSearchParams, p?: ChannelQuery): void {
+  if (!p) return;
+  if (p.channel === "instagram") qs.set("channel", "instagram");
+  else if (p.sessionKey) qs.set("sessionKey", p.sessionKey);
+  else if (p.excludeInternal) qs.set("excludeInternal", "1");
+}
+
 export const api = {
   superadmin: {
     listTenants: () => req<{ tenants: TenantSummary[] }>("/superadmin/tenants"),
@@ -2265,9 +2308,11 @@ export const api = {
   },
   chat: {
     // Conexões de WhatsApp (números de atendimento) — para etiquetar conversas.
-    waSessions: () => req<{ sessionKey: string; displayName: string | null; phoneNumber: string | null; color: string; icon: string | null }[]>("/chat/wa-sessions"),
-    conversations: (params?: { search?: string; status?: string; label?: string; sectorId?: number; assigneeId?: number }) => {
+    // lineType/alertsEnabled/allowed: atendimento por canais (26/10/2026).
+    waSessions: () => req<{ sessionKey: string; displayName: string | null; phoneNumber: string | null; color: string; icon: string | null; lineType?: "varejo" | "atacado" | "interna"; alertsEnabled?: boolean; allowed?: boolean }[]>("/chat/wa-sessions"),
+    conversations: (params?: { search?: string; status?: string; label?: string; sectorId?: number; assigneeId?: number } & ChannelQuery) => {
       const qs = new URLSearchParams();
+      setChannelQuery(qs, params);
       if (params?.search) qs.set("search", params.search);
       if (params?.status) qs.set("status", params.status);
       if (params?.label) qs.set("label", params.label);
@@ -2278,16 +2323,28 @@ export const api = {
     // Contagem REAL por categoria (não fica presa ao lote de 100 mais recentes
     // que a listagem acima retorna) — usada pelos números das abinhas
     // (Potenciais/Pendentes/Ativos/Resolvidas) na Central de Atendimento.
-    conversationCounts: (params?: { search?: string; label?: string; sectorId?: number; assigneeId?: number }) => {
+    conversationCounts: (params?: { search?: string; label?: string; sectorId?: number; assigneeId?: number } & ChannelQuery) => {
       const qs = new URLSearchParams();
+      setChannelQuery(qs, params);
       if (params?.search) qs.set("search", params.search);
       if (params?.label) qs.set("label", params.label);
       if (params?.sectorId) qs.set("sectorId", String(params.sectorId));
       if (params?.assigneeId) qs.set("assigneeId", String(params.assigneeId));
-      return req<{ ativos: number; pendentes: number; potenciais: number; resolvidas: number; favoritos: number }>(
+      return req<{ ativos: number; responder?: number; aguardando?: number; pendentes: number; potenciais: number; resolvidas: number; favoritos: number }>(
         `/chat/conversations/counts?${qs.toString()}`,
       );
     },
+    // Atendimento por canais (26/10/2026): números de cada canal (barra da
+    // Central) e painel do administrador; canal lembrado por pessoa;
+    // "Não precisa responder" e "Retomar depois".
+    channelsOverview: () => req<ChannelsOverview>("/chat/channels/overview"),
+    channelPreference: () => req<{ channel: string; preferredChannel: string | null; defaultChannel: string | null }>("/chat/channel-preference"),
+    saveChannelPreference: (channel: string) =>
+      req<{ ok: boolean; channel: string }>("/chat/channel-preference", { method: "PUT", body: JSON.stringify({ channel }) }),
+    noReply: (id: number) => req<Conversation>(`/chat/conversations/${id}/no-reply`, { method: "POST" }),
+    snooze: (id: number, until: string) =>
+      req<Conversation>(`/chat/conversations/${id}/snooze`, { method: "POST", body: JSON.stringify({ until }) }),
+    cancelSnooze: (id: number) => req<Conversation>(`/chat/conversations/${id}/snooze`, { method: "DELETE" }),
     // Quantidade de atendimento em ABERTO por número de WhatsApp conectado
     // (pedido 17/09: painel perto de "Conversas" pra ver a carga de cada
     // linha). Mesma visibilidade de conversationCounts acima, só agrupada
@@ -3625,9 +3682,9 @@ export const api = {
     },
     users: {
       list: () => req<(User & { isActive: boolean; createdAt: string })[]>("/admin/users"),
-      create: (data: { name: string; email: string; password: string; role: string; sectorIds: number[]; storeName?: string; extension?: string; adminAccess?: string[] | null; moduleAccess?: UserModuleAccess | null; accessHours?: { start: string; end: string; days: number[] } | null; allowedSessionKeys?: string[] | null }) =>
+      create: (data: { name: string; email: string; password: string; role: string; sectorIds: number[]; storeName?: string; extension?: string; adminAccess?: string[] | null; moduleAccess?: UserModuleAccess | null; accessHours?: { start: string; end: string; days: number[] } | null; allowedSessionKeys?: string[] | null; defaultChannel?: string | null }) =>
         req<User>("/admin/users", { method: "POST", body: JSON.stringify(data) }),
-      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorIds: number[]; storeName: string; extension: string; isActive: boolean; permissions: Record<string, boolean>; adminAccess: string[] | null; moduleAccess: UserModuleAccess | null; accessHours: { start: string; end: string; days: number[] } | null; allowedSessionKeys: string[] | null; internalChatSingleTask: boolean; queueRestrictToAssigned: boolean; chatQueueSingleTask: boolean }>) =>
+      update: (id: number, data: Partial<{ name: string; email: string; password: string; role: string; sectorIds: number[]; storeName: string; extension: string; isActive: boolean; permissions: Record<string, boolean>; adminAccess: string[] | null; moduleAccess: UserModuleAccess | null; accessHours: { start: string; end: string; days: number[] } | null; allowedSessionKeys: string[] | null; defaultChannel: string | null; internalChatSingleTask: boolean; queueRestrictToAssigned: boolean; chatQueueSingleTask: boolean }>) =>
         req<User>(`/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
       remove: (id: number, transferToId: number | null) =>
         req<{ ok: boolean; transferredConversations: number }>(`/admin/users/${id}`, { method: "DELETE", body: JSON.stringify({ transferToId }) }),

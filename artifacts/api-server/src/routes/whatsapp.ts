@@ -14,6 +14,7 @@ import { broadcast } from "../lib/sseEmitter";
 import { restrictedRecipients } from "../lib/conversationScope";
 import { fillIdleQueueVendors } from "../lib/queueAutoAssign";
 import { DEFAULT_SESSION_KEY, mayInsertOnStatusPersist } from "../lib/whatsappSessionRows";
+import { isLineType } from "../lib/attendanceState";
 
 const router: IRouter = Router();
 
@@ -54,6 +55,10 @@ export interface AdminWAState extends BridgeWAState {
   /** WhatsApp de compras: mensagens de fornecedores vão ao ERP (19/10/2026). */
   forwardToErp: boolean;
   directAssigneeId: number | null;
+  /** Atendimento por canais (26/10/2026): varejo | atacado | interna. */
+  lineType: string;
+  /** Toca som e alarme de atraso desta linha na Central. */
+  alertsEnabled: boolean;
 }
 
 async function persistSessionState(tenantId: number, key: string, state: BridgeWAState): Promise<void> {
@@ -138,6 +143,8 @@ function offlineState(
     phoneOutboundEnabled: row?.phoneOutboundEnabled ?? false,
     forwardToErp: row?.forwardToErp ?? false,
     directAssigneeId: row?.directAssigneeId ?? null,
+    lineType: row?.lineType ?? "varejo",
+    alertsEnabled: row?.alertsEnabled ?? true,
   };
 }
 
@@ -190,6 +197,8 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         phoneOutboundEnabled: row?.phoneOutboundEnabled ?? false,
         forwardToErp: row?.forwardToErp ?? false,
         directAssigneeId: row?.directAssigneeId ?? null,
+        lineType: row?.lineType ?? "varejo",
+        alertsEnabled: row?.alertsEnabled ?? true,
       });
     } else if (bridgeAvailable) {
       // Bridge is up but doesn't know this session yet — ask it to start it.
@@ -214,6 +223,8 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         phoneOutboundEnabled: row?.phoneOutboundEnabled ?? false,
         forwardToErp: row?.forwardToErp ?? false,
         directAssigneeId: row?.directAssigneeId ?? null,
+        lineType: row?.lineType ?? "varejo",
+        alertsEnabled: row?.alertsEnabled ?? true,
       });
       void fetchFromBridge("/whatsapp/sessions", "POST", { session: key }).catch(() => {});
     } else {
@@ -340,6 +351,32 @@ router.post("/whatsapp/sessions/:key/queue-auto-assign", requireFeature("whatsap
     .returning();
   if (!updated) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
   res.json({ ok: true, queueAutoAssignEnabled: updated.queueAutoAssignEnabled });
+});
+
+// ─── Tipo da linha e som/alarme (atendimento por canais, 26/10/2026) ───────
+// "interna" (Compras, ADM, fornecedores) fica fora do "Todos" da Central, do
+// alarme de atraso e dos indicadores. Mudar para interna desliga o som/alarme
+// (dá pra ligar de novo); voltar para cliente liga.
+router.post("/whatsapp/sessions/:key/channel-settings", requireFeature("whatsapp"), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+  const body = (req.body ?? {}) as { lineType?: unknown; alertsEnabled?: unknown };
+  const [current] = await db.select().from(whatsappSessionsTable)
+    .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId))).limit(1);
+  if (!current) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
+  const set: Partial<typeof whatsappSessionsTable.$inferInsert> = { updatedAt: new Date() };
+  if (body.lineType !== undefined) {
+    if (!isLineType(body.lineType)) { res.status(400).json({ error: "Tipo de linha inválido" }); return; }
+    set.lineType = body.lineType;
+    if (body.alertsEnabled === undefined && body.lineType !== current.lineType) {
+      if (body.lineType === "interna") set.alertsEnabled = false;
+      else if (current.lineType === "interna") set.alertsEnabled = true;
+    }
+  }
+  if (body.alertsEnabled !== undefined) set.alertsEnabled = !!body.alertsEnabled;
+  const [updated] = await db.update(whatsappSessionsTable).set(set)
+    .where(eq(whatsappSessionsTable.id, current.id)).returning();
+  res.json({ ok: true, lineType: updated!.lineType, alertsEnabled: updated!.alertsEnabled });
 });
 
 // Pesquisa de satisfação desligada POR LINHA (pedido 14/09: público do
@@ -747,6 +784,8 @@ router.get("/whatsapp/status", requireFeature("whatsapp"), async (req, res): Pro
         phoneOutboundEnabled: row?.phoneOutboundEnabled ?? false,
         forwardToErp: row?.forwardToErp ?? false,
         directAssigneeId: row?.directAssigneeId ?? null,
+        lineType: row?.lineType ?? "varejo",
+        alertsEnabled: row?.alertsEnabled ?? true,
       };
       res.json(result);
       return;

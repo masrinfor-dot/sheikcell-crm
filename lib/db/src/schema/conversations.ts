@@ -102,6 +102,18 @@ export const conversationsTable = pgTable("conversations", {
   // Lembrete único da pesquisa: marcado quando o lembrete foi enviado (ou
   // reivindicado pelo agendador). Nunca é enviado mais de um por atendimento.
   surveyReminderSentAt: timestamp("survey_reminder_sent_at", { withTimezone: true }),
+  // Atendimento por canais (26/10/2026) — ver lib/attendanceState.ts.
+  // "Não precisa responder": a conversa conta como "Aguardando cliente" até
+  // o cliente mandar mensagem nova (last_message_at > reply_dismissed_at).
+  replyDismissedAt: timestamp("reply_dismissed_at", { withTimezone: true }),
+  replyDismissedBy: integer("reply_dismissed_by").references(() => usersTable.id, { onDelete: "set null" }),
+  // "Retomar depois": fica em "Aguardando cliente" até snooze_until e volta
+  // para "Responder agora" no horário, com aviso ao responsável. Mensagem
+  // nova depois de snooze_set_at cancela o lembrete.
+  snoozeUntil: timestamp("snooze_until", { withTimezone: true }),
+  snoozeSetAt: timestamp("snooze_set_at", { withTimezone: true }),
+  snoozedBy: integer("snoozed_by").references(() => usersTable.id, { onDelete: "set null" }),
+  snoozeNotifiedAt: timestamp("snooze_notified_at", { withTimezone: true }),
   isArchived: boolean("is_archived").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

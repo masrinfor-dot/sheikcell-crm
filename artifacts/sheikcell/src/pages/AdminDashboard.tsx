@@ -129,6 +129,16 @@ type WASession = {
   /** WhatsApp de compras: mensagens de fornecedores vão ao ERP (19/10/2026). */
   forwardToErp?: boolean;
   directAssigneeId: number | null;
+  /** Atendimento por canais (26/10/2026): varejo | atacado | interna. */
+  lineType?: "varejo" | "atacado" | "interna";
+  /** Toca som e alarme de atraso desta linha na Central. */
+  alertsEnabled?: boolean;
+};
+
+const LINE_TYPE_HELP: Record<string, string> = {
+  varejo: "Entra no \"Todos\", nos alertas de atraso e nos indicadores.",
+  atacado: "Entra no \"Todos\", nos alertas e nos indicadores, separado como Atacado.",
+  interna: "Fica fora do \"Todos\", dos alertas de atraso e dos indicadores de atendimento. Abre só pelo botão do canal.",
 };
 
 type UserRow = {
@@ -138,7 +148,7 @@ type UserRow = {
   // mostrar nome/cor de cada um) — sector/sectorId acima continuam existindo
   // como o setor primário (compatibilidade).
   sectors?: Sector[];
-  storeName?: string | null; extension?: string | null; adminAccess?: string[] | null; moduleAccess?: UserModuleAccess | null; accessHours?: { start: string; end: string; days: number[] } | null; allowedSessionKeys?: string[] | null; createdAt: string;
+  storeName?: string | null; extension?: string | null; adminAccess?: string[] | null; moduleAccess?: UserModuleAccess | null; accessHours?: { start: string; end: string; days: number[] } | null; allowedSessionKeys?: string[] | null; defaultChannel?: string | null; createdAt: string;
   permissions?: Record<string, boolean> | null;
   internalChatSingleTask?: boolean;
   queueRestrictToAssigned?: boolean;
@@ -675,7 +685,7 @@ export default function AdminDashboard() {
 
   // Vendedor em mais de um setor (pedido 17/09): sectorIds substitui o antigo
   // sectorId único — array com 0 ou mais setores marcados.
-  const [userForm, setUserForm] = useState<{ name: string; email: string; password: string; role: string; sectorIds: number[]; storeName: string; extension: string; adminAccess: string[]; moduleAccess: UserModuleAccess; ahEnabled: boolean; ahStart: string; ahEnd: string; ahDays: number[]; waEnabled: boolean; waKeys: string[] }>({ name: "", email: "", password: "", role: "vendedor", sectorIds: [1], storeName: "", extension: "", adminAccess: [], moduleAccess: {}, ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [] });
+  const [userForm, setUserForm] = useState<{ name: string; email: string; password: string; role: string; sectorIds: number[]; storeName: string; extension: string; adminAccess: string[]; moduleAccess: UserModuleAccess; ahEnabled: boolean; ahStart: string; ahEnd: string; ahDays: number[]; waEnabled: boolean; waKeys: string[]; defaultChannel: string }>({ name: "", email: "", password: "", role: "vendedor", sectorIds: [1], storeName: "", extension: "", adminAccess: [], moduleAccess: {}, ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [], defaultChannel: "" });
   const [sectorForm, setSectorForm] = useState<{ name: string; description: string; icon: string; color: string; isActive: boolean; enabledModules: OptionalModule[] | null; vendorsSeeResolved: boolean }>({ name: "", description: "", icon: "smartphone", color: "#1a2e6e", isActive: true, enabledModules: null, vendorsSeeResolved: false });
 
   const fetchAll = useCallback(async () => {
@@ -842,14 +852,14 @@ export default function AdminDashboard() {
   const openAddUser = () => {
     setEditUser(null);
     const firstSectorId = activeSectors[0]?.id ?? sectors[0]?.id ?? 1;
-    setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorIds: [firstSectorId], storeName: "", extension: "", adminAccess: [], moduleAccess: {}, ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [] });
+    setUserForm({ name: "", email: "", password: "", role: "vendedor", sectorIds: [firstSectorId], storeName: "", extension: "", adminAccess: [], moduleAccess: {}, ahEnabled: false, ahStart: "08:00", ahEnd: "18:00", ahDays: [1, 2, 3, 4, 5, 6], waEnabled: false, waKeys: [], defaultChannel: "" });
     setOpenUserSections(new Set(["basico"]));
     setShowAddUser(true);
   };
   const openEditUser = (u: UserRow) => {
     setEditUser(u);
     const sectorIds = u.sectors?.length ? u.sectors.map((s) => s.id) : (u.sectorId != null ? [u.sectorId] : []);
-    setUserForm({ name: u.name, email: u.email, password: "", role: u.role, sectorIds, storeName: u.storeName ?? "", extension: u.extension ?? "", adminAccess: u.adminAccess ?? [], moduleAccess: u.moduleAccess ?? {}, ahEnabled: !!u.accessHours, ahStart: u.accessHours?.start ?? "08:00", ahEnd: u.accessHours?.end ?? "18:00", ahDays: u.accessHours?.days?.length ? u.accessHours.days : [1, 2, 3, 4, 5, 6], waEnabled: !!u.allowedSessionKeys, waKeys: u.allowedSessionKeys ?? [] });
+    setUserForm({ name: u.name, email: u.email, password: "", role: u.role, sectorIds, storeName: u.storeName ?? "", extension: u.extension ?? "", adminAccess: u.adminAccess ?? [], moduleAccess: u.moduleAccess ?? {}, ahEnabled: !!u.accessHours, ahStart: u.accessHours?.start ?? "08:00", ahEnd: u.accessHours?.end ?? "18:00", ahDays: u.accessHours?.days?.length ? u.accessHours.days : [1, 2, 3, 4, 5, 6], waEnabled: !!u.allowedSessionKeys, waKeys: u.allowedSessionKeys ?? [], defaultChannel: u.defaultChannel ?? "" });
     setOpenUserSections(new Set(["basico"]));
     setShowAddUser(true);
   };
@@ -867,6 +877,7 @@ export default function AdminDashboard() {
             ? { start: userForm.ahStart, end: userForm.ahEnd, days: userForm.ahDays }
             : null,
           allowedSessionKeys: userForm.role === "vendedor" && userForm.waEnabled ? userForm.waKeys : null,
+          defaultChannel: userForm.defaultChannel || null,
         };
         if (userForm.password) payload.password = userForm.password;
         await api.admin.users.update(editUser.id, payload);
@@ -881,6 +892,7 @@ export default function AdminDashboard() {
             ? { start: userForm.ahStart, end: userForm.ahEnd, days: userForm.ahDays }
             : null,
           allowedSessionKeys: userForm.role === "vendedor" && userForm.waEnabled ? userForm.waKeys : null,
+          defaultChannel: userForm.defaultChannel || null,
         });
         toast({ title: "Atendente criado!" });
       }
@@ -1663,6 +1675,50 @@ export default function AdminDashboard() {
                       </span>
                     )}
                   </div>
+                </div>
+
+                {/* Atendimento por canais (26/10/2026): tipo da linha e som/alarme.
+                    Interna (Compras, ADM, fornecedores) fica fora do "Todos",
+                    do alarme de atraso e dos indicadores do painel. */}
+                <div className="mb-3 p-3 rounded-xl border border-border bg-secondary/30 space-y-2" style={{ borderTop: `4px solid ${s.color}` }}>
+                  <label className="flex flex-col gap-1 text-xs font-semibold text-foreground">
+                    Tipo da linha
+                    <select
+                      value={s.lineType ?? "varejo"}
+                      data-testid={`select-wa-line-type-${s.sessionKey}`}
+                      onChange={async (e) => {
+                        const r = await fetch(`/api/whatsapp/sessions/${s.sessionKey}/channel-settings`, {
+                          method: "POST", credentials: "include",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ lineType: e.target.value }),
+                        });
+                        if (!r.ok) toast({ title: "Não foi possível salvar", variant: "destructive" });
+                        fetchWAStatus();
+                      }}
+                      className="h-11 px-2.5 rounded-lg border border-border bg-white text-sm font-normal"
+                    >
+                      <option value="varejo">Cliente — Varejo</option>
+                      <option value="atacado">Cliente — Atacado</option>
+                      <option value="interna">Interna (fornecedores, ADM)</option>
+                    </select>
+                  </label>
+                  <p className="text-[11px] text-muted-foreground">{LINE_TYPE_HELP[s.lineType ?? "varejo"]}</p>
+                  <label className="flex items-center gap-2.5 text-sm cursor-pointer min-h-[40px]" data-testid={`checkbox-wa-alerts-${s.sessionKey}`}>
+                    <input
+                      type="checkbox"
+                      checked={s.alertsEnabled ?? true}
+                      onChange={async (e) => {
+                        await fetch(`/api/whatsapp/sessions/${s.sessionKey}/channel-settings`, {
+                          method: "POST", credentials: "include",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ alertsEnabled: e.target.checked }),
+                        });
+                        fetchWAStatus();
+                      }}
+                      className="w-4 h-4 accent-[var(--primary)] shrink-0"
+                    />
+                    Tocar som e alarme de atraso desta linha
+                  </label>
                 </div>
 
                 <div className="text-sm text-muted-foreground mb-3 space-y-1">
@@ -3145,6 +3201,30 @@ export default function AdminDashboard() {
                   </div>
                 )}
               </div>
+
+              {/* Canal padrão da Central (atendimento por canais, 26/10/2026):
+                  a Central abre já nesse canal. Se a pessoa trocar na barra,
+                  vale a última escolha dela; mudar aqui volta para este padrão. */}
+              {waSessions && waSessions.length > 1 && (
+                <div className="pt-3 border-t border-border">
+                  <label className="flex flex-col gap-1 text-xs font-medium">
+                    Canal em que a Central abre
+                    <select value={userForm.defaultChannel} data-testid="select-user-default-channel"
+                      onChange={(e) => setUserForm({ ...userForm, defaultChannel: e.target.value })}
+                      className="h-10 px-2 rounded-lg border border-border bg-white text-sm font-normal">
+                      <option value="">Todos</option>
+                      {waSessions
+                        .filter((w) => !(userForm.role === "vendedor" && userForm.waEnabled) || userForm.waKeys.includes(w.sessionKey))
+                        .map((w) => (
+                          <option key={w.sessionKey} value={`wa:${w.sessionKey}`}>
+                            {w.displayName || w.sessionKey}{w.lineType === "interna" ? " (interna)" : ""}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <p className="text-[10px] text-muted-foreground mt-1">Vendedor continua só com as linhas liberadas para ele. Se a pessoa trocar de canal na Central, fica a última escolha dela.</p>
+                </div>
+              )}
 
               {/* Acesso e restrições (só vendedor) */}
               {userForm.role === "vendedor" && (
