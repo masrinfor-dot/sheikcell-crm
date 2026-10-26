@@ -248,3 +248,12 @@ export const gerenteRecurrencesTable = pgTable("gerente_recurrences", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [index("gerente_recurrences_next_idx").on(t.active, t.nextAt)]);
 export type GerenteRecurrence = typeof gerenteRecurrencesTable.$inferSelect;
+
+// Categoria (projeto) da tarefa do quadro, usada pelo Gerente IA pra
+// organizar: Loja PP, Compras, Financeiro, Marketing, Sistema, Pessoal…
+export const gerenteTaskMetaTable = pgTable("gerente_task_meta", {
+  taskId: integer("task_id").primaryKey().references(() => tasksTable.id, { onDelete: "cascade" }),
+  tenantId: integer("tenant_id").notNull(),
+  category: text("category"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index("gerente_task_meta_tenant_idx").on(t.tenantId)]);

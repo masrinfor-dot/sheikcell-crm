@@ -3235,6 +3235,7 @@ export const api = {
         req<Omit<GerenteSettings, "lines"> & { warnings?: string[] }>("/gerente/settings", { method: "PATCH", body: JSON.stringify(data) }),
     },
     overview: () => req<GerenteOverview>("/gerente/overview"),
+    panelLink: () => req<{ token: string; url: string }>("/gerente/panel-link", { method: "POST" }),
     erp: {
       setKey: (key: string) => req<{ ok: boolean; message: string }>("/gerente/erp-key", { method: "PUT", body: JSON.stringify({ key }) }),
       test: () => req<{ ok: boolean; message: string }>("/gerente/erp-key/test", { method: "POST" }),

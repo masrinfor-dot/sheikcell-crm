@@ -200,7 +200,7 @@ test("painel: gasto, conta, tarefa pra equipe, consultas e desfazer", async () =
   assert.equal(bills[0]!.dueDate.slice(5), "11-10");
 
   const t = await handlePanelMessage(tenantId, "tarefa pro Nilmar: conferir estoque até sexta");
-  assert.match(t.replies[0]!, /Nilmar Souza/);
+  assert.match(t.replies[0]!, /para \*Nilmar\*/);
   const tasks = await db.select().from(tasksTable).where(eq(tasksTable.tenantId, tenantId));
   assert.equal(tasks.length, 1);
   assert.equal(tasks[0]!.title, "conferir estoque");
@@ -507,4 +507,58 @@ test("link do vendedor é só leitura; link do dono pode editar", async () => {
   const rw = (await createLink(s, "dia", null, 1)).split("/g/")[1]!;
   assert.equal((await resolveLink(ro))!.canEdit, false);
   assert.equal((await resolveLink(rw))!.canEdit, true);
+});
+
+test("tarefas v2: não duplica, vários responsáveis numa tarefa só, categoria, edição avisa quem entrou, juntar duplicadas", async () => {
+  const { createTask } = await import("./gerente.ts");
+  const { updateTask, mergeDuplicateTasks, addSubtask, toggleSubtask } = await import("./gerenteTaskOps.ts");
+  const { gerenteTaskMetaTable, taskSubtasksTable } = await import("@workspace/db");
+  const [davi] = await db.insert(usersTable).values({ tenantId, name: "Davi Teste", email: `davi-${sessionKey}@test.local`, passwordHash: "x", role: "vendedor" }).returning();
+  await db.insert(employeesTable).values({ tenantId, userId: davi!.id, name: "Davi Teste", phone: "(33) 99875-4887" });
+
+  bridgeSends.length = 0;
+  const r1 = await createTask(tenantId, { title: "Conferir estoque de capinhas", assigneeNames: ["Nilmar", "Davi"], category: "Loja PP" });
+  const taskId = r1.ref!.id;
+  const assignees = await db.select().from(taskAssigneesTable).where(eq(taskAssigneesTable.taskId, taskId));
+  assert.equal(assignees.length, 2, "uma tarefa só com os dois responsáveis");
+  assert.ok(bridgeSends.some((s) => s.to === "5533977776666"), "Nilmar recebeu");
+  assert.ok(bridgeSends.some((s) => s.to === "5533998754887"), "Davi recebeu");
+  const [meta] = await db.select().from(gerenteTaskMetaTable).where(eq(gerenteTaskMetaTable.taskId, taskId));
+  assert.equal(meta!.category, "Loja PP");
+
+  // Mesmo título com outra grafia → não cria outra.
+  const r2 = await createTask(tenantId, { title: "conferir estoque de capinha!" });
+  assert.match(r2.text, /Já existe a tarefa/);
+  assert.equal((await db.select().from(tasksTable).where(and(eq(tasksTable.tenantId, tenantId), eq(tasksTable.title, "conferir estoque de capinha!")))).length, 0);
+
+  // Edição: tira o Davi, troca prioridade/categoria; ninguém novo → sem envio.
+  bridgeSends.length = 0;
+  await updateTask(tenantId, taskId, { priority: "alta", category: "Compras", assigneeIds: [userId] });
+  const [t] = await db.select().from(tasksTable).where(eq(tasksTable.id, taskId));
+  assert.equal(t!.priority, "alta");
+  assert.equal((await db.select().from(taskAssigneesTable).where(eq(taskAssigneesTable.taskId, taskId))).length, 1);
+  assert.equal(bridgeSends.filter((s) => s.to === "5533998754887").length, 0);
+  // Davi volta → recebe a tarefa no WhatsApp.
+  await updateTask(tenantId, taskId, { assigneeIds: [userId, davi!.id] });
+  await waitFor(async () => bridgeSends.find((s) => s.to === "5533998754887"));
+
+  // Checklist.
+  await addSubtask(tenantId, taskId, "Contar Loja PP");
+  const [st] = await db.select().from(taskSubtasksTable).where(eq(taskSubtasksTable.taskId, taskId));
+  await toggleSubtask(tenantId, taskId, st!.id, true);
+  const [st2] = await db.select().from(taskSubtasksTable).where(eq(taskSubtasksTable.id, st!.id));
+  assert.equal(st2!.isDone, true);
+
+  // Duplicadas antigas (criadas direto no banco, como as de produção) são juntadas.
+  const [a] = await db.insert(tasksTable).values({ tenantId, title: "Letreiro PP" }).returning();
+  const [b] = await db.insert(tasksTable).values({ tenantId, title: "letreiro pp." }).returning();
+  await db.insert(taskAssigneesTable).values({ tenantId, taskId: b!.id, userId: davi!.id });
+  const merged = await mergeDuplicateTasks(tenantId);
+  const g = merged.find((m) => m.kept === a!.id);
+  assert.ok(g, "manteve a mais antiga");
+  assert.deepEqual(g.archived.map((x) => x.id), [b!.id]);
+  const [bb] = await db.select().from(tasksTable).where(eq(tasksTable.id, b!.id));
+  assert.equal(bb!.isArchived, true);
+  const keptAssignees = await db.select().from(taskAssigneesTable).where(eq(taskAssigneesTable.taskId, a!.id));
+  assert.ok(keptAssignees.some((x) => x.userId === davi!.id), "responsável da duplicada passa pra que ficou");
 });

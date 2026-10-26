@@ -18,7 +18,7 @@ import {
   db,
   gerenteSettingsTable, gerenteMessagesTable, gerenteEventsTable, gerenteRemindersTable,
   gerenteEntriesTable, gerenteBillsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable,
-  tasksTable, taskAssigneesTable, usersTable, storesTable, tenantsTable, whatsappSessionsTable,
+  tasksTable, taskAssigneesTable, usersTable, gerenteTaskMetaTable, storesTable, tenantsTable, whatsappSessionsTable,
   crmContactsTable, crmInternalNotesTable, conversationsTable,
   type GerenteSettings,
 } from "@workspace/db";
@@ -174,30 +174,66 @@ export async function createBill(tenantId: number, p: {
   };
 }
 
+export const TASK_CATEGORIES = ["Loja PP", "Loja SJ", "Loja SC", "Compras", "Financeiro", "Marketing", "Sistema", "Equipe/RH", "Atacado", "Pessoal"] as const;
+
+/** Título canônico pra achar duplicada: sem acento, sem pontuação, x→s, sem plural. */
+export function canonTitle(t: string): string {
+  return norm(t).replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter(Boolean)
+    .map((w) => w.replace(/x/g, "s").replace(/s$/, "")).join(" ");
+}
+
+export async function findDuplicateTask(tenantId: number, title: string): Promise<{ id: number; title: string } | null> {
+  const key = canonTitle(title);
+  if (!key) return null;
+  const open = await db.select({ id: tasksTable.id, title: tasksTable.title }).from(tasksTable)
+    .where(and(eq(tasksTable.tenantId, tenantId), eq(tasksTable.isArchived, false), ne(tasksTable.status, "done")))
+    .orderBy(asc(tasksTable.id)).limit(1000);
+  return open.find((t) => canonTitle(t.title) === key) ?? null;
+}
+
 export async function createTask(tenantId: number, p: {
-  title: string; assigneeName?: string | null; dueAt?: Date | null; priority?: "baixa" | "media" | "alta"; description?: string | null;
+  title: string; assigneeName?: string | null; assigneeNames?: string[] | null; dueAt?: Date | null;
+  priority?: "baixa" | "media" | "alta"; description?: string | null; category?: string | null;
 }): Promise<ActionResult> {
+  // Nunca cria a mesma tarefa duas vezes (a IA às vezes repete a chamada).
+  const dup = await findDuplicateTask(tenantId, p.title);
+  if (dup) return { text: `📋 Já existe a tarefa *${dup.id} — ${dup.title}* (não criei outra). Pra mudar algo: *link da tarefa ${dup.id}*.` };
+
   const users = await teamUsers(tenantId);
-  const assignee = matchUser(users, p.assigneeName);
-  const creator = await ownerUserId(tenantId);
+  const owner = await ownerUserId(tenantId);
+  const names = [...(p.assigneeNames ?? []), ...(p.assigneeName ? [p.assigneeName] : [])].map((n) => n.trim()).filter(Boolean);
+  const matched: { id: number; name: string }[] = [];
+  const notFound: string[] = [];
+  for (const n of names) {
+    const u = matchUser(users, n);
+    if (u) { if (!matched.some((m) => m.id === u.id)) matched.push(u); } else notFound.push(n);
+  }
+  // Sem responsável = tarefa do dono ("Minhas"), nunca solta no quadro.
+  const assignees = matched.length ? matched : owner ? [{ id: owner, name: users.find((u) => u.id === owner)?.name ?? "Você" }] : [];
+  const category = p.category && p.category.trim() ? p.category.trim().slice(0, 40) : null;
   const [t] = await db.insert(tasksTable).values({
     tenantId, title: p.title.slice(0, 200), description: p.description?.slice(0, 2000) ?? null,
-    priority: p.priority ?? "media", dueDate: p.dueAt ?? null, createdById: creator,
+    priority: p.priority ?? "media", dueDate: p.dueAt ?? null, createdById: owner,
   }).returning();
-  if (assignee) await db.insert(taskAssigneesTable).values({ tenantId, taskId: t!.id, userId: assignee.id });
-  const who = assignee ? `para *${assignee.name}*` : p.assigneeName ? `(não achei "${p.assigneeName}" na equipe — ficou sem responsável)` : "(sem responsável)";
-  // Com responsável: a tarefa vai pro WhatsApp dele, que confirma com foto.
+  for (const a of assignees) await db.insert(taskAssigneesTable).values({ tenantId, taskId: t!.id, userId: a.id });
+  if (category) await db.insert(gerenteTaskMetaTable).values({ taskId: t!.id, tenantId, category }).onConflictDoNothing();
+
+  const team = assignees.filter((a) => a.id !== owner);
+  const who = team.length ? `para *${team.map((a) => a.name.trim().split(" ")[0]).join(", ")}*` : "nas *suas* tarefas";
   let dispatchLine = "";
-  if (assignee) {
+  if (team.length) {
     const settings = await getGerenteSettings(tenantId);
     const { dispatchTaskToSeller } = await import("./gerenteDispatch");
-    dispatchLine = "\n" + await dispatchTaskToSeller(tenantId, {
-      taskId: t!.id, userId: assignee.id, assigneeName: assignee.name, title: t!.title,
-      dueAt: p.dueAt ?? null, priority: p.priority ?? "media", ownerSessionKey: settings.lastSessionKey,
-    });
+    for (const a of team) {
+      dispatchLine += "\n" + await dispatchTaskToSeller(tenantId, {
+        taskId: t!.id, userId: a.id, assigneeName: a.name, title: t!.title,
+        dueAt: p.dueAt ?? null, priority: p.priority ?? "media", ownerSessionKey: settings.lastSessionKey,
+      });
+    }
   }
+  const nf = notFound.length ? `\n⚠️ Não achei na equipe: ${notFound.join(", ")}.` : "";
   return {
-    text: `📋 Tarefa *${t!.id}* criada no quadro ${who}: *${t!.title}*${p.dueAt ? ` — prazo ${fmtWhen(p.dueAt)}` : ""}${p.priority === "alta" ? " · prioridade alta" : ""}.${dispatchLine}`,
+    text: `📋 Tarefa *${t!.id}* criada ${who}: *${t!.title}*${category ? ` · ${category}` : ""}${p.dueAt ? ` — prazo ${fmtWhen(p.dueAt)}` : ""}${p.priority === "alta" ? " · 🔴 prioridade alta" : ""}.${nf}${dispatchLine}`,
     ref: { table: "task", id: t!.id },
   };
 }
@@ -565,14 +601,21 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: "criar_tarefa_equipe",
-    description: "Cria uma tarefa no quadro da equipe, com responsável (nome de alguém da equipe), prazo e prioridade.",
+    description: "Cria UMA tarefa no quadro. Um assunto = uma tarefa: se várias pessoas fazem a mesma coisa, é UMA tarefa com vários responsáveis. Sem responsável = tarefa do próprio dono.",
     parameters: { type: "object", properties: {
-      titulo: { type: "string" }, responsavel: { type: "string" }, prazo: { type: "string", description: "YYYY-MM-DDTHH:mm" },
-      prioridade: { type: "string", enum: ["baixa", "media", "alta"] }, detalhes: { type: "string" },
+      titulo: { type: "string", description: "Curto e claro, começando pelo verbo (ex.: Negociar taxa com Sicoob)" },
+      responsaveis: { type: "array", items: { type: "string" }, description: "Nomes de quem da equipe vai fazer (vazio = o dono)" },
+      prazo: { type: "string", description: "YYYY-MM-DDTHH:mm — só se ele disser um prazo" },
+      prioridade: { type: "string", enum: ["baixa", "media", "alta"] },
+      categoria: { type: "string", enum: [...TASK_CATEGORIES] },
+      detalhes: { type: "string" },
     }, required: ["titulo"] },
     run: async (a, ctx) => createTask(ctx.tenantId, {
-      title: cleanTitle(str(a["titulo"], 200)), assigneeName: optStr(a["responsavel"], 80), dueAt: parseSpLocal(optStr(a["prazo"], 20)),
+      title: cleanTitle(str(a["titulo"], 200)),
+      assigneeNames: Array.isArray(a["responsaveis"]) ? (a["responsaveis"] as unknown[]).map((x) => str(x, 80)).filter(Boolean) : null,
+      assigneeName: optStr(a["responsavel"], 80), dueAt: parseSpLocal(optStr(a["prazo"], 20)),
       priority: a["prioridade"] === "alta" ? "alta" : a["prioridade"] === "baixa" ? "baixa" : "media", description: optStr(a["detalhes"], 2000),
+      category: optStr(a["categoria"], 40),
     }),
   },
   {
@@ -652,6 +695,7 @@ async function buildSystemPrompt(tenantId: number, settings: GerenteSettings): P
     `Agora é ${describeNow()} (fuso de São Paulo). Toda data/hora que você mandar nas ferramentas deve ser nesse fuso, formato YYYY-MM-DDTHH:mm. "Amanhã às 9" = o dia seguinte às 09:00. Sem hora explícita: lembrete/compromisso às 09:00; tarefa às 18:00. Nunca agende no passado — se a hora de hoje já passou, use amanhã.`,
     `Regra central: tudo que ele pede vira um registro com destino, responsável, prazo e acompanhamento. Use as ferramentas para registrar; nunca diga que registrou sem chamar a ferramenta. Uma mensagem pode ter mais de um pedido — chame uma ferramenta por pedido.`,
     `Equipe (para responsável de tarefa): ${users.length ? users.map((u) => `${u.name} (${u.role})`).join(", ") : "ninguém cadastrado"}.`,
+    `Tarefas: nunca crie a mesma tarefa duas vezes nem uma tarefa por pessoa — várias pessoas na mesma coisa = UMA tarefa com vários responsáveis. Lista de itens diferentes (ex.: "letreiro PP, uniforme, curso de IA") = uma tarefa por item. Coisa que o próprio dono vai fazer = sem responsável. Sempre escolha a categoria (${TASK_CATEGORIES.join(", ")}). Prioridade alta só se ele disser urgente/hoje/importante. Não invente prazo.`,
     `Lojas: ${stores.length ? stores.map((s) => s.name).join(", ") : "sem cadastro"}. Âmbito "pessoal" só quando ele deixar claro que é da vida pessoal; o padrão é "empresa".`,
     `Valores em reais (ex.: "1.250,50" = 1250.50). Quando algo essencial faltar (valor, horário de lembrete/compromisso), pergunte de forma curta em vez de chutar.`,
     `Se ele corrigir algo recém-registrado ("era 60, não 50"), use desfazer_ultimo e registre de novo com o dado certo. Quando ele perguntar algo, use consultar ou buscar_cliente. Respostas curtas, em português do Brasil, sem formalidade excessiva. Não invente informações.`,
@@ -694,9 +738,15 @@ async function runAi(tenantId: number, phone: string, settings: GerenteSettings,
   const replies: string[] = [];
   const refs: MsgRef[] = [];
   const intents: string[] = [];
+  const seenCalls = new Set<string>();
   for (const call of calls) {
     const tool = TOOLS.find((t) => t.name === call.function.name);
     if (!tool) continue;
+    // A IA às vezes repete a mesma chamada na mesma resposta (tarefa duplicada).
+    let callKey = `${call.function.name}:${call.function.arguments ?? ""}`;
+    try { const pa = JSON.parse(call.function.arguments || "{}") as Record<string, unknown>; if (typeof pa["titulo"] === "string") callKey = `${call.function.name}:${canonTitle(pa["titulo"] as string)}`; } catch { /* usa o texto cru */ }
+    if (seenCalls.has(callKey)) continue;
+    seenCalls.add(callKey);
     intents.push(tool.name);
     let args: Record<string, unknown> = {};
     try { args = call.function.arguments ? (JSON.parse(call.function.arguments) as Record<string, unknown>) : {}; } catch { args = {}; }
