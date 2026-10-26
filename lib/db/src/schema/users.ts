@@ -129,6 +129,12 @@ export const usersTable = pgTable("users", {
   // Um array restringe esse membro da equipe aos escopos ali listados (ver
   // SUPERADMIN_SCOPES acima). Ignorado para qualquer outra role.
   superadminScopes: jsonb("superadmin_scopes").$type<SuperadminScope[] | null>(),
+  // Atendimento por canais (26/10/2026): canal em que a Central abre para a
+  // pessoa (escolhido pelo admin no cadastro) e o último canal escolhido na
+  // barra de canais (lembrado; vale antes do padrão). Valores: "todos",
+  // "instagram" ou "wa:<session_key>". null = sem escolha.
+  defaultChannel: text("default_channel"),
+  preferredChannel: text("preferred_channel"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });

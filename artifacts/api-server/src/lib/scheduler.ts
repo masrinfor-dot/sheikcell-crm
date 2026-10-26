@@ -277,6 +277,11 @@ export async function sendSurveyReminders(): Promise<void> {
 
 export function startScheduler(): void {
   setInterval(() => { void deliverScheduledMessages(); }, 30_000);
+  // "Retomar depois" da Central (26/10/2026): no horário, a conversa volta
+  // para "Responder agora" e o responsável recebe o aviso no sino.
+  setInterval(() => {
+    void import("./snoozeReminders").then((m) => m.runSnoozeReminders()).catch(() => {});
+  }, 30_000);
   // Mensagens das OS do ERP Prumo (06/10/2026): busca a fila do ERP a cada
   // minuto, manda pelo WhatsApp e abre o atendimento (ver erpOsMessages.ts).
   setInterval(() => {

@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { createReadStream, existsSync, statSync } from "fs";
 import path from "path";
-import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, messagePinsTable, attendanceLogsTable, attendanceStartEventsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, chatSavedFiltersTable, whatsappSessionsTable, whatsappContactsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, taskAssigneesTable, crmPurchasesTable, appSettingsTable, tradeInEvaluationsTable, timeClockEntriesTable, sensitiveActionLogTable, broadcastDispatchLogTable } from "@workspace/db";
+import { db, chatNotificationsTable, conversationsTable, messagesTable, sectorsTable, usersTable, conversationParticipantsTable, conversationPinsTable, messagePinsTable, attendanceLogsTable, attendanceStartEventsTable, crmContactsTable, crmCustomFieldsTable, chatLabelsTable, chatSavedFiltersTable, whatsappSessionsTable, whatsappContactsTable, quickRepliesTable, scheduledMessagesTable, tasksTable, taskAssigneesTable, crmPurchasesTable, appSettingsTable, tenantInstagramIntegrationsTable, tradeInEvaluationsTable, timeClockEntriesTable, sensitiveActionLogTable, broadcastDispatchLogTable } from "@workspace/db";
 import { eq, desc, and, or, lt, gte, ilike, sql, inArray, notInArray, isNull, asc } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { requireAuth, requireAdminOrSupervisor, tenantIdOf, requireTenant, isTenantSuspended } from "../middlewares/auth";
@@ -40,6 +40,10 @@ import {
 } from "../lib/whatsappInbound";
 import { processWAHistoryArchived, processWAHistoryBatch, type WAHistoryArchivedPayload, type WAHistoryPayload } from "../lib/whatsappHistory";
 import { AVATAR_DIR } from "../lib/waProfile";
+import {
+  channelCondition, channelFilterFromQuery, isLineType, parseChannelId, validSnoozeUntil,
+  SQL_ACTIVE, SQL_AGUARDANDO, SQL_NEEDS_REPLY, SQL_RESPONDER, SQL_WAITING_SINCE,
+} from "../lib/attendanceState";
 
 const router: IRouter = Router();
 
@@ -431,6 +435,27 @@ async function buildConversationVisibilityConditions(
   return conditions;
 }
 
+// Linhas "internas" da loja (Compras, ADM, fornecedores — tipo da linha em
+// Administração › WhatsApp): ficam fora do "Todos" quando a tela pede
+// (excludeInternal=1), do alarme de atraso e dos indicadores do painel.
+async function internalSessionKeys(tenantId: number): Promise<string[]> {
+  const rows = await db.select({ key: whatsappSessionsTable.sessionKey }).from(whatsappSessionsTable)
+    .where(and(eq(whatsappSessionsTable.tenantId, tenantId), eq(whatsappSessionsTable.lineType, "interna")));
+  return rows.map((r) => r.key);
+}
+
+// Filtro de canal (barra de canais da Central, 26/10/2026): sessionKey=<linha>,
+// channel=instagram ou excludeInternal=1 ("Todos" sem as linhas internas).
+// Feito no banco — antes o filtro "Número" era só na tela, em cima do lote
+// carregado, e os contadores não batiam.
+async function pushChannelCondition(conditions: unknown[], req: Request, tenantId: number): Promise<void> {
+  const q = req.query as Record<string, unknown>;
+  const needsInternal = q["excludeInternal"] === "1" || q["excludeInternal"] === "true";
+  const f = channelFilterFromQuery(q, needsInternal ? await internalSessionKeys(tenantId) : []);
+  const cond = channelCondition(f);
+  if (cond) conditions.push(cond);
+}
+
 router.get("/chat/conversations", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const { search, label, status, sectorId, assigneeId } = req.query as Record<string, string | undefined>;
@@ -439,6 +464,7 @@ router.get("/chat/conversations", requireAuth, requireChatAccess(), async (req, 
     sectorId: sectorId ? Number(sectorId) : undefined,
     assigneeId: assigneeId ? Number(assigneeId) : undefined,
   });
+  await pushChannelCondition(conditions, req, tenantId);
 
   if (status) conditions.push(eq(conversationsTable.status, status));
   if (search) {
@@ -475,7 +501,10 @@ router.get("/chat/conversations", requireAuth, requireChatAccess(), async (req, 
       .limit(100);
   } else {
     const categoryPredicates = [
-      and(sql`${conversationsTable.assigneeId} IS NOT NULL`, notInArray(conversationsTable.status, ["resolved", "archived"]))!, // ativos
+      // ativos, em duas metades (26/10/2026) pra "Responder agora" nunca
+      // ficar de fora do lote por causa de muita conversa "Aguardando cliente".
+      SQL_RESPONDER,
+      SQL_AGUARDANDO,
       and(isNull(conversationsTable.assigneeId), eq(conversationsTable.status, "pending"))!, // pendentes
       and(isNull(conversationsTable.assigneeId), notInArray(conversationsTable.status, ["pending", "resolved", "archived"]))!, // potenciais
       inArray(conversationsTable.status, ["resolved", "archived"]), // resolvidas
@@ -667,6 +696,7 @@ router.get("/chat/conversations/counts", requireAuth, requireChatAccess(), async
     sectorId: sectorId ? Number(sectorId) : undefined,
     assigneeId: assigneeId ? Number(assigneeId) : undefined,
   });
+  await pushChannelCondition(conditions, req, tenantId);
   if (search) {
     conditions.push(or(
       ilike(conversationsTable.name, `%${search}%`),
@@ -684,6 +714,9 @@ router.get("/chat/conversations/counts", requireAuth, requireChatAccess(), async
       // isArchived já é sempre false aqui (condição de base), então "resolvidas"
       // se reduz a checar o status.
       ativos: sql<string>`count(*) filter (where ${conversationsTable.assigneeId} is not null and ${conversationsTable.status} not in ('resolved', 'archived'))`,
+      // "Ativos" dividido (26/10/2026): a vez é nossa x esperando o cliente.
+      responder: sql<string>`count(*) filter (where ${SQL_RESPONDER})`,
+      aguardando: sql<string>`count(*) filter (where ${SQL_AGUARDANDO})`,
       pendentes: sql<string>`count(*) filter (where ${conversationsTable.assigneeId} is null and ${conversationsTable.status} = 'pending')`,
       potenciais: sql<string>`count(*) filter (where ${conversationsTable.assigneeId} is null and ${conversationsTable.status} not in ('pending', 'resolved', 'archived'))`,
       resolvidas: sql<string>`count(*) filter (where ${conversationsTable.status} in ('resolved', 'archived'))`,
@@ -698,6 +731,8 @@ router.get("/chat/conversations/counts", requireAuth, requireChatAccess(), async
 
   res.json({
     ativos: Number(row?.ativos ?? 0),
+    responder: Number(row?.responder ?? 0),
+    aguardando: Number(row?.aguardando ?? 0),
     pendentes: Number(row?.pendentes ?? 0),
     potenciais: Number(row?.potenciais ?? 0),
     resolvidas: Number(row?.resolvidas ?? 0),
@@ -742,6 +777,255 @@ router.get("/chat/conversations/counts-by-session", requireAuth, requireChatAcce
     ativos: Number(r.ativos),
     naFila: Number(r.naFila),
   })));
+});
+
+// ─── Atendimento por canais (pedido do Samuel, 26/10/2026) ─────────────────
+// "preciso separar os atendimentos por canais de atendimento diferentes, pois
+// mistura todos os números conectados". Barra de canais na Central (Todos +
+// uma por linha de WhatsApp + Instagram), cada uma com quantos clientes
+// esperam resposta; painel do administrador por canal; "Não precisa
+// responder" e "Retomar depois". Regras em lib/attendanceState.ts.
+
+async function alertMinutesFor(tenantId: number): Promise<{ enabled: boolean; minutes: number }> {
+  const rows = await db.select({ key: appSettingsTable.key, value: appSettingsTable.value }).from(appSettingsTable)
+    .where(and(eq(appSettingsTable.tenantId, tenantId), inArray(appSettingsTable.key, ["alert_unanswered_enabled", "alert_unanswered_minutes"])));
+  const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  return {
+    enabled: (map["alert_unanswered_enabled"] ?? "true") === "true",
+    minutes: Math.max(1, parseInt(map["alert_unanswered_minutes"] ?? "5", 10) || 5),
+  };
+}
+
+const CHANNEL_KEY_SQL = sql<string>`(CASE WHEN ${conversationsTable.channel} = 'instagram' THEN 'instagram' ELSE 'wa:' || ${conversationsTable.sessionKey} END)`;
+
+router.get("/chat/channels/overview", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const role = req.session.userRole!;
+  const isManager = role === "admin" || role === "supervisor" || role === "vendedor_chefe" || role === "superadmin";
+  const alert = await alertMinutesFor(tenantId);
+  const lateCut = sql`now() - make_interval(mins => ${alert.minutes})`;
+
+  const conditions = await buildConversationVisibilityConditions(req, tenantId, {});
+  conditions.push(notInArray(conversationsTable.status, ["resolved", "archived"]));
+
+  const rows = await db.select({
+    ch: CHANNEL_KEY_SQL,
+    responder: sql<string>`count(*) filter (where ${SQL_RESPONDER})`,
+    atrasados: sql<string>`count(*) filter (where ${SQL_RESPONDER} and ${SQL_WAITING_SINCE} <= ${lateCut})`,
+    maiorEsperaMin: sql<string | null>`floor(max(extract(epoch from (now() - ${SQL_WAITING_SINCE})) / 60) filter (where ${SQL_RESPONDER}))`,
+    fila: sql<string>`count(*) filter (where ${conversationsTable.assigneeId} is null)`,
+    filaEsperando: sql<string>`count(*) filter (where ${conversationsTable.assigneeId} is null and ${SQL_NEEDS_REPLY})`,
+    aguardando: sql<string>`count(*) filter (where ${SQL_AGUARDANDO})`,
+    sellerIds: sql<number[] | null>`array_agg(distinct ${conversationsTable.assigneeId}) filter (where ${SQL_ACTIVE})`,
+  }).from(conversationsTable).where(and(...conditions)).groupBy(CHANNEL_KEY_SQL);
+  const byCh = new Map(rows.map((r) => [r.ch, r]));
+
+  const lines = await db.select({
+    sessionKey: whatsappSessionsTable.sessionKey,
+    displayName: whatsappSessionsTable.displayName,
+    phoneNumber: whatsappSessionsTable.phoneNumber,
+    color: whatsappSessionsTable.color,
+    icon: whatsappSessionsTable.icon,
+    lineType: whatsappSessionsTable.lineType,
+    alertsEnabled: whatsappSessionsTable.alertsEnabled,
+  }).from(whatsappSessionsTable).where(eq(whatsappSessionsTable.tenantId, tenantId)).orderBy(whatsappSessionsTable.id);
+
+  const allowed = await getCurrentAllowedSessionKeys(req);
+  const [ig] = await db.select({ enabled: tenantInstagramIntegrationsTable.enabled, username: tenantInstagramIntegrationsTable.username })
+    .from(tenantInstagramIntegrationsTable).where(eq(tenantInstagramIntegrationsTable.tenantId, tenantId)).limit(1);
+  const hasInstagram = (ig?.enabled === true || byCh.has("instagram")) && (allowed == null || allowed.includes("instagram"));
+
+  const users = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable).where(eq(usersTable.tenantId, tenantId));
+  const userName = new Map(users.map((u) => [u.id, u.name]));
+
+  type Ch = {
+    id: string; sessionKey: string | null; label: string; color: string; icon: string | null;
+    lineType: "varejo" | "atacado" | "interna"; internal: boolean; alertsEnabled: boolean;
+    responder: number; atrasados: number; maiorEsperaMin: number | null; fila: number; filaEsperando: number;
+    aguardando: number; sellers: string[];
+  };
+  const metrics = (id: string) => {
+    const r = byCh.get(id);
+    return {
+      responder: Number(r?.responder ?? 0),
+      atrasados: Number(r?.atrasados ?? 0),
+      maiorEsperaMin: r?.maiorEsperaMin != null ? Number(r.maiorEsperaMin) : null,
+      fila: Number(r?.fila ?? 0),
+      filaEsperando: Number(r?.filaEsperando ?? 0),
+      aguardando: Number(r?.aguardando ?? 0),
+      sellers: (r?.sellerIds ?? []).filter((x): x is number => x != null).map((x) => userName.get(x) ?? `#${x}`).sort((a, b) => a.localeCompare(b, "pt-BR")),
+    };
+  };
+  const channels: Ch[] = [];
+  const seen = new Set<string>();
+  for (const l of lines) {
+    if (allowed != null && !allowed.includes(l.sessionKey)) continue;
+    const id = `wa:${l.sessionKey}`;
+    seen.add(id);
+    const lineType = isLineType(l.lineType) ? l.lineType : "varejo";
+    channels.push({
+      id, sessionKey: l.sessionKey,
+      label: l.displayName || (l.phoneNumber ? l.phoneNumber.replace(/@.*$/, "") : l.sessionKey === "default" ? "Principal" : l.sessionKey),
+      color: l.color, icon: l.icon, lineType, internal: lineType === "interna", alertsEnabled: l.alertsEnabled,
+      ...metrics(id),
+    });
+  }
+  // Conversas de uma linha que não tem mais cadastro (ex.: "default" antiga):
+  // aparecem como canal próprio pra nada sumir da conta.
+  for (const r of rows) {
+    if (r.ch === "instagram" || seen.has(r.ch)) continue;
+    const key = r.ch.slice(3);
+    if (allowed != null && !allowed.includes(key)) continue;
+    seen.add(r.ch);
+    channels.push({
+      id: r.ch, sessionKey: key, label: key === "default" ? "Principal" : key, color: "#10b981", icon: null,
+      lineType: "varejo", internal: false, alertsEnabled: true, ...metrics(r.ch),
+    });
+  }
+  if (hasInstagram) {
+    channels.push({
+      id: "instagram", sessionKey: null, label: ig?.username ? `Instagram @${ig.username}` : "Instagram",
+      color: "#c026d3", icon: null, lineType: "varejo", internal: false, alertsEnabled: true, ...metrics("instagram"),
+    });
+  }
+
+  const clientChannels = channels.filter((ch) => !ch.internal);
+  const sum = (k: "responder" | "atrasados" | "fila") => clientChannels.reduce((n, ch) => n + ch[k], 0);
+  const internalKeys = channels.filter((ch) => ch.internal && ch.sessionKey).map((ch) => ch.sessionKey!);
+
+  // Vendedores com conversas paradas (mais que o limite do alerta) e 1ª
+  // resposta média de hoje: só pra quem gerencia (admin/supervisor/chefe).
+  let stuck: { userId: number; name: string; count: number; maiorEsperaMin: number; channels: string[] }[] = [];
+  let firstResponse: { avgSeconds: number | null; count: number } | null = null;
+  if (isManager) {
+    const notInternal = internalKeys.length
+      ? sql`(${conversationsTable.channel} = 'instagram' OR ${conversationsTable.sessionKey} NOT IN (${sql.join(internalKeys.map((k) => sql`${k}`), sql`, `)}))`
+      : sql`TRUE`;
+    const stuckRows = await db.select({
+      userId: conversationsTable.assigneeId,
+      count: sql<string>`count(*)`,
+      maiorEsperaMin: sql<string>`floor(max(extract(epoch from (now() - ${SQL_WAITING_SINCE}))) / 60)`,
+      chs: sql<string[]>`array_agg(distinct ${CHANNEL_KEY_SQL})`,
+    }).from(conversationsTable)
+      .where(and(...conditions, SQL_RESPONDER, sql`${SQL_WAITING_SINCE} <= ${lateCut}`, notInternal, sql`${conversationsTable.phone} NOT LIKE '%@g.us'`))
+      .groupBy(conversationsTable.assigneeId)
+      .orderBy(sql`count(*) desc`);
+    stuck = stuckRows.filter((r) => r.userId != null).map((r) => ({
+      userId: r.userId!, name: userName.get(r.userId!) ?? `#${r.userId}`, count: Number(r.count),
+      maiorEsperaMin: Number(r.maiorEsperaMin), channels: r.chs ?? [],
+    }));
+
+    // 1ª resposta: média do tempo até a primeira mensagem do vendedor nos
+    // atendimentos FINALIZADOS hoje (attendance_logs.first_response_seconds,
+    // gravado ao finalizar). Linhas internas ficam de fora.
+    const fr = await db.select({
+      avg: sql<string | null>`round(avg(${attendanceLogsTable.firstResponseSeconds}))`,
+      n: sql<string>`count(${attendanceLogsTable.firstResponseSeconds})`,
+    }).from(attendanceLogsTable)
+      .leftJoin(conversationsTable, eq(conversationsTable.id, attendanceLogsTable.conversationId))
+      .where(and(
+        eq(attendanceLogsTable.tenantId, tenantId),
+        sql`${attendanceLogsTable.createdAt} >= (date_trunc('day', now() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')`,
+        sql`(${conversationsTable.id} IS NULL OR ${notInternal})`,
+      ));
+    firstResponse = { avgSeconds: fr[0]?.avg != null ? Number(fr[0].avg) : null, count: Number(fr[0]?.n ?? 0) };
+  }
+
+  res.json({
+    alertEnabled: alert.enabled,
+    alertMinutes: alert.minutes,
+    channels,
+    totals: { responder: sum("responder"), atrasados: sum("atrasados"), fila: sum("fila") },
+    stuck,
+    firstResponse,
+    updatedAt: new Date().toISOString(),
+  });
+});
+
+// Canal em que a Central abre: o último escolhido na barra (lembrado) ou, sem
+// escolha salva, o padrão definido pelo admin no cadastro da pessoa.
+router.get("/chat/channel-preference", requireAuth, async (req, res): Promise<void> => {
+  const [me] = await db.select({ preferredChannel: usersTable.preferredChannel, defaultChannel: usersTable.defaultChannel })
+    .from(usersTable).where(eq(usersTable.id, req.session.userId!)).limit(1);
+  res.json({
+    channel: me?.preferredChannel ?? me?.defaultChannel ?? "todos",
+    preferredChannel: me?.preferredChannel ?? null,
+    defaultChannel: me?.defaultChannel ?? null,
+  });
+});
+
+router.put("/chat/channel-preference", requireAuth, async (req, res): Promise<void> => {
+  const channel = parseChannelId((req.body as { channel?: unknown } | undefined)?.channel);
+  if (!channel) { res.status(400).json({ error: "Canal inválido" }); return; }
+  await db.update(usersTable).set({ preferredChannel: channel }).where(eq(usersTable.id, req.session.userId!));
+  res.json({ ok: true, channel });
+});
+
+async function loadConvForStateChange(req: Request, res: Response): Promise<{ tenantId: number; conv: typeof conversationsTable.$inferSelect } | null> {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return null;
+  const id = parseInt(String(req.params.id), 10);
+  if (!Number.isInteger(id)) { res.status(400).json({ error: "Conversa inválida" }); return null; }
+  const [conv] = await db.select().from(conversationsTable)
+    .where(and(eq(conversationsTable.id, id), eq(conversationsTable.tenantId, tenantId))).limit(1);
+  if (!conv) { res.status(404).json({ error: "Conversa não encontrada" }); return null; }
+  if (!(await canAccessConversation(conv, req))) { res.status(403).json({ error: "Acesso negado" }); return null; }
+  if (conv.isArchived || conv.status === "resolved" || conv.status === "archived") {
+    res.status(400).json({ error: "Atendimento já finalizado" }); return null;
+  }
+  return { tenantId, conv };
+}
+
+async function broadcastConvUpdated(conv: typeof conversationsTable.$inferSelect): Promise<void> {
+  broadcast("conversation_updated", conv, {
+    tenantId: conv.tenantId, sectorId: conv.sectorId, sessionKey: conv.sessionKey,
+    isPotential: isPotentialConversation(conv), restrictedTo: await restrictedRecipients(conv),
+  });
+}
+
+// "Não precisa responder": vai para "Aguardando cliente" sem mandar nada ao
+// cliente; volta sozinha para "Responder agora" quando o cliente escrever.
+router.post("/chat/conversations/:id/no-reply", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const loaded = await loadConvForStateChange(req, res); if (!loaded) return;
+  const { tenantId, conv } = loaded;
+  const now = new Date();
+  const [updated] = await db.update(conversationsTable).set({
+    replyDismissedAt: now, replyDismissedBy: req.session.userId!,
+    snoozeUntil: null, snoozeSetAt: null, snoozedBy: null, snoozeNotifiedAt: null,
+    unreadCount: 0, updatedAt: now,
+  }).where(eq(conversationsTable.id, conv.id)).returning();
+  await broadcastConvUpdated(updated!);
+  void logSensitiveAction(req, tenantId, "nao_precisa_responder",
+    `Marcou "Não precisa responder" em ${conv.name}`, { conversationId: conv.id });
+  res.json(updated);
+});
+
+// "Retomar depois": fica em "Aguardando cliente" até o horário escolhido; no
+// horário volta para "Responder agora" e o responsável recebe aviso
+// (lib/snoozeReminders.ts). Mensagem do cliente antes disso cancela.
+router.post("/chat/conversations/:id/snooze", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const loaded = await loadConvForStateChange(req, res); if (!loaded) return;
+  const { tenantId, conv } = loaded;
+  const now = new Date();
+  const until = validSnoozeUntil((req.body as { until?: unknown } | undefined)?.until, now.getTime());
+  if (!until) { res.status(400).json({ error: "Escolha um horário no futuro (até 60 dias)." }); return; }
+  const [updated] = await db.update(conversationsTable).set({
+    snoozeUntil: until, snoozeSetAt: now, snoozedBy: req.session.userId!, snoozeNotifiedAt: null,
+    replyDismissedAt: null, replyDismissedBy: null, unreadCount: 0, updatedAt: now,
+  }).where(eq(conversationsTable.id, conv.id)).returning();
+  await broadcastConvUpdated(updated!);
+  void logSensitiveAction(req, tenantId, "retomar_depois",
+    `Marcou "Retomar depois" em ${conv.name} para ${until.toISOString()}`, { conversationId: conv.id, metadata: { until: until.toISOString() } });
+  res.json(updated);
+});
+
+router.delete("/chat/conversations/:id/snooze", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const loaded = await loadConvForStateChange(req, res); if (!loaded) return;
+  const { conv } = loaded;
+  const [updated] = await db.update(conversationsTable).set({
+    snoozeUntil: null, snoozeSetAt: null, snoozedBy: null, snoozeNotifiedAt: null, updatedAt: new Date(),
+  }).where(eq(conversationsTable.id, conv.id)).returning();
+  await broadcastConvUpdated(updated!);
+  res.json(updated);
 });
 
 // ─── Conversa pelo telefone (22/10/2026) ─────────────────────────────────
@@ -2350,11 +2634,17 @@ router.get("/chat/wa-sessions", requireAuth, async (req, res): Promise<void> => 
       phoneNumber: whatsappSessionsTable.phoneNumber,
       color: whatsappSessionsTable.color,
       icon: whatsappSessionsTable.icon,
+      // Atendimento por canais (26/10/2026): tipo da linha e som/alarme.
+      lineType: whatsappSessionsTable.lineType,
+      alertsEnabled: whatsappSessionsTable.alertsEnabled,
     })
     .from(whatsappSessionsTable)
     .where(eq(whatsappSessionsTable.tenantId, tenantId))
     .orderBy(whatsappSessionsTable.id);
-  res.json(rows);
+  // allowed: se a pessoa pode abrir este canal na barra da Central
+  // (vendedor restrito a linhas só vê as liberadas).
+  const allowedKeys = await getCurrentAllowedSessionKeys(req);
+  res.json(rows.map((r) => ({ ...r, allowed: allowedKeys == null || allowedKeys.includes(r.sessionKey) })));
 });
 
 // ─── Excluir atendimento (admin ou supervisor) ─────────────────────────────
