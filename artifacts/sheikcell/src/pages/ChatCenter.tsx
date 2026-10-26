@@ -303,16 +303,6 @@ function fmtShortDate(iso: string): string {
   return new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" }).replace(".", "");
 }
 
-// Etapas do atendimento mostradas na faixa abaixo do cabeçalho da conversa
-// (novo design). Espelham as abas da lista — é a jornada real que o sistema
-// já controla (Potencial → fila → atendimento → finalizado).
-const ATTENDANCE_STEPS: { id: Category; label: string }[] = [
-  { id: "potenciais", label: "Potencial" },
-  { id: "pendentes", label: "Na fila" },
-  { id: "ativos", label: "Em atendimento" },
-  { id: "resolvidas", label: "Finalizado" },
-];
-
 // Tempo que o cliente está esperando resposta, em texto curto
 // ("7 min", "2 h", "3 d"). Usado nos chips "aguardando"/"atrasado".
 function waitLabel(minutes: number): string {
@@ -4885,16 +4875,51 @@ export default function ChatCenter({
                     Resp. {activeConv.assignee.name}
                   </span>
                 )}
+                {infoContact?.profile && !isGroupConv(activeConv) && (
+                  <span className="shk-chip shk-chip-primary" title="Nível do cliente no CRM">{infoContact.profile}</span>
+                )}
                 {/* Data e hora de início do atendimento (quando foi assumido) */}
                 {activeConv.attendanceStartedAt && (
-                  <span className="hidden sm:inline-flex items-center gap-1 h-[22px] px-2 rounded-md text-[11px] font-bold whitespace-nowrap bg-transparent text-muted-foreground font-semibold" title="Início do atendimento" data-testid="text-attendance-started">
+                  <span className="hidden xl:inline-flex items-center gap-1 text-[11px] text-muted-foreground whitespace-nowrap" title="Início do atendimento" data-testid="text-attendance-started">
                     <CalendarClock className="w-3 h-3" />
-                    Início: {new Date(activeConv.attendanceStartedAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                    {new Date(activeConv.attendanceStartedAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
                   </span>
                 )}
               </div>
             </div>
             <div className="flex items-center gap-1.5 flex-wrap justify-end max-w-full shrink-0" ref={headerPickersRef}>
+              {/* Responder agora x Aguardando cliente (26/10/2026), compacto no
+                  cabeçalho: situação + "Não precisa responder" + "Retomar depois". */}
+              {activeCategory === "ativos" && (
+                <>
+                  <span className={`hidden lg:inline text-xs font-semibold mr-1 ${needsReply(activeConv, nowTick) ? "text-red-700" : "text-green-700"}`} data-testid="reply-state">
+                    {needsReply(activeConv, nowTick) ? "Responder agora" : "Aguardando cliente"}
+                  </span>
+                  {snoozePending(activeConv, nowTick) && (
+                    <span className="shk-chip bg-blue-50 text-blue-900 border border-blue-200" data-testid="chip-header-snooze">
+                      <CalendarClock className="w-3 h-3" />retomar {snoozeLabel(activeConv.snoozeUntil, nowTick)}
+                      <button type="button" onClick={() => void handleCancelSnooze(activeConv)} disabled={replyActionBusy}
+                        className="ml-1 underline font-semibold" data-testid="button-cancel-snooze">cancelar</button>
+                    </span>
+                  )}
+                  {needsReply(activeConv, nowTick) && (
+                    <button type="button" onClick={() => void handleNoReply(activeConv)} disabled={replyActionBusy}
+                      data-testid="button-no-reply"
+                      aria-label="Não precisa responder"
+                      title="Não precisa responder: vai para Aguardando cliente sem mandar mensagem. Se o cliente escrever, volta sozinha."
+                      className="inline-flex shk-icon-btn disabled:opacity-50">
+                      <CheckCheck className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                  <button type="button" onClick={() => setShowSnooze((v) => !v)} aria-expanded={showSnooze}
+                    data-testid="button-snooze"
+                    aria-label="Retomar depois"
+                    title="Retomar depois"
+                    className={`inline-flex shk-icon-btn ${showSnooze ? "!bg-blue-50 !text-blue-900" : ""}`}>
+                    <Clock className="w-3.5 h-3.5" />
+                  </button>
+                </>
+              )}
               {/* Busca de texto DENTRO desta conversa — diferente da busca da
                   lista de conversas (que filtra por nome/número). */}
               <button
@@ -5252,45 +5277,11 @@ export default function ChatCenter({
             </div>
           </div>
 
-          {/* Responder agora x Aguardando cliente (atendimento por canais,
-              26/10/2026): "Não precisa responder" e "Retomar depois" — só em
-              atendimento com responsável. */}
+          {/* Painel "Retomar depois" (só aparece quando aberto pelo botão do cabeçalho). */}
           {activeCategory === "ativos" && (
-            <div className="bg-white border-b border-border px-3 md:px-5 py-2" data-testid="reply-actions">
-              <div className="flex flex-wrap items-center gap-2">
-                {showChannelBar && (
-                  <span className="shk-chip shk-chip-outline" title="Linha por onde saem as respostas">
-                    <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: channelColorOf(activeConv) ?? WA_SESSION_DEFAULT_COLOR }} />
-                    Linha: {activeConv.channel === "instagram" ? "Instagram" : waSessionLabel(activeConv.sessionKey, waSessions)}
-                  </span>
-                )}
-                <span className={`text-xs font-semibold ${needsReply(activeConv, nowTick) ? "text-red-700" : "text-green-700"}`} data-testid="reply-state">
-                  {needsReply(activeConv, nowTick) ? "Responder agora" : "Aguardando cliente"}
-                </span>
-                {snoozePending(activeConv, nowTick) && (
-                  <span className="shk-chip bg-blue-50 text-blue-900 border border-blue-200" data-testid="chip-header-snooze">
-                    <CalendarClock className="w-3 h-3" />retomar {snoozeLabel(activeConv.snoozeUntil, nowTick)}
-                    <button type="button" onClick={() => void handleCancelSnooze(activeConv)} disabled={replyActionBusy}
-                      className="ml-1 underline font-semibold" data-testid="button-cancel-snooze">cancelar</button>
-                  </span>
-                )}
-                <span className="flex-1" />
-                {needsReply(activeConv, nowTick) && (
-                  <button type="button" onClick={() => void handleNoReply(activeConv)} disabled={replyActionBusy}
-                    data-testid="button-no-reply"
-                    title="Move para Aguardando cliente sem mandar mensagem. Se o cliente escrever, volta sozinha."
-                    className="inline-flex items-center h-9 px-3 rounded-lg border border-[#D4D4D8] bg-white text-xs font-semibold text-[#27272A] hover:bg-[#F7F7F8] disabled:opacity-50">
-                    Não precisa responder
-                  </button>
-                )}
-                <button type="button" onClick={() => setShowSnooze((v) => !v)} aria-expanded={showSnooze}
-                  data-testid="button-snooze"
-                  className={`inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border text-xs font-semibold ${showSnooze ? "border-blue-300 bg-blue-50 text-blue-900" : "border-[#D4D4D8] bg-white text-[#27272A] hover:bg-[#F7F7F8]"}`}>
-                  <Clock className="w-3.5 h-3.5" />Retomar depois
-                </button>
-              </div>
+            <>
               {showSnooze && (
-                <div className="mt-2 p-3 rounded-xl border border-border bg-[#FAFAFA] flex flex-wrap items-center gap-2" data-testid="snooze-panel">
+                <div className="mx-3 md:mx-5 my-2 p-3 rounded-xl border border-border bg-[#FAFAFA] flex flex-wrap items-center gap-2" data-testid="snooze-panel">
                   <span className="text-xs text-[#3F3F46] mr-1">Voltar a falar com o cliente:</span>
                   {snoozeOptions(nowTick).map((o) => (
                     <button key={o.label} type="button" disabled={replyActionBusy}
@@ -5318,41 +5309,8 @@ export default function ChatCenter({
                   <span className="basis-full text-[11px] text-muted-foreground">No horário, a conversa volta sozinha para "Responder agora" com um aviso. Se o cliente escrever antes, ela sobe na hora.</span>
                 </div>
               )}
-            </div>
+            </>
           )}
-
-          {/* Etapa do atendimento (novo design): faixa só de leitura com a
-              jornada real da conversa — as ações continuam nos botões acima. */}
-          {(() => {
-            const cur = conversationCategory(activeConv);
-            const idx = ATTENDANCE_STEPS.findIndex((st) => st.id === cur);
-            return (
-              <div className="bg-white border-b border-border px-3 md:px-5 py-2 hidden md:flex items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&>*]:shrink-0" data-testid="attendance-steps">
-                <span className="text-[11px] font-extrabold uppercase tracking-wider text-muted-foreground mr-1.5">Etapa</span>
-                {ATTENDANCE_STEPS.map((st, i) => (
-                  <Fragment key={st.id}>
-                    {i > 0 && <span className={`w-5 h-px ${i <= idx ? "bg-[#A1A1AA]" : "bg-[#E4E4E7]"}`} />}
-                    <span
-                      aria-current={i === idx ? "step" : undefined}
-                      className={`inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-xs font-semibold ${
-                        i === idx ? "bg-foreground text-white"
-                          : i < idx ? "text-[#52525B]"
-                          : "text-[#A1A1AA]"
-                      }`}
-                    >
-                      {i < idx && <Check className="w-3 h-3" />}
-                      {st.label}
-                    </span>
-                  </Fragment>
-                ))}
-                {infoContact?.profile && !isGroupConv(activeConv) && (
-                  <span className="ml-auto pl-3 inline-flex items-center gap-1 text-xs text-muted-foreground">
-                    Cliente <span className="shk-chip shk-chip-primary">{infoContact.profile}</span>
-                  </span>
-                )}
-              </div>
-            );
-          })()}
 
           {/* Label chips */}
           {currentLabels.length > 0 && (
