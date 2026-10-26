@@ -92,6 +92,14 @@ router.patch("/gerente/settings", async (req, res): Promise<void> => {
   res.json({ ...safe, erpAgentKeySet: !!_c, warnings });
 });
 
+// Aba "Tarefas" do painel: usa o mesmo gerenciador do link do celular.
+router.post("/gerente/panel-link", async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { createLink } = await import("../lib/gerenteExtras");
+  const url = await createLink(await getGerenteSettings(tenantId), "dia", null, 1, true);
+  res.json({ token: url.split("/g/")[1], url });
+});
+
 // ─── ERP (linha ADM) ─────────────────────────────────────────────────────────
 router.put("/gerente/erp-key", async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;

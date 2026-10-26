@@ -170,8 +170,111 @@ export async function tryTaskCommand(tenantId: number, text: string): Promise<st
     if (!task) return ambiguous(candidates, "comentar");
     return addTaskComment(tenantId, task.id, c[2]!.trim(), true);
   }
+  if (/^(organizar tarefas|limpar duplicadas|juntar duplicadas|organiza as tarefas)$/.test(n)) {
+    const r = await mergeDuplicateTasks(tenantId);
+    if (!r.length) return "👌 Nenhuma tarefa duplicada.";
+    return `🧹 Juntei ${r.reduce((s, g) => s + g.archived.length, 0)} duplicada(s):\n${r.map((g) => `• ficou a ${g.kept}; arquivei ${g.archived.map((a) => a.id).join(", ")} (${g.archived[0]!.title})`).join("\n")}`;
+  }
   // "avisa o Alan: texto", "avisar Davi que …", "manda pro Christian: …"
   const a = t.match(/^(?:avisa|avisar|informa|informar|manda pr[oa]|mandar pr[oa]|fala pr[oa]|fala com)\s+(?:(?:o|a)\s+)?([A-Za-zÀ-ÿ]+)\s*(?::|,|\s+que\s+)\s*(.+)$/i);
   if (a && !/^(me|mim|eu)$/i.test(a[1]!)) return messageTeamMember(tenantId, a[1]!, a[2]!.trim());
   return null;
+}
+
+// ─── Edição completa (link e painel) ─────────────────────────────────────────
+
+export type TaskPatch = {
+  title?: string; dueDate?: Date | null; priority?: "baixa" | "media" | "alta";
+  assigneeIds?: number[]; category?: string | null; description?: string | null;
+};
+
+/** Edita a tarefa. Responsável novo recebe a tarefa no WhatsApp. */
+export async function updateTask(tenantId: number, taskId: number, patch: TaskPatch): Promise<string> {
+  const { gerenteTaskMetaTable } = await import("@workspace/db");
+  const [t] = await db.select().from(tasksTable).where(and(eq(tasksTable.id, taskId), eq(tasksTable.tenantId, tenantId))).limit(1);
+  if (!t) return "Não achei essa tarefa.";
+  const set: Partial<typeof tasksTable.$inferInsert> = { updatedAt: new Date() };
+  if (patch.title !== undefined && patch.title.trim()) set.title = patch.title.trim().slice(0, 200);
+  if (patch.dueDate !== undefined) set.dueDate = patch.dueDate;
+  if (patch.priority) set.priority = patch.priority;
+  if (patch.description !== undefined) set.description = patch.description?.slice(0, 2000) || null;
+  await db.update(tasksTable).set(set).where(eq(tasksTable.id, taskId));
+  const msgs: string[] = [];
+  if (patch.category !== undefined) {
+    const category = patch.category?.trim().slice(0, 40) || null;
+    await db.insert(gerenteTaskMetaTable).values({ taskId, tenantId, category })
+      .onConflictDoUpdate({ target: gerenteTaskMetaTable.taskId, set: { category, updatedAt: new Date() } });
+  }
+  if (patch.assigneeIds) {
+    const valid = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable)
+      .where(and(eq(usersTable.tenantId, tenantId), eq(usersTable.isActive, true), inArray(usersTable.id, patch.assigneeIds.length ? patch.assigneeIds : [-1])));
+    const before = await assigneesOf(taskId);
+    const added = valid.filter((v) => !before.some((b) => b.id === v.id));
+    await db.delete(taskAssigneesTable).where(eq(taskAssigneesTable.taskId, taskId));
+    for (const v of valid) await db.insert(taskAssigneesTable).values({ tenantId, taskId, userId: v.id });
+    const owner = await ownerUser(tenantId);
+    const toSend = added.filter((a) => a.id !== owner?.id);
+    if (toSend.length) {
+      const { dispatchTaskToSeller } = await import("./gerenteDispatch");
+      const { getGerenteSettings } = await import("./gerente");
+      const settings = await getGerenteSettings(tenantId);
+      const [fresh] = await db.select().from(tasksTable).where(eq(tasksTable.id, taskId)).limit(1);
+      for (const a of toSend) msgs.push(await dispatchTaskToSeller(tenantId, {
+        taskId, userId: a.id, assigneeName: a.name.trim(), title: fresh!.title, dueAt: fresh!.dueDate, priority: fresh!.priority, ownerSessionKey: settings.lastSessionKey,
+      }));
+    }
+  }
+  return ["✅ Tarefa atualizada.", ...msgs].join("\n");
+}
+
+export async function addSubtask(tenantId: number, taskId: number, title: string): Promise<void> {
+  const { taskSubtasksTable } = await import("@workspace/db");
+  const [t] = await db.select({ id: tasksTable.id }).from(tasksTable).where(and(eq(tasksTable.id, taskId), eq(tasksTable.tenantId, tenantId))).limit(1);
+  if (!t) return;
+  await db.insert(taskSubtasksTable).values({ tenantId, taskId, title: title.trim().slice(0, 200) });
+}
+
+export async function toggleSubtask(tenantId: number, taskId: number, subtaskId: number, done: boolean): Promise<void> {
+  const { taskSubtasksTable } = await import("@workspace/db");
+  await db.update(taskSubtasksTable).set({ isDone: done })
+    .where(and(eq(taskSubtasksTable.id, subtaskId), eq(taskSubtasksTable.taskId, taskId), eq(taskSubtasksTable.tenantId, tenantId)));
+}
+
+export async function archiveTask(tenantId: number, taskId: number): Promise<string> {
+  const [t] = await db.update(tasksTable).set({ isArchived: true, updatedAt: new Date() })
+    .where(and(eq(tasksTable.id, taskId), eq(tasksTable.tenantId, tenantId))).returning();
+  if (!t) return "Não achei essa tarefa.";
+  await db.update(gerenteTaskDispatchesTable).set({ status: "cancelada" })
+    .where(and(eq(gerenteTaskDispatchesTable.taskId, taskId), inArray(gerenteTaskDispatchesTable.status, ["enviada", "aguardando_prova"])));
+  return `🗑️ Tarefa ${t.id} arquivada.`;
+}
+
+/**
+ * Junta tarefas abertas com o mesmo título (duplicadas pela IA): fica a mais
+ * antiga, com todos os responsáveis; as outras são arquivadas (dá pra
+ * recuperar no quadro). Devolve o que foi arquivado.
+ */
+export async function mergeDuplicateTasks(tenantId: number): Promise<{ kept: number; archived: { id: number; title: string }[] }[]> {
+  const { canonTitle } = await import("./gerente");
+  const open = await db.select({ id: tasksTable.id, title: tasksTable.title }).from(tasksTable)
+    .where(and(eq(tasksTable.tenantId, tenantId), eq(tasksTable.isArchived, false), ne(tasksTable.status, "done")))
+    .orderBy(asc(tasksTable.id)).limit(2000);
+  const groups = new Map<string, { id: number; title: string }[]>();
+  for (const t of open) { const k = canonTitle(t.title); if (!k) continue; groups.set(k, [...(groups.get(k) ?? []), t]); }
+  const out: { kept: number; archived: { id: number; title: string }[] }[] = [];
+  for (const g of groups.values()) {
+    if (g.length < 2) continue;
+    const [keep, ...rest] = g;
+    const keepWho = await assigneesOf(keep!.id);
+    for (const r of rest) {
+      for (const a of await assigneesOf(r.id)) {
+        if (!keepWho.some((k) => k.id === a.id)) { await db.insert(taskAssigneesTable).values({ tenantId, taskId: keep!.id, userId: a.id }); keepWho.push(a); }
+      }
+      await db.update(tasksTable).set({ isArchived: true, updatedAt: new Date() }).where(eq(tasksTable.id, r.id));
+      await db.update(gerenteTaskDispatchesTable).set({ status: "cancelada" })
+        .where(and(eq(gerenteTaskDispatchesTable.taskId, r.id), inArray(gerenteTaskDispatchesTable.status, ["enviada", "aguardando_prova"])));
+    }
+    out.push({ kept: keep!.id, archived: rest });
+  }
+  return out;
 }

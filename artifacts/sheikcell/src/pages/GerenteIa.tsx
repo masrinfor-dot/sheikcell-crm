@@ -5,9 +5,11 @@ import {
   type GerenteEntry, type GerenteBill, type GerenteMessage, type GerenteScope, type GerenteTeamMember, type GerenteErpAction,
 } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
+import GerenteTasks from "@/components/GerenteTasks";
 import {
   BrainCircuit, Sun, CalendarDays, Bell, Wallet, MessageCircle, Settings as SettingsIcon,
   Plus, Check, Clock, X, Trash2, Send, RefreshCw, AlertTriangle, Smartphone,
+  ListChecks,
 } from "lucide-react";
 
 // Aba "Gerente IA" (admin): secretária executiva por WhatsApp — só mensagens
@@ -19,7 +21,7 @@ const BTN = "px-3 py-1.5 rounded-lg text-xs font-semibold transition disabled:op
 const BTN_PRIMARY = `${BTN} bg-primary text-white`;
 const BTN_GHOST = `${BTN} border border-border hover:bg-muted`;
 
-type SubTab = "dia" | "agenda" | "lembretes" | "financeiro" | "conversar" | "config";
+type SubTab = "dia" | "tarefas" | "agenda" | "lembretes" | "financeiro" | "conversar" | "config";
 
 const brl = (cents: number): string => (cents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 const fmtDT = (iso: string): string => new Date(iso).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
@@ -64,6 +66,7 @@ export default function GerenteIa() {
 
   const tabs: { id: SubTab; label: string; icon: typeof Sun }[] = [
     { id: "dia", label: "Meu dia", icon: Sun },
+    { id: "tarefas", label: "Tarefas", icon: ListChecks },
     { id: "agenda", label: "Agenda", icon: CalendarDays },
     { id: "lembretes", label: "Lembretes", icon: Bell },
     { id: "financeiro", label: "Financeiro", icon: Wallet },
@@ -101,6 +104,7 @@ export default function GerenteIa() {
       </div>
 
       {sub === "dia" && <MeuDia onGo={setSub} />}
+      {sub === "tarefas" && <TarefasPainel />}
       {sub === "agenda" && <Agenda />}
       {sub === "lembretes" && <Lembretes />}
       {sub === "financeiro" && <Financeiro />}
@@ -124,6 +128,15 @@ const DISPATCH_META: Record<string, { label: string; color: string }> = {
   falhou: { label: "Falhou o envio", color: "bg-red-100 text-red-700" },
   cancelada: { label: "Cancelada", color: "bg-slate-100 text-slate-500" },
 };
+
+function TarefasPainel() {
+  const [token, setToken] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => { api.gerente.panelLink().then((r) => setToken(r.token)).catch((e) => setErr(errMsg(e))); }, []);
+  if (err) return <p className="text-sm text-red-600">{err}</p>;
+  if (!token) return <p className="text-sm text-muted-foreground">Carregando tarefas…</p>;
+  return <GerenteTasks token={token} embedded />;
+}
 
 function MeuDia({ onGo }: { onGo: (t: SubTab) => void }) {
   const { toast } = useToast();
