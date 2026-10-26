@@ -38,6 +38,10 @@ export const gerenteSettingsTable = pgTable("gerente_settings", {
   eveningSummaryTime: text("evening_summary_time").default("19:00"),
   eveningSentOn: date("evening_sent_on"),
   weeklyReportSentOn: date("weekly_report_sent_on"),
+  // Equipe: "bom dia" com as tarefas de cada um e cobrança no fim do dia.
+  teamDigestEnabled: boolean("team_digest_enabled").notNull().default(true),
+  teamMorningTime: text("team_morning_time").notNull().default("08:00"),
+  teamEveningTime: text("team_evening_time").notNull().default("18:00"),
   // Chave do agente do ERP (agk_...), cifrada com o mesmo cofre do ERP.
   erpAgentKeyCiphertext: text("erp_agent_key_ciphertext"),
   erpAgentKeyIv: text("erp_agent_key_iv"),
@@ -178,6 +182,9 @@ export const gerenteTaskDispatchesTable = pgTable("gerente_task_dispatches", {
   proofUrl: text("proof_url"),
   proofNote: text("proof_note"),
   overdueNotifiedAt: timestamp("overdue_notified_at", { withTimezone: true }),
+  // Vendedor respondeu "3" (dúvida): a próxima mensagem dele vai pro dono.
+  questionAt: timestamp("question_at", { withTimezone: true }),
+  postponeCount: integer("postpone_count").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
   index("gerente_task_dispatches_tenant_phone_idx").on(t.tenantId, t.phone),
@@ -257,3 +264,13 @@ export const gerenteTaskMetaTable = pgTable("gerente_task_meta", {
   category: text("category"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [index("gerente_task_meta_tenant_idx").on(t.tenantId)]);
+
+// Mensagens diárias para a equipe (bom dia / cobrança) — uma por pessoa/dia.
+export const gerenteTeamDigestsTable = pgTable("gerente_team_digests", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull(),
+  userId: integer("user_id").notNull(),
+  kind: text("kind").notNull(), // manha | tarde
+  day: date("day").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [uniqueIndex("gerente_team_digests_uniq").on(t.tenantId, t.userId, t.kind, t.day)]);

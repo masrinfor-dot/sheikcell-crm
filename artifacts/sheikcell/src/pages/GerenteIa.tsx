@@ -6,6 +6,7 @@ import {
 } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import GerenteTasks from "@/components/GerenteTasks";
+import GerenteTaskDashboard from "@/components/GerenteTaskDashboard";
 import {
   BrainCircuit, Sun, CalendarDays, Bell, Wallet, MessageCircle, Settings as SettingsIcon,
   Plus, Check, Clock, X, Trash2, Send, RefreshCw, AlertTriangle, Smartphone,
@@ -216,6 +217,8 @@ function MeuDia({ onGo }: { onGo: (t: SubTab) => void }) {
         <Kpi label="Equipe: aguardando prova" value={pendingDispatch.length} tone={pendingDispatch.length ? "text-amber-600" : ""} />
         <Kpi label="Saldo do mês" value={brl(receitas - gastos)} tone={receitas - gastos >= 0 ? "text-green-700" : "text-red-700"} onClick={() => onGo("financeiro")} />
       </div>
+
+      <GerenteTaskDashboard onOpenTasks={() => onGo("tarefas")} />
 
       {loadH > 8 && (
         <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5 flex items-center gap-2">
@@ -737,7 +740,7 @@ function Config({ settings, onSaved }: { settings: GerenteSettings; onSaved: (s:
   const save = async () => {
     setSaving(true);
     try {
-      const updated = await api.gerente.settings.update({ enabled: s.enabled, assistantName: s.assistantName, authorizedPhones: s.authorizedPhones, quietStart: s.quietStart, quietEnd: s.quietEnd, dailyDigestTime: s.dailyDigestTime });
+      const updated = await api.gerente.settings.update({ enabled: s.enabled, assistantName: s.assistantName, authorizedPhones: s.authorizedPhones, quietStart: s.quietStart, quietEnd: s.quietEnd, dailyDigestTime: s.dailyDigestTime, teamDigestEnabled: s.teamDigestEnabled, teamMorningTime: s.teamMorningTime, teamEveningTime: s.teamEveningTime });
       onSaved({ ...s, ...updated, lines: s.lines });
       if (updated.warnings?.length) toast({ title: "Salvo, mas confira", description: updated.warnings.join(" "), variant: "destructive" });
       else toast({ title: "Configurações salvas ✅" });
@@ -786,6 +789,14 @@ function Config({ settings, onSaved }: { settings: GerenteSettings; onSaved: (s:
           <label>Resumo "Meu dia"<input type="time" className={INPUT} value={s.dailyDigestTime ?? ""} onChange={(e) => setS({ ...s, dailyDigestTime: e.target.value || null })} /></label>
         </div>
         <p className="text-[10px] text-muted-foreground">No horário de descanso, só lembretes urgentes são enviados. Deixe o resumo em branco pra desligar.</p>
+        <div className="border-t border-border pt-3 space-y-2">
+          <label className="flex items-center gap-2 font-semibold"><input type="checkbox" checked={s.teamDigestEnabled} onChange={(e) => setS({ ...s, teamDigestEnabled: e.target.checked })} /> Mensagens diárias pra equipe</label>
+          <div className="grid grid-cols-2 gap-2">
+            <label>“Bom dia” com as tarefas<input type="time" className={INPUT} value={s.teamMorningTime} disabled={!s.teamDigestEnabled} onChange={(e) => setS({ ...s, teamMorningTime: e.target.value })} /></label>
+            <label>Cobrança do fim do dia<input type="time" className={INPUT} value={s.teamEveningTime} disabled={!s.teamDigestEnabled} onChange={(e) => setS({ ...s, teamEveningTime: e.target.value })} /></label>
+          </div>
+          <p className="text-[10px] text-muted-foreground">De segunda a sábado, cada pessoa recebe só as tarefas dela e responde 1 (terminei), 2 (adiar) ou 3 (dúvida). Na cobrança, você recebe quem ficou devendo.</p>
+        </div>
         <button onClick={save} disabled={saving} className={BTN_PRIMARY} data-testid="button-save-gerente">{saving ? "Salvando..." : "Salvar"}</button>
       </div>
       <div className="space-y-4">

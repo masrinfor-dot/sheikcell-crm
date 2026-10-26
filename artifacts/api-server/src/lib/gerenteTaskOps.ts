@@ -170,7 +170,7 @@ export async function tryTaskCommand(tenantId: number, text: string): Promise<st
     if (!task) return ambiguous(candidates, "comentar");
     return addTaskComment(tenantId, task.id, c[2]!.trim(), true);
   }
-  if (/^(organizar tarefas|limpar duplicadas|juntar duplicadas|organiza as tarefas)$/.test(n)) {
+  if (/^(limpar duplicadas|juntar duplicadas|juntar tarefas duplicadas)$/.test(n)) {
     const r = await mergeDuplicateTasks(tenantId);
     if (!r.length) return "👌 Nenhuma tarefa duplicada.";
     return `🧹 Juntei ${r.reduce((s, g) => s + g.archived.length, 0)} duplicada(s):\n${r.map((g) => `• ficou a ${g.kept}; arquivei ${g.archived.map((a) => a.id).join(", ")} (${g.archived[0]!.title})`).join("\n")}`;
