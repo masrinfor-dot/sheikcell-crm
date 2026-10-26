@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import OrganizeSheet, { type OrganizeItem } from "./GerenteOrganize";
 
 // Gerenciador de tarefas do Gerente IA — o mesmo no link do celular (/g/:token,
 // sem login) e na aba "Tarefas" do painel. Inspirado em Todoist/Things/
@@ -68,6 +69,9 @@ export default function GerenteTasks({ token, embedded = false }: { token: strin
   const [capture, setCapture] = useState("");
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [organizing, setOrganizing] = useState(false);
+  const loadPlan = useCallback(() => api<{ merged: number; items: OrganizeItem[] }>(`${base}/organize-plan`, { method: "POST" }), [base]);
+  const applyPlan = useCallback((items: OrganizeItem[]) => api<{ applied: number }>(`${base}/organize-apply`, { method: "POST", body: JSON.stringify({ items }) }), [base]);
 
   const load = useCallback(async () => {
     try { setData(await api<DiaData>(base)); setError(null); } catch (e) { setError((e as Error).message); }
@@ -195,6 +199,12 @@ export default function GerenteTasks({ token, embedded = false }: { token: strin
         ))}
       </div>
 
+      {canEdit && (overdue.length + noDue.length + data.tasks.filter((t) => t.status !== "done" && !t.category).length) > 0 && (
+        <button onClick={() => setOrganizing(true)} className="w-full rounded-xl border border-indigo-200 bg-indigo-50 text-indigo-800 text-sm font-semibold py-2.5">
+          ✨ Arrumar tarefas — {overdue.length} atrasada(s), {data.tasks.filter((t) => t.status !== "done" && !t.category).length} sem categoria
+        </button>
+      )}
+
       <div className="flex gap-1.5 overflow-x-auto pb-1 -mx-1 px-1">
         {tabs.map((t) => (
           <button key={t.id} onClick={() => setView(t.id)} className={`shrink-0 px-3 py-1.5 rounded-full text-sm font-medium border ${view === t.id ? "bg-slate-900 text-white border-slate-900" : "bg-white text-slate-700 border-slate-300"}`}>
@@ -274,7 +284,8 @@ export default function GerenteTasks({ token, embedded = false }: { token: strin
         </div>
       )}
 
-      {canEdit && <div className="text-center"><button onClick={mergeDup} className="text-xs text-slate-500 underline">🧹 Juntar tarefas duplicadas</button></div>}
+      {canEdit && <div className="text-center"><button onClick={mergeDup} className="text-xs text-slate-500 underline">🧹 Só juntar duplicadas</button></div>}
+      {organizing && <OrganizeSheet load={loadPlan} apply={applyPlan} onClose={() => setOrganizing(false)} onDone={(m) => { flash(m); void load(); }} />}
 
       {openId != null && <TaskSheet base={base} id={openId} canEdit={canEdit} team={data.team} categories={data.categories} today={data.today} onClose={() => setOpenId(null)} onChanged={(m) => { if (m) flash(m); void load(); }} />}
       {toast && <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] max-w-[92vw] bg-slate-900 text-white text-sm rounded-xl px-4 py-2.5 shadow-lg whitespace-pre-wrap">{toast}</div>}

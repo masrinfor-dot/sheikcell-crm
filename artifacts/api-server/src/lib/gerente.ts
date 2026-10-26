@@ -328,13 +328,31 @@ type PendingAction =
   | { type: "pay_bill"; billId: number; withEntry?: boolean }
   | { type: "cancel_bill"; billId: number }
   | { type: "cancel_event"; eventId: number }
-  | { type: "cancel_reminder"; reminderId: number };
+  | { type: "cancel_reminder"; reminderId: number }
+  | { type: "organize_tasks"; items: import("./gerenteOrganize").OrganizeItem[] };
 
 async function setPending(tenantId: number, phone: string, action: PendingAction, summary: string): Promise<string> {
   await db.insert(gerentePendingActionsTable)
     .values({ tenantId, phone, action, summary, expiresAt: new Date(Date.now() + PENDING_TTL_MS) })
     .onConflictDoUpdate({ target: [gerentePendingActionsTable.tenantId, gerentePendingActionsTable.phone], set: { action, summary, expiresAt: new Date(Date.now() + PENDING_TTL_MS), createdAt: new Date() } });
   return `${summary}\nConfirma? Responda *sim* ou *não*.`;
+}
+
+/** Junta duplicadas e deixa o plano de arrumação esperando o "sim". */
+export async function organizeTasksCommand(tenantId: number, phone: string): Promise<string> {
+  const { mergeDuplicateTasks } = await import("./gerenteTaskOps");
+  const { buildOrganizePlan, describePlan } = await import("./gerenteOrganize");
+  const merged = await mergeDuplicateTasks(tenantId);
+  const archived = merged.reduce((s, g) => s + g.archived.length, 0);
+  const head = archived ? `🧹 Juntei ${archived} tarefa(s) duplicada(s).\n\n` : "";
+  const items = await buildOrganizePlan(tenantId);
+  if (!items.length) return `${head}${describePlan(items)}`;
+  const action: PendingAction = { type: "organize_tasks", items };
+  const summary = `Arrumar ${items.length} tarefa(s)`;
+  const expiresAt = new Date(Date.now() + 2 * 3_600_000);
+  await db.insert(gerentePendingActionsTable).values({ tenantId, phone, action, summary, expiresAt })
+    .onConflictDoUpdate({ target: [gerentePendingActionsTable.tenantId, gerentePendingActionsTable.phone], set: { action, summary, expiresAt, createdAt: new Date() } });
+  return `${head}${describePlan(items)}\n\nAplico? Responda *sim* ou *não*. (Dá pra ajustar uma por uma no *link*.)`;
 }
 
 async function resolvePending(tenantId: number, phone: string, yes: boolean): Promise<{ text: string; refs: MsgRef[] }> {
@@ -371,6 +389,11 @@ async function resolvePending(tenantId: number, phone: string, yes: boolean): Pr
     const [e] = await db.update(gerenteEventsTable).set({ status: "cancelado", updatedAt: new Date() })
       .where(and(eq(gerenteEventsTable.id, a.eventId), eq(gerenteEventsTable.tenantId, tenantId))).returning();
     return one(e ? `🗑️ Compromisso cancelado: *${e.title}*.` : "Não achei mais esse compromisso.");
+  }
+  if (a.type === "organize_tasks") {
+    const { applyOrganizePlan } = await import("./gerenteOrganize");
+    const n = await applyOrganizePlan(tenantId, a.items);
+    return one(`✅ Pronto! Arrumei ${n} tarefa(s): categorias e prazos novos aplicados. Pra ver: *link*.`);
   }
   if (a.type === "cancel_reminder") {
     const [r] = await db.update(gerenteRemindersTable).set({ status: "cancelado", updatedAt: new Date() })
@@ -835,6 +858,13 @@ async function processOne(input: GerenteInput): Promise<string[]> {
     return erpFill;
   }
 
+  // "arrumar tarefas": junta duplicadas e propõe categoria + prazo novo.
+  if (/^(arrumar|arruma|organizar|organiza|organize|arrume)( as| minhas| todas as)? tarefas$/.test(norm(text))) {
+    const r = await organizeTasksCommand(tenantId, phone);
+    await saveRepliesAndSend(input, [r], ["arrumar_tarefas"], []);
+    return [r];
+  }
+
   // Tarefas da equipe por mensagem: concluir/ativar/reabrir/comentar/avisar.
   const { tryTaskCommand } = await import("./gerenteTaskOps");
   const taskCmd = await tryTaskCommand(tenantId, text);
@@ -1179,8 +1209,9 @@ async function runNotificationsOnce(): Promise<{ sent: number }> {
       }
 
       try {
-        const { runTaskOverdueChecks } = await import("./gerenteDispatch");
+        const { runTaskOverdueChecks, runTeamDigests } = await import("./gerenteDispatch");
         sent += await runTaskOverdueChecks(settings.tenantId);
+        if (!quiet) sent += await runTeamDigests(settings, now);
       } catch (err) {
         logger.warn({ err, tenantId: settings.tenantId }, "Gerente IA: falha ao checar tarefas atrasadas");
       }

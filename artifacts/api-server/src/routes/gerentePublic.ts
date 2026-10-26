@@ -201,6 +201,22 @@ router.post("/gerente-public/:token/capture", async (req, res): Promise<void> =>
   res.json(await handlePanelMessage(ref.tenantId, text.slice(0, 2000)));
 });
 
+router.post("/gerente-public/:token/organize-plan", async (req, res): Promise<void> => {
+  const link = await linkOr404(req, res); if (!link) return;
+  if (!link.canEdit) { res.status(403).json({ error: "Este link é só de leitura." }); return; }
+  const { buildOrganizePlan } = await import("../lib/gerenteOrganize");
+  const { mergeDuplicateTasks } = await import("../lib/gerenteTaskOps");
+  const merged = await mergeDuplicateTasks(link.tenantId);
+  res.json({ merged: merged.reduce((s, g) => s + g.archived.length, 0), items: await buildOrganizePlan(link.tenantId) });
+});
+
+router.post("/gerente-public/:token/organize-apply", async (req, res): Promise<void> => {
+  const link = await linkOr404(req, res); if (!link) return;
+  if (!link.canEdit) { res.status(403).json({ error: "Este link é só de leitura." }); return; }
+  const { applyOrganizePlan, sanitizeItems } = await import("../lib/gerenteOrganize");
+  res.json({ applied: await applyOrganizePlan(link.tenantId, sanitizeItems((req.body as { items?: unknown })?.items)) });
+});
+
 router.post("/gerente-public/:token/merge-duplicates", async (req, res): Promise<void> => {
   const ref = await editable(req, res, false); if (!ref) return;
   const { mergeDuplicateTasks } = await import("../lib/gerenteTaskOps");

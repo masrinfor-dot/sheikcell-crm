@@ -16,7 +16,7 @@ const {
   db, tenantsTable, sectorsTable, usersTable, conversationsTable, messagesTable, whatsappSessionsTable,
   attendanceLogsTable, crmContactsTable, whatsappContactsTable, tasksTable, taskAssigneesTable,
   gerenteSettingsTable, gerenteMessagesTable, gerenteRemindersTable, gerenteEntriesTable, gerenteBillsTable,
-  gerenteEventsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable, employeesTable, taskCommentsTable, gerenteTeamPhonesTable, gerenteErpActionsTable, tenantErpIntegrationsTable, gerenteLinksTable, gerenteRecurrencesTable,
+  gerenteEventsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable, employeesTable, taskCommentsTable, gerenteTeamPhonesTable, gerenteErpActionsTable, tenantErpIntegrationsTable, gerenteLinksTable, gerenteRecurrencesTable, gerenteTeamDigestsTable,
 } = await import("@workspace/db");
 const { eq, and, desc } = await import("drizzle-orm");
 const { processInboundWA } = await import("./whatsappInbound.ts");
@@ -68,6 +68,7 @@ async function wipe(): Promise<void> {
     await db.delete(gerenteErpActionsTable).where(eq(gerenteErpActionsTable.tenantId, id));
     await db.delete(gerenteLinksTable).where(eq(gerenteLinksTable.tenantId, id));
     await db.delete(gerenteRecurrencesTable).where(eq(gerenteRecurrencesTable.tenantId, id));
+    await db.delete(gerenteTeamDigestsTable).where(eq(gerenteTeamDigestsTable.tenantId, id));
     await db.delete(tenantErpIntegrationsTable).where(eq(tenantErpIntegrationsTable.tenantId, id));
     await db.delete(taskCommentsTable).where(eq(taskCommentsTable.tenantId, id));
     await db.delete(employeesTable).where(eq(employeesTable.tenantId, id));
@@ -561,4 +562,82 @@ test("tarefas v2: não duplica, vários responsáveis numa tarefa só, categoria
   assert.equal(bb!.isArchived, true);
   const keptAssignees = await db.select().from(taskAssigneesTable).where(eq(taskAssigneesTable.taskId, a!.id));
   assert.ok(keptAssignees.some((x) => x.userId === davi!.id), "responsável da duplicada passa pra que ficou");
+});
+
+test("vendedor: 2 adia pra amanhã, 3 manda dúvida pro dono, 1 pede a foto; '149' solto não é resposta", async () => {
+  const { createTask } = await import("./gerente.ts");
+  const seller = "5533977776666"; // número da Equipe no WhatsApp do Nilmar (teste anterior)
+  const due = new Date(Date.now() + 3 * 3_600_000);
+  const r = await createTask(tenantId, { title: "Trocar etiqueta de preço da vitrine", assigneeNames: ["Nilmar"], dueAt: due });
+  const taskId = r.ref!.id;
+  const msg = bridgeSends.filter((s) => s.to === seller).pop()!;
+  assert.match(msg.text, new RegExp(`\\*1 ${taskId}\\* ✅`));
+  const proof = (text: string, msgType = "text") => tryConsumeTaskProof({ tenantId, sessionKey, phone: seller, text, msgType, mediaUrl: null });
+
+  assert.equal(await proof("149"), false);
+
+  bridgeSends.length = 0;
+  assert.equal(await proof(`2 ${taskId}`), true);
+  const [t1] = await db.select().from(tasksTable).where(eq(tasksTable.id, taskId));
+  assert.ok(t1!.dueDate!.getTime() - due.getTime() > 23 * 3_600_000, "prazo foi pra amanhã");
+  await waitFor(async () => bridgeSends.find((s) => s.to === OWNER_PHONE_CANONICAL && /adiou/.test(s.text)));
+
+  bridgeSends.length = 0;
+  assert.equal(await proof(`3 ${taskId}`), true);
+  assert.equal(await proof("Qual etiqueta? A amarela ou a branca?"), true);
+  const ownerMsg = await waitFor(async () => bridgeSends.find((s) => s.to === OWNER_PHONE_CANONICAL && /dúvida/.test(s.text)));
+  assert.match(ownerMsg.text, /A amarela ou a branca\?/);
+  const cs = await db.select().from(taskCommentsTable).where(eq(taskCommentsTable.taskId, taskId));
+  assert.ok(cs.some((c) => c.content.startsWith("❓ Dúvida: Qual etiqueta")));
+  // Depois de encaminhada, mensagem comum volta a seguir o fluxo normal.
+  assert.equal(await proof("bom dia pessoal"), false);
+
+  // Dúvida já com o texto, numa mensagem só (acentos preservados).
+  bridgeSends.length = 0;
+  assert.equal(await proof(`3 ${taskId} Não achei a impressora`), true);
+  await waitFor(async () => bridgeSends.find((s) => s.to === OWNER_PHONE_CANONICAL && /Não achei a impressora/.test(s.text)));
+
+  assert.equal(await proof(`1 ${taskId}`), true);
+  const [d] = await db.select().from(gerenteTaskDispatchesTable).where(and(eq(gerenteTaskDispatchesTable.taskId, taskId), eq(gerenteTaskDispatchesTable.phone, seller)));
+  assert.equal(d!.status, "aguardando_prova");
+});
+
+test("bom dia da equipe: cada um recebe só as suas tarefas, uma vez por dia; domingo não", async () => {
+  const { runTeamDigests } = await import("./gerenteDispatch.ts");
+  const settings = { tenantId, teamDigestEnabled: true, teamMorningTime: "08:00", teamEveningTime: "18:00", lastSessionKey: sessionKey };
+  // Segunda-feira 08:05 em São Paulo.
+  const monday = new Date("2026-11-02T08:05:00-03:00");
+  bridgeSends.length = 0;
+  const n = await runTeamDigests(settings, monday);
+  assert.ok(n >= 1, "mandou pra alguém");
+  const nil = bridgeSends.find((s) => s.to === "5533977776666");
+  assert.ok(nil, "Nilmar recebeu");
+  assert.match(nil.text, /Bom dia, Nilmar/);
+  assert.match(nil.text, /Responda:/);
+  assert.equal(await runTeamDigests(settings, new Date("2026-11-02T08:30:00-03:00")), 0, "não repete no mesmo dia");
+  assert.equal(await runTeamDigests(settings, new Date("2026-11-01T08:05:00-03:00")), 0, "domingo não manda");
+  assert.equal(await runTeamDigests(settings, new Date("2026-11-03T07:30:00-03:00")), 0, "antes do horário não manda");
+});
+
+test("'arrumar tarefas': propõe categoria e prazo novo; 'sim' aplica", async () => {
+  const { buildOrganizePlan, guessCategory } = await import("./gerenteOrganize.ts");
+  const { gerenteTaskMetaTable } = await import("@workspace/db");
+  assert.equal(guessCategory("Pedidos de frontal A51 LCD e OLED"), "Compras");
+  assert.equal(guessCategory("Negociar Sicoob"), "Financeiro");
+  assert.equal(guessCategory("Lona letreiro SC"), "Loja SC");
+  const [late] = await db.insert(tasksTable).values({ tenantId, title: "Pedido de bateria iPhone 11", dueDate: new Date(Date.now() - 2 * 86_400_000), priority: "alta" }).returning();
+  const plan = await buildOrganizePlan(tenantId);
+  const it = plan.find((i) => i.taskId === late!.id);
+  assert.ok(it, "tarefa atrasada entrou no plano");
+  assert.ok(new Date(it.dueAt!).getTime() > Date.now(), "prazo novo no futuro");
+  assert.equal(it.category, "Compras");
+
+  const r = await handlePanelMessage(tenantId, "arrumar tarefas");
+  assert.match(r.replies[0]!, /Aplico\?/);
+  const ok = await handlePanelMessage(tenantId, "sim");
+  assert.match(ok.replies[0]!, /Arrumei/);
+  const [t] = await db.select().from(tasksTable).where(eq(tasksTable.id, late!.id));
+  assert.ok(t!.dueDate!.getTime() > Date.now());
+  const [m] = await db.select().from(gerenteTaskMetaTable).where(eq(gerenteTaskMetaTable.taskId, late!.id));
+  assert.equal(m!.category, "Compras");
 });

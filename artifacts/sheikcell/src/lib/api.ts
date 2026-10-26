@@ -1595,7 +1595,17 @@ export type GerenteSettings = {
   quietStart: string; quietEnd: string; dailyDigestTime: string | null; dailyDigestSentOn: string | null;
   lastSessionKey: string | null; lastPhone: string | null; createdAt: string; updatedAt: string;
   admSessionKey: string | null; erpAgentKeySet: boolean;
+  teamDigestEnabled: boolean; teamMorningTime: string; teamEveningTime: string;
   lines: { sessionKey: string; displayName: string | null; phoneNumber: string | null; status: string }[];
+};
+export type GerenteOrganizeItem = { taskId: number; title: string; priority: string; category?: string | null; oldCategory?: string | null; dueAt?: string | null; oldDue?: string | null; reason?: string };
+export type GerenteTaskStats = {
+  now: string; today: string;
+  kpis: { open: number; overdue: number; dueToday: number; noDue: number; noCategory: number; done7: number; onTimePct: number | null; withProof: number };
+  team: { userId: number; name: string; isOwner: boolean; open: number; overdue: number; done7: number; onTimePct: number | null; awaitingProof: number; postponed: number }[];
+  categories: { name: string; open: number; overdue: number }[];
+  trend: { date: string; created: number; done: number }[];
+  oldestLate: { id: number; title: string; dueDate: string; daysLate: number; assignees: string[] }[];
 };
 export type GerenteEvent = {
   id: number; title: string; startsAt: string; endsAt: string | null; location: string | null; participants: string | null;
@@ -3288,10 +3298,13 @@ export const api = {
   gerente: {
     settings: {
       get: () => req<GerenteSettings>("/gerente/settings"),
-      update: (data: Partial<Pick<GerenteSettings, "enabled" | "assistantName" | "authorizedPhones" | "quietStart" | "quietEnd" | "dailyDigestTime" | "admSessionKey">>) =>
+      update: (data: Partial<Pick<GerenteSettings, "enabled" | "assistantName" | "authorizedPhones" | "quietStart" | "quietEnd" | "dailyDigestTime" | "admSessionKey" | "teamDigestEnabled" | "teamMorningTime" | "teamEveningTime">>) =>
         req<Omit<GerenteSettings, "lines"> & { warnings?: string[] }>("/gerente/settings", { method: "PATCH", body: JSON.stringify(data) }),
     },
     overview: () => req<GerenteOverview>("/gerente/overview"),
+    taskStats: () => req<GerenteTaskStats>("/gerente/task-stats"),
+    organizePlan: () => req<{ merged: number; items: GerenteOrganizeItem[] }>("/gerente/organize/plan", { method: "POST" }),
+    organizeApply: (items: GerenteOrganizeItem[]) => req<{ applied: number }>("/gerente/organize/apply", { method: "POST", body: JSON.stringify({ items }) }),
     panelLink: () => req<{ token: string; url: string }>("/gerente/panel-link", { method: "POST" }),
     erp: {
       setKey: (key: string) => req<{ ok: boolean; message: string }>("/gerente/erp-key", { method: "PUT", body: JSON.stringify({ key }) }),

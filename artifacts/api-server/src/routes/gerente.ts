@@ -84,12 +84,99 @@ router.patch("/gerente/settings", async (req, res): Promise<void> => {
   if (isHM(b["quietEnd"])) set.quietEnd = b["quietEnd"];
   if (b["dailyDigestTime"] === null) set.dailyDigestTime = null;
   else if (isHM(b["dailyDigestTime"])) set.dailyDigestTime = b["dailyDigestTime"];
+  if (typeof b["teamDigestEnabled"] === "boolean") set.teamDigestEnabled = b["teamDigestEnabled"];
+  if (isHM(b["teamMorningTime"])) set.teamMorningTime = b["teamMorningTime"];
+  if (isHM(b["teamEveningTime"])) set.teamEveningTime = b["teamEveningTime"];
   await getGerenteSettings(tenantId);
   const [updated] = await db.update(gerenteSettingsTable).set(set).where(eq(gerenteSettingsTable.tenantId, tenantId)).returning();
   invalidateGerenteCache(tenantId);
   const { erpAgentKeyCiphertext: _c, erpAgentKeyIv: _i, erpAgentKeyAuthTag: _a, erpAgentKeyVersion: _v, ...safe } = updated!;
   void _i; void _a; void _v;
   res.json({ ...safe, erpAgentKeySet: !!_c, warnings });
+});
+
+// ─── Indicadores de tarefas e equipe (dashboard) ─────────────────────────────
+router.get("/gerente/task-stats", async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { gerenteTaskMetaTable } = await import("@workspace/db");
+  const now = new Date();
+  const today = spDateISO(now);
+  const since30 = new Date(now.getTime() - 30 * 86_400_000);
+  const tasks = await db.select({
+    id: tasksTable.id, title: tasksTable.title, status: tasksTable.status, priority: tasksTable.priority, dueDate: tasksTable.dueDate,
+    createdAt: tasksTable.createdAt, updatedAt: tasksTable.updatedAt, category: gerenteTaskMetaTable.category,
+  }).from(tasksTable).leftJoin(gerenteTaskMetaTable, eq(gerenteTaskMetaTable.taskId, tasksTable.id))
+    .where(and(eq(tasksTable.tenantId, tenantId), eq(tasksTable.isArchived, false), sql`(${tasksTable.status} <> 'done' OR ${tasksTable.updatedAt} >= ${since30})`))
+    .limit(3000);
+  const ids = tasks.map((t) => t.id);
+  const asg = ids.length ? await db.select({ taskId: taskAssigneesTable.taskId, userId: usersTable.id, name: usersTable.name, role: usersTable.role })
+    .from(taskAssigneesTable).innerJoin(usersTable, eq(usersTable.id, taskAssigneesTable.userId)).where(inArray(taskAssigneesTable.taskId, ids)) : [];
+  const disp = await db.select({ userId: gerenteTaskDispatchesTable.userId, status: gerenteTaskDispatchesTable.status, doneAt: gerenteTaskDispatchesTable.doneAt, proofUrl: gerenteTaskDispatchesTable.proofUrl, postponeCount: gerenteTaskDispatchesTable.postponeCount })
+    .from(gerenteTaskDispatchesTable).where(and(eq(gerenteTaskDispatchesTable.tenantId, tenantId), gte(gerenteTaskDispatchesTable.createdAt, since30)));
+
+  const open = tasks.filter((t) => t.status !== "done");
+  const isLate = (t: typeof tasks[number]) => !!t.dueDate && t.dueDate.getTime() < now.getTime();
+  const done30 = tasks.filter((t) => t.status === "done");
+  const onTime = (list: typeof tasks) => { const w = list.filter((t) => t.dueDate); return w.length ? Math.round(100 * w.filter((t) => t.updatedAt.getTime() <= t.dueDate!.getTime() + 60_000).length / w.length) : null; };
+  const since7 = now.getTime() - 7 * 86_400_000;
+
+  const people = new Map<number, { userId: number; name: string; isOwner: boolean; open: number; overdue: number; done7: number; onTimePct: number | null; awaitingProof: number; postponed: number; done30: typeof tasks }>();
+  const byTask = new Map<number, typeof tasks[number]>(tasks.map((t) => [t.id, t]));
+  for (const a of asg) {
+    const t = byTask.get(a.taskId); if (!t) continue;
+    const p = people.get(a.userId) ?? { userId: a.userId, name: a.name.trim(), isOwner: a.role === "admin", open: 0, overdue: 0, done7: 0, onTimePct: null, awaitingProof: 0, postponed: 0, done30: [] };
+    if (t.status !== "done") { p.open++; if (isLate(t)) p.overdue++; }
+    else { p.done30.push(t); if (t.updatedAt.getTime() >= since7) p.done7++; }
+    people.set(a.userId, p);
+  }
+  for (const d of disp) {
+    const p = people.get(d.userId); if (!p) continue;
+    if (d.status === "aguardando_prova") p.awaitingProof++;
+    p.postponed += d.postponeCount;
+  }
+  const team = [...people.values()].map(({ done30: d, ...p }) => ({ ...p, onTimePct: onTime(d) }))
+    .sort((a, b) => (a.isOwner ? 1 : 0) - (b.isOwner ? 1 : 0) || b.overdue - a.overdue || b.open - a.open);
+
+  const catCount = new Map<string, { open: number; overdue: number }>();
+  for (const t of open) { const k = t.category ?? "Sem categoria"; const c = catCount.get(k) ?? { open: 0, overdue: 0 }; c.open++; if (isLate(t)) c.overdue++; catCount.set(k, c); }
+
+  const trend: { date: string; created: number; done: number }[] = [];
+  for (let i = 13; i >= 0; i--) {
+    const d = spDateISO(new Date(now.getTime() - i * 86_400_000));
+    trend.push({ date: d, created: tasks.filter((t) => spDateISO(t.createdAt) === d).length, done: done30.filter((t) => spDateISO(t.updatedAt) === d).length });
+  }
+  const oldestLate = open.filter(isLate).sort((a, b) => a.dueDate!.getTime() - b.dueDate!.getTime()).slice(0, 6)
+    .map((t) => ({ id: t.id, title: t.title, dueDate: t.dueDate, daysLate: Math.floor((now.getTime() - t.dueDate!.getTime()) / 86_400_000), assignees: asg.filter((a) => a.taskId === t.id).map((a) => a.name.trim().split(" ")[0]) }));
+
+  res.json({
+    now: now.toISOString(), today,
+    kpis: {
+      open: open.length, overdue: open.filter(isLate).length,
+      dueToday: open.filter((t) => t.dueDate && spDateISO(t.dueDate) === today && !isLate(t)).length,
+      noDue: open.filter((t) => !t.dueDate).length,
+      noCategory: open.filter((t) => !t.category).length,
+      done7: done30.filter((t) => t.updatedAt.getTime() >= since7).length,
+      onTimePct: onTime(done30),
+      withProof: disp.filter((d) => d.proofUrl && d.doneAt && d.doneAt.getTime() >= since7).length,
+    },
+    team, categories: [...catCount.entries()].map(([name, c]) => ({ name, ...c })).sort((a, b) => b.open - a.open),
+    trend, oldestLate,
+  });
+});
+
+// Arrumação automática (mesmo plano do comando "arrumar tarefas").
+router.post("/gerente/organize/plan", async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { buildOrganizePlan } = await import("../lib/gerenteOrganize");
+  const { mergeDuplicateTasks } = await import("../lib/gerenteTaskOps");
+  const merged = await mergeDuplicateTasks(tenantId);
+  res.json({ merged: merged.reduce((s, g) => s + g.archived.length, 0), items: await buildOrganizePlan(tenantId) });
+});
+router.post("/gerente/organize/apply", async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { applyOrganizePlan, sanitizeItems } = await import("../lib/gerenteOrganize");
+  const n = await applyOrganizePlan(tenantId, sanitizeItems((req.body as { items?: unknown })?.items));
+  res.json({ applied: n });
 });
 
 // Aba "Tarefas" do painel: usa o mesmo gerenciador do link do celular.
