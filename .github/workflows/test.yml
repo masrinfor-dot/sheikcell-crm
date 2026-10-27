@@ -51,7 +51,14 @@ jobs:
           DATABASE_URL: postgres://sheikcell:sheikcell123@localhost:5432/sheikcell
 
       - name: Roda os testes do api-server (inclui isolamento entre lojas)
-        run: pnpm --filter @workspace/api-server run test
+        # Teste que falhar vira aviso (annotation) no GitHub, com o nome e o
+        # erro, para dar para ler sem baixar o log inteiro.
+        run: |
+          set -o pipefail
+          pnpm --filter @workspace/api-server run test 2>&1 | tee test-output.txt || {
+            grep -n -A12 "^not ok" test-output.txt | head -120 | sed -e 's/%/%25/g' | while IFS= read -r line; do echo "::error title=Teste falhou::$line"; done
+            exit 1
+          }
 
       - name: Typecheck do monorepo inteiro
         run: pnpm run typecheck

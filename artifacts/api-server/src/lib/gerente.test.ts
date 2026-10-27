@@ -610,8 +610,11 @@ test("bom dia da equipe: cada um recebe só as suas tarefas, uma vez por dia; do
   bridgeSends.length = 0;
   const n = await runTeamDigests(settings, monday);
   assert.ok(n >= 1, "mandou pra alguém");
-  const nil = bridgeSends.find((s) => s.to === "5533977776666");
-  assert.ok(nil, "Nilmar recebeu");
+  // O teste anterior manda um aviso ao Nilmar sem esperar ("👍 Ótimo! Agora
+  // manda uma foto…"); às vezes ele chega depois do reset acima. Procura a
+  // mensagem do bom dia, não a primeira que chegou para ele.
+  const nil = bridgeSends.find((s) => s.to === "5533977776666" && /Bom dia/.test(s.text));
+  assert.ok(nil, "Nilmar recebeu o bom dia");
   assert.match(nil.text, /Bom dia, Nilmar/);
   assert.match(nil.text, /Responda:/);
   assert.equal(await runTeamDigests(settings, new Date("2026-11-02T08:30:00-03:00")), 0, "não repete no mesmo dia");
