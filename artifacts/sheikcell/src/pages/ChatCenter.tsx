@@ -14,7 +14,7 @@ import {
   Settings2, Trash2, Info, Sparkles, Check, Bell, BellOff, VolumeX, Zap, CalendarClock, AlertTriangle,
   Pin, PinOff, Reply, Star, StarOff, ChevronLeft, ChevronRight,
   MapPin, ShoppingBag, CreditCard, BarChart3, Ban, UserPlus, ExternalLink,
-  FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Download, Maximize2, Pencil,
+  FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Download, Maximize2, Minimize2, Pencil,
   MoreVertical, RotateCcw, Percent, FolderOpen, Flag, Lock, Forward, Clock,
 } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
@@ -1840,6 +1840,25 @@ export default function ChatCenter({
   }, [desktopEnabled, toast]);
 
   const msgsEndRef = useRef<HTMLDivElement>(null);
+  // Tela cheia do atendimento (27/10/2026): esconde o topo e o menu do sistema
+  // e, quando o navegador deixa, entra em tela cheia de verdade (some também
+  // a barra do navegador/Windows). Esc sai.
+  const [focusMode, setFocusMode] = useState(false);
+  const toggleFocusMode = useCallback(() => {
+    setFocusMode((on) => {
+      const next = !on;
+      try {
+        if (next && !document.fullscreenElement) void document.documentElement.requestFullscreen?.().catch(() => {});
+        if (!next && document.fullscreenElement) void document.exitFullscreen?.().catch(() => {});
+      } catch { /* navegador sem tela cheia: fica só o modo foco */ }
+      return next;
+    });
+  }, []);
+  useEffect(() => {
+    const onFs = () => { if (!document.fullscreenElement) setFocusMode(false); };
+    document.addEventListener("fullscreenchange", onFs);
+    return () => document.removeEventListener("fullscreenchange", onFs);
+  }, []);
   const msgsContainerRef = useRef<HTMLDivElement>(null);
   // Sempre reflete a conversa aberta AGORA — usado para descartar respostas de
   // paginação que chegam depois de trocar de conversa.
@@ -2128,10 +2147,67 @@ export default function ChatCenter({
     }
   }, [activeId]);
 
+  // Rolagem da conversa (27/10/2026: "ao mudar de aba a conversa volta para o
+  // final; tem que permanecer no local para comparar com outras coisas").
+  // Antes, QUALQUER atualização da lista de mensagens (voltar à aba, recibo
+  // de leitura, recarga) jogava para o fim. Agora:
+  // - ao abrir uma conversa: volta onde a pessoa parou nela (ou o fim, na 1ª vez);
+  // - mensagem nova: só desce sozinho se a pessoa já estava lá embaixo,
+  //   ou se foi ela mesma que mandou;
+  // - qualquer outra atualização: não mexe na posição.
+  const positionedConvRef = useRef<number | null>(null);
+  const lastMsgIdRef = useRef<number | null>(null);
+  const nearBottomRef = useRef(true);
+  // Posição por conversa, guardada também no navegador (sessionStorage) para
+  // valer ao sair do Atendimento e voltar.
+  const savedScrollRef = useRef<Map<number, number>>((() => {
+    try {
+      const raw = sessionStorage.getItem("shk-chat-scroll");
+      return new Map<number, number>(raw ? (JSON.parse(raw) as [number, number][]) : []);
+    } catch { return new Map<number, number>(); }
+  })());
+  const scrollSaveTimerRef = useRef<number | null>(null);
+  const onMsgsScroll = useCallback(() => {
+    const el = msgsContainerRef.current;
+    const id = activeIdRef.current;
+    if (!el || id == null || positionedConvRef.current !== id) return;
+    nearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    savedScrollRef.current.set(id, nearBottomRef.current ? -1 : el.scrollTop);
+    if (scrollSaveTimerRef.current == null) {
+      scrollSaveTimerRef.current = window.setTimeout(() => {
+        scrollSaveTimerRef.current = null;
+        try {
+          const entries = [...savedScrollRef.current.entries()].slice(-200);
+          sessionStorage.setItem("shk-chat-scroll", JSON.stringify(entries));
+        } catch { /* navegador sem armazenamento: vale só nesta tela */ }
+      }, 500);
+    }
+  }, []);
+  useEffect(() => { if (activeId == null) positionedConvRef.current = null; }, [activeId]);
   useEffect(() => {
     if (skipAutoScrollRef.current) { skipAutoScrollRef.current = false; return; }
-    msgsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    const last = messages.length ? messages[messages.length - 1] : null;
+    if (!last || activeId == null || last.conversationId !== activeId) return;
+    if (positionedConvRef.current !== activeId) {
+      // Primeira carga desta conversa: posição salva (-1 = estava no fim).
+      positionedConvRef.current = activeId;
+      lastMsgIdRef.current = last.id;
+      const saved = savedScrollRef.current.get(activeId);
+      nearBottomRef.current = saved == null || saved === -1;
+      requestAnimationFrame(() => {
+        const el = msgsContainerRef.current;
+        if (!el || activeIdRef.current !== activeId) return;
+        el.scrollTop = saved == null || saved === -1 ? el.scrollHeight : saved;
+      });
+      return;
+    }
+    const appended = last.id !== lastMsgIdRef.current;
+    lastMsgIdRef.current = last.id;
+    if (appended && (nearBottomRef.current || last.direction === "outbound")) {
+      msgsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      nearBottomRef.current = true;
+    }
+  }, [messages, activeId]);
 
   // Resync ao voltar pra tela (pedido 11/09: "a digitação voltou ficar
   // atrasada, dificulta acompanhar pelo celular"). No celular, o navegador
@@ -3895,7 +3971,9 @@ export default function ChatCenter({
   }
 
   return (
-    <div className="flex flex-col h-[calc(var(--vvh,100dvh)-7rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-88px-var(--shk-topbar-extra,0px))] bg-[#F7F7F8] overflow-hidden rounded-none md:rounded-2xl border-0 md:border border-border shadow-none md:shadow-sm">
+    <div className={focusMode
+      ? "fixed inset-0 z-[60] flex flex-col h-[100dvh] bg-[#F7F7F8] overflow-hidden"
+      : "flex flex-col h-[calc(var(--vvh,100dvh)-7rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-88px-var(--shk-topbar-extra,0px))] bg-[#F7F7F8] overflow-hidden rounded-none md:rounded-2xl border-0 md:border border-border shadow-none md:shadow-sm"}>
       {/* ── BARRA DE CANAIS (atendimento por canais, 26/10/2026) ──────────
           Todos + uma por linha de WhatsApp + Instagram, cada uma com quantos
           clientes esperam resposta. O canal escolhido fica lembrado. */}
@@ -3935,6 +4013,13 @@ export default function ChatCenter({
               Mostrar linhas internas em "Todos"
             </label>
           )}
+          <button type="button" onClick={toggleFocusMode} data-testid="button-focus-mode"
+            aria-pressed={focusMode}
+            title={focusMode ? "Sair da tela cheia (Esc)" : "Tela cheia: esconde o menu do sistema para a conversa ficar maior"}
+            className="hidden md:inline-flex ml-auto items-center gap-1.5 h-9 px-3 rounded-full border border-border bg-white text-xs font-semibold text-[#27272A] hover:bg-[#F7F7F8] shrink-0">
+            {focusMode ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+            {focusMode ? "Sair da tela cheia" : "Tela cheia"}
+          </button>
         </div>
       )}
       {/* ── PAINEL DO ADMINISTRADOR POR CANAL (26/10/2026) ─────────────────
@@ -4312,16 +4397,6 @@ export default function ChatCenter({
             );
           })}
         </div>
-        {/* Explicação curta da aba + canal escolhido (lembrado para você). */}
-        <div className="px-3 py-1.5 bg-white border-b border-border text-[11px] text-muted-foreground flex items-center gap-2 flex-wrap" data-testid="tab-help">
-          <span className="flex-1 min-w-[180px]">{CATEGORIES.find((c) => c.id === category)?.help}</span>
-          {showChannelBar && (
-            <span className="shrink-0">
-              Canal: <strong style={{ color: currentChannel.id === "todos" ? undefined : currentChannel.color }}>{currentChannel.label}{currentChannel.id === "todos" && hasInternalLines && !showInternal ? " (sem linhas internas)" : ""}</strong>
-            </span>
-          )}
-        </div>
-
         {/* Disparo em massa pra Resolvidos (pedido 14/09, Atacado): "lista de
             transmissão" — seleciona vários e manda a mesma mensagem. Só
             aparece pra quem já pode ver Resolvidos (canSeeResolved). */}
@@ -4778,7 +4853,7 @@ export default function ChatCenter({
                 </button>
               )}
               {/* No celular: uma linha só, arrastável pro lado (não empurra a conversa pra baixo) */}
-              <div className="flex items-center gap-1.5 mt-1 text-xs text-muted-foreground overflow-x-auto sm:overflow-visible sm:flex-wrap [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&>*]:shrink-0">
+              <div className="flex items-center gap-1.5 mt-1 text-xs text-muted-foreground overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&>*]:shrink-0" data-testid="conv-header-chips">
                 {(() => {
                   const w = waitingMinutes(activeConv, nowTick);
                   if (w == null || (isGroupConv(activeConv) && !isOverdue(activeConv))) return null;
@@ -4878,6 +4953,13 @@ export default function ChatCenter({
                 {infoContact?.profile && !isGroupConv(activeConv) && (
                   <span className="shk-chip shk-chip-primary" title="Nível do cliente no CRM">{infoContact.profile}</span>
                 )}
+                {/* Etiquetas: na mesma linha (antes era uma faixa a mais). */}
+                {currentLabels.map((label) => (
+                  <span key={label} className="shk-chip shk-chip-primary">
+                    <Tag className="w-2.5 h-2.5" />{label}
+                    <button type="button" onClick={() => handleLabel(label)} aria-label={`Tirar etiqueta ${label}`} className="ml-0.5 opacity-60 hover:opacity-100"><X className="w-2.5 h-2.5" /></button>
+                  </span>
+                ))}
                 {/* Data e hora de início do atendimento (quando foi assumido) */}
                 {activeConv.attendanceStartedAt && (
                   <span className="hidden xl:inline-flex items-center gap-1 text-[11px] text-muted-foreground whitespace-nowrap" title="Início do atendimento" data-testid="text-attendance-started">
@@ -5312,18 +5394,6 @@ export default function ChatCenter({
             </>
           )}
 
-          {/* Label chips */}
-          {currentLabels.length > 0 && (
-            <div className="bg-white border-b border-border px-5 py-2 flex items-center gap-1.5 flex-wrap">
-              {currentLabels.map((label) => (
-                <span key={label} className="shk-chip shk-chip-primary !h-6">
-                  <Tag className="w-2.5 h-2.5" />{label}
-                  <button onClick={() => handleLabel(label)} className="ml-0.5 opacity-60 hover:opacity-100"><X className="w-2.5 h-2.5" /></button>
-                </span>
-              ))}
-            </div>
-          )}
-
           {/* Busca de texto dentro da conversa aberta */}
           {showMsgSearch && (
             <div className="bg-white border-b border-border px-3 py-2" data-testid="bar-search-in-conv">
@@ -5408,7 +5478,8 @@ export default function ChatCenter({
           {/* Messages area — WhatsApp wallpaper */}
           <div
             ref={msgsContainerRef}
-            className="flex-1 overflow-y-auto px-3 md:px-8 py-6 bg-[#F7F7F8]"
+            onScroll={onMsgsScroll}
+            className="flex-1 overflow-y-auto px-3 md:px-8 py-4 bg-[#F7F7F8]"
           >
             <MediaLightboxProvider>
             <div className="max-w-[880px] mx-auto">
@@ -5570,7 +5641,7 @@ export default function ChatCenter({
             </div>
           )}
           {/* Mensagem (vai pro cliente) x Nota interna (só a equipe vê) */}
-          <div className={`flex items-center gap-2 px-3 md:px-5 pt-2.5 bg-white ${replyTarget || (aiSuggestion && composerMode === "message") ? "" : "border-t border-border"}`}>
+          <div className={`flex md:hidden items-center gap-2 px-3 md:px-5 pt-2.5 bg-white ${replyTarget || (aiSuggestion && composerMode === "message") ? "" : "border-t border-border"}`}>
             <div className="inline-flex p-[3px] rounded-[10px] bg-[#F2F2F4] gap-0.5">
               <button type="button" onClick={() => setComposerMode("message")} data-testid="button-composer-mode-message"
                 aria-pressed={composerMode === "message"}
@@ -5595,7 +5666,21 @@ export default function ChatCenter({
               pra mensagens curtas. O grupo campo+enviar abaixo força
               w-full nesse breakpoint, then joga pra própria linha; a partir
               de sm (tablet/desktop) volta tudo numa linha só, como sempre foi. */}
-          <form onSubmit={handleSend} className="bg-white px-3 md:px-5 pt-2 pb-3 flex items-center flex-wrap sm:flex-nowrap gap-1.5">
+          <form onSubmit={handleSend} className={`bg-white px-3 md:px-5 pt-2 pb-3 md:py-2.5 flex items-center flex-wrap sm:flex-nowrap gap-1.5 ${replyTarget || (aiSuggestion && composerMode === "message") ? "" : "md:border-t md:border-border"}`}>
+            {/* No computador, Responder / Nota interna ficam na própria linha do campo
+                (27/10/2026: uma faixa a menos embaixo da conversa). */}
+            <div className="hidden md:inline-flex p-[3px] rounded-[10px] bg-[#F2F2F4] gap-0.5 shrink-0">
+              <button type="button" onClick={() => setComposerMode("message")}
+                aria-pressed={composerMode === "message"} title="Mensagem para o cliente"
+                className={`text-xs font-bold h-[30px] px-2.5 rounded-lg transition ${composerMode === "message" ? "bg-foreground text-white" : "text-[#3F3F46] hover:bg-white"}`}>
+                Responder
+              </button>
+              <button type="button" onClick={() => { setComposerMode("note"); cancelReply(); }}
+                aria-pressed={composerMode === "note"} title="Nota interna: só a equipe vê, não vai para o WhatsApp"
+                className={`flex items-center gap-1 text-xs font-bold h-[30px] px-2.5 rounded-lg transition ${composerMode === "note" ? "bg-[#6B4E00] text-white" : "text-[#3F3F46] hover:bg-white"}`}>
+                <Lock className="w-3 h-3" />Nota
+              </button>
+            </div>
             <input
               ref={fileInputRef}
               type="file"
