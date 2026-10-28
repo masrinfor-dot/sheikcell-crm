@@ -46,6 +46,21 @@ export const tenantErpIntegrationsTable = pgTable("tenant_erp_integrations", {
   demandLastError: text("demand_last_error"),
   demandSentCount: integer("demand_sent_count").notNull().default(0),
   demandPendingCount: integer("demand_pending_count").notNull().default(0),
+  // Pontuação do atendimento → gamificação do ERP (27/10/2026). Ligado por
+  // padrão quando a ligação existe; só conta o que acontecer depois de
+  // `gamificationSince` (nada de histórico antigo). Cursores: última mensagem
+  // já olhada (1ª resposta) e a última venda atribuída já lida do ERP.
+  gamificationEnabled: boolean("gamification_enabled").notNull().default(true),
+  gamificationSince: timestamp("gamification_since", { withTimezone: true }),
+  gamificationMsgCursor: integer("gamification_msg_cursor").notNull().default(0),
+  gamificationSalesCursor: text("gamification_sales_cursor"),
+  gamificationLastSyncAt: timestamp("gamification_last_sync_at", { withTimezone: true }),
+  gamificationLastError: text("gamification_last_error"),
+  // "Clientes esperando resposta" na TV de cada loja do ERP (27/10/2026): o
+  // CRM manda a fila (nome curto + minutos) a cada minuto.
+  tvWaitingEnabled: boolean("tv_waiting_enabled").notNull().default(true),
+  tvWaitingLastPushAt: timestamp("tv_waiting_last_push_at", { withTimezone: true }),
+  tvWaitingLastError: text("tv_waiting_last_error"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });

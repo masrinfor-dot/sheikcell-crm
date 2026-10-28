@@ -13,6 +13,7 @@ import internalChatRouter from "./internalChat";
 import tasksRouter from "./tasks";
 import settingsRouter from "./settings";
 import erpExchangesRouter from "./erpExchanges";
+import erpGamificationRouter from "./erpGamification";
 import instagramRouter, { instagramPublicRouter } from "./instagram";
 import partnerLinksRouter from "./partnerLinks";
 import tradeInRouter, { tradeInPublicRouter } from "./tradeIn";
@@ -74,6 +75,8 @@ router.use(tasksRouter);
 router.use(settingsRouter);
 // Trocas com o ERP (19/10/2026): mapa e histórico do que vai e vem do ERP.
 router.use(erpExchangesRouter);
+// Pontuação do atendimento e fila da TV das lojas do ERP (27/10/2026).
+router.use(erpGamificationRouter);
 router.use(instagramRouter);
 router.use(partnerLinksRouter);
 // Avaliação de usados → ERP (07/10/2026): exportar e desligar aqui.

@@ -3401,7 +3401,7 @@ export const api = {
       demandRun: () =>
         req<{ ok: boolean; conversations: number; messages: number; requests: number; outOfStock: number; status: ErpIntegrationStatus }>("/settings/erp/demand/run", { method: "POST" }),
       test: () =>
-        req<{ ok: boolean; tenant: string; keyName: string | null; canSendOsMessages: boolean; canSyncHr: boolean }>("/settings/erp/test", { method: "POST" }),
+        req<{ ok: boolean; tenant: string; keyName: string | null; canSendOsMessages: boolean; canSyncHr: boolean; canSendGamification?: boolean; canPushTvWaiting?: boolean }>("/settings/erp/test", { method: "POST" }),
       remove: () => req<ErpIntegrationStatus>("/settings/erp", { method: "DELETE" }),
       exchangeFlows: () => req<ErpExchangeFlows>("/settings/erp/exchanges/flows"),
       exchanges: (params: Record<string, string>) =>

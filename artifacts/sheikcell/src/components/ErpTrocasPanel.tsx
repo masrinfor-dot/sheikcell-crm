@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type ErpDirection, type ErpExchangeFlows, type ErpExchangeList, type ErpFlowStatus } from "@/lib/api";
 import { ArrowLeftRight, RefreshCw } from "lucide-react";
+import ErpGamificationLog from "./ErpGamificationLog";
 
 // Trocas com o ERP (19/10/2026 — Samuel: "cria uma aba com todas as
 // informações que são trocadas entre o CRM e o Prumo"). Em cima, o mapa: o que
@@ -27,6 +28,13 @@ const SCOPE_LABEL: Record<string, string> = {
   "surveys.send": "Pesquisa de satisfação (NPS)",
   "hr.sync": "RH (colaboradores e ponto)",
   "supplier_prices.write": "Listas de preço dos fornecedores",
+  "attendance.write": "Atendimentos do CRM",
+  "sales.read": "Vendas do atendimento",
+  "demand.write": "Pedidos de clientes (atacado)",
+  "raffles.send": "Sorteios",
+  "tasks.sync": "Quadro de tarefas",
+  "gamification.events": "Eventos de atendimento (gamificação)",
+  "crm_waiting.write": "Fila de espera do atendimento (TV da loja)",
 };
 
 const fmt = (iso: string) => new Date(iso).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
@@ -121,6 +129,9 @@ export default function ErpTrocasPanel() {
           </div>
         )}
       </section>
+
+      {/* Pontuação do atendimento (27/10/2026): o que o ERP respondeu a cada evento. */}
+      <ErpGamificationLog />
 
       <section className="space-y-3">
         <div>
