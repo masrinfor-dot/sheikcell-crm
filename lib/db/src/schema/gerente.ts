@@ -40,6 +40,8 @@ export const gerenteSettingsTable = pgTable("gerente_settings", {
   weeklyReportSentOn: date("weekly_report_sent_on"),
   // Equipe: "bom dia" com as tarefas de cada um e cobrança no fim do dia.
   teamDigestEnabled: boolean("team_digest_enabled").notNull().default(true),
+  // Chat interno do CRM: sala do Gerente, uma por pessoa e uma por loja.
+  internalChatEnabled: boolean("internal_chat_enabled").notNull().default(true),
   teamMorningTime: text("team_morning_time").notNull().default("08:00"),
   teamEveningTime: text("team_evening_time").notNull().default("18:00"),
   // Chave do agente do ERP (agk_...), cifrada com o mesmo cofre do ERP.
@@ -277,3 +279,17 @@ export const gerenteTeamDigestsTable = pgTable("gerente_team_digests", {
   day: date("day").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [uniqueIndex("gerente_team_digests_uniq").on(t.tenantId, t.userId, t.kind, t.day)]);
+
+// Salas do chat interno criadas pelo Gerente IA: "gerente" (dono + bot),
+// "pessoa" (dono + pessoa + bot, ref = userId) e "loja" (ref = storeId).
+export const gerenteChatRoomsTable = pgTable("gerente_chat_rooms", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull(),
+  kind: text("kind").notNull(),
+  refId: integer("ref_id").notNull().default(0),
+  conversationId: integer("conversation_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("gerente_chat_rooms_uq").on(t.tenantId, t.kind, t.refId),
+  index("gerente_chat_rooms_conv_idx").on(t.conversationId),
+]);

@@ -627,6 +627,9 @@ router.post("/internal-chat/conversations/:id/messages", requireAuth, async (req
   const recipients = await recipientsFor(conv);
   broadcastInternal("internal_message", { conversationId: convId, kind: conv.kind, message }, tenantId, recipients);
 
+  // Salas do Gerente IA (🤖 Gerente IA / 📋 Gerente · Pessoa): o bot responde.
+  void import("../lib/gerenteInternal").then((m) => m.onInternalMessage({ tenantId, conversationId: convId, senderId: userId, text, type: "text", mediaUrl: null })).catch(() => undefined);
+
   // Preview de link: fire-and-forget, mesmo padrão do chat de clientes — não
   // atrasa a resposta, atualiza a mensagem quando o preview chega.
   const previewUrl = firstUrlIn(text);
@@ -861,6 +864,9 @@ router.post("/internal-chat/conversations/:id/media", requireAuth, async (req, r
 
   const recipients = await recipientsFor(conv);
   broadcastInternal("internal_message", { conversationId: convId, kind: conv.kind, message }, tenantId, recipients);
+
+  // Foto na sala "📋 Gerente · Pessoa" = prova de tarefa.
+  void import("../lib/gerenteInternal").then((m) => m.onInternalMessage({ tenantId, conversationId: convId, senderId: userId, text: caption ?? "", type: msgType, mediaUrl })).catch(() => undefined);
 
   res.json(message);
 });

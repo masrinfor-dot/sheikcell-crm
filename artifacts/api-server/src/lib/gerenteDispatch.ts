@@ -73,11 +73,22 @@ export async function dispatchTaskToSeller(tenantId: number, p: {
 }): Promise<string> {
   try {
     const phone = await sellerPhone(tenantId, p.userId);
-    if (!phone) {
-      await db.insert(gerenteTaskDispatchesTable).values({ tenantId, taskId: p.taskId, userId: p.userId, assigneeName: p.assigneeName, status: "sem_telefone" });
-      return `⚠️ ${p.assigneeName.split(" ")[0]} não tem WhatsApp cadastrado (Gerente IA → Configurações → Equipe no WhatsApp) — a tarefa ficou só no quadro.`;
-    }
     const first = p.assigneeName.split(" ")[0];
+    const { postToPerson } = await import("./gerenteInternal");
+    const chatText = [
+      `📋 Nova tarefa${p.priority === "alta" ? " (URGENTE)" : ""} #${p.taskId}`,
+      p.title,
+      p.dueAt ? `⏰ Prazo: ${fmtWhen(p.dueAt)}` : null,
+      "",
+      `Responda aqui: 1 ${p.taskId} terminei (depois mande a foto) · 2 ${p.taskId} adiar · 3 ${p.taskId} dúvida`,
+    ].filter((l) => l !== null).join("\n");
+    const inChat = await postToPerson(tenantId, p.userId, chatText);
+    if (!phone) {
+      await db.insert(gerenteTaskDispatchesTable).values({ tenantId, taskId: p.taskId, userId: p.userId, assigneeName: p.assigneeName, status: inChat ? "enviada" : "sem_telefone", sentAt: inChat ? new Date() : null });
+      return inChat
+        ? `💬 Enviada pra ${first} no chat do CRM (sem WhatsApp cadastrado).`
+        : `⚠️ ${first} não tem WhatsApp cadastrado (Gerente IA → Configurações → Equipe no WhatsApp) — a tarefa ficou só no quadro.`;
+    }
     const text = [
       `📋 *Nova tarefa${p.priority === "alta" ? " (URGENTE)" : ""}*`,
       `Olá, ${first}! ${p.title}`,
@@ -91,7 +102,9 @@ export async function dispatchTaskToSeller(tenantId: number, p: {
       tenantId, taskId: p.taskId, userId: p.userId, assigneeName: p.assigneeName, phone,
       sessionKey: used, status: used ? "enviada" : "falhou", sentAt: used ? new Date() : null,
     });
-    return used ? `📲 Enviada no WhatsApp de ${first}. Aviso quando ele mandar a prova.` : `⚠️ Não consegui enviar no WhatsApp de ${first} (linha desconectada?). A tarefa está no quadro.`;
+    return used ? `📲 Enviada no WhatsApp de ${first}${inChat ? " e no chat do CRM" : ""}. Aviso quando ele mandar a prova.`
+      : inChat ? `💬 Enviada pra ${first} no chat do CRM (o WhatsApp não saiu — linha desconectada?).`
+      : `⚠️ Não consegui enviar no WhatsApp de ${first} (linha desconectada?). A tarefa está no quadro.`;
   } catch (err) {
     logger.warn({ err, tenantId }, "Gerente IA: falha ao enviar tarefa ao vendedor");
     return "⚠️ Não consegui enviar a tarefa pelo WhatsApp; ela está no quadro.";
@@ -296,12 +309,15 @@ async function taskLink(tenantId: number, taskId: number, canEdit = false, selle
 }
 
 /** Manda uma mensagem pro WhatsApp de uma pessoa da equipe. Devolve se saiu. */
-export async function sendToTeamMember(tenantId: number, userId: number, text: string): Promise<boolean> {
+export async function sendToTeamMember(tenantId: number, userId: number, text: string, opts: { chat?: boolean } = {}): Promise<boolean> {
+  // Chat interno do CRM (sala "📋 Gerente · Pessoa") + WhatsApp. Entregue = qualquer um dos dois.
+  const { postToPerson } = await import("./gerenteInternal");
+  const inChat = opts.chat === false ? false : await postToPerson(tenantId, userId, text);
   const phone = await sellerPhone(tenantId, userId);
-  if (!phone) return false;
+  if (!phone) return inChat;
   const { getGerenteSettings } = await import("./gerente");
   const settings = await getGerenteSettings(tenantId);
-  return !!(await sendVia(phone, await pickLine(tenantId, settings.lastSessionKey), text));
+  return !!(await sendVia(phone, await pickLine(tenantId, settings.lastSessionKey), text)) || inChat;
 }
 
 // ─── Respostas rápidas: adiar e dúvida ───────────────────────────────────────
@@ -415,6 +431,8 @@ export async function runTeamDigests(settings: { tenantId: number; teamDigestEna
     const text = kind === "manha"
       ? [`☀️ *Bom dia, ${first}!* Suas tarefas de hoje:`, ...shown.map((t) => taskLine(t, today)), relevant.length > 10 ? `…e mais ${relevant.length - 10}.` : null, "", quickReplyHelp(shown.length === 1 ? shown[0]!.id : null)].filter((l) => l !== null).join("\n")
       : [`🔔 *${first}, antes de fechar o dia:* estas ainda estão abertas:`, ...shown.map((t) => taskLine(t, today)), "", quickReplyHelp(shown.length === 1 ? shown[0]!.id : null)].join("\n");
+    const { postToPerson } = await import("./gerenteInternal");
+    await postToPerson(settings.tenantId, userId, text);
     const used = await sendVia(phone, lines, text);
     if (!used) continue;
     for (const t of shown) await ensureDispatch(settings.tenantId, userId, u.name, phone, used, t.id);

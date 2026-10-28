@@ -744,7 +744,7 @@ function Config({ settings, onSaved }: { settings: GerenteSettings; onSaved: (s:
   const save = async () => {
     setSaving(true);
     try {
-      const updated = await api.gerente.settings.update({ enabled: s.enabled, assistantName: s.assistantName, authorizedPhones: s.authorizedPhones, quietStart: s.quietStart, quietEnd: s.quietEnd, dailyDigestTime: s.dailyDigestTime, teamDigestEnabled: s.teamDigestEnabled, teamMorningTime: s.teamMorningTime, teamEveningTime: s.teamEveningTime });
+      const updated = await api.gerente.settings.update({ enabled: s.enabled, assistantName: s.assistantName, authorizedPhones: s.authorizedPhones, quietStart: s.quietStart, quietEnd: s.quietEnd, dailyDigestTime: s.dailyDigestTime, teamDigestEnabled: s.teamDigestEnabled, teamMorningTime: s.teamMorningTime, teamEveningTime: s.teamEveningTime, internalChatEnabled: s.internalChatEnabled });
       onSaved({ ...s, ...updated, lines: s.lines });
       if (updated.warnings?.length) toast({ title: "Salvo, mas confira", description: updated.warnings.join(" "), variant: "destructive" });
       else toast({ title: "Configurações salvas ✅" });
@@ -799,6 +799,8 @@ function Config({ settings, onSaved }: { settings: GerenteSettings; onSaved: (s:
             <label>“Bom dia” com as tarefas<input type="time" className={INPUT} value={s.teamMorningTime} disabled={!s.teamDigestEnabled} onChange={(e) => setS({ ...s, teamMorningTime: e.target.value })} /></label>
             <label>Cobrança do fim do dia<input type="time" className={INPUT} value={s.teamEveningTime} disabled={!s.teamDigestEnabled} onChange={(e) => setS({ ...s, teamEveningTime: e.target.value })} /></label>
           </div>
+          <label className="flex items-center gap-2 font-semibold pt-2"><input type="checkbox" checked={s.internalChatEnabled} onChange={(e) => setS({ ...s, internalChatEnabled: e.target.checked })} /> Usar o chat interno do CRM</label>
+          <p className="text-[10px] text-muted-foreground">Cria no chat interno a sala <b>🤖 Gerente IA</b> (fale com o Gerente por ali, igual ao WhatsApp), uma sala <b>📋 Gerente · Pessoa</b> por colaborador (tarefas e recados chegam ali também — mesmo sem WhatsApp — e ele responde 1/2/3 ou manda a foto) e <b>📣 Gerente · Loja</b> pros recados da loja.</p>
           <p className="text-[10px] text-muted-foreground">De segunda a sábado, cada pessoa recebe só as tarefas dela e responde 1 (terminei), 2 (adiar) ou 3 (dúvida). Na cobrança, você recebe quem ficou devendo.</p>
         </div>
         <button onClick={save} disabled={saving} className={BTN_PRIMARY} data-testid="button-save-gerente">{saving ? "Salvando..." : "Salvar"}</button>
