@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import { useParams } from "wouter";
 import GerenteTasks, { TaskSheet } from "@/components/GerenteTasks";
+import GerenteSellerTask from "@/components/GerenteSellerTask";
 
 // Página do link seguro do Gerente IA (/g/:token): abre no celular sem login.
 // Link "dia" → gerenciador completo de tarefas (o mesmo do painel).
 // Link de uma tarefa → a ficha dela. Só o link do dono edita.
 
-type Head = { scope: "dia" | "task"; canEdit: boolean; task?: { id: number }; team?: { id: number; name: string; isOwner?: boolean }[]; categories?: string[]; today?: string };
+type SellerTaskData = Parameters<typeof GerenteSellerTask>[0]["task"];
+type Head = { scope: "dia" | "task"; canEdit: boolean; seller?: { userId: number; name: string } | null; task?: SellerTaskData; team?: { id: number; name: string; isOwner?: boolean }[]; categories?: string[]; today?: string };
 
 export default function GerenteLink() {
   const { token } = useParams<{ token: string }>();
@@ -27,12 +29,13 @@ export default function GerenteLink() {
       <div className="max-w-2xl mx-auto space-y-3">
         <header className="flex items-center justify-between">
           <h1 className="font-bold text-lg">📋 Gerente IA · Tarefas</h1>
-          {head && !head.canEdit && <span className="text-[11px] text-slate-500">só leitura</span>}
+          {head && !head.canEdit && !head.seller && <span className="text-[11px] text-slate-500">só leitura</span>}
         </header>
         {error && <div className="bg-white rounded-2xl p-4 text-sm text-red-700">{error}<p className="text-xs text-slate-500 mt-1">Peça um novo no WhatsApp: <b>link</b>.</p></div>}
         {!head && !error && <p className="text-sm text-slate-500">Carregando…</p>}
         {head?.scope === "dia" && <GerenteTasks token={token} />}
-        {head?.scope === "task" && head.task && (
+        {head?.scope === "task" && head.task && head.seller && <GerenteSellerTask token={token} task={head.task} sellerName={head.seller.name} />}
+        {head?.scope === "task" && head.task && !head.seller && (
           <TaskSheet inline base={`/api/gerente-public/${token}`} id={head.task.id} canEdit={head.canEdit} team={head.team ?? []}
             categories={head.categories ?? []} today={head.today ?? new Date().toISOString().slice(0, 10)}
             onChanged={(m) => { if (m) { setToast(m.replace(/\*/g, "")); setTimeout(() => setToast(null), 5000); } }} />

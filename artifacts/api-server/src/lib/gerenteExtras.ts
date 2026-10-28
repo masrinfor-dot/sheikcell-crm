@@ -26,11 +26,11 @@ function randomAlnum(n: number): string {
 
 // ─── Links ───────────────────────────────────────────────────────────────────
 
-export async function createLink(settings: GerenteSettings, scope: "dia" | "task", refId: number | null, days: number, canEdit = true): Promise<string> {
+export async function createLink(settings: GerenteSettings, scope: "dia" | "task", refId: number | null, days: number, canEdit = true, userId: number | null = null): Promise<string> {
   // Só letras e números: "_" e "~" viram formatação no WhatsApp (itálico,
   // tachado) e quebravam o link quando o código tinha dois deles.
   const token = randomAlnum(32);
-  await db.insert(gerenteLinksTable).values({ tenantId: settings.tenantId, tokenHash: hash(token), scope, refId, canEdit, expiresAt: new Date(Date.now() + days * 86_400_000) });
+  await db.insert(gerenteLinksTable).values({ tenantId: settings.tenantId, tokenHash: hash(token), scope, refId, canEdit, userId, expiresAt: new Date(Date.now() + days * 86_400_000) });
   const base = (settings.publicBaseUrl ?? process.env["PUBLIC_WEB_URL"] ?? DEFAULT_BASE).replace(/\/+$/, "");
   return `${base}/g/${token}`;
 }

@@ -92,7 +92,12 @@ router.get("/gerente-public/:token", async (req, res): Promise<void> => {
   if (link.scope === "task" && link.refId) {
     const task = await taskDetail(tenantId, link.refId);
     if (!task) { res.status(404).json({ error: "Tarefa não encontrada." }); return; }
-    res.json({ scope: "task", canEdit: link.canEdit, expiresAt: link.expiresAt, task, team: link.canEdit ? await team(tenantId) : [], categories: TASK_CATEGORIES, today: new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" }) });
+    let seller: { userId: number; name: string } | null = null;
+    if (!link.canEdit && link.userId) {
+      const [u] = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable).where(and(eq(usersTable.id, link.userId), eq(usersTable.tenantId, tenantId))).limit(1);
+      if (u) seller = { userId: u.id, name: u.name.trim() };
+    }
+    res.json({ scope: "task", canEdit: link.canEdit, seller, expiresAt: link.expiresAt, task, team: link.canEdit ? await team(tenantId) : [], categories: TASK_CATEGORIES, today: new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" }) });
     return;
   }
   const today = spDateISO();
@@ -120,6 +125,40 @@ router.get("/gerente-public/:token/task/:id", async (req, res): Promise<void> =>
   const task = await taskDetail(link.tenantId, id);
   if (!task) { res.status(404).json({ error: "Tarefa não encontrada." }); return; }
   res.json({ scope: "task", canEdit: link.canEdit, expiresAt: link.expiresAt, task });
+});
+
+// ─── Ações do vendedor (link da tarefa dele) ─────────────────────────────────
+
+async function sellerRef(req: Request, res: Response): Promise<{ tenantId: number; taskId: number; userId: number } | null> {
+  const link = await resolveLink(String(req.params["token"]));
+  const id = Number(req.params["id"]);
+  if (!link || link.canEdit || !link.userId || link.scope !== "task" || link.refId !== id) { res.status(403).json({ error: "Este link não permite essa ação." }); return null; }
+  const [t] = await db.select({ id: tasksTable.id, status: tasksTable.status, isArchived: tasksTable.isArchived }).from(tasksTable).where(and(eq(tasksTable.id, id), eq(tasksTable.tenantId, link.tenantId))).limit(1);
+  if (!t || t.isArchived) { res.status(404).json({ error: "Tarefa não encontrada." }); return null; }
+  if (t.status === "done") { res.status(409).json({ error: "Essa tarefa já foi concluída." }); return null; }
+  return { tenantId: link.tenantId, taskId: t.id, userId: link.userId };
+}
+
+router.post("/gerente-public/:token/task/:id/seller", async (req, res): Promise<void> => {
+  const ref = await sellerRef(req, res); if (!ref) return;
+  const b = (req.body ?? {}) as { action?: unknown; text?: unknown };
+  const action = b.action === "doing" || b.action === "postpone" || b.action === "question" ? b.action : null;
+  if (!action) { res.status(400).json({ error: "Ação inválida." }); return; }
+  const { sellerAction } = await import("../lib/gerenteDispatch");
+  res.json({ message: await sellerAction(ref.tenantId, ref.taskId, ref.userId, action, typeof b.text === "string" ? b.text.slice(0, 1500) : undefined) });
+});
+
+router.post("/gerente-public/:token/task/:id/proof", async (req, res): Promise<void> => {
+  const ref = await sellerRef(req, res); if (!ref) return;
+  const b = (req.body ?? {}) as { imageBase64?: unknown; mime?: unknown; note?: unknown };
+  const mime = typeof b.mime === "string" && /^image\/(jpeg|png|webp)$/.test(b.mime) ? b.mime : null;
+  if (!mime || typeof b.imageBase64 !== "string" || b.imageBase64.length < 100) { res.status(400).json({ error: "Mande uma foto (JPG/PNG)." }); return; }
+  const { saveMedia } = await import("../lib/whatsappInbound");
+  let mediaUrl: string;
+  try { mediaUrl = await saveMedia(b.imageBase64.replace(/^data:[^,]+,/, ""), mime); }
+  catch { res.status(400).json({ error: "Foto inválida ou grande demais." }); return; }
+  const { sellerProof } = await import("../lib/gerenteDispatch");
+  res.json({ message: await sellerProof(ref.tenantId, ref.taskId, ref.userId, mediaUrl, typeof b.note === "string" && b.note.trim() ? b.note.trim().slice(0, 300) : null) });
 });
 
 // ─── Ações (só link do dono) ─────────────────────────────────────────────────

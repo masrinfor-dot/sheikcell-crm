@@ -958,7 +958,8 @@ async function processOne(input: GerenteInput): Promise<string[]> {
 
   // Linha ADM: conta, "paguei" e "recebi" vão pra fila de aprovação do ERP
   // em vez do controle local do Gerente.
-  if (rule && sessionKey && settings.admSessionKey === sessionKey && (rule.kind === "conta" || rule.kind === "gasto" || rule.kind === "receita")) {
+  if (rule && sessionKey && settings.admSessionKey === sessionKey && (rule.kind === "conta" || rule.kind === "gasto" || rule.kind === "receita")
+    && await (await import("./gerenteErp")).erpAgentConfigured(settings)) {
     const r = await erpFromRule(settings, phone, rule, text, input.inMessageId);
     if (r) {
       await saveRepliesAndSend(input, [r], [`erp_${rule.kind}`], []);
@@ -1111,6 +1112,26 @@ export async function tryConsumeGerenteInbound(input: {
   }
   if (!authorized) return false;
 
+  // Só a linha do Gerente (ADM) atende o dono. Nas outras linhas a mensagem
+  // dele segue o fluxo normal (atendimento) e ele recebe, no máx. 1x a cada
+  // 6h, um aviso pela linha ADM dizendo onde falar com o Gerente.
+  try {
+    const { settings } = await cachedContext(input.tenantId);
+    const line = await gerenteLine(settings);
+    if (line && input.sessionKey !== line) {
+      const key = `${input.tenantId}`;
+      const last = otherLineTips.get(key) ?? 0;
+      if (Date.now() - last > 6 * 3_600_000) {
+        otherLineTips.set(key, Date.now());
+        const phone = normalizePhone(input.phone);
+        if (phone) void sendRawWhatsAppText(phone, line, "📌 O Gerente IA agora atende só por *este número (ADM)*. A mensagem que você mandou na outra linha foi pro atendimento normal — pra tarefas, recados e resumo, fale comigo aqui.");
+      }
+      return false;
+    }
+  } catch (err) {
+    logger.warn({ err, tenantId: input.tenantId }, "Gerente IA: falha ao checar a linha do Gerente");
+  }
+
   // Daqui pra frente a mensagem É do dono: erro = descarta e loga, NUNCA
   // devolve false — senão a mensagem pessoal dele vira atendimento e a
   // equipe vê.
@@ -1145,7 +1166,7 @@ export async function tryConsumeGerenteInbound(input: {
         const settingsNow = await getGerenteSettings(input.tenantId);
         const erpOn = await (await import("./gerenteErp")).erpAgentConfigured(settingsNow);
         const financial = /\b(boleto|comprovante|pagar|paguei|pago|conta|nota|fatura|pix|recibo)\b/i.test(text);
-        const isAdm = !!settingsNow.admSessionKey && settingsNow.admSessionKey === input.sessionKey;
+        const isAdm = erpOn && !!settingsNow.admSessionKey && settingsNow.admSessionKey === input.sessionKey;
         if (!(isAdm || financial || (erpOn && !text))) {
           if (!text) {
             await db.update(gerenteMessagesTable).set({ intent: "anexo_recebido" }).where(eq(gerenteMessagesTable.id, saved.id));
@@ -1209,12 +1230,25 @@ export async function handlePanelMessage(tenantId: number, text: string): Promis
  * loja. Só grava no histórico quando o envio foi aceito — senão a aba
  * Conversar vira uma parede de avisos que nunca chegaram.
  */
+/**
+ * Linha do Gerente: com a linha ADM escolhida E conectada, o Gerente só
+ * atende e só envia por ela. Sem ADM (ou ADM caída) = comportamento antigo
+ * (qualquer linha), pra nenhum aviso se perder.
+ */
+export async function gerenteLine(settings: Pick<GerenteSettings, "tenantId" | "admSessionKey">): Promise<string | null> {
+  if (!settings.admSessionKey) return null;
+  const [s] = await db.select({ status: whatsappSessionsTable.status }).from(whatsappSessionsTable)
+    .where(and(eq(whatsappSessionsTable.tenantId, settings.tenantId), eq(whatsappSessionsTable.sessionKey, settings.admSessionKey))).limit(1);
+  return s?.status === "connected" ? settings.admSessionKey : null;
+}
+
 export async function notifyOwner(settings: GerenteSettings, text: string): Promise<boolean> {
   const phone = settings.lastPhone ?? settings.authorizedPhones[0];
-  if (!phone || !settings.lastSessionKey) return false;
+  const preferred = (await gerenteLine(settings)) ?? settings.lastSessionKey;
+  if (!phone || !preferred) return false;
   const others = await db.select({ sessionKey: whatsappSessionsTable.sessionKey }).from(whatsappSessionsTable)
     .where(and(eq(whatsappSessionsTable.tenantId, settings.tenantId), eq(whatsappSessionsTable.status, "connected")));
-  const candidates = [settings.lastSessionKey, ...others.map((o) => o.sessionKey).filter((k) => k !== settings.lastSessionKey)];
+  const candidates = [preferred, ...others.map((o) => o.sessionKey).filter((k) => k !== preferred)];
   for (const sessionKey of candidates) {
     if (await sendRawWhatsAppText(phone, sessionKey, text)) {
       await saveOut(settings.tenantId, phone, sessionKey, text, "sistema");
@@ -1231,6 +1265,8 @@ export async function notifyOwnerByTenant(tenantId: number, text: string): Promi
   if (!settings.enabled) return false;
   return notifyOwner(settings, text);
 }
+
+const otherLineTips = new Map<string, number>();
 
 // Uma rodada por vez: com o bridge lento (timeout de 60 s por envio) a rodada
 // pode passar de 1 min, e a seguinte reenviaria os mesmos lembretes.

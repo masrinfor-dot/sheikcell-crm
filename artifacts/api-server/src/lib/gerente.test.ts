@@ -726,3 +726,55 @@ test("contato compartilhado sozinho: pergunta pra quem mandar (não vira atendim
   const [m] = await db.select().from(gerenteMessagesTable).where(and(eq(gerenteMessagesTable.tenantId, tenantId), eq(gerenteMessagesTable.intent, "anexo_recebido"))).orderBy(desc(gerenteMessagesTable.id)).limit(1);
   assert.match(m!.content, /Fornecedor X/);
 });
+
+test("só a linha ADM atende o dono: em outra linha vira atendimento e ele é avisado pelo ADM", async () => {
+  const other = `${sessionKey}-varejo`;
+  await db.insert(whatsappSessionsTable).values({ tenantId, sessionKey: other, status: "connected" });
+  await db.update(gerenteSettingsTable).set({ admSessionKey: sessionKey }).where(eq(gerenteSettingsTable.tenantId, tenantId));
+  invalidateGerenteCache(tenantId);
+  bridgeSends.length = 0;
+  await processInboundWA({
+    sessionKey: other, isGroupMsg: false,
+    data: { key: { remoteJid: `${OWNER_PHONE_JID}@s.whatsapp.net`, fromMe: false, id: `oth-${Date.now()}` }, pushName: "Dono", message: { conversation: "lembra de ligar pro banco amanhã 9h" } },
+  } as Parameters<typeof processInboundWA>[0]);
+  const tip = await waitFor(async () => bridgeSends.find((s) => s.session === sessionKey && /só por \*este número \(ADM\)\*/.test(s.text)));
+  assert.ok(tip);
+  const conv = await db.select().from(conversationsTable).where(and(eq(conversationsTable.tenantId, tenantId), eq(conversationsTable.sessionKey, other)));
+  assert.equal(conv.length, 1, "na outra linha vira atendimento normal");
+  const rem = await db.select().from(gerenteRemindersTable).where(and(eq(gerenteRemindersTable.tenantId, tenantId), eq(gerenteRemindersTable.title, "ligar pro banco")));
+  assert.equal(rem.length, 0, "não virou lembrete");
+
+  // ADM desconectada: volta a atender em qualquer linha (nada se perde).
+  await db.update(whatsappSessionsTable).set({ status: "disconnected" }).where(eq(whatsappSessionsTable.sessionKey, sessionKey));
+  const { gerenteLine, getGerenteSettings } = await import("./gerente.ts");
+  assert.equal(await gerenteLine(await getGerenteSettings(tenantId)), null);
+  await db.update(whatsappSessionsTable).set({ status: "connected" }).where(eq(whatsappSessionsTable.sessionKey, sessionKey));
+  assert.equal(await gerenteLine(await getGerenteSettings(tenantId)), sessionKey);
+});
+
+test("link do vendedor: comecei, adiar, dúvida e foto que conclui (só na tarefa dele)", async () => {
+  const { createTask, getGerenteSettings } = await import("./gerente.ts");
+  const { createLink, resolveLink } = await import("./gerenteExtras.ts");
+  const { sellerAction, sellerProof } = await import("./gerenteDispatch.ts");
+  const { saveMedia } = await import("./whatsappInbound.ts");
+  bridgeSends.length = 0;
+  const r = await createTask(tenantId, { title: "Limpar o balcão da loja", assigneeNames: ["Nilmar"] });
+  const taskId = r.ref!.id;
+  const sent = bridgeSends.find((s) => s.to === "5533977776666" && /Limpar o balcão/.test(s.text));
+  assert.match(sent!.text, /Abrir a tarefa \(comecei/);
+  const token = sent!.text.match(/\/g\/([A-Za-z0-9]{32})/)![1]!;
+  const link = await resolveLink(token);
+  assert.equal(link!.userId, userId);
+  assert.equal(link!.canEdit, false);
+
+  assert.match(await sellerAction(tenantId, taskId, userId, "doing"), /em andamento/);
+  const [t1] = await db.select().from(tasksTable).where(eq(tasksTable.id, taskId));
+  assert.equal(t1!.status, "doing");
+  assert.match(await sellerAction(tenantId, taskId, userId, "question", "Uso qual produto?"), /Mandei sua dúvida/);
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+  const url = await saveMedia(png, "image/png");
+  assert.match(await sellerProof(tenantId, taskId, userId, url, null), /concluída/);
+  const [t2] = await db.select().from(tasksTable).where(eq(tasksTable.id, taskId));
+  assert.equal(t2!.status, "done");
+  void getGerenteSettings; void createLink;
+});
