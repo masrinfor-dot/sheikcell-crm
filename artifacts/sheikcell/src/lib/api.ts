@@ -1595,7 +1595,7 @@ export type GerenteSettings = {
   quietStart: string; quietEnd: string; dailyDigestTime: string | null; dailyDigestSentOn: string | null;
   lastSessionKey: string | null; lastPhone: string | null; createdAt: string; updatedAt: string;
   admSessionKey: string | null; erpAgentKeySet: boolean;
-  teamDigestEnabled: boolean; teamMorningTime: string; teamEveningTime: string;
+  teamDigestEnabled: boolean; teamMorningTime: string; teamEveningTime: string; internalChatEnabled: boolean;
   lines: { sessionKey: string; displayName: string | null; phoneNumber: string | null; status: string }[];
 };
 export type GerenteOrganizeItem = { taskId: number; title: string; priority: string; category?: string | null; oldCategory?: string | null; dueAt?: string | null; oldDue?: string | null; reason?: string };
@@ -3298,7 +3298,7 @@ export const api = {
   gerente: {
     settings: {
       get: () => req<GerenteSettings>("/gerente/settings"),
-      update: (data: Partial<Pick<GerenteSettings, "enabled" | "assistantName" | "authorizedPhones" | "quietStart" | "quietEnd" | "dailyDigestTime" | "admSessionKey" | "teamDigestEnabled" | "teamMorningTime" | "teamEveningTime">>) =>
+      update: (data: Partial<Pick<GerenteSettings, "enabled" | "assistantName" | "authorizedPhones" | "quietStart" | "quietEnd" | "dailyDigestTime" | "admSessionKey" | "teamDigestEnabled" | "teamMorningTime" | "teamEveningTime" | "internalChatEnabled">>) =>
         req<Omit<GerenteSettings, "lines"> & { warnings?: string[] }>("/gerente/settings", { method: "PATCH", body: JSON.stringify(data) }),
     },
     overview: () => req<GerenteOverview>("/gerente/overview"),

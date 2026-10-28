@@ -90,6 +90,8 @@ type ActionResult = { text: string; ref?: MsgRef };
 
 async function saveOut(tenantId: number, phone: string, sessionKey: string | null, content: string, source: string): Promise<void> {
   await db.insert(gerenteMessagesTable).values({ tenantId, phone, sessionKey, direction: "out", source, content });
+  // Espelho na sala "🤖 Gerente IA" do chat interno (o que veio do chat já está lá).
+  if (source !== "chat") void import("./gerenteInternal").then((m) => m.mirrorToGerenteRoom(tenantId, "out", content)).catch(() => undefined);
 }
 
 // ─── Ações (compartilhadas pelas regras, pela IA e pelo painel) ──────────────
@@ -831,7 +833,7 @@ const queues = new Map<string, Promise<unknown>>();
 
 export type GerenteInput = {
   tenantId: number; phone: string; sessionKey: string | null; text: string;
-  source: "whatsapp" | "painel"; inMessageId: number;
+  source: "whatsapp" | "painel" | "chat"; inMessageId: number;
 };
 
 async function applyRule(intent: RuleIntent, tenantId: number, phone: string): Promise<{ replies: string[]; refs: MsgRef[] }> {
@@ -1147,6 +1149,7 @@ export async function tryConsumeGerenteInbound(input: {
       payload: input.mediaUrl || input.msgType === "contact" || input.msgType === "location" ? { mediaUrl: input.mediaUrl, msgType: input.msgType } : null,
     }).onConflictDoNothing().returning();
     if (!saved) return true; // reentrega da mesma mensagem — já tratada
+    void import("./gerenteInternal").then((m) => m.mirrorToGerenteRoom(input.tenantId, "in", content)).catch(() => undefined);
 
     await db.update(gerenteSettingsTable).set({ lastSessionKey: input.sessionKey, lastPhone: phone, updatedAt: new Date() })
       .where(eq(gerenteSettingsTable.tenantId, input.tenantId));
@@ -1209,6 +1212,16 @@ export async function tryConsumeGerenteInbound(input: {
     logger.error({ err, tenantId: input.tenantId }, "Gerente IA: falha ao tratar mensagem do dono (descartada, não vira atendimento)");
     return true;
   }
+}
+
+/** Sala "🤖 Gerente IA" do chat interno: mesma interpretação; a resposta volta no chat. */
+export async function handleChatMessage(tenantId: number, text: string): Promise<string[]> {
+  const settings = await getGerenteSettings(tenantId);
+  const phone = settings.lastPhone ?? settings.authorizedPhones[0] ?? "chat";
+  const [saved] = await db.insert(gerenteMessagesTable).values({
+    tenantId, phone, sessionKey: null, direction: "in", source: "chat", content: text.trim().slice(0, 2000),
+  }).returning();
+  return handleGerenteText({ tenantId, phone, sessionKey: null, text, source: "chat", inMessageId: saved!.id });
 }
 
 /** Caixa de conversa do painel: mesma interpretação, sem passar pelo WhatsApp. */

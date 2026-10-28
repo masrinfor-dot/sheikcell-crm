@@ -16,7 +16,7 @@ const {
   db, tenantsTable, sectorsTable, usersTable, conversationsTable, messagesTable, whatsappSessionsTable,
   attendanceLogsTable, crmContactsTable, whatsappContactsTable, tasksTable, taskAssigneesTable,
   gerenteSettingsTable, gerenteMessagesTable, gerenteRemindersTable, gerenteEntriesTable, gerenteBillsTable,
-  gerenteEventsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable, employeesTable, taskCommentsTable, gerenteTeamPhonesTable, gerenteErpActionsTable, tenantErpIntegrationsTable, gerenteLinksTable, gerenteRecurrencesTable, gerenteTeamDigestsTable, storesTable,
+  gerenteEventsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable, employeesTable, taskCommentsTable, gerenteTeamPhonesTable, gerenteErpActionsTable, tenantErpIntegrationsTable, gerenteLinksTable, gerenteRecurrencesTable, gerenteTeamDigestsTable, storesTable, gerenteChatRoomsTable, internalConversationsTable, internalMessagesTable,
 } = await import("@workspace/db");
 const { eq, and, desc } = await import("drizzle-orm");
 const { processInboundWA } = await import("./whatsappInbound.ts");
@@ -69,6 +69,8 @@ async function wipe(): Promise<void> {
     await db.delete(gerenteLinksTable).where(eq(gerenteLinksTable.tenantId, id));
     await db.delete(gerenteRecurrencesTable).where(eq(gerenteRecurrencesTable.tenantId, id));
     await db.delete(gerenteTeamDigestsTable).where(eq(gerenteTeamDigestsTable.tenantId, id));
+    await db.delete(gerenteChatRoomsTable).where(eq(gerenteChatRoomsTable.tenantId, id));
+    await db.delete(internalConversationsTable).where(eq(internalConversationsTable.tenantId, id));
     await db.delete(tenantErpIntegrationsTable).where(eq(tenantErpIntegrationsTable.tenantId, id));
     await db.delete(taskCommentsTable).where(eq(taskCommentsTable.tenantId, id));
     await db.delete(employeesTable).where(eq(employeesTable.tenantId, id));
@@ -777,4 +779,47 @@ test("link do vendedor: comecei, adiar, dúvida e foto que conclui (só na taref
   const [t2] = await db.select().from(tasksTable).where(eq(tasksTable.id, taskId));
   assert.equal(t2!.status, "done");
   void getGerenteSettings; void createLink;
+});
+
+test("chat interno: sala do Gerente responde o dono; tarefa chega na sala da pessoa; '1 N' + foto conclui; recado de loja vai pra sala da loja", async () => {
+  const { mirrorToGerenteRoom, onInternalMessage, botUserId } = await import("./gerenteInternal.ts");
+  const { createTask } = await import("./gerente.ts");
+  const { sendToTeam } = await import("./gerenteComms.ts");
+  const { saveMedia } = await import("./whatsappInbound.ts");
+  const [owner] = await db.insert(usersTable).values({ tenantId, name: "Samuel Teste", email: `samuel-${sessionKey}@test.local`, passwordHash: "x", role: "admin" }).returning();
+  const bot = await botUserId(tenantId);
+  const roomOf = async (kind: string, refId = 0) => (await db.select().from(gerenteChatRoomsTable).where(and(eq(gerenteChatRoomsTable.tenantId, tenantId), eq(gerenteChatRoomsTable.kind, kind), eq(gerenteChatRoomsTable.refId, refId))))[0];
+  const msgs = async (conv: number) => db.select().from(internalMessagesTable).where(eq(internalMessagesTable.conversationId, conv)).orderBy(internalMessagesTable.id);
+
+  // Sala do Gerente: o dono escreve "resumo" no chat e o bot responde lá.
+  await mirrorToGerenteRoom(tenantId, "out", "teste");
+  const g = await roomOf("gerente");
+  assert.ok(g, "sala do Gerente criada");
+  await onInternalMessage({ tenantId, conversationId: g.conversationId, senderId: owner!.id, text: "como está a equipe?", type: "text", mediaUrl: null });
+  const gm = await msgs(g.conversationId);
+  assert.ok(gm.some((m) => m.senderId === bot && /Equipe agora/.test(m.content)), "bot respondeu no chat");
+
+  // Tarefa pra pessoa: chega na sala dela.
+  const r = await createTask(tenantId, { title: "Separar capinhas da vitrine", assigneeNames: ["Nilmar"] });
+  const taskId = r.ref!.id;
+  assert.match(r.text, /e no chat do CRM/);
+  const pr = await roomOf("pessoa", userId);
+  assert.ok(pr, "sala da pessoa criada");
+  assert.ok((await msgs(pr.conversationId)).some((m) => m.senderId === bot && m.content.includes(`Nova tarefa #${taskId}`)));
+
+  // Vendedor responde "1 N" e manda a foto na sala.
+  await onInternalMessage({ tenantId, conversationId: pr.conversationId, senderId: userId, text: `1 ${taskId}`, type: "text", mediaUrl: null });
+  assert.ok((await msgs(pr.conversationId)).some((m) => /manda aqui uma foto/.test(m.content)));
+  const url = await saveMedia("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "image/png");
+  await onInternalMessage({ tenantId, conversationId: pr.conversationId, senderId: userId, text: "", type: "image", mediaUrl: url });
+  const [t] = await db.select().from(tasksTable).where(eq(tasksTable.id, taskId));
+  assert.equal(t!.status, "done");
+
+  // Recado pra loja: uma mensagem na sala da loja.
+  const out = await sendToTeam(tenantId, { names: [], loja: "SC", message: "Fechar 18h hoje", item: null });
+  assert.match(out, /Mandei o recado/);
+  const [st] = await db.select().from(storesTable).where(eq(storesTable.tenantId, tenantId));
+  const lr = await roomOf("loja", st!.id);
+  assert.ok(lr, "sala da loja criada");
+  assert.ok((await msgs(lr.conversationId)).some((m) => /Fechar 18h hoje/.test(m.content)));
 });
