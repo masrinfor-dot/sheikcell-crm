@@ -56,17 +56,19 @@ jobs:
           if-no-files-found: error
 
       - name: Publicar em Releases
-        shell: pwsh
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $v = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
-          $tag = "desktop-v$v"
-          $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
-          $pre = if ("${{ github.ref }}" -eq "refs/heads/producao") { @() } else { @("--prerelease") }
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -ne 0) {
-            gh release create $tag $exe.FullName --target "${{ github.sha }}" --title "Sheikcell CRM para Windows v$v" --notes "Baixe o arquivo terminado em -setup.exe e execute. Não precisa de administrador." @pre
-          } else {
-            gh release upload $tag $exe.FullName --clobber
-          }
+          v=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          tag="desktop-v$v"
+          exe=$(ls src-tauri/target/release/bundle/nsis/*.exe | head -1)
+          pre="--prerelease"
+          [ "${{ github.ref }}" = "refs/heads/producao" ] && pre=""
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$exe" --clobber
+          else
+            gh release create "$tag" "$exe" --target "${{ github.sha }}" $pre \
+              --title "Sheikcell CRM para Windows v$v" \
+              --notes "Baixe o arquivo terminado em -setup.exe e execute. Não precisa de administrador."
+          fi
