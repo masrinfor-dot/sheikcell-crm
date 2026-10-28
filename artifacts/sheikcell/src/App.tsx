@@ -1,6 +1,7 @@
 import { Switch, Route, Router as WouterRouter, Redirect } from "wouter";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
+import OfflineBanner from "@/components/OfflineBanner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { BrandingProvider } from "@/lib/branding";
@@ -107,6 +108,7 @@ function App() {
               <AppRoutes />
             </WouterRouter>
             <Toaster />
+            <OfflineBanner />
           </BrandingProvider>
         </AuthProvider>
       </TooltipProvider>

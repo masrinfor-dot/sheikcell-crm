@@ -1,0 +1,14 @@
+{
+  "name": "sheikcell-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "App Windows do Sheikcell CRM (Tauri 2). Fora do workspace pnpm de propósito.",
+  "scripts": {
+    "tauri": "tauri",
+    "icons": "tauri icon ../artifacts/sheikcell/public/icons/icon-512.png",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.0"
+  }
+}

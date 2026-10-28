@@ -3,6 +3,7 @@ import { api, type User } from "./api";
 import ChangePasswordModal from "@/components/ChangePasswordModal";
 import { ActivityGuardProvider } from "./activityGuard";
 import { toast } from "@/hooks/use-toast";
+import { clearOfflineCache } from "./offlineCache";
 
 type AuthCtx = {
   user: User | null;
@@ -59,12 +60,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = async (email: string, password: string): Promise<void> => {
     const r = await api.auth.login(email, password);
+    // Telas guardadas offline são de quem estava logado antes neste PC.
+    await clearOfflineCache();
     setUser(r.user);
   };
 
   const logout = async () => {
-    await api.auth.logout();
-    setUser(null);
+    try {
+      await api.auth.logout();
+    } finally {
+      // Sempre apaga o cache offline, mesmo se o logout falhar por falta de rede.
+      await clearOfflineCache();
+      setUser(null);
+    }
   };
 
   return (
