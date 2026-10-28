@@ -35,6 +35,9 @@ declare module "express-session" {
     // escopos ali listados — ver requireSuperadminScope/requireFullSuperadmin
     // em middlewares/auth.ts. Só é definido quando userRole="superadmin".
     superadminScopes: string[] | null | undefined;
+    // Quando o cargo/setores/linhas foram relidos do banco pela última vez
+    // (app.ts, a cada 1 min) — mudar o cargo vale sem sair e entrar.
+    authRefreshedAt: number | undefined;
     // Controle de sessões (item 15 do roadmap de segurança): metadados
     // gravados uma vez no login, usados só pra exibir/auditar — nunca pra
     // autenticação. userAgent cru (o parsing pra "dispositivo/navegador"
