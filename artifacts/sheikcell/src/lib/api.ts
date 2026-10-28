@@ -1,3 +1,13 @@
+import {
+  isCacheable,
+  readCached,
+  writeCached,
+  clearOfflineCache,
+  markServedFromCache,
+  markNetworkOk,
+  markNetworkFailed,
+} from "./offlineCache";
+
 const BASE = "/api";
 export const API_BASE = BASE;
 
@@ -22,10 +32,31 @@ export class ApiError extends Error {
 // (ex.: importação de lista, busca de fotos), onde sem ele um proxy/rede
 // travada deixa o spinner girando pra sempre em vez de mostrar um erro.
 // Chamadas normais (sem timeoutMs) mantêm o comportamento de sempre.
+//
+// Offline / internet ruim (app desktop, Fase 1): leituras GET bem-sucedidas
+// ficam guardadas no IndexedDB (ver offlineCache.ts). Se a rede cair, demorar
+// mais que SLOW_NET_TIMEOUT_MS ou o servidor responder 502/503/504, a tela
+// recebe a última versão guardada em vez de travar. Escritas sem internet
+// falham com mensagem clara (fila offline de escrita fica para a Fase 2).
+const SLOW_NET_TIMEOUT_MS = 12_000;
+const OFFLINE_MSG = "Sem conexão com o servidor. Verifique a internet e tente de novo.";
+
 export async function req<T>(path: string, opts?: RequestInit & { timeoutMs?: number }): Promise<T> {
   const { timeoutMs, ...init } = opts ?? {};
-  const controller = timeoutMs ? new AbortController() : null;
-  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  const method = (init.method ?? "GET").toUpperCase();
+  const cacheable = method === "GET" && isCacheable(path);
+  const cached = cacheable ? await readCached<T>(path) : null;
+
+  // Sabidamente offline e já temos a tela guardada: nem tenta a rede.
+  if (cached && typeof navigator !== "undefined" && navigator.onLine === false) {
+    markServedFromCache();
+    return cached.data;
+  }
+
+  // Com cópia local, não deixa a tela esperando uma rede lenta pra sempre.
+  const effectiveTimeout = timeoutMs ?? (cached && !init.signal ? SLOW_NET_TIMEOUT_MS : undefined);
+  const controller = effectiveTimeout ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), effectiveTimeout) : null;
   let res: Response;
   try {
     res = await fetch(`${BASE}${path}`, {
@@ -35,12 +66,25 @@ export async function req<T>(path: string, opts?: RequestInit & { timeoutMs?: nu
       ...(controller ? { signal: controller.signal } : {}),
     });
   } catch (err) {
-    if (controller?.signal.aborted) throw new ApiError("Tempo esgotado — tente novamente.");
-    throw err;
+    const timedOut = !!controller?.signal.aborted;
+    if (cached) {
+      markServedFromCache();
+      return cached.data;
+    }
+    if (timedOut) throw new ApiError("Tempo esgotado — tente novamente.");
+    // Abort pedido por quem chamou (ex.: troca de tela) não é falta de rede.
+    if ((err as { name?: string })?.name === "AbortError") throw err;
+    markNetworkFailed();
+    throw new ApiError(OFFLINE_MSG, "OFFLINE");
   } finally {
     if (timer) clearTimeout(timer);
   }
   if (!res.ok) {
+    // API fora do ar / gateway sem resposta: mostra a última versão guardada.
+    if (cached && (res.status === 502 || res.status === 503 || res.status === 504)) {
+      markServedFromCache();
+      return cached.data;
+    }
     const err = await res.json().catch(() => ({ error: res.statusText }));
     const code = (err as { code?: string }).code;
     // Sessão expirada ou encerrada no servidor (cookie venceu — 24h desde o
@@ -53,8 +97,10 @@ export async function req<T>(path: string, opts?: RequestInit & { timeoutMs?: nu
     // (checagem silenciosa no carregamento inicial, visitante deslogado é
     // esperado) nem REAUTH_REQUIRED (fluxo separado de confirmar senha de
     // novo pra ação sensível — RoutineChecklistGate.tsx já trata via `code`).
-    if (res.status === 401 && code !== "REAUTH_REQUIRED" && path !== "/auth/login" && path !== "/auth/me") {
-      window.dispatchEvent(new CustomEvent("sheikcell:unauthorized"));
+    if (res.status === 401 && code !== "REAUTH_REQUIRED" && path !== "/auth/login") {
+      // Sessão não vale mais: apaga as telas guardadas deste PC.
+      void clearOfflineCache();
+      if (path !== "/auth/me") window.dispatchEvent(new CustomEvent("sheikcell:unauthorized"));
     }
     throw new ApiError(
       (err as { error?: string }).error ?? res.statusText,
@@ -62,8 +108,11 @@ export async function req<T>(path: string, opts?: RequestInit & { timeoutMs?: nu
       (err as { conversationId?: number }).conversationId,
     );
   }
+  markNetworkOk();
   if (res.status === 204) return undefined as unknown as T;
-  return res.json() as Promise<T>;
+  const data = (await res.json()) as T;
+  if (cacheable) void writeCached(path, data);
+  return data;
 }
 
 // Lê um File como base64 (mesmo padrão do chat.sendMedia/internalChat.sendMedia)

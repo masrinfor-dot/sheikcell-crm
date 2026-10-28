@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Sheikcell CRM",
+  "version": "0.1.0",
+  "identifier": "br.com.sheikcell.crm",
+  "build": {
+    "frontendDist": "https://crm.sheikcell.com.br"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Sheikcell CRM",
+        "width": 1366,
+        "height": 800,
+        "minWidth": 1024,
+        "minHeight": 640,
+        "maximized": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "Sheik Cell Celulares Ltda",
+    "shortDescription": "Sheikcell CRM",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": { "type": "embedBootstrapper" },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["PortugueseBR"],
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}
