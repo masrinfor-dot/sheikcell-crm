@@ -475,6 +475,9 @@ router.post("/settings/erp/test", requireAdmin, async (req, res): Promise<void> 
       keyName: ping.key?.name ?? null,
       canSendOsMessages: (ping.key?.scopes ?? []).includes("service_orders.notify"),
       canSyncHr: (ping.key?.scopes ?? []).includes("hr.sync"),
+      // Pontuação do atendimento e fila da TV da loja (27/10/2026).
+      canSendGamification: (ping.key?.scopes ?? []).includes("gamification.events"),
+      canPushTvWaiting: (ping.key?.scopes ?? []).includes("crm_waiting.write"),
       erpWebUrl: webUrl,
     });
   } catch (err) {

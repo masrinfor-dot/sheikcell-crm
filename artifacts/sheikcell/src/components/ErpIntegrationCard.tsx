@@ -3,6 +3,7 @@ import { api, type ErpIntegrationStatus } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { Link2, Trash2, CheckCircle2, AlertTriangle } from "lucide-react";
 import ErpSalesSyncBlock from "./ErpSalesSyncBlock";
+import ErpGamificationBlock from "./ErpGamificationBlock";
 
 // Ligação com o ERP Prumo (06/10/2026): endereço da API e a chave gerada no
 // ERP (Auxiliares › Integrações, acesso "Mensagens das OS"). Ligado, o CRM
@@ -47,6 +48,8 @@ export default function ErpIntegrationCard() {
       description: [
         r.canSendOsMessages ? "Mensagens das OS: ok." : "Sem o acesso \"Mensagens das OS\".",
         r.canSyncHr ? "RH: ok." : "Sem o acesso \"RH (colaboradores e ponto)\".",
+        r.canSendGamification ? "Pontuação do atendimento: ok." : "Sem o acesso \"Eventos de atendimento (gamificação)\".",
+        r.canPushTvWaiting ? "Fila na TV: ok." : "Sem o acesso \"Fila de espera do atendimento (TV da loja)\".",
       ].join(" "),
       variant: r.canSendOsMessages || r.canSyncHr ? "default" : "destructive",
     });
@@ -172,6 +175,8 @@ export default function ErpIntegrationCard() {
       )}
       {/* Vendas do atendimento (19/10/2026). */}
       {status?.configured && <ErpSalesSyncBlock />}
+      {/* Pontuação do atendimento e fila da TV das lojas do ERP (27/10/2026). */}
+      {status?.configured && <ErpGamificationBlock />}
 
       <div>
         <label className="text-xs font-medium mb-1 block">Endereço da API do ERP</label>

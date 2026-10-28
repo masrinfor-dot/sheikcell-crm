@@ -323,7 +323,18 @@ export function startScheduler(): void {
   // Trocas com o ERP (19/10/2026): o histórico fica 90 dias; limpa a cada 6 h.
   setInterval(() => {
     void import("./erpExchanges").then((m) => m.cleanupErpExchanges()).catch(() => {});
+    void import("./erpGamification").then((m) => m.cleanupGamificationEvents()).catch(() => {});
   }, 6 * 60 * 60_000);
+  // Pontuação do atendimento → gamificação do ERP (27/10/2026): primeira
+  // resposta, sem resposta no prazo e conversa que virou venda, a cada minuto
+  // (fila com nova tentativa — ver erpGamification.ts).
+  setInterval(() => {
+    void import("./erpGamification").then((m) => m.runErpGamification()).catch(() => {});
+  }, 60_000);
+  // "Clientes esperando resposta" na TV das lojas do ERP (27/10/2026), a cada minuto.
+  setInterval(() => {
+    void import("./erpTvWaiting").then((m) => m.runErpTvWaiting()).catch(() => {});
+  }, 60_000);
   // Lembrete da pesquisa de satisfação: granularidade de minutos basta.
   setInterval(() => { void sendSurveyReminders(); }, 60_000);
   // Gerente IA (19/10/2026): lembretes, avisos de compromisso e o resumo

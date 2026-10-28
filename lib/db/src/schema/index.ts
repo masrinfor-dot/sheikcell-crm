@@ -50,3 +50,4 @@ export * from "./instagram";
 export * from "./erp_sales";
 export * from "./erp_exchange_logs";
 export * from "./gerente";
+export * from "./erp_gamification";

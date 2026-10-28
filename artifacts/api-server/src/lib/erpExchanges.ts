@@ -183,6 +183,41 @@ export const CRM_ERP_FLOWS: readonly ErpFlowDef[] = [
     ],
   },
   {
+    key: "gamification_events",
+    label: "Pontuação do atendimento (gamificação)",
+    what: "O CRM manda os eventos das conversas — primeira resposta (segundos), conversa sem resposta no prazo do alarme e conversa que virou venda no ERP — para o ERP dar ou tirar pontos do atendente. Só ids e números, nunca o texto.",
+    scope: "gamification.events",
+    frequency: "A cada 1 minuto (lotes de até 200, com novas tentativas se o ERP estiver fora)",
+    enabled: (r) => r.gamificationEnabled,
+    enabledHint: "Ligue \"Enviar pontuação de atendimento ao ERP\" no cartão do ERP (aba Conexões).",
+    routes: [
+      { method: "POST", path: "/gamification/v1/events", direction: "CRM_TO_ERP", one: "evento de pontuação enviado", many: "eventos de pontuação enviados" },
+      { method: "GET", path: "/sales/attributed", direction: "ERP_TO_CRM", one: "venda do atendimento lida", many: "vendas do atendimento lidas" },
+    ],
+  },
+  {
+    key: "tv_waiting",
+    label: "Clientes esperando resposta (TV da loja)",
+    what: "A cada minuto o CRM manda, por loja do ERP, quem está esperando resposta: primeiro nome + inicial, canal, setor e há quanto tempo. Nunca celular nem mensagem.",
+    scope: "crm_waiting.write",
+    frequency: "A cada 1 minuto",
+    enabled: (r) => r.tvWaitingEnabled,
+    enabledHint: "Ligue \"Mostrar na TV da loja\" e ligue as lojas no cartão do ERP (aba Conexões).",
+    routes: [
+      { method: "POST", path: "/crm-waiting/v1/snapshot", direction: "CRM_TO_ERP", one: "loja com a fila enviada", many: "lojas com a fila enviada" },
+    ],
+  },
+  {
+    key: "stores",
+    label: "Lojas do ERP",
+    what: "O CRM busca a lista de lojas do ERP para você ligar cada loja/linha daqui a uma loja de lá.",
+    scope: "stores.read",
+    frequency: "Ao abrir \"Lojas no ERP\" no cartão do ERP",
+    routes: [
+      { method: "GET", path: "/stores", direction: "ERP_TO_CRM", one: "loja do ERP", many: "lojas do ERP" },
+    ],
+  },
+  {
     key: "raffles_export",
     label: "Sorteios (arquivo)",
     what: "Arquivo com os sorteios e os resultados do CRM, que o ERP importa.",
