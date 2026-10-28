@@ -1301,7 +1301,7 @@ export async function processInboundWA(body: InboundWAPayload): Promise<void> {
   // conversa de atendimento (a equipe não vê). Antes da pesquisa e do robô.
   if (!isGroup) {
     const { tryConsumeGerenteInbound } = await import("./gerente");
-    const handled = await tryConsumeGerenteInbound({ tenantId, sessionKey, phone, text, msgType, mediaUrl, externalId });
+    const handled = await tryConsumeGerenteInbound({ tenantId, sessionKey, phone, text: text || (msgType === "contact" || msgType === "location" ? displayContent : ""), msgType, mediaUrl, externalId });
     if (handled) return;
     // Vendedor confirmando tarefa enviada pelo Gerente IA ("feito" + foto).
     const { tryConsumeTaskProof } = await import("./gerenteDispatch");

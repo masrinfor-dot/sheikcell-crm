@@ -16,7 +16,7 @@ const {
   db, tenantsTable, sectorsTable, usersTable, conversationsTable, messagesTable, whatsappSessionsTable,
   attendanceLogsTable, crmContactsTable, whatsappContactsTable, tasksTable, taskAssigneesTable,
   gerenteSettingsTable, gerenteMessagesTable, gerenteRemindersTable, gerenteEntriesTable, gerenteBillsTable,
-  gerenteEventsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable, employeesTable, taskCommentsTable, gerenteTeamPhonesTable, gerenteErpActionsTable, tenantErpIntegrationsTable, gerenteLinksTable, gerenteRecurrencesTable, gerenteTeamDigestsTable,
+  gerenteEventsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable, employeesTable, taskCommentsTable, gerenteTeamPhonesTable, gerenteErpActionsTable, tenantErpIntegrationsTable, gerenteLinksTable, gerenteRecurrencesTable, gerenteTeamDigestsTable, storesTable,
 } = await import("@workspace/db");
 const { eq, and, desc } = await import("drizzle-orm");
 const { processInboundWA } = await import("./whatsappInbound.ts");
@@ -82,6 +82,7 @@ async function wipe(): Promise<void> {
     await db.delete(whatsappSessionsTable).where(eq(whatsappSessionsTable.tenantId, id));
     await db.delete(usersTable).where(eq(usersTable.tenantId, id));
     await db.delete(sectorsTable).where(eq(sectorsTable.tenantId, id));
+    await db.delete(storesTable).where(eq(storesTable.tenantId, id));
     await db.delete(tenantsTable).where(eq(tenantsTable.id, id));
   }
 }
@@ -494,7 +495,7 @@ test("WhatsApp: 'tarefa estorno concluída' acha 'EXTORNOS', fecha e avisa o res
   assert.ok(comments.some((x) => x.content === "Já falei com o banco"));
   bridgeSends.length = 0;
   const a = await handlePanelMessage(tenantId, "avisa o Nilmar: passa no banco antes das 15h");
-  assert.match(a.replies[0]!, /Mandei pro Nilmar/);
+  assert.match(a.replies[0]!, /Mandei o recado pra \*Nilmar\*/);
   assert.ok(bridgeSends.find((s) => /passa no banco antes das 15h/.test(s.text)));
   const none = await handlePanelMessage(tenantId, "concluir tarefa tarefa-que-nao-existe-xyz");
   assert.match(none.replies[0]!, /Não achei/);
@@ -643,4 +644,85 @@ test("'arrumar tarefas': propõe categoria e prazo novo; 'sim' aplica", async ()
   assert.ok(t!.dueDate!.getTime() > Date.now());
   const [m] = await db.select().from(gerenteTaskMetaTable).where(eq(gerenteTaskMetaTable.taskId, late!.id));
   assert.equal(m!.category, "Compras");
+});
+
+test("apelidos e lojas: Gabi, Cris, Lu; 'meninos de São Cristóvão'", async () => {
+  const { matchPerson, parseTargets } = await import("./gerenteComms.ts");
+  const people = [
+    { id: 1, name: "Gabrielly Rosa", storeId: null }, { id: 2, name: "Christian Colares", storeId: null },
+    { id: 3, name: "Lucelia", storeId: null }, { id: 4, name: "Alan David", storeId: null }, { id: 5, name: "Ana Paula", storeId: null },
+  ];
+  assert.equal(matchPerson(people, "Gabi")?.id, 1);
+  assert.equal(matchPerson(people, "Cris")?.id, 2);
+  assert.equal(matchPerson(people, "Lu")?.id, 3);
+  assert.equal(matchPerson(people, "a Lu")?.id, 3);
+  assert.equal(matchPerson(people, "Paula")?.id, 5);
+  assert.equal(matchPerson(people, "Aldo"), null);
+  assert.deepEqual(parseTargets("os meninos de São Cristóvão, por favor"), { names: [], loja: "São Cristóvão" });
+  assert.deepEqual(parseTargets("loja SC"), { names: [], loja: "SC" });
+  assert.deepEqual(parseTargets("Alan e Davi"), { names: ["Alan", "Davi"], loja: null });
+});
+
+test("recado e encaminhamento direto: 'avisa o Nilmar que…', 'manda isso pro Nilmar', 'fala pros meninos de SC: …'", async () => {
+  const { tryDirectCommand } = await import("./gerenteComms.ts");
+  const seller = "5533977776666";
+  const newIn = async (content: string, payload: Record<string, unknown> | null = null) => (await db.insert(gerenteMessagesTable).values({ tenantId, phone: OWNER_PHONE_CANONICAL, direction: "in", source: "whatsapp", content, payload }).returning())[0]!.id;
+
+  bridgeSends.length = 0;
+  let id = await newIn("avisa o Nilmar que a reunião é às 18h");
+  let r = await tryDirectCommand(tenantId, OWNER_PHONE_CANONICAL, id, "avisa o Nilmar que a reunião é às 18h");
+  assert.match(r!, /Mandei o recado pra \*Nilmar\*/);
+  assert.ok(bridgeSends.find((s) => s.to === seller && /a reunião é às 18h/.test(s.text)));
+
+  // Contato compartilhado e depois "manda isso pro Nilmar".
+  bridgeSends.length = 0;
+  await newIn("👤 Contato compartilhado: João Peças — 5533988880000", { msgType: "contact", mediaUrl: null });
+  id = await newIn("manda isso pro Nilmar");
+  r = await tryDirectCommand(tenantId, OWNER_PHONE_CANONICAL, id, "manda isso pro Nilmar");
+  assert.match(r!, /Mandei o contato/);
+  assert.ok(bridgeSends.find((s) => s.to === seller && /João Peças — 5533988880000/.test(s.text)));
+
+  // Loja: Nilmar é de São Cristóvão.
+  const [st] = await db.insert(storesTable).values({ tenantId, name: "SÃO CRISTOVÃO - 03" }).returning();
+  await db.update(usersTable).set({ storeId: st!.id }).where(eq(usersTable.id, userId));
+  bridgeSends.length = 0;
+  id = await newIn("fala pros meninos de SC: abram 8h amanhã");
+  r = await tryDirectCommand(tenantId, OWNER_PHONE_CANONICAL, id, "fala pros meninos de SC: abram 8h amanhã");
+  assert.match(r!, /SÃO CRISTOVÃO/);
+  assert.ok(bridgeSends.find((s) => s.to === seller && /abram 8h amanhã/.test(s.text)));
+
+  // Ninguém da equipe com esse nome: não é atalho (a IA trata).
+  assert.equal(await tryDirectCommand(tenantId, OWNER_PHONE_CANONICAL, id, "manda pra frente o pedido"), null);
+});
+
+test("link, resumo e equipe em linguagem natural", async () => {
+  const l = await handlePanelMessage(tenantId, "Mande o link para acessar as tarefas");
+  assert.match(l.replies[0]!, /\/g\/[A-Za-z0-9]{32}/);
+  const r = await handlePanelMessage(tenantId, "me dá um resumo");
+  assert.match(r.replies[0]!, /Equipe agora/);
+  assert.match(r.replies[0]!, /\/g\//);
+  const e = await handlePanelMessage(tenantId, "como está a equipe?");
+  assert.match(e.replies[0]!, /Nilmar — \d+ aberta/);
+});
+
+test("histórico: resposta da mensagem anterior entra mesmo gravada depois da atual", async () => {
+  const { loadHistory } = await import("./gerente.ts");
+  const ph = "5533900000001";
+  const ins = async (direction: "in" | "out", content: string) => (await db.insert(gerenteMessagesTable).values({ tenantId, phone: ph, direction, source: "whatsapp", content }).returning())[0]!.id;
+  await ins("in", "criar tarefa A");
+  const b = await ins("in", "criar tarefa B");
+  await ins("out", "Tarefa A criada");
+  const h = await loadHistory(tenantId, ph, b);
+  assert.deepEqual(h.map((m) => m.content), ["criar tarefa A", "Tarefa A criada"]);
+});
+
+test("contato compartilhado sozinho: pergunta pra quem mandar (não vira atendimento)", async () => {
+  bridgeSends.length = 0;
+  await processInboundWA({
+    sessionKey, isGroupMsg: false,
+    data: { key: { remoteJid: `${OWNER_PHONE_JID}@s.whatsapp.net`, fromMe: false, id: `ct-${Date.now()}` }, pushName: "Dono", message: { contactMessage: { displayName: "Fornecedor X", vcard: "BEGIN:VCARD\nTEL;waid=5531999990000:+55 31 99999-0000\nEND:VCARD" } } },
+  } as Parameters<typeof processInboundWA>[0]);
+  await waitFor(async () => bridgeSends.find((s) => /Pra quem eu mando/.test(s.text)));
+  const [m] = await db.select().from(gerenteMessagesTable).where(and(eq(gerenteMessagesTable.tenantId, tenantId), eq(gerenteMessagesTable.intent, "anexo_recebido"))).orderBy(desc(gerenteMessagesTable.id)).limit(1);
+  assert.match(m!.content, /Fornecedor X/);
 });

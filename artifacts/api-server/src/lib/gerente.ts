@@ -13,7 +13,7 @@
 //     e manda o resumo "Meu dia" de manhã.
 // Nunca lança pra fora: falha aqui não pode derrubar o webhook do WhatsApp.
 import type OpenAI from "openai";
-import { and, eq, desc, asc, gte, lte, lt, isNull, isNotNull, inArray, ilike, ne, sql } from "drizzle-orm";
+import { and, or, eq, desc, asc, gte, lte, lt, isNull, isNotNull, inArray, ilike, ne, sql } from "drizzle-orm";
 import {
   db,
   gerenteSettingsTable, gerenteMessagesTable, gerenteEventsTable, gerenteRemindersTable,
@@ -555,7 +555,7 @@ async function findBill(tenantId: number, query: string): Promise<typeof gerente
 
 type ToolDef = {
   name: string; description: string; parameters: Record<string, unknown>;
-  run: (args: Record<string, unknown>, ctx: { tenantId: number; phone: string }) => Promise<ActionResult>;
+  run: (args: Record<string, unknown>, ctx: { tenantId: number; phone: string; inMessageId: number }) => Promise<ActionResult>;
 };
 
 const str = (v: unknown, max = 500): string => (typeof v === "string" ? v.trim().slice(0, max) : "");
@@ -663,7 +663,7 @@ const TOOLS: ToolDef[] = [
     name: "consultar",
     description: "Consulta o que o dono tem registrado: resumo do dia, agenda, lembretes, tarefas da equipe, contas, financeiro do mês.",
     parameters: { type: "object", properties: {
-      o_que: { type: "string", enum: ["meu_dia", "agenda", "lembretes", "tarefas", "contas", "financeiro"] },
+      o_que: { type: "string", enum: ["meu_dia", "equipe", "agenda", "lembretes", "tarefas", "contas", "financeiro"], description: "meu_dia = resumo do dia; equipe = como está cada pessoa (abertas, atrasadas, foto pendente)" },
       dias: { type: "integer", description: "Para agenda: quantos dias à frente (padrão 7)" },
       mes: { type: "string", description: "Para financeiro: YYYY-MM (padrão: mês atual)" },
     }, required: ["o_que"] },
@@ -688,6 +688,34 @@ const TOOLS: ToolDef[] = [
     run: async (a, ctx) => ({ text: await snoozeLastReminder(ctx.tenantId, typeof a["minutos"] === "number" ? a["minutos"] : null, parseSpLocal(optStr(a["quando"], 20))) }),
   },
   {
+    name: "mandar_para_equipe",
+    description: "Manda um recado pelo WhatsApp para pessoas da equipe ou para todos de uma loja, e/ou ENCAMINHA o que o dono acabou de mandar (contato, foto, documento, áudio, texto anterior). Use para: 'manda pro Alan…', 'avisa a Lu que…', 'fala pros meninos de SC…', 'encaminha isso pra Gabi', 'manda esse contato pra loja SC', ou quando o áudio do dono é claramente falado PARA alguém da equipe ('…, viu, Lu?').",
+    parameters: { type: "object", properties: {
+      pessoas: { type: "array", items: { type: "string" }, description: "Nomes ou apelidos (Lu, Gabi, Cris…). 'todos' = equipe inteira" },
+      loja: { type: "string", description: "Quando for para todos de uma loja: PP, SJ, SC, São Cristóvão…" },
+      mensagem: { type: "string", description: "O recado, na voz do dono, claro e direto (ex.: 'Manda o DVR de 8 canais pra distribuidora hoje'). Vazio se for só encaminhar." },
+      encaminhar_anterior: { type: "boolean", description: "true quando ele diz 'isso', 'esse contato', 'essa foto', 'esse número' — encaminha a mensagem/anexo anterior (ou o anexo desta mensagem)" },
+    } },
+    run: async (a, ctx) => {
+      const { sendToTeam, ownerItem } = await import("./gerenteComms");
+      const names = Array.isArray(a["pessoas"]) ? (a["pessoas"] as unknown[]).map((x) => str(x, 60)).filter(Boolean) : [];
+      const item = a["encaminhar_anterior"] === true ? await ownerItem(ctx.tenantId, ctx.phone, ctx.inMessageId, true) : await ownerItem(ctx.tenantId, ctx.phone, ctx.inMessageId, true).then((i) => (i && i.id === ctx.inMessageId ? i : null));
+      return { text: await sendToTeam(ctx.tenantId, { names, loja: optStr(a["loja"], 40), message: optStr(a["mensagem"], 1500), item }) };
+    },
+  },
+  {
+    name: "enviar_link",
+    description: "Manda o link (abre no celular, sem login) do painel de tarefas/dia do dono, ou de uma tarefa específica. Use sempre que ele pedir link, painel, acessar/ver as tarefas.",
+    parameters: { type: "object", properties: { tarefa: { type: "integer", description: "Número da tarefa (omitir = painel completo)" } } },
+    run: async (a, ctx) => {
+      const { createLink } = await import("./gerenteExtras");
+      const settings = await getGerenteSettings(ctx.tenantId);
+      const id = typeof a["tarefa"] === "number" ? a["tarefa"] : null;
+      if (id) return { text: `🔗 Tarefa ${id}:\n${await createLink(settings, "task", id, 30)}` };
+      return { text: `🔗 Seu painel de tarefas:\n${await createLink(settings, "dia", null, 7)}` };
+    },
+  },
+  {
     name: "desfazer_ultimo",
     description: "Desfaz o último registro criado (lembrete, lançamento, conta, compromisso ou tarefa). Use também quando o dono corrigir algo: desfaça e crie de novo com os dados certos.",
     parameters: { type: "object", properties: {} },
@@ -695,11 +723,12 @@ const TOOLS: ToolDef[] = [
   },
 ];
 
-type QueryKind = "meu_dia" | "agenda" | "lembretes" | "tarefas" | "contas" | "financeiro";
+type QueryKind = "meu_dia" | "equipe" | "agenda" | "lembretes" | "tarefas" | "contas" | "financeiro";
 
 async function runQuery(tenantId: number, what: QueryKind, opts: { days?: number; month?: string | null } = {}): Promise<string> {
   switch (what) {
     case "meu_dia": return buildDigest(tenantId);
+    case "equipe": { const { teamStatus } = await import("./gerenteComms"); return teamStatus(tenantId); }
     case "agenda": return listAgenda(tenantId, Math.max(1, Math.min(60, opts.days ?? 7)));
     case "lembretes": return listReminders(tenantId);
     case "tarefas": return listTasks(tenantId);
@@ -721,21 +750,32 @@ async function buildSystemPrompt(tenantId: number, settings: GerenteSettings): P
     `Tarefas: nunca crie a mesma tarefa duas vezes nem uma tarefa por pessoa — várias pessoas na mesma coisa = UMA tarefa com vários responsáveis. Lista de itens diferentes (ex.: "letreiro PP, uniforme, curso de IA") = uma tarefa por item. Coisa que o próprio dono vai fazer = sem responsável. Sempre escolha a categoria (${TASK_CATEGORIES.join(", ")}). Prioridade alta só se ele disser urgente/hoje/importante. Não invente prazo.`,
     `Lojas: ${stores.length ? stores.map((s) => s.name).join(", ") : "sem cadastro"}. Âmbito "pessoal" só quando ele deixar claro que é da vida pessoal; o padrão é "empresa".`,
     `Valores em reais (ex.: "1.250,50" = 1250.50). Quando algo essencial faltar (valor, horário de lembrete/compromisso), pergunte de forma curta em vez de chutar.`,
+    `Você PODE mandar links (enviar_link) e PODE mandar recados/encaminhar coisas para a equipe pelo WhatsApp (mandar_para_equipe). Nunca diga que não consegue mandar links ou mensagens.`,
+    `Responsável x assunto: a pessoa só é RESPONSÁVEL quando ele pede que ela faça ("pede pro Alan…", "Alan tem que…", "tarefa pra Gabi…"). Se a pessoa é só o ASSUNTO ("ver por que a Gabi não voltou", "conversar com o Christian sobre…", "cobrar a Marcela"), a tarefa é DO DONO (sem responsável).`,
+    `Recado x tarefa: "avisa/fala/manda pro X que…" = mandar_para_equipe (recado). "tarefa pro X…", "pede pro X fazer…", "X precisa…" = criar_tarefa_equipe com responsável X (ela já vai pro WhatsApp dele). Não faça as duas coisas pro mesmo pedido.`,
+    `Dado solto sem instrução (só um telefone, endereço, nome, contato ou link): não faça perguntas longas — responda numa linha oferecendo: mandar pra alguém (diga quem), virar tarefa ou lembrete.`,
+    `IMPORTANTE: as mensagens anteriores da conversa JÁ foram atendidas. Aja SOMENTE sobre a última mensagem do dono; use o histórico só para entender referências ("isso", "ele", "o mesmo").`,
     `Se ele corrigir algo recém-registrado ("era 60, não 50"), use desfazer_ultimo e registre de novo com o dado certo. Quando ele perguntar algo, use consultar ou buscar_cliente. Respostas curtas, em português do Brasil, sem formalidade excessiva. Não invente informações.`,
   ].join("\n");
 }
 
-async function loadHistory(tenantId: number, phone: string, beforeMessageId: number): Promise<OpenAI.Chat.Completions.ChatCompletionMessageParam[]> {
+export async function loadHistory(tenantId: number, phone: string, beforeMessageId: number): Promise<OpenAI.Chat.Completions.ChatCompletionMessageParam[]> {
   // Só o que veio ANTES da mensagem atual (por id) — duas mensagens rápidas
   // do dono ou um aviso do agendador no meio não podem entrar como "atual".
   // Avisos do sistema ficam de fora: não são fala da IA nesta conversa.
-  const rows = await db.select({ direction: gerenteMessagesTable.direction, content: gerenteMessagesTable.content })
+  // As respostas da IA entram mesmo com id maior (resposta da mensagem
+  // anterior gravada depois que esta chegou) — senão a mensagem anterior
+  // parece sem resposta e a IA faz de novo (tarefa duplicada, resposta
+  // trocada).
+  const rows = await db.select({ id: gerenteMessagesTable.id, direction: gerenteMessagesTable.direction, content: gerenteMessagesTable.content })
     .from(gerenteMessagesTable)
     .where(and(
-      eq(gerenteMessagesTable.tenantId, tenantId), eq(gerenteMessagesTable.phone, phone),
-      lt(gerenteMessagesTable.id, beforeMessageId), ne(gerenteMessagesTable.source, "sistema"),
+      eq(gerenteMessagesTable.tenantId, tenantId), eq(gerenteMessagesTable.phone, phone), ne(gerenteMessagesTable.source, "sistema"),
+      or(lt(gerenteMessagesTable.id, beforeMessageId), eq(gerenteMessagesTable.direction, "out")),
     ))
     .orderBy(desc(gerenteMessagesTable.id)).limit(HISTORY_LIMIT);
+  // Ordem: cada resposta logo depois da pergunta que ela respondeu (as
+  // respostas atrasadas vão pra antes da mensagem atual, que não está aqui).
   return rows.reverse().map((r) => ({ role: r.direction === "in" ? "user" : "assistant", content: r.content.slice(0, 1500) }) as OpenAI.Chat.Completions.ChatCompletionMessageParam);
 }
 
@@ -774,7 +814,7 @@ async function runAi(tenantId: number, phone: string, settings: GerenteSettings,
     let args: Record<string, unknown> = {};
     try { args = call.function.arguments ? (JSON.parse(call.function.arguments) as Record<string, unknown>) : {}; } catch { args = {}; }
     try {
-      const r = await tool.run(args, { tenantId, phone });
+      const r = await tool.run(args, { tenantId, phone, inMessageId });
       replies.push(r.text);
       if (r.ref) refs.push(r.ref);
     } catch (err) {
@@ -858,6 +898,38 @@ async function processOne(input: GerenteInput): Promise<string[]> {
     return erpFill;
   }
 
+  // "é boleto"/"lança no ERP" logo depois de uma foto/PDF: manda aquele arquivo pro ERP.
+  if (/^(e |é |eh )?(um |uma )?(boleto|comprovante|lanca(r)? no erp|lança(r)? no erp|manda(r)? pro erp)\b/i.test(text) && text.length < 60) {
+    const { ownerItem } = await import("./gerenteComms");
+    const it = await ownerItem(tenantId, phone, input.inMessageId, false);
+    if (it?.mediaUrl) {
+      const r = await handleOwnerDocument(settings, phone, it.mediaUrl, text, input.inMessageId);
+      await saveRepliesAndSend(input, r, ["erp_documento"], []);
+      return r;
+    }
+  }
+  // Resumo e status da equipe, em qualquer jeito de pedir.
+  const nt = norm(text);
+  if (nt.length <= 60 && /\b(resumo|como (esta|ta|tá) (a equipe|o pessoal|tudo)|status( da equipe)?|equipe hoje|situacao da equipe)\b/.test(nt) && !/\b(pr[oa]|manda)\b/.test(nt)) {
+    const { teamStatus } = await import("./gerenteComms");
+    const { createLink } = await import("./gerenteExtras");
+    const wantsTeam = /equipe|pessoal|status/.test(nt) && !/resumo/.test(nt);
+    const body = wantsTeam ? await teamStatus(tenantId) : `${await buildDigest(tenantId)}\n\n${await teamStatus(tenantId)}`;
+    const r = `${body}\n\n🔗 Painel: ${await createLink(settings, "dia", null, 7)}`;
+    await saveRepliesAndSend(input, [r], ["resumo"], []);
+    return [r];
+  }
+
+  // Recados e encaminhamentos diretos ("avisa a Lu que…", "manda isso pro Alan").
+  {
+    const { tryDirectCommand } = await import("./gerenteComms");
+    const direct = await tryDirectCommand(tenantId, phone, input.inMessageId, text);
+    if (direct) {
+      await saveRepliesAndSend(input, [direct], ["recado_equipe"], []);
+      return [direct];
+    }
+  }
+
   // "arrumar tarefas": junta duplicadas e propõe categoria + prazo novo.
   if (/^(arrumar|arruma|organizar|organiza|organize|arrume)( as| minhas| todas as)? tarefas$/.test(norm(text))) {
     const r = await organizeTasksCommand(tenantId, phone);
@@ -894,7 +966,7 @@ async function processOne(input: GerenteInput): Promise<string[]> {
     }
   }
   // Pedido de busca de cliente é frequente e barato — regra própria.
-  const client = !rule ? text.match(/^(?:o que (?:eu )?combinei com|cliente|busca(?:r)? cliente|quem [eé])\s+(?:(?:o|a)\s+)?(.+?)\??$/i) : null;
+  const client = !rule && !/\b(manda|mandar|envia|encaminha|avisa|pr[oa])\b/i.test(text) ? text.match(/^(?:o que (?:eu )?combinei com|cliente|busca(?:r)? cliente|quem [eé])\s+(?:(?:o|a)\s+)?(.+?)\??$/i) : null;
 
   if (rule) {
     const r = await applyRule(rule, tenantId, phone);
@@ -928,7 +1000,7 @@ async function processOne(input: GerenteInput): Promise<string[]> {
 
 async function saveRepliesAndSend(input: GerenteInput, replies: string[], intents: string[], refs: MsgRef[]): Promise<void> {
   const { tenantId, phone, sessionKey, source } = input;
-  await db.update(gerenteMessagesTable).set({ intent: intents.join(",").slice(0, 200) || null, payload: { refs } })
+  await db.update(gerenteMessagesTable).set({ intent: intents.join(",").slice(0, 200) || null, payload: sql`coalesce(${gerenteMessagesTable.payload}, '{}'::jsonb) || ${JSON.stringify({ refs })}::jsonb` })
     .where(eq(gerenteMessagesTable.id, input.inMessageId));
   for (const r of replies) {
     await saveOut(tenantId, phone, sessionKey, r, source);
@@ -1051,6 +1123,7 @@ export async function tryConsumeGerenteInbound(input: {
     const [saved] = await db.insert(gerenteMessagesTable).values({
       tenantId: input.tenantId, phone, sessionKey: input.sessionKey, direction: "in", source: "whatsapp",
       content, externalId: input.externalId,
+      payload: input.mediaUrl || input.msgType === "contact" || input.msgType === "location" ? { mediaUrl: input.mediaUrl, msgType: input.msgType } : null,
     }).onConflictDoNothing().returning();
     if (!saved) return true; // reentrega da mesma mensagem — já tratada
 
@@ -1059,9 +1132,29 @@ export async function tryConsumeGerenteInbound(input: {
     invalidateGerenteCache(input.tenantId);
 
     void (async () => {
-      // Foto/PDF (boleto, comprovante): vai pra fila do ERP, legenda como contexto.
+      const say = async (msg: string) => { await saveOut(input.tenantId, phone, input.sessionKey, msg, "whatsapp"); await sendRawWhatsAppText(phone, input.sessionKey, msg); };
+      // Contato/localização compartilhado sem pedido: guarda e pergunta pra quem vai.
+      if ((input.msgType === "contact" || input.msgType === "location") && !/\b(pr[oa]|para|manda|avisa|encaminha)\b/i.test(text.replace(/^👤.*$|^📍.*$/gm, ""))) {
+        await db.update(gerenteMessagesTable).set({ intent: "anexo_recebido" }).where(eq(gerenteMessagesTable.id, saved.id));
+        await say(`${input.msgType === "contact" ? "📇 Recebi o contato" : "📍 Recebi a localização"}. Pra quem eu mando? Ex.: *manda pro Alan* ou *manda pra loja SC*.`);
+        return;
+      }
+      // Foto/PDF: boleto/comprovante vai pro ERP; com pedido na legenda
+      // ("manda pro Alan") é encaminhado; sem nada, pergunta o que fazer.
       if ((input.msgType === "image" || input.msgType === "doc") && input.mediaUrl) {
         const settingsNow = await getGerenteSettings(input.tenantId);
+        const erpOn = await (await import("./gerenteErp")).erpAgentConfigured(settingsNow);
+        const financial = /\b(boleto|comprovante|pagar|paguei|pago|conta|nota|fatura|pix|recibo)\b/i.test(text);
+        const isAdm = !!settingsNow.admSessionKey && settingsNow.admSessionKey === input.sessionKey;
+        if (!(isAdm || financial || (erpOn && !text))) {
+          if (!text) {
+            await db.update(gerenteMessagesTable).set({ intent: "anexo_recebido" }).where(eq(gerenteMessagesTable.id, saved.id));
+            await say(`📎 Recebi ${input.msgType === "image" ? "a foto" : "o arquivo"}. O que eu faço?\n• *manda pro Alan* / *manda pra loja SC*\n• *tarefa pro …* com isso\n• *é boleto* (lança no ERP)`);
+            return;
+          }
+          await handleGerenteText({ tenantId: input.tenantId, phone, sessionKey: input.sessionKey, text: `${text}\n[o dono anexou ${input.msgType === "image" ? "uma foto" : "um arquivo"} nesta mensagem]`, source: "whatsapp", inMessageId: saved.id });
+          return;
+        }
         const replies = await handleOwnerDocument(settingsNow, phone, input.mediaUrl, text, saved.id);
         await db.update(gerenteMessagesTable).set({ intent: "erp_documento" }).where(eq(gerenteMessagesTable.id, saved.id));
         for (const r of replies) { await saveOut(input.tenantId, phone, input.sessionKey, r, "whatsapp"); await sendRawWhatsAppText(phone, input.sessionKey, r); }
