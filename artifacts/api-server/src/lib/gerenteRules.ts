@@ -388,25 +388,20 @@ export function parseByRules(raw: string, now: Date = new Date()): RuleIntent | 
 }
 
 export const HELP_TEXT = [
-  "Sou seu Gerente IA. Fale comigo como falaria com uma secretária:",
+  "🤖 *Gerente IA* — fale comigo normal, por texto ou áudio:",
   "",
-  "• *Lembrete* — \"lembra de ligar pro contador amanhã às 9h\"",
-  "• *Gasto/receita* — \"gastei 50 no almoço\", \"recebi 300 do João\"",
-  "• *Conta* — \"pagar 1.500 aluguel dia 10/11\", \"receber 500 da Maria sexta\"",
-  "• *Tarefa pra equipe* — \"tarefa pro Nilmar: conferir estoque até sexta\" (vai pro WhatsApp dele; ele responde *1* terminei + foto, *2* adiar, *3* dúvida)",
-  "• *Compromisso* — \"reunião com o contador quinta às 14h\"",
-  "• *Consultas* — \"meu dia\", \"agenda\", \"lembretes\", \"tarefas\", \"contas\", \"financeiro\"",
-  "• *Cliente* — \"o que combinei com o Carlos?\"",
+  "📋 *Tarefa:* \"tarefa pro Alan: conferir estoque até sexta\" (vai pro WhatsApp dele)",
+  "📣 *Recado:* \"avisa a Lu que o cliente vem às 15h\" · \"fala pra loja SC: …\"",
+  "📎 *Encaminhar:* mande o contato/foto e depois \"manda pro Christian\"",
+  "🔗 *Painel:* \"link\" · \"link da tarefa 12\"",
+  "📊 *Resumo:* \"resumo\" · \"como está a equipe?\"",
+  "✅ *Fechar:* \"tarefa estorno concluída\" (avisa o responsável)",
+  "🧹 *Organizar:* \"arrumar tarefas\"",
+  "⏰ *Lembrete:* \"lembra de ligar pro contador amanhã 9h\"",
+  "💰 *Dinheiro:* \"gastei 50 no almoço\" · \"pagar 1.500 aluguel dia 10\"",
+  "📅 *Agenda:* \"reunião quinta 14h\"",
   "",
-  "• *Rotina* — \"todo dia 10 pagar 1.500 aluguel\", \"toda segunda 9h tarefa pro Alan: limpar a vitrine\" (*rotinas* lista)",
-  "• *Link* — \"link\" (seu dia no celular) ou \"link da tarefa 12\"",
-  "• *Equipe* — \"tarefa estorno concluída\", \"ativar tarefa 126\", \"comentar tarefa 126: …\", \"avisa o Alan: …\" (o responsável recebe no WhatsApp)",
-  "• *Arrumar tarefas* — junto as duplicadas e proponho categoria e prazo novo pras atrasadas; você responde *sim*",
-  "• *Fechamento* — à noite te mando o que foi feito; responda *mover* pra passar o resto pra amanhã",
-  "• *Boleto/comprovante* — mande a foto ou PDF que vai pra aprovação no ERP",
-  "",
-  "Quando eu avisar um lembrete, responda *feito* ou *adia 1h*.",
-  "Errou algo? Mande *desfazer* ou me corrija em texto.",
+  "Errou? *desfazer*.",
 ].join("\n");
 
 // ─── Rotinas recorrentes ─────────────────────────────────────────────────────

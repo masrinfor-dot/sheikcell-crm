@@ -218,7 +218,9 @@ export async function tryExtraCommand(settings: GerenteSettings, text: string): 
     if (!task) return `Não achei a tarefa ${id}.`;
     return `🔗 Tarefa *${task.id} — ${task.title}*:\n${await createLink(settings, "task", task.id, 30)}\n(abre sem login, vale 30 dias — dá pra comentar, ativar, concluir e avisar o responsável)`;
   }
-  if (/^(link|links|link do (meu )?dia|abrir (meu )?dia|painel|meu painel|link do painel|link das tarefas)\??$/.test(t)) {
+  // Qualquer pedido curto de link/painel ("mande o link pra acessar as tarefas", "me passa o painel").
+  if (/^(link|links|link do (meu )?dia|abrir (meu )?dia|painel|meu painel|link do painel|link das tarefas)\??$/.test(t)
+    || (t.length <= 80 && /\b(link|painel)\b/.test(t) && !/\b(pr[oa]|pros|pras)\s+[a-z]/.test(t) && !/https?:/.test(t))) {
     return `🔗 Seu dia, tarefas da equipe e provas:\n${await createLink(settings, "dia", null, 7)}\n(abre sem login, vale 7 dias — toque na tarefa pra comentar, concluir ou avisar a equipe)`;
   }
   if (/^(rotinas|minhas rotinas|recorrentes|lembretes fixos)\??$/.test(t)) return listRecurrences(settings.tenantId);

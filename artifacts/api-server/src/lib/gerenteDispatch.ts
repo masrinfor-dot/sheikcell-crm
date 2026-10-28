@@ -387,3 +387,19 @@ export async function runTeamDigests(settings: { tenantId: number; teamDigestEna
   if (charged.length) await notifyOwnerText(settings.tenantId, `🔔 *Cobrei a equipe* — tarefas de hoje ainda abertas: ${charged.join(", ")}.`);
   return sent;
 }
+
+/** Encaminha um arquivo que o dono mandou (foto/PDF) pro WhatsApp de alguém da equipe. */
+export async function sendRawWhatsAppMediaToTeam(tenantId: number, userId: number, mediaUrl: string, caption: string | null): Promise<boolean> {
+  const phone = await sellerPhone(tenantId, userId);
+  if (!phone) return false;
+  const { loadMedia } = await import("./gerenteErp");
+  const media = await loadMedia(mediaUrl).catch(() => null);
+  if (!media) return false;
+  const { sendRawWhatsAppMedia } = await import("./outbound");
+  const { getGerenteSettings } = await import("./gerente");
+  const settings = await getGerenteSettings(tenantId);
+  for (const k of await pickLine(tenantId, settings.lastSessionKey)) {
+    if (await sendRawWhatsAppMedia(phone, k, { base64: media.buf.toString("base64"), mimetype: media.mime, filename: media.fileName }, caption)) return true;
+  }
+  return false;
+}

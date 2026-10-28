@@ -29,6 +29,24 @@ export async function sendRawWhatsAppText(phone: string, sessionKey: string, tex
   }
 }
 
+/** Envia um arquivo (foto, PDF, áudio) pelo bridge, sem gravar conversa. */
+export async function sendRawWhatsAppMedia(phone: string, sessionKey: string, file: { base64: string; mimetype: string; filename: string }, caption: string | null): Promise<boolean> {
+  const bridgeUrl = process.env["WHATSAPP_BRIDGE_URL"] ?? "http://localhost:3002";
+  const bridgeSecret = createHmac("sha256", process.env["SESSION_SECRET"] ?? "sheikcell-dev-only-secret").update("whatsapp-bridge-v1").digest("hex");
+  const type = file.mimetype.startsWith("image/") ? "image" : file.mimetype.startsWith("audio/") ? "audio" : file.mimetype.startsWith("video/") ? "video" : "document";
+  try {
+    const r = await fetch(`${bridgeUrl}/whatsapp/send-media`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Bridge-Secret": bridgeSecret },
+      body: JSON.stringify({ to: phone, type, base64: file.base64, mimetype: file.mimetype, filename: file.filename, caption: caption ?? undefined, session: sessionKey }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Envia um texto para o cliente de uma conversa (mesmo caminho do envio manual):
  * grava a mensagem, atualiza a conversa, avisa via SSE e encaminha ao bridge.
