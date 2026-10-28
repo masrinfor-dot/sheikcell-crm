@@ -113,6 +113,39 @@ app.use("/api", async (req, _res, next) => {
   next();
 });
 
+// Cargo, setores e linhas atualizados na sessão (28/10/2026: "a Lucélia,
+// mesmo como admin, não vê todos os atendimentos igual aos meus"). A sessão
+// guardava o cargo do momento do login; se o admin mudasse o cargo, os
+// setores ou as linhas da pessoa, ela continuava com o acesso antigo até
+// sair e entrar de novo (a tela mostrava "Administrador", lido do banco, mas
+// o servidor ainda filtrava como vendedor). Agora, no máximo a cada 1 min, a
+// sessão relê esses dados do banco. Usuário desativado ou apagado sai.
+app.use("/api", async (req, res, next) => {
+  const s = req.session;
+  const refreshMs = Number(process.env["SESSION_REFRESH_MS"] ?? 60_000);
+  if (!s?.userId || Date.now() - (s.authRefreshedAt ?? 0) < refreshMs) { next(); return; }
+  try {
+    const { db, usersTable } = await import("@workspace/db");
+    const { eq } = await import("drizzle-orm");
+    const [u] = await db.select().from(usersTable).where(eq(usersTable.id, s.userId)).limit(1);
+    if (!u || !u.isActive) {
+      s.destroy(() => { res.status(401).json({ error: "Sessão encerrada. Entre de novo." }); });
+      return;
+    }
+    s.userRole = u.role;
+    if (u.role !== "superadmin") s.tenantId = u.tenantId;
+    s.userSectorId = u.sectorId ?? undefined;
+    s.userSectorIds = u.sectorIds?.length ? u.sectorIds : (u.sectorId ? [u.sectorId] : []);
+    s.userStoreId = u.storeId ?? undefined;
+    s.userName = u.name;
+    s.accessHours = u.role === "vendedor" ? (u.accessHours ?? null) : null;
+    s.allowedSessionKeys = u.role === "vendedor" ? (u.allowedSessionKeys ?? null) : null;
+    s.superadminScopes = u.role === "superadmin" ? (u.superadminScopes ?? null) : undefined;
+    s.authRefreshedAt = Date.now();
+  } catch { /* banco fora: segue com o que a sessão já tem */ }
+  next();
+});
+
 app.use("/api", router);
 
 // Sem isto, qualquer exceção não tratada numa rota (Express 5 encaminha
