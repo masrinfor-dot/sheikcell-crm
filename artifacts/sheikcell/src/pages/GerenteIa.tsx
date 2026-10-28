@@ -637,8 +637,12 @@ function ErpAdm({ settings, onSaved }: { settings: GerenteSettings; onSaved: (s:
 
   return (
     <div className="shk-card p-4 space-y-3 lg:col-span-2">
-      <p className="font-semibold">🧾 ERP — linha ADM (boletos, contas e pagamentos)</p>
-      <p className="text-[10px] text-muted-foreground">Na linha ADM, conta (<i>pagar 1.500 aluguel dia 10/11</i>), baixa (<i>paguei 1.500 aluguel</i>) e qualquer <b>foto/PDF de boleto ou comprovante</b> viram pedido na fila do ERP — nada é lançado sem aprovação em <b>ERP › Financeiro › Aprovações do agente</b>. Fotos e PDFs mandados em outras linhas também vão pro ERP.</p>
+      <p className="font-semibold">📱 Linha do Gerente (ADM) e ERP</p>
+      <p className="text-[10px] text-muted-foreground"><b>Com a linha ADM escolhida e conectada, o Gerente IA atende e envia só por ela:</b> suas mensagens, tarefas e recados pra equipe, bom dia/cobrança e avisos. Se você mandar mensagem em outra linha, ela vai pro atendimento normal e o Gerente te lembra de usar o ADM. Se a linha ADM cair, o Gerente usa as outras linhas pra nenhum aviso se perder.</p>
+      <p className="text-[10px] text-muted-foreground">Com o ERP ligado, na linha ADM conta (<i>pagar 1.500 aluguel dia 10/11</i>), baixa (<i>paguei 1.500 aluguel</i>) e <b>foto/PDF de boleto ou comprovante</b> viram pedido na fila do ERP — nada é lançado sem aprovação em <b>ERP › Financeiro › Aprovações do agente</b>.</p>
+      {settings.admSessionKey && settings.lines.find((l) => l.sessionKey === settings.admSessionKey)?.status !== "connected" && (
+        <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">⚠️ A linha ADM não está conectada — enquanto isso o Gerente continua usando as outras linhas. Conecte pelo QR em Configurações → WhatsApp.</p>
+      )}
       <div className="grid md:grid-cols-2 gap-3">
         <label>Linha ADM
           <select className={INPUT} value={settings.admSessionKey ?? ""} onChange={(e) => setLine(e.target.value)}>

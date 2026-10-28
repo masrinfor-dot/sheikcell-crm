@@ -234,6 +234,9 @@ export const gerenteLinksTable = pgTable("gerente_links", {
   // Link do dono pode comentar/mudar situação/avisar a equipe; o que vai pro
   // vendedor é só leitura.
   canEdit: boolean("can_edit").notNull().default(false),
+  // Link do vendedor: quem é ele (pode comecar, mandar foto e concluir,
+  // adiar e mandar dúvida — só na tarefa dele).
+  userId: integer("user_id"),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [uniqueIndex("gerente_links_token_uq").on(t.tokenHash)]);

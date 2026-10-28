@@ -46,7 +46,13 @@ export async function sellerPhone(tenantId: number, userId: number): Promise<str
 }
 
 /** Linha por onde as tarefas saem: a última que o dono usou; senão a 1ª conectada. */
-async function pickLine(tenantId: number, preferred: string | null): Promise<string[]> {
+async function pickLine(tenantId: number, preferredIn: string | null): Promise<string[]> {
+  // Linha ADM conectada manda em tudo que o Gerente envia.
+  let preferred = preferredIn;
+  try {
+    const { getGerenteSettings, gerenteLine } = await import("./gerente");
+    preferred = (await gerenteLine(await getGerenteSettings(tenantId))) ?? preferredIn;
+  } catch { /* segue com a linha recebida */ }
   const rows = await db.select({ sessionKey: whatsappSessionsTable.sessionKey }).from(whatsappSessionsTable)
     .where(and(eq(whatsappSessionsTable.tenantId, tenantId), eq(whatsappSessionsTable.status, "connected")));
   const keys = rows.map((r) => r.sessionKey);
@@ -78,7 +84,7 @@ export async function dispatchTaskToSeller(tenantId: number, p: {
       p.dueAt ? `⏰ Prazo: ${fmtWhen(p.dueAt)}` : null,
       "",
       quickReplyHelp(p.taskId),
-      await taskLink(tenantId, p.taskId),
+      await taskLink(tenantId, p.taskId, false, p.userId),
     ].filter((l) => l !== null).join("\n");
     const used = await sendVia(phone, await pickLine(tenantId, p.ownerSessionKey), text);
     await db.insert(gerenteTaskDispatchesTable).values({
@@ -97,6 +103,32 @@ async function notifyOwnerText(tenantId: number, text: string): Promise<void> {
   await notifyOwnerByTenant(tenantId, text);
 }
 
+/**
+ * A IA olha a foto de prova e diz se ela parece NÃO ter relação com a
+ * tarefa. Devolve o motivo (pra avisar o dono) ou null (ok / sem IA).
+ */
+async function checkProof(tenantId: number, title: string, proofUrl: string): Promise<string | null> {
+  if (!title) return null;
+  try {
+    const { loadMedia } = await import("./gerenteErp");
+    const media = await loadMedia(proofUrl);
+    if (!media || !media.mime.startsWith("image/")) return null;
+    const { getOpenAiClientForTenant } = await import("./aiClient");
+    const openai = await getOpenAiClientForTenant(tenantId);
+    const c = await openai.chat.completions.create({
+      model: "gpt-4o-mini", max_tokens: 120, response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: "Você confere fotos de prova de tarefas de uma loja de celulares. Seja tolerante: só reprove quando a foto claramente não tem nada a ver com a tarefa (ex.: foto preta, selfie, print aleatório, foto repetida de outra coisa). Responda JSON {\"ok\": true|false, \"motivo\": \"curto, em português\"}." },
+        { role: "user", content: [{ type: "text", text: `Tarefa: ${title}` }, { type: "image_url", image_url: { url: `data:${media.mime};base64,${media.buf.toString("base64")}`, detail: "low" } }] },
+      ],
+    }, { timeout: 15_000 });
+    const j = JSON.parse(c.choices[0]?.message?.content ?? "{}") as { ok?: boolean; motivo?: string };
+    return j.ok === false ? (j.motivo || "a foto não parece ser da tarefa").slice(0, 200) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function conclude(d: typeof gerenteTaskDispatchesTable.$inferSelect, proofUrl: string, note: string | null): Promise<void> {
   const now = new Date();
   await db.update(gerenteTaskDispatchesTable).set({ status: "concluida", doneAt: now, proofUrl, proofNote: note })
@@ -109,7 +141,11 @@ async function conclude(d: typeof gerenteTaskDispatchesTable.$inferSelect, proof
   });
   const [task] = await db.select({ title: tasksTable.title }).from(tasksTable).where(eq(tasksTable.id, d.taskId)).limit(1);
   const link = await taskLink(d.tenantId, d.taskId, true);
-  await notifyOwnerText(d.tenantId, `✅ *${d.assigneeName.split(" ")[0]} concluiu:* ${task?.title ?? `tarefa ${d.taskId}`}\n📸 Prova anexada${link ? `:\n${link.replace(/^🔗 Ver a tarefa: /, "")}` : " na tarefa (CRM → Tarefas)."}`);
+  const check = await checkProof(d.tenantId, task?.title ?? "", proofUrl);
+  if (check) {
+    await db.insert(taskCommentsTable).values({ tenantId: d.tenantId, taskId: d.taskId, authorId: null, content: `⚠️ Conferência automática: ${check}` });
+  }
+  await notifyOwnerText(d.tenantId, `✅ *${d.assigneeName.split(" ")[0]} concluiu:* ${task?.title ?? `tarefa ${d.taskId}`}\n📸 Prova anexada${check ? `\n⚠️ *Confira a foto:* ${check}` : ""}${link ? `:\n${link.replace(/^🔗 Ver a tarefa: /, "")}` : " na tarefa (CRM → Tarefas)."}`);
 }
 
 /**
@@ -248,11 +284,12 @@ export async function sendTeamTest(tenantId: number, phone: string, name: string
 }
 
 /** Linha "🔗 Ver a tarefa: <link>" (link seguro, sem login). "" se falhar. */
-async function taskLink(tenantId: number, taskId: number, canEdit = false): Promise<string> {
+async function taskLink(tenantId: number, taskId: number, canEdit = false, sellerId: number | null = null): Promise<string> {
   try {
     const { getGerenteSettings } = await import("./gerente");
     const { createLink } = await import("./gerenteExtras");
-    return `🔗 Ver a tarefa: ${await createLink(await getGerenteSettings(tenantId), "task", taskId, 30, canEdit)}`;
+    const url = await createLink(await getGerenteSettings(tenantId), "task", taskId, 30, canEdit, canEdit ? null : sellerId);
+    return sellerId && !canEdit ? `🔗 Abrir a tarefa (comecei / foto e concluir / adiar / dúvida): ${url}` : `🔗 Ver a tarefa: ${url}`;
   } catch {
     return "";
   }
@@ -402,4 +439,40 @@ export async function sendRawWhatsAppMediaToTeam(tenantId: number, userId: numbe
     if (await sendRawWhatsAppMedia(phone, k, { base64: media.buf.toString("base64"), mimetype: media.mime, filename: media.fileName }, caption)) return true;
   }
   return false;
+}
+
+// ─── Link do vendedor: agir na tarefa sem WhatsApp ───────────────────────────
+
+async function dispatchFor(tenantId: number, taskId: number, userId: number): Promise<typeof gerenteTaskDispatchesTable.$inferSelect | null> {
+  const [d] = await db.select().from(gerenteTaskDispatchesTable)
+    .where(and(eq(gerenteTaskDispatchesTable.tenantId, tenantId), eq(gerenteTaskDispatchesTable.taskId, taskId), eq(gerenteTaskDispatchesTable.userId, userId)))
+    .orderBy(desc(gerenteTaskDispatchesTable.id)).limit(1);
+  if (d) return d;
+  const { usersTable } = await import("@workspace/db");
+  const [u] = await db.select({ name: usersTable.name }).from(usersTable).where(and(eq(usersTable.id, userId), eq(usersTable.tenantId, tenantId))).limit(1);
+  if (!u) return null;
+  const [n] = await db.insert(gerenteTaskDispatchesTable).values({ tenantId, taskId, userId, assigneeName: u.name.trim(), phone: await sellerPhone(tenantId, userId), status: "enviada", sentAt: new Date() }).returning();
+  return n ?? null;
+}
+
+export async function sellerAction(tenantId: number, taskId: number, userId: number, action: "doing" | "postpone" | "question", text?: string): Promise<string> {
+  const d = await dispatchFor(tenantId, taskId, userId);
+  if (!d) return "Tarefa não encontrada.";
+  if (action === "postpone") return postpone(d);
+  if (action === "question") {
+    const q = (text ?? "").trim();
+    if (!q) return "Escreva a dúvida.";
+    return forwardQuestion(d, q);
+  }
+  await db.update(tasksTable).set({ status: "doing", updatedAt: new Date() }).where(and(eq(tasksTable.id, taskId), eq(tasksTable.tenantId, tenantId)));
+  const [task] = await db.select({ title: tasksTable.title }).from(tasksTable).where(eq(tasksTable.id, taskId)).limit(1);
+  await notifyOwnerText(tenantId, `▶️ *${d.assigneeName.split(" ")[0]} começou:* ${task?.title ?? `tarefa ${taskId}`}`);
+  return "▶️ Marcado como em andamento. Quando terminar, mande a foto aqui.";
+}
+
+export async function sellerProof(tenantId: number, taskId: number, userId: number, mediaUrl: string, note: string | null): Promise<string> {
+  const d = await dispatchFor(tenantId, taskId, userId);
+  if (!d) return "Tarefa não encontrada.";
+  await conclude(d, mediaUrl, note);
+  return "✅ Tarefa concluída com a foto. Obrigado!";
 }
