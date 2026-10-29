@@ -3330,6 +3330,7 @@ export const api = {
       list: () => req<GerenteMemberRow[]>("/gerente/members"),
       add: (data: { name: string; phone: string; userId?: number | null }) => req<GerenteMemberRow>("/gerente/members", { method: "POST", body: JSON.stringify(data) }),
       remove: (id: number) => req<{ ok: boolean }>(`/gerente/members/${id}`, { method: "DELETE" }),
+      sendLink: (id: number) => req<{ ok: boolean; url: string; message: string }>(`/gerente/members/${id}/send-link`, { method: "POST", timeoutMs: 90_000 }),
     },
     team: {
       list: () => req<GerenteTeamMember[]>("/gerente/team"),
