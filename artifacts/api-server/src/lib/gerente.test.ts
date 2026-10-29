@@ -16,7 +16,7 @@ const {
   db, tenantsTable, sectorsTable, usersTable, conversationsTable, messagesTable, whatsappSessionsTable,
   attendanceLogsTable, crmContactsTable, whatsappContactsTable, tasksTable, taskAssigneesTable,
   gerenteSettingsTable, gerenteMessagesTable, gerenteRemindersTable, gerenteEntriesTable, gerenteBillsTable,
-  gerenteEventsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable, employeesTable, taskCommentsTable, gerenteTeamPhonesTable, gerenteErpActionsTable, tenantErpIntegrationsTable, gerenteLinksTable, gerenteRecurrencesTable, gerenteTeamDigestsTable, storesTable, gerenteChatRoomsTable, internalConversationsTable, internalMessagesTable, gerenteMembersTable, gerenteChatFollowupsTable, internalConversationMembersTable,
+  gerenteEventsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable, employeesTable, taskCommentsTable, gerenteTeamPhonesTable, gerenteErpActionsTable, tenantErpIntegrationsTable, gerenteLinksTable, gerenteRecurrencesTable, gerenteTeamDigestsTable, storesTable, gerenteChatRoomsTable, internalConversationsTable, internalMessagesTable, gerenteMembersTable, gerenteChatFollowupsTable, internalConversationMembersTable, gerenteSectorsTable, gerenteTaskAcksTable,
 } = await import("@workspace/db");
 const { eq, and, desc } = await import("drizzle-orm");
 const { processInboundWA } = await import("./whatsappInbound.ts");
@@ -72,6 +72,8 @@ async function wipe(): Promise<void> {
     await db.delete(gerenteChatRoomsTable).where(eq(gerenteChatRoomsTable.tenantId, id));
     await db.delete(gerenteMembersTable).where(eq(gerenteMembersTable.tenantId, id));
     await db.delete(gerenteChatFollowupsTable).where(eq(gerenteChatFollowupsTable.tenantId, id));
+    await db.delete(gerenteSectorsTable).where(eq(gerenteSectorsTable.tenantId, id));
+    await db.delete(gerenteTaskAcksTable).where(eq(gerenteTaskAcksTable.tenantId, id));
     await db.delete(internalConversationsTable).where(eq(internalConversationsTable.tenantId, id));
     await db.delete(tenantErpIntegrationsTable).where(eq(tenantErpIntegrationsTable.tenantId, id));
     await db.delete(taskCommentsTable).where(eq(taskCommentsTable.tenantId, id));
@@ -932,4 +934,55 @@ test("chat primeiro: tarefa vai só pro chat; sem abrir em X min vai pro WhatsAp
   assert.equal(await runChatFollowups(tenantId, new Date(Date.now() + 31 * 60_000)), 0);
   assert.equal(bridgeSends.filter((s) => s.to === seller).length, 0);
   await db.update(gerenteSettingsTable).set({ teamChannel: "both" }).where(eq(gerenteSettingsTable.tenantId, tenantId));
+});
+
+test("setores: padrões criados; 'tarefa do financeiro: …' vai pros responsáveis do setor", async () => {
+  const { getSectors, upsertSector } = await import("./gerenteSectors.ts");
+  const sectors = await getSectors(tenantId);
+  for (const n of ["ADM", "Financeiro", "RH", "Compras", "Comercial"]) assert.ok(sectors.some((x) => x.name === n), n);
+  const fin = sectors.find((x) => x.name === "Financeiro")!;
+  await upsertSector(tenantId, { id: fin.id, name: fin.name, responsibleIds: [userId] });
+  const r = await handlePanelMessage(tenantId, "tarefa do financeiro: pagar o contador até sexta");
+  assert.match(r.replies[0]!, /Financeiro/);
+  assert.match(r.replies[0]!, /responsáveis do setor/);
+  const [t] = (await db.select().from(tasksTable).where(eq(tasksTable.tenantId, tenantId)).orderBy(desc(tasksTable.id)).limit(1));
+  assert.match(t!.title, /pagar o contador/i);
+  const asg = await db.select().from(taskAssigneesTable).where(eq(taskAssigneesTable.taskId, t!.id));
+  assert.deepEqual(asg.map((a) => a.userId), [userId]);
+  const { gerenteTaskMetaTable } = await import("@workspace/db");
+  const [m] = await db.select().from(gerenteTaskMetaTable).where(eq(gerenteTaskMetaTable.taskId, t!.id));
+  assert.equal(m!.category, "Financeiro");
+});
+
+test("ciência entre gerentes: tarefa do dono pra gestora pede 'ok N'; resposta avisa o dono; 'prazo N …' ajusta", async () => {
+  const LUC = "5533987100000"; // gestora do teste anterior (Lucelia Gestora)
+  const { createTask } = await import("./gerente.ts");
+  bridgeSends.length = 0;
+  const r = await createTask(tenantId, { title: "Revisar o caixa da semana", assigneeNames: ["Lucelia"], dueAt: new Date(Date.now() + 2 * 86_400_000) });
+  const taskId = r.ref!.id;
+  assert.match(r.text, /Pedi a Lucelia a ciência e a confirmação do prazo/);
+  const ask = bridgeSends.find((s) => s.to === LUC && /criou uma tarefa pra você/.test(s.text));
+  assert.ok(ask, "pedido de ciência foi pra gestora");
+  assert.match(ask.text, new RegExp(`ok ${taskId}`));
+  assert.equal(bridgeSends.filter((s) => s.to === LUC && /Nova tarefa/.test(s.text)).length, 0, "gestora não recebe como vendedora");
+
+  bridgeSends.length = 0;
+  await processInboundWA({
+    sessionKey, isGroupMsg: false,
+    data: { key: { remoteJid: `${LUC}@s.whatsapp.net`, fromMe: false, id: `ack-${Date.now()}` }, pushName: "Lucelia", message: { conversation: `ok ${taskId}` } },
+  } as Parameters<typeof processInboundWA>[0]);
+  await waitFor(async () => bridgeSends.find((s) => s.to === OWNER_PHONE_CANONICAL && /está ciente da tarefa #\d+/.test(s.text) && /confirmou o prazo/.test(s.text)));
+  const [a] = await db.select().from(gerenteTaskAcksTable).where(eq(gerenteTaskAcksTable.taskId, taskId));
+  assert.ok(a!.ackedAt);
+
+  // Segunda: ela combina outro prazo.
+  const r2 = await createTask(tenantId, { title: "Fechar escala de dezembro", assigneeNames: ["Lucelia"] });
+  bridgeSends.length = 0;
+  await processInboundWA({
+    sessionKey, isGroupMsg: false,
+    data: { key: { remoteJid: `${LUC}@s.whatsapp.net`, fromMe: false, id: `ack2-${Date.now()}` }, pushName: "Lucelia", message: { conversation: `prazo ${r2.ref!.id} sexta 15h` } },
+  } as Parameters<typeof processInboundWA>[0]);
+  await waitFor(async () => bridgeSends.find((s) => s.to === OWNER_PHONE_CANONICAL && /combinou um novo prazo/.test(s.text)));
+  const [t2] = await db.select().from(tasksTable).where(eq(tasksTable.id, r2.ref!.id));
+  assert.ok(t2!.dueDate, "prazo gravado");
 });

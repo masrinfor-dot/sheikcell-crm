@@ -332,3 +332,28 @@ export const gerenteChatFollowupsTable = pgTable("gerente_chat_followups", {
   resolvedAt: timestamp("resolved_at", { withTimezone: true }),
   escalatedAt: timestamp("escalated_at", { withTimezone: true }),
 }, (t) => [index("gerente_chat_followups_open_idx").on(t.tenantId, t.resolvedAt, t.escalatedAt)]);
+
+// Setores do Gerente (ADM, Financeiro, RH, Compras, Comercial…): cada tarefa
+// tem um setor; tarefa de setor sem responsável citado vai pros responsáveis dele.
+export const gerenteSectorsTable = pgTable("gerente_sectors", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull(),
+  name: text("name").notNull(),
+  responsibleIds: jsonb("responsible_ids").$type<number[]>().notNull().default([]),
+  position: integer("position").notNull().default(0),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [uniqueIndex("gerente_sectors_tenant_name_uq").on(t.tenantId, t.name)]);
+export type GerenteSector = typeof gerenteSectorsTable.$inferSelect;
+
+// Tarefa de um gerente pro outro (Samuel ↔ Lucelia): pede ciência e confirmação do prazo.
+export const gerenteTaskAcksTable = pgTable("gerente_task_acks", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull(),
+  taskId: integer("task_id").notNull().references(() => tasksTable.id, { onDelete: "cascade" }),
+  userId: integer("user_id").notNull(),
+  requestedBy: integer("requested_by"),
+  requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+  ackedAt: timestamp("acked_at", { withTimezone: true }),
+  remindedAt: timestamp("reminded_at", { withTimezone: true }),
+}, (t) => [uniqueIndex("gerente_task_acks_task_user_uq").on(t.taskId, t.userId)]);

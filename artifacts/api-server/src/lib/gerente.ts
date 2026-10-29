@@ -17,7 +17,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { and, or, eq, desc, asc, gte, lte, lt, isNull, isNotNull, inArray, ilike, ne, sql } from "drizzle-orm";
 import {
   db,
-  gerenteSettingsTable, gerenteMessagesTable, gerenteEventsTable, gerenteRemindersTable, gerenteMembersTable, type GerenteMember,
+  gerenteSettingsTable, gerenteMessagesTable, gerenteEventsTable, gerenteRemindersTable, gerenteMembersTable, type GerenteMember, gerenteTaskAcksTable, taskCommentsTable,
   gerenteEntriesTable, gerenteBillsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable,
   tasksTable, taskAssigneesTable, usersTable, gerenteTaskMetaTable, storesTable, tenantsTable, whatsappSessionsTable,
   crmContactsTable, crmInternalNotesTable, conversationsTable,
@@ -237,11 +237,17 @@ export async function createTask(tenantId: number, p: {
     const u = matchUser(users, n);
     if (u) { if (!matched.some((m) => m.id === u.id)) matched.push(u); } else notFound.push(n);
   }
-  // Sem responsável = tarefa do dono ("Minhas"), nunca solta no quadro.
+  // Setor: o nome que veio vira o setor cadastrado (ADM, Financeiro, RH…).
+  const { findSector } = await import("./gerenteSectors");
+  const sector = await findSector(tenantId, p.category);
+  const category = sector?.name ?? (p.category && p.category.trim() ? p.category.trim().slice(0, 40) : null);
+  // Sem pessoa citada: responsáveis do setor; sem setor com responsável = quem pediu.
   const actor = actorStore.getStore();
   const me = actor?.role === "gestor" && actor.userId ? actor.userId : owner;
-  const assignees = matched.length ? matched : me ? [{ id: me, name: users.find((u) => u.id === me)?.name ?? "Você" }] : [];
-  const category = p.category && p.category.trim() ? p.category.trim().slice(0, 40) : null;
+  const sectorPeople = !matched.length && sector?.responsibleIds.length
+    ? users.filter((u) => sector.responsibleIds.includes(u.id)).map((u) => ({ id: u.id, name: u.name }))
+    : [];
+  const assignees = matched.length ? matched : sectorPeople.length ? sectorPeople : me ? [{ id: me, name: users.find((u) => u.id === me)?.name ?? "Você" }] : [];
   const [t] = await db.insert(tasksTable).values({
     tenantId, title: p.title.slice(0, 200), description: p.description?.slice(0, 2000) ?? null,
     priority: p.priority ?? "media", dueDate: p.dueAt ?? null, createdById: me,
@@ -249,9 +255,15 @@ export async function createTask(tenantId: number, p: {
   for (const a of assignees) await db.insert(taskAssigneesTable).values({ tenantId, taskId: t!.id, userId: a.id });
   if (category) await db.insert(gerenteTaskMetaTable).values({ taskId: t!.id, tenantId, category }).onConflictDoNothing();
 
-  const team = assignees.filter((a) => a.id !== owner && a.id !== me);
-  const who = team.length ? `para *${team.map((a) => a.name.trim().split(" ")[0]).join(", ")}*` : "nas *suas* tarefas";
+  // Gerentes (dono + gestores) não recebem a tarefa como vendedor: recebem o
+  // pedido de ciência e confirmação do prazo (quando foi o OUTRO gerente que criou).
+  const leaderIds = new Set([...(owner ? [owner] : []), ...(await activeMembers(tenantId)).map((m) => m.userId).filter((x): x is number => x != null)]);
+  const leadersAsked = assignees.filter((a) => leaderIds.has(a.id) && a.id !== me);
+  const team = assignees.filter((a) => a.id !== owner && a.id !== me && !leaderIds.has(a.id));
+  const others = [...team, ...leadersAsked];
+  const who = others.length ? `para *${others.map((a) => a.name.trim().split(" ")[0]).join(", ")}*` : "nas *suas* tarefas";
   let dispatchLine = "";
+  for (const a of leadersAsked) dispatchLine += "\n" + await requestLeaderAck(tenantId, { taskId: t!.id, title: t!.title, dueAt: p.dueAt ?? null, userId: a.id, name: a.name, requestedBy: me });
   if (team.length) {
     const settings = await getGerenteSettings(tenantId);
     const { dispatchTaskToSeller } = await import("./gerenteDispatch");
@@ -264,9 +276,100 @@ export async function createTask(tenantId: number, p: {
   }
   const nf = notFound.length ? `\n⚠️ Não achei na equipe: ${notFound.join(", ")}.` : "";
   return {
-    text: `📋 Tarefa *${t!.id}* criada ${who}: *${t!.title}*${category ? ` · ${category}` : ""}${p.dueAt ? ` — prazo ${fmtWhen(p.dueAt)}` : ""}${p.priority === "alta" ? " · 🔴 prioridade alta" : ""}.${nf}${dispatchLine}`,
+    text: `📋 Tarefa *${t!.id}* criada ${who}: *${t!.title}*${category ? ` · ${category}` : ""}${sectorPeople.length ? " (responsáveis do setor)" : ""}${p.dueAt ? ` — prazo ${fmtWhen(p.dueAt)}` : ""}${p.priority === "alta" ? " · 🔴 prioridade alta" : ""}.${nf}${dispatchLine}`,
     ref: { table: "task", id: t!.id },
   };
+}
+
+// ─── Ciência e prazo entre gerentes (Samuel ↔ Lucelia) ───────────────────────
+
+async function leaderContact(tenantId: number, userId: number): Promise<{ phone: string | null; name: string; isOwner: boolean }> {
+  const owner = await ownerUserId(tenantId);
+  const [u] = await db.select({ name: usersTable.name }).from(usersTable).where(eq(usersTable.id, userId)).limit(1);
+  const name = u?.name.trim() ?? "Gerente";
+  if (userId === owner) { const s = await getGerenteSettings(tenantId); return { phone: s.lastPhone ?? s.authorizedPhones[0] ?? null, name, isOwner: true }; }
+  const m = (await activeMembers(tenantId)).find((x) => x.userId === userId);
+  return { phone: m ? normalizePhone(m.phone) ?? m.phone : null, name, isOwner: false };
+}
+
+/** Manda pra um gerente (dono ou gestor) pelo WhatsApp do Gerente. */
+export async function notifyLeaderUser(tenantId: number, userId: number, text: string): Promise<boolean> {
+  const c = await leaderContact(tenantId, userId);
+  const settings = await getGerenteSettings(tenantId);
+  if (c.isOwner) return notifyOwner(settings, text);
+  return c.phone ? notifyPhone(settings, c.phone, text) : false;
+}
+
+async function requestLeaderAck(tenantId: number, p: { taskId: number; title: string; dueAt: Date | null; userId: number; name: string; requestedBy: number | null }): Promise<string> {
+  await db.insert(gerenteTaskAcksTable).values({ tenantId, taskId: p.taskId, userId: p.userId, requestedBy: p.requestedBy }).onConflictDoNothing();
+  const by = p.requestedBy ? (await leaderContact(tenantId, p.requestedBy)).name.split(" ")[0] : "O Gerente";
+  const ok = await notifyLeaderUser(tenantId, p.userId, [
+    `📋 *${by} criou uma tarefa pra você:* #${p.taskId} ${p.title}`,
+    p.dueAt ? `⏰ Prazo: ${fmtWhen(p.dueAt)}` : "⏰ Sem prazo definido",
+    "",
+    `Confirme a ciência: *ok ${p.taskId}* (ciente${p.dueAt ? " e prazo ok" : ""})`,
+    `ou *prazo ${p.taskId} sexta 15h* pra combinar outro prazo.`,
+  ].join("\n"));
+  const first = p.name.split(" ")[0];
+  return ok ? `📨 Pedi a ${first} a ciência e a confirmação do prazo — te aviso quando ${first} confirmar.` : `⚠️ Não consegui avisar ${first} (sem número/linha). A tarefa está no quadro.`;
+}
+
+/** "ok 201" / "ciente" / "prazo 201 sexta 15h" de um gerente com ciência pendente. */
+async function tryAckCommand(tenantId: number, text: string): Promise<string | null> {
+  const actor = actorStore.getStore();
+  const userId = actor?.role === "gestor" ? actor.userId : await ownerUserId(tenantId);
+  if (!userId) return null;
+  const t = norm(text).replace(/[.!]+$/, "");
+  const okM = t.match(/^(ok|ciente|confirmo|confirmado|de acordo|combinado|beleza|blz)(?:\s*(?:tarefa\s*)?#?(\d+))?(?:\s*,?\s*(?:ciente|prazo ok|confirmado))?$/);
+  const prazoM = t.match(/^(?:prazo|novo prazo|muda o prazo|mudar prazo)(?:\s*(?:da\s*)?(?:tarefa\s*)?#?(\d+))?\s+(.+)$/);
+  if (!okM && !prazoM) return null;
+  const pending = await db.select({ a: gerenteTaskAcksTable, title: tasksTable.title, dueDate: tasksTable.dueDate }).from(gerenteTaskAcksTable)
+    .innerJoin(tasksTable, eq(tasksTable.id, gerenteTaskAcksTable.taskId))
+    .where(and(eq(gerenteTaskAcksTable.tenantId, tenantId), eq(gerenteTaskAcksTable.userId, userId), isNull(gerenteTaskAcksTable.ackedAt), eq(tasksTable.isArchived, false)))
+    .orderBy(desc(gerenteTaskAcksTable.id)).limit(20);
+  if (!pending.length) return null;
+  const n = Number((okM ?? prazoM)![okM ? 2 : 1]) || null;
+  const target = n ? pending.find((p) => p.a.taskId === n) : pending.length === 1 ? pending[0] : undefined;
+  if (!target) {
+    if (n) return null;
+    return `Qual tarefa? Responda *ok N* ou *prazo N …*:\n${pending.map((p) => `• ${p.a.taskId} — ${p.title}${p.dueDate ? ` (${fmtWhen(p.dueDate)})` : ""}`).join("\n")}`;
+  }
+  const me = (await leaderContact(tenantId, userId)).name.split(" ")[0];
+  let newDue: Date | null = null;
+  if (prazoM) {
+    const { when } = extractWhen(` ${prazoM[2]} `, new Date(), 18);
+    if (!when) return "Não entendi o novo prazo. Ex.: *prazo " + target.a.taskId + " sexta 15h*.";
+    newDue = when;
+    await db.update(tasksTable).set({ dueDate: when, updatedAt: new Date() }).where(eq(tasksTable.id, target.a.taskId));
+  }
+  await db.update(gerenteTaskAcksTable).set({ ackedAt: new Date() }).where(eq(gerenteTaskAcksTable.id, target.a.id));
+  await db.insert(taskCommentsTable).values({ tenantId, taskId: target.a.taskId, authorId: userId, content: newDue ? `📅 Ciente; prazo combinado: ${fmtWhen(newDue)}.` : `✅ Ciente${target.dueDate ? " e prazo confirmado" : ""}.` });
+  if (target.a.requestedBy && target.a.requestedBy !== userId) {
+    await notifyLeaderUser(tenantId, target.a.requestedBy, newDue
+      ? `📅 *${me}* está ciente da tarefa #${target.a.taskId} (${target.title}) e combinou um novo prazo: *${fmtWhen(newDue)}*.`
+      : `✅ *${me}* está ciente da tarefa #${target.a.taskId} (${target.title})${target.dueDate ? ` e confirmou o prazo (${fmtWhen(target.dueDate)})` : ""}.`);
+  }
+  return newDue ? `📅 Prazo da tarefa #${target.a.taskId} ajustado para ${fmtWhen(newDue)}. Avisei quem criou.` : `✅ Ciência confirmada na tarefa #${target.a.taskId}. Avisei quem criou.`;
+}
+
+/** Job: ciência pendente há 3h → lembra o gerente uma vez e avisa quem criou. */
+export async function runAckReminders(tenantId: number, now: Date = new Date()): Promise<number> {
+  const rows = await db.select({ a: gerenteTaskAcksTable, title: tasksTable.title, status: tasksTable.status }).from(gerenteTaskAcksTable)
+    .innerJoin(tasksTable, eq(tasksTable.id, gerenteTaskAcksTable.taskId))
+    .where(and(eq(gerenteTaskAcksTable.tenantId, tenantId), isNull(gerenteTaskAcksTable.ackedAt), isNull(gerenteTaskAcksTable.remindedAt),
+      lt(gerenteTaskAcksTable.requestedAt, new Date(now.getTime() - 3 * 3_600_000)), eq(tasksTable.isArchived, false))).limit(20);
+  let n = 0;
+  for (const r of rows) {
+    await db.update(gerenteTaskAcksTable).set({ remindedAt: now }).where(eq(gerenteTaskAcksTable.id, r.a.id));
+    if (r.status === "done") continue;
+    await notifyLeaderUser(tenantId, r.a.userId, `⏳ Falta sua ciência na tarefa #${r.a.taskId} — ${r.title}.\nResponda *ok ${r.a.taskId}* ou *prazo ${r.a.taskId} …*`);
+    if (r.a.requestedBy) {
+      const who = (await leaderContact(tenantId, r.a.userId)).name.split(" ")[0];
+      await notifyLeaderUser(tenantId, r.a.requestedBy, `⏳ *${who}* ainda não confirmou a ciência da tarefa #${r.a.taskId} (${r.title}). Lembrei de novo.`);
+    }
+    n++;
+  }
+  return n;
 }
 
 async function createEvent(tenantId: number, p: {
@@ -712,7 +815,7 @@ const TOOLS: ToolDef[] = [
       responsaveis: { type: "array", items: { type: "string" }, description: "Nomes de quem da equipe vai fazer (vazio = o dono)" },
       prazo: { type: "string", description: "YYYY-MM-DDTHH:mm — só se ele disser um prazo" },
       prioridade: { type: "string", enum: ["baixa", "media", "alta"] },
-      categoria: { type: "string", enum: [...TASK_CATEGORIES] },
+      categoria: { type: "string", description: "Setor da tarefa — um dos setores listados nas instruções (ADM, Financeiro, RH, Compras, Comercial…)" },
       detalhes: { type: "string" },
     }, required: ["titulo"] },
     run: async (a, ctx) => createTask(ctx.tenantId, {
@@ -830,6 +933,13 @@ async function runQuery(tenantId: number, what: QueryKind, opts: { days?: number
   }
 }
 
+async function sectorsForPrompt(tenantId: number): Promise<string> {
+  const { getSectors } = await import("./gerenteSectors");
+  const sectors = await getSectors(tenantId);
+  const users = await teamUsers(tenantId);
+  return sectors.map((s) => `${s.name}${s.responsibleIds.length ? ` (resp.: ${users.filter((u) => s.responsibleIds.includes(u.id)).map((u) => u.name.split(" ")[0]).join(", ")})` : ""}`).join(", ");
+}
+
 async function buildSystemPrompt(tenantId: number, settings: GerenteSettings): Promise<string> {
   const users = await teamUsers(tenantId);
   const stores = await db.select({ name: storesTable.name }).from(storesTable)
@@ -840,7 +950,7 @@ async function buildSystemPrompt(tenantId: number, settings: GerenteSettings): P
     `Agora é ${describeNow()} (fuso de São Paulo). Toda data/hora que você mandar nas ferramentas deve ser nesse fuso, formato YYYY-MM-DDTHH:mm. "Amanhã às 9" = o dia seguinte às 09:00. Sem hora explícita: lembrete/compromisso às 09:00; tarefa às 18:00. Nunca agende no passado — se a hora de hoje já passou, use amanhã.`,
     `Regra central: tudo que ele pede vira um registro com destino, responsável, prazo e acompanhamento. Use as ferramentas para registrar; nunca diga que registrou sem chamar a ferramenta. Uma mensagem pode ter mais de um pedido — chame uma ferramenta por pedido.`,
     `Equipe (para responsável de tarefa): ${users.length ? users.map((u) => `${u.name} (${u.role})`).join(", ") : "ninguém cadastrado"}.`,
-    `Tarefas: nunca crie a mesma tarefa duas vezes nem uma tarefa por pessoa — várias pessoas na mesma coisa = UMA tarefa com vários responsáveis. Lista de itens diferentes (ex.: "letreiro PP, uniforme, curso de IA") = uma tarefa por item. Coisa que o próprio dono vai fazer = sem responsável. Sempre escolha a categoria (${TASK_CATEGORIES.join(", ")}). Prioridade alta só se ele disser urgente/hoje/importante. Não invente prazo.`,
+    `Tarefas: nunca crie a mesma tarefa duas vezes nem uma tarefa por pessoa — várias pessoas na mesma coisa = UMA tarefa com vários responsáveis. Lista de itens diferentes (ex.: "letreiro PP, uniforme, curso de IA") = uma tarefa por item. Coisa que o próprio dono vai fazer = sem responsável. Sempre escolha o SETOR (campo categoria): ${await sectorsForPrompt(tenantId)}. Tarefa de um setor sem pessoa citada vai pros responsáveis do setor (não invente responsável). Prioridade alta só se ele disser urgente/hoje/importante. Não invente prazo.`,
     `Lojas: ${stores.length ? stores.map((s) => s.name).join(", ") : "sem cadastro"}. Âmbito "pessoal" só quando ele deixar claro que é da vida pessoal; o padrão é "empresa".`,
     `Valores em reais (ex.: "1.250,50" = 1250.50). Quando algo essencial faltar (valor, horário de lembrete/compromisso), pergunte de forma curta em vez de chutar.`,
     `Você PODE mandar links (enviar_link) e PODE mandar recados/encaminhar coisas para a equipe pelo WhatsApp (mandar_para_equipe). Nunca diga que não consegue mandar links ou mensagens.`,
@@ -999,6 +1109,29 @@ async function processOne(input: GerenteInput): Promise<string[]> {
   if (erpFill) {
     await saveRepliesAndSend(input, erpFill, ["erp_completar"], []);
     return erpFill;
+  }
+
+  // "tarefa do financeiro: pagar o contador até sexta" → setor (vai pros responsáveis dele).
+  {
+    const sm = text.match(/^(?:nova\s+)?tarefa\s+(?:do|da|pro|pra|para\s+o|para\s+a|no|na)\s+(?:setor\s+(?:de\s+|do\s+|da\s+)?)?([^:]{2,30}?)\s*:\s*(.{3,})$/i);
+    if (sm) {
+      const { findSector } = await import("./gerenteSectors");
+      const sector = await findSector(tenantId, sm[1]);
+      const isPerson = matchUser(await teamUsers(tenantId), sm[1]!);
+      if (sector && !isPerson) {
+        const { when, rest } = extractWhen(` ${sm[2]} `, new Date(), 18);
+        const r = await createTask(tenantId, { title: cleanTitle(rest) || sm[2]!.trim(), dueAt: when, category: sector.name });
+        await saveRepliesAndSend(input, [r.text], ["tarefa_setor"], r.ref ? [r.ref] : []);
+        return [r.text];
+      }
+    }
+  }
+
+  // Ciência/prazo de tarefa entre gerentes ("ok 201", "prazo 201 sexta 15h").
+  const ack = await tryAckCommand(tenantId, text);
+  if (ack) {
+    await saveRepliesAndSend(input, [ack], ["ciencia_tarefa"], []);
+    return [ack];
   }
 
   // "é boleto"/"lança no ERP" logo depois de uma foto/PDF: manda aquele arquivo pro ERP.
@@ -1510,6 +1643,7 @@ async function runNotificationsOnce(): Promise<{ sent: number }> {
         sent += await runTaskOverdueChecks(settings.tenantId);
         if (!quiet) sent += await runTeamDigests(settings, now);
         if (!quiet) { const { runChatFollowups } = await import("./gerenteInternal"); sent += await runChatFollowups(settings.tenantId, now); }
+        if (!quiet) sent += await runAckReminders(settings.tenantId, now);
       } catch (err) {
         logger.warn({ err, tenantId: settings.tenantId }, "Gerente IA: falha ao checar tarefas atrasadas");
       }

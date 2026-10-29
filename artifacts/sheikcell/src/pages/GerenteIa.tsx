@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import {
   api,
   type GerenteSettings, type GerenteOverview, type GerenteEvent, type GerenteReminder,
-  type GerenteEntry, type GerenteBill, type GerenteMessage, type GerenteScope, type GerenteTeamMember, type GerenteErpAction, type GerenteMemberRow } from "@/lib/api";
+  type GerenteEntry, type GerenteBill, type GerenteMessage, type GerenteScope, type GerenteTeamMember, type GerenteErpAction, type GerenteMemberRow, type GerenteSectorRow } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import GerenteTasks from "@/components/GerenteTasks";
 import GerenteTaskDashboard from "@/components/GerenteTaskDashboard";
@@ -675,6 +675,48 @@ function ErpAdm({ settings, onSaved }: { settings: GerenteSettings; onSaved: (s:
 }
 
 // ─── Equipe no WhatsApp ──────────────────────────────────────────────────────
+function SetoresGerente() {
+  const { toast } = useToast();
+  const [rows, setRows] = useState<GerenteSectorRow[]>([]);
+  const [team, setTeam] = useState<GerenteTeamMember[]>([]);
+  const [newName, setNewName] = useState("");
+  const load = useCallback(async () => {
+    try { const [s, t] = await Promise.all([api.gerente.sectors.list(), api.gerente.team.list()]); setRows(s); setTeam(t); }
+    catch (err) { toast({ title: "Erro", description: errMsg(err), variant: "destructive" }); }
+  }, [toast]);
+  useEffect(() => { void load(); }, [load]);
+  const save = async (data: { id?: number | null; name: string; responsibleIds: number[]; isActive?: boolean }) => {
+    try { await api.gerente.sectors.save(data); await load(); } catch (err) { toast({ title: "Erro", description: errMsg(err), variant: "destructive" }); }
+  };
+  const toggle = (s: GerenteSectorRow, uid: number) => save({ id: s.id, name: s.name, responsibleIds: s.responsibleIds.includes(uid) ? s.responsibleIds.filter((x) => x !== uid) : [...s.responsibleIds, uid] });
+  return (
+    <div className="shk-card p-4 space-y-3 lg:col-span-2">
+      <p className="font-semibold">🏢 Setores e responsáveis</p>
+      <p className="text-[10px] text-muted-foreground">Toda tarefa fica num setor. Tarefa de um setor sem pessoa citada (ex.: <i>“tarefa do financeiro: pagar o contador”</i>) vai pros <b>responsáveis do setor</b> — no chat e no WhatsApp. No Kanban dá pra ver tudo por setor.</p>
+      <div className="space-y-2">
+        {rows.map((s) => (
+          <div key={s.id} className="border border-border rounded-lg p-2 text-xs space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <b>{s.name}</b>
+              <button onClick={() => save({ id: s.id, name: s.name, responsibleIds: s.responsibleIds, isActive: false })} className={BTN_GHOST}><Trash2 className="w-3 h-3 inline" /> Remover</button>
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {team.map((t) => {
+                const on = s.responsibleIds.includes(t.id);
+                return <button key={t.id} onClick={() => toggle(s, t.id)} className={`px-2 py-0.5 rounded-full border ${on ? "bg-primary text-primary-foreground border-primary" : "border-border text-muted-foreground"}`}>{on ? "✓ " : ""}{t.name.split(" ")[0]}</button>;
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="flex gap-2">
+        <input className={INPUT} placeholder="Novo setor (ex.: Assistência Técnica)" value={newName} onChange={(e) => setNewName(e.target.value)} />
+        <button onClick={async () => { if (newName.trim()) { await save({ name: newName, responsibleIds: [] }); setNewName(""); } }} className={BTN_PRIMARY}><Plus className="w-3.5 h-3.5 inline" /> Adicionar</button>
+      </div>
+    </div>
+  );
+}
+
 function GestoresGerente() {
   const { toast } = useToast();
   const [rows, setRows] = useState<GerenteMemberRow[]>([]);
@@ -810,6 +852,7 @@ function Config({ settings, onSaved }: { settings: GerenteSettings; onSaved: (s:
   return (
     <div className="grid lg:grid-cols-2 gap-4 items-start text-xs">
       <ErpAdm settings={s} onSaved={(n) => { setS(n); onSaved(n); }} />
+      <SetoresGerente />
       <GestoresGerente />
       <EquipeWhatsapp />
       <div className="shk-card p-4 space-y-3">

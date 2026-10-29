@@ -133,6 +133,25 @@ router.delete("/gerente/members/:id", async (req, res): Promise<void> => {
   res.json({ ok: true });
 });
 
+// ─── Setores (ADM, Financeiro, RH, Compras, Comercial…) ───────────────────────
+router.get("/gerente/sectors", async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { getSectors } = await import("../lib/gerenteSectors");
+  res.json(await getSectors(tenantId));
+});
+router.post("/gerente/sectors", async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const b = (req.body ?? {}) as { id?: unknown; name?: unknown; responsibleIds?: unknown; isActive?: unknown };
+  const name = typeof b.name === "string" ? b.name.trim() : "";
+  if (!name) { res.status(400).json({ error: "Dê um nome ao setor." }); return; }
+  const ids = Array.isArray(b.responsibleIds) ? b.responsibleIds.map(Number).filter((n) => Number.isInteger(n) && n > 0) : [];
+  const valid = ids.length ? (await db.select({ id: usersTable.id }).from(usersTable).where(and(eq(usersTable.tenantId, tenantId), inArray(usersTable.id, ids)))).map((u) => u.id) : [];
+  const { upsertSector } = await import("../lib/gerenteSectors");
+  try {
+    res.json(await upsertSector(tenantId, { id: typeof b.id === "number" ? b.id : null, name, responsibleIds: valid, isActive: typeof b.isActive === "boolean" ? b.isActive : undefined }));
+  } catch (err) { res.status(400).json({ error: (err as Error).message }); }
+});
+
 // ─── Indicadores de tarefas e equipe (dashboard) ─────────────────────────────
 router.get("/gerente/task-stats", async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;

@@ -12,7 +12,6 @@ import {
   gerenteTaskDispatchesTable, gerenteBillsTable, gerenteTaskMetaTable,
 } from "@workspace/db";
 import { resolveLink } from "../lib/gerenteExtras";
-import { TASK_CATEGORIES } from "../lib/gerente";
 import { parseSpLocal, spDateISO } from "../lib/gerenteRules";
 
 const router: IRouter = Router();
@@ -97,7 +96,7 @@ router.get("/gerente-public/:token", async (req, res): Promise<void> => {
       const [u] = await db.select({ id: usersTable.id, name: usersTable.name }).from(usersTable).where(and(eq(usersTable.id, link.userId), eq(usersTable.tenantId, tenantId))).limit(1);
       if (u) seller = { userId: u.id, name: u.name.trim() };
     }
-    res.json({ scope: "task", canEdit: link.canEdit, seller, expiresAt: link.expiresAt, task, team: link.canEdit ? await team(tenantId) : [], categories: TASK_CATEGORIES, today: new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" }) });
+    res.json({ scope: "task", canEdit: link.canEdit, seller, expiresAt: link.expiresAt, task, team: link.canEdit ? await team(tenantId) : [], categories: await (await import("../lib/gerenteSectors")).sectorNames(tenantId), today: new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" }) });
     return;
   }
   const today = spDateISO();
@@ -114,7 +113,8 @@ router.get("/gerente-public/:token", async (req, res): Promise<void> => {
     team(tenantId),
     db.selectDistinct({ category: gerenteTaskMetaTable.category }).from(gerenteTaskMetaTable).where(eq(gerenteTaskMetaTable.tenantId, tenantId)),
   ]);
-  const categories = [...new Set([...TASK_CATEGORIES, ...cats.map((c) => c.category).filter((c): c is string => !!c)])];
+  const { sectorNames } = await import("../lib/gerenteSectors");
+  const categories = [...new Set([...(await sectorNames(tenantId)), ...cats.map((c) => c.category).filter((c): c is string => !!c)])];
   // Link de gestor (canEdit + userId): sem contas e sem a agenda/lembretes do dono.
   const gestorLink = link.canEdit && link.userId != null;
   res.json({ scope: "dia", canEdit: link.canEdit, expiresAt: link.expiresAt, today, now: new Date().toISOString(),
