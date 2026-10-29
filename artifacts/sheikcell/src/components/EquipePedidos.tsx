@@ -104,7 +104,7 @@ export function usePedidos(enabled = true, everyMs = 30_000) {
 // ─── Pedir algo para alguém ─────────────────────────────────────────────────
 
 export function PedirBox({ people, meId, compact = false, onCreated }: {
-  people: Pessoa[]; meId: number; compact?: boolean; onCreated: (t: Task) => void;
+  people: Pessoa[]; meId: number; compact?: boolean; onCreated: (t: Task, assigneeId: number) => void;
 }) {
   const { toast } = useToast();
   const [text, setText] = useState("");
@@ -135,7 +135,7 @@ export function PedirBox({ people, meId, compact = false, onCreated }: {
       setText("");
       setPick("");
       toast({ title: target.id === meId ? "Pedido criado para você" : `Pedido enviado para ${target.name}` });
-      onCreated(t);
+      onCreated(t, target.id);
     } catch (err) {
       toast({ title: "Não deu para criar o pedido", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     } finally {

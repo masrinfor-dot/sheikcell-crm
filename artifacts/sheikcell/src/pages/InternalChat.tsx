@@ -2121,7 +2121,11 @@ export default function InternalChat({ docked = false, onActiveConversationChang
     <p className="text-sm text-[#52525B] bg-white border rounded-xl p-4" role="status">{pedidos.blocked}</p>
   ) : null;
   const pedirBox = (compact: boolean) => canEditPedidos && user ? (
-    <PedirBox people={people} meId={meId} compact={compact} onCreated={(t) => { pedidos.patchLocal(t); setPedidoId(t.id); }} />
+    <PedirBox people={people} meId={meId} compact={compact} onCreated={(t, assigneeId) => {
+      pedidos.patchLocal(t); setPedidoId(t.id);
+      // Pedido para outra pessoa: mostra em "Que eu pedi" pra ele aparecer no quadro.
+      if (assigneeId !== meId && pedidoScope === "mim") setPedidoScope("pedi");
+    }} />
   ) : null;
   const scopeBar = <ScopeBar scope={pedidoScope} setScope={setPedidoScope} tasks={pedidos.tasks} meId={meId} now={now} />;
   const board = (opts: { colHeight?: string; fill?: boolean }) => pedidosBlocked ?? (
