@@ -6,7 +6,7 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import path from "node:path";
 import { createReadStream } from "node:fs";
-import { and, eq, gte, lt, asc, desc, ne, inArray, sql } from "drizzle-orm";
+import { and, eq, gte, lt, asc, desc, ne, inArray, sql, isNull } from "drizzle-orm";
 import {
   db, tasksTable, taskCommentsTable, taskAssigneesTable, taskSubtasksTable, usersTable, gerenteEventsTable, gerenteRemindersTable,
   gerenteTaskDispatchesTable, gerenteBillsTable, gerenteTaskMetaTable,
@@ -105,9 +105,9 @@ router.get("/gerente-public/:token", async (req, res): Promise<void> => {
   const end = new Date(start.getTime() + 86_400_000);
   const [events, reminders, bills, tasks, members, cats] = await Promise.all([
     db.select({ id: gerenteEventsTable.id, title: gerenteEventsTable.title, startsAt: gerenteEventsTable.startsAt, location: gerenteEventsTable.location })
-      .from(gerenteEventsTable).where(and(eq(gerenteEventsTable.tenantId, tenantId), eq(gerenteEventsTable.status, "agendado"), gte(gerenteEventsTable.startsAt, start), lt(gerenteEventsTable.startsAt, new Date(start.getTime() + 7 * 86_400_000)))).orderBy(asc(gerenteEventsTable.startsAt)).limit(40),
+      .from(gerenteEventsTable).where(and(eq(gerenteEventsTable.tenantId, tenantId), isNull(gerenteEventsTable.memberPhone), eq(gerenteEventsTable.status, "agendado"), gte(gerenteEventsTable.startsAt, start), lt(gerenteEventsTable.startsAt, new Date(start.getTime() + 7 * 86_400_000)))).orderBy(asc(gerenteEventsTable.startsAt)).limit(40),
     db.select({ id: gerenteRemindersTable.id, title: gerenteRemindersTable.title, dueAt: gerenteRemindersTable.dueAt, urgent: gerenteRemindersTable.urgent })
-      .from(gerenteRemindersTable).where(and(eq(gerenteRemindersTable.tenantId, tenantId), eq(gerenteRemindersTable.status, "pendente"), lt(gerenteRemindersTable.dueAt, end))).orderBy(asc(gerenteRemindersTable.dueAt)).limit(40),
+      .from(gerenteRemindersTable).where(and(eq(gerenteRemindersTable.tenantId, tenantId), isNull(gerenteRemindersTable.memberPhone), eq(gerenteRemindersTable.status, "pendente"), lt(gerenteRemindersTable.dueAt, end))).orderBy(asc(gerenteRemindersTable.dueAt)).limit(40),
     db.select({ id: gerenteBillsTable.id, kind: gerenteBillsTable.kind, description: gerenteBillsTable.description, amountCents: gerenteBillsTable.amountCents, dueDate: gerenteBillsTable.dueDate })
       .from(gerenteBillsTable).where(and(eq(gerenteBillsTable.tenantId, tenantId), eq(gerenteBillsTable.status, "aberta"))).orderBy(asc(gerenteBillsTable.dueDate)).limit(20),
     taskList(tenantId),

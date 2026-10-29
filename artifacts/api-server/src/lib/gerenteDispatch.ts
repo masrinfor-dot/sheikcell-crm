@@ -112,8 +112,9 @@ export async function dispatchTaskToSeller(tenantId: number, p: {
 }
 
 async function notifyOwnerText(tenantId: number, text: string): Promise<void> {
-  const { notifyOwnerByTenant } = await import("./gerente");
-  await notifyOwnerByTenant(tenantId, text);
+  // Dono + gestores (2º número): os dois acompanham a equipe.
+  const { notifyTeamLeads } = await import("./gerente");
+  await notifyTeamLeads(tenantId, text);
 }
 
 /**

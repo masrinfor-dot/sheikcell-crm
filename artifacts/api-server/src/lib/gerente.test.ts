@@ -16,7 +16,7 @@ const {
   db, tenantsTable, sectorsTable, usersTable, conversationsTable, messagesTable, whatsappSessionsTable,
   attendanceLogsTable, crmContactsTable, whatsappContactsTable, tasksTable, taskAssigneesTable,
   gerenteSettingsTable, gerenteMessagesTable, gerenteRemindersTable, gerenteEntriesTable, gerenteBillsTable,
-  gerenteEventsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable, employeesTable, taskCommentsTable, gerenteTeamPhonesTable, gerenteErpActionsTable, tenantErpIntegrationsTable, gerenteLinksTable, gerenteRecurrencesTable, gerenteTeamDigestsTable, storesTable, gerenteChatRoomsTable, internalConversationsTable, internalMessagesTable,
+  gerenteEventsTable, gerentePendingActionsTable, gerenteTaskDispatchesTable, employeesTable, taskCommentsTable, gerenteTeamPhonesTable, gerenteErpActionsTable, tenantErpIntegrationsTable, gerenteLinksTable, gerenteRecurrencesTable, gerenteTeamDigestsTable, storesTable, gerenteChatRoomsTable, internalConversationsTable, internalMessagesTable, gerenteMembersTable,
 } = await import("@workspace/db");
 const { eq, and, desc } = await import("drizzle-orm");
 const { processInboundWA } = await import("./whatsappInbound.ts");
@@ -70,6 +70,7 @@ async function wipe(): Promise<void> {
     await db.delete(gerenteRecurrencesTable).where(eq(gerenteRecurrencesTable.tenantId, id));
     await db.delete(gerenteTeamDigestsTable).where(eq(gerenteTeamDigestsTable.tenantId, id));
     await db.delete(gerenteChatRoomsTable).where(eq(gerenteChatRoomsTable.tenantId, id));
+    await db.delete(gerenteMembersTable).where(eq(gerenteMembersTable.tenantId, id));
     await db.delete(internalConversationsTable).where(eq(internalConversationsTable.tenantId, id));
     await db.delete(tenantErpIntegrationsTable).where(eq(tenantErpIntegrationsTable.tenantId, id));
     await db.delete(taskCommentsTable).where(eq(taskCommentsTable.tenantId, id));
@@ -822,4 +823,54 @@ test("chat interno: sala do Gerente responde o dono; tarefa chega na sala da pes
   const lr = await roomOf("loja", st!.id);
   assert.ok(lr, "sala da loja criada");
   assert.ok((await msgs(lr.conversationId)).some((m) => /Fechar 18h hoje/.test(m.content)));
+});
+
+test("gestor (2º número): tarefas e recados como o dono, lembretes próprios, financeiro bloqueado, recebe avisos da equipe", async () => {
+  const GESTOR = "5533977770000";
+  await db.insert(gerenteMembersTable).values({ tenantId, phone: GESTOR, name: "Maria Gestora" });
+  invalidateGerenteCache(tenantId);
+  const fromGestor = async (text: string) => processInboundWA({
+    sessionKey, isGroupMsg: false,
+    data: { key: { remoteJid: `${GESTOR}@s.whatsapp.net`, fromMe: false, id: `g-${Math.random().toString(36).slice(2)}` }, pushName: "Maria", message: { conversation: text } },
+  } as Parameters<typeof processInboundWA>[0]);
+
+  bridgeSends.length = 0;
+  await fromGestor("lembra de ligar pro fornecedor amanhã às 9h");
+  const rem = await waitFor(async () => (await db.select().from(gerenteRemindersTable).where(and(eq(gerenteRemindersTable.tenantId, tenantId), eq(gerenteRemindersTable.memberPhone, GESTOR))))[0]);
+  assert.equal(rem.title, "ligar pro fornecedor");
+  const owner = await handlePanelMessage(tenantId, "lembretes");
+  assert.doesNotMatch(owner.replies[0]!, /ligar pro fornecedor/, "lembrete do gestor não aparece pro dono");
+
+  bridgeSends.length = 0;
+  await fromGestor("gastei 80 no motoboy");
+  await waitFor(async () => bridgeSends.find((s) => s.to === GESTOR && /Financeiro, contas e ERP ficam só com o dono/.test(s.text)));
+  const entries = await db.select().from(gerenteEntriesTable).where(and(eq(gerenteEntriesTable.tenantId, tenantId), eq(gerenteEntriesTable.description, "motoboy")));
+  assert.equal(entries.length, 0);
+
+  bridgeSends.length = 0;
+  await fromGestor("avisa o Nilmar que o caminhão chega às 14h");
+  const rec = await waitFor(async () => bridgeSends.find((s) => s.to === "5533977776666" && /caminhão chega às 14h/.test(s.text)));
+  assert.match(rec.text, /Maria:/, "recado sai no nome do gestor");
+
+  // Aviso da equipe vai pro dono E pro gestor.
+  bridgeSends.length = 0;
+  const { notifyTeamLeads } = await import("./gerente.ts");
+  await notifyTeamLeads(tenantId, "✅ Nilmar concluiu: teste");
+  assert.ok(bridgeSends.find((s) => s.to === GESTOR && /Nilmar concluiu/.test(s.text)));
+  assert.ok(bridgeSends.find((s) => s.to === OWNER_PHONE_CANONICAL && /Nilmar concluiu/.test(s.text)));
+});
+
+test("mensagem pra cliente: mostra antes, só envia no 'sim'", async () => {
+  const { prepareClientMessage, getGerenteSettings } = await import("./gerente.ts");
+  await db.insert(crmContactsTable).values({ tenantId, name: "João Cliente Teste", phone: "5533955554444", contact: "(33) 95555-4444" });
+  const settings = await getGerenteSettings(tenantId);
+  const phone = settings.lastPhone ?? settings.authorizedPhones[0]!;
+  bridgeSends.length = 0;
+  const preview = await prepareClientMessage(tenantId, phone, "João Cliente", "Olá João! Seu aparelho está pronto. 😊");
+  assert.match(preview, /Mensagem pra \*João Cliente Teste\*/);
+  assert.match(preview, /Confirma\?/);
+  assert.equal(bridgeSends.filter((s) => s.to === "5533955554444").length, 0, "nada sai antes do sim");
+  const ok = await handlePanelMessage(tenantId, "sim");
+  assert.match(ok.replies[0]!, /Enviado pra \*João Cliente Teste\*/);
+  assert.ok(bridgeSends.find((s) => s.to === "5533955554444" && /aparelho está pronto/.test(s.text)));
 });

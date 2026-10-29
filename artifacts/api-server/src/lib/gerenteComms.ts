@@ -117,7 +117,9 @@ export async function sendToTeam(tenantId: number, p: { names: string[]; loja: s
     return notFound.length ? `Não achei ${notFound.map((n) => `*${n}*`).join(", ")} na equipe. Quem é? (mande o nome como está no cadastro)` : "Pra quem eu mando? Diga o nome (ex.: *manda pro Alan*) ou a loja (*manda pra loja SC*).";
   }
   if (!p.message && !p.item) return "O que eu mando? Escreva o recado ou mande o contato/foto antes.";
-  const owner = await ownerFirst(tenantId);
+  const { currentActor } = await import("./gerente");
+  const actor = currentActor();
+  const owner = actor?.role === "gestor" ? actor.name.split(" ")[0]! : await ownerFirst(tenantId);
   const { sendToTeamMember, sendRawWhatsAppMediaToTeam } = await import("./gerenteDispatch");
   const ok: string[] = [], fail: string[] = [];
   const itemText = p.item && !p.item.mediaUrl ? p.item.content : null;

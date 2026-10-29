@@ -80,6 +80,8 @@ export const gerenteMessagesTable = pgTable("gerente_messages", {
 export const gerenteEventsTable = pgTable("gerente_events", {
   id: serial("id").primaryKey(),
   tenantId: integer("tenant_id").notNull(),
+  // Gestor (2º número): agenda/lembretes dele ficam separados; null = do dono.
+  memberPhone: text("member_phone"),
   title: text("title").notNull(),
   startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
   endsAt: timestamp("ends_at", { withTimezone: true }),
@@ -99,6 +101,8 @@ export const gerenteEventsTable = pgTable("gerente_events", {
 export const gerenteRemindersTable = pgTable("gerente_reminders", {
   id: serial("id").primaryKey(),
   tenantId: integer("tenant_id").notNull(),
+  // Gestor (2º número): agenda/lembretes dele ficam separados; null = do dono.
+  memberPhone: text("member_phone"),
   title: text("title").notNull(),
   dueAt: timestamp("due_at", { withTimezone: true }).notNull(),
   urgent: boolean("urgent").notNull().default(false),
@@ -293,3 +297,18 @@ export const gerenteChatRoomsTable = pgTable("gerente_chat_rooms", {
   uniqueIndex("gerente_chat_rooms_uq").on(t.tenantId, t.kind, t.refId),
   index("gerente_chat_rooms_conv_idx").on(t.conversationId),
 ]);
+
+// Pessoas com acesso ao Gerente IA além do dono (ex.: gerente da loja):
+// mesmo poder em tarefas, equipe, recados e clientes; agenda e lembretes
+// próprios; financeiro e ERP continuam só do dono.
+export const gerenteMembersTable = pgTable("gerente_members", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull(),
+  phone: text("phone").notNull(),
+  name: text("name").notNull(),
+  userId: integer("user_id"),
+  role: text("role").notNull().default("gestor"),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [uniqueIndex("gerente_members_tenant_phone_uq").on(t.tenantId, t.phone)]);
+export type GerenteMember = typeof gerenteMembersTable.$inferSelect;
