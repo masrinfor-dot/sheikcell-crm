@@ -733,7 +733,7 @@ function GestoresGerente() {
     try {
       await api.gerente.members.add({ name: form.name, phone: form.phone, userId: form.userId ? Number(form.userId) : null });
       setForm({ name: "", phone: "", userId: "" }); await load();
-      toast({ title: "Acesso liberado ✅", description: "Peça pra pessoa mandar \"ajuda\" pro número do Gerente." });
+      toast({ title: "Acesso liberado ✅", description: "O link do painel já foi pro WhatsApp da pessoa. Todo dia de manhã ela recebe o resumo com um link novo." });
     } catch (err) { toast({ title: "Não deu pra cadastrar", description: errMsg(err), variant: "destructive" }); }
     finally { setBusy(false); }
   };
