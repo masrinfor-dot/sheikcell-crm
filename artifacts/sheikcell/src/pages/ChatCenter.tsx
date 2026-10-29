@@ -17,6 +17,8 @@ import {
   FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Download, Maximize2, Minimize2, Pencil,
   MoreVertical, RotateCcw, Percent, FolderOpen, Flag, Lock, Forward, Clock,
 } from "lucide-react";
+import AttendanceBoard from "@/components/AttendanceBoard";
+import { SquareKanban as BoardIcon, List as ListIcon } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 import ErpPurchasesBlock from "@/components/ErpPurchasesBlock";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -1843,6 +1845,21 @@ export default function ChatCenter({
   // Tela cheia do atendimento (27/10/2026): esconde o topo e o menu do sistema
   // e, quando o navegador deixa, entra em tela cheia de verdade (some também
   // a barra do navegador/Windows). Esc sai.
+  // Quadro de atendimento (29/10/2026): "Lista | Quadro", lembrado por pessoa
+  // neste navegador. No celular continua a lista (o quadro precisa de largura).
+  const [boardView, setBoardViewState] = useState<boolean>(() => {
+    try { return localStorage.getItem("shk-chat-view") === "quadro"; } catch { return false; }
+  });
+  const setBoardView = useCallback((on: boolean) => {
+    setBoardViewState(on);
+    // No quadro a conversa abre ao lado: a ficha do cliente começa fechada
+    // pra sobrar espaço para as mensagens (dá para abrir pelo botão "i").
+    if (on) setInfoCollapsed(true);
+    try { localStorage.setItem("shk-chat-view", on ? "quadro" : "lista"); } catch { /* sem storage */ }
+  }, []);
+  // "Enviar e lembrar": depois de responder, oferece lembrete caso o cliente
+  // não responda (usa o mesmo "Retomar depois" — cancela sozinho se ele escrever).
+  const [remindOfferFor, setRemindOfferFor] = useState<number | null>(null);
   const [focusMode, setFocusMode] = useState(false);
   const toggleFocusMode = useCallback(() => {
     setFocusMode((on) => {
@@ -2121,7 +2138,7 @@ export default function ChatCenter({
 
   useEffect(() => { convsRef.current = convs; }, [convs]);
 
-  useEffect(() => { activeIdRef.current = activeId; setShowSnooze(false); }, [activeId]);
+  useEffect(() => { activeIdRef.current = activeId; setShowSnooze(false); setRemindOfferFor(null); }, [activeId]);
 
   useEffect(() => {
     if (activeId) {
@@ -2770,6 +2787,7 @@ export default function ChatCenter({
         ? prev.filter((m) => m.id !== optimistic.id)
         : prev.map((m) => m.id === optimistic.id ? msg : m));
       if (msg.sendError) toast({ title: "Mensagem não entregue", description: msg.sendError, variant: "destructive" });
+      else if (!isNote) setRemindOfferFor(msg.conversationId ?? activeId);
     } catch {
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
       setMsgText(text);
@@ -3833,6 +3851,7 @@ export default function ChatCenter({
   }, [docked, overview, channel]);
 
   const isManagerRole = user?.role === "admin" || user?.role === "supervisor" || user?.role === "vendedor_chefe" || user?.role === "superadmin";
+  const boardOn = boardView && !docked;
 
   // "Passar conversas para outro vendedor" (painel do admin): mostra as
   // conversas paradas do vendedor e abre a transferência na mais antiga.
@@ -3867,6 +3886,7 @@ export default function ChatCenter({
       applyConvUpdate(await api.chat.snooze(conv.id, until.toISOString()));
       setShowSnooze(false);
       setSnoozeCustom("");
+      setRemindOfferFor(null);
       toast({ title: `Combinado: volta para "Responder agora" ${label}.`, description: "No horário você recebe um aviso. Se o cliente escrever antes, ela sobe na hora." });
       refreshCountsSoon();
     } catch (e) {
@@ -4148,11 +4168,18 @@ export default function ChatCenter({
       <div className="flex flex-1 min-h-0">
 
       {/* ── LEFT PANEL: conversation list ──────────────────────────────── */}
-      <div className={`${activeConv ? "hidden md:flex" : "flex"} w-full md:w-80 lg:w-96 bg-white flex-col md:border-r border-border shrink-0`}>
+      <div className={`${activeConv ? "hidden md:flex" : "flex"} ${boardOn ? "md:!hidden" : ""} w-full md:w-80 lg:w-96 bg-white flex-col md:border-r border-border shrink-0`}>
         {/* Header */}
         <div className="px-4 pt-4 pb-2 bg-white flex items-center justify-between">
           <span className="font-extrabold text-lg tracking-tight text-foreground">Atendimento</span>
           <div className="flex items-center gap-1">
+            {!docked && (
+              <button type="button" onClick={() => setBoardView(true)} data-testid="button-board-view"
+                title="Ver em quadro (Kanban): cada atendimento cai sozinho na coluna certa"
+                className="hidden md:inline-flex items-center gap-1 h-8 px-2 rounded-lg border border-border text-xs font-semibold text-[#27272A] hover:bg-secondary">
+                <BoardIcon className="w-4 h-4" />Quadro
+              </button>
+            )}
             <div className="relative">
               <button
                 ref={bellBtnRef}
@@ -4771,7 +4798,42 @@ export default function ChatCenter({
       </div>
 
       {/* ── RIGHT PANEL: chat window ────────────────────────────────────── */}
-      {!activeConv ? (
+      {boardOn && (
+        <div className="hidden md:flex flex-1 min-w-0 flex-col">
+          <div className="flex items-center gap-2 px-3 pt-3">
+            <span className="font-extrabold text-lg tracking-tight">Atendimento</span>
+            <div className="inline-flex rounded-lg border border-border bg-white overflow-hidden" role="group" aria-label="Modo de visualização">
+              <button type="button" onClick={() => setBoardView(false)} data-testid="button-list-view"
+                className="h-8 px-3 text-xs font-semibold inline-flex items-center gap-1 text-[#3F3F46] hover:bg-secondary"><ListIcon className="w-3.5 h-3.5" />Lista</button>
+              <button type="button" aria-pressed="true"
+                className="h-8 px-3 text-xs font-semibold inline-flex items-center gap-1 bg-foreground text-white"><BoardIcon className="w-3.5 h-3.5" />Quadro</button>
+            </div>
+            {activeConv && (
+              <button type="button" onClick={() => setActiveId(null)} data-testid="button-board-close-conv"
+                className="ml-auto h-8 px-3 rounded-lg border border-border bg-white text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap hover:bg-secondary">
+                <X className="w-3.5 h-3.5" />Fechar conversa
+              </button>
+            )}
+          </div>
+          <AttendanceBoard
+            convs={visibleConvs}
+            now={nowTick}
+            alertMinutes={alertMinutes}
+            alertEnabled={alertEnabled}
+            meId={user?.id ?? null}
+            canSeeTeam={isManagerRole}
+            activeId={activeId}
+            onOpen={(c) => setActiveId(c.id)}
+            channelOf={(c) => {
+              if (c.channel === "instagram") return { label: "Instagram", color: barChannels.find((ch) => ch.id === "instagram")?.color ?? "#c026d3" };
+              const id = `wa:${c.sessionKey ?? "default"}`;
+              const ch = barChannels.find((x) => x.id === id);
+              return { label: ch?.label ?? waSessionLabel(c.sessionKey ?? "default", waSessions), color: ch?.color ?? waSessionColor(c.sessionKey ?? "default", waSessions) };
+            }}
+          />
+        </div>
+      )}
+      {!activeConv ? (boardOn ? null :
         <div className="hidden md:flex flex-1 flex-col items-center justify-center text-muted-foreground bg-[#F7F7F8]">
           <div className="w-20 h-20 rounded-2xl bg-white border border-border flex items-center justify-center mb-4">
             <MessageCircle className="w-10 h-10 text-primary/40" />
@@ -4780,7 +4842,7 @@ export default function ChatCenter({
           <p className="text-sm mt-1">Selecione uma conversa para começar</p>
         </div>
       ) : (
-        <div className="flex-1 flex min-w-0">
+        <div className={boardOn ? "flex-1 md:flex-none md:w-[440px] xl:w-[520px] 2xl:w-[680px] flex min-w-0 md:border-l border-border" : "flex-1 flex min-w-0"}>
         <div
           className="flex-1 flex flex-col min-w-0 relative"
           onDragEnter={handleDragEnter}
@@ -5362,6 +5424,24 @@ export default function ChatCenter({
           {/* Painel "Retomar depois" (só aparece quando aberto pelo botão do cabeçalho). */}
           {activeCategory === "ativos" && (
             <>
+              {remindOfferFor === activeConv.id && !showSnooze && activeConv.lastMessageDirection !== "inbound" && (
+                <div className="mx-3 md:mx-5 my-1.5 px-3 py-2 rounded-xl border border-blue-200 bg-blue-50 flex flex-wrap items-center gap-2" data-testid="remind-offer">
+                  <CalendarClock className="w-4 h-4 text-blue-900 shrink-0" />
+                  <span className="text-xs font-semibold text-blue-950 mr-1">Lembrar se o cliente não responder:</span>
+                  {snoozeOptions(nowTick).map((o) => (
+                    <button key={o.label} type="button" disabled={replyActionBusy}
+                      onClick={() => void handleSnooze(activeConv, o.until, o.label)}
+                      data-testid={`remind-option-${o.label.replace(/\s+/g, "-")}`}
+                      className="h-8 px-3 rounded-full border border-blue-300 bg-white text-blue-900 text-xs font-semibold hover:bg-blue-100 disabled:opacity-50">
+                      {o.label}
+                    </button>
+                  ))}
+                  <button type="button" onClick={() => setRemindOfferFor(null)} aria-label="Não lembrar"
+                    className="ml-auto h-8 w-8 rounded-full inline-flex items-center justify-center text-blue-900 hover:bg-blue-100">
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
               {showSnooze && (
                 <div className="mx-3 md:mx-5 my-2 p-3 rounded-xl border border-border bg-[#FAFAFA] flex flex-wrap items-center gap-2" data-testid="snooze-panel">
                   <span className="text-xs text-[#3F3F46] mr-1">Voltar a falar com o cliente:</span>
