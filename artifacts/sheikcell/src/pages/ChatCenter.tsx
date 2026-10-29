@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo, Fragment, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { api, can, ApiError, type Conversation, type ChatMessage, type PinnedMessage, type Sector, type ChatLabel, type ChatSavedFilter, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata, type CatalogCoupon, type BroadcastDispatchLog, type BroadcastDispatchSummary, type CrmPurchase, type AttendanceLog, type ChannelsOverview, type ChannelQuery } from "@/lib/api";
-import { needsReply, waitingSince as replyWaitingSince, snoozePending, channelOfConv, snoozeLabel, snoozeOptions } from "@/lib/conversationReplyState";
+import { api, can, ApiError, type Conversation, type ChatMessage, type PinnedMessage, type Sector, type ChatLabel, type ChatSavedFilter, type User, type CrmContact, type CrmCustomField, type QuickReply, type ScheduledMessage, type ChatNotification, type Store as StoreType, type OutboundUsage, type MessageMetadata, type CatalogCoupon, type BroadcastDispatchLog, type BroadcastDispatchSummary, type CrmPurchase, type AttendanceLog, type ChannelsOverview, type ChannelQuery, type AttendHours } from "@/lib/api";
+import { needsReply, waitingSince as replyWaitingSince, snoozePending, channelOfConv, snoozeLabel, snoozeOptions, businessWait } from "@/lib/conversationReplyState";
 import { useAuth } from "@/lib/auth";
 import { useActivityGuard } from "@/lib/activityGuard";
 import { useToast } from "@/hooks/use-toast";
@@ -17,7 +17,7 @@ import {
   FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Download, Maximize2, Minimize2, Pencil,
   MoreVertical, RotateCcw, Percent, FolderOpen, Flag, Lock, Forward, Clock,
 } from "lucide-react";
-import AttendanceBoard from "@/components/AttendanceBoard";
+import AttendanceBoard, { type BoardColumn, type TeamStat, type WaitInfo } from "@/components/AttendanceBoard";
 import { SquareKanban as BoardIcon, List as ListIcon } from "lucide-react";
 import CrmContactDetail from "@/components/CrmContactDetail";
 import ErpPurchasesBlock from "@/components/ErpPurchasesBlock";
@@ -278,6 +278,8 @@ type WaSessionInfo = {
   // Atendimento por canais (26/10/2026): tipo da linha, som/alarme e se a
   // pessoa pode abrir este canal (vendedor restrito a linhas).
   lineType?: "varejo" | "atacado" | "interna"; alertsEnabled?: boolean; allowed?: boolean;
+  /** Prazo de atraso desta linha (quadro, fase 2); null = o geral da loja. */
+  alertMinutes?: number | null;
 };
 
 const WA_SESSION_DEFAULT_COLOR = "#10b981"; // mesmo verde que era fixo antes, agora só o fallback
@@ -1502,6 +1504,14 @@ export default function ChatCenter({
   const [cfgMinutes, setCfgMinutes] = useState(5);
   const [cfgEnabled, setCfgEnabled] = useState(true);
   const [savingAlertCfg, setSavingAlertCfg] = useState(false);
+  // Quadro, fase 2 (29/10/2026): limite por vendedor e horário da loja.
+  const [boardWipLimit, setBoardWipLimit] = useState(0);
+  const [attendHours, setAttendHours] = useState<AttendHours | null>(null);
+  const [cfgWip, setCfgWip] = useState(8);
+  const [cfgHoursOn, setCfgHoursOn] = useState(false);
+  const [cfgOpen, setCfgOpen] = useState("08:00");
+  const [cfgClose, setCfgClose] = useState("18:00");
+  const [cfgDays, setCfgDays] = useState<number[]>([1, 2, 3, 4, 5, 6]);
   // Trava anti-disparo em massa do Atendimento ativo (mesmo modal de config).
   const [cfgOutboundHourly, setCfgOutboundHourly] = useState(10);
   const [cfgOutboundDaily, setCfgOutboundDaily] = useState(40);
@@ -2138,7 +2148,15 @@ export default function ChatCenter({
 
   useEffect(() => { convsRef.current = convs; }, [convs]);
 
-  useEffect(() => { activeIdRef.current = activeId; setShowSnooze(false); setRemindOfferFor(null); }, [activeId]);
+  // Arrastar um card para "Retomar depois" no quadro abre a conversa já com
+  // o painel de horário aberto.
+  const openSnoozeForRef = useRef<number | null>(null);
+  useEffect(() => {
+    activeIdRef.current = activeId;
+    setShowSnooze(activeId != null && openSnoozeForRef.current === activeId);
+    openSnoozeForRef.current = null;
+    setRemindOfferFor(null);
+  }, [activeId]);
 
   useEffect(() => {
     if (activeId) {
@@ -2537,6 +2555,7 @@ export default function ChatCenter({
     api.chatUsers().then(setChatUsers).catch(() => {});
     api.settings.get().then((s) => {
       setAlertEnabled(s.alertUnansweredEnabled); setAlertMinutes(s.alertUnansweredMinutes);
+      setBoardWipLimit(s.boardWipLimit ?? 0); setAttendHours(s.attendHours ?? null);
       setCfgOutboundHourly(s.outboundHourlyLimit); setCfgOutboundDaily(s.outboundDailyLimit);
       setCfgBroadcastInterval(Math.round(s.broadcastIntervalMs / 1000));
       // "Outro" nunca vem do backend — é sempre a última opção fixa aqui,
@@ -3665,12 +3684,22 @@ export default function ChatCenter({
   // do limite (padrão 5 min). Não vale para resolvidas/arquivadas.
   // "Não precisa responder"/"Retomar depois" (26/10/2026) tiram da espera;
   // retomar vencido conta a partir do horário combinado.
+  // Quadro, fase 2 (29/10/2026): o prazo pode ser da linha (Administração ›
+  // WhatsApp) e, com o horário da loja configurado, a espera só conta com a
+  // loja aberta — fora do horário fica "pausada" (sem vermelho nem alarme).
+  const waitOf = useCallback((c: Conversation): WaitInfo => {
+    const line = c.channel === "instagram" ? null : waSessions.find((w) => w.sessionKey === (c.sessionKey ?? "default"));
+    const limit = line?.alertMinutes ?? alertMinutes;
+    const since = replyWaitingSince(c, nowTick);
+    if (since == null) return { min: null, limit, paused: false };
+    const bw = businessWait(since, nowTick, attendHours);
+    return { min: Math.max(0, Math.floor((nowTick - bw.since) / 60000)), limit, paused: bw.paused };
+  }, [waSessions, alertMinutes, attendHours, nowTick]);
   const isOverdue = useCallback((c: Conversation): boolean => {
     if (!alertEnabled) return false;
-    const since = replyWaitingSince(c, nowTick);
-    if (since == null) return false;
-    return nowTick - since >= alertMinutes * 60000;
-  }, [alertEnabled, alertMinutes, nowTick]);
+    const w = waitOf(c);
+    return w.min != null && !w.paused && w.min >= w.limit;
+  }, [alertEnabled, waitOf]);
 
   // Atendimento por canais: em que canal a conversa está e se a linha toca
   // som/alarme (linha interna nasce desligada — Administração › WhatsApp).
@@ -3852,6 +3881,37 @@ export default function ChatCenter({
 
   const isManagerRole = user?.role === "admin" || user?.role === "supervisor" || user?.role === "vendedor_chefe" || user?.role === "superadmin";
   const boardOn = boardView && !docked;
+  // Visão Equipe do quadro: números de cada vendedor (a cada 2 min).
+  const [teamStats, setTeamStats] = useState<Map<number, TeamStat>>(new Map());
+  useEffect(() => {
+    if (!boardOn || !isManagerRole) return;
+    const load = () => api.chat.teamStats().then((rows) => setTeamStats(new Map(rows.map((r) => [r.userId, r])))).catch(() => {});
+    load();
+    const t = setInterval(load, 120_000);
+    return () => clearInterval(t);
+  }, [boardOn, isManagerRole]);
+  const handleBoardDrop = (c: Conversation, col: BoardColumn) => {
+    if (col === "aguardando") { void handleNoReply(c); return; }
+    if (col === "retomar") {
+      if (activeId === c.id) setShowSnooze(true);
+      else { openSnoozeForRef.current = c.id; setActiveId(c.id); }
+      return;
+    }
+    if (col === "finalizados") { setActiveId(c.id); handleFinalize(c.id); }
+  };
+  const handleBoardTransfer = async (list: Conversation[], target: { id: number; name: string }) => {
+    let ok = 0;
+    for (const c of list) {
+      try {
+        const updated = await api.chat.updateConversation(c.id, { assigneeId: target.id });
+        setConvs((prev) => prev.map((x) => x.id === c.id ? { ...x, ...updated } : x));
+        ok++;
+        try { await api.chat.sendMessage(c.id, `🔀 Conversa transferida para ${target.name}`); } catch { /* só registro */ }
+      } catch { /* segue com as outras */ }
+    }
+    toast({ title: ok === list.length ? `${ok} conversa(s) passada(s) para ${target.name}` : `${ok} de ${list.length} passada(s) para ${target.name}`, variant: ok === list.length ? undefined : "destructive" });
+    refreshCountsSoon();
+  };
 
   // "Passar conversas para outro vendedor" (painel do admin): mostra as
   // conversas paradas do vendedor e abre a transferência na mais antiga.
@@ -4570,7 +4630,12 @@ export default function ChatCenter({
             {/* Alerta de sem resposta: só admin/supervisor liga/desliga */}
             {(user?.role === "admin" || user?.role === "supervisor") && (
               <button
-                onClick={() => { setCfgEnabled(alertEnabled); setCfgMinutes(alertMinutes); setShowAlertCfg(true); }}
+                onClick={() => {
+                  setCfgEnabled(alertEnabled); setCfgMinutes(alertMinutes);
+                  setCfgWip(boardWipLimit); setCfgHoursOn(!!attendHours);
+                  if (attendHours) { setCfgOpen(attendHours.open); setCfgClose(attendHours.close); setCfgDays(attendHours.days); }
+                  setShowAlertCfg(true);
+                }}
                 data-testid="button-toggle-unanswered-alert"
                 title={`Configurar alerta de atendimentos sem resposta (vale para toda a equipe)`}
                 className={`ml-1 text-xs px-2.5 py-1 rounded-full transition border font-semibold ${alertEnabled
@@ -4736,7 +4801,7 @@ export default function ChatCenter({
                     }}
                     onTogglePin={() => void handleTogglePin(conv)}
                     overdue={isOverdue(conv)}
-                    waitingMin={isGroupConv(conv) && !isOverdue(conv) ? null : waitingMinutes(conv, nowTick)}
+                    waitingMin={isGroupConv(conv) && !isOverdue(conv) ? null : waitOf(conv).min}
                     currentUserId={user?.id}
                     targetStoreName={conv.targetStoreId ? storeNames[conv.targetStoreId] ?? null : null}
                     sessionBadge={
@@ -4818,8 +4883,13 @@ export default function ChatCenter({
           <AttendanceBoard
             convs={visibleConvs}
             now={nowTick}
-            alertMinutes={alertMinutes}
             alertEnabled={alertEnabled}
+            waitOf={waitOf}
+            wipLimit={boardWipLimit}
+            onDropTo={handleBoardDrop}
+            teamStats={teamStats}
+            transferTargets={chatUsers.filter((u) => u.role !== "superadmin").map((u) => ({ id: u.id, name: u.name }))}
+            onTransfer={handleBoardTransfer}
             meId={user?.id ?? null}
             canSeeTeam={isManagerRole}
             activeId={activeId}
@@ -4917,7 +4987,7 @@ export default function ChatCenter({
               {/* No celular: uma linha só, arrastável pro lado (não empurra a conversa pra baixo) */}
               <div className="flex items-center gap-1.5 mt-1 text-xs text-muted-foreground overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&>*]:shrink-0" data-testid="conv-header-chips">
                 {(() => {
-                  const w = waitingMinutes(activeConv, nowTick);
+                  const w = waitOf(activeConv).min;
                   if (w == null || (isGroupConv(activeConv) && !isOverdue(activeConv))) return null;
                   return isOverdue(activeConv)
                     ? <span className="shk-chip shk-chip-late" data-testid="chip-header-overdue"><AlertTriangle className="w-3 h-3" />atrasado {waitLabel(w)}</span>
@@ -6744,6 +6814,45 @@ export default function ChatCenter({
                 className="w-full px-3 py-2 rounded-xl border border-border text-sm mt-1" />
               <p className="text-xs text-muted-foreground mt-1">Vale para toda a equipe. Cada área tem um toque diferente (Potenciais, Pendentes e Ativos) e o alarme fica na tela repetindo até responder ou silenciar.</p>
             </div>
+            <div className="pt-2 border-t border-border space-y-2" data-testid="board-cfg">
+              <p className="text-sm font-semibold">Quadro do atendimento</p>
+              <div>
+                <label htmlFor="cfg-wip" className="text-xs text-muted-foreground">Limite de conversas em "Responder agora" por vendedor (0 = sem limite)</label>
+                <input id="cfg-wip" type="number" min={0} max={100} value={cfgWip}
+                  onChange={(e) => setCfgWip(Number(e.target.value))} data-testid="input-board-wip"
+                  className="w-full px-3 py-2 rounded-xl border border-border text-sm mt-1" />
+              </div>
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={cfgHoursOn} onChange={(e) => setCfgHoursOn(e.target.checked)} data-testid="checkbox-attend-hours" />
+                Contar a espera só com a loja aberta
+              </label>
+              {cfgHoursOn && (
+                <div className="space-y-2">
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="text-xs text-muted-foreground">Abre
+                      <input type="time" value={cfgOpen} onChange={(e) => setCfgOpen(e.target.value)} data-testid="input-attend-open"
+                        className="w-full px-3 py-2 rounded-xl border border-border text-sm mt-1" />
+                    </label>
+                    <label className="text-xs text-muted-foreground">Fecha
+                      <input type="time" value={cfgClose} onChange={(e) => setCfgClose(e.target.value)} data-testid="input-attend-close"
+                        className="w-full px-3 py-2 rounded-xl border border-border text-sm mt-1" />
+                    </label>
+                  </div>
+                  <div className="flex flex-wrap gap-1" role="group" aria-label="Dias que a loja abre">
+                    {["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"].map((d, i) => {
+                      const on = cfgDays.includes(i);
+                      return (
+                        <button key={d} type="button" aria-pressed={on}
+                          onClick={() => setCfgDays((prev) => on ? prev.filter((x) => x !== i) : [...prev, i].sort())}
+                          className={`h-9 px-2.5 rounded-lg border text-xs font-semibold ${on ? "bg-foreground text-white border-foreground" : "bg-white text-[#3F3F46] border-border"}`}>{d}</button>
+                      );
+                    })}
+                  </div>
+                  <p className="text-xs text-muted-foreground">Fora desse horário a conversa fica "loja fechada" (sem vermelho e sem alarme). Ao abrir, a espera conta a partir da abertura.</p>
+                </div>
+              )}
+              <p className="text-xs text-muted-foreground">O prazo de atraso também pode ser diferente por linha, em Administração › WhatsApp.</p>
+            </div>
             <div className="pt-2 border-t border-border">
               <label className="text-sm font-semibold flex items-center gap-1.5">
                 <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
@@ -6809,11 +6918,24 @@ export default function ChatCenter({
                 }
                 setSavingAlertCfg(true);
                 try {
+                  const wip = Math.round(cfgWip);
+                  if (!Number.isFinite(wip) || wip < 0 || wip > 100) {
+                    toast({ title: "Limite por vendedor inválido", description: "Use de 0 (sem limite) a 100.", variant: "destructive" });
+                    return;
+                  }
+                  if (cfgHoursOn && (!cfgOpen || !cfgClose || cfgOpen >= cfgClose || cfgDays.length === 0)) {
+                    toast({ title: "Horário da loja inválido", description: "A abertura tem de ser antes do fechamento e pelo menos um dia marcado.", variant: "destructive" });
+                    return;
+                  }
                   const s = await api.settings.update({
                     alertUnansweredEnabled: cfgEnabled, alertUnansweredMinutes: mins,
                     outboundHourlyLimit: hourly, outboundDailyLimit: daily,
                     broadcastIntervalMs: intervalSec * 1000,
+                    boardWipLimit: wip,
+                    attendHours: cfgHoursOn ? { open: cfgOpen, close: cfgClose, days: cfgDays } : null,
                   });
+                  setBoardWipLimit(s.boardWipLimit ?? 0);
+                  setAttendHours(s.attendHours ?? null);
                   setAlertEnabled(s.alertUnansweredEnabled);
                   setAlertMinutes(s.alertUnansweredMinutes);
                   setCfgOutboundHourly(s.outboundHourlyLimit);

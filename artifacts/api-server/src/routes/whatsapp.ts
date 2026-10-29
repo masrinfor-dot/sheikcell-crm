@@ -59,6 +59,8 @@ export interface AdminWAState extends BridgeWAState {
   lineType: string;
   /** Toca som e alarme de atraso desta linha na Central. */
   alertsEnabled: boolean;
+  /** Prazo de atraso desta linha (min); null = o geral da loja. */
+  alertMinutes: number | null;
 }
 
 async function persistSessionState(tenantId: number, key: string, state: BridgeWAState): Promise<void> {
@@ -145,6 +147,7 @@ function offlineState(
     directAssigneeId: row?.directAssigneeId ?? null,
     lineType: row?.lineType ?? "varejo",
     alertsEnabled: row?.alertsEnabled ?? true,
+    alertMinutes: row?.alertMinutes ?? null,
   };
 }
 
@@ -199,6 +202,7 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         directAssigneeId: row?.directAssigneeId ?? null,
         lineType: row?.lineType ?? "varejo",
         alertsEnabled: row?.alertsEnabled ?? true,
+        alertMinutes: row?.alertMinutes ?? null,
       });
     } else if (bridgeAvailable) {
       // Bridge is up but doesn't know this session yet — ask it to start it.
@@ -225,6 +229,7 @@ router.get("/whatsapp/sessions", requireFeature("whatsapp"), async (req, res): P
         directAssigneeId: row?.directAssigneeId ?? null,
         lineType: row?.lineType ?? "varejo",
         alertsEnabled: row?.alertsEnabled ?? true,
+        alertMinutes: row?.alertMinutes ?? null,
       });
       void fetchFromBridge("/whatsapp/sessions", "POST", { session: key }).catch(() => {});
     } else {
@@ -360,7 +365,7 @@ router.post("/whatsapp/sessions/:key/queue-auto-assign", requireFeature("whatsap
 router.post("/whatsapp/sessions/:key/channel-settings", requireFeature("whatsapp"), async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
-  const body = (req.body ?? {}) as { lineType?: unknown; alertsEnabled?: unknown };
+  const body = (req.body ?? {}) as { lineType?: unknown; alertsEnabled?: unknown; alertMinutes?: unknown };
   const [current] = await db.select().from(whatsappSessionsTable)
     .where(and(eq(whatsappSessionsTable.sessionKey, key), eq(whatsappSessionsTable.tenantId, tenantId))).limit(1);
   if (!current) { res.status(404).json({ error: "Conexão não encontrada" }); return; }
@@ -374,9 +379,17 @@ router.post("/whatsapp/sessions/:key/channel-settings", requireFeature("whatsapp
     }
   }
   if (body.alertsEnabled !== undefined) set.alertsEnabled = !!body.alertsEnabled;
+  if (body.alertMinutes !== undefined) {
+    if (body.alertMinutes === null || body.alertMinutes === "") set.alertMinutes = null;
+    else {
+      const m = Math.round(Number(body.alertMinutes));
+      if (!Number.isFinite(m) || m < 1 || m > 240) { res.status(400).json({ error: "Prazo deve ser entre 1 e 240 minutos" }); return; }
+      set.alertMinutes = m;
+    }
+  }
   const [updated] = await db.update(whatsappSessionsTable).set(set)
     .where(eq(whatsappSessionsTable.id, current.id)).returning();
-  res.json({ ok: true, lineType: updated!.lineType, alertsEnabled: updated!.alertsEnabled });
+  res.json({ ok: true, lineType: updated!.lineType, alertsEnabled: updated!.alertsEnabled, alertMinutes: updated!.alertMinutes });
 });
 
 // Pesquisa de satisfação desligada POR LINHA (pedido 14/09: público do
@@ -786,6 +799,7 @@ router.get("/whatsapp/status", requireFeature("whatsapp"), async (req, res): Pro
         directAssigneeId: row?.directAssigneeId ?? null,
         lineType: row?.lineType ?? "varejo",
         alertsEnabled: row?.alertsEnabled ?? true,
+        alertMinutes: row?.alertMinutes ?? null,
       };
       res.json(result);
       return;

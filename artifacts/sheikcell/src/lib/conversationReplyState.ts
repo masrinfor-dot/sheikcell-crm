@@ -82,3 +82,23 @@ export function snoozeOptions(now = Date.now()): { label: string; until: Date }[
   opts.push({ label: "em 3 dias", until: at(3, 10) });
   return opts;
 }
+
+// ─── Horário da loja (quadro, fase 2 — 29/10/2026) ───────────────────────
+// "Pra não amanhecer tudo vermelho": com o horário configurado, a espera do
+// cliente só conta com a loja aberta. Fora do horário a conversa fica
+// "pausada" (sem vermelho/alarme); ao abrir, conta a partir da abertura.
+// Horário de Brasília (UTC-3, sem horário de verão desde 2019).
+export type StoreHours = { open: string; close: string; days: number[] } | null | undefined;
+
+export function businessWait(since: number, now: number, hours: StoreHours): { since: number; paused: boolean } {
+  if (!hours) return { since, paused: false };
+  const BRT = -3 * 3600_000;
+  const local = new Date(now + BRT);
+  const [oh, om] = hours.open.split(":").map(Number) as [number, number];
+  const [ch, cm] = hours.close.split(":").map(Number) as [number, number];
+  const minutes = local.getUTCHours() * 60 + local.getUTCMinutes();
+  const open = oh * 60 + om, close = ch * 60 + cm;
+  if (!hours.days.includes(local.getUTCDay()) || minutes < open || minutes >= close) return { since, paused: true };
+  const todayOpen = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate(), oh, om) - BRT;
+  return { since: Math.max(since, todayOpen), paused: false };
+}

@@ -77,6 +77,9 @@ export const whatsappSessionsTable = pgTable("whatsapp_sessions", {
   // Som e alarme de atraso desta linha na Central (linha interna nasce
   // desligada — trocar o tipo para interna desliga, voltar para cliente liga).
   alertsEnabled: boolean("alerts_enabled").notNull().default(true),
+  // Prazo de atraso desta linha em minutos (quadro, 29/10/2026) — ex.: Atacado
+  // 10, Varejo 15. null = usa o prazo geral da loja (alert_unanswered_minutes).
+  alertMinutes: integer("alert_minutes"),
   directAssigneeId: integer("direct_assignee_id").references(() => usersTable.id, { onDelete: "set null" }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
