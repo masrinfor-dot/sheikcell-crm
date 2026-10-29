@@ -86,6 +86,8 @@ router.patch("/gerente/settings", async (req, res): Promise<void> => {
   else if (isHM(b["dailyDigestTime"])) set.dailyDigestTime = b["dailyDigestTime"];
   if (typeof b["teamDigestEnabled"] === "boolean") set.teamDigestEnabled = b["teamDigestEnabled"];
   if (typeof b["internalChatEnabled"] === "boolean") set.internalChatEnabled = b["internalChatEnabled"];
+  if (b["teamChannel"] === "chat_first" || b["teamChannel"] === "both") set.teamChannel = b["teamChannel"];
+  if (typeof b["chatFallbackMinutes"] === "number" && Number.isInteger(b["chatFallbackMinutes"])) set.chatFallbackMinutes = Math.max(5, Math.min(1440, b["chatFallbackMinutes"]));
   if (isHM(b["teamMorningTime"])) set.teamMorningTime = b["teamMorningTime"];
   if (isHM(b["teamEveningTime"])) set.teamEveningTime = b["teamEveningTime"];
   await getGerenteSettings(tenantId);

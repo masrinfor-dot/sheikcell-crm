@@ -1595,7 +1595,7 @@ export type GerenteSettings = {
   quietStart: string; quietEnd: string; dailyDigestTime: string | null; dailyDigestSentOn: string | null;
   lastSessionKey: string | null; lastPhone: string | null; createdAt: string; updatedAt: string;
   admSessionKey: string | null; erpAgentKeySet: boolean;
-  teamDigestEnabled: boolean; teamMorningTime: string; teamEveningTime: string; internalChatEnabled: boolean;
+  teamDigestEnabled: boolean; teamMorningTime: string; teamEveningTime: string; internalChatEnabled: boolean; teamChannel: "chat_first" | "both"; chatFallbackMinutes: number;
   lines: { sessionKey: string; displayName: string | null; phoneNumber: string | null; status: string }[];
 };
 export type GerenteMemberRow = { id: number; tenantId: number; phone: string; name: string; userId: number | null; role: string; isActive: boolean; createdAt: string };
@@ -3299,7 +3299,7 @@ export const api = {
   gerente: {
     settings: {
       get: () => req<GerenteSettings>("/gerente/settings"),
-      update: (data: Partial<Pick<GerenteSettings, "enabled" | "assistantName" | "authorizedPhones" | "quietStart" | "quietEnd" | "dailyDigestTime" | "admSessionKey" | "teamDigestEnabled" | "teamMorningTime" | "teamEveningTime" | "internalChatEnabled">>) =>
+      update: (data: Partial<Pick<GerenteSettings, "enabled" | "assistantName" | "authorizedPhones" | "quietStart" | "quietEnd" | "dailyDigestTime" | "admSessionKey" | "teamDigestEnabled" | "teamMorningTime" | "teamEveningTime" | "internalChatEnabled" | "teamChannel" | "chatFallbackMinutes">>) =>
         req<Omit<GerenteSettings, "lines"> & { warnings?: string[] }>("/gerente/settings", { method: "PATCH", body: JSON.stringify(data) }),
     },
     overview: () => req<GerenteOverview>("/gerente/overview"),

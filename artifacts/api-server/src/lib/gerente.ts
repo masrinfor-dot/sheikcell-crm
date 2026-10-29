@@ -1214,7 +1214,9 @@ export async function tryConsumeGerenteInbound(input: {
   let isMemberMsg = false;
   try {
     const { settings, moduleOn, members } = await cachedContext(input.tenantId);
-    isMemberMsg = !isAuthorizedPhone(settings, input.phone) && !!memberForPhone(members, input.phone);
+    // Cadastrado como gestor = regras de gestor, mesmo se o número também estiver
+    // na lista do dono (senão teria acesso ao financeiro/ERP do dono).
+    isMemberMsg = !!memberForPhone(members, input.phone);
     authorized = moduleOn && settings.enabled && (isAuthorizedPhone(settings, input.phone) || isMemberMsg);
   } catch (err) {
     logger.warn({ err, tenantId: input.tenantId }, "Gerente IA: falha ao avaliar mensagem recebida");
@@ -1411,11 +1413,15 @@ export async function notifyPhone(settings: GerenteSettings, phone: string, text
  * Avisos da EQUIPE (concluiu, adiou, dúvida, cobrança, mensagem no chat):
  * vão pro dono e pra todos os gestores — os dois organizam as tarefas.
  */
-export async function notifyTeamLeads(tenantId: number, text: string): Promise<boolean> {
+export async function notifyTeamLeads(tenantId: number, text: string, opts: { skipUserId?: number | null } = {}): Promise<boolean> {
   const settings = await getGerenteSettings(tenantId);
   if (!settings.enabled) return false;
   let ok = await notifyOwner(settings, text);
-  for (const m of await activeMembers(tenantId)) ok = (await notifyPhone(settings, normalizePhone(m.phone) ?? m.phone, text)) || ok;
+  // Não avisa o próprio gestor sobre o que ele mesmo fez/escreveu.
+  for (const m of await activeMembers(tenantId)) {
+    if (opts.skipUserId && m.userId === opts.skipUserId) continue;
+    ok = (await notifyPhone(settings, normalizePhone(m.phone) ?? m.phone, text)) || ok;
+  }
   return ok;
 }
 
@@ -1503,6 +1509,7 @@ async function runNotificationsOnce(): Promise<{ sent: number }> {
         const { runTaskOverdueChecks, runTeamDigests } = await import("./gerenteDispatch");
         sent += await runTaskOverdueChecks(settings.tenantId);
         if (!quiet) sent += await runTeamDigests(settings, now);
+        if (!quiet) { const { runChatFollowups } = await import("./gerenteInternal"); sent += await runChatFollowups(settings.tenantId, now); }
       } catch (err) {
         logger.warn({ err, tenantId: settings.tenantId }, "Gerente IA: falha ao checar tarefas atrasadas");
       }

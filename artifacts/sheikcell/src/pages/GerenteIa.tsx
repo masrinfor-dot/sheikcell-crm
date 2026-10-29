@@ -789,7 +789,7 @@ function Config({ settings, onSaved }: { settings: GerenteSettings; onSaved: (s:
   const save = async () => {
     setSaving(true);
     try {
-      const updated = await api.gerente.settings.update({ enabled: s.enabled, assistantName: s.assistantName, authorizedPhones: s.authorizedPhones, quietStart: s.quietStart, quietEnd: s.quietEnd, dailyDigestTime: s.dailyDigestTime, teamDigestEnabled: s.teamDigestEnabled, teamMorningTime: s.teamMorningTime, teamEveningTime: s.teamEveningTime, internalChatEnabled: s.internalChatEnabled });
+      const updated = await api.gerente.settings.update({ enabled: s.enabled, assistantName: s.assistantName, authorizedPhones: s.authorizedPhones, quietStart: s.quietStart, quietEnd: s.quietEnd, dailyDigestTime: s.dailyDigestTime, teamDigestEnabled: s.teamDigestEnabled, teamMorningTime: s.teamMorningTime, teamEveningTime: s.teamEveningTime, internalChatEnabled: s.internalChatEnabled, teamChannel: s.teamChannel, chatFallbackMinutes: s.chatFallbackMinutes });
       onSaved({ ...s, ...updated, lines: s.lines });
       if (updated.warnings?.length) toast({ title: "Salvo, mas confira", description: updated.warnings.join(" "), variant: "destructive" });
       else toast({ title: "Configurações salvas ✅" });
@@ -847,6 +847,18 @@ function Config({ settings, onSaved }: { settings: GerenteSettings; onSaved: (s:
           </div>
           <label className="flex items-center gap-2 font-semibold pt-2"><input type="checkbox" checked={s.internalChatEnabled} onChange={(e) => setS({ ...s, internalChatEnabled: e.target.checked })} /> Usar o chat interno do CRM</label>
           <p className="text-[10px] text-muted-foreground">Cria no chat interno a sala <b>🤖 Gerente IA</b> (fale com o Gerente por ali, igual ao WhatsApp), uma sala <b>📋 Gerente · Pessoa</b> por colaborador (tarefas e recados chegam ali também — mesmo sem WhatsApp — e ele responde 1/2/3 ou manda a foto) e <b>📣 Gerente · Loja</b> pros recados da loja.</p>
+          {s.internalChatEnabled && (
+            <div className="grid grid-cols-3 gap-2 items-end">
+              <label className="col-span-2">Como a tarefa/recado chega na equipe
+                <select className={INPUT} value={s.teamChannel} onChange={(e) => setS({ ...s, teamChannel: e.target.value as "chat_first" | "both" })}>
+                  <option value="chat_first">Chat interno primeiro; WhatsApp pessoal se não abrir</option>
+                  <option value="both">Chat interno e WhatsApp ao mesmo tempo</option>
+                </select>
+              </label>
+              <label>Esperar (min)<input type="number" min={5} max={1440} className={INPUT} value={s.chatFallbackMinutes} disabled={s.teamChannel !== "chat_first"} onChange={(e) => setS({ ...s, chatFallbackMinutes: Number(e.target.value) || 30 })} /></label>
+            </div>
+          )}
+          {s.internalChatEnabled && s.teamChannel === "chat_first" && <p className="text-[10px] text-muted-foreground">Se a pessoa não abrir a sala dela no chat em {s.chatFallbackMinutes} min, o Gerente manda no WhatsApp pessoal e alerta você e os gestores (🔕 "não abriu o chat").</p>}
           <p className="text-[10px] text-muted-foreground">De segunda a sábado, cada pessoa recebe só as tarefas dela e responde 1 (terminei), 2 (adiar) ou 3 (dúvida). Na cobrança, você recebe quem ficou devendo.</p>
         </div>
         <button onClick={save} disabled={saving} className={BTN_PRIMARY} data-testid="button-save-gerente">{saving ? "Salvando..." : "Salvar"}</button>
