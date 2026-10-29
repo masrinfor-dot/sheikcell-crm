@@ -124,6 +124,24 @@ router.post("/gerente/members", async (req, res): Promise<void> => {
   invalidateGerenteCache(tenantId);
   res.status(201).json(row);
 });
+// Manda pro gestor, pelo WhatsApp do Gerente, o link do painel de tarefas DELE
+// (sem contas nem agenda do dono) — e posta na sala dele no chat interno.
+router.post("/gerente/members/:id/send-link", async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = idParam(String(req.params["id"])); if (!id) { res.status(400).json({ error: "id inválido" }); return; }
+  const { gerenteMembersTable } = await import("@workspace/db");
+  const [m] = await db.select().from(gerenteMembersTable).where(and(eq(gerenteMembersTable.id, id), eq(gerenteMembersTable.tenantId, tenantId))).limit(1);
+  if (!m) { res.status(404).json({ error: "Pessoa não encontrada." }); return; }
+  const settings = await getGerenteSettings(tenantId);
+  const { createLink } = await import("../lib/gerenteExtras");
+  const url = await createLink(settings, "dia", null, 30, true, m.userId ?? -1);
+  const first = m.name.trim().split(" ")[0];
+  const text = `🔗 *${first}, seu painel de tarefas do Gerente IA:*\n${url}\n\nAbre no celular sem login (vale 30 dias): Kanban, tarefas da equipe, criar e distribuir tarefas, comentar e concluir.\nAqui neste número você também fala com o Gerente — mande *ajuda* pra ver tudo. Pra um link novo: *link*.`;
+  const { notifyPhone } = await import("../lib/gerente");
+  const ok = await notifyPhone(settings, m.phone, text);
+  res.json({ ok, url, message: ok ? `Link enviado no WhatsApp de ${first}.` : `Não consegui enviar no WhatsApp de ${first} (linha desconectada?). Link: ${url}` });
+});
+
 router.delete("/gerente/members/:id", async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const id = idParam(String(req.params["id"])); if (!id) { res.status(400).json({ error: "id inválido" }); return; }
