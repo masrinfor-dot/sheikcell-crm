@@ -97,3 +97,20 @@ export const taskRemindersTable = pgTable("task_reminders", {
   uniqueIndex("task_reminders_dedupe_unique").on(t.dedupeKey),
   index("task_reminders_recipient_idx").on(t.recipientUserId),
 ]);
+
+// Tela "Equipe" (chat interno + pedidos, 29/10/2026): pedido parado
+// "Esperando alguém" (outra pessoa, fornecedor, cliente…) e por quem. O ERP
+// não tem esse estado (lá a tarefa segue "fazendo"), então fica guardado aqui,
+// ligado ao NÚMERO da tarefa — o mesmo id que o quadro usa nos dois modos
+// (tabelas daqui ou tarefas no ERP, que mantêm o número). Sem FK em tasks
+// por isso: com as tarefas no ERP, o número pode não existir aqui.
+export const taskWaitingTable = pgTable("task_waiting", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull(),
+  taskId: integer("task_id").notNull(),
+  waitingFor: text("waiting_for").notNull(),
+  setById: integer("set_by_id").references(() => usersTable.id, { onDelete: "set null" }),
+  since: timestamp("since", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("task_waiting_tenant_task_uq").on(t.tenantId, t.taskId),
+]);

@@ -300,6 +300,9 @@ export type InternalConversation = {
   activeHandlerId?: number | null;
   activeHandlerName?: string | null;
   activeHandlerSince?: string | null;
+  // Tela "Equipe": alguém te mandou mensagem e você ainda não respondeu
+  // (direta, ou @menção/resposta a você num grupo). null = nada pendente.
+  waitingReplySince?: string | null;
 };
 
 export type Store = {
@@ -1014,6 +1017,9 @@ export type Task = {
   // enviado mas não deu pra agendar (sem cliente/prazo, cliente sem
   // conversa etc.) — a tarefa é salva normalmente mesmo assim.
   clientMessageWarning?: string;
+  // Tela "Equipe": pedido parado "Esperando alguém" (por quem e desde quando).
+  waitingFor?: string | null;
+  waitingSince?: string | null;
 };
 
 export type TaskComment = {
@@ -3451,6 +3457,8 @@ export const api = {
       position: number; isArchived: boolean;
       contactId: number | null; durationMinutes: number | null; alertMinutesBefore: number | null;
       clientMessage: string;
+      // Tela "Equipe": texto = "Esperando alguém" (quem); null = voltou a fazer.
+      waitingFor: string | null;
     }>) => req<Task>(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
     report: () => req<{ bySector: TaskReportBucket[]; byUser: TaskReportBucket[] }>("/tasks/report"),
     comments: (id: number) => req<TaskComment[]>(`/tasks/${id}/comments`),

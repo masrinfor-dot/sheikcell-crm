@@ -26,6 +26,7 @@ import {
   type ErpTaskNotice,
 } from "../lib/erpTasks";
 import { appSetting } from "../lib/tradeInMoved";
+import { setWaiting, waitingChange, withWaiting } from "../lib/taskWaiting";
 import { scheduleClientMessageForTask } from "../lib/taskClientMessage";
 import { logger } from "../lib/logger";
 
@@ -129,9 +130,13 @@ async function visibleTasks(req: Request, res: Response, tenantId: number) {
   return visible.map((t) => toCrmTask(t, ctx));
 }
 
+async function visibleWithWaiting(req: Request, res: Response, tenantId: number) {
+  return withWaiting(tenantId, await visibleTasks(req, res, tenantId));
+}
+
 router.get("/tasks", async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
-  try { res.json(await visibleTasks(req, res, tenantId)); } catch (err) { fail(res, err); }
+  try { res.json(await visibleWithWaiting(req, res, tenantId)); } catch (err) { fail(res, err); }
 });
 
 router.get("/tasks/report", async (req, res): Promise<void> => {
@@ -291,6 +296,7 @@ type TaskBody = {
   position?: number; isArchived?: boolean;
   contactId?: number | null; durationMinutes?: number | null; alertMinutesBefore?: number | null;
   clientMessage?: string | null;
+  waitingFor?: string | null;
 };
 
 async function contactFields(tenantId: number, raw: unknown): Promise<Record<string, unknown> | { error: string }> {
@@ -359,7 +365,8 @@ async function respondTask(req: Request, res: Response, tenantId: number, t: Erp
       req.session.userId ?? null,
     );
   }
-  res.status(status).json({ ...toCrmTask(t, ctx), ...(clientMessageWarning ? { clientMessageWarning } : {}) });
+  const [view] = await withWaiting(tenantId, [toCrmTask(t, ctx)]);
+  res.status(status).json({ ...view!, ...(clientMessageWarning ? { clientMessageWarning } : {}) });
 }
 
 router.post("/tasks", async (req, res): Promise<void> => {
@@ -387,7 +394,12 @@ router.patch("/tasks/:id", async (req, res): Promise<void> => {
     }
     const built = await buildErpBody(req, tenantId, body, current);
     if ("error" in built) { res.status(400).json({ error: built.error }); return; }
-    const t = await erpPost<ErpTask>(conn(res), `/${n}`, { actor: await actorOf(req), ...built.body }, "PATCH");
+    // Tela "Equipe": "Esperando alguém" fica no CRM (o ERP não tem esse estado).
+    const waiting = waitingChange(body, current.status);
+    const t = Object.keys(built.body).length > 0
+      ? await erpPost<ErpTask>(conn(res), `/${n}`, { actor: await actorOf(req), ...built.body }, "PATCH")
+      : current;
+    if (waiting !== undefined) await setWaiting(tenantId, n, waiting, req.session.userId ?? null);
     await respondTask(req, res, tenantId, t, body.clientMessage);
   } catch (err) { fail(res, err); }
 });

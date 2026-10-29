@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
-import { api, can, canEditModule, ApiError, type InternalConversation, type InternalMessage, type MessageMetadata, type InternalChatSearchHit } from "@/lib/api";
+import { api, can, canEditModule, moduleLevel, ApiError, type InternalConversation, type InternalMessage, type MessageMetadata, type InternalChatSearchHit, type Task } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { reportInternalChatUnread } from "@/hooks/useInternalChatNotifier";
 import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/sharedEventSource";
@@ -8,10 +8,12 @@ import { acquireSharedEventSource, releaseSharedEventSource } from "@/lib/shared
 const INTERNAL_CHAT_EVENTS_URL = "/api/internal-chat/events";
 import {
   Users, Send, Plus, X, Search, MessagesSquare, ChevronLeft, SquareKanban, ClipboardPlus, Trash2, Pencil,
-  Paperclip, Mic, Square, Reply, Forward, FileText, Volume2, VolumeX, Bell, BellOff, Loader2, RefreshCw, Pin, PinOff,
+  Paperclip, Mic, Square, Reply, Forward, FileText, Volume2, VolumeX, Bell, BellOff, Loader2, RefreshCw, Pin, PinOff, ArrowLeft,
   FileSpreadsheet, FileArchive, File as FileGeneric, Globe, Image, Check, Ban, Video,
 } from "lucide-react";
 import TaskBoard from "./TaskBoard";
+import { PedidoPanel, PedidosBoard, PedirBox, ScopeBar, useNow, usePedidos, useWide } from "@/components/EquipePedidos";
+import { replyLateText, scopeCounts, type Scope } from "@/lib/equipePedidos";
 
 // Rótulos/emoji fixos de mensagens de mídia sem legenda (ver POST .../media
 // no servidor) — usados para não exibir o placeholder como se fosse texto.
@@ -252,8 +254,21 @@ export default function InternalChat({ docked = false, onActiveConversationChang
   useEffect(() => { draftRef.current = draft; }, [draft]);
   const [sending, setSending] = useState(false);
   const [showNew, setShowNew] = useState(false);
-  // Aba interna: conversas da equipe ou o quadro de tarefas (kanban).
-  const [view, setView] = useState<"chat" | "tasks">("chat");
+  // Tela "Equipe" (29/10/2026): chat interno + pedidos no mesmo lugar.
+  //  - tela cheia: "equipe" (conversas · quadro de pedidos · pedido aberto)
+  //    ou "tasks" (o quadro completo de sempre: agenda, subtarefas, relatório);
+  //  - encaixado (barra lateral/celular do vendedor): abas "chat" e "equipe"
+  //    (pedidos), e "tasks" a partir do pedido.
+  const [view, setView] = useState<"chat" | "equipe" | "tasks">(docked ? "chat" : "equipe");
+  const canSeePedidos = moduleLevel(user, "tarefas") != null;
+  const canEditPedidos = canEditModule(user, "tarefas");
+  // Encaixado na aba de conversas, o quadro de pedidos não está à vista: consulta mais devagar.
+  const pedidos = usePedidos(canSeePedidos, docked && view === "chat" ? 120_000 : 30_000);
+  const [pedidoScope, setPedidoScope] = useState<Scope>("mim");
+  const [pedidoId, setPedidoId] = useState<number | null>(null);
+  const now = useNow();
+  const isMd = useWide("(min-width: 768px)");
+  const isWide = useWide("(min-width: 1280px)");
   const [colleagues, setColleagues] = useState<{ id: number; name: string; role: string }[]>([]);
   const [colleagueSearch, setColleagueSearch] = useState("");
   // Criação de grupo: modo do modal "Novo", nome e participantes escolhidos.
@@ -520,6 +535,9 @@ export default function InternalChat({ docked = false, onActiveConversationChang
             lastMessage: payload.message.content,
             lastMessageAt: payload.message.createdAt,
             unreadCount: bumpUnread ? c.unreadCount + 1 : c.unreadCount,
+            // "sem resposta há X": respondi = some; conversa direta = começa a contar.
+            waitingReplySince: payload.message.senderId === user?.id ? null
+              : c.kind === "direct" ? (c.waitingReplySince ?? payload.message.createdAt) : c.waitingReplySince,
           };
         });
       });
@@ -663,6 +681,8 @@ export default function InternalChat({ docked = false, onActiveConversationChang
   // Abre o modal "criar tarefa" preenchido com a mensagem; se ela menciona
   // alguém (@Nome), já sugere esse colega como responsável.
   const teamNames = [...colleagues.map((c) => c.name), ...(user?.name ? [user.name] : [])];
+  // Pessoas do "@nome" e do "Passar para…" (eu + colegas).
+  const people = [...(user ? [{ id: user.id, name: user.name }] : []), ...colleagues.map((c) => ({ id: c.id, name: c.name }))];
   const openTaskFromMsg = (m: InternalMessage) => {
     setTaskFromMsg(m);
     setTaskTitle(m.content.length > 80 ? `${m.content.slice(0, 77)}...` : m.content);
@@ -677,14 +697,17 @@ export default function InternalChat({ docked = false, onActiveConversationChang
     if (!title) { toast({ title: "Dê um título à tarefa", variant: "destructive" }); return; }
     setCreatingTask(true);
     try {
-      await api.tasks.create({
+      const created = await api.tasks.create({
         title,
         description: `Criada a partir do chat interno — mensagem de ${taskFromMsg.senderName} em ${new Date(taskFromMsg.createdAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}:\n\n"${taskFromMsg.content}"`,
         assigneeIds: taskAssignee ? [Number(taskAssignee)] : [],
-        dueDate: taskDue || null,
+        // Só a data: vale até o fim do expediente (18h de Brasília), não meia-noite UTC.
+        dueDate: taskDue ? `${taskDue}T18:00:00-03:00` : null,
       });
       setTaskFromMsg(null);
-      toast({ title: "Tarefa criada no quadro! 📋" });
+      pedidos.patchLocal(created);
+      if (!docked) setPedidoId(created.id);
+      toast({ title: "Virou pedido no quadro da Equipe 📋" });
     } catch (err) {
       toast({ title: "Erro ao criar tarefa", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     } finally {
@@ -817,7 +840,7 @@ export default function InternalChat({ docked = false, onActiveConversationChang
       setMessages((prev) => (prev.some((m) => m.id === msg.id)
         ? prev.filter((m) => m.id !== optimistic.id)
         : prev.map((m) => (m.id === optimistic.id ? msg : m))));
-      setConversations((prev) => prev.map((c) => (c.id === activeId ? { ...c, lastMessage: msg.content, lastMessageAt: msg.createdAt } : c)));
+      setConversations((prev) => prev.map((c) => (c.id === activeId ? { ...c, lastMessage: msg.content, lastMessageAt: msg.createdAt, waitingReplySince: null } : c)));
       setReplyTarget(null);
     } catch (err) {
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
@@ -887,7 +910,7 @@ export default function InternalChat({ docked = false, onActiveConversationChang
       setMessages((prev) => (prev.some((m) => m.id === msg.id)
         ? prev.filter((m) => m.id !== optimistic.id)
         : prev.map((m) => (m.id === optimistic.id ? msg : m))));
-      setConversations((prev) => prev.map((c) => (c.id === activeId ? { ...c, lastMessage: msg.content, lastMessageAt: msg.createdAt } : c)));
+      setConversations((prev) => prev.map((c) => (c.id === activeId ? { ...c, lastMessage: msg.content, lastMessageAt: msg.createdAt, waitingReplySince: null } : c)));
     } catch (err) {
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
       toast({ title: "Erro ao enviar arquivo", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
@@ -1285,6 +1308,16 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                       </span>
                     )}
                   </div>
+                  {(() => {
+                    // Tela "Equipe": alguém te mandou e você não respondeu.
+                    const late = replyLateText(c.waitingReplySince, now);
+                    return late && (
+                      <span data-testid={`internal-conv-late-${c.id}`}
+                        className={`mt-1 inline-block text-[11px] font-bold rounded-md px-1.5 py-px ${late.strong ? "bg-red-100 text-red-800" : "bg-amber-100 text-amber-900"}`}>
+                        {late.text}
+                      </span>
+                    );
+                  })()}
                 </div>
               </button>
             ))}
@@ -1462,7 +1495,8 @@ export default function InternalChat({ docked = false, onActiveConversationChang
                         <button
                           onClick={() => openTaskFromMsg(m)}
                           data-testid={`button-task-from-msg-${m.id}`}
-                          title="Criar tarefa desta mensagem"
+                          title="Virar pedido (tarefa)"
+                          aria-label="Virar pedido (tarefa)"
                           className="p-1.5 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10"
                         >
                           <ClipboardPlus className="w-3.5 h-3.5" />
@@ -1816,20 +1850,20 @@ export default function InternalChat({ docked = false, onActiveConversationChang
     <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setTaskFromMsg(null)}>
       <div className="bg-card rounded-xl w-full max-w-sm shadow-xl border overflow-hidden mx-3" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-4 py-3 border-b">
-          <span className="font-semibold text-sm flex items-center gap-2"><ClipboardPlus className="w-4 h-4 text-primary" /> Criar tarefa desta mensagem</span>
-          <button onClick={() => setTaskFromMsg(null)} data-testid="button-close-task-modal" className="p-1 rounded hover:bg-muted/60"><X className="w-4 h-4" /></button>
+          <span className="font-semibold text-sm flex items-center gap-2"><ClipboardPlus className="w-4 h-4 text-primary" /> Virar pedido</span>
+          <button onClick={() => setTaskFromMsg(null)} data-testid="button-close-task-modal" aria-label="Fechar" className="w-10 h-10 inline-flex items-center justify-center rounded hover:bg-muted/60"><X className="w-4 h-4" /></button>
         </div>
         <div className="p-4 space-y-3">
           <div className="text-xs bg-muted/40 border rounded-lg px-3 py-2 text-muted-foreground line-clamp-3">
             "{taskFromMsg.content}" — {taskFromMsg.senderName}
           </div>
           <div>
-            <label className="text-xs font-semibold text-muted-foreground">Título da tarefa</label>
+            <label className="text-xs font-semibold text-muted-foreground">O que precisa ser feito</label>
             <input value={taskTitle} onChange={(e) => setTaskTitle(e.target.value)} data-testid="input-task-title"
               className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
           </div>
           <div>
-            <label className="text-xs font-semibold text-muted-foreground">Responsável</label>
+            <label className="text-xs font-semibold text-muted-foreground">Para quem</label>
             <select value={taskAssignee} onChange={(e) => setTaskAssignee(e.target.value)} data-testid="select-task-assignee"
               className="mt-1 w-full rounded-lg border px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary/40">
               <option value="">Sem responsável</option>
@@ -1844,7 +1878,7 @@ export default function InternalChat({ docked = false, onActiveConversationChang
           </div>
           <button onClick={createTaskFromMsg} disabled={creatingTask} data-testid="button-create-task-from-msg"
             className="w-full py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition">
-            {creatingTask ? "Criando..." : "Criar tarefa no quadro"}
+            {creatingTask ? "Criando..." : "Criar pedido"}
           </button>
         </div>
       </div>
@@ -2068,26 +2102,72 @@ export default function InternalChat({ docked = false, onActiveConversationChang
     </div>
   );
 
+  // ─── Tela "Equipe": pedidos ao lado das conversas ──────────────────────
+  const meId = user?.id ?? 0;
+  const selectedPedido: Task | null = pedidoId != null ? pedidos.tasks.find((t) => t.id === pedidoId) ?? null : null;
+  const openPedido = (t: Task) => setPedidoId(t.id);
+  const pedidoPanel = selectedPedido && (
+    <PedidoPanel
+      task={selectedPedido}
+      meId={meId}
+      people={people}
+      onClose={() => setPedidoId(null)}
+      onChanged={pedidos.patchLocal}
+      onRead={pedidos.markRead}
+      onOpenFull={() => { setPedidoId(null); setView("tasks"); }}
+    />
+  );
+  const pedidosBlocked = pedidos.blocked && pedidos.tasks.length === 0 ? (
+    <p className="text-sm text-[#52525B] bg-white border rounded-xl p-4" role="status">{pedidos.blocked}</p>
+  ) : null;
+  const pedirBox = (compact: boolean) => canEditPedidos && user ? (
+    <PedirBox people={people} meId={meId} compact={compact} onCreated={(t) => { pedidos.patchLocal(t); setPedidoId(t.id); }} />
+  ) : null;
+  const scopeBar = <ScopeBar scope={pedidoScope} setScope={setPedidoScope} tasks={pedidos.tasks} meId={meId} now={now} />;
+  const board = (opts: { colHeight?: string; fill?: boolean }) => pedidosBlocked ?? (
+    <PedidosBoard tasks={pedidos.tasks} scope={pedidoScope} meId={meId} now={now} selectedId={pedidoId}
+      unread={pedidos.unread} onOpen={openPedido} {...opts} />
+  );
+  const fullBoardBack = (
+    <div className="flex items-center gap-2 px-3 py-2 border-b bg-muted/20 shrink-0">
+      <button type="button" onClick={() => setView("equipe")} data-testid="button-voltar-equipe"
+        className="h-10 px-3 rounded-lg border bg-white text-sm font-semibold inline-flex items-center gap-1.5 hover:bg-muted/50">
+        <ArrowLeft className="w-4 h-4" aria-hidden="true" /> Voltar para Equipe
+      </button>
+      <span className="text-xs text-muted-foreground">Quadro completo: agenda, subtarefas e relatório.</span>
+    </div>
+  );
+  const pedidosParaMim = scopeCounts(pedidos.tasks, meId, now).mim;
+
   const viewTabs = (
-    <div className="flex items-center gap-1 p-1.5 border-b bg-muted/20 shrink-0">
+    <div className="flex items-center gap-1 p-1.5 border-b bg-muted/20 shrink-0" role="tablist" aria-label="Chat interno">
       <button
+        role="tab"
+        aria-selected={view === "chat"}
         onClick={() => setView("chat")}
         data-testid="tab-internal-chat"
-        className={`flex-1 flex items-center justify-center gap-1.5 text-xs font-semibold rounded-lg px-3 py-2 transition ${
+        className={`flex-1 min-h-10 flex items-center justify-center gap-1.5 text-xs font-semibold rounded-lg px-3 py-2 transition ${
           view === "chat" ? "bg-primary text-white" : "text-muted-foreground hover:bg-muted/60"
         }`}
       >
-        <MessagesSquare className="w-3.5 h-3.5" /> Conversas
+        <MessagesSquare className="w-3.5 h-3.5" aria-hidden="true" /> Conversas
       </button>
-      <button
-        onClick={() => setView("tasks")}
-        data-testid="tab-internal-tasks"
-        className={`flex-1 flex items-center justify-center gap-1.5 text-xs font-semibold rounded-lg px-3 py-2 transition ${
-          view === "tasks" ? "bg-primary text-white" : "text-muted-foreground hover:bg-muted/60"
-        }`}
-      >
-        <SquareKanban className="w-3.5 h-3.5" /> Quadro de Tarefas
-      </button>
+      {canSeePedidos && (
+        <button
+          role="tab"
+          aria-selected={view !== "chat"}
+          onClick={() => setView("equipe")}
+          data-testid="tab-internal-tasks"
+          className={`flex-1 min-h-10 flex items-center justify-center gap-1.5 text-xs font-semibold rounded-lg px-3 py-2 transition ${
+            view !== "chat" ? "bg-primary text-white" : "text-muted-foreground hover:bg-muted/60"
+          }`}
+        >
+          <SquareKanban className="w-3.5 h-3.5" aria-hidden="true" /> Pedidos
+          {pedidosParaMim > 0 && (
+            <span className={`text-[10px] font-bold rounded-full px-1.5 ${view !== "chat" ? "bg-white text-primary" : "bg-primary text-white"}`}>{pedidosParaMim}</span>
+          )}
+        </button>
+      )}
     </div>
   );
 
@@ -2096,36 +2176,129 @@ export default function InternalChat({ docked = false, onActiveConversationChang
       <div className="relative flex flex-col h-full min-h-0 bg-card overflow-hidden">
         {viewTabs}
         {view === "tasks" ? (
-          <div className="flex-1 overflow-y-auto p-3">
-            <TaskBoard compact />
+          <>
+            {fullBoardBack}
+            <div className="flex-1 overflow-y-auto p-3">
+              <TaskBoard compact />
+            </div>
+          </>
+        ) : view === "equipe" ? (
+          <div className="flex-1 min-h-0 overflow-y-auto p-2 flex flex-col gap-2" data-testid="equipe-pedidos-docked">
+            {pedirBox(true)}
+            {scopeBar}
+            {board({ colHeight: "380px" })}
+            <button type="button" onClick={() => setView("tasks")} className="self-start h-10 px-3 rounded-lg border bg-white text-xs font-semibold inline-flex items-center gap-1.5 hover:bg-muted/50">
+              <SquareKanban className="w-4 h-4" aria-hidden="true" /> Quadro completo (agenda, subtarefas)
+            </button>
           </div>
         ) : active ? (
           <section className="flex-1 flex flex-col min-h-0">{threadPanel}</section>
         ) : (
           <div className="flex flex-col h-full min-h-0">{listPanel}</div>
         )}
+        {pedidoPanel && view === "equipe" && (
+          <div className="absolute inset-0 z-40 bg-card flex flex-col" role="dialog" aria-label="Pedido">{pedidoPanel}</div>
+        )}
         {newModal}{editModal}{taskModal}{forwardModal}
       </div>
     );
   }
 
+  // Tela cheia: "Equipe" = conversas (esquerda) · quadro de pedidos (meio,
+  // ou a conversa aberta) · pedido aberto (direita em tela larga; por cima
+  // nas menores). No celular: tudo empilhado (pedir, conversas, quadro com
+  // rolagem para o lado) e o pedido/conversa em tela cheia.
+  const equipeHeader = (
+    <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b shrink-0">
+      <strong className="text-lg">Equipe</strong>
+      <span className="text-[13px] text-[#52525B] hidden sm:inline">Chat interno e pedidos no mesmo lugar</span>
+      <div className="ml-auto flex flex-wrap items-center gap-1.5">
+        {isMd && canSeePedidos && scopeBar}
+        {canSeePedidos && (
+          <button type="button" onClick={() => setView("tasks")} data-testid="button-abrir-quadro-completo"
+            className="h-10 px-3 rounded-full border border-[#D4D4D8] bg-white text-[13px] font-semibold inline-flex items-center gap-1.5 hover:bg-[#F4F4F5]">
+            <SquareKanban className="w-4 h-4" aria-hidden="true" /> Quadro completo
+          </button>
+        )}
+      </div>
+    </div>
+  );
+
+  const pedidosMiddle = canSeePedidos ? (
+    <div className="flex-1 min-h-0 min-w-0 flex flex-col gap-3 p-3 overflow-hidden" data-testid="equipe-pedidos">
+      {pedirBox(false)}
+      {board({ fill: true })}
+    </div>
+  ) : threadPanel;
+
+  const equipeBody = isMd ? (
+    <div className="relative flex flex-1 min-h-0">
+      <aside className="w-72 lg:w-80 shrink-0 border-r flex flex-col bg-muted/20 min-h-0">{listPanel}</aside>
+      <section className="flex-1 min-w-0 flex flex-col min-h-0">
+        {active ? (
+          <>
+            {canSeePedidos && (
+              <div className="px-3 py-1.5 border-b bg-muted/20 shrink-0">
+                <button type="button" onClick={() => setActiveId(null)} data-testid="button-voltar-quadro"
+                  className="h-10 px-3 rounded-lg text-sm font-semibold inline-flex items-center gap-1.5 hover:bg-muted/60">
+                  <ArrowLeft className="w-4 h-4" aria-hidden="true" /> Voltar ao quadro de pedidos
+                </button>
+              </div>
+            )}
+            {threadPanel}
+          </>
+        ) : pedidosMiddle}
+      </section>
+      {canSeePedidos && isWide && (
+        <aside className="w-[380px] shrink-0 border-l bg-white flex flex-col min-h-0" aria-label="Pedido aberto">
+          {pedidoPanel ?? (
+            <div className="m-auto text-center flex flex-col gap-2 p-6 text-sm text-[#52525B]">
+              <strong className="text-foreground text-[15px]">Clique num pedido</strong>
+              <span>Cada pedido tem a sua própria conversa. Nada se perde no meio do grupo.</span>
+            </div>
+          )}
+        </aside>
+      )}
+      {!isWide && pedidoPanel && (
+        <div className="absolute inset-y-0 right-0 z-40 w-full max-w-md bg-white border-l shadow-xl flex flex-col" role="dialog" aria-label="Pedido">{pedidoPanel}</div>
+      )}
+    </div>
+  ) : active ? (
+    <section className="flex-1 flex flex-col min-w-0 min-h-0">{threadPanel}</section>
+  ) : (
+    <div className="relative flex-1 min-h-0 overflow-y-auto p-2 flex flex-col gap-3" data-testid="equipe-mobile">
+      {pedirBox(true)}
+      <div className="h-[45vh] shrink-0 flex flex-col border rounded-xl overflow-hidden bg-muted/20">{listPanel}</div>
+      {canSeePedidos && (
+        <>
+          <h2 className="text-sm font-bold px-1">Pedidos</h2>
+          {scopeBar}
+          {board({ colHeight: "420px" })}
+        </>
+      )}
+    </div>
+  );
+
   return (
     <div className="px-2 md:px-4 py-2 md:py-4">
-      {/* Celular: uma coluna só (lista OU conversa) e altura descontando a
-          bottom nav — duas colunas espremidas distorciam tudo. Mesmo cálculo
-          de altura/largura do ChatCenter — sem o max-w antigo, que sobrava
-          espaço vazio nas laterais em telas largas. */}
+      {/* Celular: uma coluna só e altura descontando a bottom nav — mesmo
+          cálculo de altura/largura do ChatCenter. */}
       <div className="relative flex flex-col h-[calc(var(--vvh,100dvh)-7rem-env(safe-area-inset-bottom))] md:h-[calc(100vh-88px-var(--shk-topbar-extra,0px))] md:min-h-[480px] rounded-xl border bg-card overflow-hidden shadow-sm">
-        {viewTabs}
         {view === "tasks" ? (
-          <div className="flex-1 overflow-y-auto p-4">
-            <TaskBoard />
-          </div>
+          <>
+            {fullBoardBack}
+            <div className="flex-1 overflow-y-auto p-4">
+              <TaskBoard />
+            </div>
+          </>
         ) : (
-          <div className="relative flex flex-1 min-h-0">
-            <aside className={`w-full md:w-80 lg:w-96 shrink-0 md:border-r flex-col bg-muted/20 ${active ? "hidden md:flex" : "flex"}`}>{listPanel}</aside>
-            <section className={`flex-1 flex-col min-w-0 ${active ? "flex" : "hidden md:flex"}`}>{threadPanel}</section>
-          </div>
+          <>
+            {equipeHeader}
+            {equipeBody}
+          </>
+        )}
+        {!isMd && pedidoPanel && view !== "tasks" && (
+          <div className="absolute inset-0 z-40 bg-white flex flex-col" role="dialog" aria-label="Pedido">{pedidoPanel}</div>
         )}
         {newModal}{editModal}{taskModal}{forwardModal}
       </div>
