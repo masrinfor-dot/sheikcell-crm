@@ -1527,6 +1527,33 @@ export async function notifyOwner(settings: GerenteSettings, text: string): Prom
   return false;
 }
 
+/** Link do painel do gestor (sem contas/agenda do dono) + texto pronto pra mandar. */
+export async function gestorLinkMessage(settings: GerenteSettings, m: GerenteMember, days = 30): Promise<{ url: string; text: string }> {
+  const { createLink } = await import("./gerenteExtras");
+  const url = await createLink(settings, "dia", null, days, true, m.userId ?? -1);
+  const first = m.name.trim().split(" ")[0];
+  return { url, text: `🔗 *${first}, seu painel de tarefas do Gerente IA:*\n${url}\n\nAbre no celular sem login: Kanban, tarefas da equipe, criar e distribuir tarefas, comentar e concluir.\nAqui neste número você também fala com o Gerente — mande *ajuda* pra ver tudo. Pra um link novo: *link*.` };
+}
+
+/** Bom dia dos gestores (1x/dia): o dia dele, a equipe e o link do painel. */
+async function sendGestorDigests(settings: GerenteSettings, today: string): Promise<number> {
+  const { gerenteTeamDigestsTable } = await import("@workspace/db");
+  const { teamStatus } = await import("./gerenteComms");
+  const { createLink } = await import("./gerenteExtras");
+  let n = 0;
+  for (const m of await activeMembers(settings.tenantId)) {
+    if (!m.userId) continue;
+    const ins = await db.insert(gerenteTeamDigestsTable).values({ tenantId: settings.tenantId, userId: m.userId, kind: "gestor", day: today }).onConflictDoNothing().returning();
+    if (!ins.length) continue;
+    const phone = normalizePhone(m.phone) ?? m.phone;
+    const actor: GerenteActor = { role: "gestor", phone, name: m.name, userId: m.userId };
+    const body = await actorStore.run(actor, async () => `${await buildDigest(settings.tenantId)}\n\n${await teamStatus(settings.tenantId)}`);
+    const url = await createLink(settings, "dia", null, 2, true, m.userId);
+    if (await notifyPhone(settings, phone, `${body}\n\n🔗 Seu painel: ${url}`)) n++;
+  }
+  return n;
+}
+
 /** Aviso pra outro número com acesso (gestor), pela linha do Gerente. */
 export async function notifyPhone(settings: GerenteSettings, phone: string, text: string): Promise<boolean> {
   const preferred = (await gerenteLine(settings)) ?? settings.lastSessionKey;
@@ -1653,6 +1680,8 @@ async function runNotificationsOnce(): Promise<{ sent: number }> {
         const ok = await notifyOwner(settings, `${await buildDigest(settings.tenantId)}\n\n🔗 Abrir no celular: ${await createLink(settings, "dia", null, 2)}`);
         if (ok) { await db.update(gerenteSettingsTable).set({ dailyDigestSentOn: today, updatedAt: now }).where(eq(gerenteSettingsTable.id, settings.id)); sent++; }
       }
+      // Gestores: resumo do dia DELES + equipe + link novo do painel (sem contas do dono).
+      if (settings.dailyDigestTime && hm >= settings.dailyDigestTime && !quiet) sent += await sendGestorDigests(settings, today);
     } catch (err) {
       logger.warn({ err, tenantId: settings.tenantId }, "Gerente IA: falha nos avisos");
     }

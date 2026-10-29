@@ -122,7 +122,14 @@ router.post("/gerente/members", async (req, res): Promise<void> => {
   const [row] = await db.insert(gerenteMembersTable).values({ tenantId, name, phone, userId })
     .onConflictDoUpdate({ target: [gerenteMembersTable.tenantId, gerenteMembersTable.phone], set: { name, userId, isActive: true } }).returning();
   invalidateGerenteCache(tenantId);
-  res.status(201).json(row);
+  // Já manda o link de acesso pro WhatsApp do novo gestor.
+  let linkSent = false;
+  try {
+    const { notifyPhone, gestorLinkMessage } = await import("../lib/gerente");
+    const { text } = await gestorLinkMessage(settings, row!);
+    linkSent = await notifyPhone(settings, row!.phone, text);
+  } catch (err) { req.log.warn({ err }, "Gerente IA: falha ao mandar o link pro gestor"); }
+  res.status(201).json({ ...row, linkSent });
 });
 // Manda pro gestor, pelo WhatsApp do Gerente, o link do painel de tarefas DELE
 // (sem contas nem agenda do dono) — e posta na sala dele no chat interno.
@@ -133,11 +140,9 @@ router.post("/gerente/members/:id/send-link", async (req, res): Promise<void> =>
   const [m] = await db.select().from(gerenteMembersTable).where(and(eq(gerenteMembersTable.id, id), eq(gerenteMembersTable.tenantId, tenantId))).limit(1);
   if (!m) { res.status(404).json({ error: "Pessoa não encontrada." }); return; }
   const settings = await getGerenteSettings(tenantId);
-  const { createLink } = await import("../lib/gerenteExtras");
-  const url = await createLink(settings, "dia", null, 30, true, m.userId ?? -1);
+  const { notifyPhone, gestorLinkMessage } = await import("../lib/gerente");
+  const { url, text } = await gestorLinkMessage(settings, m);
   const first = m.name.trim().split(" ")[0];
-  const text = `🔗 *${first}, seu painel de tarefas do Gerente IA:*\n${url}\n\nAbre no celular sem login (vale 30 dias): Kanban, tarefas da equipe, criar e distribuir tarefas, comentar e concluir.\nAqui neste número você também fala com o Gerente — mande *ajuda* pra ver tudo. Pra um link novo: *link*.`;
-  const { notifyPhone } = await import("../lib/gerente");
   const ok = await notifyPhone(settings, m.phone, text);
   res.json({ ok, url, message: ok ? `Link enviado no WhatsApp de ${first}.` : `Não consegui enviar no WhatsApp de ${first} (linha desconectada?). Link: ${url}` });
 });
