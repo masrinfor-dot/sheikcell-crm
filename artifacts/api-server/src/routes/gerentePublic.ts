@@ -115,7 +115,10 @@ router.get("/gerente-public/:token", async (req, res): Promise<void> => {
     db.selectDistinct({ category: gerenteTaskMetaTable.category }).from(gerenteTaskMetaTable).where(eq(gerenteTaskMetaTable.tenantId, tenantId)),
   ]);
   const categories = [...new Set([...TASK_CATEGORIES, ...cats.map((c) => c.category).filter((c): c is string => !!c)])];
-  res.json({ scope: "dia", canEdit: link.canEdit, expiresAt: link.expiresAt, today, now: new Date().toISOString(), events, reminders, bills, tasks, team: members, categories });
+  // Link de gestor (canEdit + userId): sem contas e sem a agenda/lembretes do dono.
+  const gestorLink = link.canEdit && link.userId != null;
+  res.json({ scope: "dia", canEdit: link.canEdit, expiresAt: link.expiresAt, today, now: new Date().toISOString(),
+    events: gestorLink ? [] : events, reminders: gestorLink ? [] : reminders, bills: gestorLink ? [] : bills, tasks, team: members, categories });
 });
 
 router.get("/gerente-public/:token/task/:id", async (req, res): Promise<void> => {

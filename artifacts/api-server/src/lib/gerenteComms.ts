@@ -125,14 +125,14 @@ export async function sendToTeam(tenantId: number, p: { names: string[]; loja: s
   const itemText = p.item && !p.item.mediaUrl ? p.item.content : null;
   const text = [`📣 *${owner}:*${p.message ? ` ${p.message}` : ""}`, itemText && itemText !== p.message ? itemText : null].filter(Boolean).join("\n");
   // Recado pra loja: uma mensagem na sala da loja (chat interno) em vez de uma por pessoa.
-  let storeChat = false;
+  let storeConv: number | null = null;
   if (storeName) {
     const { postToStore } = await import("./gerenteInternal");
-    storeChat = await postToStore(tenantId, storeName, people.map((x) => x.id), text, p.item?.mediaUrl ? { url: p.item.mediaUrl, type: p.item.msgType === "image" ? "image" : "doc" } : null);
+    storeConv = await postToStore(tenantId, storeName, people.map((x) => x.id), text, p.item?.mediaUrl ? { url: p.item.mediaUrl, type: p.item.msgType === "image" ? "image" : "doc" } : null);
   }
   for (const person of people) {
     try {
-      let sent = (await sendToTeamMember(tenantId, person.id, text, { chat: !storeName })) || storeChat;
+      let sent = await sendToTeamMember(tenantId, person.id, text, { chat: !storeName, forceWhatsApp: !!p.item?.mediaUrl, storeConversationId: storeConv, summary: (p.message ?? "encaminhamento").slice(0, 120) });
       if (sent && p.item?.mediaUrl) sent = await sendRawWhatsAppMediaToTeam(tenantId, person.id, p.item.mediaUrl, p.message ? null : `📎 Enviado por ${owner}`);
       (sent ? ok : fail).push(person.name.trim().split(" ")[0]!);
     } catch (err) {

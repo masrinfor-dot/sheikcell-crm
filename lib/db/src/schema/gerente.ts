@@ -42,6 +42,11 @@ export const gerenteSettingsTable = pgTable("gerente_settings", {
   teamDigestEnabled: boolean("team_digest_enabled").notNull().default(true),
   // Chat interno do CRM: sala do Gerente, uma por pessoa e uma por loja.
   internalChatEnabled: boolean("internal_chat_enabled").notNull().default(true),
+  // Equipe: "chat_first" = tarefa/recado vai pelo chat interno e, se a pessoa
+  // não abrir em chatFallbackMinutes, vai pro WhatsApp pessoal + alerta aos
+  // gerentes. "both" = chat e WhatsApp ao mesmo tempo.
+  teamChannel: text("team_channel").notNull().default("chat_first"),
+  chatFallbackMinutes: integer("chat_fallback_minutes").notNull().default(30),
   teamMorningTime: text("team_morning_time").notNull().default("08:00"),
   teamEveningTime: text("team_evening_time").notNull().default("18:00"),
   // Chave do agente do ERP (agk_...), cifrada com o mesmo cofre do ERP.
@@ -312,3 +317,18 @@ export const gerenteMembersTable = pgTable("gerente_members", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [uniqueIndex("gerente_members_tenant_phone_uq").on(t.tenantId, t.phone)]);
 export type GerenteMember = typeof gerenteMembersTable.$inferSelect;
+
+// Tarefa/recado mandado só pelo chat interno, esperando a pessoa ver.
+export const gerenteChatFollowupsTable = pgTable("gerente_chat_followups", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").notNull(),
+  userId: integer("user_id").notNull(),
+  conversationId: integer("conversation_id").notNull(),
+  kind: text("kind").notNull(), // tarefa | recado
+  taskId: integer("task_id"),
+  whatsappText: text("whatsapp_text").notNull(),
+  summary: text("summary").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  escalatedAt: timestamp("escalated_at", { withTimezone: true }),
+}, (t) => [index("gerente_chat_followups_open_idx").on(t.tenantId, t.resolvedAt, t.escalatedAt)]);

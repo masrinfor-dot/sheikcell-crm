@@ -12,10 +12,10 @@
 // O bot é um usuário INATIVO (não faz login, não aparece nas listas da
 // equipe) que só existe pra assinar as mensagens.
 import { randomBytes } from "node:crypto";
-import { and, eq, asc, inArray, desc, ne } from "drizzle-orm";
+import { and, eq, asc, inArray, desc, ne, gte, lt, isNull } from "drizzle-orm";
 import {
   db, usersTable, storesTable, internalConversationsTable, internalConversationMembersTable, internalMessagesTable,
-  gerenteChatRoomsTable, gerenteSettingsTable, tasksTable, taskAssigneesTable, gerenteTaskDispatchesTable, gerenteMembersTable,
+  gerenteChatRoomsTable, gerenteSettingsTable, gerenteChatFollowupsTable, tasksTable, taskAssigneesTable, gerenteTaskDispatchesTable, gerenteMembersTable,
 } from "@workspace/db";
 import { broadcastInternal } from "./sseEmitter";
 import { norm } from "./gerenteRules";
@@ -91,9 +91,9 @@ async function ensureRoom(tenantId: number, kind: "gerente" | "pessoa" | "loja",
 }
 
 /** Grava a mensagem na sala e avisa em tempo real quem está nela. */
-async function post(tenantId: number, convId: number, senderId: number, content: string, media?: { url: string; type: "image" | "doc" | "audio" } | null): Promise<void> {
+async function post(tenantId: number, convId: number, senderId: number, content: string, media?: { url: string; type: "image" | "doc" | "audio" } | null): Promise<{ messageId: number; at: Date } | null> {
   const text = content.trim() || (media ? (media.type === "image" ? "📷 Foto" : media.type === "audio" ? "🎵 Áudio" : "📎 Arquivo") : "");
-  if (!text) return;
+  if (!text) return null;
   // Mesmo diretório de mídia; o chat interno serve pelo próprio caminho (com controle de acesso).
   if (media) media = { ...media, url: `/api/internal-chat/media/${media.url.split("/").pop()}` };
   const [m] = await db.insert(internalMessagesTable).values({
@@ -107,6 +107,7 @@ async function post(tenantId: number, convId: number, senderId: number, content:
     conversationId: convId, kind: "group",
     message: { id: m!.id, conversationId: convId, senderId, senderName: sender?.name ?? BOT_NAME, content: text, type: media?.type ?? "text", mediaUrl: media?.url ?? null, transcript: null, forwarded: false, replyToId: null, replyTo: null, createdAt: m!.createdAt },
   }, tenantId, recipients);
+  return { messageId: m!.id, at: m!.createdAt };
 }
 
 const first = (n: string) => n.trim().split(" ")[0] ?? n;
@@ -167,27 +168,93 @@ export async function replyInGerenteRoom(tenantId: number, text: string): Promis
 
 /** Tarefa/recado pra uma pessoa: vai pra sala dela. true = entregue. */
 export async function postToPerson(tenantId: number, userId: number, text: string, media?: { url: string; type: "image" | "doc" | "audio" } | null): Promise<boolean> {
+  return !!(await postToPersonTracked(tenantId, userId, text, media));
+}
+
+/** Igual ao postToPerson, mas devolve a sala (pra acompanhar se a pessoa viu). */
+export async function postToPersonTracked(tenantId: number, userId: number, text: string, media?: { url: string; type: "image" | "doc" | "audio" } | null): Promise<{ conversationId: number } | null> {
   try {
-    if (!(await enabled(tenantId))) return false;
+    if (!(await enabled(tenantId))) return null;
     const room = await personRoom(tenantId, userId);
-    if (!room) return false;
-    await post(tenantId, room, await botUserId(tenantId), plain(text), media);
-    return true;
-  } catch (err) { logger.warn({ err, tenantId }, "Gerente IA: falha ao postar no chat da pessoa"); return false; }
+    if (!room) return null;
+    const r = await post(tenantId, room, await botUserId(tenantId), plain(text), media);
+    return r ? { conversationId: room } : null;
+  } catch (err) { logger.warn({ err, tenantId }, "Gerente IA: falha ao postar no chat da pessoa"); return null; }
+}
+
+// ─── Chat primeiro; sem retorno → WhatsApp pessoal + alerta ──────────────────
+
+/** true = a equipe recebe primeiro só pelo chat interno (WhatsApp só se não abrir). */
+export async function chatFirst(tenantId: number): Promise<{ on: boolean; minutes: number }> {
+  const [s] = await db.select({ ch: gerenteSettingsTable.teamChannel, min: gerenteSettingsTable.chatFallbackMinutes, on: gerenteSettingsTable.internalChatEnabled, enabled: gerenteSettingsTable.enabled })
+    .from(gerenteSettingsTable).where(eq(gerenteSettingsTable.tenantId, tenantId)).limit(1);
+  return { on: !!s && s.enabled && s.on && s.ch === "chat_first", minutes: Math.max(5, Math.min(24 * 60, s?.min ?? 30)) };
+}
+
+export async function trackFollowup(tenantId: number, p: { userId: number; conversationId: number; kind: "tarefa" | "recado"; taskId?: number | null; whatsappText: string; summary: string }): Promise<void> {
+  await db.insert(gerenteChatFollowupsTable).values({ tenantId, userId: p.userId, conversationId: p.conversationId, kind: p.kind, taskId: p.taskId ?? null, whatsappText: p.whatsappText, summary: p.summary.slice(0, 200) });
+}
+
+/** A pessoa abriu a sala (leu) ou respondeu depois do envio? Tarefa já andou? */
+async function followupResolved(f: typeof gerenteChatFollowupsTable.$inferSelect): Promise<boolean> {
+  const [mem] = await db.select({ lastReadAt: internalConversationMembersTable.lastReadAt }).from(internalConversationMembersTable)
+    .where(and(eq(internalConversationMembersTable.conversationId, f.conversationId), eq(internalConversationMembersTable.userId, f.userId))).limit(1);
+  if (mem?.lastReadAt && mem.lastReadAt.getTime() >= f.createdAt.getTime()) return true;
+  const [reply] = await db.select({ id: internalMessagesTable.id }).from(internalMessagesTable)
+    .where(and(eq(internalMessagesTable.conversationId, f.conversationId), eq(internalMessagesTable.senderId, f.userId), gte(internalMessagesTable.createdAt, f.createdAt))).limit(1);
+  if (reply) return true;
+  if (f.taskId) {
+    const [t] = await db.select({ status: tasksTable.status, isArchived: tasksTable.isArchived }).from(tasksTable).where(eq(tasksTable.id, f.taskId)).limit(1);
+    if (!t || t.isArchived || t.status !== "todo") return true;
+  }
+  return false;
+}
+
+/**
+ * Job (1 min): o que foi só pelo chat e a pessoa não abriu em X min vai pro
+ * WhatsApp pessoal dela, e os gerentes recebem o alerta. Uma vez por envio.
+ */
+export async function runChatFollowups(tenantId: number, now: Date = new Date()): Promise<number> {
+  const { minutes } = await chatFirst(tenantId);
+  const cutoff = new Date(now.getTime() - minutes * 60_000);
+  const rows = await db.select().from(gerenteChatFollowupsTable)
+    .where(and(eq(gerenteChatFollowupsTable.tenantId, tenantId), isNull(gerenteChatFollowupsTable.resolvedAt), isNull(gerenteChatFollowupsTable.escalatedAt), lt(gerenteChatFollowupsTable.createdAt, cutoff)))
+    .limit(30);
+  let n = 0;
+  const late = new Map<number, { name: string; items: string[]; sent: boolean }>();
+  for (const f of rows) {
+    if (await followupResolved(f)) { await db.update(gerenteChatFollowupsTable).set({ resolvedAt: now }).where(eq(gerenteChatFollowupsTable.id, f.id)); continue; }
+    await db.update(gerenteChatFollowupsTable).set({ escalatedAt: now }).where(eq(gerenteChatFollowupsTable.id, f.id));
+    const { sendWhatsAppToTeamMember } = await import("./gerenteDispatch");
+    const sent = await sendWhatsAppToTeamMember(tenantId, f.userId, f.whatsappText, f.taskId);
+    const [u] = await db.select({ name: usersTable.name }).from(usersTable).where(eq(usersTable.id, f.userId)).limit(1);
+    const e = late.get(f.userId) ?? { name: first(u?.name ?? "Equipe"), items: [], sent };
+    e.items.push(`${f.kind === "tarefa" ? "📋" : "📣"} ${f.summary}`);
+    e.sent = e.sent && sent;
+    late.set(f.userId, e);
+    n++;
+  }
+  if (late.size) {
+    const { notifyTeamLeads } = await import("./gerente");
+    for (const e of late.values()) {
+      await notifyTeamLeads(tenantId, `🔕 *${e.name} não abriu o chat do CRM em ${minutes} min:*\n${e.items.map((i) => `• ${i}`).join("\n")}\n${e.sent ? `📲 Mandei no WhatsApp pessoal dele(a).` : `⚠️ Não consegui mandar no WhatsApp (sem número cadastrado ou linha caída) — cobre pessoalmente.`}`);
+    }
+  }
+  return n;
 }
 
 /** Recado pra loja: sala da loja com todos que trabalham nela. */
-export async function postToStore(tenantId: number, storeName: string, memberIds: number[], text: string, media?: { url: string; type: "image" | "doc" | "audio" } | null): Promise<boolean> {
+export async function postToStore(tenantId: number, storeName: string, memberIds: number[], text: string, media?: { url: string; type: "image" | "doc" | "audio" } | null): Promise<number | null> {
   try {
-    if (!(await enabled(tenantId))) return false;
+    if (!(await enabled(tenantId))) return null;
     const owner = await ownerId(tenantId);
-    if (!owner) return false;
+    if (!owner) return null;
     const [st] = await db.select({ id: storesTable.id }).from(storesTable).where(and(eq(storesTable.tenantId, tenantId), eq(storesTable.name, storeName))).limit(1);
-    if (!st) return false;
+    if (!st) return null;
     const room = await ensureRoom(tenantId, "loja", st.id, `📣 Gerente · ${storeName.replace(/\s*-\s*\d+\s*$/, "")}`, [...await leaderIds(tenantId), ...memberIds]);
     await post(tenantId, room, await botUserId(tenantId), plain(text), media);
-    return true;
-  } catch (err) { logger.warn({ err, tenantId }, "Gerente IA: falha ao postar no chat da loja"); return false; }
+    return room;
+  } catch (err) { logger.warn({ err, tenantId }, "Gerente IA: falha ao postar no chat da loja"); return null; }
 }
 
 // ─── Entradas: alguém escreveu numa sala do Gerente ──────────────────────────
@@ -243,6 +310,19 @@ export async function onInternalMessage(p: { tenantId: number; conversationId: n
       return;
     }
 
+    // Gestora na PRÓPRIA sala (ela também é vendedora): o que não for resposta
+    // de tarefa (1/2/3, feito, foto) é pedido pro Gerente — vira tarefa etc.
+    if (room.kind === "pessoa" && p.senderId === room.refId && gestor && p.type === "text") {
+      const t0 = norm(p.text);
+      const isReply = /^([123])(\s|$|[-–.:)])/.test(t0) || /^(feito|pronto|concluido|conclui|terminei|finalizei)\b/.test(t0);
+      if (!isReply && p.text.trim()) {
+        const { handleChatMessage } = await import("./gerente");
+        const replies = await handleChatMessage(p.tenantId, p.text.trim(), gestor.phone);
+        for (const r of replies) await say(r);
+        return;
+      }
+    }
+
     // Pessoa respondendo na sala dela: 1/2/3, "feito", foto de prova.
     if (room.kind === "pessoa" && p.senderId === room.refId) {
       const userId = room.refId;
@@ -283,7 +363,7 @@ export async function onInternalMessage(p: { tenantId: number; conversationId: n
       if (p.text.trim() && owner) {
         const [u] = await db.select({ name: usersTable.name }).from(usersTable).where(eq(usersTable.id, userId)).limit(1);
         const { notifyTeamLeads } = await import("./gerente");
-        await notifyTeamLeads(p.tenantId, `💬 *${first(u?.name ?? "Equipe")}* no chat do CRM:\n“${p.text.trim().slice(0, 600)}”\nPra responder: *avisa ${first(u?.name ?? "")}: …*`);
+        await notifyTeamLeads(p.tenantId, `💬 *${first(u?.name ?? "Equipe")}* no chat do CRM:\n“${p.text.trim().slice(0, 600)}”\nPra responder: *avisa ${first(u?.name ?? "")}: …*`, { skipUserId: userId });
       }
     }
   } catch (err) {
