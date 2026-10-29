@@ -1788,7 +1788,13 @@ export type AppSettings = {
   attendantNameVisibleToCustomer: boolean;
   finalizeReasons: string[];
   branding: Branding;
+  // Quadro do atendimento, fase 2 (29/10/2026).
+  boardWipLimit?: number;
+  attendHours?: AttendHours | null;
 };
+
+/** Horário da loja: a espera do cliente só conta com a loja aberta. days: 0 = domingo. */
+export type AttendHours = { open: string; close: string; days: number[] };
 
 // Cota de avaliações de usados por pessoa da equipe (pedido 19/09).
 export type TradeInEvalPeriod = "day" | "week" | "month";
@@ -1901,6 +1907,7 @@ export type ChannelOverviewItem = {
   lineType: "varejo" | "atacado" | "interna";
   internal: boolean;
   alertsEnabled: boolean;
+  alertMinutes?: number;
   responder: number;
   atrasados: number;
   maiorEsperaMin: number | null;
@@ -2321,7 +2328,7 @@ export const api = {
   chat: {
     // Conexões de WhatsApp (números de atendimento) — para etiquetar conversas.
     // lineType/alertsEnabled/allowed: atendimento por canais (26/10/2026).
-    waSessions: () => req<{ sessionKey: string; displayName: string | null; phoneNumber: string | null; color: string; icon: string | null; lineType?: "varejo" | "atacado" | "interna"; alertsEnabled?: boolean; allowed?: boolean }[]>("/chat/wa-sessions"),
+    waSessions: () => req<{ sessionKey: string; displayName: string | null; phoneNumber: string | null; color: string; icon: string | null; lineType?: "varejo" | "atacado" | "interna"; alertsEnabled?: boolean; alertMinutes?: number | null; allowed?: boolean }[]>("/chat/wa-sessions"),
     conversations: (params?: { search?: string; status?: string; label?: string; sectorId?: number; assigneeId?: number } & ChannelQuery) => {
       const qs = new URLSearchParams();
       setChannelQuery(qs, params);
@@ -2350,6 +2357,7 @@ export const api = {
     // Central) e painel do administrador; canal lembrado por pessoa;
     // "Não precisa responder" e "Retomar depois".
     channelsOverview: () => req<ChannelsOverview>("/chat/channels/overview"),
+    teamStats: () => req<{ userId: number; avgFirstResponseSec7d: number | null; avgFirstResponseSecToday: number | null; finalized7d: number; finalizedToday: number }[]>("/chat/board/team-stats"),
     channelPreference: () => req<{ channel: string; preferredChannel: string | null; defaultChannel: string | null }>("/chat/channel-preference"),
     saveChannelPreference: (channel: string) =>
       req<{ ok: boolean; channel: string }>("/chat/channel-preference", { method: "PUT", body: JSON.stringify({ channel }) }),

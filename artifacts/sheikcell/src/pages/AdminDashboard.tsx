@@ -133,6 +133,8 @@ type WASession = {
   lineType?: "varejo" | "atacado" | "interna";
   /** Toca som e alarme de atraso desta linha na Central. */
   alertsEnabled?: boolean;
+  /** Prazo de atraso desta linha (min); null = o geral da loja (quadro, 29/10/2026). */
+  alertMinutes?: number | null;
 };
 
 const LINE_TYPE_HELP: Record<string, string> = {
@@ -1719,6 +1721,35 @@ export default function AdminDashboard() {
                     />
                     Tocar som e alarme de atraso desta linha
                   </label>
+                  {(s.lineType ?? "varejo") !== "interna" && (
+                    <label className="flex flex-col gap-1 text-xs font-semibold text-foreground">
+                      Prazo de resposta desta linha (minutos)
+                      <input
+                        type="number" min={1} max={240}
+                        defaultValue={s.alertMinutes ?? ""}
+                        key={`${s.sessionKey}-${s.alertMinutes ?? "x"}`}
+                        placeholder="Usar o prazo geral da loja"
+                        data-testid={`input-wa-alert-minutes-${s.sessionKey}`}
+                        onBlur={async (e) => {
+                          const raw = e.target.value.trim();
+                          const value = raw === "" ? null : Number(raw);
+                          if ((value ?? null) === (s.alertMinutes ?? null)) return;
+                          const r = await fetch(`/api/whatsapp/sessions/${s.sessionKey}/channel-settings`, {
+                            method: "POST", credentials: "include",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ alertMinutes: value }),
+                          });
+                          if (!r.ok) {
+                            const j = await r.json().catch(() => ({}));
+                            toast({ title: (j as { error?: string }).error ?? "Não foi possível salvar", variant: "destructive" });
+                          } else toast({ title: value == null ? "Linha usa o prazo geral da loja" : `Prazo desta linha: ${value} min` });
+                          fetchWAStatus();
+                        }}
+                        className="h-11 px-2.5 rounded-lg border border-border bg-white text-sm font-normal"
+                      />
+                      <span className="text-[11px] font-normal text-muted-foreground">Depois desse tempo sem resposta o cliente fica vermelho no quadro e toca o alarme. Vazio = prazo geral (Atendimento › Configurações).</span>
+                    </label>
+                  )}
                 </div>
 
                 <div className="text-sm text-muted-foreground mb-3 space-y-1">

@@ -810,7 +810,13 @@ router.get("/chat/channels/overview", requireAuth, requireChatAccess(), async (r
   const role = req.session.userRole!;
   const isManager = role === "admin" || role === "supervisor" || role === "vendedor_chefe" || role === "superadmin";
   const alert = await alertMinutesFor(tenantId);
-  const lateCut = sql`now() - make_interval(mins => ${alert.minutes})`;
+  // Prazo por linha (quadro, fase 2 — 29/10/2026): a linha pode ter o próprio
+  // prazo (ex.: Atacado 10 min); sem ele, vale o geral da loja.
+  const lateCut = sql`now() - make_interval(mins => coalesce((
+    select ws.alert_minutes from ${whatsappSessionsTable} ws
+    where ws.tenant_id = ${conversationsTable.tenantId} and ws.session_key = ${conversationsTable.sessionKey}
+      and ${conversationsTable.channel} <> 'instagram'
+    limit 1), ${alert.minutes}::int))`;
 
   const conditions = await buildConversationVisibilityConditions(req, tenantId, {});
   conditions.push(notInArray(conversationsTable.status, ["resolved", "archived"]));
@@ -835,6 +841,7 @@ router.get("/chat/channels/overview", requireAuth, requireChatAccess(), async (r
     icon: whatsappSessionsTable.icon,
     lineType: whatsappSessionsTable.lineType,
     alertsEnabled: whatsappSessionsTable.alertsEnabled,
+    alertMinutes: whatsappSessionsTable.alertMinutes,
   }).from(whatsappSessionsTable).where(eq(whatsappSessionsTable.tenantId, tenantId)).orderBy(whatsappSessionsTable.id);
 
   const allowed = await getCurrentAllowedSessionKeys(req);
@@ -847,7 +854,7 @@ router.get("/chat/channels/overview", requireAuth, requireChatAccess(), async (r
 
   type Ch = {
     id: string; sessionKey: string | null; label: string; color: string; icon: string | null;
-    lineType: "varejo" | "atacado" | "interna"; internal: boolean; alertsEnabled: boolean;
+    lineType: "varejo" | "atacado" | "interna"; internal: boolean; alertsEnabled: boolean; alertMinutes: number;
     responder: number; atrasados: number; maiorEsperaMin: number | null; fila: number; filaEsperando: number;
     aguardando: number; sellers: string[];
   };
@@ -874,6 +881,7 @@ router.get("/chat/channels/overview", requireAuth, requireChatAccess(), async (r
       id, sessionKey: l.sessionKey,
       label: l.displayName || (l.phoneNumber ? l.phoneNumber.replace(/@.*$/, "") : l.sessionKey === "default" ? "Principal" : l.sessionKey),
       color: l.color, icon: l.icon, lineType, internal: lineType === "interna", alertsEnabled: l.alertsEnabled,
+      alertMinutes: l.alertMinutes ?? alert.minutes,
       ...metrics(id),
     });
   }
@@ -886,13 +894,13 @@ router.get("/chat/channels/overview", requireAuth, requireChatAccess(), async (r
     seen.add(r.ch);
     channels.push({
       id: r.ch, sessionKey: key, label: key === "default" ? "Principal" : key, color: "#10b981", icon: null,
-      lineType: "varejo", internal: false, alertsEnabled: true, ...metrics(r.ch),
+      lineType: "varejo", internal: false, alertsEnabled: true, alertMinutes: alert.minutes, ...metrics(r.ch),
     });
   }
   if (hasInstagram) {
     channels.push({
       id: "instagram", sessionKey: null, label: ig?.username ? `Instagram @${ig.username}` : "Instagram",
-      color: "#c026d3", icon: null, lineType: "varejo", internal: false, alertsEnabled: true, ...metrics("instagram"),
+      color: "#c026d3", icon: null, lineType: "varejo", internal: false, alertsEnabled: true, alertMinutes: alert.minutes, ...metrics("instagram"),
     });
   }
 
@@ -947,6 +955,39 @@ router.get("/chat/channels/overview", requireAuth, requireChatAccess(), async (r
     firstResponse,
     updatedAt: new Date().toISOString(),
   });
+});
+
+// ─── Quadro, visão Equipe (29/10/2026): números de cada vendedor ──────────
+// Tempo médio da 1ª resposta e atendimentos finalizados (últimos 7 dias e
+// hoje), por vendedor — só para quem gerencia. Base: attendance_logs, gravado
+// ao finalizar.
+router.get("/chat/board/team-stats", requireAuth, requireChatAccess(), async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const role = req.session.userRole!;
+  if (!(role === "admin" || role === "supervisor" || role === "vendedor_chefe" || role === "superadmin")) {
+    res.status(403).json({ error: "Só para quem gerencia a equipe" }); return;
+  }
+  const todayStart = sql`(date_trunc('day', now() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')`;
+  const rows = await db.select({
+    userId: attendanceLogsTable.attendantId,
+    avg7d: sql<string | null>`round(avg(${attendanceLogsTable.firstResponseSeconds}))`,
+    finalized7d: sql<string>`count(*)`,
+    finalizedToday: sql<string>`count(*) filter (where ${attendanceLogsTable.createdAt} >= ${todayStart})`,
+    avgToday: sql<string | null>`round(avg(${attendanceLogsTable.firstResponseSeconds}) filter (where ${attendanceLogsTable.createdAt} >= ${todayStart}))`,
+  }).from(attendanceLogsTable)
+    .where(and(
+      eq(attendanceLogsTable.tenantId, tenantId),
+      sql`${attendanceLogsTable.attendantId} is not null`,
+      sql`${attendanceLogsTable.createdAt} >= now() - interval '7 days'`,
+    ))
+    .groupBy(attendanceLogsTable.attendantId);
+  res.json(rows.map((r) => ({
+    userId: r.userId!,
+    avgFirstResponseSec7d: r.avg7d != null ? Number(r.avg7d) : null,
+    avgFirstResponseSecToday: r.avgToday != null ? Number(r.avgToday) : null,
+    finalized7d: Number(r.finalized7d),
+    finalizedToday: Number(r.finalizedToday),
+  })));
 });
 
 // Canal em que a Central abre: o último escolhido na barra (lembrado) ou, sem
@@ -2644,6 +2685,7 @@ router.get("/chat/wa-sessions", requireAuth, async (req, res): Promise<void> => 
       // Atendimento por canais (26/10/2026): tipo da linha e som/alarme.
       lineType: whatsappSessionsTable.lineType,
       alertsEnabled: whatsappSessionsTable.alertsEnabled,
+      alertMinutes: whatsappSessionsTable.alertMinutes,
     })
     .from(whatsappSessionsTable)
     .where(eq(whatsappSessionsTable.tenantId, tenantId))

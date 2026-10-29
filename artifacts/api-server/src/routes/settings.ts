@@ -14,6 +14,13 @@ const router: IRouter = Router();
 const DEFAULTS: Record<string, string> = {
   alert_unanswered_enabled: "true",
   alert_unanswered_minutes: "5",
+  // Quadro do atendimento, fase 2 (29/10/2026): limite de conversas em
+  // "Responder agora" por vendedor (0 = sem limite) e horário da loja (vazio
+  // = o tempo de espera conta 24 h; preenchido = só conta com a loja aberta,
+  // pra não amanhecer tudo vermelho). Formato do horário: JSON
+  // {"open":"08:00","close":"18:00","days":[1,2,3,4,5,6]} (0 = domingo).
+  board_wip_limit: "8",
+  attend_hours: "",
   branding_company_name: "",
   branding_logo: "",
   branding_primary_color: "",
@@ -48,6 +55,19 @@ function parseFinalizeReasons(raw: string): string[] {
   return JSON.parse(DEFAULTS.finalize_reasons!) as string[];
 }
 
+type AttendHours = { open: string; close: string; days: number[] };
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+export function parseAttendHours(raw: string | null | undefined): AttendHours | null {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw) as Partial<AttendHours>;
+    if (typeof v.open !== "string" || typeof v.close !== "string" || !HHMM.test(v.open) || !HHMM.test(v.close) || v.open >= v.close) return null;
+    const days = Array.isArray(v.days) ? [...new Set(v.days.filter((d): d is number => Number.isInteger(d) && d >= 0 && d <= 6))].sort() : [];
+    if (!days.length) return null;
+    return { open: v.open, close: v.close, days };
+  } catch { return null; }
+}
+
 function brandingOf(map: Record<string, string>) {
   return {
     companyName: map.branding_company_name || null,
@@ -72,6 +92,8 @@ router.get("/settings", requireAuth, async (req, res): Promise<void> => {
     attendantNameVisibleToCustomer: map.attendant_name_visible_to_customer !== "false",
     finalizeReasons: parseFinalizeReasons(map.finalize_reasons),
     branding: brandingOf(map),
+    boardWipLimit: Math.max(0, parseInt(map.board_wip_limit, 10) || 0),
+    attendHours: parseAttendHours(map.attend_hours),
   });
 });
 
@@ -86,6 +108,7 @@ router.patch("/settings", requireAdminOrSupervisor, async (req, res): Promise<vo
     broadcastIntervalMs?: number;
     attendantNameVisibleToCustomer?: boolean;
   };
+  const { boardWipLimit, attendHours } = req.body as { boardWipLimit?: number; attendHours?: unknown };
   const updates: [string, string][] = [];
   if (alertUnansweredEnabled !== undefined) {
     updates.push(["alert_unanswered_enabled", alertUnansweredEnabled ? "true" : "false"]);
@@ -131,6 +154,22 @@ router.patch("/settings", requireAdminOrSupervisor, async (req, res): Promise<vo
   if (attendantNameVisibleToCustomer !== undefined) {
     updates.push(["attendant_name_visible_to_customer", attendantNameVisibleToCustomer ? "true" : "false"]);
   }
+  if (boardWipLimit !== undefined) {
+    const w = Math.round(Number(boardWipLimit));
+    if (!Number.isFinite(w) || w < 0 || w > 100) {
+      res.status(400).json({ error: "Limite por vendedor deve ser entre 0 (sem limite) e 100" });
+      return;
+    }
+    updates.push(["board_wip_limit", String(w)]);
+  }
+  if (attendHours !== undefined) {
+    if (attendHours === null) updates.push(["attend_hours", ""]);
+    else {
+      const parsed = parseAttendHours(JSON.stringify(attendHours));
+      if (!parsed) { res.status(400).json({ error: "Horário inválido: abertura antes do fechamento (HH:MM) e pelo menos um dia." }); return; }
+      updates.push(["attend_hours", JSON.stringify(parsed)]);
+    }
+  }
   if (updates.length === 0) { res.status(400).json({ error: "Nada para atualizar" }); return; }
   for (const [key, value] of updates) {
     // app_settings agora é chaveado por (tenant_id, key) — o upsert precisa
@@ -150,6 +189,8 @@ router.patch("/settings", requireAdminOrSupervisor, async (req, res): Promise<vo
     attendantNameVisibleToCustomer: map.attendant_name_visible_to_customer !== "false",
     finalizeReasons: parseFinalizeReasons(map.finalize_reasons),
     branding: brandingOf(map),
+    boardWipLimit: Math.max(0, parseInt(map.board_wip_limit, 10) || 0),
+    attendHours: parseAttendHours(map.attend_hours),
   });
 });
 
