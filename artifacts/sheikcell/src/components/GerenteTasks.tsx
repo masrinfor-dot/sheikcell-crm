@@ -201,7 +201,7 @@ export default function GerenteTasks({ token, embedded = false }: { token: strin
 
       {canEdit && (overdue.length + noDue.length + data.tasks.filter((t) => t.status !== "done" && !t.category).length) > 0 && (
         <button onClick={() => setOrganizing(true)} className="w-full rounded-xl border border-indigo-200 bg-indigo-50 text-indigo-800 text-sm font-semibold py-2.5">
-          ✨ Arrumar tarefas — {overdue.length} atrasada(s), {data.tasks.filter((t) => t.status !== "done" && !t.category).length} sem categoria
+          ✨ Arrumar tarefas — {overdue.length} atrasada(s), {data.tasks.filter((t) => t.status !== "done" && !t.category).length} sem setor
         </button>
       )}
 
@@ -219,7 +219,7 @@ export default function GerenteTasks({ token, embedded = false }: { token: strin
           {data.team.map((p) => <option key={p.id} value={p.id}>{p.isOwner ? `${first(p.name)} (eu)` : p.name}</option>)}
         </select>
         <select value={category} onChange={(e) => setCategory(e.target.value)} className="flex-1 min-w-0 rounded-xl border border-slate-300 bg-white px-2 py-2 text-sm">
-          <option value="">Todas as categorias</option>
+          <option value="">Todos os setores</option>
           {data.categories.map((c) => <option key={c} value={c}>{c}</option>)}
         </select>
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar" className="w-24 sm:w-40 rounded-xl border border-slate-300 bg-white px-2 py-2 text-sm" />
@@ -335,7 +335,7 @@ function Kanban({ tasks, team, categories, canEdit, now, renderCard, onMove }: {
     if (none.length) cols.push({ key: "p0", title: "Sem responsável", tone: "bg-amber-100/70", tasks: none, accepts: false });
   } else {
     cols = categories.map((c) => ({ key: `c:${c}`, title: c, tone: "bg-indigo-100/60", tasks: open.filter((t) => t.category === c).sort(prio), accepts: true }));
-    cols.push({ key: "c:", title: "Sem categoria", tone: "bg-amber-100/70", tasks: open.filter((t) => !t.category).sort(prio), accepts: true });
+    cols.push({ key: "c:", title: "Sem setor", tone: "bg-amber-100/70", tasks: open.filter((t) => !t.category).sort(prio), accepts: true });
   }
 
   const move = (t: TaskRow, key: string) => {
@@ -358,7 +358,7 @@ function Kanban({ tasks, team, categories, canEdit, now, renderCard, onMove }: {
     <div className="space-y-2">
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-xs text-slate-500">Agrupar por</span>
-        {([["status", "Situação"], ["pessoa", "Responsável"], ["categoria", "Loja / categoria"]] as const).map(([g, l]) => (
+        {([["status", "Situação"], ["pessoa", "Responsável"], ["categoria", "Setor"]] as const).map(([g, l]) => (
           <button key={g} onClick={() => pick(g)} className={`px-3 py-1 rounded-full text-xs font-semibold border ${group === g ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-slate-700 border-slate-300"}`}>{l}</button>
         ))}
         {late > 0 && <span className="text-xs text-red-600 font-semibold">⚠️ {late} atrasada(s)</span>}
@@ -502,7 +502,7 @@ export function TaskSheet({ base, id, canEdit, team, categories, today, onClose,
     </div>
 
     <div className={card}>
-      <h4 className="text-xs font-bold uppercase text-slate-500">Categoria</h4>
+      <h4 className="text-xs font-bold uppercase text-slate-500">Setor</h4>
       {canEdit ? (
         <>
           <div className="flex flex-wrap gap-1.5">
@@ -510,7 +510,7 @@ export function TaskSheet({ base, id, canEdit, team, categories, today, onClose,
               className={`px-3 py-1.5 rounded-full text-sm border ${t.category === c ? "bg-indigo-600 text-white border-indigo-600" : "bg-white border-slate-300"}`}>{c}</button>)}
           </div>
           <div className="flex gap-2">
-            <input value={newCat} onChange={(e) => setNewCat(e.target.value)} placeholder="Outra categoria" className="flex-1 rounded-xl border border-slate-300 px-2 py-1.5 text-sm" />
+            <input value={newCat} onChange={(e) => setNewCat(e.target.value)} placeholder="Outro setor" className="flex-1 rounded-xl border border-slate-300 px-2 py-1.5 text-sm" />
             <button disabled={!newCat.trim() || busy} onClick={() => { void patch({ category: newCat.trim() }); setNewCat(""); }} className="px-3 rounded-xl bg-slate-900 text-white text-sm disabled:opacity-40">Usar</button>
           </div>
         </>

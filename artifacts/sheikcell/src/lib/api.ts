@@ -1599,6 +1599,7 @@ export type GerenteSettings = {
   lines: { sessionKey: string; displayName: string | null; phoneNumber: string | null; status: string }[];
 };
 export type GerenteMemberRow = { id: number; tenantId: number; phone: string; name: string; userId: number | null; role: string; isActive: boolean; createdAt: string };
+export type GerenteSectorRow = { id: number; tenantId: number; name: string; responsibleIds: number[]; position: number; isActive: boolean };
 export type GerenteOrganizeItem = { taskId: number; title: string; priority: string; category?: string | null; oldCategory?: string | null; dueAt?: string | null; oldDue?: string | null; reason?: string };
 export type GerenteTaskStats = {
   now: string; today: string;
@@ -3312,6 +3313,10 @@ export const api = {
       test: () => req<{ ok: boolean; message: string }>("/gerente/erp-key/test", { method: "POST" }),
       actions: () => req<GerenteErpAction[]>("/gerente/erp-actions"),
       resend: (id: number) => req<{ message: string }>(`/gerente/erp-actions/${id}/resend`, { method: "POST", timeoutMs: 90_000 }),
+    },
+    sectors: {
+      list: () => req<GerenteSectorRow[]>("/gerente/sectors"),
+      save: (data: { id?: number | null; name: string; responsibleIds: number[]; isActive?: boolean }) => req<GerenteSectorRow>("/gerente/sectors", { method: "POST", body: JSON.stringify(data) }),
     },
     members: {
       list: () => req<GerenteMemberRow[]>("/gerente/members"),

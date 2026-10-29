@@ -26,7 +26,9 @@ const KEYWORDS: [RegExp, string][] = [
   [/banco|sicoob|sicredi|pagar|boleto|conta|imposto|contador|financ|cobrar|cobranca|pix|maquininha|taxa|emprestimo|negociar/, "Financeiro"],
   [/sistema|app|crm|erp|site|whatsapp bot|automacao|integra|cadastro no sistema|opcao de/, "Sistema"],
   [/letreiro|lona|banner|instagram|post|video|youtube|marketing|campanha|anuncio|panfleto|adesivo|selo|etiqueta|vitrine/, "Marketing"],
-  [/uniforme|funcionari|colaborador|contrat|ferias|treinamento|reuniao de equipe|rh|vale|salario|ponto/, "Equipe/RH"],
+  [/uniforme|funcionari|colaborador|contrat|ferias|treinamento|reuniao de equipe|rh|vale|salario|ponto|curriculo/, "RH"],
+  [/cliente|venda|vender|proposta|orcamento|parceria|cotacao com cliente/, "Comercial"],
+  [/documento|contrato|cartorio|cnpj|alvara|aluguel|contador|escritorio|administrativ/, "ADM"],
   [/curso|toastmaster|cdl|pessoal|medico|academia|familia|casa/, "Pessoal"],
 ];
 
@@ -68,7 +70,8 @@ function nextWorkdays(now: Date, n: number): string[] {
 }
 
 export async function buildOrganizePlan(tenantId: number, now: Date = new Date()): Promise<OrganizeItem[]> {
-  const { TASK_CATEGORIES } = await import("./gerente");
+  const { sectorNames } = await import("./gerenteSectors");
+  const SECTORS = await sectorNames(tenantId);
   const open = await db.select({ id: tasksTable.id, title: tasksTable.title, description: tasksTable.description, priority: tasksTable.priority, dueDate: tasksTable.dueDate })
     .from(tasksTable)
     .where(and(eq(tasksTable.tenantId, tenantId), eq(tasksTable.isArchived, false), ne(tasksTable.status, "done")))
@@ -78,7 +81,7 @@ export async function buildOrganizePlan(tenantId: number, now: Date = new Date()
   const catOf = new Map(metas.map((m) => [m.taskId, m.category]));
 
   const noCat = open.filter((t) => !catOf.get(t.id));
-  const ai = await aiCategories(tenantId, noCat, [...TASK_CATEGORIES]);
+  const ai = await aiCategories(tenantId, noCat, SECTORS);
 
   // Carga já marcada nos próximos dias (tarefas com prazo no futuro).
   const days = nextWorkdays(now, 30);
@@ -105,7 +108,7 @@ export async function buildOrganizePlan(tenantId: number, now: Date = new Date()
 
   const items: OrganizeItem[] = [];
   for (const t of open) {
-    const category = catOf.get(t.id) ? null : (ai.get(t.id) ?? guessCategory(t.title, t.description));
+    const category = catOf.get(t.id) ? null : (ai.get(t.id) ?? (() => { const g = guessCategory(t.title, t.description); return g && SECTORS.includes(g) ? g : null; })());
     const due = newDue.get(t.id);
     if (!category && !due) continue;
     items.push({
