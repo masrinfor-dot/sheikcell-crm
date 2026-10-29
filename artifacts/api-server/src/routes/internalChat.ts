@@ -17,6 +17,7 @@ import { randomUUID } from "crypto";
 import path from "path";
 import { MEDIA_DIR } from "../lib/whatsappInbound";
 import { fetchLinkPreview, firstUrlIn } from "../lib/linkPreview";
+import { pendingReplyMap } from "../lib/internalPendingReply";
 
 const router: IRouter = Router();
 
@@ -271,6 +272,13 @@ router.get("/internal-chat/conversations", requireAuth, async (req, res): Promis
   const handlerMap: Record<number, string> = {};
   for (const h of handlerRows) handlerMap[h.id] = h.name;
 
+  // Tela "Equipe": "sem resposta há X" — alguém te mandou e você não respondeu.
+  const [meRow] = await db.select({ name: usersTable.name }).from(usersTable).where(eq(usersTable.id, userId)).limit(1);
+  const pendingMap = await pendingReplyMap(
+    tenantId, { id: userId, name: meRow?.name ?? "" },
+    memberships.map((m) => ({ id: m.conversationId, kind: m.kind })),
+  ).catch(() => new Map<number, Date>());
+
   const result = memberships.map((m) => {
     const other = otherMap[m.conversationId] ?? null;
     return {
@@ -289,6 +297,7 @@ router.get("/internal-chat/conversations", requireAuth, async (req, res): Promis
       activeHandlerId: m.activeHandlerId,
       activeHandlerName: m.activeHandlerId != null ? (handlerMap[m.activeHandlerId] ?? null) : null,
       activeHandlerSince: m.activeHandlerSince,
+      waitingReplySince: (pendingMap.get(m.conversationId) ?? null) as Date | null,
     };
   });
 

@@ -9,6 +9,7 @@ import { requireModuleAccess } from "../lib/moduleAccess";
 import { MEDIA_DIR } from "../lib/whatsappInbound";
 import { scheduleClientMessageForTask } from "../lib/taskClientMessage";
 import tasksErpRouter from "./tasksErp";
+import { setWaiting, waitingChange, withWaiting } from "../lib/taskWaiting";
 import { writeFile, mkdir } from "fs/promises";
 import { randomUUID } from "crypto";
 import path from "path";
@@ -212,7 +213,7 @@ router.get("/tasks", requireAuth, async (req, res): Promise<void> => {
     : [];
   const contactMap = Object.fromEntries(contacts.map((c) => [c.id, c]));
 
-  res.json(visible.map((t) => ({
+  res.json(await withWaiting(tenantId, visible.map((t) => ({
     ...t,
     sector: t.sectorId ? (sectorMap[t.sectorId] ?? null) : null,
     assignees: (assigneeMap.get(t.id) ?? []).map((id) => userMap[id]).filter((u): u is { id: number; name: string } => u != null),
@@ -221,7 +222,7 @@ router.get("/tasks", requireAuth, async (req, res): Promise<void> => {
     subtaskTotal: subMap[t.id]?.total ?? 0,
     subtaskDone: subMap[t.id]?.done ?? 0,
     commentCount: comMap[t.id] ?? 0,
-  })));
+  }))));
 });
 
 // ─── Relatório de tarefas por setor e por vendedor ──────────────────────────
@@ -540,6 +541,9 @@ router.patch("/tasks/:id", requireAuth, async (req, res): Promise<void> => {
   }
   if (durationMinutes !== undefined) update.durationMinutes = cleanMinutes(durationMinutes, 24 * 60);
   if (alertMinutesBefore !== undefined) update.alertMinutesBefore = cleanMinutes(alertMinutesBefore, 7 * 24 * 60);
+  // Tela "Equipe": "Esperando alguém" (ver lib/taskWaiting.ts).
+  const waiting = waitingChange(req.body as { waitingFor?: unknown; status?: unknown }, existing.status);
+  if (waiting !== undefined) await setWaiting(tenantId, id, waiting, req.session.userId ?? null);
   const [updated] = await db.update(tasksTable).set(update)
     .where(and(eq(tasksTable.id, id), eq(tasksTable.tenantId, tenantId))).returning();
   if (resolvedAssignees !== null) await setTaskAssignees(id, tenantId, resolvedAssignees);
@@ -549,7 +553,8 @@ router.patch("/tasks/:id", requireAuth, async (req, res): Promise<void> => {
       tenantId, { id: updated.id, contactId: updated.contactId, dueDate: updated.dueDate }, clientMessage, req.session.userId ?? null,
     );
   }
-  res.json({ ...(await enrichTask(updated!)), ...(clientMessageWarning ? { clientMessageWarning } : {}) });
+  const [withW] = await withWaiting(tenantId, [await enrichTask(updated!)]);
+  res.json({ ...withW!, ...(clientMessageWarning ? { clientMessageWarning } : {}) });
 });
 
 // ─── Delete (archive) ────────────────────────────────────────────────────────

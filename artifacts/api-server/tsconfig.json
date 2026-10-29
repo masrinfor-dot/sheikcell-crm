@@ -12,6 +12,9 @@
     "allowImportingTsExtensions": true
   },
   "include": ["src"],
+  // Testa um arquivo do front (artifacts/sheikcell/src/lib/equipePedidos.ts),
+  // fora de src: o typecheck do front cobre o arquivo testado.
+  "exclude": ["src/lib/equipePedidos.test.ts"],
   "references": [
     {
       "path": "../../lib/db"
