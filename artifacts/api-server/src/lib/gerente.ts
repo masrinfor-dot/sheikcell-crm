@@ -112,7 +112,13 @@ type ActionResult = { text: string; ref?: MsgRef };
 async function saveOut(tenantId: number, phone: string, sessionKey: string | null, content: string, source: string): Promise<void> {
   await db.insert(gerenteMessagesTable).values({ tenantId, phone, sessionKey, direction: "out", source, content });
   // Espelho na sala "🤖 Gerente IA" do chat interno (o que veio do chat já está lá).
-  if (source !== "chat") void import("./gerenteInternal").then((m) => m.mirrorToGerenteRoom(tenantId, "out", content)).catch(() => undefined);
+  if (source !== "chat") {
+    void (async () => {
+      const gestor = memberForPhone(await activeMembers(tenantId), phone);
+      const { mirrorToGerenteRoom } = await import("./gerenteInternal");
+      await mirrorToGerenteRoom(tenantId, "out", content, gestor ? phone : null);
+    })().catch(() => undefined);
+  }
 }
 
 // ─── Ações (compartilhadas pelas regras, pela IA e pelo painel) ──────────────
@@ -967,7 +973,7 @@ export async function resolveActor(tenantId: number, phone: string): Promise<Ger
 export async function handleGerenteText(input: GerenteInput): Promise<string[]> {
   const key = `${input.tenantId}:${input.phone}`;
   const prev = queues.get(key) ?? Promise.resolve();
-  const actor = input.source === "whatsapp" ? await resolveActor(input.tenantId, input.phone) : await resolveActor(input.tenantId, "");
+  const actor = input.source === "whatsapp" || input.source === "chat" ? await resolveActor(input.tenantId, input.phone) : await resolveActor(input.tenantId, "");
   const next = prev.then(() => actorStore.run(actor, () => processOne(input))).catch((err): string[] => {
     logger.warn({ err, tenantId: input.tenantId }, "Gerente IA: falha ao processar mensagem");
     return ["Tive um problema aqui. Pode repetir? Se continuar, mande *ajuda*."];
@@ -1216,6 +1222,15 @@ export async function tryConsumeGerenteInbound(input: {
   }
   if (!authorized) return false;
 
+  // Gestor que também é vendedor (ex.: Lucelia): "1 149", "feito" + foto da
+  // tarefa DELE continuam valendo como resposta de tarefa.
+  if (isMemberMsg) {
+    try {
+      const { tryConsumeTaskProof } = await import("./gerenteDispatch");
+      if (await tryConsumeTaskProof({ tenantId: input.tenantId, sessionKey: input.sessionKey, phone: input.phone, text: input.text, msgType: input.msgType, mediaUrl: input.mediaUrl })) return true;
+    } catch { /* segue pro Gerente */ }
+  }
+
   // Só a linha do Gerente (ADM) atende o dono. Nas outras linhas a mensagem
   // dele segue o fluxo normal (atendimento) e ele recebe, no máx. 1x a cada
   // 6h, um aviso pela linha ADM dizendo onde falar com o Gerente.
@@ -1251,7 +1266,7 @@ export async function tryConsumeGerenteInbound(input: {
       payload: input.mediaUrl || input.msgType === "contact" || input.msgType === "location" ? { mediaUrl: input.mediaUrl, msgType: input.msgType } : null,
     }).onConflictDoNothing().returning();
     if (!saved) return true; // reentrega da mesma mensagem — já tratada
-    if (!isMemberMsg) void import("./gerenteInternal").then((m) => m.mirrorToGerenteRoom(input.tenantId, "in", content)).catch(() => undefined);
+    void import("./gerenteInternal").then((m) => m.mirrorToGerenteRoom(input.tenantId, "in", content, isMemberMsg ? phone : null)).catch(() => undefined);
 
     // Só o dono define por onde os avisos DELE saem (o gestor não muda isso).
     if (!isMemberMsg) {
@@ -1320,9 +1335,9 @@ export async function tryConsumeGerenteInbound(input: {
 }
 
 /** Sala "🤖 Gerente IA" do chat interno: mesma interpretação; a resposta volta no chat. */
-export async function handleChatMessage(tenantId: number, text: string): Promise<string[]> {
+export async function handleChatMessage(tenantId: number, text: string, gestorPhone: string | null = null): Promise<string[]> {
   const settings = await getGerenteSettings(tenantId);
-  const phone = settings.lastPhone ?? settings.authorizedPhones[0] ?? "chat";
+  const phone = gestorPhone ?? settings.lastPhone ?? settings.authorizedPhones[0] ?? "chat";
   const [saved] = await db.insert(gerenteMessagesTable).values({
     tenantId, phone, sessionKey: null, direction: "in", source: "chat", content: text.trim().slice(0, 2000),
   }).returning();
@@ -1385,7 +1400,7 @@ export async function notifyPhone(settings: GerenteSettings, phone: string, text
   const candidates = [preferred, ...others.map((o) => o.sessionKey).filter((k) => k !== preferred)].filter((k): k is string => !!k);
   for (const sessionKey of candidates) {
     if (await sendRawWhatsAppText(phone, sessionKey, text)) {
-      await db.insert(gerenteMessagesTable).values({ tenantId: settings.tenantId, phone, sessionKey, direction: "out", source: "sistema", content: text });
+      await saveOut(settings.tenantId, phone, sessionKey, text, "sistema");
       return true;
     }
   }
