@@ -4,7 +4,7 @@
 //   • fechamento do dia (noite): o que foi feito, o que ficou, "mover" pra amanhã;
 //   • relatório semanal da equipe (segunda de manhã).
 import { createHash, randomBytes } from "node:crypto";
-import { and, eq, gte, lt, lte, inArray, asc, ne } from "drizzle-orm";
+import { and, eq, gte, lt, lte, inArray, asc, ne, isNull } from "drizzle-orm";
 import {
   db, gerenteLinksTable, gerenteRecurrencesTable, gerenteSettingsTable, gerenteRemindersTable,
   gerenteTaskDispatchesTable, tasksTable, type GerenteSettings,
@@ -135,8 +135,8 @@ export async function buildEveningSummary(settings: GerenteSettings): Promise<st
   const tenantId = settings.tenantId;
   const { start, end } = dayRange(spDateISO());
   const [doneRem, openRem, doneTasks, proofs, pendingDispatch] = await Promise.all([
-    db.select({ title: gerenteRemindersTable.title }).from(gerenteRemindersTable).where(and(eq(gerenteRemindersTable.tenantId, tenantId), eq(gerenteRemindersTable.status, "concluido"), gte(gerenteRemindersTable.updatedAt, start))),
-    db.select({ title: gerenteRemindersTable.title }).from(gerenteRemindersTable).where(and(eq(gerenteRemindersTable.tenantId, tenantId), eq(gerenteRemindersTable.status, "pendente"), lt(gerenteRemindersTable.dueAt, end))),
+    db.select({ title: gerenteRemindersTable.title }).from(gerenteRemindersTable).where(and(eq(gerenteRemindersTable.tenantId, tenantId), isNull(gerenteRemindersTable.memberPhone), eq(gerenteRemindersTable.status, "concluido"), gte(gerenteRemindersTable.updatedAt, start))),
+    db.select({ title: gerenteRemindersTable.title }).from(gerenteRemindersTable).where(and(eq(gerenteRemindersTable.tenantId, tenantId), isNull(gerenteRemindersTable.memberPhone), eq(gerenteRemindersTable.status, "pendente"), lt(gerenteRemindersTable.dueAt, end))),
     db.select({ title: tasksTable.title }).from(tasksTable).where(and(eq(tasksTable.tenantId, tenantId), eq(tasksTable.status, "done"), gte(tasksTable.updatedAt, start))),
     db.select({ title: tasksTable.title, who: gerenteTaskDispatchesTable.assigneeName }).from(gerenteTaskDispatchesTable).innerJoin(tasksTable, eq(tasksTable.id, gerenteTaskDispatchesTable.taskId))
       .where(and(eq(gerenteTaskDispatchesTable.tenantId, tenantId), eq(gerenteTaskDispatchesTable.status, "concluida"), gte(gerenteTaskDispatchesTable.doneAt, start))),
@@ -161,7 +161,7 @@ export async function moveLeftoversToTomorrow(tenantId: number): Promise<string>
   const tomorrow = spDateISO(new Date(end.getTime() + 12 * 3_600_000));
   const nine = parseSpLocal(`${tomorrow}T09:00`)!;
   const moved = await db.update(gerenteRemindersTable).set({ dueAt: nine, sentAt: null, updatedAt: new Date() })
-    .where(and(eq(gerenteRemindersTable.tenantId, tenantId), eq(gerenteRemindersTable.status, "pendente"), lt(gerenteRemindersTable.dueAt, end))).returning({ id: gerenteRemindersTable.id });
+    .where(and(eq(gerenteRemindersTable.tenantId, tenantId), isNull(gerenteRemindersTable.memberPhone), eq(gerenteRemindersTable.status, "pendente"), lt(gerenteRemindersTable.dueAt, end))).returning({ id: gerenteRemindersTable.id });
   return moved.length ? `➡️ ${moved.length} lembrete(s) movido(s) pra amanhã às 9h.` : "Nada pra mover. 👍";
 }
 

@@ -2,8 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import {
   api,
   type GerenteSettings, type GerenteOverview, type GerenteEvent, type GerenteReminder,
-  type GerenteEntry, type GerenteBill, type GerenteMessage, type GerenteScope, type GerenteTeamMember, type GerenteErpAction,
-} from "@/lib/api";
+  type GerenteEntry, type GerenteBill, type GerenteMessage, type GerenteScope, type GerenteTeamMember, type GerenteErpAction, type GerenteMemberRow } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import GerenteTasks from "@/components/GerenteTasks";
 import GerenteTaskDashboard from "@/components/GerenteTaskDashboard";
@@ -676,6 +675,52 @@ function ErpAdm({ settings, onSaved }: { settings: GerenteSettings; onSaved: (s:
 }
 
 // ─── Equipe no WhatsApp ──────────────────────────────────────────────────────
+function GestoresGerente() {
+  const { toast } = useToast();
+  const [rows, setRows] = useState<GerenteMemberRow[]>([]);
+  const [team, setTeam] = useState<GerenteTeamMember[]>([]);
+  const [form, setForm] = useState({ name: "", phone: "", userId: "" });
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    try { const [m, t] = await Promise.all([api.gerente.members.list(), api.gerente.team.list()]); setRows(m); setTeam(t); }
+    catch (err) { toast({ title: "Erro", description: errMsg(err), variant: "destructive" }); }
+  }, [toast]);
+  useEffect(() => { void load(); }, [load]);
+  const add = async () => {
+    setBusy(true);
+    try {
+      await api.gerente.members.add({ name: form.name, phone: form.phone, userId: form.userId ? Number(form.userId) : null });
+      setForm({ name: "", phone: "", userId: "" }); await load();
+      toast({ title: "Acesso liberado ✅", description: "Peça pra pessoa mandar \"ajuda\" pro número do Gerente." });
+    } catch (err) { toast({ title: "Não deu pra cadastrar", description: errMsg(err), variant: "destructive" }); }
+    finally { setBusy(false); }
+  };
+  const remove = async (id: number) => { try { await api.gerente.members.remove(id); await load(); } catch (err) { toast({ title: "Erro", description: errMsg(err), variant: "destructive" }); } };
+  return (
+    <div className="shk-card p-4 space-y-3 lg:col-span-2">
+      <p className="font-semibold">👥 Outras pessoas que usam o Gerente (gestor)</p>
+      <p className="text-[10px] text-muted-foreground">O gestor fala com o Gerente pelo WhatsApp igual a você: cria e distribui tarefas, manda recados pra equipe e mensagens pra clientes (com confirmação), pede resumo e link. Ele tem <b>agenda e lembretes próprios</b> e recebe junto com você os avisos da equipe (concluiu, adiou, dúvida, cobrança). <b>Financeiro, contas, ERP e a sua agenda continuam só seus.</b> Use o celular <b>pessoal</b> da pessoa (uma linha do CRM não consegue mandar mensagem pra si mesma).</p>
+      {rows.length === 0 && <p className="text-xs text-muted-foreground">Ninguém além de você.</p>}
+      {rows.map((m) => (
+        <div key={m.id} className="flex items-center gap-2 text-xs border border-border rounded-lg p-2">
+          <span className="flex-1"><b>{m.name}</b> · {fmtPhone(m.phone)}{m.userId ? ` · usuário ${team.find((t) => t.id === m.userId)?.name ?? m.userId}` : ""}</span>
+          <button onClick={() => remove(m.id)} className={BTN_GHOST}><Trash2 className="w-3 h-3 inline" /> Tirar acesso</button>
+        </div>
+      ))}
+      <div className="grid md:grid-cols-4 gap-2">
+        <input className={INPUT} placeholder="Nome (ex.: Maria)" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+        <input className={INPUT} placeholder="Celular pessoal (33 99999-0000)" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
+        <select className={INPUT} value={form.userId} onChange={(e) => setForm({ ...form, userId: e.target.value })}>
+          <option value="">Usuário do CRM (opcional)</option>
+          {team.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+        </select>
+        <button onClick={add} disabled={busy || !form.name.trim() || !form.phone.trim()} className={BTN_PRIMARY}>{busy ? "Salvando..." : "Liberar acesso"}</button>
+      </div>
+      <p className="text-[10px] text-muted-foreground">Ligar ao usuário do CRM faz as tarefas que o gestor criar pra ele mesmo ficarem no nome dele.</p>
+    </div>
+  );
+}
+
 function EquipeWhatsapp() {
   const { toast } = useToast();
   const [rows, setRows] = useState<GerenteTeamMember[]>([]);
@@ -765,6 +810,7 @@ function Config({ settings, onSaved }: { settings: GerenteSettings; onSaved: (s:
   return (
     <div className="grid lg:grid-cols-2 gap-4 items-start text-xs">
       <ErpAdm settings={s} onSaved={(n) => { setS(n); onSaved(n); }} />
+      <GestoresGerente />
       <EquipeWhatsapp />
       <div className="shk-card p-4 space-y-3">
         <label className="flex items-center gap-2 font-bold text-sm">

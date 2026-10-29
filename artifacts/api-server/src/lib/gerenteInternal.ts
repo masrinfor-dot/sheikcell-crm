@@ -247,8 +247,8 @@ export async function onInternalMessage(p: { tenantId: number; conversationId: n
       // Conversa normal com o dono: avisa no WhatsApp dele (ele está na rua).
       if (p.text.trim() && owner) {
         const [u] = await db.select({ name: usersTable.name }).from(usersTable).where(eq(usersTable.id, userId)).limit(1);
-        const { notifyOwnerByTenant } = await import("./gerente");
-        await notifyOwnerByTenant(p.tenantId, `💬 *${first(u?.name ?? "Equipe")}* no chat do CRM:\n“${p.text.trim().slice(0, 600)}”\nPra responder: *avisa ${first(u?.name ?? "")}: …*`);
+        const { notifyTeamLeads } = await import("./gerente");
+        await notifyTeamLeads(p.tenantId, `💬 *${first(u?.name ?? "Equipe")}* no chat do CRM:\n“${p.text.trim().slice(0, 600)}”\nPra responder: *avisa ${first(u?.name ?? "")}: …*`);
       }
     }
   } catch (err) {

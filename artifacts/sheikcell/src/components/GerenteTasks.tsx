@@ -61,7 +61,7 @@ export default function GerenteTasks({ token, embedded = false }: { token: strin
   const base = `/api/gerente-public/${token}`;
   const [data, setData] = useState<DiaData | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<View>("hoje");
+  const [view, setView] = useState<View>(() => (embedded && typeof window !== "undefined" && window.innerWidth >= 1024 ? "quadro" : "hoje"));
   const [person, setPerson] = useState<number | "">("");
   const [category, setCategory] = useState("");
   const [q, setQ] = useState("");
@@ -166,7 +166,7 @@ export default function GerenteTasks({ token, embedded = false }: { token: strin
     { id: "proximas", label: "Próximas", n: upcoming.length },
     { id: "semprazo", label: "Sem prazo", n: noDue.length },
     { id: "equipe", label: "Equipe" },
-    { id: "quadro", label: "Quadro" },
+    { id: "quadro", label: "📊 Kanban" },
     { id: "concluidas", label: "Concluídas", n: done.length },
   ];
 
@@ -176,7 +176,7 @@ export default function GerenteTasks({ token, embedded = false }: { token: strin
   const unassigned = open.filter((t) => t.assignees.length === 0);
 
   return (
-    <div className={`space-y-3 ${embedded ? "" : "max-w-2xl mx-auto"}`}>
+    <div className={`space-y-3 ${embedded || view === "quadro" ? "" : "max-w-2xl mx-auto"}`}>
       {canEdit && (
         <div className="flex gap-2">
           <input value={capture} onChange={(e) => setCapture(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void sendCapture(); }}
@@ -263,17 +263,19 @@ export default function GerenteTasks({ token, embedded = false }: { token: strin
         </div>
       )}
       {view === "quadro" && (
-        <div className="flex gap-3 overflow-x-auto pb-2 -mx-1 px-1 snap-x">
-          {(["todo", "doing", "done"] as const).map((s) => {
-            const col = s === "done" ? done : open.filter((t) => t.status === s).sort(byPrio);
-            return (
-              <div key={s} className="snap-start shrink-0 w-[85%] sm:w-80 bg-slate-200/60 rounded-2xl p-2 space-y-1.5">
-                <h3 className="text-xs font-bold uppercase text-slate-600 px-1">{STATUS_LABEL[s]} · {col.length}</h3>
-                {col.map((t) => <Row key={t.id} t={t} />)}
-              </div>
-            );
-          })}
-        </div>
+        <Kanban tasks={filtered} team={data.team} categories={data.categories} canEdit={canEdit} now={now}
+          renderCard={(t) => <Row t={t} />}
+          onMove={async (t, patchBody, statusTo) => {
+            try {
+              if (statusTo) {
+                setData((d) => d ? { ...d, tasks: d.tasks.map((x) => x.id === t.id ? { ...x, status: statusTo } : x) } : d);
+                const r = await api<{ message: string }>(`${base}/task/${t.id}/status`, { method: "POST", body: JSON.stringify({ status: statusTo, notify: true }) }); flash(r.message);
+              } else if (patchBody) {
+                const r = await api<{ message?: string }>(`${base}/task/${t.id}`, { method: "PATCH", body: JSON.stringify(patchBody) }); if (r.message) flash(r.message);
+              }
+            } catch (e) { flash((e as Error).message); }
+            void load();
+          }} />
       )}
       {view === "concluidas" && (done.length ? <Section title="Concluídas (7 dias)" tasks={done} tone="text-green-700" /> : <p className="text-sm text-slate-500 text-center py-6">Nada concluído nos últimos 7 dias.</p>)}
 
@@ -289,6 +291,108 @@ export default function GerenteTasks({ token, embedded = false }: { token: strin
 
       {openId != null && <TaskSheet base={base} id={openId} canEdit={canEdit} team={data.team} categories={data.categories} today={data.today} onClose={() => setOpenId(null)} onChanged={(m) => { if (m) flash(m); void load(); }} />}
       {toast && <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] max-w-[92vw] bg-slate-900 text-white text-sm rounded-xl px-4 py-2.5 shadow-lg whitespace-pre-wrap">{toast}</div>}
+    </div>
+  );
+}
+
+// ─── Kanban ──────────────────────────────────────────────────────────────────
+// Agrupa por situação, responsável ou loja/categoria. No computador arrasta o
+// cartão; no celular usa o "Mover para…" do cartão. Mudar de coluna = mudar a
+// situação (avisa o responsável), o responsável (o novo recebe no WhatsApp) ou
+// a categoria.
+
+type GroupBy = "status" | "pessoa" | "categoria";
+type Col = { key: string; title: string; tone: string; tasks: TaskRow[]; accepts: boolean };
+
+function Kanban({ tasks, team, categories, canEdit, now, renderCard, onMove }: {
+  tasks: TaskRow[]; team: Person[]; categories: string[]; canEdit: boolean; now: number;
+  renderCard: (t: TaskRow) => React.ReactNode;
+  onMove: (t: TaskRow, patch: Record<string, unknown> | null, status: "todo" | "doing" | "done" | null) => Promise<void>;
+}) {
+  const [group, setGroup] = useState<GroupBy>(() => { try { return (localStorage.getItem("gerente.kanban.group") as GroupBy) || "status"; } catch { return "status"; } });
+  const [dragId, setDragId] = useState<number | null>(null);
+  const [over, setOver] = useState<string | null>(null);
+  const pick = (g: GroupBy) => { setGroup(g); try { localStorage.setItem("gerente.kanban.group", g); } catch { /* sem storage */ } };
+  const open = tasks.filter((t) => t.status !== "done");
+  const prio = (a: TaskRow, b: TaskRow) => ["alta", "media", "baixa"].indexOf(a.priority) - ["alta", "media", "baixa"].indexOf(b.priority) || (a.dueDate ?? "9").localeCompare(b.dueDate ?? "9");
+  const waiting = (t: TaskRow) => t.status !== "done" && t.whatsapp === "aguardando_prova";
+
+  let cols: Col[];
+  if (group === "status") {
+    cols = [
+      { key: "todo", title: "A fazer", tone: "bg-slate-200/70", tasks: open.filter((t) => t.status === "todo" && !waiting(t)).sort(prio), accepts: true },
+      { key: "doing", title: "Fazendo", tone: "bg-blue-100/70", tasks: open.filter((t) => t.status === "doing" && !waiting(t)).sort(prio), accepts: true },
+      { key: "wait", title: "Aguardando foto", tone: "bg-amber-100/70", tasks: open.filter(waiting).sort(prio), accepts: false },
+      { key: "done", title: "Feito (7 dias)", tone: "bg-green-100/70", tasks: tasks.filter((t) => t.status === "done").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), accepts: true },
+    ];
+  } else if (group === "pessoa") {
+    const ordered = [...team].sort((a, b) => (a.isOwner ? -1 : b.isOwner ? 1 : a.name.localeCompare(b.name)));
+    cols = ordered.map((p) => ({
+      key: `p${p.id}`, title: p.isOwner ? `${first(p.name)} (você)` : p.name.split(" ").slice(0, 2).join(" "), tone: "bg-slate-200/70",
+      tasks: open.filter((t) => t.assignees.some((a) => a.id === p.id)).sort(prio), accepts: true,
+    }));
+    const none = open.filter((t) => t.assignees.length === 0);
+    if (none.length) cols.push({ key: "p0", title: "Sem responsável", tone: "bg-amber-100/70", tasks: none, accepts: false });
+  } else {
+    cols = categories.map((c) => ({ key: `c:${c}`, title: c, tone: "bg-indigo-100/60", tasks: open.filter((t) => t.category === c).sort(prio), accepts: true }));
+    cols.push({ key: "c:", title: "Sem categoria", tone: "bg-amber-100/70", tasks: open.filter((t) => !t.category).sort(prio), accepts: true });
+  }
+
+  const move = (t: TaskRow, key: string) => {
+    if (group === "status") {
+      if (key === "wait") return;
+      const st = key as "todo" | "doing" | "done";
+      if (st !== t.status) void onMove(t, null, st);
+    } else if (group === "pessoa") {
+      const id = Number(key.slice(1));
+      if (!id || (t.assignees.length === 1 && t.assignees[0]!.id === id)) return;
+      void onMove(t, { assigneeIds: [id] }, null);
+    } else {
+      const c = key.slice(2) || null;
+      if (c !== t.category) void onMove(t, { category: c }, null);
+    }
+  };
+  const late = cols.reduce((n, c) => n + c.tasks.filter((t) => t.status !== "done" && t.dueDate && new Date(t.dueDate).getTime() < now).length, 0);
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-xs text-slate-500">Agrupar por</span>
+        {([["status", "Situação"], ["pessoa", "Responsável"], ["categoria", "Loja / categoria"]] as const).map(([g, l]) => (
+          <button key={g} onClick={() => pick(g)} className={`px-3 py-1 rounded-full text-xs font-semibold border ${group === g ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-slate-700 border-slate-300"}`}>{l}</button>
+        ))}
+        {late > 0 && <span className="text-xs text-red-600 font-semibold">⚠️ {late} atrasada(s)</span>}
+        {canEdit && <span className="text-[11px] text-slate-400 hidden md:inline">Arraste o cartão pra outra coluna</span>}
+      </div>
+      <div className="flex gap-3 overflow-x-auto pb-3 -mx-1 px-1 snap-x">
+        {cols.map((c) => (
+          <div key={c.key}
+            onDragOver={(e) => { if (canEdit && c.accepts && dragId != null) { e.preventDefault(); setOver(c.key); } }}
+            onDragLeave={() => setOver((o) => (o === c.key ? null : o))}
+            onDrop={(e) => { e.preventDefault(); setOver(null); const t = tasks.find((x) => x.id === dragId); setDragId(null); if (t) move(t, c.key); }}
+            className={`snap-start shrink-0 w-[82%] sm:w-72 rounded-2xl p-2 space-y-1.5 ${c.tone} ${over === c.key ? "ring-2 ring-indigo-500" : ""}`}>
+            <div className="flex items-center justify-between px-1">
+              <h3 className="text-xs font-bold uppercase text-slate-700 truncate">{c.title}</h3>
+              <span className="text-xs text-slate-500 tabular-nums">{c.tasks.length}</span>
+            </div>
+            {c.tasks.length === 0 && <p className="text-[11px] text-slate-400 px-1 py-3 text-center">{canEdit && c.accepts ? "Solte um cartão aqui" : "—"}</p>}
+            {c.tasks.map((t) => (
+              <div key={t.id} draggable={canEdit} onDragStart={() => setDragId(t.id)} onDragEnd={() => { setDragId(null); setOver(null); }}
+                className={`${dragId === t.id ? "opacity-40" : ""} ${canEdit ? "cursor-grab active:cursor-grabbing" : ""}`}>
+                {renderCard(t)}
+                {canEdit && (
+                  <select value="" onChange={(e) => { if (e.target.value) move(t, e.target.value); }} aria-label="Mover para"
+                    className="md:hidden mt-1 w-full text-[11px] rounded-lg border border-slate-300 bg-white/80 px-2 py-1 text-slate-600">
+                    <option value="">Mover para…</option>
+                    {cols.filter((x) => x.accepts && x.key !== c.key).map((x) => <option key={x.key} value={x.key}>{x.title}</option>)}
+                  </select>
+                )}
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+      {group === "pessoa" && canEdit && <p className="text-[11px] text-slate-500">Arrastar pra outra pessoa troca o responsável — quem recebe é avisado no WhatsApp e no chat do CRM.</p>}
     </div>
   );
 }

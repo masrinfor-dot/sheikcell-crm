@@ -1598,6 +1598,7 @@ export type GerenteSettings = {
   teamDigestEnabled: boolean; teamMorningTime: string; teamEveningTime: string; internalChatEnabled: boolean;
   lines: { sessionKey: string; displayName: string | null; phoneNumber: string | null; status: string }[];
 };
+export type GerenteMemberRow = { id: number; tenantId: number; phone: string; name: string; userId: number | null; role: string; isActive: boolean; createdAt: string };
 export type GerenteOrganizeItem = { taskId: number; title: string; priority: string; category?: string | null; oldCategory?: string | null; dueAt?: string | null; oldDue?: string | null; reason?: string };
 export type GerenteTaskStats = {
   now: string; today: string;
@@ -3311,6 +3312,11 @@ export const api = {
       test: () => req<{ ok: boolean; message: string }>("/gerente/erp-key/test", { method: "POST" }),
       actions: () => req<GerenteErpAction[]>("/gerente/erp-actions"),
       resend: (id: number) => req<{ message: string }>(`/gerente/erp-actions/${id}/resend`, { method: "POST", timeoutMs: 90_000 }),
+    },
+    members: {
+      list: () => req<GerenteMemberRow[]>("/gerente/members"),
+      add: (data: { name: string; phone: string; userId?: number | null }) => req<GerenteMemberRow>("/gerente/members", { method: "POST", body: JSON.stringify(data) }),
+      remove: (id: number) => req<{ ok: boolean }>(`/gerente/members/${id}`, { method: "DELETE" }),
     },
     team: {
       list: () => req<GerenteTeamMember[]>("/gerente/team"),

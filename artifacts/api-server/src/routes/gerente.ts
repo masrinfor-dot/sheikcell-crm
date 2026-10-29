@@ -8,7 +8,7 @@ import {
   gerenteEntriesTable, gerenteBillsTable, gerentePendingActionsTable, whatsappSessionsTable,
   crmContactsTable, conversationsTable, tasksTable, taskAssigneesTable, usersTable, gerenteTaskDispatchesTable, gerenteTeamPhonesTable, gerenteErpActionsTable,
 } from "@workspace/db";
-import { eq, and, desc, asc, gte, lt, ne, inArray, sql } from "drizzle-orm";
+import { eq, and, desc, asc, gte, lt, ne, inArray, sql, isNull } from "drizzle-orm";
 import { phoneVariants } from "../lib/phone";
 import { requireAdmin, requireModule, requireTenant } from "../middlewares/auth";
 import {
@@ -94,6 +94,41 @@ router.patch("/gerente/settings", async (req, res): Promise<void> => {
   const { erpAgentKeyCiphertext: _c, erpAgentKeyIv: _i, erpAgentKeyAuthTag: _a, erpAgentKeyVersion: _v, ...safe } = updated!;
   void _i; void _a; void _v;
   res.json({ ...safe, erpAgentKeySet: !!_c, warnings });
+});
+
+// ─── Pessoas com acesso ao Gerente (gestor / 2º número) ─────────────────────
+router.get("/gerente/members", async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { gerenteMembersTable } = await import("@workspace/db");
+  res.json(await db.select().from(gerenteMembersTable).where(eq(gerenteMembersTable.tenantId, tenantId)).orderBy(asc(gerenteMembersTable.id)));
+});
+router.post("/gerente/members", async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const { gerenteMembersTable } = await import("@workspace/db");
+  const { normalizePhone } = await import("../lib/phone");
+  const b = (req.body ?? {}) as { name?: unknown; phone?: unknown; userId?: unknown };
+  const name = typeof b.name === "string" ? b.name.trim().slice(0, 60) : "";
+  const phone = normalizePhone(typeof b.phone === "string" ? b.phone : "");
+  if (!name || !phone || phone.length < 12 || phone.length > 13) { res.status(400).json({ error: "Informe nome e um celular válido com DDD (ex.: 33 99999-0000)." }); return; }
+  const settings = await getGerenteSettings(tenantId);
+  if (settings.authorizedPhones.some((a) => normalizePhone(a) === phone)) { res.status(400).json({ error: "Esse já é o número do dono." }); return; }
+  // Uma linha do próprio CRM não consegue mandar mensagem pra si mesma.
+  const lines = await db.select({ phoneNumber: whatsappSessionsTable.phoneNumber, displayName: whatsappSessionsTable.displayName }).from(whatsappSessionsTable).where(eq(whatsappSessionsTable.tenantId, tenantId));
+  const line = lines.find((l) => l.phoneNumber && normalizePhone(l.phoneNumber) === phone);
+  if (line) { res.status(400).json({ error: `Esse número é uma linha do CRM (${line.displayName ?? line.phoneNumber}). A pessoa precisa usar o celular PESSOAL dela pra falar com o Gerente.` }); return; }
+  const userId = typeof b.userId === "number" && Number.isInteger(b.userId) ? b.userId : null;
+  const [row] = await db.insert(gerenteMembersTable).values({ tenantId, name, phone, userId })
+    .onConflictDoUpdate({ target: [gerenteMembersTable.tenantId, gerenteMembersTable.phone], set: { name, userId, isActive: true } }).returning();
+  invalidateGerenteCache(tenantId);
+  res.status(201).json(row);
+});
+router.delete("/gerente/members/:id", async (req, res): Promise<void> => {
+  const tenantId = requireTenant(req, res); if (tenantId == null) return;
+  const id = idParam(String(req.params["id"])); if (!id) { res.status(400).json({ error: "id inválido" }); return; }
+  const { gerenteMembersTable } = await import("@workspace/db");
+  await db.delete(gerenteMembersTable).where(and(eq(gerenteMembersTable.id, id), eq(gerenteMembersTable.tenantId, tenantId)));
+  invalidateGerenteCache(tenantId);
+  res.json({ ok: true });
 });
 
 // ─── Indicadores de tarefas e equipe (dashboard) ─────────────────────────────
@@ -277,15 +312,15 @@ router.get("/gerente/overview", async (req, res): Promise<void> => {
   const weekEnd = new Date(start.getTime() + 8 * 86_400_000);
   const now = new Date();
   const [events, reminders, bills, entriesMonth, digest, weekEvents, weekReminders, teamTasks] = await Promise.all([
-    db.select().from(gerenteEventsTable).where(and(eq(gerenteEventsTable.tenantId, tenantId), eq(gerenteEventsTable.status, "agendado"), gte(gerenteEventsTable.startsAt, start), lt(gerenteEventsTable.startsAt, end))).orderBy(asc(gerenteEventsTable.startsAt)),
-    db.select().from(gerenteRemindersTable).where(and(eq(gerenteRemindersTable.tenantId, tenantId), eq(gerenteRemindersTable.status, "pendente"), lt(gerenteRemindersTable.dueAt, end))).orderBy(asc(gerenteRemindersTable.dueAt)),
+    db.select().from(gerenteEventsTable).where(and(eq(gerenteEventsTable.tenantId, tenantId), isNull(gerenteEventsTable.memberPhone), eq(gerenteEventsTable.status, "agendado"), gte(gerenteEventsTable.startsAt, start), lt(gerenteEventsTable.startsAt, end))).orderBy(asc(gerenteEventsTable.startsAt)),
+    db.select().from(gerenteRemindersTable).where(and(eq(gerenteRemindersTable.tenantId, tenantId), isNull(gerenteRemindersTable.memberPhone), eq(gerenteRemindersTable.status, "pendente"), lt(gerenteRemindersTable.dueAt, end))).orderBy(asc(gerenteRemindersTable.dueAt)),
     db.select().from(gerenteBillsTable).where(and(eq(gerenteBillsTable.tenantId, tenantId), eq(gerenteBillsTable.status, "aberta"))).orderBy(asc(gerenteBillsTable.dueDate)).limit(50),
     db.select({
       kind: gerenteEntriesTable.kind, scope: gerenteEntriesTable.scope, total: sql<number>`coalesce(sum(${gerenteEntriesTable.amountCents}), 0)::int`,
     }).from(gerenteEntriesTable).where(and(eq(gerenteEntriesTable.tenantId, tenantId), sql`to_char(${gerenteEntriesTable.entryDate}, 'YYYY-MM') = ${today.slice(0, 7)}`)).groupBy(gerenteEntriesTable.kind, gerenteEntriesTable.scope),
     buildDigest(tenantId),
-    db.select({ startsAt: gerenteEventsTable.startsAt }).from(gerenteEventsTable).where(and(eq(gerenteEventsTable.tenantId, tenantId), eq(gerenteEventsTable.status, "agendado"), gte(gerenteEventsTable.startsAt, end), lt(gerenteEventsTable.startsAt, weekEnd))),
-    db.select({ dueAt: gerenteRemindersTable.dueAt }).from(gerenteRemindersTable).where(and(eq(gerenteRemindersTable.tenantId, tenantId), eq(gerenteRemindersTable.status, "pendente"), gte(gerenteRemindersTable.dueAt, end), lt(gerenteRemindersTable.dueAt, weekEnd))),
+    db.select({ startsAt: gerenteEventsTable.startsAt }).from(gerenteEventsTable).where(and(eq(gerenteEventsTable.tenantId, tenantId), isNull(gerenteEventsTable.memberPhone), eq(gerenteEventsTable.status, "agendado"), gte(gerenteEventsTable.startsAt, end), lt(gerenteEventsTable.startsAt, weekEnd))),
+    db.select({ dueAt: gerenteRemindersTable.dueAt }).from(gerenteRemindersTable).where(and(eq(gerenteRemindersTable.tenantId, tenantId), isNull(gerenteRemindersTable.memberPhone), eq(gerenteRemindersTable.status, "pendente"), gte(gerenteRemindersTable.dueAt, end), lt(gerenteRemindersTable.dueAt, weekEnd))),
     // Tarefas da equipe atrasadas ou vencendo hoje (quadro de Tarefas).
     db.select({ id: tasksTable.id, title: tasksTable.title, dueDate: tasksTable.dueDate, status: tasksTable.status, priority: tasksTable.priority })
       .from(tasksTable).where(and(eq(tasksTable.tenantId, tenantId), eq(tasksTable.isArchived, false), ne(tasksTable.status, "done"), lt(tasksTable.dueDate, end)))
@@ -341,7 +376,7 @@ router.post("/gerente/rollover", async (req, res): Promise<void> => {
   let moved = 0;
   if (reminderIds.length) {
     const r = await db.update(gerenteRemindersTable).set({ dueAt: nineAm, sentAt: null, updatedAt: new Date() })
-      .where(and(eq(gerenteRemindersTable.tenantId, tenantId), eq(gerenteRemindersTable.status, "pendente"), inArray(gerenteRemindersTable.id, reminderIds))).returning({ id: gerenteRemindersTable.id });
+      .where(and(eq(gerenteRemindersTable.tenantId, tenantId), isNull(gerenteRemindersTable.memberPhone), eq(gerenteRemindersTable.status, "pendente"), inArray(gerenteRemindersTable.id, reminderIds))).returning({ id: gerenteRemindersTable.id });
     moved += r.length;
   }
   if (eventIds.length) {
@@ -349,7 +384,7 @@ router.post("/gerente/rollover", async (req, res): Promise<void> => {
       startsAt: sql`${gerenteEventsTable.startsAt} + interval '1 day'`,
       endsAt: sql`${gerenteEventsTable.endsAt} + interval '1 day'`,
       remindedAt: null, updatedAt: new Date(),
-    }).where(and(eq(gerenteEventsTable.tenantId, tenantId), eq(gerenteEventsTable.status, "agendado"), inArray(gerenteEventsTable.id, eventIds))).returning({ id: gerenteEventsTable.id });
+    }).where(and(eq(gerenteEventsTable.tenantId, tenantId), isNull(gerenteEventsTable.memberPhone), eq(gerenteEventsTable.status, "agendado"), inArray(gerenteEventsTable.id, eventIds))).returning({ id: gerenteEventsTable.id });
     moved += r.length;
   }
   res.json({ moved, to: tomorrow });
@@ -362,7 +397,7 @@ router.get("/gerente/events", async (req, res): Promise<void> => {
   const days = Math.max(1, Math.min(90, Number(req.query["days"] ?? 30) || 30));
   const to = new Date(from.getTime() + days * 86_400_000);
   const rows = await db.select().from(gerenteEventsTable)
-    .where(and(eq(gerenteEventsTable.tenantId, tenantId), gte(gerenteEventsTable.startsAt, from), lt(gerenteEventsTable.startsAt, to)))
+    .where(and(eq(gerenteEventsTable.tenantId, tenantId), isNull(gerenteEventsTable.memberPhone), gte(gerenteEventsTable.startsAt, from), lt(gerenteEventsTable.startsAt, to)))
     .orderBy(asc(gerenteEventsTable.startsAt)).limit(300);
   res.json(rows);
 });
@@ -409,7 +444,7 @@ router.get("/gerente/reminders", async (req, res): Promise<void> => {
   const tenantId = requireTenant(req, res); if (tenantId == null) return;
   const all = req.query["all"] === "1";
   const rows = await db.select().from(gerenteRemindersTable)
-    .where(all ? eq(gerenteRemindersTable.tenantId, tenantId) : and(eq(gerenteRemindersTable.tenantId, tenantId), eq(gerenteRemindersTable.status, "pendente")))
+    .where(all ? eq(gerenteRemindersTable.tenantId, tenantId) : and(eq(gerenteRemindersTable.tenantId, tenantId), isNull(gerenteRemindersTable.memberPhone), eq(gerenteRemindersTable.status, "pendente")))
     .orderBy(all ? desc(gerenteRemindersTable.dueAt) : asc(gerenteRemindersTable.dueAt)).limit(200);
   res.json(rows);
 });
