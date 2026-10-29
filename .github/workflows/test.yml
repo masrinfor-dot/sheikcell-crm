@@ -55,10 +55,19 @@ jobs:
         # erro, para dar para ler sem baixar o log inteiro.
         run: |
           set -o pipefail
-          pnpm --filter @workspace/api-server run test 2>&1 | tee test-output.txt || {
-            grep -n -A12 "^not ok" test-output.txt | head -120 | sed -e 's/%/%25/g' | while IFS= read -r line; do echo "::error title=Teste falhou::$line"; done
-            exit 1
-          }
+          pnpm --filter @workspace/api-server run test 2>&1 | tee test-output.txt
+
+      - name: Mostra o teste que falhou
+        if: failure()
+        run: |
+          grep -n -B2 -A14 -E "^ *(not ok|✖)" test-output.txt | grep -v -E "^\S*-\s*$" | head -60 > falhas.txt || true
+          echo "--- fim do log ---" >> falhas.txt
+          tail -n 30 test-output.txt >> falhas.txt || true
+          n=0
+          while IFS= read -r line; do
+            n=$((n+1)); [ $n -gt 9 ] && break
+            echo "::error title=Teste falhou ($n)::$(sed -n "$(( (n-1)*10+1 )),$(( n*10 ))p" falhas.txt | sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g')"
+          done < <(seq 1 9)
 
       - name: Typecheck do monorepo inteiro
         run: pnpm run typecheck
