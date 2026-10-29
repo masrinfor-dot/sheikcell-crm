@@ -56,7 +56,7 @@ jobs:
         run: |
           set -o pipefail
           pnpm --filter @workspace/api-server run test 2>&1 | tee test-output.txt || {
-            grep -n -A12 "^not ok" test-output.txt | head -120 | sed -e 's/%/%25/g' | while IFS= read -r line; do echo "::error title=Teste falhou::$line"; done
+            { grep -n -A12 "^ *not ok" test-output.txt | head -120; echo "--- fim do log ---"; tail -n 40 test-output.txt; } | sed -e 's/%/%25/g' | while IFS= read -r line; do echo "::error title=Teste falhou::$line"; done
             exit 1
           }
 
