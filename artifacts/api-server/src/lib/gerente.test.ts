@@ -874,3 +874,33 @@ test("mensagem pra cliente: mostra antes, só envia no 'sim'", async () => {
   assert.match(ok.replies[0]!, /Enviado pra \*João Cliente Teste\*/);
   assert.ok(bridgeSends.find((s) => s.to === "5533955554444" && /aparelho está pronto/.test(s.text)));
 });
+
+test("gestora no chat interno: sala própria do Gerente e 'tarefa: …' na sala do vendedor vira tarefa dele", async () => {
+  const { onInternalMessage, mirrorToGerenteRoom, botUserId } = await import("./gerenteInternal.ts");
+  const [luc] = await db.insert(usersTable).values({ tenantId, name: "Lucelia Gestora", email: `luc-${sessionKey}@test.local`, passwordHash: "x", role: "vendedor" }).returning();
+  const LUC = "5533987100000";
+  await db.insert(gerenteMembersTable).values({ tenantId, phone: LUC, name: "Lucelia", userId: luc!.id });
+  invalidateGerenteCache(tenantId);
+  const bot = await botUserId(tenantId);
+
+  // Sala "🤖 Gerente IA · Lucelia": ela pede resumo da equipe.
+  await mirrorToGerenteRoom(tenantId, "out", "oi", LUC);
+  const [gr] = await db.select().from(gerenteChatRoomsTable).where(and(eq(gerenteChatRoomsTable.tenantId, tenantId), eq(gerenteChatRoomsTable.kind, "gerente"), eq(gerenteChatRoomsTable.refId, luc!.id)));
+  assert.ok(gr, "sala da gestora criada");
+  await onInternalMessage({ tenantId, conversationId: gr!.conversationId, senderId: luc!.id, text: "como está a equipe?", type: "text", mediaUrl: null });
+  const gm = await db.select().from(internalMessagesTable).where(eq(internalMessagesTable.conversationId, gr!.conversationId));
+  assert.ok(gm.some((m) => m.senderId === bot && /Equipe agora/.test(m.content)));
+
+  // Sala do Nilmar: a gestora entra como membro e "tarefa: …" cria a tarefa pra ele.
+  const [pr] = await db.select().from(gerenteChatRoomsTable).where(and(eq(gerenteChatRoomsTable.tenantId, tenantId), eq(gerenteChatRoomsTable.kind, "pessoa"), eq(gerenteChatRoomsTable.refId, userId)));
+  const { postToPerson } = await import("./gerenteInternal.ts");
+  await postToPerson(tenantId, userId, "teste de membros");
+  const members = await db.select().from((await import("@workspace/db")).internalConversationMembersTable).where(eq((await import("@workspace/db")).internalConversationMembersTable.conversationId, pr!.conversationId));
+  assert.ok(members.some((m) => m.userId === luc!.id), "gestora está na sala do vendedor");
+  await onInternalMessage({ tenantId, conversationId: pr!.conversationId, senderId: luc!.id, text: "tarefa: repor capas de iPhone 13 na vitrine", type: "text", mediaUrl: null });
+  const [t] = await db.select().from(tasksTable).where(and(eq(tasksTable.tenantId, tenantId), eq(tasksTable.title, "repor capas de iPhone 13 na vitrine")));
+  assert.ok(t, "tarefa criada");
+  assert.equal(t!.createdById, luc!.id, "criada pela gestora");
+  const asg = await db.select().from(taskAssigneesTable).where(eq(taskAssigneesTable.taskId, t!.id));
+  assert.deepEqual(asg.map((a) => a.userId), [userId]);
+});

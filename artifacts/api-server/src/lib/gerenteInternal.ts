@@ -15,7 +15,7 @@ import { randomBytes } from "node:crypto";
 import { and, eq, asc, inArray, desc, ne } from "drizzle-orm";
 import {
   db, usersTable, storesTable, internalConversationsTable, internalConversationMembersTable, internalMessagesTable,
-  gerenteChatRoomsTable, gerenteSettingsTable, tasksTable, taskAssigneesTable, gerenteTaskDispatchesTable,
+  gerenteChatRoomsTable, gerenteSettingsTable, tasksTable, taskAssigneesTable, gerenteTaskDispatchesTable, gerenteMembersTable,
 } from "@workspace/db";
 import { broadcastInternal } from "./sseEmitter";
 import { norm } from "./gerenteRules";
@@ -113,7 +113,24 @@ const first = (n: string) => n.trim().split(" ")[0] ?? n;
 /** O chat interno não usa *negrito* do WhatsApp — tira os asteriscos. */
 const plain = (t: string) => t.replace(/\*([^*\n]+)\*/g, "$1");
 
-async function gerenteRoom(tenantId: number): Promise<number | null> {
+/** Gestores (2º número) ligados a um usuário do CRM — entram nas salas da equipe. */
+async function gestores(tenantId: number): Promise<{ userId: number; name: string; phone: string }[]> {
+  const rows = await db.select({ userId: gerenteMembersTable.userId, name: gerenteMembersTable.name, phone: gerenteMembersTable.phone }).from(gerenteMembersTable)
+    .where(and(eq(gerenteMembersTable.tenantId, tenantId), eq(gerenteMembersTable.isActive, true)));
+  return rows.filter((r): r is { userId: number; name: string; phone: string } => r.userId != null);
+}
+/** Quem lidera: dono + gestores. */
+async function leaderIds(tenantId: number): Promise<number[]> {
+  const owner = await ownerId(tenantId);
+  return [...new Set([...(owner ? [owner] : []), ...(await gestores(tenantId)).map((g) => g.userId)])];
+}
+
+async function gerenteRoom(tenantId: number, gestorUserId: number | null = null): Promise<number | null> {
+  if (gestorUserId) {
+    const g = (await gestores(tenantId)).find((x) => x.userId === gestorUserId);
+    if (!g) return null;
+    return ensureRoom(tenantId, "gerente", gestorUserId, `${BOT_NAME} · ${first(g.name)}`, [gestorUserId]);
+  }
   const owner = await ownerId(tenantId);
   if (!owner) return null;
   return ensureRoom(tenantId, "gerente", 0, BOT_NAME, [owner]);
@@ -123,18 +140,21 @@ async function personRoom(tenantId: number, userId: number): Promise<number | nu
   const owner = await ownerId(tenantId);
   const [u] = await db.select({ name: usersTable.name }).from(usersTable).where(and(eq(usersTable.id, userId), eq(usersTable.tenantId, tenantId))).limit(1);
   if (!owner || !u || userId === owner) return null;
-  return ensureRoom(tenantId, "pessoa", userId, `📋 Gerente · ${first(u.name)}`, [owner, userId]);
+  return ensureRoom(tenantId, "pessoa", userId, `📋 Gerente · ${first(u.name)}`, [...await leaderIds(tenantId), userId]);
 }
 
 // ─── Saídas do Gerente pro chat ──────────────────────────────────────────────
 
 /** Mensagem do bot (ou do dono) na sala do Gerente — espelho do WhatsApp e avisos. */
-export async function mirrorToGerenteRoom(tenantId: number, direction: "in" | "out", content: string): Promise<void> {
+export async function mirrorToGerenteRoom(tenantId: number, direction: "in" | "out", content: string, gestorPhone: string | null = null): Promise<void> {
   try {
     if (!(await enabled(tenantId))) return;
-    const room = await gerenteRoom(tenantId);
+    const { normalizePhone } = await import("./phone");
+    const g = gestorPhone ? (await gestores(tenantId)).find((x) => normalizePhone(x.phone) === normalizePhone(gestorPhone)) : null;
+    if (gestorPhone && !g) return;
+    const room = await gerenteRoom(tenantId, g?.userId ?? null);
     if (!room) return;
-    const sender = direction === "in" ? (await ownerId(tenantId))! : await botUserId(tenantId);
+    const sender = direction === "in" ? (g ? g.userId : (await ownerId(tenantId))!) : await botUserId(tenantId);
     await post(tenantId, room, sender, direction === "in" ? `📱 ${content}` : plain(content));
   } catch (err) { logger.warn({ err, tenantId }, "Gerente IA: falha ao espelhar no chat interno"); }
 }
@@ -164,7 +184,7 @@ export async function postToStore(tenantId: number, storeName: string, memberIds
     if (!owner) return false;
     const [st] = await db.select({ id: storesTable.id }).from(storesTable).where(and(eq(storesTable.tenantId, tenantId), eq(storesTable.name, storeName))).limit(1);
     if (!st) return false;
-    const room = await ensureRoom(tenantId, "loja", st.id, `📣 Gerente · ${storeName.replace(/\s*-\s*\d+\s*$/, "")}`, [owner, ...memberIds]);
+    const room = await ensureRoom(tenantId, "loja", st.id, `📣 Gerente · ${storeName.replace(/\s*-\s*\d+\s*$/, "")}`, [...await leaderIds(tenantId), ...memberIds]);
     await post(tenantId, room, await botUserId(tenantId), plain(text), media);
     return true;
   } catch (err) { logger.warn({ err, tenantId }, "Gerente IA: falha ao postar no chat da loja"); return false; }
@@ -198,13 +218,28 @@ export async function onInternalMessage(p: { tenantId: number; conversationId: n
     const owner = await ownerId(p.tenantId);
     const say = (t: string) => post(p.tenantId, p.conversationId, bot, plain(t));
 
-    // Dono falando com o Gerente pelo chat.
-    if (room.kind === "gerente" && p.senderId === owner) {
+    // Dono (sala "🤖 Gerente IA") ou gestor (sala "🤖 Gerente IA · Nome") falando com o Gerente pelo chat.
+    const gs = await gestores(p.tenantId);
+    const gestor = gs.find((g) => g.userId === p.senderId) ?? null;
+    if (room.kind === "gerente" && ((room.refId === 0 && p.senderId === owner) || (room.refId === p.senderId && gestor))) {
       const text = p.text.trim();
       if (!text) { await say("Por aqui eu entendo texto. Pra encaminhar foto/arquivo, mande pelo WhatsApp do ADM. 🙂"); return; }
       const { handleChatMessage } = await import("./gerente");
-      const replies = await handleChatMessage(p.tenantId, text);
+      const replies = await handleChatMessage(p.tenantId, text, room.refId === 0 ? null : gestor!.phone);
       for (const r of replies) await say(r);
+      return;
+    }
+
+    // Líder (dono/gestor) escrevendo na sala de um vendedor: "tarefa: …" vira
+    // tarefa DELE na hora; "avisa: …" é só recado (ele já vê aqui).
+    if (room.kind === "pessoa" && p.senderId !== room.refId && (p.senderId === owner || gestor)) {
+      const m = p.text.trim().match(/^(?:nova\s+)?tarefa\s*(?:pra\s+(?:ele|ela|voc[eê])\s*)?[:\-–]?\s+(.{3,})$/i);
+      if (!m) return;
+      const [u] = await db.select({ name: usersTable.name }).from(usersTable).where(eq(usersTable.id, room.refId)).limit(1);
+      if (!u) return;
+      const { handleChatMessage } = await import("./gerente");
+      const replies = await handleChatMessage(p.tenantId, `tarefa pro ${first(u.name)}: ${m[1]!.trim()}`, gestor && p.senderId !== owner ? gestor.phone : null);
+      for (const r of replies) await say(r.replace(/\n?💬 Enviada.*$/m, ""));
       return;
     }
 
