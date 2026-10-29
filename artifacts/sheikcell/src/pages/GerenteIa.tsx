@@ -746,6 +746,7 @@ function GestoresGerente() {
       {rows.map((m) => (
         <div key={m.id} className="flex items-center gap-2 text-xs border border-border rounded-lg p-2">
           <span className="flex-1"><b>{m.name}</b> · {fmtPhone(m.phone)}{m.userId ? ` · usuário ${team.find((t) => t.id === m.userId)?.name ?? m.userId}` : ""}</span>
+          <button onClick={async () => { try { const r = await api.gerente.members.sendLink(m.id); toast({ title: r.ok ? "Link enviado ✅" : "Não enviou", description: r.message }); } catch (err) { toast({ title: "Erro", description: errMsg(err), variant: "destructive" }); } }} className={BTN_GHOST}><Send className="w-3 h-3 inline" /> Enviar link de acesso</button>
           <button onClick={() => remove(m.id)} className={BTN_GHOST}><Trash2 className="w-3 h-3 inline" /> Tirar acesso</button>
         </div>
       ))}
